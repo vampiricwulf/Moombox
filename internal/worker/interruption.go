@@ -480,7 +480,9 @@ func isAuthWalledPlayability(err youtube.PlayabilityError) bool {
 //
 //   - info == nil: ProbeVideoStatus can return (nil, nil) in a shutdown
 //     race (every Innertube client failing without surfacing a hard error —
-//     the same defensive case buildYouTubeProbeFn already guards). Reported
+//     the same defensive case probeVideoInfo handles, by treating a nil probe
+//     answer as nothing selectable and falling through to its one-shot
+//     cascade, orchestrator_youtube.go). Reported
 //     as an error (not "not ended") so the engine's CheckStreamStatus
 //     caller treats it as an inconclusive check (checkErr != nil: defers
 //     the verdict, does not latch anything) rather than as a false

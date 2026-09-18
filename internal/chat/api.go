@@ -161,9 +161,23 @@ func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI
 	}
 }
 
+// freshContinuationWatchURL builds the watch-page URL this package fetches a
+// continuation from. bpctr and has_verified are yt-dlp's age-gate bypass pair
+// (_video.py:3809, `query = {'bpctr': '9999999999', 'has_verified': '1'}`):
+// without them an age-restricted stream answers with the age-gate shell, whose
+// ytInitialData carries no liveChatRenderer at all — so the continuation is
+// read as "this stream has no chat" rather than read.
+//
+// The two parameters are spelled out here rather than shared with
+// internal/youtube's watchPageURL (which is unexported, and whose package this
+// one deliberately does not depend on); both cite the same upstream line.
+func freshContinuationWatchURL(videoID string) string {
+	return fmt.Sprintf("%s/watch?v=%s&bpctr=9999999999&has_verified=1", youtubeBase, videoID)
+}
+
 // FetchFreshContinuation fetches a chat continuation token from the watch page.
 func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) (continuation string, isReplay bool, err error) {
-	url := fmt.Sprintf("%s/watch?v=%s", youtubeBase, videoID)
+	url := freshContinuationWatchURL(videoID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -303,15 +317,39 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 // of the real assignment is skipped instead of ending the search. Shape
 // mirrors internal/youtube's extractChatContinuation, which is the same
 // extraction with a typed envelope in place of this map walk.
+//
+// The map decode IS the candidate acceptance (report #60 / YOUTUBE-15). The
+// old predicate ran json.Valid over the whole literal and then decoded the
+// same bytes — two full passes over a multi-megabyte page answering one
+// question, since json.Unmarshal validates its entire input before decoding
+// anything. On go1.27 that is `encoding/json`'s DefaultOptionsV1 option
+// ReportErrorsWithLegacySemantics, which states it outright ("the syntactic
+// structure of the JSON input is fully validated before performing the
+// semantic unmarshaling"). Only the cheap half of the old predicate survives
+// ahead of it (utils.IsNonEmptyJSONBody: something between the braces, which a
+// forged `{}` fails and a decode would not).
+//
+// Decoding into a FRESH map per candidate is load-bearing: json.Unmarshal
+// merges into a map it is handed, so reusing one across candidates would let a
+// rejected candidate's top-level keys survive into the accepted document.
+// Unlike the typed-envelope twin there is no type-error case to let through —
+// every syntactically valid object decodes into map[string]any — so a decode
+// failure is precisely the syntax error json.Valid used to reject.
 func ExtractChatContinuation(page []byte) (string, bool, error) {
-	raw, ok := utils.FindJSONObjectCandidate(page, ytInitialDataAnchors, utils.IsNonEmptyJSONObject)
+	var data map[string]any
+	_, ok := utils.FindJSONObjectCandidate(page, ytInitialDataAnchors, func(obj []byte) bool {
+		if !utils.IsNonEmptyJSONBody(obj) {
+			return false
+		}
+		var cand map[string]any
+		if json.Unmarshal(obj, &cand) != nil {
+			return false
+		}
+		data = cand
+		return true
+	})
 	if !ok {
 		return "", false, fmt.Errorf("ytInitialData not found")
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return "", false, fmt.Errorf("parse ytInitialData: %w", err)
 	}
 
 	// Navigate: contents.twoColumnWatchNextResults.conversationBar.liveChatRenderer

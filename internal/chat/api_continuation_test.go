@@ -1,6 +1,9 @@
 package chat
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
 
 // chatPage renders a watch page whose ytInitialData carries a chat
 // continuation, in the given assignment form. It mirrors watchPageHTML in
@@ -36,6 +39,38 @@ func TestExtractChatContinuationSkipsAForgedCandidate(t *testing.T) {
 	}
 }
 
+// TestExtractChatContinuationSkipsAMalformedCandidate pins the acceptance test
+// after the decode became it (report #60 / YOUTUBE-15, the chat twin of
+// internal/youtube's extractChatContinuation). The old predicate was
+// utils.IsNonEmptyJSONObject (since deleted — it had no production caller
+// left) — a json.Valid scan over a multi-megabyte literal FOLLOWED by a full
+// map decode of the same bytes, two passes answering one question. The map
+// decode alone answers it, so only the emptiness half
+// (utils.IsNonEmptyJSONBody) runs ahead of it.
+//
+// A page-authored candidate that scans balanced but is not valid JSON is
+// exactly what json.Valid used to reject, so it is what the decode must reject
+// now — otherwise the search ends on it and the real blob behind it is lost.
+//
+// Mutant this kills: accepting on utils.IsNonEmptyJSONBody alone (the decode's
+// error ignored, or moved back after the search). The forged candidate then
+// wins and the function reports "no liveChatRenderer found" instead of
+// returning MALFORMEDOK — chat capture silently off for that stream.
+func TestExtractChatContinuationSkipsAMalformedCandidate(t *testing.T) {
+	// Balanced braces, a non-empty body, and a trailing comma json.Unmarshal
+	// rejects as a syntax error.
+	page := `<p>var ytInitialData = {"contents":{"twoColumnWatchNextResults":{},},}</p>` +
+		chatPage(`var ytInitialData = `, "MALFORMEDOK")
+
+	tok, _, err := ExtractChatContinuation([]byte(page))
+	if err != nil {
+		t.Fatalf("ExtractChatContinuation: %v — a malformed candidate ahead of the real assignment ended the search", err)
+	}
+	if tok != "MALFORMEDOK" {
+		t.Errorf("token = %q, want %q", tok, "MALFORMEDOK")
+	}
+}
+
 // TestExtractChatContinuationReadsTheWindowAssignmentForm pins the second
 // anchor. The lazy regex this replaces matched only `var ytInitialData = `
 // with exactly one space and required a `;</script>` terminator, so the
@@ -67,5 +102,30 @@ func TestExtractChatContinuationReportsAMissingBlob(t *testing.T) {
 	if _, _, err := ExtractChatContinuation([]byte(`<html><body>nothing here</body></html>`)); err == nil ||
 		err.Error() != "ytInitialData not found" {
 		t.Errorf("err = %v, want %q", err, "ytInitialData not found")
+	}
+}
+
+// TestFreshContinuationWatchURLCarriesTheAgeGateBypass is row #59's twin in
+// this package. FetchFreshContinuation is the chat path's own watch-page
+// fetch, and without yt-dlp's bpctr / has_verified pair (_video.py:3809) an
+// age-restricted stream answers with the age-gate shell — whose ytInitialData
+// carries no liveChatRenderer, so the continuation is read as "no chat"
+// instead of being read at all.
+//
+// The whole query string is pinned: the two parameters are APPENDED to the URL
+// that already worked, so a rewrite that drops or reorders `v=` fails here too.
+//
+// Mutant this kills: the two parameters dropped → the query check fails.
+func TestFreshContinuationWatchURLCarriesTheAgeGateBypass(t *testing.T) {
+	got := freshContinuationWatchURL("dQw4w9WgXcQ")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("freshContinuationWatchURL produced an unparseable URL %q: %v", got, err)
+	}
+	if want := "https://www.youtube.com/watch"; u.Scheme+"://"+u.Host+u.Path != want {
+		t.Errorf("endpoint = %q, want %q", u.Scheme+"://"+u.Host+u.Path, want)
+	}
+	if want := "v=dQw4w9WgXcQ&bpctr=9999999999&has_verified=1"; u.RawQuery != want {
+		t.Errorf("query = %q, want exactly %q", u.RawQuery, want)
 	}
 }

@@ -361,6 +361,14 @@ type ConnectivityMsg struct {
 	Online bool
 }
 
+// SidecarStatusMsg is sent when the BotGuard sidecar's liveness changes.
+// A plain bool by design: internal/tui must not import internal/bgutils, so
+// cmd/moombox's wiring projects sidecar.Health onto this and nothing else
+// crosses the boundary.
+type SidecarStatusMsg struct {
+	Healthy bool
+}
+
 // chordState tracks the two-key chord system state machine.
 type chordState struct {
 	prefix     string    // "a", "r", "o", "q" or ""
@@ -722,6 +730,17 @@ func (a *App) SetVersion(v string) {
 // SetInternalToken sets the secret token for CSRF bypass on local API calls.
 func (a *App) SetInternalToken(token string) {
 	a.internalToken = token
+}
+
+// SetSidecarDown seeds the status bar's BotGuard sidecar alert before Run.
+//
+// The subscription in cmd/moombox carries every later transition through
+// SidecarStatusMsg, but its immediate first snapshot lands before tui.Run has
+// stored the program, and Send is a no-op until then. The state that already
+// exists at TUI start therefore has to come in through the model, like every
+// other pre-run Set* on this type.
+func (a *App) SetSidecarDown(down bool) {
+	a.statusBar.sidecarDown = down
 }
 
 // SetConfig provides the config reference for the settings panel.

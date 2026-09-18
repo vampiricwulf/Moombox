@@ -450,8 +450,15 @@ func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visito
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// Read a bounded body rather than discarding it: YouTube explains a
+		// 400/401/403 in `error.message`, and "browse API error: HTTP 403"
+		// alone tells an operator nothing. The prefix is kept ahead of the
+		// detail for the same reason doRetryRequest keeps its own.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		// Still drain the remainder: an un-consumed body costs the keep-alive
+		// connection, which is what the io.Copy this replaced was for.
 		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("browse API error: HTTP %d", resp.StatusCode)
+		return nil, innertubeHTTPError("browse", resp.StatusCode, errBody)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBrowseResponseBytes))
 	if err != nil {

@@ -13,11 +13,63 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// fetchWatchPageForChat is youtube.FetchWatchPage behind a package var so the
+// chat-source tests can assert that a FRESH carried source costs no round
+// trip. Production never writes it.
+var fetchWatchPageForChat = youtube.FetchWatchPage
+
+// chatSourceFor returns the continuation, replay flag and visitor data to
+// start a chat downloader from.
+//
+// It prefers what the VideoInfo already carries: FetchWatchPage extracts those
+// three on every call, and GetVideoInfo fetched the page moments ago, so
+// fetching it again cost a second 1-5 MB authenticated download at job start
+// and at every early-chat restart (report #56 / YOUTUBE-10). A source that is
+// missing (a cookieless probe never parsed a page) or older than
+// chatSourceMaxAge falls back to the fetch, which is the old behaviour.
+//
+// The carried source is CONSUMED: one page, one chat start. A second setup off
+// the same VideoInfo — a re-entered download, an early-chat restart handed the
+// same info — is a different run and gets its own fetch, so a token this job
+// already started a downloader from is never presented twice. The field is an
+// in-process hand-off slot with no other reader (VideoInfo.Chat, `json:"-"`),
+// which is what makes clearing it a local act rather than a mutation anyone
+// else can observe.
+func chatSourceFor(ctx context.Context, info *youtube.VideoInfo, videoID, cookieHeader string) (youtube.ChatSource, error) {
+	if info != nil && info.Chat.Usable() {
+		src := info.Chat
+		info.Chat = youtube.ChatSource{}
+		return src, nil
+	}
+	wp, err := fetchWatchPageForChat(ctx, videoID, cookieHeader)
+	if err != nil {
+		return youtube.ChatSource{}, err
+	}
+	// The page's own stamp when it has one — same rule as withAttestation's
+	// (close-review Finding 10); a test seam that synthesizes a result has
+	// none, so the fetch instant here stands in.
+	fetchedAt := wp.FetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
+	src := youtube.ChatSource{
+		FetchedAt:    fetchedAt,
+		Continuation: wp.ChatContinuation,
+		IsReplay:     wp.ChatIsReplay,
+		Err:          wp.ChatErr,
+	}
+	if wp.Ytcfg != nil {
+		src.VisitorData = wp.Ytcfg.VisitorData
+	}
+	return src, nil
+}
+
 // setupChatDownloader creates a chat downloader for a YouTube job (A3).
-// Fetches the watch page to extract the chat continuation token, visitor data,
-// and determines whether chat is live or replay. Returns nil if chat is unavailable.
+// Takes the chat continuation token, visitor data and the live/replay verdict
+// from the watch page GetVideoInfo already parsed, fetching one only as a
+// fallback. Returns nil if chat is unavailable.
 func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo) *chat.ChatDownloader {
-	// Fetch watch page to get chat continuation and visitor data. This is a
+	// The cookie header is only needed for the FALLBACK fetch. That is a
 	// ONE-SHOT call, so a snapshot of the header is the right thing here — the
 	// long-lived chat downloader below gets a live getter instead.
 	cookieHeader := ""
@@ -25,7 +77,15 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		cookieHeader = jobCtx.YT.Auth.GetCookieHeader()
 	}
 
-	watchResult, err := youtube.FetchWatchPage(ctx, jobCtx.Job.VideoID, cookieHeader)
+	// Chat continuation, replay flag and visitor data are extracted at
+	// watch-page parse time (see watch_page.go) and ride on the VideoInfo
+	// GetVideoInfo just returned, so the ordinary path re-parses nothing and
+	// fetches nothing. There is no body STRING to collect either: since the
+	// 2026-09-15 sweep (Arc 3) FetchWatchPage reads the page as []byte and its
+	// extractors read it in place, and the token json.Unmarshal produced does
+	// not alias the page — so neither the info nor a fallback result retains
+	// those bytes and the page is collectable by the time this runs.
+	src, err := chatSourceFor(ctx, videoInfo, jobCtx.Job.VideoID, cookieHeader)
 	if err != nil {
 		o.logger.Warn("failed to fetch watch page for chat", "err", err, "videoID", jobCtx.Job.VideoID)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
@@ -33,28 +93,14 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		})
 		return nil
 	}
-
-	// Chat continuation is extracted at watch-page parse time (see watch_page.go);
-	// reading from the result avoids re-parsing the ~5 MB HTML. There is no body
-	// STRING to collect: since the 2026-09-15 sweep (Arc 3) FetchWatchPage reads
-	// the page as []byte and its extractors read it in place, and the token
-	// json.Unmarshal produced does not alias the page — so the result retains
-	// none of those bytes and the page is collectable by the time this runs.
-	continuation := watchResult.ChatContinuation
-	isReplay := watchResult.ChatIsReplay
-	if continuation == "" {
-		o.logger.Debug("no chat continuation available", "videoID", jobCtx.Job.VideoID, "err", watchResult.ChatErr)
+	if src.Continuation == "" {
+		o.logger.Debug("no chat continuation available", "videoID", jobCtx.Job.VideoID, "err", src.Err)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"chat_status": "unavailable",
 		})
 		return nil
 	}
-
-	// Extract visitor data from ytcfg
-	visitorData := ""
-	if watchResult.Ytcfg != nil {
-		visitorData = watchResult.Ytcfg.VisitorData
-	}
+	continuation, isReplay, visitorData := src.Continuation, src.IsReplay, src.VisitorData
 
 	chatPath := filepath.Join(jobCtx.StagingDir, "chat.json")
 	opts := chat.ChatDownloaderOptions{

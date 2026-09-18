@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -155,6 +156,14 @@ const (
 // FetchWatchPage returns.
 type WatchPageResult struct {
 	Ytcfg *YtcfgData
+	// FetchedAt is when this page's bytes arrived. It is what bounds the age
+	// of the chat continuation the page carried (ChatSource.Usable): stamping
+	// that at the END of an extraction instead measured the two-minute window
+	// from up to tens of seconds later than the page's real age, which is the
+	// wrong direction — it trusts a token for longer than it should
+	// (close-review Finding 10). Zero when a caller synthesized the result
+	// after a failed fetch; consumers fall back to their own clock.
+	FetchedAt time.Time
 	// SessionAuth is YouTube's own verdict on whether this fetch was a
 	// signed-in session. The zero value is SessionAuthUnknown, which is what
 	// callers that synthesize a WatchPageResult after a failed fetch get for
@@ -171,11 +180,17 @@ type WatchPageResult struct {
 	// available" with diagnostic context for the caller's debug log.
 	ChatErr error
 	// AttestationChallenge is the compact JSON of the BotGuard bgChallenge
-	// YouTube embedded in this page load via window.ytAtN(...) — the
-	// session's own attestation challenge, used to mint session-coherent
-	// GVS PO tokens (moonarchive 96344fe parity). Empty when the page did
-	// not carry one or it failed to parse; consumers must treat empty as
-	// "fall back to the sidecar's /att/get flow".
+	// YouTube embedded in this page load via window.ytAtN(...) — the session's
+	// own attestation challenge (moonarchive 96344fe parity). Empty when the
+	// page did not carry one or it failed to parse.
+	//
+	// NOT used to mint anything. The challenge-sourced GVS mint it was
+	// extracted for was deleted by owner ruling R1 (2026-09-15); the field's
+	// only readers are the two "no attestation challenge from watch page"
+	// Debug lines in player_api_strategy.go, which test it for emptiness and
+	// report AttestationReason. It is kept deliberately (that same ruling) so
+	// restoring the path is a one-line call, and because the reason string
+	// beside it is the diagnostic a premiere's 403s would be read from.
 	AttestationChallenge string
 	// AttestationReason names WHY AttestationChallenge is empty (one of the
 	// atn* constants). A genuine absence and a silently-broken extractor both
@@ -195,9 +210,19 @@ func isConsentRedirect(resp *http.Response) bool {
 		strings.HasPrefix(resp.Request.URL.Host, "consent.")
 }
 
+// watchPageURL builds the watch-page URL. bpctr and has_verified are yt-dlp's
+// age-gate bypass pair (_video.py:3809, `query = {'bpctr': '9999999999',
+// 'has_verified': '1'}`): without them an age-restricted video answers with
+// the age-gate shell instead of the page, so its embedded player response —
+// the watch-page ScheduledStartTime source and the WatchPage format tier —
+// is lost for exactly the videos that need every source they can get.
+func watchPageURL(videoID string) string {
+	return fmt.Sprintf("%s?v=%s&bpctr=9999999999&has_verified=1", constants.YouTubeURLs.Watch, videoID)
+}
+
 // FetchWatchPage fetches and parses a YouTube watch page.
 func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*WatchPageResult, error) {
-	url := fmt.Sprintf("%s?v=%s", constants.YouTubeURLs.Watch, videoID)
+	url := watchPageURL(videoID)
 
 	headers := map[string]string{
 		"User-Agent":      constants.UserAgents.Web,
@@ -231,6 +256,9 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch watch page: %w", err)
 	}
+	// Stamped here, at the instant the page's bytes exist — not at the end of
+	// the extraction that consumes them (close-review Finding 10).
+	fetchedAt := time.Now()
 
 	// No string(body) here: every extractor below reads the page as bytes,
 	// so the ~1-5 MB copy this used to make on every watch-page fetch —
@@ -243,6 +271,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 
 	return &WatchPageResult{
 		Ytcfg:                ytcfg,
+		FetchedAt:            fetchedAt,
 		SessionAuth:          sessionAuth,
 		PlayerResponse:       playerResponse,
 		ChatContinuation:     chatContinuation,
@@ -603,8 +632,8 @@ type chatContinuationData struct {
 // drop the raw page before returning. json.Unmarshal allocates fresh strings,
 // so the returned token does not alias the page's backing array.
 //
-// The blob is located by extractYtInitialData (channel_membership.go), the
-// same brace-depth scan the membership path uses — which drops the old
+// The blob is located by extractYtInitialDataInto (channel_membership.go),
+// the same brace-depth scan the membership path uses — which drops the old
 // regex's `;</script>` terminator while keeping its two anchored assignment
 // spellings. A page-authored assignment CAN present itself as a candidate —
 // e.g. a page-authored `var ytInitialData = {}` — but since the 2026-09-15
@@ -626,13 +655,39 @@ type chatContinuationData struct {
 // renderers the map decode cost 32,593 allocations to read one string, and it
 // is linear in page size.
 func extractChatContinuation(page []byte) (string, bool, error) {
-	raw, ok := extractYtInitialData(page)
-	if !ok {
+	// The envelope decode IS the candidate acceptance now (report #60 /
+	// YOUTUBE-15). json.Valid answered the same question with a second full
+	// pass over the multi-megabyte literal — a third, really, since
+	// json.Unmarshal validates the whole input itself before decoding
+	// anything. On go1.27 that guarantee is `encoding/json`'s
+	// DefaultOptionsV1 option ReportErrorsWithLegacySemantics ("the syntactic
+	// structure of the JSON input is fully validated before performing the
+	// semantic unmarshaling"), not the v1 implementation detail it used to be
+	// — named here so the next Go bump does not read this as stale.
+	//
+	// A SYNTAX error is precisely what json.Valid rejected, so it is what
+	// rejects a candidate here. A TYPE error is NOT: encoding/json records the
+	// first one and keeps decoding, and the four partial-decode rows of
+	// TestExtractChatContinuationShapes — plus the "renderer absent and the
+	// envelope decode errored" row, which needs the error, not a skip — are
+	// exactly the candidates the old acceptance let through. Rejecting them
+	// here would search on past the real document and lose both the token and
+	// the diagnosis.
+	var env watchNextChatEnvelope
+	var err error
+	if !extractYtInitialDataInto(page, func(obj []byte) bool {
+		var cand watchNextChatEnvelope
+		decodeErr := json.Unmarshal(obj, &cand)
+		var syntaxErr *json.SyntaxError
+		if errors.As(decodeErr, &syntaxErr) {
+			return false
+		}
+		env, err = cand, decodeErr
+		return true
+	}) {
 		return "", false, fmt.Errorf("ytInitialData not found")
 	}
 
-	var env watchNextChatEnvelope
-	err := json.Unmarshal(raw, &env)
 	rendererRaw := env.Contents.TwoColumnWatchNextResults.ConversationBar.LiveChatRenderer
 	if len(rendererRaw) == 0 || string(rendererRaw) == "null" {
 		if err != nil {

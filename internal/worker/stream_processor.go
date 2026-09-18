@@ -32,7 +32,7 @@ const (
 	// returning ErrAuthRequired is the realistic case — would otherwise be
 	// restarted on every probe for the rest of the wait. The case the restart
 	// exists for, a waiting-room chat YouTube reset, self-limits at roughly
-	// the ~50 minutes recoverStaleContinuation spends before giving up, so
+	// the ~35 minutes recoverStaleContinuation spends before giving up, so
 	// this floor never delays it.
 	earlyChatMinRestartInterval = 5 * time.Minute
 

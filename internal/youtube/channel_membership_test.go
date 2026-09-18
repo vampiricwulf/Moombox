@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -11,7 +12,7 @@ import (
 )
 
 // wrapPage embeds a ytInitialData JSON literal in a minimal HTML page the way
-// YouTube serves it, so tests exercise extractYtInitialData + parseMembershipTab
+// YouTube serves it, so tests exercise extractYtInitialDataInto + parseMembershipTab
 // end to end.
 func wrapPage(jsonBody string) []byte {
 	return []byte(`<!DOCTYPE html><html><head><script nonce="x">` +
@@ -172,17 +173,59 @@ func TestParseMembershipTab_Dedup(t *testing.T) {
 	}
 }
 
+// TestParseMembershipTab_ForgedCandidateDoesNotDenyAccess pins report #60's
+// decision at the layer that pays for it. A page can author a syntactically
+// valid `var ytInitialData = {"contents":"forged"}` ahead of the real
+// assignment: it is JSON, it is non-empty, and it BALANCES — so a predicate
+// that only checks those accepts it, the search ends there, and a genuine
+// member is told they have no access to their own membership tab.
+//
+// The envelope decode is what rejects it: `contents` is an object in
+// ytInitialTabs and a string here, so json.Unmarshal errors and the candidate
+// is skipped rather than ending the search. Only the layer below (the
+// candidate iterator) was tested; this pins the consumer.
+//
+// Mutant this kills: extractYtInitialDataInto accepting on the cheap half
+// alone (`return utils.IsNonEmptyJSONBody(obj)`, i.e. the decode dropped from
+// the acceptance) → the forged literal wins and hasAccess is false.
+func TestParseMembershipTab_ForgedCandidateDoesNotDenyAccess(t *testing.T) {
+	page := []byte(`<!DOCTYPE html><html><head>` +
+		`<script nonce="x">var ytInitialData = {"contents":"forged"};</script>` +
+		`<script nonce="y">var ytInitialData = ` + lockupMembershipJSON + `;</script>` +
+		`</head><body></body></html>`)
+
+	videos, ok := parseMembershipTab(page)
+	if !ok {
+		t.Fatal("hasAccess=false — a forged ytInitialData ahead of the real one denied a member their own tab")
+	}
+	if len(videos) != 2 {
+		t.Errorf("videos = %d, want the real document's 2", len(videos))
+	}
+}
+
 func TestParseMembershipTab_NoInitialData(t *testing.T) {
 	if v, ok := parseMembershipTab([]byte("<html>no data here</html>")); ok || v != nil {
 		t.Errorf("expected (nil,false) when ytInitialData absent, got (%+v,%v)", v, ok)
 	}
 }
 
-func TestExtractYtInitialData_BalancedBraces(t *testing.T) {
+// takeFirstYtInitialData accepts the first candidate offered and keeps its
+// bytes, which is what the three locator tests below assert on: they pin the
+// SCAN, not a consumer's decode.
+func takeFirstYtInitialData(page []byte) ([]byte, bool) {
+	var got []byte
+	ok := extractYtInitialDataInto(page, func(obj []byte) bool {
+		got = obj
+		return true
+	})
+	return got, ok
+}
+
+func TestExtractYtInitialDataInto_BalancedBraces(t *testing.T) {
 	// JSON containing braces and escaped quotes inside strings — the brace
 	// scanner must not terminate early on a '}' inside a string literal.
 	body := `{"a":"has } brace and \" quote","b":{"c":"}"},"d":1}`
-	got, ok := extractYtInitialData(wrapPage(body))
+	got, ok := takeFirstYtInitialData(wrapPage(body))
 	if !ok {
 		t.Fatal("extraction failed")
 	}
@@ -191,17 +234,17 @@ func TestExtractYtInitialData_BalancedBraces(t *testing.T) {
 	}
 }
 
-func TestExtractYtInitialData_WindowBracketForm(t *testing.T) {
+func TestExtractYtInitialDataInto_WindowBracketForm(t *testing.T) {
 	// The `window["ytInitialData"] = {…}` assignment form must also match.
 	page := `<script>window["ytInitialData"] = {"contents":{"x":1}};</script>`
-	got, ok := extractYtInitialData([]byte(page))
+	got, ok := takeFirstYtInitialData([]byte(page))
 	if !ok || string(got) != `{"contents":{"x":1}}` {
 		t.Errorf("window-bracket form not extracted: ok=%v got=%s", ok, got)
 	}
 }
 
-func TestExtractYtInitialData_Absent(t *testing.T) {
-	if _, ok := extractYtInitialData([]byte("<html></html>")); ok {
+func TestExtractYtInitialDataInto_Absent(t *testing.T) {
+	if _, ok := takeFirstYtInitialData([]byte("<html></html>")); ok {
 		t.Error("expected extraction to fail when marker absent")
 	}
 }
@@ -573,5 +616,36 @@ func TestFetchMembershipVideosReportsAccessSeparatelyFromTheVideoList(t *testing
 				t.Errorf("hasAccess = %v, want %v — the video list cannot answer this question", hasAccess, tc.wantHasAccess)
 			}
 		})
+	}
+}
+
+// TestExtractYtInitialDataDecodeIsTheAcceptance is row #60's behaviour half:
+// a candidate that the CONSUMER cannot decode must not end the search, so a
+// forged literal before the real assignment denies nothing. (No candidate cap
+// — the Arc 3 fix-wave ruling: a cap re-opens the denial the iterator exists
+// to close.)
+//
+// Mutants this kills:
+//   - the decode result ignored by the predicate → the forged literal wins
+//   - the iterator stopping at the first match   → same
+func TestExtractYtInitialDataDecodeIsTheAcceptance(t *testing.T) {
+	page := []byte(`<meta name="description" content="x">` +
+		`<script>var ytInitialData = {"contents":"not-an-object"};</script>` +
+		`<script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[]}}};</script>`)
+
+	var env ytInitialTabs
+	ok := extractYtInitialDataInto(page, func(obj []byte) bool {
+		var cand ytInitialTabs
+		if json.Unmarshal(obj, &cand) != nil {
+			return false
+		}
+		env = cand
+		return true
+	})
+	if !ok {
+		t.Fatal("the real ytInitialData was not found past the undecodable one")
+	}
+	if env.Contents.TwoColumnBrowseResultsRenderer.Tabs == nil {
+		t.Errorf("decoded the wrong candidate: %+v", env)
 	}
 }

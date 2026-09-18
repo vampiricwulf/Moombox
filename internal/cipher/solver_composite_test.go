@@ -292,3 +292,34 @@ func (c *countingBatchSolver) Batch(ctx context.Context, p string, sigs, ns []st
 	c.onBatch()
 	return c.inner.Batch(ctx, p, sigs, ns)
 }
+
+// TestCompositeSetSidecarSwapsTheSigPath pins the seam the BotGuard sidecar
+// supervisor needs. sig is sidecar-ONLY (the routing policy), so a process
+// whose sidecar died and came back must be able to install the REBUILT
+// sidecar solver — the old one's per-player "already sent" map describes the
+// dead child's memory. Before this, the sidecar half was captured at
+// construction and a restarted sidecar was unreachable for the rest of the run.
+//
+// Mutants this kills:
+//   - SetSidecar implemented as a no-op          → the first Sig still errors
+//   - Sig reading a value snapshotted in the ctor → the first Sig still errors
+//   - SetSidecar(nil) not clearing the slot       → the last Sig returns "S"
+func TestCompositeSetSidecarSwapsTheSigPath(t *testing.T) {
+	goja := &staticSolver{sig: map[string]string{"x": "goja-should-never-serve-sig"}}
+	c := NewCompositeSolver(nil, goja)
+
+	if _, err := c.Sig(context.Background(), "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
+		t.Fatalf("Sig with no sidecar: err = %v, want ErrSidecarUnavailable", err)
+	}
+
+	c.SetSidecar(&staticSolver{sig: map[string]string{"x": "S"}})
+	got, err := c.Sig(context.Background(), "p1", "x")
+	if err != nil || got != "S" {
+		t.Fatalf("Sig after SetSidecar = (%q, %v), want (\"S\", nil)", got, err)
+	}
+
+	c.SetSidecar(nil)
+	if _, err := c.Sig(context.Background(), "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
+		t.Fatalf("Sig after SetSidecar(nil): err = %v, want ErrSidecarUnavailable", err)
+	}
+}

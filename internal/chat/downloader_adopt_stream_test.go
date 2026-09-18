@@ -50,6 +50,9 @@ func writeBigChatFile(t *testing.T, path string, n int) int64 {
 // Mutant: restoring os.ReadFile + json.Unmarshal allocates at least the file
 // size in raw bytes plus the decoded slice, and fails the budget below.
 func TestAdoptionSummaryIsStreamed(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation budget is not meaningful under the race detector")
+	}
 	path := filepath.Join(t.TempDir(), "chat.json")
 	const n = 2000
 	size := writeBigChatFile(t, path, n)

@@ -259,8 +259,19 @@ func (s *Service) InvalidateVisitorData() {
 }
 
 // ProbeVideoStatusAuthenticated performs an authenticated probe using TV_DOWNGRADED.
-// Used for polling members-only upcoming streams.
+// Used for polling members-only upcoming streams, and — since owner decision
+// O-H — by the 30 s quality monitor.
+//
+// The cookie file is re-read first, exactly as GetVideoInfo and the
+// authenticated cascade do (Auth.SyncCookies → CookieJar.Reload, memoized on
+// (size, mtime) so an unchanged file costs a stat). Without it this path would
+// keep sending whatever the jar held at startup, and a rotation — by the
+// refresh service, by a Web/TUI import, by the user replacing the file — would
+// not reach the probe at all.
 func (s *Service) ProbeVideoStatusAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
+	if err := s.Auth.SyncCookies(); err != nil {
+		s.logger.Warn("[YouTube] SyncCookies failed before authenticated probe", "error", err)
+	}
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()

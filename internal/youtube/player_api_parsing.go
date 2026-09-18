@@ -3,18 +3,87 @@ package youtube
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 )
 
-func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
+// VideoIDMismatchError reports a player response whose videoDetails.videoId is
+// not the video that was asked for. yt-dlp calls this an "invalid player
+// response" (_video.py:3022-3026) and its only attested cause is a blocked or
+// rate-limited source IP being served a SUBSTITUTE video
+// (TeamNewPipe/NewPipe#8713). It is returned rather than logged because the
+// cascade's error handling is what skips the client.
+type VideoIDMismatchError struct {
+	Requested string
+	Got       string
+}
+
+func (e *VideoIDMismatchError) Error() string {
+	return fmt.Sprintf("player response is for video %q, not %q (YouTube served a substitute — the source IP may be rate-limited or blocked)",
+		capSubstituteID(e.Got), e.Requested)
+}
+
+// substituteIDDisplayRunes bounds how much of a wire-supplied video id is
+// rendered. A real one is 11 characters; 32 leaves room for a shape nobody has
+// seen yet while keeping the line readable.
+const substituteIDDisplayRunes = 32
+
+// capSubstituteID bounds a video id for DISPLAY. Got comes straight off the
+// wire, so it is as long as YouTube (or whatever answered for it) cares to
+// make it: a 14,000-byte id rendered a 22-kilobyte error string, which reaches
+// the job's `error` column through `full fetch failed: %w` and the IP-block
+// verdict's log field (close-review Finding 4). The cut is on a RUNE boundary
+// so %q still produces valid UTF-8; the field itself is never modified,
+// because a caller comparing ids must see what actually arrived.
+func capSubstituteID(id string) string {
+	if utf8.RuneCountInString(id) <= substituteIDDisplayRunes {
+		return id
+	}
+	return string([]rune(id)[:substituteIDDisplayRunes]) + "…"
+}
+
+// ErrAllClientsMismatched is upstream's terminal verdict when nothing survived
+// the check: `raise ExtractorError('All player responses are invalid. Your IP
+// is likely being blocked by Youtube')` (_video.py:3181-3187).
+var ErrAllClientsMismatched = errors.New("every Innertube client returned a player response for a different video — this IP is likely being blocked by YouTube")
+
+func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData, requestedVideoID string) (*VideoInfo, error) {
 	videoDetails, _ := data["videoDetails"].(map[string]any)
+
+	// yt-dlp's _invalid_player_response (_video.py:3022-3026, applied to the
+	// watch page's own response at :3038 and per client at :3122): "YouTube
+	// may return a different video player response than expected." Taking a
+	// substitute's response would hand this job the substitute's status AND
+	// formats — the waiting-room probe reads a VOD substitute as "became VOD"
+	// and the orchestrator archives the wrong video.
+	//
+	// An ABSENT or EMPTY videoId is ACCEPTED, and that MATCHES upstream rather
+	// than diverging from it: _invalid_player_response returns the *id*, not a
+	// bool, and both call sites test that return for TRUTHINESS —
+	// `if pr_id := self._invalid_player_response(pr, video_id):` (:3122) and
+	// `if initial_pr and not self._invalid_player_response(...)` (:3038) — so
+	// a None or "" id leaves the response in `prs`. Go has no truthiness, so
+	// the rule is spelled out here: only a NON-EMPTY id that differs is a
+	// substitute.
+	//
+	// It is load-bearing, not incidental. TV is this cascade's playability
+	// AUTHORITY and several of its refusals arrive as a playabilityStatus with
+	// no videoDetails at all; rejecting those would discard the verdict every
+	// downstream error string is built from.
+	if got := getStr(videoDetails, "videoId"); got != "" && got != requestedVideoID {
+		return nil, &VideoIDMismatchError{Requested: requestedVideoID, Got: got}
+	}
+
 	streamingData, _ := data["streamingData"].(map[string]any)
 	playabilityStatus, _ := data["playabilityStatus"].(map[string]any)
 	microformat, _ := getNestedMap(data, "microformat", "playerMicroformatRenderer")
@@ -28,10 +97,22 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// carry EncryptedSig populated and a raw `url=` value in URL; the
 	// strategy resolves them via cipher.ResolveFormatURL right before
 	// constructing SegmentDownloaders.
-	formats := p.parseFormats(streamingData)
+	formats, formatDiag := p.parseFormats(ctx, streamingData)
 
-	// Stream classification
-	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0)
+	// Stream classification. hasFormats asks whether the response CARRIED
+	// formats, not whether any survived the parse: a response whose formats
+	// are all DRM still proves the broadcast has media, and classifying on the
+	// post-filter count turns a finished stream into `upcoming` — a stall the
+	// single-client ProbeVideoStatusAuthenticated path never recovers from,
+	// for exactly the accounts the tv-client DRM experiment hits.
+	//
+	// URL-less entries count for the same reason and by the same argument: a
+	// client YouTube has forced onto SABR returns a full format list with the
+	// per-format URLs stripped, so the response proves the media exists just
+	// as loudly, and nothing about "this client cannot fetch it" makes a
+	// finished broadcast upcoming.
+	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat,
+		len(formats) > 0 || formatDiag.DRMSkipped > 0 || formatDiag.URLlessFormats > 0)
 
 	// Metadata
 	title := getStr(videoDetails, "title")
@@ -113,6 +194,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PlayabilityReason:  playReason,
 		PublishedAt:        publishedAt,
 		PublishedPrecision: publishedPrecision,
+		FormatDiag:         formatDiag,
 	}, nil
 }
 
@@ -215,6 +297,132 @@ func microformatDate(microformat map[string]any) string {
 	return ""
 }
 
+// extractionStateKey is the context key for extractionState. Its own unexported
+// type, so no other package can collide with it.
+type extractionStateKey struct{}
+
+// extractionState is the scratch one extraction — one GetVideoInfo* cascade —
+// carries across the several player responses it parses. It rides the context
+// because the parse path (doRetryRequest → parsePlayerResponse → parseFormats)
+// is entered from every fetchWith* helper, and the context is the only
+// per-extraction value all of them already thread; the alternative is a new
+// parameter on eight call sites that do nothing with it.
+//
+// The fields are atomic although a cascade runs its clients sequentially
+// today: the guarantee "no fetch is in a goroutine" is one a later arc can
+// quietly invalidate by parallelising the client sweep, and an unsynchronised
+// write would then be a data race that -race only catches if that path happens
+// to be exercised. Three words buy the class away.
+type extractionState struct {
+	drmWarned atomic.Bool
+	// drmSkipped accumulates every response's DRM drop count, and
+	// collapsedRenditions holds the pool's own collapse count. They are what
+	// finishExtraction stamps onto the VideoInfo the cascade returns; see
+	// FormatDiag for why one is a sum and the other is not.
+	drmSkipped          atomic.Int64
+	collapsedRenditions atomic.Int64
+}
+
+// withExtractionState opens one extraction's scratch. Called once at the head
+// of each cascade; every player response parsed under the returned context
+// then shares the same state.
+func withExtractionState(ctx context.Context) context.Context {
+	return context.WithValue(ctx, extractionStateKey{}, &extractionState{})
+}
+
+// extractionStateFrom returns this extraction's state, or nil when the caller
+// is not inside a cascade — a direct parse, as several tests make.
+func extractionStateFrom(ctx context.Context) *extractionState {
+	s, _ := ctx.Value(extractionStateKey{}).(*extractionState)
+	return s
+}
+
+// firstDRMReport reports whether this extraction has yet to log the DRM-skip
+// warning, recording that it now has. Nil (no cascade) reports every time,
+// which is the plain per-call behaviour a direct parseFormats caller expects.
+func (s *extractionState) firstDRMReport() bool {
+	return s == nil || s.drmWarned.CompareAndSwap(false, true)
+}
+
+// addDRMSkipped folds one response's DRM drop count into the extraction's
+// running total. Nil outside a cascade — a probe keeps nothing across calls.
+func (s *extractionState) addDRMSkipped(n int) {
+	if s != nil && n > 0 {
+		s.drmSkipped.Add(int64(n))
+	}
+}
+
+// noteCollapsedRenditions records the POOL's collapse count. Stored rather
+// than added: each cascade return path deduplicates the pool exactly once, so
+// the last value written is the pool that was actually returned.
+func (s *extractionState) noteCollapsedRenditions(n int) {
+	if s != nil {
+		s.collapsedRenditions.Store(int64(n))
+	}
+}
+
+// poolCounts returns the two extraction-wide FormatDiag figures. Zero outside
+// a cascade, where the caller keeps its own per-response numbers.
+func (s *extractionState) poolCounts() (drmSkipped, collapsedRenditions int) {
+	if s == nil {
+		return 0, 0
+	}
+	return int(s.drmSkipped.Load()), int(s.collapsedRenditions.Load())
+}
+
+// playerCallScopeKey is the context key for playerCallScope — its own
+// unexported type, so no other package can collide with it.
+type playerCallScopeKey struct{}
+
+// playerCallScope describes the ONE player call whose response is being
+// parsed: which client answered it, and whether the call was a probe. It rides
+// the context for the same reason extractionState does — the parse path is
+// entered from every fetchWith* helper and the context is the only value all
+// of them already thread.
+//
+// probeOnly is the audience rule for the DRM report. The quality monitor and
+// the members-only waiting-room poll probe every 30 s, and an account in the
+// tv-client DRM experiment gets DRM formats in nearly every one of those
+// responses — a Warn there is a permanent wall at the default log level for a
+// fact the operator was already told once. Probes report at Debug; real
+// extractions keep upstream's once-per-run Warn.
+type playerCallScope struct {
+	client    string
+	probeOnly bool
+}
+
+// clientName is the label the DRM report names. "unknown" covers a direct
+// parse with no fetch helper above it (several tests), which upstream cannot
+// have because every response it parses came from a named client.
+func (s playerCallScope) clientName() string {
+	if s.client == "" {
+		return "unknown"
+	}
+	return s.client
+}
+
+// withPlayerClient names the client whose response the parse below is about.
+func withPlayerClient(ctx context.Context, client string) context.Context {
+	sc := playerCallScopeFrom(ctx)
+	sc.client = client
+	return context.WithValue(ctx, playerCallScopeKey{}, sc)
+}
+
+// withProbeOnlyCall marks the call below as a probe. Applied to the context
+// handed to ONE fetch, never to a cascade's own context.
+func withProbeOnlyCall(ctx context.Context) context.Context {
+	sc := playerCallScopeFrom(ctx)
+	sc.probeOnly = true
+	return context.WithValue(ctx, playerCallScopeKey{}, sc)
+}
+
+// playerCallScopeFrom returns the scope of the call being parsed, or the zero
+// scope when the caller set none.
+func playerCallScopeFrom(ctx context.Context) playerCallScope {
+	sc, _ := ctx.Value(playerCallScopeKey{}).(playerCallScope)
+	return sc
+}
+
 // parseFormats extracts format metadata + raw stream URLs from a
 // streamingData map. Cipher decryption (sig + n) is intentionally NOT
 // performed here — strategies do it post-selection via
@@ -229,10 +437,28 @@ func microformatDate(microformat map[string]any) string {
 // EncryptedSig is empty. Selection still uses Format.URL != "" as
 // the "format has a URL" signal — we always set URL to something
 // fetchable-after-resolve.
-func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
+//
+// ctx carries the extraction's scratch state (see extractionState): the
+// DRM-skip warning is reported once per extraction, not once per response.
+// It also carries the call's scope (see playerCallScope) — which client
+// answered, and whether this was a probe rather than an extraction.
+//
+// The second return is what this response's format list LOST (see FormatDiag).
+// Callers need the DRM half because "this response carried no formats" and
+// "every format it carried was DRM" are different facts: classification reads
+// the first, and only the unfiltered count can tell it apart from an empty
+// streamingData.
+func (p *PlayerAPI) parseFormats(ctx context.Context, streamingData map[string]any) ([]Format, FormatDiag) {
+	var diag FormatDiag
 	if streamingData == nil {
-		return nil
+		return nil, diag
 	}
+
+	// A client YouTube has forced onto SABR advertises the one URL it will
+	// serve media from and strips the per-format ones. Counting the two
+	// together is what tells that apart from an empty streamingData
+	// (_video.py:3527-3548 reports the same pair of signals).
+	diag.SabrForced = getStr(streamingData, "serverAbrStreamingUrl") != ""
 
 	var formats []Format
 	// adaptiveFormats is iterated first so that when an itag appears in both
@@ -252,6 +478,18 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 				continue
 			}
 
+			// DRM formats are dropped rather than ranked. yt-dlp reports them
+			// as skipped (_video.py:3418-3428 — an account-level experiment
+			// applies DRM to ALL videos on the tv client, issue #12563) and
+			// YoutubeDL.py:2930 filters them out, because muxing encrypted
+			// samples produces an unplayable archive. Dropping here rather
+			// than in the selector means a clean same-itag format from
+			// another client still wins the dedup tie it used to LOSE.
+			if drm, ok := f["drmFamilies"].([]any); ok && len(drm) > 0 {
+				diag.DRMSkipped++
+				continue
+			}
+
 			formatURL := getStr(f, "url")
 			sigCipher := getStr(f, "signatureCipher")
 			var encSig, sigKey string
@@ -264,6 +502,7 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 				if parseErr != nil {
 					p.logger.Debug("[PlayerApi] Failed to parse signatureCipher",
 						slog.String("error", parseErr.Error()))
+					diag.URLlessFormats++
 					continue
 				}
 				formatURL = params.Get("url")
@@ -273,11 +512,15 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 					sigKey = "signature"
 				}
 				if formatURL == "" || encSig == "" {
+					diag.URLlessFormats++
 					continue
 				}
 			}
 
+			// No url and no usable signatureCipher: nothing fetchable. This is
+			// the arm a SABR-forced client lands every one of its formats on.
 			if formatURL == "" {
+				diag.URLlessFormats++
 				continue
 			}
 
@@ -308,10 +551,78 @@ func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 				format.TargetDurationSec = td
 			}
 
+			if at, ok := f["audioTrack"].(map[string]any); ok {
+				format.AudioTrackID = getStr(at, "id")
+				format.AudioTrackName = getStr(at, "displayName")
+				format.AudioIsDefault = getBool(at, "audioIsDefault")
+			}
+			format.IsDrc = getBool(f, "isDrc")
+
 			formats = append(formats, format)
 		}
 	}
-	return formats
+	if diag.DRMSkipped > 0 {
+		st := extractionStateFrom(ctx)
+		st.addDRMSkipped(diag.DRMSkipped)
+		scope := playerCallScopeFrom(ctx)
+		const drmNote = "a YouTube account experiment applies DRM to all videos on the tv client — yt-dlp issue #12563"
+		switch {
+		case scope.probeOnly:
+			// A probe is not an extraction. The quality monitor and the
+			// members-only waiting-room poll run one of these every 30 s for
+			// the whole life of a waiting stream, so the same Warn the
+			// extraction path prints once would be a permanent wall here —
+			// for a fact the operator was already told by the extraction that
+			// set the job up. Recorded, not shouted.
+			p.logger.Debug("[PlayerApi] skipped DRM-protected formats (probe)",
+				"client", scope.clientName(), "count", diag.DRMSkipped, "note", drmNote)
+		case st.firstDRMReport():
+			// Warn, not Debug: upstream reports this with report_warning
+			// (_video.py:3420-3428, only_once=True), and a silently
+			// DRM-stripped format pool is exactly the state an operator needs
+			// told about — it is the difference between "this video has no
+			// 1080p" and "this ACCOUNT gets no 1080p". The count is per
+			// response; the LINE is once per extraction, as upstream's
+			// only_once is once per run. The client is named because
+			// upstream's message embeds client_name and because the whole
+			// point of the diagnosis is that it is the TV client doing it.
+			p.logger.Warn("[PlayerApi] skipped DRM-protected formats",
+				"client", scope.clientName(), "count", diag.DRMSkipped, "note", drmNote)
+		}
+	}
+	// Beside the DRM count, the other thing this response loses on the way to
+	// the consumers: the alternate audio renditions deduplicateFormats will
+	// collapse away, one per itag beyond the preferred one. Nothing downstream
+	// can see them once the pool is built, so the diagnosis is recorded here.
+	// Silent on an ordinary response, which carries no track fields at all.
+	if collapsible := countCollapsibleRenditions(formats); collapsible > 0 {
+		p.logger.Debug("[PlayerApi] response carries alternate audio renditions",
+			"collapsed", collapsible,
+			"note", "dubbed and DRC renditions; the pool keeps one per itag — the original-language, non-DRC one")
+	}
+	return formats, diag
+}
+
+// countCollapsibleRenditions counts the track-carrying entries that will lose
+// their itag to a preferred sibling: for each itag, every rendition beyond the
+// first. Only entries with a track id or a DRC flag are counted, so an
+// ordinary response — where an itag can still appear in both adaptiveFormats
+// and formats — reports nothing.
+func countCollapsibleRenditions(formats []Format) int {
+	seen := map[int]bool{}
+	collapsible := 0
+	for i := range formats {
+		f := &formats[i]
+		if f.AudioTrackID == "" && !f.IsDrc {
+			continue
+		}
+		if seen[f.Itag] {
+			collapsible++
+			continue
+		}
+		seen[f.Itag] = true
+	}
+	return collapsible
 }
 
 // decryptNParam decrypts the n-parameter in a URL to avoid throttling.
@@ -410,6 +721,53 @@ func isUpcomingFromPlayability(statusCode, reasonLower string) bool {
 		(statusCode == "UNPLAYABLE" && strings.Contains(reasonLower, "live event will begin"))
 }
 
+// ageGateReasons are yt-dlp's AGE_GATE_REASONS reason substrings
+// (_video.py:2900-2903, the reason substrings on 2901). They are the
+// load-bearing half of the match: upstream's status entries in the same tuple
+// are lower-case and are substring-matched against the raw upper-case
+// `status`, so upstream in practice detects an age gate through the REASON
+// text.
+var ageGateReasons = []string{"confirm your age", "age-restricted", "inappropriate"}
+
+// isAgeGateReason reports whether a playability reason (already lower-cased)
+// names an age gate.
+func isAgeGateReason(reasonLower string) bool {
+	for _, r := range ageGateReasons {
+		if strings.Contains(reasonLower, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDesktopLegacyAgeGate mirrors upstream's first test,
+// `traverse_obj(player_response, ('playabilityStatus',
+// 'desktopLegacyAgeGateReason'))` (_video.py:2896-2897) — a TRUTHINESS test,
+// so a key present but zero/empty/false is not an age gate.
+//
+// Every shape encoding/json can produce for an `any` is spelled out, including
+// the two containers: Python calls an empty dict or list falsy, so a
+// `desktopLegacyAgeGateReason` of `{}` or `[]` is NOT a gate. Only an
+// unreachable type reaches the default arm.
+func hasDesktopLegacyAgeGate(status map[string]any) bool {
+	switch v := status["desktopLegacyAgeGateReason"].(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case string:
+		return v != ""
+	case float64:
+		return v != 0
+	case map[string]any:
+		return len(v) > 0
+	case []any:
+		return len(v) > 0
+	default:
+		return true
+	}
+}
+
 func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	if status == nil {
 		return PlayabilityUnknown, ""
@@ -432,15 +790,35 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 		return PlayabilityOK, ""
 	}
 
+	// Age gates, ported from _is_agegated (_video.py:2894-2904). This runs
+	// BEFORE the status switch because the shapes it catches are spread across
+	// three different status codes (AGE_CHECK_REQUIRED, UNPLAYABLE,
+	// LOGIN_REQUIRED) — and AFTER the upcoming check, because a waiting room
+	// is not an error and must never be classified as one.
+	//
+	// `status == "OK"` is excluded for that same reason: a response YouTube
+	// says is PLAYABLE is not an error either, and every shape this block
+	// exists to catch is non-OK. Without the exclusion an OK response that
+	// merely carries desktopLegacyAgeGateReason or an age-flavoured reason
+	// would classify age_restricted, and checkPlayability
+	// (internal/worker/stream_processor.go) aborts the job on every non-ok
+	// verdict — with the notification SUPPRESSED for age_restricted. Upstream
+	// cannot hit this: its _is_agegated only ever appends clients
+	// (_video.py:3157-3175), it never overrides a playability verdict.
+	//
+	// It cannot steal a members-only verdict either: none of the three
+	// substrings appears in YouTube's membership reason text, which says "Join
+	// this channel to get access to members-only content".
+	if statusCode != "OK" && (hasDesktopLegacyAgeGate(status) || isAgeGateReason(reasonLower)) {
+		return PlayabilityAgeRestricted, reason
+	}
+
 	switch statusCode {
 	case "OK":
 		return PlayabilityOK, ""
 	case "LOGIN_REQUIRED":
 		if strings.Contains(reasonLower, "member") || strings.Contains(reasonLower, "join") {
 			return PlayabilityMembersOnly, reason
-		}
-		if strings.Contains(reasonLower, "age") {
-			return PlayabilityAgeRestricted, reason
 		}
 		return PlayabilityLoginRequired, reason
 	case "UNPLAYABLE":
@@ -457,7 +835,7 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 			return PlayabilityUnavailable, reason
 		}
 		return PlayabilityUnknown, reason
-	case "AGE_VERIFICATION_REQUIRED":
+	case "AGE_VERIFICATION_REQUIRED", "AGE_CHECK_REQUIRED":
 		return PlayabilityAgeRestricted, reason
 	case "ERROR":
 		if strings.Contains(reasonLower, "private") || strings.Contains(reasonLower, "unavailable") {
@@ -557,32 +935,124 @@ func collectFormats(pool *[]Format, formats []Format, source string, authLevel i
 	}
 }
 
-func deduplicateFormats(pool []Format) []Format {
-	byItag := make(map[int]Format)
+// formatKey is yt-dlp's get_stream_id (_video.py:3396-3397): itag alone is not
+// an identity. A dubbed video lists several itag-140 entries from ONE client
+// differing only by audioTrack.id, and the DRC rendition of a track is a
+// separate stream, not a variant — keying on itag alone kept whichever was
+// listed first and silently discarded the rest.
+type formatKey struct {
+	itag         int
+	audioTrackID string
+	isDrc        bool
+}
+
+// deduplicateFormats reduces the collected pools to the format list the rest
+// of Moombox sees. It runs upstream's identity first — one entry per
+// (itag, audioTrack.id, isDrc), lowest auth level winning a stream that
+// several clients returned — and then COLLAPSES each itag to the single
+// rendition the audio-track preference would pick.
+//
+// That collapse is this port's one deliberate divergence from yt-dlp, which
+// keeps every rendition and carries the identity into its format ids
+// ("140-drc", _video.py:3450-3456). Moombox's consumers look formats up by
+// itag alone — SelectBestDashStream picks among same-itag entries by
+// bandwidth, and resolveFormatURLByItag returns the first entry of an itag at
+// setup and on every 403 credential refresh — so leaving several renditions of
+// one itag in the pool lets the live path archive a dub, or splice a second
+// language into a file that is already half written. Collapsing here means
+// every itag-keyed lookup resolves to exactly the rendition the selector
+// prefers, on the VOD path, the manifestless DASH path and the 403 refresh
+// alike, without any consumer needing to learn the 3-part identity.
+//
+// ctx is here for one reason: this is where the collapse actually happens, so
+// it is the only place that can count it EXACTLY. Each response's own count
+// (the Debug line in parseFormats) counts the copies every client returned, so
+// summing those over a cascade reports one rendition several times; the figure
+// recorded here is taken after the cross-client merge. finishExtraction stamps
+// it onto FormatDiag.CollapsedRenditions.
+func deduplicateFormats(ctx context.Context, pool []Format) []Format {
+	byStream := make(map[formatKey]Format)
 	for _, f := range pool {
 		if f.URL == "" {
 			continue
 		}
-		existing, exists := byItag[f.Itag]
+		key := formatKey{itag: f.Itag, audioTrackID: f.AudioTrackID, isDrc: f.IsDrc}
+		existing, exists := byStream[key]
 		if !exists {
-			byItag[f.Itag] = f
+			byStream[key] = f
 			continue
 		}
 		fAuth := authLevelOf(&f)
 		eAuth := authLevelOf(&existing)
 		if fAuth < eAuth {
-			byItag[f.Itag] = f
+			byStream[key] = f
 		}
 	}
 
-	result := make([]Format, 0, len(byItag))
-	for _, f := range byItag {
+	result := make([]Format, 0, len(byStream))
+	for _, f := range byStream {
 		result = append(result, f)
 	}
+	// Ordered by the whole key so the output is deterministic across map
+	// iterations — the itag-only sort stopped being total the moment one itag
+	// could appear more than once.
 	slices.SortFunc(result, func(a, b Format) int {
-		return cmp.Compare(a.Itag, b.Itag)
+		if c := cmp.Compare(a.Itag, b.Itag); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.AudioTrackID, b.AudioTrackID); c != 0 {
+			return c
+		}
+		return cmp.Compare(boolOrder(a.IsDrc), boolOrder(b.IsDrc))
 	})
+	collapsed := collapseToPreferredRendition(result)
+	extractionStateFrom(ctx).noteCollapsedRenditions(len(result) - len(collapsed))
+	return collapsed
+}
+
+// collapseToPreferredRendition keeps one rendition per itag: the highest
+// audioTrackScore (which already ranks a clean rendition above its DRC twin),
+// then the existing lowest-auth-level tie-break. streams arrives sorted by the
+// whole 3-part key, so the winners come out in ascending itag order — the same
+// order, row for row, that the pre-collapse dedup produced for every response
+// without an audioTrack or an isDrc flag.
+//
+// Video itags are untouched: they carry no track fields, so one itag can only
+// hold one stream and the loop hands it straight back.
+func collapseToPreferredRendition(streams []Format) []Format {
+	preferred := make(map[int]Format, len(streams))
+	order := make([]int, 0, len(streams))
+	for _, f := range streams {
+		best, seen := preferred[f.Itag]
+		if !seen {
+			preferred[f.Itag] = f
+			order = append(order, f.Itag)
+			continue
+		}
+		if fScore, bestScore := audioTrackScore(&f), audioTrackScore(&best); fScore != bestScore {
+			if fScore > bestScore {
+				preferred[f.Itag] = f
+			}
+			continue
+		}
+		if authLevelOf(&f) < authLevelOf(&best) {
+			preferred[f.Itag] = f
+		}
+	}
+
+	result := make([]Format, 0, len(order))
+	for _, itag := range order {
+		result = append(result, preferred[itag])
+	}
 	return result
+}
+
+// boolOrder gives false < true, so the clean rendition sorts before its DRC twin.
+func boolOrder(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // --- JSON helper functions ---
@@ -620,6 +1090,14 @@ func getInt(m map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func getBool(m map[string]any, key string) bool {
+	if m == nil {
+		return false
+	}
+	b, _ := m[key].(bool)
+	return b
 }
 
 func getNestedMap(m map[string]any, keys ...string) (map[string]any, bool) {

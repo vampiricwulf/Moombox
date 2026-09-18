@@ -33,6 +33,8 @@ export class MoomboxApp {
     this._lastCheckedJobIds = { jobs: null, archived: null };
     this.reconnectAttempts = 0;
     this.autoCookieReloginRequired = null;
+    // Tri-state; see loadStatus. null = the server has no opinion.
+    this.sidecarHealthy = null;
     this.nextFeedCheck = 0;
     this.nextDecapiCheck = 0;
     this.nextTwitchCheck = 0;
@@ -571,6 +573,10 @@ export class MoomboxApp {
         this.cookieStatus = status.cookieStatus;
         this.twitchAuthStatus = status.twitchAuthStatus;
         this.activePlatforms = status.activePlatforms || {};
+        // Tri-state on purpose. `null` means the server published nothing —
+        // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
+        // as a fault; only an explicit `healthy: false` raises the warning.
+        this.sidecarHealthy = status.botguardSidecar ? status.botguardSidecar.healthy === true : null;
         if (status.version) {
           if (this._version && status.version !== this._version) {
             // The server restarted on a DIFFERENT version — an update
@@ -821,14 +827,24 @@ export class MoomboxApp {
       warningItems.push({ action: "yt-relogin", label: "YT: Re-login" });
     if (twActive && this.autoCookieReloginRequired?.twitch)
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
+    // The BotGuard sidecar is an ALERT, not a status: while it is down,
+    // signature-ciphered formats cannot be resolved at all (sig has no
+    // fallback) and PO tokens fall to the goja path, which errors. It carries
+    // no action — the supervisor is already retrying and there is nothing for
+    // the operator to click.
+    if (this.sidecarHealthy === false)
+      warningItems.push({
+        label: "PO tokens: sidecar down",
+        title: "The BotGuard sidecar is not running — signature-ciphered formats and PO tokens are unavailable. Moombox is retrying.",
+      });
 
     if (warningsEl) {
       warningsEl.textContent = "";
       for (const w of warningItems) {
         const span = document.createElement("span");
         span.className = "status-warning";
-        span.dataset.action = w.action;
-        span.title = "Click to re-login";
+        if (w.action) span.dataset.action = w.action;
+        span.title = w.title || "Click to re-login";
         span.textContent = w.label;
         warningsEl.appendChild(span);
       }
@@ -842,7 +858,11 @@ export class MoomboxApp {
         icon.name = "exclamation-triangle";
         warningsIcon.appendChild(icon);
         warningsIcon.title = warningItems.map(w => w.label).join(", ");
-        warningsIcon.dataset.action = warningItems[0].action;
+        if (warningItems[0].action) {
+          warningsIcon.dataset.action = warningItems[0].action;
+        } else {
+          delete warningsIcon.dataset.action;
+        }
       } else {
         // Clear stale children, title, and dataset from previous warnings
         warningsIcon.textContent = "";

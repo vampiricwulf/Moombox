@@ -89,6 +89,11 @@ type StatusBarModel struct {
 	SelectedCount int
 	// offline indicates that internet connectivity is unavailable.
 	offline bool
+	// sidecarDown indicates that the BotGuard sidecar is not running. An
+	// alert, not a status: while it is down, signature-ciphered formats
+	// cannot be resolved at all (sig has no goja fallback) and PO tokens
+	// fall to a path that errors.
+	sidecarDown bool
 }
 
 // NewStatusBarModel creates a new status bar model.
@@ -359,6 +364,17 @@ func (m *StatusBarModel) renderMetrics(t barTier, counts barJobCounts) string {
 			parts = append(parts, statusBarRedStyle.Render("OFF"))
 		} else {
 			parts = append(parts, statusBarRedStyle.Render("OFFLINE"))
+		}
+	}
+
+	// BotGuard sidecar — an alert for the same reason OFFLINE is one: it names
+	// a capability that is GONE, not a number. So it abbreviates instead of
+	// disappearing.
+	if m.sidecarDown {
+		if t >= tierTight {
+			parts = append(parts, statusBarRedStyle.Render("POT"))
+		} else {
+			parts = append(parts, statusBarRedStyle.Render("SIDECAR DOWN"))
 		}
 	}
 
