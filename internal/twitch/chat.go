@@ -49,8 +49,13 @@ const (
 	// up to once a second while chat is pending, beside the chat.json append
 	// fsync. The sidecar only ever carries the dedup window a reconnect replay
 	// can overlap, so a save that is at most five seconds behind the file
-	// costs a header undercount that self-heals on the next flush; Twitch IRC
-	// has no replay, so nothing else reads it. The DEFERRED final save on stop
+	// costs a count that is short by the messages written in the unsaved
+	// window: restoreResumeState seeds fileCount/totalCount straight from
+	// that stale sidecar and sets flushedToDisk, which makes Start skip
+	// adoptExistingPartFile — the only path that re-counts the file — so the
+	// deficit persists in that part's header count and the job's chat total
+	// until the next part roll. No message is lost; the file itself is
+	// written every flush regardless. The DEFERRED final save on stop
 	// (Start's exit path) is deliberately NOT throttled.
 	ircResumeSaveFloor = 5 * time.Second
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
@@ -1292,7 +1297,12 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.flush()
 
 		if panicked {
-			// Don't clear resume state on panic — allow resume on restart
+			// Don't clear resume state on panic — allow resume on restart.
+			// Unthrottled, exactly like the interrupted-exit save just below:
+			// the flush above went through saveResumeStateThrottled, which can
+			// leave the sidecar up to resumeSaveFloor stale, and a panic's
+			// resume point must be as fresh as any other interrupted exit.
+			cd.saveResumeState()
 			return
 		}
 

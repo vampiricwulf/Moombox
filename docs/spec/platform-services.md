@@ -553,7 +553,6 @@ The IRC parser handles two message types:
 
 **USERNOTICE** (subs, raids, memberships):
 - Tag fields extracted: same as PRIVMSG plus `msg-id`, `system-msg`, `msg-param-sub-plan`, `msg-param-recipient-display-name`, `msg-param-viewerCount`.
-- `system-msg` is unescaped (`\s` to space).
 - Message type normalization: `sub` -> `"sub"`, `resub` -> `"resub"`, `subgift`/`submysterygift` -> `"subgift"`, `raid` -> `"raid"`, everything else -> `"system"`.
 
 IRCv3 tag values are decoded through `unescapeIRCTag` (`internal/twitch/chat_irc.go`) — `\:` to `;`, `\s` to a space, `\\`, `\r` and `\n`, with an unknown escape yielding its character and a lone trailing backslash dropped. It is applied to `system-msg`, `display-name` and `msg-param-recipient-display-name`, the same three chatterino decodes (`references/chatterino7` IrcHelpers.hpp). The reachable case is a system message that quotes a semicolon: `;` separates tags on the wire, so Twitch must escape it.
@@ -589,7 +588,7 @@ Chat messages are written to disk using a **message-triggered timer** pattern:
 - **Max reconnects**: 10.
 - **Backoff**: Exponential, `1000 * 2^attempt` milliseconds, capped at 30 seconds.
 - **Max consecutive errors**: 20 per session. Exceeding this triggers reconnection (not abort).
-- **State preservation**: `flush()` is called before each reconnect. Resume state is written to `{outputPath}.resume.json`, at most once per `ircResumeSaveFloor` (`internal/twitch/chat.go`, 5 s) — `saveResumeStateThrottled` (same file) is what the periodic flush calls, so a busy channel no longer pays a ~39 KB marshal, fsync and rename once a second beside the chat.json append fsync. The floor is cleared at every part boundary (`RollFile`, `internal/twitch/chat_recording.go`) so a new part's first flush always writes its own sidecar, and the DEFERRED save on stop is never throttled — that one is what a restart reads. The cost of the floor is that after a crash the on-disk dedup window can be up to five seconds older than the chat file; Twitch IRC has no replay, so the practical consequence is a header undercount that self-heals on the next flush.
+- **State preservation**: `flush()` is called before each reconnect. Resume state is written to `{outputPath}.resume.json`, at most once per `ircResumeSaveFloor` (`internal/twitch/chat.go`, 5 s) — `saveResumeStateThrottled` (same file) is what the periodic flush calls, so a busy channel no longer pays a ~39 KB marshal, fsync and rename once a second beside the chat.json append fsync. The floor is cleared at every part boundary (`RollFile`, `internal/twitch/chat_recording.go`) so a new part's first flush always writes its own sidecar, and the DEFERRED save on stop is never throttled — that one is what a restart reads. The cost of the floor does NOT self-heal: `restoreResumeState` seeds `fileCount`/`totalCount` straight from a stale sidecar and sets `flushedToDisk`, which makes `Start` skip `adoptExistingPartFile` — the only path that re-counts the file — so a crash inside the floor window leaves that part's header count and the job's chat total short by the unsaved messages for the life of that part, not just until the next flush. No message is lost; the chat file itself is written every flush regardless.
 
 #### Resume State
 

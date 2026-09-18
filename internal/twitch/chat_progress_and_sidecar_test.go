@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -136,5 +137,74 @@ func TestPartRollClearsTheSidecarFloor(t *testing.T) {
 	if _, err := os.Stat(chatResumePath(next)); err != nil {
 		t.Errorf("the new part has no resume sidecar after its first flush (%v) — the floor "+
 			"carried across the part boundary", err)
+	}
+}
+
+// panicOnceLogger panics on its first Info call and behaves like testLogger
+// (embedded) for everything else — including the RECOVER block's own
+// cd.logger.Error call, which must not itself panic or the test process
+// crashes instead of failing cleanly.
+type panicOnceLogger struct {
+	testLogger
+	panicked atomic.Bool
+}
+
+func (l *panicOnceLogger) Info(msg string, args ...any) {
+	if l.panicked.CompareAndSwap(false, true) {
+		panic("forced panic: " + msg)
+	}
+}
+
+// TestChatDownloaderPanicStillSavesTheFreshResumeSidecar is fix-round-1 finding
+// 2 (task-2-review.md): Start's exit defer flushes and then, on the PANIC
+// branch, used to return immediately — before the unthrottled
+// cd.saveResumeState() call the ordinary interrupted-exit branch makes just
+// below it. The flush's own sidecar save is throttled (saveResumeStateThrottled,
+// this file), so a panic landing inside the floor window left the sidecar up to
+// ~6s stale in exactly the branch whose stated purpose is "allow resume on
+// restart".
+//
+// The logger is swapped for one that panics on its FIRST Info call, forcing
+// runIRCSession's very first statement (`cd.logger.Info(...)`, chat_irc.go) to
+// panic — before any dial, any lock, and any real session state — so this test
+// needs no network and cannot deadlock on cd.mu. It must not be cd.logger = nil:
+// the recover block's own cd.logger.Error call would then also panic, and an
+// unrecovered second panic crashes the test binary instead of failing the test.
+//
+// Sequence: one message is added and flushed (the first sidecar save, never
+// throttled), then a SECOND message is added but not flushed — that is the
+// state a correct panic-exit save must capture. cd.totalCount > 0 makes Start
+// treat the downloader as already-initialized and skip resume-loading, so
+// nothing overwrites the seeded state before the panic.
+//
+// Mutant: reverting the panic branch to its old bare `return` (dropping the
+// added cd.saveResumeState() call) — the sidecar then still reads
+// MessageCount 1 from the first save instead of 2.
+func TestChatDownloaderPanicStillSavesTheFreshResumeSidecar(t *testing.T) {
+	cd := newSidecarTestChatDownloader(t)
+	cd.delays.resumeSaveFloor = time.Hour
+
+	cd.addMessage(&TwitchChatMessage{ID: "m1", TimestampMs: 1})
+	cd.flush() // first save: never throttled, writes MessageCount 1
+
+	cd.addMessage(&TwitchChatMessage{ID: "m2", TimestampMs: 2}) // unflushed; inside the floor
+
+	cd.logger = &panicOnceLogger{} // panics on runIRCSession's first line, before any dial or lock
+
+	if err := cd.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned %v after a recovered panic, want nil (a recovered panic with "+
+			"no named return yields the zero value)", err)
+	}
+
+	state := cd.loadResumeState()
+	if state == nil {
+		t.Fatal("no resume state on disk after the panic exit — the panic branch must still save one")
+	}
+	if state.MessageCount != 2 {
+		t.Errorf("resume sidecar MessageCount = %d, want 2 — the panic exit saved the STALE "+
+			"throttled state instead of the fresh one at panic time", state.MessageCount)
+	}
+	if state.TotalCount != 2 {
+		t.Errorf("resume sidecar TotalCount = %d, want 2 — same staleness, the job-level count", state.TotalCount)
 	}
 }

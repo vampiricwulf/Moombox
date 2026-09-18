@@ -20,6 +20,14 @@ import (
 // runs in ~150 ms instead of ~75 s, keeping the RATIOS production has: the
 // idle window is three check ticks, and the pong window is between one and two.
 // Nothing here is small enough to race the Windows timer granularity (~15 ms).
+//
+// resumeSaveFloor is deliberately left at its zero value rather than scaled:
+// zero DISABLES the throttle (saveResumeStateThrottled), and none of the tests
+// that use this fixture (chat_keepalive_test.go, chat_reconnect_directive_test.go)
+// assert anything about the resume sidecar's cadence — only the keepalive
+// mechanism. A future test that adds a sidecar assertion on top of this
+// fixture must set resumeSaveFloor itself, the way the sidecar tests
+// (chat_progress_and_sidecar_test.go) already do.
 func fastChatDelays() chatDelays {
 	return chatDelays{
 		keepaliveIdle:     60 * time.Millisecond,
