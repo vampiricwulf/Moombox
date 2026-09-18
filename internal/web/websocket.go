@@ -719,6 +719,16 @@ func (hub *WebSocketHub) BroadcastJobUpdate(data any) {
 	hub.Broadcast("job_update", data)
 }
 
+// BroadcastJobProgress sends the slim per-tick frame: only the fields a
+// download's ~60 Hz progress write actually moves. The CADENCE is identical to
+// job_update's — this makes each update cheaper, never rarer (the protected
+// ruling) — and the client merges the frame onto the row it already holds. The
+// payload shape is the caller's (cmd/moombox/job_progress.go); this hub stays
+// deliberately ignorant of internal/database.
+func (hub *WebSocketHub) BroadcastJobProgress(data any) {
+	hub.Broadcast("job_progress", data)
+}
+
 // BroadcastJobsUpdate sends the full job list (on add/delete).
 func (hub *WebSocketHub) BroadcastJobsUpdate(data any) {
 	hub.Broadcast("jobs_update", data)

@@ -523,7 +523,8 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | Type | Payload | When Sent |
 |------|---------|-----------|
 | `initial_state` | `{ jobs, logs, config, monitors, hideFinishedAgeDays, ... }` | Once, immediately after WebSocket connection is accepted |
-| `job_update` | Single job object | When any field of a single job changes |
+| `job_update` | Single job object | When a job changes in any way a progress tick does not: a status transition, an error, a chat-status change, the mux naming its output, a new job, a trim edit. Progress-only ticks take `job_progress` instead. |
+| `job_progress` | `{ id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt }` | Every progress tick of an active download (~60 Hz per job). Carries only the columns the tick writes; the client MERGES it onto the row it already holds (`{...old, ...patch}`) rather than replacing it. Sent when `JobChange.Changes` names progress columns ONLY — anything else, `status` included, goes out as `job_update`. The frame is a tenth of the row it replaces; the cadence is identical (`isProgressOnlyChange` / `newJobProgressFrame`, `cmd/moombox/job_progress.go`). |
 | `jobs_update` | Full job array | When a job is added or deleted (full list, not incremental) |
 | `job_deleted` | `{ id }` | When a job row is removed from the database |
 | `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes |
