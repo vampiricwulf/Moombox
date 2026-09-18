@@ -1047,11 +1047,53 @@ func IsStagedRestartPath(name string) bool {
 	if i < 0 {
 		return false
 	}
-	stamp := name[i+len(StagedRestartSuffix):]
-	if stamp == "" {
+	return allDigits(name[i+len(StagedRestartSuffix):])
+}
+
+// RestartSiblingStem reports whether base is a RECOVERED set-aside recording —
+// the sibling output file the worker muxes beside a job's archive, named
+// <stem>.restart-<unix ts>[-N].<ext> — and returns the <stem> whose archive it
+// belongs to.
+//
+// The twin predicate IsStagedRestartPath matches the RAW recording in staging,
+// whose name ENDS at the timestamp; this one matches the muxed output, where
+// the timestamp is an infix before the container extension and may carry the
+// worker's collision counter. Both live here, beside the const they share, for
+// the reason StagedRestartSuffix's doc comment gives: package worker's orphan
+// sweep has to tell a recovered sibling from an ordinary output file so it is
+// never offered for deletion, and hardcoding the literal there is exactly the
+// drift this pair exists to prevent.
+//
+// base is a file's base name, not a path.
+func RestartSiblingStem(base string) (string, bool) {
+	body := base
+	if dot := strings.LastIndex(base, "."); dot >= 0 {
+		body = base[:dot] // strip the container extension
+	}
+	i := strings.LastIndex(body, StagedRestartSuffix)
+	if i < 0 {
+		return "", false
+	}
+	stamp := body[i+len(StagedRestartSuffix):]
+	// <ts> or <ts>-<counter>; both halves are digits, so an ordinary file that
+	// merely contains ".restart-" is never mistaken for one of ours.
+	if ts, counter, split := strings.Cut(stamp, "-"); split {
+		if !allDigits(ts) || !allDigits(counter) {
+			return "", false
+		}
+	} else if !allDigits(stamp) {
+		return "", false
+	}
+	return body[:i], true
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits — the stamp
+// rule both restart predicates above hang on.
+func allDigits(s string) bool {
+	if s == "" {
 		return false
 	}
-	for _, r := range stamp {
+	for _, r := range s {
 		if r < '0' || r > '9' {
 			return false
 		}

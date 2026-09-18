@@ -244,20 +244,19 @@ func TestJobNeedsStagingExpiryGate(t *testing.T) {
 	}
 }
 
-// TestOrphanSweepShieldsAnAsideOnlyStagingDir pins extra item (b): the sweep
-// learns engine.IsStagedRestartPath. A staging dir whose only remaining media
-// is a set-aside recording holds captured footage no mux has consumed, so it
-// is not an orphan to delete — but unlike the unmuxed-PART shield it defers to
-// the same age rule the other two incomplete shields use, because finalize now
-// muxes every readable aside to its own sibling file: one still sitting here
-// days later is one FFmpeg could not read, not footage awaiting a routine
-// recovery. When the dir IS offered, the sweep names the aside so the operator
-// can see what the deletion would take.
+// TestOrphanSweepShieldsAnAsideOnlyStagingDir pins extra item (b) as fix round
+// 1 re-ruled it: the sweep learns engine.IsStagedRestartPath, and a staging dir
+// whose only remaining media is a set-aside recording is never an orphan to
+// delete — with NO age rule, because an aside that survives finalize is one
+// FFmpeg could not read and the only copy of that footage. When such a dir IS
+// offered (its job row is gone entirely), the sweep names the aside so the
+// operator sees what the deletion would take.
 //
 // Mutants, one per arm: dropping the aside term from jobNeedsStaging (the
-// sweep offers a live aside-only dir for deletion); making the aside shield
-// unconditional (an aged dir is pinned forever); dropping the Asides field
-// (the offer says only "staging", with no hint that it holds a recording).
+// sweep offers a live aside-only dir for deletion); putting the age rule back
+// on the aside shield (a month-old recording is offered on a stock install,
+// whose expiry default is 7 days, not 0); dropping the Asides field (the offer
+// says only "staging", with no hint that it holds a recording).
 func TestOrphanSweepShieldsAnAsideOnlyStagingDir(t *testing.T) {
 	dir := t.TempDir()
 	db, err := database.Open(filepath.Join(dir, "test.db"))
@@ -311,18 +310,115 @@ func TestOrphanSweepShieldsAnAsideOnlyStagingDir(t *testing.T) {
 		t.Errorf("offered entry Asides = %v, want [%s] — the report must name the recording the deletion would take", gone.Asides, asideName)
 	}
 
-	// The shield's age rule, read directly: scanStagingOrphans can only see
-	// the updated_at AddJob stamps (now), and the window is measured from it.
-	aged := &database.Job{ID: "j-shield", Status: database.StatusFinished,
-		UpdatedAt: time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)}
-	if jobNeedsStaging(db, cfg, aged, liveDir) {
-		t.Error("an aside-only staging dir is still shielded past the expiry window — the aside shield must defer to the same age rule as the other two")
+	// The shield has NO age rule (fix round 1, Important 2): read directly,
+	// because scanStagingOrphans can only ever see the updated_at AddJob
+	// stamps. incomplete_staging_expiry_days DEFAULTS TO 7 — "0 = preserve
+	// forever" is the meaning of the value, not the default — so an age rule
+	// here would offer a month-old unmuxed recording for deletion on a stock
+	// install, and that recording is exactly what ENGINE-6 exists to keep.
+	for _, age := range []time.Duration{0, 8 * 24 * time.Hour, 30 * 24 * time.Hour} {
+		job := &database.Job{ID: "j-shield", Status: database.StatusFinished,
+			UpdatedAt: time.Now().Add(-age).UTC().Format(time.RFC3339)}
+		if !jobNeedsStaging(db, cfg, job, liveDir) {
+			t.Errorf("an aside-only staging dir aged %v is no longer shielded — an unmuxed set-aside "+
+				"recording never expires; it is shielded until it is muxed or the job is deleted", age)
+		}
 	}
-	fresh := &database.Job{ID: "j-shield", Status: database.StatusFinished,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
-	if !jobNeedsStaging(db, cfg, fresh, liveDir) {
-		t.Error("a fresh aside-only staging dir is not shielded")
+	// The control: the SAME job, the same age, with the aside gone is an
+	// ordinary expired orphan — proving the aside is what held it.
+	emptyDir := filepath.Join(stagingRoot, "j-empty")
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	expired := &database.Job{ID: "j-shield", Status: database.StatusFinished, IncompleteTail: true,
+		UpdatedAt: time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)}
+	if jobNeedsStaging(db, cfg, expired, emptyDir) {
+		t.Error("an aged incomplete-tail dir with no aside in it is still shielded — the tail and chat shields keep their age rule")
+	}
+}
+
+// TestOutputSweepOwnsARecoveredAsideSibling pins fix round 1's Important 1: a
+// recovered set-aside recording is written into the OUTPUT directory as
+// <stem>.restart-<ts>.mp4, and nothing references it (it is deliberately not a
+// segment row), so the output sweep offered it as a deletable orphan the
+// moment finalize produced it — with no age rule and nothing naming it, one
+// click from the Files tab's "Delete All". It is owned by the job whose stem
+// it carries.
+//
+// The three shapes, one sub-test each. Mutants: dropping the sibling term from
+// scanOutputOrphans (the sibling is offered beside a live job); dropping the
+// stem-ownership check (a sibling whose job is gone is silently unreachable);
+// dropping the Asides annotation (an offered sibling reads as scratch space).
+func TestOutputSweepOwnsARecoveredAsideSibling(t *testing.T) {
+	const siblingName = "Stream Title.restart-1700000000.mp4"
+
+	setup := func(t *testing.T, files ...string) (*database.Database, *config.MoomboxConfig, string) {
+		t.Helper()
+		_, db := testWorkerSetup(t)
+		outputDir := t.TempDir()
+		cfg := &config.MoomboxConfig{}
+		cfg.Paths.OutputDirectory = outputDir
+		for _, name := range files {
+			if err := os.WriteFile(filepath.Join(outputDir, name), []byte("media"), 0o644); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+		return db, cfg, outputDir
+	}
+	offered := func(t *testing.T, db *database.Database, cfg *config.MoomboxConfig) map[string]OrphanedEntry {
+		t.Helper()
+		entries, err := scanOutputOrphans(db, cfg)
+		if err != nil {
+			t.Fatalf("scanOutputOrphans: %v", err)
+		}
+		out := map[string]OrphanedEntry{}
+		for _, e := range entries {
+			out[normalizePath(e.Path)] = e
+		}
+		return out
+	}
+
+	t.Run("the job still exists: the sibling is owned, never offered", func(t *testing.T) {
+		db, cfg, outputDir := setup(t, "Stream Title.mp4", siblingName)
+		if _, err := db.AddJob(&database.Job{ID: "j-own", VideoID: "j-own", Status: database.StatusFinished,
+			OutputFile: filepath.Join(outputDir, "Stream Title.mp4")}); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+		got := offered(t, db, cfg)
+		if _, ok := got[normalizePath(filepath.Join(outputDir, siblingName))]; ok {
+			t.Error("the recovered set-aside recording was offered as a deletable output orphan — it is the job's own captured footage, and Delete All takes it")
+		}
+		if len(got) != 0 {
+			t.Errorf("scanOutputOrphans offered %d entries for a job with everything referenced: %v", len(got), got)
+		}
+	})
+
+	t.Run("the job is gone: the sibling folds into its stem's entry", func(t *testing.T) {
+		db, cfg, outputDir := setup(t, "Stream Title.mp4", siblingName)
+		got := offered(t, db, cfg)
+		if _, ok := got[normalizePath(filepath.Join(outputDir, siblingName))]; ok {
+			t.Error("the sibling was offered as its own row — it belongs to the archive beside it, and deleting one without the other is not a choice worth offering")
+		}
+		main, ok := got[normalizePath(filepath.Join(outputDir, "Stream Title.mp4"))]
+		if !ok {
+			t.Fatal("the orphaned archive itself was not offered")
+		}
+		if len(main.Asides) != 1 || main.Asides[0] != siblingName {
+			t.Errorf("the archive's entry lists Asides = %v, want [%s] — the operator must see the recovered recording that goes with it", main.Asides, siblingName)
+		}
+	})
+
+	t.Run("only the sibling is left: it stands alone, still named", func(t *testing.T) {
+		db, cfg, outputDir := setup(t, siblingName)
+		got := offered(t, db, cfg)
+		e, ok := got[normalizePath(filepath.Join(outputDir, siblingName))]
+		if !ok {
+			t.Fatal("a sibling with neither a job nor an archive beside it was not offered at all — it would be undeletable forever")
+		}
+		if len(e.Asides) != 1 || e.Asides[0] != siblingName {
+			t.Errorf("the lone sibling's entry lists Asides = %v, want [%s]", e.Asides, siblingName)
+		}
+	})
 }
 
 // TestScanTrimOrphansIssuesOneQuery pins ENGINE-17 (report #52): the scan used
@@ -339,8 +435,8 @@ func TestScanTrimOrphansIssuesOneQuery(t *testing.T) {
 			t.Fatalf("AddJob: %v", err)
 		}
 		if err := db.AddTrim(&database.TrimRecord{
-			ID: jobID + "-t", JobID: jobID, StartTime: 0, EndTime: 10,
-			Filename: jobID + "/trim/clip.mp4", CreatedAt: "2026-09-17T00:00:00Z", Duration: 10,
+			ID: jobID + "-t", JobID: jobID, StartTime: 3, EndTime: 10,
+			Filename: jobID + "/trim/clip.mp4", CreatedAt: "2026-09-17T00:00:00Z", Duration: 7,
 		}); err != nil {
 			t.Fatalf("AddTrim: %v", err)
 		}
@@ -356,6 +452,14 @@ func TestScanTrimOrphansIssuesOneQuery(t *testing.T) {
 	seen := map[string]bool{}
 	for _, tr := range trims {
 		seen[tr.JobID] = true
+		// Every column lands in its own field. GetAllTrims and GetTrimsForJob
+		// share one projection and one scan (fix round 1, Minor 5), so this
+		// also pins the pair against a column added to one and not the other.
+		// Mutant: swapping two Scan targets in scanTrims.
+		if tr.ID != tr.JobID+"-t" || tr.StartTime != 3 || tr.EndTime != 10 || tr.Duration != 7 ||
+			tr.Filename != tr.JobID+"/trim/clip.mp4" || tr.CreatedAt != "2026-09-17T00:00:00Z" {
+			t.Errorf("GetAllTrims returned %+v — a column is landing in the wrong field", tr)
+		}
 	}
 	for i := range 3 {
 		if !seen["j"+strconv.Itoa(i)] {

@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -87,8 +89,12 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // capture ended incomplete (the chat resume sidecar in staging is what a
 // later Retry pages on from), it still holds a recording the engine set
 // aside rather than truncated (engine.StagedRestartSuffix), or it still has
-// an unmuxed captured part (recoverable via the Mux action). The first three
-// shields expire on the same age rule; the unmuxed-part shield never does.
+// an unmuxed captured part (recoverable via the Mux action). The tail and
+// chat shields expire on one age rule — which is ON by default: the option
+// behind it, downloader.incomplete_staging_expiry_days, ships at 7 days ("0 =
+// preserve forever" describes the VALUE 0, not the default). The set-aside
+// and unmuxed-part shields have no age rule at all: both hold captured media
+// that exists nowhere else.
 //
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
@@ -97,17 +103,19 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	if job == nil || job.Status != database.StatusFinished {
 		return false
 	}
-	// One age rule, read once, so that the doc's claim above — the three
+	// One age rule, read once, so that the doc's claim above — the two
 	// expiring shields expire together — is visible in the expression.
 	notExpired := !incompleteStagingExpired(cfg, job)
-	// The aside shield is the third one on that rule (sweep-2 Task 11, extra
-	// item b). Finalize muxes every readable set-aside recording into its own
-	// sibling file and deletes it, so one still sitting in staging after the
-	// window has lapsed is one FFmpeg could not read — not footage waiting on
-	// a routine recovery — and the dir it pins is real disk. The unmuxed-PART
-	// shield below still never expires: that media the Mux action can recover
-	// at any time.
-	asideShield := notExpired && len(stagedAsideRecordings(jobStagingDir)) > 0
+	// The aside shield is NOT on that rule (fix round 1, Important 2).
+	// Finalize muxes every READABLE set-aside recording into its own sibling
+	// file and deletes it, so one still sitting in staging is one FFmpeg could
+	// not read — the only copy of footage that exists nowhere else, which is
+	// the whole point of preserving rather than truncating it. An age rule
+	// here would offer it for deletion seven days later on a stock install,
+	// because incomplete_staging_expiry_days DEFAULTS TO 7; it is shielded
+	// until it is muxed or the job is deleted. The unmuxed-PART shield below
+	// is unconditional for the same reason.
+	asideShield := len(stagedAsideRecordings(jobStagingDir)) > 0
 	return (job.IncompleteTail && notExpired) ||
 		(job.ChatStatus == chatStatusIncomplete && notExpired) ||
 		asideShield ||
@@ -427,42 +435,56 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 	}
 
 	knownFiles := make(map[string]bool)
+	// knownStems is knownFiles with the container extension off, so a
+	// recovered set-aside recording can be recognised as belonging to the
+	// archive whose name it carries (see the sibling branch in the walk).
+	knownStems := make(map[string]bool)
+	known := func(p string) {
+		n := normalizePath(p)
+		knownFiles[n] = true
+		knownStems[strings.TrimSuffix(n, filepath.Ext(n))] = true
+	}
 	for _, job := range jobs {
 		if job.OutputFile != "" {
-			knownFiles[normalizePath(job.OutputFile)] = true
+			known(job.OutputFile)
 		}
 		if job.ChatFile != "" {
-			knownFiles[normalizePath(job.ChatFile)] = true
+			known(job.ChatFile)
 		}
 		if job.ThumbnailFile != "" {
-			knownFiles[normalizePath(job.ThumbnailFile)] = true
+			known(job.ThumbnailFile)
 		}
 		if job.DescriptionFile != "" {
-			knownFiles[normalizePath(job.DescriptionFile)] = true
+			known(job.DescriptionFile)
 		}
 		// The RELATIVE-path columns must count too: imported jobs set ONLY
 		// Filename/ChatFilename (no absolute OutputFile/ChatFile), so
 		// without these their perfectly valid files would be offered as
 		// orphans — and deleting them leaves a broken Finished job.
 		if job.Filename != "" {
-			knownFiles[normalizePath(filepath.Join(absOutputDir, job.Filename))] = true
+			known(filepath.Join(absOutputDir, job.Filename))
 		}
 		if job.ChatFilename != "" {
-			knownFiles[normalizePath(filepath.Join(absOutputDir, job.ChatFilename))] = true
+			known(filepath.Join(absOutputDir, job.ChatFilename))
 		}
 		// Include part (quality/gap split) files so they aren't flagged as
 		// orphans — both the videos and their per-part chat files.
 		for _, seg := range job.Segments {
 			if seg.FilePath != "" {
-				knownFiles[normalizePath(seg.FilePath)] = true
+				known(seg.FilePath)
 			}
 			if seg.ChatFile != "" {
-				knownFiles[normalizePath(seg.ChatFile)] = true
+				known(seg.ChatFile)
 			}
 		}
 	}
 
 	var entries []OrphanedEntry
+	// Recovered set-aside recordings found in the walk, grouped by the stem
+	// they belong to. They are never rows of their own: either the stem is a
+	// known archive and the sibling is owned (dropped here), or the stem is
+	// itself an orphan and the siblings are folded into ITS entry below.
+	siblingsByStem := map[string]*orphanedSiblings{}
 
 	err = filepath.Walk(absOutputDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -491,6 +513,28 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 			return nil // Referenced by a job
 		}
 
+		// A recovered set-aside recording (<stem>.restart-<ts>[-N].<ext>) is
+		// captured footage the finalize muxed out of staging, and it is
+		// deliberately NOT a segment row — which made it unreferenced by
+		// construction, and so a one-click deletion from the Files tab the
+		// moment it was written (fix round 1, Important 1). It belongs to the
+		// archive whose stem it carries: owned while that archive is known,
+		// and otherwise folded into the archive's own entry rather than
+		// offered as a row of its own.
+		if stem, ok := engine.RestartSiblingStem(filepath.Base(absPath)); ok {
+			stemPath := normalizePath(filepath.Join(filepath.Dir(absPath), stem))
+			if knownStems[stemPath] {
+				return nil // its job still has the archive this belongs to
+			}
+			group := siblingsByStem[stemPath]
+			if group == nil {
+				group = &orphanedSiblings{dir: filepath.Dir(absPath)}
+				siblingsByStem[stemPath] = group
+			}
+			group.names = append(group.names, filepath.Base(absPath))
+			return nil
+		}
+
 		relPath, _ := filepath.Rel(absOutputDir, absPath)
 
 		entries = append(entries, OrphanedEntry{
@@ -507,7 +551,62 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		return entries, err
 	}
 
-	return entries, nil
+	return appendOrphanedSiblings(entries, siblingsByStem, absOutputDir), nil
+}
+
+// appendOrphanedSiblings attaches each recovered set-aside recording to the
+// orphaned archive it belongs to, and gives the ones whose archive is gone
+// too a row of their own — named, so the operator can tell captured footage
+// from scratch space before deleting it. Without that last part a sibling
+// whose archive was already deleted would be invisible to the sweep AND
+// unreachable from it: preserved forever with no way to reclaim the disk.
+func appendOrphanedSiblings(entries []OrphanedEntry, siblingsByStem map[string]*orphanedSiblings, absOutputDir string) []OrphanedEntry {
+	if len(siblingsByStem) == 0 {
+		return entries
+	}
+	for i := range entries {
+		stem := normalizePath(strings.TrimSuffix(entries[i].Path, filepath.Ext(entries[i].Path)))
+		if group, ok := siblingsByStem[stem]; ok {
+			entries[i].Asides = append(entries[i].Asides, group.names...)
+			delete(siblingsByStem, stem)
+		}
+	}
+	// Deterministic order: map iteration is not, and the sweep's output is
+	// compared in tests and rendered in a table.
+	stems := make([]string, 0, len(siblingsByStem))
+	for stem := range siblingsByStem {
+		stems = append(stems, stem)
+	}
+	sort.Strings(stems)
+	for _, stem := range stems {
+		group := siblingsByStem[stem]
+		sort.Strings(group.names)
+		for _, name := range group.names {
+			abs := filepath.Join(group.dir, name)
+			info, err := os.Stat(abs)
+			if err != nil {
+				continue // vanished between the walk and here
+			}
+			relPath, _ := filepath.Rel(absOutputDir, abs)
+			entries = append(entries, OrphanedEntry{
+				Path:     abs,
+				RelPath:  relPath,
+				Type:     "output",
+				Size:     info.Size(),
+				Modified: info.ModTime().UTC().Format(time.RFC3339),
+				Asides:   []string{name},
+			})
+		}
+	}
+	return entries
+}
+
+// orphanedSiblings is one archive stem's recovered set-aside recordings, with
+// the directory in its real spelling (the map key is normalised for Windows'
+// case-insensitive comparison, which is not a path to hand back).
+type orphanedSiblings struct {
+	dir   string
+	names []string
 }
 
 // scanTrimOrphans scans for trim files not referenced by any DB trim record.

@@ -204,6 +204,7 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 func (q *JobQueue) AcquireLifecycleSlot(ctx context.Context, jobID string) bool {
 	var warnTimer *time.Timer
 	var warnC <-chan time.Time
+	waitStart := time.Now()
 	defer func() {
 		if warnTimer != nil {
 			warnTimer.Stop()
@@ -243,8 +244,13 @@ func (q *JobQueue) AcquireLifecycleSlot(ctx context.Context, jobID string) bool 
 		case <-warnC:
 			warnC = nil // one line per wait
 			if lg != nil {
+				// waited is MEASURED, beside the threshold that let it be
+				// logged: a lone "waited=30s" reads like an elapsed time and
+				// is not one (fix round 1, Minor 6).
 				lg.Warn("waiting for a lifecycle slot; the download cannot start until one frees",
-					"jobID", jobID, "held", held, "limit", limit, "waited", warnAfter.String())
+					"jobID", jobID, "held", held, "limit", limit,
+					"threshold", warnAfter.String(),
+					"waited", time.Since(waitStart).Round(time.Microsecond).String())
 			}
 		}
 	}

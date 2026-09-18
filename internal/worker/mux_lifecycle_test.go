@@ -308,6 +308,41 @@ func TestIsStagedRestartPath(t *testing.T) {
 	}
 }
 
+// TestRestartSiblingStem pins the OTHER half of the pair: the muxed sibling
+// the worker writes beside a job's archive, where the timestamp is an infix
+// before the container extension and may carry the collision counter. The
+// orphan sweep keys on this to tell a recovered recording from an ordinary
+// unreferenced output file.
+//
+// Mutants: dropping the counter arm (a `-2` sibling is offered for deletion);
+// dropping the digits rule (any file whose name contains ".restart-" is
+// treated as owned footage and can never be swept); matching the RAW staging
+// name here (the two predicates collapse into one and a staging aside would
+// be read as an output sibling).
+func TestRestartSiblingStem(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wantStem string
+		wantOK   bool
+	}{
+		{"Stream Title.restart-1700000000.mp4", "Stream Title", true},
+		{"Stream Title.restart-1700000000-2.mp4", "Stream Title", true},
+		{"a.b.c.restart-1.mkv", "a.b.c", true},
+		{"Stream Title.mp4", "", false},
+		{"video.mp4.restart-1700000000", "", false}, // the RAW staging aside
+		{"Stream Title.restart-.mp4", "", false},
+		{"Stream Title.restart-notatimestamp.mp4", "", false},
+		{"Stream Title.restart-1700000000-x.mp4", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stem, ok := engine.RestartSiblingStem(tc.name)
+			if ok != tc.wantOK || stem != tc.wantStem {
+				t.Errorf("RestartSiblingStem(%q) = (%q, %v), want (%q, %v)", tc.name, stem, ok, tc.wantStem, tc.wantOK)
+			}
+		})
+	}
+}
+
 // TestStagedRecordingPartsOrdersAsidesFirst pins extra item (d): the engine
 // leaves a recording it could not resume beside the fresh one as
 // <file>.restart-<ts>, and the part list a staging dir yields is those asides
@@ -426,6 +461,28 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 		t.Errorf("no %s beside the archive (stat err = %v) — the set-aside recording was never muxed, "+
 			"so staging cleanup takes it with the dir", sibling, err)
 	}
+	// The twin goes with the recording it describes (fix round 1, Minor 3: the
+	// removal shipped unpinned and the reviewer's mutant survived the package).
+	// Mutant: dropping the engine.StagedRestartSidecar removal — a sidecar
+	// outlives its media and a later Start could match its offsets.
+	if _, err := os.Stat(twin); !os.IsNotExist(err) {
+		t.Errorf("the aside's resume sidecar %s survived its recovery (stat err = %v) — a sidecar "+
+			"beside nothing is a stale offset map", twin, err)
+	}
+	// And the sweep must not offer the sibling: it is the job's own footage,
+	// unreferenced by construction (fix round 1, Important 1).
+	outCfg := &config.MoomboxConfig{}
+	outCfg.Paths.OutputDirectory = filepath.Dir(fresh.OutputFile)
+	outEntries, err := scanOutputOrphans(db, outCfg)
+	if err != nil {
+		t.Fatalf("scanOutputOrphans: %v", err)
+	}
+	for _, e := range outEntries {
+		if normalizePath(e.Path) == normalizePath(sibling) {
+			t.Errorf("the recovered sibling %s is offered as a deletable output orphan right after "+
+				"finalize — the Files tab's Delete All takes it", sibling)
+		}
+	}
 	if segs, err := db.GetSegments("j-aside-mux"); err != nil {
 		t.Fatalf("GetSegments: %v", err)
 	} else if len(segs) != 0 {
@@ -461,6 +518,89 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 			t.Errorf("staging was swept while an unmuxed aside was still in it: %v", err)
 		}
 	})
+}
+
+// TestMuxStagedAsidesRemovesTheRecordingAndItsTwin pins fix round 1's Minor 3
+// where it can actually be seen. The whole-finalize test cannot: a successful
+// recovery leaves no aside, so cleanupStagingAfterMux sweeps the entire dir and
+// the twin disappears with it whether or not the recovery removed it — which is
+// why the reviewer's mutant survived the package. Driven directly, the dir is
+// still standing when the assertions run.
+//
+// Mutant: dropping the engine.StagedRestartSidecar removal — the twin is still
+// beside a recording that is gone, and a later Start could match its offsets
+// against a fresh file.
+func TestMuxStagedAsidesRemovesTheRecordingAndItsTwin(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	staging, outputDir := t.TempDir(), t.TempDir()
+	aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
+	writeAsideFixture(t, ffmpegPath, aside, 5)
+	twin := engine.StagedRestartSidecar(aside)
+	if err := os.WriteFile(twin, []byte(`{"stale":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
+	o.muxStagedAsides(context.Background(), &JobContext{
+		Job: &database.Job{ID: "j-twin"}, StagingDir: staging,
+	}, outputDir, "Title")
+
+	sibling := filepath.Join(outputDir, "Title"+engine.StagedRestartSuffix+"1700000000.mp4")
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("the aside was not recovered to %s: %v", sibling, err)
+	}
+	if _, err := os.Stat(aside); !os.IsNotExist(err) {
+		t.Errorf("the recovered aside is still in staging (stat err = %v) — it would pin the dir forever", err)
+	}
+	if _, err := os.Stat(twin); !os.IsNotExist(err) {
+		t.Errorf("the aside's resume sidecar %s outlived the recording it describes (stat err = %v)", twin, err)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Errorf("muxStagedAsides removed the staging dir itself: %v — that is the cleanup's job, not this one's", err)
+	}
+}
+
+// TestAsideOutputPathBoundsItsCollisionCounter pins fix round 1's Minor 4: the
+// counter loop's guard let it fall out of the loop having BUILT the next
+// candidate without ever testing it, so the last name could be returned over
+// an existing file — the one outcome the counter exists to prevent. Past the
+// bound there is no name to give, and the caller must be told so rather than
+// handed one.
+//
+// Mutant: returning the final candidate unchecked (the exhaustion arm gets a
+// path back and overwrites the file sitting at it).
+func TestAsideOutputPathBoundsItsCollisionCounter(t *testing.T) {
+	dir := t.TempDir()
+	used := map[string]bool{}
+
+	first, ok := asideOutputPath(dir, "Title", "1700000000", used)
+	if !ok || first != filepath.Join(dir, "Title"+engine.StagedRestartSuffix+"1700000000.mp4") {
+		t.Fatalf("asideOutputPath = (%q, %v), want the plain <stem>.restart-<ts>.mp4", first, ok)
+	}
+	second, ok := asideOutputPath(dir, "Title", "1700000000", used)
+	if !ok || second == first {
+		t.Fatalf("a second group with the same stamp got %q (ok=%v) — it would overwrite the first", second, ok)
+	}
+
+	// Every name the counter can produce is taken on disk.
+	for n := 1; n <= asideOutputCollisionLimit; n++ {
+		name := "Title" + engine.StagedRestartSuffix + "1700000000.mp4"
+		if n > 1 {
+			name = fmt.Sprintf("Title%s1700000000-%d.mp4", engine.StagedRestartSuffix, n)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok := asideOutputPath(dir, "Title", "1700000000", map[string]bool{})
+	if ok {
+		if _, err := os.Stat(got); err == nil {
+			t.Errorf("asideOutputPath returned %q, which already exists — the recovery would overwrite it", got)
+		}
+	}
+	if ok || got != "" {
+		t.Errorf("asideOutputPath past its bound = (%q, %v), want (\"\", false) so the caller keeps the aside in staging", got, ok)
+	}
 }
 
 // --- helpers ---------------------------------------------------------------

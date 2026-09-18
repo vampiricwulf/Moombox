@@ -376,11 +376,11 @@ func (w *DownloadWorker) SetArchiveSlotsResolver(fn func(channelID string) int) 
 
 // StashTwitchStreamInfo forwards a fresh Twitch stream info hint to the
 // underlying StreamProcessor. Called by cmd/moombox's OnStreamFound /
-// OnStreamRecover monitor callbacks so the processor doesn't re-fetch what
-// the monitor just successfully fetched.
-func (w *DownloadWorker) StashTwitchStreamInfo(jobID string, info *twitch.TwitchStreamInfo) {
+// OnStreamRecover monitor callbacks so the next job to ask about that CHANNEL
+// doesn't re-fetch what the monitor just successfully fetched.
+func (w *DownloadWorker) StashTwitchStreamInfo(info *twitch.TwitchStreamInfo) {
 	if w.streamProc != nil {
-		w.streamProc.StashTwitchStreamInfo(jobID, info)
+		w.streamProc.StashTwitchStreamInfo(info)
 	}
 }
 

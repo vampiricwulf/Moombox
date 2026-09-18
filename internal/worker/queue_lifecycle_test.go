@@ -272,6 +272,23 @@ func TestLifecycleWaitWarnsWhenItBlocks(t *testing.T) {
 				t.Errorf("the blocked-acquire Warn %q does not name %q — the operator needs the job and the held count", joined, want)
 			}
 		}
+		// The measured wait and the threshold that released the line are
+		// separate fields: "waited=30s" alone reads as an elapsed time and is
+		// not one (fix round 1, Minor 6). Mutant: logging warnAfter under
+		// "waited" and dropping "threshold" — the field lookup below fails.
+		fields := map[string]string{}
+		for i := 1; i+1 < len(line); i += 2 {
+			fields[fmt.Sprint(line[i])] = fmt.Sprint(line[i+1])
+		}
+		if fields["threshold"] != q.lifecycleWarnAfter.String() {
+			t.Errorf("Warn threshold field = %q, want %q", fields["threshold"], q.lifecycleWarnAfter)
+		}
+		waited, err := time.ParseDuration(fields["waited"])
+		if err != nil {
+			t.Errorf("Warn waited field = %q, which does not parse as a duration: %v", fields["waited"], err)
+		} else if waited < q.lifecycleWarnAfter {
+			t.Errorf("Warn waited = %v, which is less than the threshold %v it fired at — it is not a measurement", waited, q.lifecycleWarnAfter)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no Warn after the wait threshold — a job parked behind the lifecycle cap is invisible")
 	}

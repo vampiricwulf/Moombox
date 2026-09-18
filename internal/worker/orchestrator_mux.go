@@ -253,18 +253,32 @@ func groupStagedAsides(asides []string) []asideGroup {
 	return out
 }
 
+// asideOutputCollisionLimit bounds asideOutputPath's counter. Reaching it
+// needs a hundred asides sharing one stem and one second, which no capture
+// produces; the bound exists so the search can never run away, and the false
+// return so it can never hand back a name it did not check.
+const asideOutputCollisionLimit = 100
+
 // asideOutputPath is where one group's recovered file lands: the archive's own
 // name with the aside's suffix on it, so the two sort together in the output
 // directory. Two groups can only collide when a root and a seg_N restart share
-// a second; the counter keeps both files rather than overwriting one.
-func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool) string {
+// a second; the counter keeps both files rather than overwriting one. Reports
+// false when every name within the bound is taken — the caller must then leave
+// the aside in staging rather than write over somebody's archive.
+func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool) (string, bool) {
 	base := filepath.Join(outputDir, filenameBase+engine.StagedRestartSuffix+stamp)
-	candidate := base + ".mp4"
-	for n := 2; n <= 100 && (used[normalizePath(candidate)] || fileExists(candidate)); n++ {
-		candidate = fmt.Sprintf("%s-%d.mp4", base, n)
+	for n := 1; n <= asideOutputCollisionLimit; n++ {
+		candidate := base + ".mp4"
+		if n > 1 {
+			candidate = fmt.Sprintf("%s-%d.mp4", base, n)
+		}
+		if used[normalizePath(candidate)] || fileExists(candidate) {
+			continue
+		}
+		used[normalizePath(candidate)] = true
+		return candidate, true
 	}
-	used[normalizePath(candidate)] = true
-	return candidate
+	return "", false
 }
 
 // muxStagedAsides muxes every recording the engine set aside into its own file
@@ -280,8 +294,10 @@ func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool
 //
 // Best-effort by design. A mux that fails leaves the aside exactly where it
 // was, where hasUnmuxedPartsForJob keeps the whole staging dir from being
-// swept and a later Mux action retries; it never fails the job, whose own
-// recording muxed fine.
+// swept — and a later Mux action retries it WHILE THE DIR STILL HOLDS
+// RECOGNISED MEDIA; an aside-only dir is not offered the Mux action at all,
+// because HasSegmentFiles (discoverStagingMedia) does not know the suffix.
+// Either way it never fails the job, whose own recording muxed fine.
 func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase string) {
 	groups := groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir))
 	if len(groups) == 0 {
@@ -289,7 +305,13 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 	}
 	used := map[string]bool{}
 	for _, g := range groups {
-		out := asideOutputPath(outputDir, filenameBase, g.stamp, used)
+		out, ok := asideOutputPath(outputDir, filenameBase, g.stamp, used)
+		if !ok {
+			o.logger.Error("no free name for a recovered set-aside recording; it stays in staging",
+				"aside", strings.Join(g.files, " | "), "tried", filenameBase+engine.StagedRestartSuffix+g.stamp,
+				"limit", asideOutputCollisionLimit, "jobID", jobCtx.Job.ID)
+			continue
+		}
 		if err := o.mux().MuxCopy(ctx, g.video, g.audio, out); err != nil {
 			o.logger.Error("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
