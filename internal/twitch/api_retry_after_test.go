@@ -84,6 +84,16 @@ func TestGQL429WithALongRetryAfterReturnsWithoutRetrying(t *testing.T) {
 		t.Errorf("err = %q, want the ordinary 429 error — worker.classifyProbeErr reads the "+
 			"status positionally out of it", err)
 	}
+	// %w preserves the wrapped message as a substring, so the Contains check
+	// above alone cannot tell "the 429 error" from "the exhausted-retries
+	// wrapper around the 429 error" — both contain "gql rate limited (429)
+	// (TestOp): ". Assert the message does NOT also carry "exhausted" so a fix
+	// that wraps the 429 in gqlRequest's %d-retries-exhausted error (instead of
+	// returning it directly) fails this test too.
+	if strings.Contains(err.Error(), "exhausted") {
+		t.Errorf("err = %q wraps the exhausted-retries error instead of returning the 429 "+
+			"directly — a Retry-After past the cap must end the attempt at once", err)
+	}
 	if n := log.countLinesContaining("twitch gql retry"); n != 0 {
 		t.Errorf("%d retry Debug line(s), want 0", n)
 	}
