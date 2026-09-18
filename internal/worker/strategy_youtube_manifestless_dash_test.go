@@ -1,15 +1,8 @@
 package worker
 
 import (
-	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -139,8 +132,13 @@ func TestPartitionManifestlessFormatsExcludesContentLength(t *testing.T) {
 // restart from 0 over staged bytes; a LIVE capture, and any part that
 // force-starts at an orchestrator-provided seq, must not.
 //
+// This is the whole of the worker's part. What DiscardStaged then does to the
+// bytes on disk — resume from a usable sidecar, set a headed recording aside,
+// or discard unrecognisable bytes — belongs to the engine and is pinned by
+// TestStartDiscardStaged* in internal/engine (fix round 2, R1).
+//
 // Mutant: setting DiscardStaged unconditionally — a live manifest-free
-// recording's staged file is O_TRUNC'd on every restart.
+// recording is restarted from sq=0 on every re-entry.
 func TestManifestlessDiscardStagedOnlyForNonLiveRestart(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -158,209 +156,4 @@ func TestManifestlessDiscardStagedOnlyForNonLiveRestart(t *testing.T) {
 			}
 		})
 	}
-}
-
-// ftypHeader is the first eight bytes of every MP4/M4A a manifest-free DASH
-// capture that began at sq=0 writes: a box length followed by the 'ftyp' type.
-var ftypHeader = []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'}
-
-// stagedManifestlessFile writes a staged recording of n bytes at
-// <dir>/video_stream, beginning with head, and returns its path.
-func stagedManifestlessFile(t *testing.T, head []byte, n int) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "video_stream")
-	body := make([]byte, n)
-	copy(body, head)
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatalf("write staged file: %v", err)
-	}
-	return path
-}
-
-// asideOf returns the single <path>.restart-<ts> media file beside path, or
-// "". The sidecar travels with it as <path>.restart-<ts>.resume.json, which is
-// not the recording and is filtered out here.
-func asideOf(t *testing.T, path string) string {
-	t.Helper()
-	all, err := filepath.Glob(path + ".restart-*")
-	if err != nil {
-		t.Fatalf("glob aside files: %v", err)
-	}
-	var matches []string
-	for _, m := range all {
-		if !strings.HasSuffix(m, ".resume.json") {
-			matches = append(matches, m)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return ""
-	case 1:
-		return matches[0]
-	default:
-		t.Fatalf("expected at most one aside file, got %v", matches)
-		return ""
-	}
-}
-
-// TestManifestlessStagingKeepsHeadedRecording is fix round 1, Important 1: the
-// DiscardStaged opt-in must not destroy a muxable recording just because the
-// stream probes post-live.
-//
-// Both rows are the re-entry the review named — a Downloading / incomplete_tail
-// row re-entered over its old staging dir, whose sidecar the engine will
-// REFUSE (corrupt JSON; or a timestamp past maxResumeStateAge = 7 days). The
-// staged file is headed, so it can be muxed as it stands and must survive: it
-// is moved aside, not truncated, and the fresh sq=0 file starts beside it.
-//
-// The engine downloader is driven for real afterwards, because the assertion
-// that matters is not what the predicate returned but what is left on disk.
-//
-// Mutant: restoring the broad predicate (prepareManifestlessStaging = a bare
-// manifestlessDiscardStaged, no inspection and no aside) — the engine opens
-// the recording O_TRUNC and both rows lose 1 MiB.
-func TestManifestlessStagingKeepsHeadedRecording(t *testing.T) {
-	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
-	const staged = 1 << 20
-
-	for _, tc := range []struct {
-		name    string
-		sidecar []byte
-	}{
-		{
-			name:    "corrupt sidecar",
-			sidecar: []byte("{not json"),
-		},
-		{
-			name: "sidecar aged past maxResumeStateAge",
-			sidecar: mustJSON(t, engine.ResumeState{
-				LastSeq:      4100,
-				BytesWritten: staged,
-				Timestamp:    time.Now().Add(-8 * 24 * time.Hour).Unix(),
-				BaseURL:      streamURL,
-			}),
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := stagedManifestlessFile(t, ftypHeader, staged)
-			if err := os.WriteFile(path+".resume.json", tc.sidecar, 0o644); err != nil {
-				t.Fatalf("write sidecar: %v", err)
-			}
-
-			discard := prepareManifestlessStaging(path, youtube.StreamPostLive, false, nopWorkerLogger{})
-
-			aside := asideOf(t, path)
-			if aside == "" {
-				t.Fatalf("no <file>.restart-* beside %s — the headed recording was not preserved", path)
-			}
-			if info, err := os.Stat(aside); err != nil || info.Size() != staged {
-				t.Fatalf("aside file %s: err=%v size=%d, want %d bytes of recording", aside, err, sizeOrZero(info), staged)
-			}
-
-			// Now let the engine do exactly what the returned flag permits.
-			d := engine.NewSegmentDownloader(engine.DownloaderOptions{
-				BaseURL:       streamURL,
-				OutputFile:    path,
-				DiscardStaged: discard,
-				MaxRetries:    1,
-			})
-			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-			defer cancel()
-			_ = d.Start(ctx)
-
-			if info, err := os.Stat(aside); err != nil || info.Size() != staged {
-				t.Fatalf("after Start, aside file %s: err=%v size=%d, want the %d-byte recording intact",
-					aside, err, sizeOrZero(info), staged)
-			}
-		})
-	}
-}
-
-// TestManifestlessStagingDiscardsWhatCannotBeMuxed pins the other half of the
-// narrowed rule: an empty staging dir keeps the ordinary byte-identical fresh
-// start, and a non-empty file with no container header is disposable — a bare
-// moof+mdat run no muxer can open. Neither produces an aside file, because
-// there is nothing worth keeping.
-//
-// Mutant: treating every non-empty file as headed (stagedRecordingHeaded =
-// true) — the unrecognisable row grows an aside file for unmuxable bytes and
-// the staging dir fills up on every restart.
-func TestManifestlessStagingDiscardsWhatCannotBeMuxed(t *testing.T) {
-	t.Run("absent staging", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "video_stream")
-		if !prepareManifestlessStaging(path, youtube.StreamPostLive, false, nopWorkerLogger{}) {
-			t.Fatal("prepareManifestlessStaging = false for absent staging, want the ordinary fresh start")
-		}
-		if aside := asideOf(t, path); aside != "" {
-			t.Fatalf("aside file %s created for absent staging", aside)
-		}
-	})
-
-	t.Run("empty staging", func(t *testing.T) {
-		path := stagedManifestlessFile(t, nil, 0)
-		if !prepareManifestlessStaging(path, youtube.StreamPostLive, false, nopWorkerLogger{}) {
-			t.Fatal("prepareManifestlessStaging = false for empty staging, want the ordinary fresh start")
-		}
-		if aside := asideOf(t, path); aside != "" {
-			t.Fatalf("aside file %s created for empty staging", aside)
-		}
-	})
-
-	t.Run("unrecognisable staging", func(t *testing.T) {
-		// A bare fragment: 'moof' where a complete file carries 'ftyp'.
-		path := stagedManifestlessFile(t, []byte{0x00, 0x00, 0x01, 0x00, 'm', 'o', 'o', 'f'}, 4096)
-		if !prepareManifestlessStaging(path, youtube.StreamPostLive, false, nopWorkerLogger{}) {
-			t.Fatal("prepareManifestlessStaging = false for headerless staging, want it discarded")
-		}
-		if aside := asideOf(t, path); aside != "" {
-			t.Fatalf("aside file %s created for bytes no muxer can open", aside)
-		}
-	})
-}
-
-// TestManifestlessStagingNeverTouchesLiveOrForced pins that the narrowing did
-// not widen the opt-in: a LIVE capture and a part force-starting at an
-// orchestrator-provided seq are still refused outright, and — crucially — the
-// staged file is left exactly where it is, not moved aside.
-//
-// Mutant: dropping the manifestlessDiscardStaged short-circuit — a live
-// recording's staging file is renamed out from under the running resume.
-func TestManifestlessStagingNeverTouchesLiveOrForced(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		status youtube.StreamStatus
-		forced bool
-	}{
-		{"live", youtube.StreamLive, false},
-		{"forced start seq", youtube.StreamPostLive, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := stagedManifestlessFile(t, ftypHeader, 4096)
-			if prepareManifestlessStaging(path, tc.status, tc.forced, nopWorkerLogger{}) {
-				t.Fatal("prepareManifestlessStaging = true, want no discard for a resumable capture")
-			}
-			if aside := asideOf(t, path); aside != "" {
-				t.Fatalf("aside file %s created for a capture that must keep appending", aside)
-			}
-			if info, err := os.Stat(path); err != nil || info.Size() != 4096 {
-				t.Fatalf("staging at %s: err=%v size=%d, want it untouched", path, err, sizeOrZero(info))
-			}
-		})
-	}
-}
-
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return b
-}
-
-func sizeOrZero(info os.FileInfo) int64 {
-	if info == nil {
-		return 0
-	}
-	return info.Size()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -208,21 +209,28 @@ type DownloaderOptions struct {
 	// every output file stays internally gapless. Leave false for platforms
 	// with seekable/backfillable streams (YouTube) and for VODs.
 	StopOnGap bool
-	// DiscardStaged tells Start that any bytes already at OutputFile are
-	// disposable, so the no-truncate guard (ErrStagedMediaPresent) stands
-	// down and the file is opened O_TRUNC. This is the ONLY way a caller
-	// destroys staged media: every implicit truncate is now a guard trip.
+	// DiscardStaged tells Start that this caller needs a file that begins at
+	// the start of the stream, so the no-truncate guard (ErrStagedMediaPresent)
+	// stands down and the file is opened O_TRUNC. It never means "destroy
+	// whatever is there": the full rule is
+	//
+	//   - a USABLE resume sidecar always wins. Start resumes, appends the
+	//     missing tail, and this flag is irrelevant — the guard block is not
+	//     even reached;
+	//   - otherwise, if staging holds a HEADED recording (an ftyp box or the
+	//     EBML magic, i.e. something a muxer can open), it is preserved as
+	//     <OutputFile>.restart-<unix ts> — with its sidecar — and the fresh
+	//     file starts beside it;
+	//   - otherwise (staging empty, or non-empty but unrecognisable) it is
+	//     discarded, which is the ordinary fresh start.
 	//
 	// The one production setter is the manifest-free DASH strategy's
 	// post-live restart: those segments carry their ftyp+moov init inline at
-	// sq=0 only, so a finished stream genuinely must begin again at 0 and
-	// the partial file cannot be appended to. Even there it is conditional —
-	// prepareManifestlessStaging sets it only once nothing muxable is left at
-	// OutputFile, moving a headed recording aside first — so the promise the
-	// guard makes above is never quietly un-made. Deliberate discards that
-	// REMOVE the media before constructing the downloader (the quality-split
-	// short-segment rule) never need this flag at all: the guard only looks
-	// at bytes that are still there.
+	// sq=0 only, so a finished stream that cannot resume genuinely must begin
+	// again at 0 and the partial file cannot be appended to. Deliberate
+	// discards that REMOVE the media before constructing the downloader (the
+	// quality-split short-segment rule) never need this flag at all: the
+	// guard only looks at bytes that are still there.
 	DiscardStaged bool
 	// MaxTimeout bounds how long the DASH loop keeps retrying/verifying while
 	// waiting for the next segment before it force-finalizes the recording —
@@ -707,7 +715,7 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 		opts.EndSeq = -1
 	}
 	if opts.ResumeFile == "" {
-		opts.ResumeFile = opts.OutputFile + ".resume.json"
+		opts.ResumeFile = opts.OutputFile + resumeFileSuffix
 	}
 
 	logger := opts.Logger
@@ -806,28 +814,44 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	}
 
 	// Shared no-truncate guard (sweep-2 ENGINE-1/5/6, verifier merge M2).
-	// Staged data with no usable resume state — a corrupt/stale/identity-
-	// rejected sidecar, a restart that re-probed the stream as post-live and
-	// re-seeded seq 0, a sidecar the natural end already cleared — must never
-	// be truncated. Truncating destroys a recording that finalize-time
-	// recovery can still mux; the decision belongs to the caller.
+	// Reached ONLY when the engine could not resume — a corrupt/stale/
+	// identity-rejected sidecar, a restart that re-probed the stream as
+	// post-live and re-seeded seq 0, a sidecar the natural end already
+	// cleared. A usable sidecar never lands here: `resuming` is already true
+	// above, the file is truncated to the fsync'd offset and the missing tail
+	// is appended, which is the documented incomplete-tail recovery.
 	//
-	// StopOnGap callers have the richer answer (close this file as a finished
-	// part and continue in a fresh one), so they keep ErrGapDetected.
-	// IsDirectURL is out of scope here: a whole-file VOD download is not
-	// segmented staged media, its partial is bounded by the 50 MB sidecar
-	// cadence, and the truncation it actually suffered (the streaming
-	// fallback) is removed at its own call site instead.
-	if !resuming && !d.opts.DiscardStaged && !d.opts.IsDirectURL {
+	// With no resume available, the bytes on disk must still not be destroyed
+	// silently — finalize-time recovery can mux them. What happens next is
+	// the caller's declared intent:
+	//
+	//   - no DiscardStaged: refuse. StopOnGap callers have the richer answer
+	//     (close this file as a finished part and continue in a fresh one),
+	//     so they keep ErrGapDetected; everyone else gets
+	//     ErrStagedMediaPresent and the orchestrator decides.
+	//   - DiscardStaged: this caller REQUIRES a file that begins at the start
+	//     of the stream (the manifest-free sq=0 restart), so it cannot refuse
+	//     — but it can preserve. A headed recording is set aside and the
+	//     fresh file starts beside it; unrecognisable bytes are discarded.
+	//
+	// IsDirectURL is out of scope for both: a whole-file VOD download is not
+	// segmented staged media and its partial is always re-fetchable from the
+	// same static URL, so restarting it costs bandwidth, not footage.
+	if !resuming && !d.opts.IsDirectURL {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
-			if d.opts.StopOnGap {
-				d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
+			if !d.opts.DiscardStaged {
+				if d.opts.StopOnGap {
+					d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
+						"file", d.opts.OutputFile, "size", info.Size())
+					return ErrGapDetected
+				}
+				d.logger.Error("[Downloader] Staged data present but resume state unusable — refusing to truncate",
 					"file", d.opts.OutputFile, "size", info.Size())
-				return ErrGapDetected
+				return fmt.Errorf("%w: %s holds %d bytes", ErrStagedMediaPresent, d.opts.OutputFile, info.Size())
 			}
-			d.logger.Error("[Downloader] Staged data present but resume state unusable — refusing to truncate",
-				"file", d.opts.OutputFile, "size", info.Size())
-			return fmt.Errorf("%w: %s holds %d bytes", ErrStagedMediaPresent, d.opts.OutputFile, info.Size())
+			if preserveErr := d.preserveStagedRecording(info.Size()); preserveErr != nil {
+				return preserveErr
+			}
 		}
 	}
 
@@ -921,6 +945,79 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		return d.runHlsLoop(ctx)
 	}
 	return d.runDashLoop(ctx)
+}
+
+// stagedRestartSuffix marks a recording Start set aside instead of truncating
+// it: <OutputFile>.restart-<unix ts>, with its sidecar alongside as
+// <OutputFile>.restart-<unix ts>.resume.json. The suffix is a contract, not an
+// implementation detail — the worker's unmuxed-part registration and the
+// orphan sweep both key on it.
+const stagedRestartSuffix = ".restart-"
+
+// resumeFileSuffix is the sidecar's name relative to its media file, used both
+// by NewSegmentDownloader's default and by the aside rename above so the two
+// can never drift apart.
+const resumeFileSuffix = ".resume.json"
+
+// preserveStagedRecording is the DiscardStaged half of the no-truncate guard.
+// The caller has declared it needs a file that begins at the start of the
+// stream, and the engine has already established it cannot resume, so the
+// bytes on disk cannot simply be appended to. They are still not destroyed:
+// anything a muxer can open is renamed to <OutputFile>.restart-<unix ts> (its
+// sidecar too) and the fresh file is opened beside it. Unrecognisable bytes —
+// a bare moof+mdat run from a part that force-started mid-stream, or fewer
+// than eight bytes — are left to the O_TRUNC below, because there is nothing
+// there to preserve.
+//
+// A rename that fails is NOT downgraded to a truncate: the guard's whole
+// promise is that nothing is destroyed implicitly, so the error surfaces and
+// the job stays resumable with everything where it was.
+func (d *SegmentDownloader) preserveStagedRecording(size int64) error {
+	if !stagedRecordingHeaded(d.opts.OutputFile) {
+		d.logger.Warn("[Downloader] Staged bytes carry no container header — discarding for a fresh start",
+			"file", d.opts.OutputFile, "size", size)
+		return nil
+	}
+	aside := fmt.Sprintf("%s%s%d", d.opts.OutputFile, stagedRestartSuffix, time.Now().Unix())
+	if err := os.Rename(d.opts.OutputFile, aside); err != nil {
+		d.logger.Error("[Downloader] Could not set the staged recording aside — refusing to truncate it",
+			"file", d.opts.OutputFile, "aside", aside, "err", err)
+		return fmt.Errorf("%w: %s holds %d bytes and could not be set aside: %w",
+			ErrStagedMediaPresent, d.opts.OutputFile, size, err)
+	}
+	// The sidecar belongs with the recording it describes. Best effort: it is
+	// unusable by definition here (that is why this branch was reached), and a
+	// job that never wrote one is the common case.
+	if err := os.Rename(d.opts.ResumeFile, aside+resumeFileSuffix); err != nil && !os.IsNotExist(err) {
+		d.logger.Warn("[Downloader] Staged recording set aside without its resume state",
+			"file", d.opts.ResumeFile, "err", err)
+	}
+	d.logger.Warn("[Downloader] Staged recording set aside for a fresh start — mux it from this path if the restart falls short; a first segment that was only partly written may not be muxable on its own",
+		"from", d.opts.OutputFile, "to", aside, "bytes", size)
+	return nil
+}
+
+// stagedRecordingHeaded reports whether path begins with a container header a
+// muxer can open: an MP4/M4A 'ftyp' box, or the Matroska/WebM EBML magic. A
+// capture that began at the start of the stream has one — a manifest-free DASH
+// sq=0 segment carries its ftyp+moov init inline — while a part that
+// force-started mid-stream is a bare moof+mdat run FFmpeg cannot demux on its
+// own. Unreadable, or shorter than the eight bytes the check needs, counts as
+// not headed: there is nothing worth preserving either way.
+func stagedRecordingHeaded(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [8]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return false
+	}
+	if string(hdr[4:8]) == "ftyp" {
+		return true
+	}
+	return hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3
 }
 
 // truncateForResume shrinks a staged recording to its fsync'd resume offset.

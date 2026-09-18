@@ -229,7 +229,7 @@ func TestTruncateForResumeStopsOnContextCancel(t *testing.T) {
 func TestStartResumeTruncateFailureKeepsStagedMedia(t *testing.T) {
 	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
 	path := stagedFile(t, 1<<20)
-	writeResumeSidecar(t, path, streamURL, 512<<10)
+	writeResumeSidecar(t, path, streamURL, 41, 512<<10, 0)
 
 	// A sharing violation that never clears — AV holding the handle. The
 	// ladder exhausts and the error must surface.
@@ -259,14 +259,14 @@ func TestStartResumeTruncateFailureKeepsStagedMedia(t *testing.T) {
 	}
 }
 
-// writeResumeSidecar drops a valid-looking sidecar beside path so Start takes
-// the resume branch and reaches the truncate.
-func writeResumeSidecar(t *testing.T, path, baseURL string, bytesWritten int64) {
+// writeResumeSidecar drops a sidecar beside path with the given age, so Start
+// either takes the resume branch (a fresh one) or rejects it (an aged one).
+func writeResumeSidecar(t *testing.T, path, baseURL string, lastSeq int, bytesWritten int64, age time.Duration) {
 	t.Helper()
 	blob, err := json.Marshal(ResumeState{
-		LastSeq:      41,
+		LastSeq:      lastSeq,
 		BytesWritten: bytesWritten,
-		Timestamp:    time.Now().Unix(),
+		Timestamp:    time.Now().Add(-age).Unix(),
 		BaseURL:      baseURL,
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func writeResumeSidecar(t *testing.T, path, baseURL string, bytesWritten int64) 
 func TestStartResumeTruncateFailureSplitsWithoutClaimingDataLoss(t *testing.T) {
 	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
 	path := stagedFile(t, 1<<20)
-	writeResumeSidecar(t, path, streamURL, 512<<10)
+	writeResumeSidecar(t, path, streamURL, 41, 512<<10, 0)
 	installTruncateSeams(t, func(string, int64) error { return errSharingViolation })
 
 	d := NewSegmentDownloader(DownloaderOptions{
@@ -310,5 +310,195 @@ func TestStartResumeTruncateFailureSplitsWithoutClaimingDataLoss(t *testing.T) {
 	}
 	if got := sizeOf(t, path); got != 1<<20 {
 		t.Fatalf("staged file is %d bytes, want 1048576 (the split must not truncate either)", got)
+	}
+}
+
+// headedStagedFile writes n bytes of staged recording that a muxer can open —
+// an MP4 box length followed by 'ftyp', exactly what a manifest-free capture
+// beginning at sq=0 puts on disk — and returns its path.
+func headedStagedFile(t *testing.T, n int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "video_stream")
+	body := make([]byte, n)
+	copy(body, []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'})
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	return path
+}
+
+// asideFiles returns the <path>.restart-<ts> media file and its sidecar, each
+// "" when absent. More than one of either is a failure: every restart must
+// reuse one aside, not accumulate copies.
+func asideFiles(t *testing.T, path string) (media, sidecar string) {
+	t.Helper()
+	all, err := filepath.Glob(path + stagedRestartSuffix + "*")
+	if err != nil {
+		t.Fatalf("glob aside files: %v", err)
+	}
+	for _, m := range all {
+		if strings.HasSuffix(m, resumeFileSuffix) {
+			if sidecar != "" {
+				t.Fatalf("more than one aside sidecar: %v", all)
+			}
+			sidecar = m
+			continue
+		}
+		if media != "" {
+			t.Fatalf("more than one aside recording: %v", all)
+		}
+		media = m
+	}
+	return media, sidecar
+}
+
+// startAgainstDeadAddress runs Start against an address nothing answers, with
+// a short deadline. Every row below cares only about what Start decided about
+// the files BEFORE the first fetch, so the download's own failure is expected
+// and the deadline only has to outlast the open sequence.
+func startAgainstDeadAddress(t *testing.T, d *SegmentDownloader) error {
+	t.Helper()
+	d.delays = fastDelays()
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	return d.Start(ctx)
+}
+
+// TestStartDiscardStagedResumesFromUsableSidecar is fix round 2's regression
+// row (R1). DiscardStaged says "this caller needs a file that starts at the
+// beginning of the stream" — it does NOT say "destroy what is there". A USABLE
+// sidecar outranks it completely: Start resumes, keeps the recording, keeps
+// the sidecar, and appends the missing tail. This is the documented
+// incomplete-tail recovery (an incomplete_tail restart, a /resume of an
+// interrupted post-live VOD, enqueueExistingJobs re-entering a Downloading
+// post-live row), and round 1 broke it by acting on size+header alone in the
+// worker, before `resuming` was known.
+//
+// Mutant: acting regardless of `resuming` (round 1's behaviour — hoist the
+// preserve above the !resuming test) — the recording and its valid sidecar are
+// renamed aside, the file restarts empty at sq=0 and the tail is re-downloaded
+// instead of appended.
+func TestStartDiscardStagedResumesFromUsableSidecar(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	const staged = 1 << 20
+	path := headedStagedFile(t, staged)
+	writeResumeSidecar(t, path, streamURL, 4100, staged, 0)
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       streamURL,
+		OutputFile:    path,
+		DiscardStaged: true,
+		MaxRetries:    1,
+	})
+	if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+		t.Fatalf("Start = %v, want a resume, not a guard trip", err)
+	}
+
+	if media, sidecar := asideFiles(t, path); media != "" || sidecar != "" {
+		t.Fatalf("aside files created (%q, %q) — a usable sidecar must be resumed, never set aside", media, sidecar)
+	}
+	if got := sizeOf(t, path); got != staged {
+		t.Fatalf("staged file is %d bytes, want %d (the resume appends, it does not restart)", got, staged)
+	}
+	if _, err := os.Stat(path + resumeFileSuffix); err != nil {
+		t.Fatalf("resume sidecar gone (%v) — it is what makes the tail appendable", err)
+	}
+	if got := d.CurrentSeq(); got != 4101 {
+		t.Fatalf("CurrentSeq = %d, want 4101 (LastSeq+1 from the sidecar)", got)
+	}
+}
+
+// TestStartDiscardStagedPreservesOnlyHeadedRecordings pins what DiscardStaged
+// does once the engine has established it CANNOT resume. A recording a muxer
+// can open is set aside with its sidecar and the fresh file starts beside it;
+// bytes no muxer can open are discarded, because there is nothing to preserve.
+//
+// Mutants: dropping the rename (rows 1-2 lose the recording to O_TRUNC);
+// treating every non-empty file as headed (row 3 grows an aside for unmuxable
+// bytes, and every restart accumulates another copy).
+func TestStartDiscardStagedPreservesOnlyHeadedRecordings(t *testing.T) {
+	const streamURL = "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=140"
+	const staged = 1 << 20
+
+	for _, tc := range []struct {
+		name      string
+		seed      func(t *testing.T) string
+		wantAside bool
+	}{
+		{
+			name: "corrupt sidecar sets the recording aside",
+			seed: func(t *testing.T) string {
+				path := headedStagedFile(t, staged)
+				if err := os.WriteFile(path+resumeFileSuffix, []byte("{not json"), 0o644); err != nil {
+					t.Fatalf("write sidecar: %v", err)
+				}
+				return path
+			},
+			wantAside: true,
+		},
+		{
+			name: "sidecar aged past maxResumeStateAge sets the recording aside",
+			seed: func(t *testing.T) string {
+				path := headedStagedFile(t, staged)
+				writeResumeSidecar(t, path, streamURL, 4100, staged, maxResumeStateAge+24*time.Hour)
+				return path
+			},
+			wantAside: true,
+		},
+		{
+			name: "unrecognisable staging is discarded",
+			seed: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "video_stream")
+				// A bare fragment: 'moof' where a complete file carries 'ftyp'.
+				body := make([]byte, 4096)
+				copy(body, []byte{0x00, 0x00, 0x01, 0x00, 'm', 'o', 'o', 'f'})
+				if err := os.WriteFile(path, body, 0o644); err != nil {
+					t.Fatalf("write staged file: %v", err)
+				}
+				return path
+			},
+			wantAside: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.seed(t)
+			before := sizeOf(t, path)
+
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:       streamURL,
+				OutputFile:    path,
+				DiscardStaged: true,
+				MaxRetries:    1,
+			})
+			if err := startAgainstDeadAddress(t, d); errors.Is(err, ErrStagedMediaPresent) {
+				t.Fatalf("Start = %v, want DiscardStaged to proceed", err)
+			}
+
+			media, sidecar := asideFiles(t, path)
+			if !tc.wantAside {
+				if media != "" || sidecar != "" {
+					t.Fatalf("aside files created (%q, %q) for bytes no muxer can open", media, sidecar)
+				}
+			} else {
+				if media == "" {
+					t.Fatalf("no %s* beside %s — the headed recording was destroyed", path+stagedRestartSuffix, path)
+				}
+				if got := sizeOf(t, media); got != before {
+					t.Fatalf("aside recording is %d bytes, want %d", got, before)
+				}
+				if sidecar == "" {
+					t.Fatalf("aside sidecar missing — it belongs with the recording it describes")
+				}
+				if _, err := os.Stat(path + resumeFileSuffix); err == nil {
+					t.Fatalf("the unusable sidecar is still beside the fresh file — it must travel with the aside")
+				}
+			}
+			if got := sizeOf(t, path); got != 0 {
+				t.Fatalf("the fresh file is %d bytes, want 0 (DiscardStaged must still start at the stream's beginning)", got)
+			}
+			if got := d.CurrentSeq(); got != 0 {
+				t.Fatalf("CurrentSeq = %d, want 0", got)
+			}
+		})
 	}
 }
