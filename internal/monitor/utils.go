@@ -232,6 +232,13 @@ type ProcessYouTubeVideoResult struct {
 	// date at all (§12). DECAPI reads it for the archive-window check on
 	// vod-family results (§13).
 	PublishedAt string
+	// Denied is true when the probe COMPLETED and isDenied flagged it: YouTube
+	// refused us (upcoming + members_only/login_required) rather than telling
+	// us about a stream. ShouldProcess is always false alongside it. DECAPI
+	// reads it to latch the verdict in its terminal memo — the classification
+	// rides on "upcoming", which decapiTerminalStatus can never treat as
+	// terminal, so without this flag the refusal is re-probed every cycle.
+	Denied bool
 }
 
 // nonLiveSkipReason decides whether a non-live classification (a VOD, post-live
@@ -437,15 +444,41 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 			p.AddToHistory(p.VideoID)
 		}
 		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
+
+	case OutcomeDenied:
+		// DENIED FIRST, and for the same reason archive.go puts it first: a
+		// refusal carries StreamStatus "upcoming" BY DEFINITION (see
+		// isDenied), so a table that reaches the classification switch below
+		// launders the 2.7.2 misfire into a broadcast job — an Upcoming row,
+		// a "Stream Found" notification, and then a COOKIES? park the config
+		// never asked for.
+		//
+		// NO AddToHistory. A refusal is not "we dealt with this video": the
+		// members-only escalation lives on the FEED path, which owns the
+		// authenticated answer, and a history row here would make its later
+		// sighting read as a re-probe.
+		//
+		// The cost of routing login_required away is that a channel under
+		// sustained anti-bot pushback gets its upcoming streams from the feed
+		// path only — which already lives with that, for exactly the window
+		// YouTube is refusing anonymous probes anyway.
+		deniedLog := p.Logger.Info
+		if p.IsReprobe {
+			deniedLog = p.Logger.Debug
+		}
+		deniedLog(fmt.Sprintf("[Monitor] YouTube refused this video (%s); not creating a job: %s (%s)",
+			cr.PlayabilityError, p.Title, p.VideoID))
+		return ProcessYouTubeVideoResult{
+			ShouldProcess: false,
+			Denied:        true,
+			Title:         p.Title,
+			StreamStatus:  cr.StreamStatus,
+		}
 	}
 
-	// cr.Outcome is OutcomeProbed or OutcomeDenied here. Today's classification
-	// below has no "denied" concept and treats every successful probe the same
-	// regardless of playability — a video isDenied() flags is still just an
-	// "upcoming" stream to this function, exactly as before the split. A
-	// later plan may special-case OutcomeDenied for escalation; DECAPI's
-	// behavior here must stay exactly what a plain "upcoming" classification
-	// produced pre-split.
+	// cr.Outcome is OutcomeProbed here — the only outcome that reaches a
+	// classification. OutcomeDenied used to fall through to this switch and be
+	// treated as a plain "upcoming"; it now returns in the arm above.
 
 	// Classify stream status (demote to Debug for re-probes of finished videos)
 	logInfo := p.Logger.Info

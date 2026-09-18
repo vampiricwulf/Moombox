@@ -449,3 +449,91 @@ func TestDecapi_TerminalMemoCoversTheOutOfWindowArm(t *testing.T) {
 		t.Fatalf("found = %v, want [vidDecWin12] — 30 days is inside a 90-day window", *found)
 	}
 }
+
+// TestDecapi_DeniedVerdictIsLatched is MON-1's second half. "Denied" is not a
+// terminal STATUS (it rides on "upcoming", which becomes live and then vod),
+// so decapiTerminalStatus cannot latch it — yet DECAPI reports the channel's
+// NEWEST video every cycle, and at the 15 s interval floor an un-latched
+// refusal is ~240 anonymous player probes an hour for an answer only a cookie
+// change can alter (and the feed's membership path owns that answer).
+//
+// Mutants:
+//   - drop the `m.denied` arm from terminalMemoHit -> the first assertion
+//     fails and the refusal is re-probed every cycle.
+//   - latch on videoID alone (ignore denied) -> the second assertion fails
+//     and a newly published stream is never probed.
+//   - record denied for every outcome -> the third assertion fails and a
+//     premiere is never picked up when it goes live.
+func TestDecapi_DeniedVerdictIsLatched(t *testing.T) {
+	dm := &DecapiMonitor{logger: silentLogger{}}
+
+	dm.recordTerminalMemo("UC_a", "vid_denied_11", "upcoming", true)
+	if !dm.terminalMemoHit("UC_a", "vid_denied_11", false, 30) {
+		t.Error("a denied verdict did not latch — the same refusal is re-probed every 15 s forever")
+	}
+	if dm.terminalMemoHit("UC_a", "vid_other_111", false, 30) {
+		t.Error("the latch fired for a DIFFERENT video — a newly published stream would never be probed")
+	}
+
+	// A non-denied "upcoming" is still not terminal: it becomes live.
+	dm.recordTerminalMemo("UC_b", "vid_upcoming1", "upcoming", false)
+	if dm.terminalMemoHit("UC_b", "vid_upcoming1", false, 30) {
+		t.Error("an ordinary upcoming latched — the premiere would never be picked up when it goes live")
+	}
+}
+
+// TestDecapi_429AlwaysEngagesTheLimiter is MON-2. `remaining` used to be
+// written only inside the strconv.Atoi success arm, so a 429 with no
+// Retry-After, or an HTTP-date one, left the limiter untouched and the cycle
+// kept hitting decapi.me at the 1 s stagger — a throttle the code answered by
+// continuing to request.
+//
+// Mutants:
+//   - move `remaining = 0` back inside the Atoi arm -> rows 1, 2 and 4 see
+//     remaining unchanged at 60.
+//   - drop the `secs > 0` guard -> "-5" parses and puts resetAt in the PAST,
+//     which waitForRateLimit's proactive reset immediately undoes (row 4).
+func TestDecapi_429AlwaysEngagesTheLimiter(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		retryAfter string
+		wantWindow time.Duration
+	}{
+		{"absent", "", decapiDefaultRateLimitWindow},
+		{"http-date", "Wed, 21 Oct 2026 07:28:00 GMT", decapiDefaultRateLimitWindow},
+		{"numeric seconds", "30", 30 * time.Second},
+		{"negative seconds", "-5", decapiDefaultRateLimitWindow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			t.Cleanup(srv.Close)
+
+			dm := &DecapiMonitor{logger: silentLogger{}}
+			dm.rateLimit = rateLimitState{limit: 60, remaining: 60}
+
+			resp, err := srv.Client().Get(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { resp.Body.Close() })
+			dm.note429(resp)
+
+			dm.mu.Lock()
+			remaining := dm.rateLimit.remaining
+			until := time.Until(dm.rateLimit.resetAt)
+			dm.mu.Unlock()
+
+			if remaining != 0 {
+				t.Errorf("remaining = %d after a 429 — the limiter never engages and the cycle keeps requesting", remaining)
+			}
+			if until < tc.wantWindow-2*time.Second || until > tc.wantWindow+2*time.Second {
+				t.Errorf("resetAt is %s away, want ~%s", until.Round(time.Second), tc.wantWindow)
+			}
+		})
+	}
+}
