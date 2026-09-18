@@ -3,6 +3,7 @@ package twitch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -258,6 +259,12 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) ([]Emo
 
 	data, err := fetchJSON(ctx, url)
 	if err != nil {
+		if errors.Is(err, errEmoteProviderNotFound) {
+			// A real answer: this channel has no BTTV emotes. Cacheable, and
+			// deliberately not a Warn — see errEmoteProviderNotFound.
+			er.logger.Debug("bttv has no record of this channel", "channelID", channelID)
+			return nil, true
+		}
 		// Warn rather than Debug — a persistently-down emote provider was
 		// invisible at the default log level, so missing emotes looked like
 		// a Moombox bug. Audit-finding twitch.md #36.
@@ -312,6 +319,12 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) ([]Emot
 
 	data, err := fetchJSON(ctx, url)
 	if err != nil {
+		if errors.Is(err, errEmoteProviderNotFound) {
+			// A real answer: this channel has no FFZ emotes. Cacheable, and
+			// deliberately not a Warn — see errEmoteProviderNotFound.
+			er.logger.Debug("ffz has no record of this channel", "channelID", channelID)
+			return nil, true
+		}
 		// Audit-finding twitch.md #36 — see fetchBTTV.
 		er.logger.Warn("ffz fetch failed", "err", err, "channelID", channelID)
 		return nil, false
@@ -370,6 +383,12 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) ([]Emot
 
 	data, err := fetchJSON(ctx, url)
 	if err != nil {
+		if errors.Is(err, errEmoteProviderNotFound) {
+			// A real answer: this channel has no 7TV emotes. Cacheable, and
+			// deliberately not a Warn — see errEmoteProviderNotFound.
+			er.logger.Debug("7tv has no record of this channel", "channelID", channelID)
+			return nil, true
+		}
 		// Audit-finding twitch.md #36 — see fetchBTTV.
 		er.logger.Warn("7tv fetch failed", "err", err, "channelID", channelID)
 		return nil, false
@@ -443,6 +462,15 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) ([]Emot
 	return emotes, true
 }
 
+// errEmoteProviderNotFound marks a 404 from a third-party emote provider.
+// It is an ANSWER, not a failure: BTTV, FFZ and 7TV all answer 404 for a
+// channel that never registered with them, which is the honest state of many
+// channels (measured 2026-09-15: id 141981764 answers 404 on all three).
+// Reading it as a failure meant nothing was cached, so Resolve re-fired three
+// requests and four Warn lines on every part roll and stream end of every job
+// on that channel, for the life of the daemon (TWITCH-4).
+var errEmoteProviderNotFound = errors.New("emote provider has no record of this channel")
+
 func fetchJSON(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -456,6 +484,12 @@ func fetchJSON(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		// Drain a bounded prefix so the connection is reusable, then report
+		// the sentinel — the caller turns it into an empty, cacheable answer.
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return nil, errEmoteProviderNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http %d", resp.StatusCode)
 	}

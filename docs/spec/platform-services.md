@@ -650,7 +650,7 @@ Both chat downloaders cap their sidecar at the newest 1000 dedup IDs — one con
 
 #### Fetch Strategy
 
-All three providers are fetched in parallel using a `sync.WaitGroup`. Each has an 8-second timeout (`emoteTimeout`). Each returns its emotes AND whether it ANSWERED — a channel with no third-party emotes is a real answer; only a provider that could not be reached or whose body could not be read is a failure. Failures are logged at warn level and are non-fatal.
+All three providers are fetched in parallel using a `sync.WaitGroup`. Each has an 8-second timeout (`emoteTimeout`). Each returns its emotes AND whether it ANSWERED. Two shapes are answers: a 200 listing no emotes, and a **404** — BTTV, FFZ and 7TV all answer 404 for a channel that never registered with them, and a channel registered with none of the three answers 404 on all three (`errEmoteProviderNotFound`, `internal/twitch/emotes.go`). Only a provider that could not be reached, that answered 5xx, or whose body could not be parsed is a failure. Reading the 404 as a failure meant nothing was cached for such a channel, so `Resolve` re-fired three requests and four Warn lines on every part roll and stream end of every job on it. Failures are logged at warn level and are non-fatal; a 404 logs at debug level.
 
 #### Provider Details
 
