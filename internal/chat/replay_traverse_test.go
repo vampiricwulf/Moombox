@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -363,5 +364,285 @@ func TestFetchErrorExhaustionRecordsAnIncompleteOutcome(t *testing.T) {
 		t.Errorf("Start = %v, want errChatFetchExhausted — a live capture that exhausted its "+
 			"consecutive-error budget stopped short, and the worker writes \"finished\" for a nil "+
 			"outcome", err)
+	}
+}
+
+// liveTimestampUsec is the absolute wallclock (µs) of synthetic message i:
+// one message per second from a fixed epoch. Both endpoints carry this same
+// field verbatim, which is exactly why the high-water mark is keyed on it.
+func liveTimestampUsec(startMs int64, i int) string {
+	return strconv.FormatInt((startMs+int64(i)*1000)*1000, 10)
+}
+
+// skewMessage renders message i of the epoch-skew archive. A LIVE record
+// arrives with no videoOffsetTimeMsec (withOffset false) — processBatch
+// derives its offset from the run's epoch — while a REPLAY record carries
+// YouTube's own offset, measured from the broadcast's ACTUAL start.
+func skewMessage(startMs int64, i int, withOffset bool) ChatMessage {
+	m := ChatMessage{
+		ID:            fmt.Sprintf("s%05d", i),
+		TimestampUsec: liveTimestampUsec(startMs, i),
+		AuthorName:    "viewer",
+		Message:       []MessagePart{{Type: "text", Text: "hi"}},
+	}
+	if withOffset {
+		m.OffsetMs = int64(i) * 1000
+		m.HasOffset = true
+	}
+	return m
+}
+
+// countIDsWithPrefix reports how many records in a written chat file carry an
+// ID in [firstIdx, lastIdx] of the skew archive.
+func countSkewRange(t *testing.T, path string, firstIdx, lastIdx int) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read chat file: %v", err)
+	}
+	var data ChatData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("parse chat file: %v", err)
+	}
+	found := 0
+	for i := firstIdx; i <= lastIdx; i++ {
+		want := fmt.Sprintf("s%05d", i)
+		for _, m := range data.Messages {
+			if m.ID == want {
+				found++
+				break
+			}
+		}
+	}
+	return found
+}
+
+// TestEarlyChatHandoffTailSurvivesTheScheduledEpochSkew is the leg the
+// high-water mark exists for, on the path it was written for.
+//
+// tryStartEarlyChat gives the run the SCHEDULED start as its epoch and nothing
+// ever corrects it (there is no epoch setter), so a live record's derived
+// offset is measured from the schedule while the replay archive's offsets come
+// from the broadcast's ACTUAL start. A stream that goes live five minutes late
+// therefore leaves a mark five minutes too high, and the adopted pass drops
+// the entire post-live tail it exists to recover — silently, with the row
+// still reading "finished".
+//
+// The absolute TimestampUsec both endpoints carry is the only key no epoch
+// enters.
+//
+// Mutants this kills:
+//   - the mark keyed on the epoch-relative OffsetMs → 0 of 60 tail messages captured
+func TestEarlyChatHandoffTailSurvivesTheScheduledEpochSkew(t *testing.T) {
+	const (
+		actualStartMs = int64(1700000000000) // 2023-11-14T22:13:20Z
+		skewMs        = int64(300000)        // the broadcast went live 5 minutes late
+		liveMsgs      = 100
+		tailMsgs      = 60
+	)
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidSkew",
+		OutputFile:          out,
+		IsLiveOrUpcoming:    true,
+		InitialContinuation: "live-tok",
+		// Exactly what tryStartEarlyChat passes: the SCHEDULED start.
+		StreamStartTime: time.UnixMilli(actualStartMs - skewMs).UTC().Format(time.RFC3339),
+	})
+
+	recoveries := 0
+	cd.testRecoveryOverride = func(context.Context) bool {
+		recoveries++
+		cd.adoptFreshContinuation("replay-0", true)
+		return true
+	}
+	livePolls, replayPolls := 0, 0
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		if !cd.isReplay() {
+			livePolls++
+			if livePolls == 1 {
+				resp := &ChatApiResponse{NextContinuation: "live-2", TimeoutMs: 1}
+				for i := range liveMsgs {
+					resp.Messages = append(resp.Messages, skewMessage(actualStartMs, i, false))
+				}
+				return resp, nil
+			}
+			return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+		}
+		replayPolls++
+		resp := &ChatApiResponse{TimeoutMs: -1}
+		switch replayPolls {
+		case 1: // the archive's head — everything the live half already has
+			for i := range liveMsgs {
+				resp.Messages = append(resp.Messages, skewMessage(actualStartMs, i, true))
+			}
+			resp.NextContinuation = "replay-100"
+		default: // the post-live tail, which is why the flip is worth making
+			for i := liveMsgs; i < liveMsgs+tailMsgs; i++ {
+				resp.Messages = append(resp.Messages, skewMessage(actualStartMs, i, true))
+			}
+			resp.IsComplete = true
+		}
+		return resp, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := cd.Start(ctx); err != nil {
+		t.Fatalf("Start = %v, want nil", err)
+	}
+
+	tail := countSkewRange(t, out, liveMsgs, liveMsgs+tailMsgs-1)
+	records, duplicates := readChatFileMessages(t, out)
+	t.Logf("SKEW skew=%v live=%d tail=%d: records=%d duplicates=%d tailCaptured=%d",
+		time.Duration(skewMs)*time.Millisecond, liveMsgs, tailMsgs, records, duplicates, tail)
+	if tail != tailMsgs {
+		t.Errorf("the post-live tail is %d of %d — the mark was measured against a different clock "+
+			"than the archive's offsets, so the pass dropped the messages it exists to recover",
+			tail, tailMsgs)
+	}
+	if duplicates != 0 {
+		t.Errorf("chat.json holds %d duplicate records", duplicates)
+	}
+	if records != liveMsgs+tailMsgs {
+		t.Errorf("chat.json holds %d records, want %d", records, liveMsgs+tailMsgs)
+	}
+	if recoveries != 1 {
+		t.Errorf("recoveries = %d, want 1", recoveries)
+	}
+}
+
+// TestReplayTraverseBoundsItselfWithNoStreamEpoch is the other leg. With no
+// StreamStartTime (both chat construction sites gate on
+// videoInfo.ScheduledStartTime being non-empty) a live record never gets an
+// offset at all, so an offset-keyed mark is never set and the guard is inert:
+// the whole live half comes back as duplicate records, which is precisely what
+// the mark was added to prevent.
+//
+// Mutants this kills:
+//   - the mark keyed on OffsetMs/HasOffset → 6,000 duplicates on a 20k archive
+func TestReplayTraverseBoundsItselfWithNoStreamEpoch(t *testing.T) {
+	const (
+		archive  = 20000
+		liveHalf = 6000
+	)
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidNoEpoch",
+		OutputFile:          out,
+		IsLiveOrUpcoming:    true,
+		InitialContinuation: "live-tok",
+		// StreamStartTime deliberately absent.
+	})
+
+	nextFrom := 0
+	cd.testRecoveryOverride = func(context.Context) bool {
+		cd.adoptFreshContinuation("replay-0", true)
+		nextFrom = 0
+		return true
+	}
+	livePolls, replayFetches := 0, 0
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		if !cd.isReplay() {
+			livePolls++
+			if livePolls == 1 {
+				resp := &ChatApiResponse{NextContinuation: "live-2", TimeoutMs: 1}
+				for i := range liveHalf {
+					// The live endpoint ships no videoOffsetTimeMsec, and with
+					// no epoch nothing can derive one.
+					m := buildArchiveMessage(i)
+					m.OffsetMs, m.HasOffset = 0, false
+					resp.Messages = append(resp.Messages, m)
+				}
+				return resp, nil
+			}
+			return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+		}
+		replayFetches++
+		if replayFetches > 3*(archive/archivePageSize+1) {
+			cd.Stop()
+			return &ChatApiResponse{IsComplete: true, TimeoutMs: -1}, nil
+		}
+		resp := archivePage(nextFrom, archive)
+		nextFrom += archivePageSize
+		return resp, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := cd.Start(ctx); err != nil {
+		t.Fatalf("Start = %v, want nil", err)
+	}
+
+	records, duplicates := readChatFileMessages(t, out)
+	t.Logf("NOEPOCH archive=%d live=%d: replay requests=%d records=%d duplicates=%d",
+		archive, liveHalf, replayFetches, records, duplicates)
+	if duplicates != 0 {
+		t.Errorf("chat.json holds %d duplicate records with no stream epoch — the mark was never "+
+			"set, so the live half was re-appended in full", duplicates)
+	}
+	if records != archive {
+		t.Errorf("chat.json holds %d records, want %d", records, archive)
+	}
+}
+
+// TestReplayTieAtTheMarkKeepsRealMessages pins the strictly-below rule on the
+// ordinary VOD path, which nothing pinned before: messages sharing one
+// millisecond are routine on a busy stream, and a page boundary can land
+// inside such a cluster. Dropping "at or below" the mark would discard the
+// rest of that cluster on every boundary — real messages, silently. Ties fall
+// through to the ID dedup instead, which covers them exactly.
+//
+// Mutants this kills:
+//   - the comparison widened to <= → the 100 cluster members after the page
+//     boundary are lost (500 records instead of 600)
+func TestReplayTieAtTheMarkKeepsRealMessages(t *testing.T) {
+	const (
+		archive      = 600
+		clusterFrom  = 300
+		clusterUntil = 500 // [300, 500): straddles the 400-message page boundary
+	)
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:          "vidTie",
+		OutputFile:       out,
+		IsReplay:         true,
+		IsLiveOrUpcoming: false,
+	})
+	cd.continuation = "replay-0"
+
+	nextFrom := 0
+	cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+		resp := archivePage(nextFrom, archive)
+		for i := range resp.Messages {
+			idx := nextFrom + i
+			if idx >= clusterFrom && idx < clusterUntil {
+				// One instant, 200 messages — the mark lands inside it. Both
+				// fields come from the archive's own message at clusterFrom,
+				// so the stream stays ordered in time either side of it.
+				at := buildArchiveMessage(clusterFrom)
+				resp.Messages[i].OffsetMs = at.OffsetMs
+				resp.Messages[i].TimestampUsec = at.TimestampUsec
+			}
+		}
+		nextFrom += archivePageSize
+		return resp, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := cd.Start(ctx); err != nil {
+		t.Fatalf("Start = %v, want nil", err)
+	}
+
+	records, duplicates := readChatFileMessages(t, out)
+	t.Logf("TIE archive=%d cluster=[%d,%d): records=%d duplicates=%d",
+		archive, clusterFrom, clusterUntil, records, duplicates)
+	if records != archive {
+		t.Errorf("chat.json holds %d records, want %d — a same-millisecond cluster straddling a "+
+			"page boundary lost its tail to the high-water comparison", records, archive)
+	}
+	if duplicates != 0 {
+		t.Errorf("chat.json holds %d duplicate records", duplicates)
 	}
 }

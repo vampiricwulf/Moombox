@@ -130,15 +130,27 @@ type ChatDownloader struct {
 	// verdict exists for). mu is load-bearing: it is written on the loop
 	// goroutine and read by that waiter on another.
 	terminalErr error
-	// replayHighWaterMs is the highest offset this run has committed, and
-	// hasReplayHighWater says whether one exists yet (offsets are legitimately
-	// negative in a waiting room, so zero is not a sentinel). It bounds a
-	// replay pass adopted mid-run: the watch page hands back the reload token,
-	// i.e. the START of the archive, and the 5000-ID dedup window cannot span
-	// an archive bigger than itself. Loop-goroutine state, updated inside
-	// processBatch's commit.
-	replayHighWaterMs  int64
-	hasReplayHighWater bool
+	// replayHighWaterUsec is the highest ABSOLUTE timestamp (timestampUsec)
+	// this run has committed, and hasReplayHighWater says whether one exists
+	// yet (a zero timestamp is a value, not a sentinel). It bounds a replay
+	// pass adopted mid-run: the watch page hands back the reload token, i.e.
+	// the START of the archive, and the 5000-ID dedup window cannot span an
+	// archive bigger than itself.
+	//
+	// ABSOLUTE, never the epoch-relative OffsetMs. A live record has no
+	// videoOffsetTimeMsec, so its offset is derived from cd.streamStartMs —
+	// which on the early-chat handoff is the SCHEDULED start (tryStartEarlyChat
+	// passes videoInfo.ScheduledStartTime and nothing ever corrects it), while
+	// the replay archive's own offsets are measured from the ACTUAL start. A
+	// stream that went live five minutes late would leave a mark five minutes
+	// too high and the pass would silently drop the entire post-live tail it
+	// exists to recover; with no StreamStartTime at all the live half gets no
+	// offsets and the mark would never be set. timestampUsec is the one field
+	// both endpoints carry verbatim, and no epoch enters it.
+	//
+	// Loop-goroutine state, updated inside processBatch's commit.
+	replayHighWaterUsec int64
+	hasReplayHighWater  bool
 	// replay is the LIVE-vs-REPLAY endpoint choice. It starts at
 	// opts.IsReplay but is mutable, because a broadcast that ends mid-run
 	// flips its watch page to isReplay:true and starts serving replay tokens;
@@ -1007,14 +1019,24 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 	// cd.streamStartMs), so they stay outside the lock as before.
 	var fresh []ChatMessage
 	replayPass := cd.isReplay()
-	highWater, haveHighWater := cd.replayHighWaterMs, cd.hasReplayHighWater
+	highWater, haveHighWater := cd.replayHighWaterUsec, cd.hasReplayHighWater
+	batchMaxUsec, batchHasUsec := int64(0), false
 	for i := range resp.Messages {
 		msg := &resp.Messages[i]
 
+		// The absolute wallclock, parsed once: the offset derivation below
+		// needs it, and so does the high-water mark.
+		var usec int64
+		hasUsec := false
+		if msg.TimestampUsec != "" {
+			if parsed, err := strconv.ParseInt(msg.TimestampUsec, 10, 64); err == nil {
+				usec, hasUsec = parsed, true
+			}
+		}
+
 		if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
-			usec, err := strconv.ParseInt(msg.TimestampUsec, 10, 64)
-			if err != nil {
-				cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec, "err", err)
+			if !hasUsec {
+				cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec)
 			} else if usec > 0 {
 				msg.OffsetMs = usec/1000 - cd.streamStartMs
 				msg.HasOffset = true
@@ -1025,9 +1047,10 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		// watch page's reload token, i.e. the beginning of the archive, so it
 		// re-serves everything the live half already committed — and the
 		// 5000-ID window (culled on every fetch) cannot span an archive
-		// bigger than itself, so on a 20k archive 1,000 of them came back as
-		// duplicate records. The replay stream is ordered by offset, so one
-		// comparison is exact and O(1).
+		// bigger than itself, so on a 20k archive 6,000 of them came back as
+		// duplicate records. Chat is ordered in time on both endpoints, so
+		// one comparison against the absolute timestamp is exact and O(1)
+		// (see replayHighWaterUsec for why it must be the absolute one).
 		//
 		// STRICTLY below the mark, not "at or below": messages sharing the
 		// mark's millisecond are common on a busy stream and a page boundary
@@ -1036,7 +1059,7 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		// ID dedup instead, which covers them exactly — they are by
 		// construction among the most recent IDs committed, and the window
 		// retains the last 5000.
-		if replayPass && haveHighWater && msg.HasOffset && msg.OffsetMs < highWater {
+		if replayPass && haveHighWater && hasUsec && usec < highWater {
 			continue
 		}
 
@@ -1045,6 +1068,9 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 			continue
 		}
 		fresh = append(fresh, *msg)
+		if hasUsec && (!batchHasUsec || usec > batchMaxUsec) {
+			batchMaxUsec, batchHasUsec = usec, true
+		}
 	}
 	if len(fresh) > 0 {
 		// messageCount is read concurrently via MessageCount() (orchestrator
@@ -1060,15 +1086,12 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		newInBatch = len(fresh)
 		// Advance the mark from what was actually committed — the LIVE half
 		// sets it too, which is what lets a replay pass skip straight to the
-		// tail the live endpoint stopped serving.
-		for i := range fresh {
-			if !fresh[i].HasOffset {
-				continue
-			}
-			if !cd.hasReplayHighWater || fresh[i].OffsetMs > cd.replayHighWaterMs {
-				cd.replayHighWaterMs = fresh[i].OffsetMs
-				cd.hasReplayHighWater = true
-			}
+		// tail the live endpoint stopped serving. A live record carries a
+		// timestamp whether or not it carries an offset, so this is set on
+		// every run, epoch or no epoch.
+		if batchHasUsec && (!cd.hasReplayHighWater || batchMaxUsec > cd.replayHighWaterUsec) {
+			cd.replayHighWaterUsec = batchMaxUsec
+			cd.hasReplayHighWater = true
 		}
 	}
 	if len(resp.Messages) > 0 {
