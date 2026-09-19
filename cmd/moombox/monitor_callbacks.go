@@ -99,7 +99,7 @@ func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool
 //     download alone; a backlog VOD that was Downloading at that moment
 //     therefore survives with no partner, and it is exactly the row that
 //     parks in COOKIES? later. NextQueuedJobs INNER-JOINs feed_items, so the
-//     scheduler would return it on no sweep ever, /retry and /resume both
+//     scheduler would never return it on any sweep, /retry and /resume both
 //     refuse Queued, and ShouldProcess(Queued) is false — the row would be
 //     lost permanently and silently. Pacing is not a property worth having
 //     for a channel that no longer exists.

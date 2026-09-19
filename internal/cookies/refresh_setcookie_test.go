@@ -18,12 +18,12 @@ import (
 // A case that would also pass against the unfixed function is labelled a
 // regression guard so nobody later mistakes it for a proof.
 
-// captureLogger records Info- and Debug-level messages, with their key/value
-// args appended, so a test can assert that an operator-visible event was
-// actually reported AT THE LEVEL it claims. Only names are recorded — never
-// values: every arg it is handed today is a holder kind, a cookie NAME or a
-// platform, and a test that needs a logger for anything carrying a secret
-// wants a different one.
+// captureLogger records Info- and Debug-level messages with their args
+// appended as key=value, so a test can assert that an operator-visible event
+// was actually reported AT THE LEVEL it claims. Values are kept, not just
+// names, and that is safe only because every arg it is handed today is a
+// holder kind, a cookie NAME or a platform — a test that needs a logger for
+// anything carrying a secret wants a different one.
 //
 // Debug as well as Info because the two levels are the subject of an
 // assertion of their own — a line demoted to Debug is invisible to an operator

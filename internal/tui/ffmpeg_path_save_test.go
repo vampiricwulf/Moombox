@@ -155,12 +155,12 @@ func TestFfmpegPathIsAppliedOnlyWhenOneWasValidated(t *testing.T) {
 // The overlay has to stay inside the smallest terminal the TUI renders at.
 // A save error is an arbitrary string — a filesystem message naming a
 // 300-character path is ordinary — and appended whole it grew the box from
-// 20 rows to 26 at 60x20, pushing "Press any key to continue" below the
+// 20 rows to 25 at 60x20, pushing "Press any key to continue" below the
 // frame. Capped, the reason still says what went wrong and the full text is
 // in moombox.log (OnSaveConfig logs it).
 //
 // Mutant: drop the maxOverlayReasonRunes truncation — the rendered overlay is
-// 26 rows and the height assertion fails.
+// 25 rows and the height assertion fails.
 func TestARefusedFfmpegSaveFitsTheSmallestTerminal(t *testing.T) {
 	cfg := config.Defaults()
 	a := NewApp()

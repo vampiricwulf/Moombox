@@ -12,7 +12,8 @@ import "testing"
 // asserted is the config the wizard hands to the save.
 //
 // Mutant: restore vNum/strconv.Atoi at the two apply sites — feedCheckInterval
-// lands as 1 and hideAge as 0.
+// lands as 10 (the default: Atoi("1.5") errors and the n > 0 guard skips the
+// assignment) and hideAge as 0.
 func TestAdvancedWizardAcceptsFractionalDurations(t *testing.T) {
 	m := NewSetupWizardModel()
 	m.values["feedCheckInterval"] = "1.5"

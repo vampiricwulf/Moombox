@@ -213,7 +213,7 @@ Three independent monitors detect new streams and create jobs:
 
 **DECAPIMonitor** — Polls DECAPI for the latest video from each monitored YouTube channel. This is a secondary detection mechanism that catches streams the RSS feed might miss (RSS updates can be delayed by minutes). Extracts video IDs from DECAPI responses, runs the same ProbeVideo + term filtering pipeline as FeedMonitor. Has its own rate limit tracking (respects DECAPI rate limit headers) and configurable check interval.
 
-**TwitchMonitor** — Polls Twitch GQL for each monitored Twitch channel. Uses the `UseLive` persisted query to check if the channel is live. When a live stream is detected, extracts stream metadata (title, category, start time, thumbnail, profile image) and calls `OnStreamFound()`. Twitch jobs are created with `StatusLive` immediately (the monitor already confirmed live status), unlike YouTube jobs which start as `StatusUpcoming` and are probed by the StreamProcessor.
+**TwitchMonitor** — Polls Twitch GQL for each monitored Twitch channel. Batches the `StreamMetadata` and `ComscoreStreamingQuery` persisted queries through `GetStreamInfoBatch` (`internal/twitch/api.go`) to check whether each channel is live. When a live stream is detected, extracts stream metadata (title, category, start time, thumbnail, profile image) and calls `OnStreamFound()`. Twitch jobs are created with `StatusLive` immediately (the monitor already confirmed live status), unlike YouTube jobs which start as `StatusUpcoming` and are probed by the StreamProcessor.
 
 All monitors share these patterns:
 - **Signal-driven scheduling** — Use `time.Timer` (not `time.Ticker`) so the next check is scheduled after the current one completes, preventing overlap
@@ -365,13 +365,13 @@ Each client's formats are tagged with an auth level: AuthLevelAndroidVR(0), Auth
 
 **N-parameter decryption:** Separate from signature cipher but using the same extraction infrastructure. The `n` parameter in YouTube URLs controls throttling — the obfuscated value triggers aggressive rate limiting. The n-parameter function is extracted from player.js, compiled to a Goja VM, and used to transform the parameter. Same caching as signature cipher.
 
-**Stream status classification:** The player response is parsed into one of: `StreamNotAStream` (regular video, not live), `StreamLive` (currently broadcasting), `StreamUpcoming` (scheduled, not yet live), `StreamProcessing` (recently ended, being processed), `StreamOffline` (ended or unavailable). Classification uses `playabilityStatus.status`, `videoDetails.isLiveContent`, and `videoDetails.isLive` from the player response. Members-only streams are detected via `playabilityStatus.reason` containing membership-related text.
+**Stream status classification:** The player response is parsed into one of: `StreamNotAStream` (regular video, not live), `StreamLive` (currently broadcasting), `StreamUpcoming` (scheduled, not yet live), `StreamPostLive` (the broadcast ended and YouTube is still processing the recording), `StreamVOD` (a finished stream served as an ordinary video). Those five are the whole of `StreamStatus` in `internal/youtube/types.go`. Classification uses `playabilityStatus.status`, `videoDetails.isLiveContent`, and `videoDetails.isLive` from the player response. Members-only streams are detected via `playabilityStatus.reason` containing membership-related text.
 
 ### Twitch
 
 Twitch integration uses the GQL API with persisted query hashes (SHA256). No REST API — everything goes through `https://gql.twitch.tv/gql`.
 
-**GQL operations:** `UseLive` (stream info), `PlaybackAccessToken` (access tokens for HLS), `VideoCommentsByOffsetOrCursor` (VOD chat), `GetStreamInfo` (stream metadata). Each operation is identified by its SHA256 persisted query hash, not the query text — Twitch's GQL endpoint routes requests by hash for caching. The `Client-ID` header is required on all GQL requests. Auth token (from cookies, specifically the `auth-token` cookie) is sent in the `Authorization: OAuth {token}` header when available.
+**GQL operations:** `StreamMetadata` and `ComscoreStreamingQuery` (live stream info, sent as one batched request), `VideoMetadata` (VOD metadata), `VideoCommentsByOffsetOrCursor` (VOD chat) — those four persisted hashes are `TwitchGQLHashes` in `internal/constants/constants.go`. The two playback-access-token calls (`StreamPlaybackAccessToken`, `VideoPlaybackAccessToken`) send GraphQL text rather than a persisted hash. Each persisted operation is identified by its SHA256 hash, not the query text — Twitch's GQL endpoint routes requests by hash for caching. The `Client-ID` header is required on all GQL requests. Auth token (from cookies, specifically the `auth-token` cookie) is sent in the `Authorization: OAuth {token}` header when available.
 
 **HLS variant selection:** The flow is: get stream/VOD access token via GQL, build Usher URL with the token, fetch the master playlist, parse `#EXT-X-STREAM-INF` lines into variant structs (resolution, frame rate, bandwidth, codecs, group ID). Selection uses the quality preference string (e.g., "1080p60", "best", "720p", "audio_only") matched against variant names, with fallback to max resolution config. If the preferred quality is unavailable, falls back to the best available variant.
 
@@ -516,9 +516,11 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, hideFinishedAgeDays}`)
 - `update_available` — New version found (payload: release info)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
-- `cookie_status` — Cookie auth change (payload: auth status)
+- `connectivity` — Network reachability changed (payload: `{online}`)
 - `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
 - `pong` — Reply to the client's `ping` (payload: none)
+
+That list is the whole wire protocol: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the four `cmd/moombox` callers (`update_available`, `disk_status`, `backfill_status`, `config_update`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.
 
 The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives the Web UI's client-side archive re-evaluation: on every `job_update`/`jobs_update` and on a 60-second idle sweep, the Web UI moves Finished jobs that have aged past the threshold from the active panel into the Archived panel. The TUI's `isJobArchived` reclassification (`internal/tui/task_list.go`) does the same, and the active panel stays in sync with wall-clock time without a page refresh. Every Go classifier — that TUI bucket, the REST `/api/jobs` split, the `job_update` broadcast gate and the `cmd/moombox` list filter — runs the one predicate in `internal/jobfilter/archive.go` (`ArchiveCutoff`, `IsArchived`), which scales the fractional day threshold exactly and treats the boundary as exclusive: a Finished job whose `updated_at` sits exactly on the cutoff stays active, as does one whose timestamp is missing or unparseable.
 
@@ -572,6 +574,7 @@ All API routes use the `/api/` prefix (no version). Non-API routes exist for POT
 - `POST /api/cookies/auto-setup/start` — Start auto-cookie browser setup (loopback only; `platform` must be `youtube` or `twitch`)
 - `POST /api/cookies/auto-setup/finish` — Complete auto-cookie setup (loopback only)
 - `POST /api/cookies/auto-setup/cancel` — Cancel auto-cookie setup (loopback only)
+- `POST /api/cookies/auto-setup/abandon` — Abandon auto-cookie setup (loopback only; the dashboard's unload beacon — closes the setup, opens nothing)
 - `GET /api/cookies/auto-status` — Auto-cookie service status
 
 **Updates:**
@@ -695,7 +698,7 @@ Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses it into TWO 
 
 **The two-tier cookie liveness pilot is ON.** `livenessRecoveryArmed` is `true` (armed 2026-09-03 by owner ruling), so a tier-2 verdict that is signed out and past the per-platform back-off logs a Warn and triggers recovery through `OnRecoveryNeeded`, exactly as a tier-1 loss does. The back-off re-alarms at 30 minutes, doubles per alarm to a 24-hour cap, and resets on a conclusive signed-in verdict; a tier-1 fire's dedupe stamp stops tier 2 firing twice for one loss. It is a source constant — the way back is a rebuild.
 
-**Deep-dive:** [docs/spec/data-and-storage.md](docs/spec/data-and-storage.md) § Cookies for the jar, the refresh service and every acquisition path; [docs/spec/operations.md](docs/spec/operations.md) § Browser Cookie Acquisition for the platform differences (the reap — a Job Object on Windows, a process group on Linux, nothing on darwin — `AbandonSetup`, the drain) and § Credential Notifications for what an operator is actually told.
+**Deep-dive:** [docs/spec/data-and-storage.md](docs/spec/data-and-storage.md) § Cookies for the jar, the refresh service and every acquisition path; [docs/spec/operations.md](docs/spec/operations.md) § Browser Cookie Acquisition for the platform differences (the reap — a Job Object on Windows, a process group on Linux, nothing on darwin — `AbandonSetup`, the drain) and [docs/spec/operations.md](docs/spec/operations.md) § Credential Notifications for what an operator is actually told.
 
 ### File Output
 

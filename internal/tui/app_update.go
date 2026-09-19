@@ -15,7 +15,7 @@ import (
 
 // maxOverlayReasonRunes caps an error string appended to an overlay's warning
 // row. The FFmpeg overlay is already 20 rows at minTermHeight, so an uncapped
-// reason (a save error naming a 300-character path) grew it to 26 and pushed
+// reason (a save error naming a 300-character path) grew it to 25 and pushed
 // the dismissal hint off the frame. 80 runes is roughly one wrapped line at
 // minTermWidth; the untruncated text is in moombox.log.
 const maxOverlayReasonRunes = 80

@@ -163,10 +163,14 @@ func TestWriteFileAtomicSyncFailureLeavesNoTempAndTargetUntouched(t *testing.T) 
 // syncFile seam records whether the target already existed at the moment it
 // ran. If the sync genuinely happens before the rename, it never does.
 //
-// Mutant this kills: moving the syncFile call to after the ReplaceFile call
-// means the target already exists by the time the seam runs, flipping
-// targetExisted to true; dropping the syncFile call entirely means the seam
-// is never invoked, leaving called false.
+// Mutants this kills: moving the syncFile call to after the ReplaceFile call
+// dies because the temp file is closed before the rename, so the seam is
+// handed an already-closed handle and WriteFileAtomic returns "fsync temp
+// file: ... file already closed" — the error surfaces before targetExisted
+// is ever consulted; dropping the syncFile call entirely means the seam is
+// never invoked, leaving called false. targetExisted stays as the guard for
+// a future reordering that puts the sync after the rename while the handle
+// is still open.
 func TestWriteFileAtomicSyncsBeforeReplacingTarget(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "player.js")
