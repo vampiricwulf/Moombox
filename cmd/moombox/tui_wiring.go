@@ -96,6 +96,49 @@ func newTUIResync(needed *atomic.Bool, jobsCh chan []*database.Job, getAll func(
 	}
 }
 
+// forwardOrDrop hands one DB event to a TUI channel without ever blocking the
+// caller — the four job forwarders in runTUI run INLINE on the ~60 Hz
+// UpdateJobFields writer goroutine — and carries the CORE-6 replay
+// bookkeeping all four of them need identically.
+//
+// On a SUCCESSFUL send it runs resync, so a drop recorded by an earlier event
+// is replayed as one full snapshot by the first event that gets through. On a
+// drop it counts the message and arms the flag, warning once per STREAK: the
+// compare-and-swap is that gate, and moving the Warn out of it would put one
+// line per dropped message into the 200-slot log channel exactly when the TUI
+// is already too far behind to drain it.
+//
+// One generic function rather than the four hand-copied seven-line blocks it
+// replaces (the channels carry four different element types): the measured
+// pin in tui_resync_test.go then drives THIS body instead of a copy of it,
+// which is what lets it catch a warning moved out of the CAS or a coalescing
+// check added ahead of the select.
+func forwardOrDrop[T any](
+	ch chan T,
+	ev T,
+	jobID string,
+	resync func(),
+	dropped *atomic.Int64,
+	needed *atomic.Bool,
+	log interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	},
+) {
+	select {
+	case ch <- ev:
+		resync()
+	default:
+		dropped.Add(1)
+		if needed.CompareAndSwap(false, true) {
+			log.Warn("TUI job update dropped — a full refresh is queued",
+				slog.String("job", jobID))
+		}
+	}
+}
+
 // runTUI starts the BubbleTea TUI, wires every callback (job actions,
 // trim service, orphan scanner, client-token management, setup wizard,
 // FFmpeg check, cookie controls, update check, etc.), runs the TUI
@@ -804,26 +847,18 @@ func (s *runState) runTUI() {
 	// expensive list/detail rebuilds (see hasDisplayChange in
 	// app_update.go). DECISIONS #21 / audit tui.md F20.
 	//
-	// Each forwarder runs resyncTUIJobs() from its SUCCESSFUL-send branch: a
-	// drop recorded by an earlier event is replayed as a full snapshot by
-	// the first event that gets through, which is what makes a dropped
-	// terminal transition recoverable instead of a stale row for the session
-	// (CORE-6). On the way IN it would instead fire once per DROPPED event —
-	// a full GetAllJobs on this, the ~60 Hz UpdateJobFields writer
-	// goroutine, for every message the stalled TUI could not take, feeding
-	// the very backlog it is recovering from. While the channel stays full
-	// the 1 s backstop below is the replay path.
+	// The four that can drop share one body, forwardOrDrop, which runs
+	// resyncTUIJobs() from its SUCCESSFUL-send branch: a drop recorded by an
+	// earlier event is replayed as a full snapshot by the first event that
+	// gets through, which is what makes a dropped terminal transition
+	// recoverable instead of a stale row for the session (CORE-6). On the way
+	// IN it would instead fire once per DROPPED event — a full GetAllJobs on
+	// this, the ~60 Hz UpdateJobFields writer goroutine, for every message
+	// the stalled TUI could not take, feeding the very backlog it is
+	// recovering from. While the channel stays full the 1 s backstop below is
+	// the replay path.
 	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
-		select {
-		case jobUpdateCh <- ev:
-			resyncTUIJobs()
-		default:
-			tuiDroppedJobs.Add(1)
-			if tuiResyncNeeded.CompareAndSwap(false, true) {
-				s.log.Warn("TUI job update dropped — a full refresh is queued",
-					slog.String("job", ev.Job.ID))
-			}
-		}
+		forwardOrDrop(jobUpdateCh, ev, ev.Job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
 	// writer-side dispatch was dropped); the TUI now learns of new jobs
@@ -831,16 +866,7 @@ func (s *runState) runTUI() {
 	// the task list instead of clearing + rebuilding from a fresh
 	// snapshot. DECISIONS #21 consumer migration.
 	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
-		select {
-		case jobAddedCh <- ev:
-			resyncTUIJobs()
-		default:
-			tuiDroppedJobs.Add(1)
-			if tuiResyncNeeded.CompareAndSwap(false, true) {
-				s.log.Warn("TUI job update dropped — a full refresh is queued",
-					slog.String("job", ev.Job.ID))
-			}
-		}
+		forwardOrDrop(jobAddedCh, ev, ev.Job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnJobDeleted subscriber: DeleteJob no longer fires OnJobsChange
 	// (writer-side dispatch dropped). The TUI's surgical-removal path
@@ -848,16 +874,7 @@ func (s *runState) runTUI() {
 	// instead of clearing+rebuilding from a full-list snapshot.
 	// DECISIONS #21.
 	unsubTUIJobDeleted := s.db.OnJobDeleted(func(ev *database.JobDeleted) {
-		select {
-		case jobDeletedCh <- ev:
-			resyncTUIJobs()
-		default:
-			tuiDroppedJobs.Add(1)
-			if tuiResyncNeeded.CompareAndSwap(false, true) {
-				s.log.Warn("TUI job update dropped — a full refresh is queued",
-					slog.String("job", ev.JobID))
-			}
-		}
+		forwardOrDrop(jobDeletedCh, ev, ev.JobID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
 	// OnJobsChange (writer-side dispatch dropped). Re-fetch the
@@ -868,27 +885,22 @@ func (s *runState) runTUI() {
 		if err != nil || job == nil {
 			return
 		}
-		select {
-		case jobTrimsChangedCh <- job:
-			resyncTUIJobs()
-		default:
-			tuiDroppedJobs.Add(1)
-			if tuiResyncNeeded.CompareAndSwap(false, true) {
-				s.log.Warn("TUI job update dropped — a full refresh is queued",
-					slog.String("job", job.ID))
-			}
-		}
+		forwardOrDrop(jobTrimsChangedCh, job, job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// This one already carries a full list, so its own drop is harmless (a
 	// snapshot is queued when a snapshot cannot be queued) and its default
-	// stays empty. A DELIVERED list IS the refresh — it is newer than
-	// anything a pending replay would fetch — so the success branch clears
-	// the flag instead of calling the replay, which would fetch and push a
-	// second snapshot into the channel that just took one.
+	// stays empty. It neither calls the replay nor CLEARS it: the list it
+	// delivers is a time-of-write snapshot taken inside the bulk write, so an
+	// UpdateJobFields that lands after that snapshot and is then dropped by a
+	// full jobUpdateCh is NOT in it. Clearing the flag there discarded that
+	// replay — a delivered list is not assumed newer than a pending one — and
+	// the dropped transition was never recovered. Leaving it armed costs one
+	// redundant GetAllJobs in the rare coincidence of a bulk write with a
+	// pending drop, and the next successful send (or the 1 s backstop) does
+	// the catch-up (CORE-6).
 	unsubTUIJobsChange := s.db.OnJobsChange(func(jobs []*database.Job) {
 		select {
 		case jobsUpdateCh <- jobs:
-			tuiResyncNeeded.Store(false)
 		default:
 		}
 	})

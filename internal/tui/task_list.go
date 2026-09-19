@@ -793,12 +793,11 @@ func isCompletedStatus(status database.JobStatus) bool {
 
 // archiveCutoff is the list's one cutoff computation, shared with the REST
 // filter, the WS broadcast gate and the Web UI through
-// jobfilter.ArchiveCutoff. Returns the zero time for a negative threshold
-// ("never archive"), which isJobArchived reads as "nothing is archived".
+// jobfilter.ArchiveCutoff — which is total, so a negative threshold ("never
+// archive") comes back as the zero time that isJobArchived reads as "nothing
+// is archived". The argument order is the list's (ageDays first); that, and
+// the single import site, is all this wrapper is for.
 func archiveCutoff(ageDays float64, now time.Time) time.Time {
-	if ageDays < 0 {
-		return time.Time{}
-	}
 	return jobfilter.ArchiveCutoff(now, ageDays)
 }
 

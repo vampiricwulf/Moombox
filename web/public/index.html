@@ -958,9 +958,10 @@
                                 id="cfg-cookie-refresh-interval"
                                 type="number"
                                 min="10"
+                                max="10080"
                                 label="Refresh Interval"
                                 placeholder="360"
-                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours, minimum: 10)"
+                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours, range: 10–10080 = 7 days)"
                             ></sl-input>
 
                             <sl-divider></sl-divider>
@@ -1142,16 +1143,16 @@
                                 id="cfg-disk-warn-percent"
                                 type="number"
                                 min="1"
-                                max="100"
+                                max="99"
                                 label="Warning Threshold"
                                 placeholder="90"
-                                help-text="Show a warning when disk usage exceeds this percentage (default: 90%, range: 1–100)"
+                                help-text="Show a warning when disk usage exceeds this percentage (default: 90%, range: 1–99)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-disk-critical-percent"
                                 type="number"
                                 min="1"
-                                max="100"
+                                max="99"
                                 label="Critical Threshold"
                                 placeholder="95"
                                 help-text="Pause new downloads when disk usage exceeds this percentage (default: 95%, must be higher than warning)"

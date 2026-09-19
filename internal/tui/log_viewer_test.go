@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -313,5 +314,114 @@ func TestLogSearchAndClearWorkOverWrappedLines(t *testing.T) {
 	}
 	if got := stripANSI(app.logs.View()); !strings.Contains(got, "Logs (0)") || strings.Contains(got, "needle") {
 		t.Errorf("the cleared panel still renders the old buffer:\n%s", got)
+	}
+}
+
+// maxInsertionAllocsAtCap bounds ONE AddLines flush of a handful of lines
+// into a full buffer at a geometry where every line wraps. Before the
+// per-line wrap cache capLines trimmed on every insertion and rebuildFiltered
+// re-cut the entire 1,000-line buffer, so a steady-state 24/7 process paid
+// ~22,000 allocations (and 1.25 MB) roughly ten times a second for rows it
+// had already produced. With the cache only the NEW lines are cut.
+//
+// Generous on purpose — the floor is the 10 new lines' own rows plus the
+// filtered/filteredLevels growth, and the budget is about two orders of
+// magnitude below the un-cached number, which is the only distinction worth
+// asserting.
+const maxInsertionAllocsAtCap = 2000
+
+// insertionAllocsRuns is how many back-to-back insertions one probe averages
+// over. Small on purpose: the buffer is already at the cap, so every call
+// trims exactly what it adds and the path is in steady state from the first
+// warm-up — and the mutant this guards against costs over a second per call.
+const insertionAllocsRuns = 8
+
+// insertionAllocs reports the heap allocations and bytes one insertion costs
+// in steady state. Deliberately NOT steadyStateAllocs: that probe's
+// wall-clock-second guard exists for the render caches that key on the
+// second, and nothing here renders — while the un-cached shape it is meant to
+// catch is slow enough that the guard would report a straddle instead of the
+// budget.
+func insertionAllocs(body func()) (allocs, bytes uint64) {
+	var before, after runtime.MemStats
+	for range 2 {
+		body()
+	}
+	runtime.ReadMemStats(&before)
+	for range insertionAllocsRuns {
+		body()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.Mallocs - before.Mallocs) / insertionAllocsRuns,
+		(after.TotalAlloc - before.TotalAlloc) / insertionAllocsRuns
+}
+
+// A full buffer at a narrow panel is the shape B-7 measured: 60 columns of
+// content, source lines ~225 columns wide, so every line cuts into four rows.
+//
+// Mutant: drop the `if m.wrapped[i] == nil` guard (cut unconditionally) or
+// re-allocate m.wrapped on every rebuild — the flush costs ~22,000
+// allocations again. The byte-identity assertion is the other half: the
+// cached rows must equal what a from-scratch rebuild produces.
+func TestInsertionAtTheCapDoesNotReWrapTheBuffer(t *testing.T) {
+	m := NewLogViewerModel()
+	m.SetSize(62, 20) // content width 60
+	wide := make([]string, maxLogLines)
+	for i := range wide {
+		wide[i] = fmt.Sprintf("2026-09-17 12:00:00 INFO worker: job dQw4w9WgXcQ segment %d %s",
+			i, strings.Repeat("x", 160))
+	}
+	m.AddLines(wide)
+	if len(m.lines) != maxLogLines {
+		t.Fatalf("fixture holds %d lines, want the %d-line cap", len(m.lines), maxLogLines)
+	}
+	if len(m.filtered) < 3*maxLogLines {
+		t.Fatalf("fixture produced %d display rows for %d source lines — the lines must wrap",
+			len(m.filtered), maxLogLines)
+	}
+
+	batch := make([]string, 10)
+	for i := range batch {
+		batch[i] = fmt.Sprintf("2026-09-17 12:01:00 WARN worker: late segment %d %s",
+			i, strings.Repeat("y", 170))
+	}
+	allocs, bytes := insertionAllocs(func() { m.AddLines(batch) })
+	t.Logf("AddLines(10) at the cap, 60-column panel: %d allocs/op, %d B/op", allocs, bytes)
+	if allocs > maxInsertionAllocsAtCap {
+		t.Errorf("one insertion into a full buffer allocates %d times, budget %d — every wrapping "+
+			"line in the buffer is being re-cut on a path that runs ~10 times a second",
+			allocs, maxInsertionAllocsAtCap)
+	}
+
+	// The cache must be invisible: the same buffer rebuilt from scratch
+	// produces byte-identical display rows.
+	fresh := NewLogViewerModel()
+	fresh.SetSize(62, 20)
+	fresh.AddLines(m.lines)
+	if len(fresh.filtered) != len(m.filtered) {
+		t.Fatalf("cached rebuild has %d display rows, a fresh one %d", len(m.filtered), len(fresh.filtered))
+	}
+	for i := range fresh.filtered {
+		if fresh.filtered[i] != m.filtered[i] {
+			t.Fatalf("display row %d differs: cached %q, fresh %q", i, m.filtered[i], fresh.filtered[i])
+		}
+		if fresh.filteredLevels[i] != m.filteredLevels[i] {
+			t.Fatalf("display row %d level differs: cached %q, fresh %q",
+				i, m.filteredLevels[i], fresh.filteredLevels[i])
+		}
+	}
+}
+
+// wrapLogLine's width guard is what keeps the unsized panel (BackfillLogs
+// seeds the ring buffer before the first WindowSizeMsg) from dividing by
+// zero. Nothing else calls it with 0 now that rebuildFiltered routes every
+// line through it, so it gets its own assertion.
+//
+// Mutant: delete the `width <= 0` early return — this panics with an integer
+// divide by zero.
+func TestWrapLogLineAtZeroWidthReturnsTheLine(t *testing.T) {
+	got := wrapLogLine("abc", 0)
+	if len(got) != 1 || got[0] != "abc" {
+		t.Errorf("wrapLogLine(%q, 0) = %#v, want one unwrapped element", "abc", got)
 	}
 }

@@ -28,6 +28,13 @@ after(() => harness?.teardownAll());
 
 // Same rows as the Go table: a threshold below one hour must produce a
 // window of exactly that many seconds, not zero.
+//
+// Mutant: port the Go copies' old truncation to this side — replace
+// `ageDays * 86400 * 1000` in _evaluateArchiveBoundary with
+// `Math.floor(ageDays * 24) * 3600 * 1000`. 0.02 d truncates to 0 hours, so
+// the `{ days: 0.02, ageSecs: 20 * 60, archived: false }` row flips: a
+// 20-minute-old Finished job is archived under a 29-minute threshold. That is
+// precisely the divergence WEB-8 reports, with the sides swapped.
 const ROWS = [
   { days: 0, ageSecs: 1, archived: true },
   { days: 0, ageSecs: 0, archived: false },
@@ -81,8 +88,16 @@ test("a Finished job exactly on the cutoff stays active", { skip }, async () => 
 
 // A negative threshold is the documented "never archive" knob and a
 // malformed updatedAt is never a reason to hide a job — both sides fail safe.
-// Go: TestIsArchivedAtNeverArchivesOnANegativeThreshold and the
-// "finished, unparseable timestamp" row of TestIsArchivedRules.
+// Go: TestIsArchivedAtNeverArchivesOnANegativeThreshold,
+// TestArchiveCutoffIsTotalForNegativeThresholds and the "finished,
+// unparseable timestamp" row of TestIsArchivedRules.
+//
+// Mutants: drop the `ageDays < 0` early return in _evaluateArchiveBoundary —
+// the year-old job archives under the "never archive" knob, and the first
+// assertion fails; rewrite the age test as the tempting `!(nowMs - t <=
+// cutoffMs)` — NaN comparisons invert, so the malformed and the missing
+// timestamp both archive and the deepEqual loses "bad" and "none"; drop the
+// `j.status !== "Finished"` guard — "cancelled" goes too.
 test("a negative threshold and a malformed timestamp never archive", { skip }, async () => {
   const { app } = await harness.makeApp();
 

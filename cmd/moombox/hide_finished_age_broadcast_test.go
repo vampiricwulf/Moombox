@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -228,5 +229,72 @@ func TestBroadcastHideFinishedAgeReportsAFailedJobRead(t *testing.T) {
 	if n := drainFor(lines, "Could not read jobs for the hide_finished_age_days broadcast"); n != 1 {
 		t.Errorf("a failed jobs read produced %d warnings, want 1 — silently broadcasting the empty "+
 			"result blanks every dashboard's job list", n)
+	}
+}
+
+// A failed jobs read must leave the memo where it was, so the identical save
+// the operator retries broadcasts again. The client-side re-filter the read
+// failure falls back on can only SHORTEN the list it already holds — the rows
+// a raised threshold un-archives live on the server — so a memo written
+// before the read turns one transient DB error into a dashboard stuck on the
+// old threshold until some unrelated event refills it (B-3).
+//
+// Mutant: store the memo before the jobs read (the pre-wave order) — the
+// second, identical call is gated as "unchanged" and reports nothing.
+func TestBroadcastHideFinishedAgeRetriesAfterAFailedJobRead(t *testing.T) {
+	s, db, lines := hideAgeTestState(t, 30)
+	db.Close()
+
+	s.broadcastHideFinishedAge()
+	if n := drainFor(lines, "Could not read jobs for the hide_finished_age_days broadcast"); n != 1 {
+		t.Fatalf("the first call produced %d warnings, want 1", n)
+	}
+
+	// Same threshold, same method, nothing else changed: the retry must do
+	// the work again rather than be swallowed by the change gate.
+	s.broadcastHideFinishedAge()
+	if n := drainFor(lines, "Could not read jobs for the hide_finished_age_days broadcast"); n != 1 {
+		t.Errorf("an identical retry after a failed read produced %d warnings, want 1 — the memo "+
+			"must record what the dashboards were actually told, not what the method set out to "+
+			"tell them", n)
+	}
+}
+
+// The gate is a load-compare-broadcast-store sequence with two independent
+// callers (a Web PUT and a TUI save). Interleaved, they can leave the memo
+// holding a threshold no dashboard was ever told, after which a later save
+// back to that value is skipped and the two UIs disagree permanently — so the
+// whole method runs under one private mutex. Observed the only way a test
+// can: take the lock and assert the method WAITS for it.
+//
+// Not a data-race pin (every field it touches is individually atomic or
+// internally locked, so `-race` sees nothing); the hazard is the logical
+// interleaving, and the lock is what removes it.
+//
+// Mutant: drop the s.hideAgeBroadcastMu.Lock()/defer Unlock() pair — the call
+// runs straight through while this test holds the mutex.
+func TestBroadcastHideFinishedAgeHoldsItsMutex(t *testing.T) {
+	s, _, _ := hideAgeTestState(t, 30)
+
+	done := make(chan struct{})
+	s.hideAgeBroadcastMu.Lock()
+	go func() {
+		defer close(done)
+		s.broadcastHideFinishedAge()
+	}()
+
+	select {
+	case <-done:
+		s.hideAgeBroadcastMu.Unlock()
+		t.Fatal("broadcastHideFinishedAge ran while its mutex was held — the load-compare-" +
+			"broadcast-store gate is four unsynchronised steps without it")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.hideAgeBroadcastMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("broadcastHideFinishedAge did not complete after the mutex was released")
 	}
 }

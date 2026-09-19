@@ -1798,8 +1798,16 @@ func (s *runState) syncJobLogRouting(job *database.Job) {
 // Gated on the status column because OnJobChange also fires for every ~60 Hz
 // progress write, and only a status write can change the answer: the progress
 // pipeline never touches jobLogsMu.
+//
+// A nil Changes falls THROUGH the gate rather than into it. UpdateJobFields is
+// notifyJobUpdate's only caller today and always fills the column list, so
+// this costs nothing on the ~60 Hz path (+1.1 ns, 0 allocs, and it still
+// returns before any lock); but a future emitter that omits Changes would
+// otherwise silently stop re-routing, and a job resurrected by /retry,
+// /resume or auto-retry would produce no per-job log lines until a restart.
+// Paying the lock at that emitter's own rate is the safe side of that trade.
 func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
-	if !slices.Contains(ev.Changes, "status") {
+	if ev.Changes != nil && !slices.Contains(ev.Changes, "status") {
 		return
 	}
 	s.syncJobLogRouting(ev.Job)

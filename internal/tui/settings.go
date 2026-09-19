@@ -117,11 +117,11 @@ var sections = []settingsSection{
 		fields: []fieldDef{
 			{"archive_window_days", "Archive window (days)", fieldNumber, nil, "how many days back to archive; upcoming/live always covered (default: 3)", nil},
 			{"archive_slots", "Archive slots", fieldNumber, nil, "backlog downloads per channel at once; new content never waits (default: 3)", nil},
-			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes (default: 10)", nil},
+			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes; fractions allowed, e.g. 0.5 (default: 10)", nil},
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic", nil},
 			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds, 5-3600 or empty for dynamic (default: 15)", nil},
 			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)", nil},
-			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle (default: 0, no max)", nil},
+			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle; fractions allowed (default: 0, no max)", nil},
 			{"membership_discovery", "Membership discovery", fieldToggle, nil, "scan each YouTube channel's members-only tab for members-only streams (+ their VODs for channels that archive uploads & premieres); needs YouTube cookies (default: on)", nil},
 		},
 	},

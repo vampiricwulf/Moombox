@@ -61,8 +61,12 @@ func frameBenchApp(tb testing.TB) *App {
 	// an early return and the numbers below would describe one line of text.
 	// Assert the fixture really renders all four panels before anything is
 	// measured against it.
+	// "Active: " is the status bar's marker, and the status bar is 70 of the
+	// 100 allocations a cached frame costs — the one panel with no cache.
+	// Without it here, blanking the status bar (a.statusBar.width = 0 after
+	// recalcLayout) passed every assertion below at 31 allocations.
 	plain := stripANSI(a.View().Content)
-	for _, want := range []string{"Tasks (", "Details", fmt.Sprintf("Logs (%d)", maxLogLines)} {
+	for _, want := range []string{"Tasks (", "Details", fmt.Sprintf("Logs (%d)", maxLogLines), "Active: "} {
 		if !strings.Contains(plain, want) {
 			tb.Fatalf("fixture frame is missing %q — View() took an early return:\n%s", want, plain)
 		}
@@ -154,6 +158,19 @@ const maxCachedFrameAllocs = 200
 // pre-wrap: see BenchmarkLogPanelAtLogCap.
 const maxCachedLogPanelAllocs = 8
 
+// maxUncachedLogPanelAllocs bounds the log panel when the memo is NOT
+// available — the frame after every insertion, ~10 times a second, and every
+// frame at all while the search box is open. Measured 5,892 on this fixture,
+// identical on both sides of CORE-2 (the pre-wrap's win there was CPU: 1.98
+// ms -> 0.32 ms), so the budget is 1.27x the measurement.
+//
+// What it catches: an allocation-shaped O(buffer) regression on the RENDER
+// path — a per-row allocation added to the loop, a copy of the whole content
+// on the way out, a viewport setting that walks the buffer allocating.
+// What it cannot: a CPU-only regression with no allocations, which is exactly
+// what SoftWrap was; TestLogLinesAreWrappedAtInsertion is that pin.
+const maxUncachedLogPanelAllocs = 7500
+
 // frameProbeRuns is how many back-to-back calls one allocation probe averages
 // over. Allocation counts on a fixed code path are exact, so this divides
 // away the probe's own noise rather than doing statistics.
@@ -215,5 +232,26 @@ func TestFrameCostAtLogCap(t *testing.T) {
 	if logAllocs > maxCachedLogPanelAllocs {
 		t.Errorf("an unchanged log panel allocates %d times, budget %d — LogViewerModel.View() is rendering instead of returning its memo",
 			logAllocs, maxCachedLogPanelAllocs)
+	}
+
+	// The other half of the panel's life: every insertion invalidates the
+	// memo, and the search box defeats it outright. Nothing pinned that path
+	// numerically, so an O(buffer) allocation regression on it would have
+	// passed both budgets above in silence.
+	//
+	// Mutant: an allocating per-row helper inside the render loop — a
+	// `for _, row := range m.filtered { _ = fmt.Sprintf("%s|", row) }` ahead
+	// of the viewport render measures 7,892 while both cached numbers stay
+	// exactly where they are. The 1,608 of slack is deliberate (a Go or
+	// lipgloss release that allocates differently), so the floor this catches
+	// is around two allocations per buffered line.
+	uncached, uncachedBytes := steadyStateAllocs(t, func() {
+		a.logs.invalidate()
+		a.logs.View()
+	})
+	t.Logf("uncached log panel: %d allocs/op, %d B/op", uncached, uncachedBytes)
+	if uncached > maxUncachedLogPanelAllocs {
+		t.Errorf("a re-rendered log panel allocates %d times, budget %d — the render path grew an "+
+			"allocation per buffered line", uncached, maxUncachedLogPanelAllocs)
 	}
 }

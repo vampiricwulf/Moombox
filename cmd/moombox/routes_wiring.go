@@ -220,7 +220,15 @@ func (s *runState) wireRoutes() func() {
 // carries it instead, written by whichever caller last published, so an
 // unrelated TUI save (log level, output directory) costs nothing and a real
 // change is never swallowed.
+// Serialised end to end by hideAgeBroadcastMu (see runstate.go): the gate is
+// a load-compare-broadcast-store sequence whose two callers are independent,
+// and interleaving them can leave the memo holding a value no dashboard was
+// told. The lock covers the config read, the jobs read and both broadcasts;
+// nothing under it writes the config store.
 func (s *runState) broadcastHideFinishedAge() {
+	s.hideAgeBroadcastMu.Lock()
+	defer s.hideAgeBroadcastMu.Unlock()
+
 	var hideAge float64
 	s.configStore.Read(func(c *config.MoomboxConfig) {
 		hideAge = c.Monitors.HideFinishedAgeDays.Value
@@ -229,7 +237,6 @@ func (s *runState) broadcastHideFinishedAge() {
 		return
 	}
 	s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
-	s.hideAgeBroadcast.Store(&hideAge)
 	jobs, err := s.db.GetAllJobs()
 	if err != nil {
 		// Never broadcast the empty slice a failed read returns:
@@ -237,11 +244,19 @@ func (s *runState) broadcastHideFinishedAge() {
 		// error would blank every open dashboard until some unrelated
 		// event refilled it. The config_update above is already out, so
 		// the clients re-filter the list they hold with the new threshold.
+		//
+		// The memo is deliberately NOT updated here: a client re-filter
+		// cannot widen the list a raised threshold makes longer (only the
+		// server holds the archived rows), so the identical save the
+		// operator retries must reach this read again rather than be
+		// swallowed as "unchanged".
 		s.log.Warn("Could not read jobs for the hide_finished_age_days broadcast — dashboards keep their current list",
 			slog.String("error", err.Error()))
 		return
 	}
 	s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
+	// Recorded only once the dashboards really have the new list.
+	s.hideAgeBroadcast.Store(&hideAge)
 }
 
 // currentWebPort resolves the port this process is actually serving on.

@@ -63,9 +63,9 @@ Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoute
 Before entering the main `run()` function, the child process checks for subcommands:
 
 - `moombox add <video_id_or_url>` -- CLI mode that adds a video to the database and exits. Connects to the running instance's web API.
-- `--version` -- Prints version and commit hash, exits immediately.
-- `--headless` / `--no-tui` -- Runs web-only mode (no BubbleTea TUI). Also activated by `MOOMBOX_NO_TUI=1` env var.
-- `--log-level <LEVEL>` -- Overrides the log level for this run only (DEBUG, INFO, WARN, ERROR). It reaches the logger and nothing else: `effectiveLogLevel` in `cmd/moombox/helpers.go` picks it over the configured level when building the logger, and `cfg.Logs.LogLevel` is left as the file has it, so the boot auto-persist, the password auto-hash and every later settings save keep writing the CONFIGURED level. A settings save re-applies that configured level to the running logger and drops the override.
+- `-version` -- Prints version and commit hash, exits immediately.
+- `-headless` / `-no-tui` -- Runs web-only mode (no BubbleTea TUI). Also activated by `MOOMBOX_NO_TUI=1` env var.
+- `-log-level <LEVEL>` -- Overrides the log level for this run only (DEBUG, INFO, WARN, ERROR). It reaches the logger and nothing else: `effectiveLogLevel` in `cmd/moombox/helpers.go` picks it over the configured level when building the logger, and `cfg.Logs.LogLevel` is left as the file has it, so the boot auto-persist, the password auto-hash and every later settings save keep writing the CONFIGURED level. A settings save re-applies that configured level to the running logger and drops the override.
 - `-config <path>` -- Specifies the config file. An explicit path is AUTHORITATIVE: that file is the only one considered, and if it does not exist Moombox starts from defaults and a later save creates it there — it never falls through to another location. Without the flag the search order is `./config.toml`, `./config/config.toml`, `~/.config/moombox/config.toml`, then defaults.
 
 TTY detection uses `go-isatty` on both stdin and stdout. If either is not a terminal, TUI is disabled automatically.

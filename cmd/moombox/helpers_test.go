@@ -184,11 +184,12 @@ func TestFilterJobsByAgeThresholdZeroArchivesPastFinished(t *testing.T) {
 // stays — the old int(value) cast collapsed both to "1 day" and disagreed with
 // the REST filter and the Web UI.
 func TestFilterJobsByAgeThresholdFractionalPrecision(t *testing.T) {
-	// Use a runtime conversion (matching filterJobsByAgeThreshold itself) so the
-	// fractional day count is truncated to whole hours exactly as production
-	// does — 1.6d→38h, 1.4d→33h — bracketing the 1.5d (36h) cutoff.
+	// Scaled by the whole day, the way jobfilter.ArchiveCutoff does it:
+	// 1.6 d = 38h24m and 1.4 d = 33h36m bracket the exact 1.5 d (36 h)
+	// cutoff. (Production stopped truncating to whole hours in CORE-8 — that
+	// truncation is what collapsed every sub-hour threshold to zero.)
 	daysAgo := func(d float64) string {
-		return time.Now().Add(-time.Duration(d*24) * time.Hour).Format(time.RFC3339)
+		return time.Now().Add(-time.Duration(d * float64(24*time.Hour))).Format(time.RFC3339)
 	}
 	aged := daysAgo(1.6)
 	fresh := daysAgo(1.4)

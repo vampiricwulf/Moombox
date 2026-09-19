@@ -57,6 +57,17 @@ type LogViewerModel struct {
 	// so the two cannot fall out of step.
 	levels         []string
 	filteredLevels []string
+	// wrapped[i] is lines[i] cut to wrapWidth, nil until it is first needed.
+	// Parallel to lines and levels (appendLine, capLines and Clear are its
+	// only writers), so a source line is cut EXACTLY ONCE in its life instead
+	// of once per rebuild. At the 1,000-line cap capLines trims on every
+	// insertion, so a 24/7 process re-cut every wrapping line ~10 times a
+	// second — 18 ms and 1.25 MB of garbage per flush at a 60-column panel,
+	// and structured log lines exceed 118 columns routinely, so a 120-column
+	// terminal pays the same shape. rebuildFiltered drops the whole slice
+	// when wrapWidth moves; the rows are immutable and are shared with
+	// filtered rather than copied.
+	wrapped [][]string
 	// rawCount is how many SOURCE log lines survive the level filter. The
 	// header reports this, not len(filtered) — filtered holds WRAPPED
 	// display lines, so a single long line would otherwise read as ten.
@@ -139,14 +150,15 @@ func NewLogViewerModel() *LogViewerModel {
 	return m
 }
 
-// appendLine records one line and its parsed level. The only writer of the
-// two slices, together with capLines.
+// appendLine records one line, its parsed level and an empty wrap slot. The
+// only writer of the three slices, together with capLines.
 func (m *LogViewerModel) appendLine(line string) {
 	m.lines = append(m.lines, line)
 	m.levels = append(m.levels, extractLogLevel(line))
+	m.wrapped = append(m.wrapped, nil)
 }
 
-// capLines trims both slices to maxLogLines, identically.
+// capLines trims all three slices to maxLogLines, identically.
 func (m *LogViewerModel) capLines() {
 	if len(m.lines) <= maxLogLines {
 		return
@@ -156,6 +168,12 @@ func (m *LogViewerModel) capLines() {
 	// 24/7 runtime target.
 	m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
 	m.levels = slices.Clone(m.levels[len(m.levels)-maxLogLines:])
+	// The surviving lines keep the rows they were already cut into — that
+	// is the whole point of the cache, since this runs on every insertion
+	// once the buffer is full.
+	if len(m.wrapped) > maxLogLines {
+		m.wrapped = slices.Clone(m.wrapped[len(m.wrapped)-maxLogLines:])
+	}
 }
 
 // AddLine appends a single log line.
@@ -186,6 +204,7 @@ func (m *LogViewerModel) AddLines(batch []string) {
 func (m *LogViewerModel) Clear() {
 	m.lines = nil
 	m.levels = nil
+	m.wrapped = nil
 	m.rawCount = 0
 	m.searching = false
 	m.searchInput.SetValue("")
@@ -320,23 +339,32 @@ func (m *LogViewerModel) rebuildFiltered() {
 	m.filtered = m.filtered[:0]
 	m.filteredLevels = m.filteredLevels[:0]
 	m.rawCount = 0
-	m.wrapWidth = m.contentWidth()
+	w := m.contentWidth()
+	// The cache holds rows cut to the OLD wrapWidth, so a width change (Tab
+	// gives every panel a different share of the terminal) drops all of it.
+	// Done here, at the one place wrapWidth is assigned, so no caller can
+	// leave rows cut to a width that is no longer the panel's — and a length
+	// that somehow fell out of step with lines self-heals in the same test.
+	if w != m.wrapWidth || len(m.wrapped) != len(m.lines) {
+		m.wrapped = make([][]string, len(m.lines))
+	}
+	m.wrapWidth = w
 	for i, line := range m.lines {
 		if m.level != LogLevelAll && !m.matchLevel(m.levels[i]) {
 			continue
 		}
 		m.rawCount++
-		// Fast path for the overwhelming majority of lines: one that already
-		// fits is appended as-is. wrapLogLine would hand back a fresh
-		// one-element slice for each of them — 1,000 throwaway allocations
-		// per rebuild at the cap, ~10 times a second.
-		if m.wrapWidth <= 0 || ansi.StringWidth(line) <= m.wrapWidth {
-			m.filtered = append(m.filtered, line)
-			m.filteredLevels = append(m.filteredLevels, m.levels[i])
-			continue
+		// Cut once per SOURCE line, not once per rebuild: at the cap
+		// capLines trims on every insertion, so before this every wrapping
+		// line was re-cut ~10 times a second for the life of the process.
+		// wrapLogLine returns the line itself as a one-element slice when it
+		// already fits (and when the panel is unsized), so this one branch
+		// covers every case and nil stays an unambiguous "not cut yet".
+		if m.wrapped[i] == nil {
+			m.wrapped[i] = wrapLogLine(line, w)
 		}
-		for _, seg := range wrapLogLine(line, m.wrapWidth) {
-			m.filtered = append(m.filtered, seg)
+		m.filtered = append(m.filtered, m.wrapped[i]...)
+		for range m.wrapped[i] {
 			m.filteredLevels = append(m.filteredLevels, m.levels[i])
 		}
 	}
@@ -535,6 +563,11 @@ func (m *LogViewerModel) applySearchHighlights() {
 		m.matchCount = 0
 		return
 	}
+	// The content is the buffer AFTER hard-wrapping, so a match that straddles
+	// a wrap boundary is not found — the row break is a real "\n" in this
+	// string. Accepted: searching the unwrapped source would need a second
+	// offset mapping back onto display rows for SetHighlights, and the miss
+	// only affects a query long enough to span the panel's own width.
 	content := m.viewport.GetContent()
 	matches := m.searchRegex.FindAllStringIndex(content, -1)
 	m.matchCount = len(matches)
@@ -586,6 +619,11 @@ func logLevelColor(level string) color.Color {
 // contentSeq, which updateViewportContent (the single funnel for
 // filtered/filteredLevels) bumps; everything else here is read straight off
 // the model or the viewport, so no mutator can forget to invalidate it.
+//
+// `searching` is deliberately ABSENT rather than forgotten: while the search
+// box is open View() neither reads nor writes the cache at all (the textinput
+// draws a blinking cursor whose state is not keyable), so a field for it
+// would key a lookup that never happens.
 type logViewerKey struct {
 	contentSeq  uint64
 	width       int

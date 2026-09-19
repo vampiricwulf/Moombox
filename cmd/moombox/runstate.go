@@ -102,6 +102,16 @@ type runState struct {
 	// of them updated would go stale the moment the other changed the
 	// threshold. nil until the first broadcast.
 	hideAgeBroadcast atomic.Pointer[float64]
+	// hideAgeBroadcastMu serialises broadcastHideFinishedAge end to end.
+	// Load-compare-broadcast-Store is four steps, and its two callers are
+	// independent (a Web PUT and a TUI save): racing them could leave the
+	// memo holding a threshold the dashboards were never told, after which a
+	// later save back to that value is skipped and the two UIs disagree
+	// permanently. The method is human-triggered and rare, so a plain mutex
+	// over the config read, the DB read and the two broadcasts is the cheap
+	// answer; it is private to that method and never held across a
+	// configStore write.
+	hideAgeBroadcastMu sync.Mutex
 
 	// --- Lifecycle control ---
 	restartRequested atomic.Bool

@@ -421,15 +421,28 @@ func attemptAutoRollback(exePath string, exitCode int) bool {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+	// The rename needs DELETE access to the destination as well as the
+	// source, so a stale .failed from an EARLIER failed update — the
+	// DB-downgrade strand leaves one until a healthy boot sweeps it — held
+	// open by a scanner without FILE_SHARE_DELETE fails all three attempts
+	// where the os.Remove(exePath) this replaced used to succeed. Keeping the
+	// broken binary is worth three retries, never the rollback itself: fall
+	// back to removing it once, which is exactly the old behaviour, so this
+	// can only ever succeed where today's code already does.
+	kept := mvErr == nil
 	if mvErr != nil {
-		fmt.Fprintf(os.Stderr, "auto-rollback: could not move failed binary aside: %v\n", mvErr)
-		return false
+		if rmErr := os.Remove(exePath); rmErr != nil {
+			fmt.Fprintf(os.Stderr, "auto-rollback: could not move failed binary aside: %v\n", mvErr)
+			return false
+		}
+		fmt.Fprintf(os.Stderr,
+			"auto-rollback: could not keep the failed binary aside (%v); removed it instead\n", mvErr)
 	}
 	if err := os.Rename(backup, exePath); err != nil {
 		fmt.Fprintf(os.Stderr, "auto-rollback: could not restore previous binary: %v\n", err)
 		return false
 	}
-	writeAutoRollbackMarker(exePath, exitCode)
+	writeAutoRollbackMarker(exePath, exitCode, kept)
 	return true
 }
 
@@ -438,17 +451,33 @@ func attemptAutoRollback(exePath string, exitCode int) bool {
 // children (2.7.0+) already announce this marker's content on boot, and
 // pending-breadcrumb-aware children additionally mark the failed version
 // skipped when they see it.
-func writeAutoRollbackMarker(exePath string, exitCode int) {
+//
+// kept says whether the broken binary really is at <exe>.failed. It normally
+// is (that is CORE-1's whole point), but the rollback falls back to removing
+// it when the move aside cannot be done, and a marker that names a file which
+// is not there sends an operator hunting for it.
+func writeAutoRollbackMarker(exePath string, exitCode int, kept bool) {
+	fate := fmt.Sprintf(
+		"The failed release was KEPT at:\n  %s\n"+
+			"(If the restored binary refuses to start — a database the newer version\n"+
+			"already migrated is one such case — rename that file back over %s.)\n",
+		exePath+failedBinarySuffix, exePath)
+	if !kept {
+		fate = fmt.Sprintf(
+			"The failed release could not be kept aside and was REMOVED.\n"+
+				"(If the restored binary refuses to start — a database the newer version\n"+
+				"already migrated is one such case — re-download that release from GitHub\n"+
+				"and put it back at %s.)\n",
+			exePath)
+	}
 	msg := fmt.Sprintf(
 		"Moombox: the first launch after a self-update failed (exit code %d) at %s.\n"+
 			"Moombox AUTOMATICALLY ROLLED BACK to the previous binary and restarted it.\n"+
-			"The failed release was KEPT at:\n  %s\n"+
-			"(If the restored binary refuses to start — a database the newer version\n"+
-			"already migrated is one such case — rename that file back over %s.)\n"+
+			"%s"+
 			"Automatic update checks will skip the failed version where supported; use a\n"+
 			"manual \"Check for updates\" to retry it deliberately.\n"+
 			"Delete this marker file once acknowledged.\n",
-		exitCode, time.Now().Format(time.RFC3339), exePath+failedBinarySuffix, exePath)
+		exitCode, time.Now().Format(time.RFC3339), fate)
 	markerPath := exePath + ".update-failed"
 	if err := os.WriteFile(markerPath, []byte(msg), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", markerPath, err)
@@ -458,13 +487,34 @@ func writeAutoRollbackMarker(exePath string, exitCode int) {
 
 // preserveUpdateRollback runs when the first boot of a freshly-applied
 // update fails AND automatic rollback was not possible (artifact already
-// swept, or the restore itself failed): it deliberately SKIPS the ~-file
-// cleanup (Windows; on Linux the .old survives because the child never
-// reached its post-milestone sweep), writes a recovery-instruction marker
-// next to the binary, and prints the same instructions to stderr.
-// Recovery is one file rename instead of a GitHub re-download.
+// swept, the restore itself failed, or — exit 3 — the rollback was never
+// attempted): it deliberately SKIPS the ~-file cleanup (Windows; on Linux the
+// .old survives because the child never reached its post-milestone sweep),
+// writes a recovery-instruction marker next to the binary, and prints the
+// same instructions to stderr. Recovery is one file rename instead of a
+// GitHub re-download.
+//
+// The one exception is exitCodeStartupError, which gets the honest notice and
+// NO marker — see the branch below.
 func preserveUpdateRollback(exePath string, exitCode int) {
 	backup := rollbackArtifactPath(exePath)
+	// A deterministic startup failure is not a failed update, and the marker
+	// is what the NEXT boot announces as "Previous Update Failed" — with
+	// instructions whose first step is to replace the binary. An operator who
+	// follows them on a port conflict lands on the older release and gets the
+	// good one marked skipped. Same preservation (this path still skips the
+	// artifact cleanup, so a manual rollback stays one rename away), honest
+	// notice, no marker (CORE-23).
+	if classifyPostUpdateExit(exitCode) == postUpdatePreserve {
+		fmt.Fprintf(os.Stderr,
+			"\nMoombox could not start after a self-update (exit code %d): a startup/environment\n"+
+				"failure — a config it cannot load, a port it cannot bind, a database it refuses —\n"+
+				"not a broken release. Fix the cause and start Moombox again.\n"+
+				"The previous version's binary is still at:\n  %s\n"+
+				"Rolling back is not the fix and would make automatic checks skip this release.\n",
+			exitCode, backup)
+		return
+	}
 	msg := fmt.Sprintf(
 		"Moombox: the first launch after a self-update failed (exit code %d) at %s.\n"+
 			"The previous version's binary should still be present at:\n  %s\n"+

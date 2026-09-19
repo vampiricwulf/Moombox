@@ -151,3 +151,41 @@ func TestFfmpegPathIsAppliedOnlyWhenOneWasValidated(t *testing.T) {
 		})
 	}
 }
+
+// The overlay has to stay inside the smallest terminal the TUI renders at.
+// A save error is an arbitrary string — a filesystem message naming a
+// 300-character path is ordinary — and appended whole it grew the box from
+// 20 rows to 26 at 60x20, pushing "Press any key to continue" below the
+// frame. Capped, the reason still says what went wrong and the full text is
+// in moombox.log (OnSaveConfig logs it).
+//
+// Mutant: drop the maxOverlayReasonRunes truncation — the rendered overlay is
+// 26 rows and the height assertion fails.
+func TestARefusedFfmpegSaveFitsTheSmallestTerminal(t *testing.T) {
+	cfg := config.Defaults()
+	a := NewApp()
+	a.SetConfigStore(config.NewStore(cfg, ""))
+	a.width, a.height = minTermWidth, minTermHeight
+	a.recalcLayout()
+	a.ffmpegCheck.Open()
+	a.ffmpegCheck.SetSize(minTermWidth, minTermHeight)
+	a.ffmpegCheck.mode = ffmpegCustom
+	a.OnSaveConfig = func(*config.MoomboxConfig) error {
+		return errors.New("open " + strings.Repeat("d", 300) + "/config.toml: permission denied")
+	}
+
+	a.Update(ffmpegCheckResultMsg{Valid: true, Version: "7.1", Path: "C:/tools/ffmpeg.exe"})
+
+	if got := len([]rune(a.ffmpegCheck.warning)); got > maxOverlayReasonRunes+80 {
+		t.Errorf("the overlay warning is %d runes — the appended reason is not capped", got)
+	}
+	view := stripANSI(a.View().Content)
+	rows := strings.Count(view, "\n") + 1
+	if rows > minTermHeight {
+		t.Errorf("the overlay renders %d rows at %dx%d, want at most %d — the dismissal hint falls "+
+			"below the frame:\n%s", rows, minTermWidth, minTermHeight, minTermHeight, view)
+	}
+	if !strings.Contains(view, "not saved") {
+		t.Errorf("the capped overlay lost the failure line:\n%s", view)
+	}
+}

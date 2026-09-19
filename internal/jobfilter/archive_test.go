@@ -37,14 +37,19 @@ func TestArchiveCutoffKeepsSubHourFractions(t *testing.T) {
 }
 
 // A threshold that cannot be scaled into a time.Duration must not produce a
-// garbage cutoff. Converting a NaN or overflowing float64 to time.Duration is
-// implementation-defined (amd64 yields math.MinInt64), which would put the
-// cutoff ~292 years in the FUTURE and archive every Finished job — the exact
-// failure mode this row exists to prevent. The zero time is the fail-safe:
-// IsArchived compares with Before, and no parsed timestamp precedes year 1.
+// garbage cutoff, and what "garbage" means depends on the machine. Converting
+// a NaN or overflowing float64 to time.Duration is implementation-defined:
+// on amd64 it yields math.MinInt64, whose negation overflows back to
+// math.MinInt64, so `now.Add(-d)` lands in the year 1734 and archives
+// NOTHING; arm64 saturates, turning NaN into 0, which puts the cutoff at
+// `now` and archives EVERYTHING. The zero time is what makes all three
+// targets agree — on the safe answer. IsArchived compares with Before, and no
+// parsed timestamp precedes year 1.
 //
-// Mutant: dropping the finite check from ArchiveCutoff — the NaN, +Inf and
-// 1e12 rows return a cutoff after now and archive the year-old job.
+// Mutant: dropping the finite check from ArchiveCutoff — the function returns
+// a garbage, platform-dependent cutoff instead of the zero time, and the
+// IsZero assertion fails on every target (the archiving assertions below only
+// bite where the platform happens to saturate).
 func TestArchiveCutoffGuardsNonFiniteThresholds(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	old := &database.Job{
@@ -61,6 +66,32 @@ func TestArchiveCutoffGuardsNonFiniteThresholds(t *testing.T) {
 		}
 		if IsArchivedAt(old, days, now) {
 			t.Errorf("IsArchivedAt(%v): a year-old Finished job must not archive", days)
+		}
+	}
+}
+
+// ArchiveCutoff is TOTAL: an ordinary negative threshold — the documented
+// "never archive" knob, and an ordinary float, not a NaN — must come back as
+// the zero time rather than as a cutoff one day in the FUTURE that archives
+// every Finished job. Every caller short-circuits on it today; the guard is
+// here so the fourth one that forgets is not CORE-8 again.
+//
+// Mutant: drop the `hideAgeDays < 0` guard from ArchiveCutoff — -1 returns
+// now+24h and the year-old job archives.
+func TestArchiveCutoffIsTotalForNegativeThresholds(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	old := &database.Job{
+		Status:    database.StatusFinished,
+		UpdatedAt: now.Add(-365 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	for _, days := range []float64{-1, -0.5, -30} {
+		cutoff := ArchiveCutoff(now, days)
+		if !cutoff.IsZero() {
+			t.Errorf("ArchiveCutoff(%v) = %v, want the zero time — a negative threshold means "+
+				"\"never archive\", and scaling it puts the cutoff in the future", days, cutoff)
+		}
+		if IsArchived(old, cutoff) {
+			t.Errorf("ArchiveCutoff(%v): a year-old Finished job must not archive", days)
 		}
 	}
 }

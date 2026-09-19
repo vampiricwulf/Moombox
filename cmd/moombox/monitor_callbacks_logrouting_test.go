@@ -78,8 +78,12 @@ func TestRetryReRoutesLogsToTheRevivedJob(t *testing.T) {
 // every import seeded a terminal ID into the routed set that only a restart
 // removed (B-3). The add path uses the same predicate as the change path.
 //
-// Mutant: OnJobAdded tracking unconditionally (s.db.TrackJobForLogs(job.ID))
-// — the imported job collects a line and this fails.
+// The fixture wires the POLICY function, so what this kills is the policy:
+// Mutant: syncJobLogRouting treating a terminal job as routable (drop the
+// IsTerminal branch, or call TrackJobForLogs unconditionally) — the imported
+// job collects a line and this fails. That the two one-line call sites really
+// do delegate to it is verified by reading them (monitor_callbacks.go's
+// OnJobAdded subscriber and syncJobLogRoutingOnChange), not by this test.
 func TestImportedFinishedJobIsNotLogRouted(t *testing.T) {
 	db, _ := logRoutingFixture(t)
 	addJob(t, db, "imported01", database.StatusFinished)
@@ -117,5 +121,41 @@ func TestProgressWritesDoNotTouchLogRouting(t *testing.T) {
 	db.RouteLogToJobs("2026-09-17 12:00:01 INFO vid0000002 muxing")
 	if got := db.GetJobLogs("vid0000002"); len(got) != 1 {
 		t.Errorf("a status write must route again, holds %d lines", len(got))
+	}
+}
+
+// The status gate reads a column list that today's only emitter always fills
+// (UpdateJobFields). An emitter that omits it must re-sync rather than
+// silently disable re-routing for the rest of the session: nil is "I did not
+// say what changed", not "nothing that matters changed".
+//
+// Driven through the production function directly, because the gate is what
+// is under test and no production caller can produce a nil Changes.
+//
+// Mutant: slices.Contains(ev.Changes, "status") without the nil fallback —
+// the untracked live job is never re-tracked and collects nothing.
+func TestAChangeWithoutAColumnListStillReRoutes(t *testing.T) {
+	db, s := logRoutingFixture(t)
+	addJob(t, db, "vid0000003", database.StatusDownloading)
+
+	// The job goes terminal and stops collecting, the ordinary way.
+	if got := db.UpdateJobFields("vid0000003", map[string]any{"status": database.StatusError}); got == nil {
+		t.Fatal("UpdateJobFields(status=Error) returned nil")
+	}
+	db.RouteLogToJobs("2026-09-17 12:00:00 ERROR vid0000003 failed")
+	if got := db.GetJobLogs("vid0000003"); len(got) != 0 {
+		t.Fatalf("a terminal job must stop collecting, holds %d lines", len(got))
+	}
+
+	// A hypothetical emitter that says a job changed without saying which
+	// column: the routing decision must be re-taken.
+	s.syncJobLogRoutingOnChange(&database.JobChange{
+		Job:     &database.Job{ID: "vid0000003", Status: database.StatusDownloading},
+		Changes: nil,
+	})
+	db.RouteLogToJobs("2026-09-17 12:00:01 INFO vid0000003 retrying")
+	if got := db.GetJobLogs("vid0000003"); len(got) != 1 {
+		t.Errorf("a change with no column list left the revived job unrouted, holds %d lines — nil "+
+			"Changes means \"unspecified\", not \"nothing relevant\"", len(got))
 	}
 }

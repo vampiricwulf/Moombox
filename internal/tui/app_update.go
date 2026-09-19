@@ -13,6 +13,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+// maxOverlayReasonRunes caps an error string appended to an overlay's warning
+// row. The FFmpeg overlay is already 20 rows at minTermHeight, so an uncapped
+// reason (a save error naming a 300-character path) grew it to 26 and pushed
+// the dismissal hint off the frame. 80 runes is roughly one wrapped line at
+// minTermWidth; the untruncated text is in moombox.log.
+const maxOverlayReasonRunes = 80
+
 // Update implements tea.Model.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -799,8 +806,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// row the overlay already prints, and which would
 					// otherwise overwrite anything set here.
 					if err := saveCb(cfgSnapshot); err != nil {
+						// Capped: the overlay is already 20 rows at the
+						// minimum terminal size (60x20), and an uncapped
+						// reason — a 300-character path, say — pushed it to
+						// 26 and dropped the dismissal hint below the frame.
+						// The full text is in moombox.log; OnSaveConfig logs
+						// it before returning.
+						reason := err.Error()
+						if r := []rune(reason); len(r) > maxOverlayReasonRunes {
+							reason = string(r[:maxOverlayReasonRunes]) + "…"
+						}
 						msg.Warning = strings.TrimSpace(msg.Warning +
-							"\nFFmpeg path not saved (it will not survive a restart): " + err.Error())
+							"\nFFmpeg path not saved (it will not survive a restart): " + reason)
 					}
 				}
 				// Both outcomes. The path is live for this session either way,
