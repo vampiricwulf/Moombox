@@ -13,9 +13,12 @@ import (
 	"testing"
 )
 
-// specDocs are the six deep-dive docs that carry code citations.
-// appendix-metrics.md (volatile numbers), design-philosophy.md and
-// vision-and-purpose.md (prose) are out on purpose.
+// specDocs are the docs whose code citations are checked: the six deep-dive
+// docs under docs/spec/, plus the two hand-edited root docs added by owner
+// decision O-Z (2026-09-17) after a sweep found four passages in SPEC.md
+// naming symbols and wire values that do not exist, and a path in CLAUDE.md
+// that does not. appendix-metrics.md (volatile numbers), design-philosophy.md
+// and vision-and-purpose.md (prose) are out on purpose.
 var specDocs = []string{
 	"architecture.md",
 	"data-and-storage.md",
@@ -23,6 +26,8 @@ var specDocs = []string{
 	"platform-services.md",
 	"security.md",
 	"user-interfaces.md",
+	"SPEC.md",
+	"CLAUDE.md",
 }
 
 // citationPrefixes are the repo-relative roots a path citation may start
@@ -123,12 +128,21 @@ func backtickSpans(line string) []span {
 	return out
 }
 
+// docPath resolves a specDocs entry to its file: the deep-dive docs live in
+// docs/spec/, SPEC.md and CLAUDE.md at the repo root.
+func docPath(root, name string) string {
+	if name == "SPEC.md" || name == "CLAUDE.md" {
+		return filepath.Join(root, name)
+	}
+	return filepath.Join(root, "docs", "spec", name)
+}
+
 // docLines reads a spec doc, LF-normalised.
 func docLines(t *testing.T, root, name string) []string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(root, "docs", "spec", name))
+	b, err := os.ReadFile(docPath(root, name))
 	if err != nil {
-		t.Fatalf("read docs/spec/%s: %v", name, err)
+		t.Fatalf("read %s: %v", name, err)
 	}
 	return strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n")
 }
@@ -215,6 +229,34 @@ func TestCitationAllowlistParsing(t *testing.T) {
 	// another entry (line 5). Both must be named by their line number.
 	if _, reasonless = parseAllowlist("# reason\na.md|internal/x/y.go\n\nb.md|internal/x/z.go\nc.md|internal/x/w.go\n"); len(reasonless) != 2 || reasonless[0] != 4 || reasonless[1] != 5 {
 		t.Errorf("an entry with no `#` reason line above it must be reported by line number; got %v", reasonless)
+	}
+}
+
+// TestRootDocsAreChecked pins owner decision O-Z: SPEC.md and CLAUDE.md, the
+// two most hand-edited docs and the ones an AI reads first, are inside the
+// citation checks. A sweep found four invented symbols in SPEC.md and a
+// non-existent path in CLAUDE.md precisely because nothing checked them.
+//
+// Mutants this kills: dropping either name from specDocs (the membership
+// assertion fails), and making docPath send them to docs/spec/ (docLines
+// t.Fatalf's on the missing file).
+func TestRootDocsAreChecked(t *testing.T) {
+	root := repoRoot(t)
+	for _, name := range []string{"SPEC.md", "CLAUDE.md"} {
+		found := false
+		for _, d := range specDocs {
+			if d == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s is not in specDocs -- O-Z put both root docs under the citation checks", name)
+			continue
+		}
+		if n := len(docLines(t, root, name)); n < 50 {
+			t.Errorf("%s resolved to %d lines -- docPath is not finding the repo-root doc", name, n)
+		}
 	}
 }
 

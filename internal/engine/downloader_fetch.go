@@ -185,10 +185,8 @@ func readBody(resp *http.Response, capBytes int64) ([]byte, error) {
 	if n <= 0 || n > capBytes {
 		return io.ReadAll(io.LimitReader(resp.Body, capBytes))
 	}
-	probeCap := n + 1
-	if probeCap > capBytes {
-		probeCap = capBytes // n == capBytes: the probe must not exceed the ceiling
-	}
+	// n == capBytes: the probe must not exceed the ceiling
+	probeCap := min(n+1, capBytes)
 	buf := make([]byte, 0, probeCap)
 	for len(buf) < cap(buf) {
 		m, err := resp.Body.Read(buf[len(buf):cap(buf)])

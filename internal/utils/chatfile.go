@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -108,8 +109,8 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 	}
 
 	bracketOffset := -1
-	for i := len(tailBuf) - 1; i >= 0; i-- {
-		if tailBuf[i] == ']' {
+	for i, b := range slices.Backward(tailBuf) {
+		if b == ']' {
 			bracketOffset = i
 			break
 		}
@@ -127,8 +128,7 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
 			return fmt.Errorf("check existing: %w", err)
 		}
-		for i := len(checkBuf) - 1; i >= 0; i-- {
-			b := checkBuf[i]
+		for _, b := range slices.Backward(checkBuf) {
 			if b == '}' {
 				hasExisting = true
 				break

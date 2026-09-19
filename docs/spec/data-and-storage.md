@@ -534,7 +534,7 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | Prefer60fps | bool | true | `prefer_60fps` | |
 | MaximumTimeout | int | 600 | `maximum_timeout` | Seconds; YouTube livestreams. Min: 30 |
 | InterruptionTimeout | FlexDuration | 120 (minutes) | `interruption_timeout` | Min: 0, no max. How long a live YouTube download's MaxTimeout-backstop finalize may keep deferring while `engine.SegmentDownloader.MayResume` reports the broadcast may still resume (`stallForPossibleResume`, `internal/engine/downloader.go`) — the interruption-resume design's Tier 1 stall. `0` disables the STALL only, not Tier 2 preservation: `attachMayResume` (`internal/worker/interruption.go`) installs `MayResume` unconditionally, and every live strategy site maps the config value through `engineInterruptionTimeout` before it reaches `engine.DownloaderOptions.InterruptionTimeout` — a positive value passes through as the ceiling, `0` (or a defensive negative) maps onto the sentinel `engine.InterruptionNoStall` (`-1`). `stallForPossibleResume`'s `InterruptionNoStall` branch still consults `MayResume` once per call and still latches `finalizedDuringInterruption` when it reports true, but always returns `false` — no stall, no clock. A parallel worker-side latch, `resumeWaitLatch` (fed by `noteRefreshFailure`/`resumeEvidence` in `internal/worker/interruption.go`), gives the same treatment to the `ErrQualityLost` refresh-failure path: evidence latches `incomplete_tail` even when `shouldWaitForResume` itself never permits an actual wait. So a `0` job never blocks finalize, but a genuinely-interrupted `0` job still finalizes with staging + resume data preserved exactly like an enabled one that gave up. Snapshotted per job start (`buildJobContext`), like `MaximumTimeout`/`SegmentWorkers` above; not restart-required. |
-| IncompleteStagingExpiryDays | FlexDuration | 7 (days) | `incomplete_staging_expiry_days` | Min: 0, no max. How long a Finished job flagged `incomplete_tail` keeps its staging directory shielded from orphan cleanup (`jobNeedsStaging`/`incompleteStagingExpired`, `internal/worker/orphans.go`). Only the disk-heavy staging shield expires — the flag (the "may be missing its tail" badge) never does: YouTube cannot resume a broadcast days later, so aged interruption staging has no resume value, while the badge stays honest indefinitely. Age is measured from the job's `updated_at`, so any activity restarts the window; unparseable timestamps preserve. After expiry the staging becomes an ordinary orphan-scanner candidate; auto-resume's staging-existence gate then falls to the silent drop and manual Reinitialize remains the recovery. `0` = preserve forever. Read live per scan; not restart-required. |
+| IncompleteStagingExpiryDays | FlexDuration | 7 (days) | `incomplete_staging_expiry_days` | Min: 0, no max. How long the two EXPIRING staging shields hold. `jobNeedsStaging` (`internal/worker/orphans.go`) keeps a Finished job's staging out of orphan cleanup for FOUR reasons, and this window governs two of them: the job is flagged `incomplete_tail` (the tail is Resume-able), or its chat capture ended incomplete (`chatStatusIncomplete` — the chat resume sidecar in staging is what a later Retry pages on from). Both lapse on the one age rule, `incompleteStagingExpired` (`internal/worker/orphans.go`). The other two shields carry NO age rule at all, because each holds captured media that exists nowhere else: staging still holding a recording the engine set aside rather than truncated (`stagedAsideRecordings`, `internal/worker/orchestrator_mux.go`) and staging still holding an unmuxed captured part (`hasUnmuxedSegmentParts`, `internal/worker/worker.go`, recoverable via the Mux action) are shielded until they are muxed or the job is deleted. Only the disk-heavy staging shield expires — the flag (the "may be missing its tail" badge) never does: YouTube cannot resume a broadcast days later, so aged interruption staging has no resume value, while the badge stays honest indefinitely. Age is measured from the job's `updated_at`, so any activity restarts the window; unparseable timestamps preserve. After expiry the staging becomes an ordinary orphan-scanner candidate; auto-resume's staging-existence gate then falls to the silent drop and manual Reinitialize remains the recovery. `0` = preserve forever. Read live per scan; not restart-required. |
 | PoToken | string | "" | `po_token` | Manual PO token override |
 | VisitorData | string | "" | `visitor_data` | Manual visitor data override |
 
@@ -1094,10 +1094,19 @@ the file with fragments that reference a different `moov`.
    recording on every restart.
 2. Output file must exist and be at least as large as `BytesWritten`; states
    older than 7 days (`maxResumeStateAge`) are discarded.
-3. If validation fails, the resume file is discarded. For Twitch live
-   (`StopOnGap`), a discarded/corrupt state with staged data present does
-   NOT truncate — the engine returns `ErrGapDetected` so the orchestrator
-   muxes the staged data as a finished part and continues fresh.
+3. If validation fails, the resume file is discarded — but the staged
+   bytes are not. NO caller truncates them. The shared no-truncate guard in
+   `Start` (`internal/engine/downloader.go`) runs whenever the engine could
+   not resume and the output file is non-empty (whole-file `IsDirectURL`
+   downloads excepted — their partial is re-fetchable from the same static
+   URL): Twitch live (`StopOnGap`) gets `ErrGapDetected`, so the orchestrator
+   muxes the staged data as a finished part and continues fresh; every other
+   caller gets `ErrStagedMediaPresent` and the orchestrator decides; and a
+   caller that REQUIRES a file beginning at the start of the stream
+   (`DiscardStaged`, the manifest-free restart) has the recording renamed to
+   `<OutputFile>.restart-<unix ts>` beside the fresh one by
+   `preserveStagedRecording` instead — only bytes the engine positively read
+   and found unrecognisable are discarded.
 4. If the resume file is missing but `StartSeq > 0` in the database, the
    database state is used as a fallback (less precise but allows recovery).
 
@@ -1105,7 +1114,11 @@ the file with fragments that reference a different `moov`.
 
 - Created during download.
 - Updated periodically during download.
-- Cleared (deleted) only when the stream ends naturally and cleanly.
+- Cleared when the stream ends naturally and cleanly — and, on a
+  `DiscardStaged` restart, sent after the recording it describes:
+  `moveResumeStateAside` (`internal/engine/downloader.go`) renames it beside
+  the set-aside file and, only when that rename fails, deletes it outright, so
+  a later Start cannot resume the regrown file against the old offsets.
 - Preserved on shutdown/cancel so downloads can be resumed on restart.
 
 ### Chat Files

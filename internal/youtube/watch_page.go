@@ -678,8 +678,7 @@ func extractChatContinuation(page []byte) (string, bool, error) {
 	if !extractYtInitialDataInto(page, func(obj []byte) bool {
 		var cand watchNextChatEnvelope
 		decodeErr := json.Unmarshal(obj, &cand)
-		var syntaxErr *json.SyntaxError
-		if errors.As(decodeErr, &syntaxErr) {
+		if _, ok := errors.AsType[*json.SyntaxError](decodeErr); ok {
 			return false
 		}
 		env, err = cand, decodeErr

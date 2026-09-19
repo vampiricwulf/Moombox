@@ -430,8 +430,7 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 	}
 
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			jsonError(rw, fmt.Sprintf("that cookie file is larger than the %d KiB this endpoint accepts",
 				maxCookieImportBytes/1024), http.StatusRequestEntityTooLarge)
 			return "", false

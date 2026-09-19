@@ -119,6 +119,8 @@ func FetchWithTimeout(parent context.Context, url string, timeout time.Duration,
 
 // FetchBody performs an HTTP GET and returns the response body as bytes.
 // Uses a single timeout context that spans both the HTTP request and body read.
+// A body longer than MaxFetchBodySize is an ERROR, not a truncated success:
+// silently handing back half a page let callers parse it as a whole one.
 func FetchBody(ctx context.Context, url string, timeout time.Duration, headers map[string]string) ([]byte, error) {
 	resp, cancel, err := FetchWithTimeout(ctx, url, timeout, headers)
 	if err != nil {
@@ -131,5 +133,18 @@ func FetchBody(ctx context.Context, url string, timeout time.Duration, headers m
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
-	return io.ReadAll(io.LimitReader(resp.Body, MaxFetchBodySize))
+	// Read ONE byte past the ceiling so an over-long body is DETECTABLE.
+	// io.LimitReader(resp.Body, MaxFetchBodySize) on its own truncates
+	// silently with a nil error, and the callers (internal/youtube's
+	// service.go and watch_page.go) would parse half a page as a complete
+	// one — a watch page missing its tail parses as "no formats", which is
+	// indistinguishable from a real extraction failure.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxFetchBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > MaxFetchBodySize {
+		return nil, fmt.Errorf("%s: response exceeds MaxFetchBodySize (%d bytes)", url, MaxFetchBodySize)
+	}
+	return body, nil
 }
