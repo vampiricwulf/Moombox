@@ -175,37 +175,37 @@ All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer fun
 ## Package Dependency Graph
 
 ```
-cmd/moombox/ (5 files)                 -- launcher + orchestrator (~2,170 lines)
+cmd/moombox/ (21 files)                -- launcher + orchestrator (~8,020 lines)
 cmd/sign/main.go                       -- CI signing tool (Ed25519)
 
-internal/config     (4 files, ~850)    -- TOML config, FlexDuration, channel terms
-internal/updater    (3 files, ~450)    -- GitHub release checker + self-updater + Ed25519
-internal/ytdlpplugin (1 file,  ~320)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI R Y overlay)
+internal/config     (6 files, ~2,110)  -- TOML config, FlexDuration, channel terms
+internal/updater    (3 files, ~870)    -- GitHub release checker + self-updater + Ed25519
+internal/ytdlpplugin (1 file,  ~330)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI R Y overlay)
 internal/logger     (1 file,  ~760)    -- slog wrapper, file rotation, ring buffer, pub/sub
-internal/database   (7 files, ~1,850)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
+internal/database   (8 files, ~3,920)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
 internal/stats      (1 file,  ~70)     -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
-internal/jobfilter  (1 file, ~270)     -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
-internal/cookies    (34 files, ~2,700)  -- jar, refresh, auto-cookie (Firefox/Chromium)
-internal/youtube    (8 files, ~1,950)  -- Service, PlayerAPI, Auth, watch page, format selector
-internal/twitch    (10 files, ~3,200)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
-internal/bgutils   (~10 files, ~1,800)  -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
-internal/bgutils/sidecar (5 files,~700) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
-internal/bgutils/embed   (1 file)       -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
-internal/cipher     (9 files, ~1,500)  -- YouTube signature cipher: AST + regex, 10-VM LRU
-internal/engine    (12 files, ~2,850)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
-internal/chat       (3 files, ~1,400)  -- YouTube live chat downloader (polling + batching)
-internal/worker    (23 files, ~6,500)  -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
-internal/monitor    (4 files, ~1,450)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
-internal/notif.     (2 files, ~330)    -- Manager + Discord webhook
-internal/web       (21 files, ~6,600)  -- chi router, WebSocket hub, auth, middleware, routes
-internal/tui       (33 files, ~13,100) -- 2-over-1 panel layout, overlays, chord system
-internal/goja       (4 files, ~800)    -- JS runtime shims (minimal DOM, TextEncoder, timers)
-internal/disk       (2 files, ~60)     -- Disk space queries: kernel32 on Windows, statfs on Linux
-internal/constants  (1 file,  ~400)    -- Hardcoded values (API keys, URLs, timeouts)
-internal/utils     (14 files, ~1,150)  -- HTTP helpers, formatters, YouTube URL parsing
+internal/jobfilter  (2 files, ~470)    -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
+internal/cookies    (35 files, ~15,870) -- jar, refresh, auto-cookie (Firefox/Chromium)
+internal/youtube    (13 files, ~6,430) -- Service, PlayerAPI, Auth, watch page, format selector
+internal/twitch    (14 files, ~6,400)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
+internal/bgutils   (6 files, ~2,050)   -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
+internal/bgutils/sidecar (7 files,~1,840) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
+internal/bgutils/embed   (4 files)      -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
+internal/cipher     (13 files, ~3,110) -- YouTube signature cipher: AST + regex, 10-VM LRU
+internal/engine    (19 files, ~7,690)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
+internal/chat       (3 files, ~2,910)  -- YouTube live chat downloader (polling + batching)
+internal/worker    (38 files, ~16,600) -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
+internal/monitor    (9 files, ~5,030)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
+internal/notif.     (3 files, ~820)    -- Manager + Discord webhook
+internal/web       (32 files, ~11,340) -- chi router, WebSocket hub, auth, middleware, routes
+internal/tui       (43 files, ~21,760) -- 2-over-1 panel layout, overlays, chord system
+internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
+internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
+internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
+internal/utils     (25 files, ~2,510)  -- HTTP helpers, formatters, YouTube URL parsing
 ```
 
-Total: approximately 49,400 lines of Go across 179 source files (excluding tests, web assets, and cmd/moombox).
+Total: approximately 116,660 lines of Go across 306 source files (excluding tests, web assets, and cmd/moombox).
 
 ### Dependency Direction
 

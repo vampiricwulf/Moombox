@@ -513,7 +513,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
 - `log` — Log line (payload: string)
 - `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
-- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, hideFinishedAgeDays}`)
+- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill}`)
 - `update_available` — New version found (payload: release info)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `connectivity` — Network reachability changed (payload: `{online}`)
