@@ -26,6 +26,13 @@
 # purpose: a blanket *.txt would renormalise unrelated files.
 internal/docs/citation_allowlist.txt text eol=lf
 
+# The Go toolchain writes go.mod/go.sum with LF, but core.autocrlf=true gives
+# them CRLF in the working tree — so `go mod tidy -diff` reported a 329-line
+# whole-file diff with zero content change, which ruled it out as a CI gate.
+# Pinning both to LF makes that gate usable (ci.yml runs it).
+go.mod text eol=lf
+go.sum text eol=lf
+
 # tools/fetch-node rewrites this tracked manifest with LF; without the pin a
 # core.autocrlf=true checkout shows it modified with identical content.
 internal/bgutils/embed/version.txt text eol=lf

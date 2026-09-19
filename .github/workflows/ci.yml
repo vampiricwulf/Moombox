@@ -112,6 +112,12 @@ jobs:
             echo "gofmt would reformat:"; echo "$out"; exit 1
           fi
 
+      - name: go mod tidy check
+        # Usable only because .gitattributes pins go.mod/go.sum to LF: under
+        # core.autocrlf=true the working-tree CRLF made `-diff` emit the whole
+        # file with no content change.
+        run: go mod tidy -diff
+
       - name: go vet
         run: go vet ./...
 

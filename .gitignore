@@ -50,8 +50,14 @@ web/tests/node_modules/
 # Brainstorm session files
 .superpowers/
 
-# Claude Code session state (per-machine, never commit)
-.claude/
+# Claude Code session state (per-machine, never commit).
+# `.claude/*` rather than `.claude/`, with the skills directory re-included:
+# the project's skills under .claude/skills/ are TRACKED, and a blanket ignore
+# of the directory means a newly authored skill never shows in `git status`
+# and needs `git add -f`. Ignoring the entries and re-including the one
+# tracked subtree keeps settings.local.json, worktrees and plugin caches out.
+.claude/*
+!.claude/skills/
 
 # Git worktrees
 .worktrees/
