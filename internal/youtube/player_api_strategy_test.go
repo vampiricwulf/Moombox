@@ -1553,3 +1553,104 @@ func TestDRMSkipIsSilentOnProbesAndNamesTheClientOnce(t *testing.T) {
 		}
 	})
 }
+
+// headerCapturingTransport answers any player request with one canned body and
+// keeps the headers the client actually sent. clientKeyedTransport above keys
+// on the client name and records no headers, so the credential pins need their
+// own transport.
+type headerCapturingTransport struct {
+	body   string
+	header http.Header
+}
+
+func (tr *headerCapturingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.header = req.Header.Clone()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(tr.body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// datedOKBody is a minimal not_a_stream player response carrying a microformat
+// publish date, so the date probe under test really parses a date rather than
+// passing vacuously on a body it ignored.
+const datedOKBody = `{
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "test1234567", "title": "t", "author": "a"},
+	"microformat": {"playerMicroformatRenderer": {"publishDate": "2026-07-14"}}
+}`
+
+// youtubeAuthCookieFile is a configured, complete YouTube session: SAPISID
+// feeds the SAPISIDHASH Authorization header, LOGIN_INFO completes the set
+// HasYouTubeAuthCookies wants.
+const youtubeAuthCookieFile = "# Netscape HTTP Cookie File\n" +
+	".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsapisid-for-the-hash\n" +
+	".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin-info-value\n"
+
+// TestProbeVideoDateSendsTheJarsCredentials pins what report row MON-10
+// assumed was missing. The row claimed the section-9 date fetch is "anonymous
+// (WebSafari, no cookies)" even for membership-source rows, and proposed adding
+// an authenticated variant. It is not anonymous: ProbeVideoDate goes through
+// fetchWithClientProbe -> fetchWithClientOpts, whose headers come from
+// Auth.GenerateAPIHeaders, which sets Cookie from the jar and the SAPISIDHASH
+// Authorization header whenever the jar holds YouTube auth. The probe-only flag
+// (owner decision O-R) skips the PLAYER PO token and nothing else — it does not
+// touch the credentials. The row found a DOC bug, not a behaviour bug, and this
+// test is what stops the doc drifting back.
+//
+// Mutants:
+//   - route ProbeVideoDate through fetchWithCookielessClient (the shape MON-10
+//     assumed was already in place) -> both header assertions fail.
+//   - drop the jar's cookie header from GenerateAPIHeaders -> the Cookie
+//     assertion fails and every members-only date fetch goes out anonymous, the
+//     state the row described.
+//   - make probeOnly suppress the auth headers too -> both fail.
+//   - send credentials from an EMPTY jar -> the anonymous subtest fails.
+func TestProbeVideoDateSendsTheJarsCredentials(t *testing.T) {
+	const videoID = "test1234567"
+
+	swap := func(t *testing.T) *headerCapturingTransport {
+		t.Helper()
+		tr := &headerCapturingTransport{body: datedOKBody}
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+		return tr
+	}
+
+	t.Run("a jar holding YouTube auth sends Cookie and SAPISIDHASH", func(t *testing.T) {
+		tr := swap(t)
+		svc := jarServiceFromCookieFile(t, youtubeAuthCookieFile)
+
+		pub, _, err := svc.ProbeVideoDate(context.Background(), videoID)
+		if err != nil {
+			t.Fatalf("ProbeVideoDate: %v", err)
+		}
+		if pub == "" {
+			t.Fatal("the probe returned no date, so the canned response was never parsed — the header assertions below would be vacuous")
+		}
+		if got := tr.header.Get("Cookie"); got == "" {
+			t.Error("the date probe sent no Cookie header — a members-only VOD's date fetch would go out anonymous")
+		}
+		if got := tr.header.Get("Authorization"); !strings.HasPrefix(got, "SAPISIDHASH ") {
+			t.Errorf("Authorization = %q, want a SAPISIDHASH — the probe is authenticated by construction", got)
+		}
+	})
+
+	t.Run("an empty jar sends neither", func(t *testing.T) {
+		tr := swap(t)
+		svc := NewService(cookies.NewCookieJar(), noopLogger{})
+
+		if _, _, err := svc.ProbeVideoDate(context.Background(), videoID); err != nil {
+			t.Fatalf("ProbeVideoDate: %v", err)
+		}
+		if got := tr.header.Get("Cookie"); got != "" {
+			t.Errorf("Cookie = %q from an empty jar", got)
+		}
+		if got := tr.header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q from an empty jar", got)
+		}
+	})
+}

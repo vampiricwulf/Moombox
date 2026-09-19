@@ -1,9 +1,12 @@
 package cookies
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -518,5 +521,161 @@ func TestLoadDeclinesTheMemoAfterALaterInstall(t *testing.T) {
 	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != fromFile {
 		t.Errorf("SID = %q, want %q — a memo recorded across a later install let the next Load short-circuit on a file it never re-read",
 			got, fromFile)
+	}
+}
+
+// memoIsSet reports the jar's memo flag. In-package on purpose: the invariant
+// this file's last two tests pin is about a FIELD, and asserting it through a
+// behavioural proxy alone would leave the next reader guessing which of the
+// two halves broke.
+func memoIsSet(j *CookieJar) bool {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.loadedMemo
+}
+
+// TestLoadNeverMemoisesBesideALoadError is fix round 1's Important 1.
+//
+// The memo's invariant is "memo true implies the sentinel is empty", and it
+// was not enforced. A CONCURRENT Load whose read fails does not bump loadGen —
+// the error arm installs no maps, so it deliberately does not — so a failing
+// read landing between a successful Load's parseInto and its post-read stat
+// left the successful call free to memoise over a sentinel the failing call
+// had just written. From then on EVERY Load short-circuits at the pre-read
+// memo check and returns before anything can clear lastLoadErr: both
+// dashboards stay red on a perfectly readable file until the file's
+// (size, mtime) changes — never, for a hand-maintained cookies.txt.
+//
+// Reachable in production without any exotic timing: the refresh pass calls
+// Load from its own goroutine while every extraction's SyncCookies calls it
+// too, and one transient EMFILE/EIO/CIFS hiccup on either is enough.
+//
+// The interleaving is landed through cookieJarAfterParse, the seam that exists
+// for exactly this window — cookieJarReadFile cannot reach it, because that
+// seam fires BEFORE parseInto rather than between parseInto and the stat.
+//
+// Mutants:
+//   - drop the `j.lastLoadErr == ""` conjunct from the memo assignment -> the
+//     memo latches beside the sentinel and the verification Load below never
+//     reads the file, so LastLoadError() stays set forever.
+//   - clear lastLoadErr somewhere other than an install (say, in Load's
+//     short-circuit) -> the first assertion still passes and the second stops
+//     meaning anything; the invariant is what is asserted, not the symptom.
+func TestLoadNeverMemoisesBesideALoadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	agedCookieFile(t, path, []string{cookieRow(".youtube.com", futureExpiry(), "SID", "from-the-file")}, time.Hour)
+
+	jar := NewCookieJar()
+
+	origHook := cookieJarAfterParse
+	t.Cleanup(func() { cookieJarAfterParse = origHook })
+	var once sync.Once
+	cookieJarAfterParse = func() {
+		// ONCE: only the first Load stages the race. The verification Load
+		// below must run against an untouched jar and a readable file.
+		once.Do(func() {
+			// The concurrent goroutine, landed synchronously in its window.
+			// Its own Load takes the error arm, which never reaches this
+			// seam, so there is no re-entry to guard against.
+			realRead := cookieJarReadFile
+			cookieJarReadFile = func(string) ([]byte, error) {
+				return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EACCES}
+			}
+			if err := jar.Load(path); err == nil {
+				t.Error("premise broken: the injected concurrent Load was supposed to fail")
+			}
+			cookieJarReadFile = realRead
+		})
+	}
+
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("the outer Load reads a perfectly good file: %v", err)
+	}
+
+	// THE INVARIANT. The successful call's own read really was internally
+	// consistent, so every other memo clause holds; this is the one that must
+	// not.
+	if memoIsSet(jar) && jar.LastLoadError() != "" {
+		t.Errorf("loadedMemo is set while LastLoadError() = %q — every later Load now "+
+			"short-circuits before anything can clear the sentinel", jar.LastLoadError())
+	}
+
+	// And the consequence, end to end: one ordinary Load of a readable file
+	// takes the badge back down.
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("the verification Load: %v", err)
+	}
+	if got := jar.LastLoadError(); got != "" {
+		t.Errorf("LastLoadError() = %q after a Load of a READABLE file — the memo short-circuit "+
+			"returned before anything could clear it, so both dashboards stay red until restart", got)
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != "from-the-file" {
+		t.Errorf("SID = %q, want %q — the jar must hold what the file says", got, "from-the-file")
+	}
+}
+
+// TestFailedLoadClearsTheMemoItNoLongerDescribes is fix round 1's Minor 2: the
+// `j.loadedMemo = false` on Load's error arm was an unpinned behaviour change.
+//
+// The arm records filePath for a read that FAILED, which is what COOKIES-2
+// needs — but it therefore moves filePath out from under a (loadedSize,
+// loadedMod) pair that describes a DIFFERENT file. Leave the memo standing and
+// a later Load of the new path whose (size, mtime) coincide with the old pair
+// short-circuits on bytes it never read, and the jar serves the previous
+// file's credentials forever.
+//
+// The coincidence is staged exactly rather than hoped for: the second file is
+// written to the same byte length and its mtime forced to the first file's.
+//
+// Mutant:
+//   - drop `j.loadedMemo = false` from the error arm -> the final Load
+//     short-circuits and the jar still holds the FIRST file's SID.
+func TestFailedLoadClearsTheMemoItNoLongerDescribes(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.txt")
+	second := filepath.Join(dir, "second.txt")
+	const firstValue = "AAAAAAAA"
+	const secondValue = "BBBBBBBB" // same length: the (size, mtime) pair must be forgeable
+	if len(firstValue) != len(secondValue) {
+		t.Fatalf("fixture values must be equal length")
+	}
+
+	agedCookieFile(t, first, []string{cookieRow(".youtube.com", futureExpiry(), "SID", firstValue)}, time.Hour)
+	jar := NewCookieJar()
+	if err := jar.Load(first); err != nil {
+		t.Fatal(err)
+	}
+	if !memoIsSet(jar) {
+		t.Fatal("setup: the first Load did not memoise, so there is nothing for the error arm to clear")
+	}
+	st1 := statOf(t, first)
+
+	// The second file, made indistinguishable from the first by the only two
+	// facts the memo compares.
+	agedCookieFile(t, second, []string{cookieRow(".youtube.com", futureExpiry(), "SID", secondValue)}, time.Hour)
+	if err := os.Chtimes(second, st1.ModTime(), st1.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if st2 := statOf(t, second); st2.Size() != st1.Size() || !st2.ModTime().Equal(st1.ModTime()) {
+		t.Fatalf("fixture did not forge (size, mtime): got (%d, %v), want (%d, %v)",
+			st2.Size(), st2.ModTime(), st1.Size(), st1.ModTime())
+	}
+
+	// A failed read of the SECOND path: filePath moves, the pair does not.
+	realRead := cookieJarReadFile
+	cookieJarReadFile = func(string) ([]byte, error) {
+		return nil, &fs.PathError{Op: "open", Path: second, Err: syscall.EACCES}
+	}
+	if err := jar.Load(second); err == nil {
+		t.Fatal("premise broken: the injected read was supposed to fail")
+	}
+	cookieJarReadFile = realRead
+
+	if err := jar.Load(second); err != nil {
+		t.Fatal(err)
+	}
+	if got := jar.GetCookieFor(PlatformYouTube, "SID"); got != secondValue {
+		t.Errorf("SID = %q, want %q — the Load short-circuited on a memo that describes a file "+
+			"this jar is no longer pointed at", got, secondValue)
 	}
 }

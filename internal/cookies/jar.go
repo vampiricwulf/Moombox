@@ -6,13 +6,17 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // cookieJarLogger is the optional logger interface CookieJar uses to report
@@ -115,6 +119,14 @@ type CookieJar struct {
 	// still that value — nobody installed after it.
 	loadGen int
 	logger  cookieJarLogger // optional; set via SetLogger
+	// lastLoadErr is the reason the most recent Load could not READ the file,
+	// bounded and path-only (never content). Empty when the last Load
+	// succeeded, and empty for an ABSENT file — "there is no cookies.txt" is
+	// never-configured, which the dashboards already render correctly; this
+	// field exists for the case they used to render as never-configured
+	// WRONGLY, a file that is present and unreadable. Written under j.mu by
+	// Load and cleared by parseInto's install.
+	lastLoadErr string
 }
 
 // Essential YouTube cookies needed for authentication.
@@ -270,9 +282,40 @@ func (j *CookieJar) Load(filePath string) error {
 			j.twitch = make(map[string]cookieEntry)
 			j.loadedMemo = false
 			j.loadGen++
+			j.lastLoadErr = ""
 			j.mu.Unlock()
 			return nil
 		}
+		// Record the path even though the read FAILED, and record why.
+		//
+		// The path, because Reload() short-circuits on an empty filePath: a
+		// boot Load that failed with anything but ENOENT used to leave it
+		// empty, so the 30-minute pass, every SyncCookies before an extraction
+		// and twitch.Auth.Reload all returned nil having read nothing, for the
+		// life of the process. Repairing the permission on the host did nothing
+		// until a restart.
+		//
+		// The reason, because "the file is there and I cannot read it" is a
+		// state both dashboards used to render as never-configured (see
+		// AuthStatus.CookieFileError).
+		//
+		// The MAPS ARE LEFT ALONE. A failed read is not evidence that the
+		// credentials already in memory are wrong, and clearing them would turn
+		// a permission slip into an outage. The MEMO is not left alone: it
+		// describes bytes read from some earlier path, and filePath has just
+		// moved out from under it, so the next Load must actually read rather
+		// than be able to short-circuit on a pair that vouches for nothing.
+		// It costs NOTHING to clear: a Load that reached this read had already
+		// missed the memo at the pre-read check, so the next one was going to
+		// read either way — the clear only removes the (size, mtime)
+		// coincidence between two DIFFERENT files that would otherwise make it
+		// short-circuit. Pinned by
+		// TestFailedLoadClearsTheMemoItNoLongerDescribes.
+		j.mu.Lock()
+		j.filePath = filePath
+		j.lastLoadErr = cookieLoadErrorSentence(filePath, err)
+		j.loadedMemo = false
+		j.mu.Unlock()
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
 
@@ -317,6 +360,28 @@ func (j *CookieJar) Load(filePath string) error {
 			j.loadedSize = postSt.Size()
 			j.loadedMod = postSt.ModTime()
 			j.loadedMemo = j.loadGen == gen &&
+				// A CONCURRENT Load whose read FAILED landed while this one
+				// was between its parseInto and this stat. That call installs
+				// no maps, so it deliberately does not bump loadGen and the
+				// clause above cannot see it — and its own j.loadedMemo=false
+				// is about to be overwritten by this assignment. Memoising
+				// here would latch the memo beside a non-empty lastLoadErr,
+				// after which every Load short-circuits at the pre-read check
+				// above and returns BEFORE anything can clear the sentinel:
+				// both dashboards stay red on a perfectly readable file until
+				// the file's (size, mtime) changes, which for a
+				// hand-maintained cookies.txt is never.
+				//
+				// The invariant this restores is "loadedMemo implies
+				// lastLoadErr is empty", and it is restored HERE rather than
+				// by bumping loadGen on the error arm. Bumping it would fix
+				// this interleaving too, but loadGen means "an install
+				// happened" for three other readers — it would make this
+				// call's own perfectly valid pair look superseded, and in the
+				// vanished-file branch below it would stop a stale memo from
+				// being cleared. The defect is about the SENTINEL; the maps
+				// and the pair this call recorded are exactly what it read.
+				j.lastLoadErr == "" &&
 				preOK &&
 				preSt.Size() == postSt.Size() &&
 				preSt.ModTime().Equal(postSt.ModTime()) &&
@@ -522,6 +587,10 @@ func (j *CookieJar) parseInto(data []byte, filePath string) int {
 	j.youtube = youtube
 	j.twitch = twitch
 	j.loadGen++
+	// Cleared HERE rather than in Load, so every install clears it: a
+	// loadFrom-built jar is a jar whose content did arrive, and a sentinel left
+	// standing over rows that parsed would keep a badge red after the repair.
+	j.lastLoadErr = ""
 	gen := j.loadGen
 	j.mu.Unlock()
 	return gen
@@ -589,6 +658,91 @@ func compareCookieDomains(a, b string) int {
 // ignoring the leading dot that only encodes include-subdomains.
 func domainLabelCount(domain string) int {
 	return strings.Count(strings.TrimPrefix(domain, "."), ".") + 1
+}
+
+// cookieLoadErrorMaxLen bounds what LastLoadError will hand out. The value the
+// sentence is built from is already short ("open /data/cookies.txt: permission
+// denied"), but it reaches a status line on both dashboards and a pathological
+// path must not be able to push a badge title to arbitrary length.
+const cookieLoadErrorMaxLen = 200
+
+// LastLoadError reports why the most recent Load could not read the cookie
+// file, or "" when it could (or when there was no file).
+//
+// PATH AND CAUSE ONLY. The read fails before a single byte is parsed, so no
+// cookie value can be in the failure to begin with — and the sentence is
+// assembled by cookieLoadErrorSentence out of the path the CALLER passed in
+// plus a syscall.Errno, never copied out of an error's own message, so an
+// error type that one day carried a line of the file in its text could not
+// reach a badge through this field either. That is what makes it safe to
+// project onto AuthStatus and render.
+func (j *CookieJar) LastLoadError() string {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.lastLoadErr
+}
+
+// cookieLoadErrorUnknownCause is what the sentence says for a failure it will
+// not quote. It has to name the PROBLEM even when it cannot name the cause: a
+// status line that says nothing is worse than the log line it replaced.
+const cookieLoadErrorUnknownCause = "the file could not be read"
+
+// cookieLoadErrorSentence words one failed read for an operator, bounded.
+//
+// REBUILT rather than rendered from err, and the cause is narrowed to
+// syscall.Errno — which is the whole of the guarantee LastLoadError's doc
+// comment and docs/spec/data-and-storage.md both make. os.ReadFile always
+// fails with a *fs.PathError whose Err is an errno, so the realistic case
+// keeps the platform's own wording ("permission denied", "Access is denied.")
+// and an errno's text is a closed set no input can widen. *fs.PathError.Err is
+// an `error` though, not a vocabulary: quoting it verbatim would put whatever
+// it carries onto two dashboards, and cookieJarReadFile is a SEAM — an
+// os.Root-rooted open, a decrypting reader or a network-mount shim would each
+// bring their own error type with them. Anything that is not an errno
+// therefore renders cookieLoadErrorUnknownCause, which still names the file.
+func cookieLoadErrorSentence(filePath string, err error) string {
+	op, cause := "open", cookieLoadErrorUnknownCause
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		var errno syscall.Errno
+		if errors.As(pathErr.Err, &errno) {
+			if pathErr.Op != "" {
+				op = pathErr.Op
+			}
+			cause = errno.Error()
+		}
+	}
+	return boundString(op+" "+filePath+": "+cause, cookieLoadErrorMaxLen)
+}
+
+// cookieLoadErrorEllipsis marks a sentence boundString had to cut.
+const cookieLoadErrorEllipsis = "..."
+
+// boundString truncates s to at most n bytes without splitting a rune, adding
+// an ellipsis when it cuts and there is room for one.
+//
+// A bound narrower than the ellipsis itself is not an error: the cut simply
+// happens silently, back to the nearest rune boundary at or below n. Without
+// that arm `cut := n - len(ellipsis)` goes negative, the loop's `cut > 0`
+// guard is false immediately, and s[:cut] panics — which is a trap for the
+// next caller of an unexported general helper rather than a problem for the
+// only one it has today.
+func boundString(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) <= n {
+		return s
+	}
+	cut := n - len(cookieLoadErrorEllipsis)
+	marker := cookieLoadErrorEllipsis
+	if cut < 0 {
+		cut, marker = n, ""
+	}
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + marker
 }
 
 // Reload reloads cookies from the same file.

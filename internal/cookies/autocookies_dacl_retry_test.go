@@ -2,7 +2,6 @@ package cookies
 
 import (
 	"errors"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,7 +59,7 @@ func awaitSettled(t *testing.T, dir string) {
 // this test's second assertion would fail because no second attempt would
 // ever be made.
 func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "cookiedir")
+	dir := cookieDirFixture(t)
 	var calls int32
 	done := make(chan struct{}, 8)
 	fakeApplyUserOnlyDACL(t, func(d string) error {
@@ -110,7 +109,7 @@ func TestTightenCookieDirOnceRetriesAfterFailure(t *testing.T) {
 // during the first call's shell-out and spawn a second apply — this test
 // would then read the counter as 2.
 func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "cookiedir")
+	dir := cookieDirFixture(t)
 	var calls int32
 	started := make(chan struct{}, 4)
 	release := make(chan struct{})
@@ -153,7 +152,7 @@ func TestTightenCookieDirOnceConcurrentWritesSpawnOneApply(t *testing.T) {
 // the next, because the fake signals before the goroutine's deferred
 // bookkeeping runs.
 func TestTightenCookieDirOncePermanentFailureCostIsOnePerWrite(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "cookiedir")
+	dir := cookieDirFixture(t)
 	var calls int32
 	done := make(chan struct{}, 8)
 	fakeApplyUserOnlyDACL(t, func(d string) error {

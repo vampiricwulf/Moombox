@@ -53,6 +53,26 @@ var (
 	// lifetime landed.
 	ErrNoSetupInProgress = errors.New("no cookie auto-setup in progress")
 
+	// ErrUnsupportedPlatform is returned by StartSetup for anything that is not
+	// "youtube" or "twitch". The empty string is NOT an error — it is what a
+	// caller that omits the field sends (the dashboard's start handler and the
+	// first-run wizard both do), and it has always meant "youtube".
+	//
+	// Before this, an unknown value was accepted and driven: only the literal
+	// "twitch" selects the Twitch login URL, so anything else fell through to
+	// YouTube's while targetPlatform kept the wrong string — the Chromium finish
+	// then skipped cdpEnsurePageTarget and the wizard judged BOTH platforms as
+	// if youtube had been asked. A wrong input accepted far enough to open a
+	// browser on it.
+	//
+	// Refused BEFORE the setup slot is claimed, so a value that was never going
+	// to work cannot lock out one that would. Nothing is normalised: StartSetup
+	// is not the place to guess what "YouTube " meant, and the two accepted
+	// values are the two the finish branches compare against literally. HTTP
+	// consumers map to 400 — a wrong input, not a server fault and not a
+	// condition that clears.
+	ErrUnsupportedPlatform = errors.New("platform must be youtube or twitch")
+
 	// ErrServiceStopped is returned by StartSetup once Stop has been called.
 	// Distinct from ErrSetupInProgress and ErrRefreshInProgress because those
 	// two clear on their own and this one never does: the service is finished
@@ -65,9 +85,11 @@ var (
 	// populated but the user explicitly aborted.
 	ErrSetupCancelled = errors.New("cookie auto-setup was cancelled")
 
-	// ErrRefreshInProgress is returned by StartSetup when a periodic
-	// (or on-demand) RefreshCookies call holds the refresh slot. HTTP
-	// consumers can map to 409 Conflict with "try again shortly" copy.
+	// ErrRefreshInProgress is returned by StartSetup AND by ImportCookies
+	// (owner decision O-D, 2026-09-17) when the refresh slot is already held —
+	// by a periodic or on-demand RefreshCookies pass, or by the other one of
+	// those two. HTTP consumers can map to 409 Conflict with "try again
+	// shortly" copy; both routes do.
 	ErrRefreshInProgress = errors.New("cookie refresh in progress")
 
 	// ErrProfileNotFound is returned by RefreshCookies when the configured

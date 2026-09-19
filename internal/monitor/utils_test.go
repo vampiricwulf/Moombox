@@ -693,3 +693,87 @@ func (silentLogger) Debug(msg string, args ...any) {}
 func (silentLogger) Info(msg string, args ...any)  {}
 func (silentLogger) Warn(msg string, args ...any)  {}
 func (silentLogger) Error(msg string, args ...any) {}
+
+// TestProcessYouTubeVideo_DeniedIsNotAJob is MON-1's first half. A DENIED
+// probe (upcoming + members_only/login_required — see isDenied) is YouTube
+// refusing us, not a stream we found. Routing it to ShouldProcess=true is the
+// 2.7.2 misfire the feed's ARCHIVE path already routes away (archive.go's
+// `case OutcomeDenied:` arm), re-entering through DECAPI's door: an Upcoming
+// job, a "Stream Found" notification, and then a COOKIES? park the config
+// never asked for.
+//
+// Denied is the narrower fact and is set for members_only ONLY (see
+// deniedIsSettled): it is the flag DECAPI's terminal memo latches on, and a
+// latch outlives the refusal that caused it. A login_required refusal is
+// transient anti-bot pushback on a PUBLIC video, so it creates no job either
+// but must stay re-probable.
+//
+// Mutants each assertion kills:
+//   - drop the OutcomeDenied arm from ProcessYouTubeVideo -> ShouldProcess
+//     comes back true for both playability values (the shipped bug).
+//   - return ShouldProcess=false but forget Denied (or make deniedIsSettled
+//     always false) -> the members_only subtest fails: the memo half in
+//     decapi.go can never latch, so TestDecapi_DeniedVerdictIsLatched's
+//     production wiring is dead and the refusal is re-probed every 15 s.
+//   - latch every refusal (deniedIsSettled -> always true, or `Denied: true`)
+//     -> the login_required subtest fails: one unlucky cycle would park
+//     DECAPI on a public video until the channel publishes something new.
+//   - write history on the denied arm -> histCalls becomes 1; a refusal is
+//     not "we dealt with this video", and a history row would make the
+//     members-only escalation's later sighting read as a re-probe.
+func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
+	for _, tc := range []struct {
+		playability string
+		wantDenied  bool
+	}{
+		{"members_only", true},
+		{"login_required", false},
+	} {
+		t.Run(tc.playability, func(t *testing.T) {
+			var histCalls int
+			res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+				Ctx: context.Background(), VideoID: "v", Title: "T",
+				Channel: &config.ChannelConfig{Name: "c"},
+				ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
+					return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: tc.playability}, nil
+				},
+				AddToHistory: func(id string) error { histCalls++; return nil },
+				Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
+			})
+			if res.ShouldProcess {
+				t.Errorf("ShouldProcess = true for a %s refusal — DECAPI would create an Upcoming job and park it in COOKIES?", tc.playability)
+			}
+			if res.Denied != tc.wantDenied {
+				if tc.wantDenied {
+					t.Errorf("Denied = false for members_only — the DECAPI terminal memo latches on this flag; without it the settled refusal is re-probed every 15 s")
+				} else {
+					t.Errorf("Denied = true for login_required — that is transient anti-bot pushback on a PUBLIC video; latching it parks DECAPI on the video until the channel publishes something new")
+				}
+			}
+			if res.StreamStatus != "upcoming" {
+				t.Errorf("StreamStatus = %q, want %q — the memo records what the probe said", res.StreamStatus, "upcoming")
+			}
+			if histCalls != 0 {
+				t.Errorf("AddToHistory called %d times — a refusal is not a video we dealt with", histCalls)
+			}
+		})
+	}
+}
+
+// TestProcessYouTubeVideo_ProbedUpcomingStillJobs is the guard on the arm
+// above: a genuine upcoming premiere (playability ok) must be unaffected.
+// Mutant: widen the denied arm to every "upcoming" -> ShouldProcess goes
+// false and Moombox stops archiving premieres entirely.
+func TestProcessYouTubeVideo_ProbedUpcomingStillJobs(t *testing.T) {
+	res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		Ctx: context.Background(), VideoID: "v", Title: "T",
+		Channel: &config.ChannelConfig{Name: "c"},
+		ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "ok"}, nil
+		},
+		Tracker: NewMetadataFailureTracker(), Logger: silentLogger{},
+	})
+	if !res.ShouldProcess || res.Denied {
+		t.Fatalf("a public upcoming premiere must still job: %+v", res)
+	}
+}

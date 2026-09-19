@@ -69,6 +69,14 @@ func (s *Scheduler) Wake() {
 // goroutine owns the only path out of Queued, so a permanent death would
 // strand the backlog silently with no error anywhere.
 func (s *Scheduler) Run(ctx context.Context) {
+	// first gates the startup sweep below to the FIRST pass of this loop. The
+	// panic-restart re-enters the same func literal, so an ungated sweep-at-
+	// start would turn a deterministically panicking sweep() into a ~1 s loop
+	// (panic -> recover -> 1 s restart sleep -> sweep -> panic) instead of the
+	// ~61 s one it is without it — ~60× the restart lines and ~60× the DB load
+	// on a path that is already a bug. Cleared BEFORE the sweep runs, so the
+	// panicking case cannot re-enter it.
+	first := true
 	for {
 		func() {
 			defer func() {
@@ -76,6 +84,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 					s.log.Error("scheduler panic, restarting", "panic", fmt.Sprint(r))
 				}
 			}()
+
+			// Startup admission sweep (MON-9). Nothing Wakes a process whose
+			// only backlog predates it: the wake sites are all event-driven —
+			// backlog CREATION, job COMPLETION, a cookie repair returning
+			// parked backlog to Queued — and a restart has none of them, so
+			// leftover Queued rows waited for the 60 s heartbeat. One pass per
+			// Run, which in the healthy case is one extra sweep per process.
+			if first {
+				first = false
+				s.sweep()
+			}
 
 			for {
 				select {

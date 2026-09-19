@@ -54,7 +54,7 @@ func TestDpapiExtractIsWindowsOnly(t *testing.T) {
 	}
 
 	logger := &recordingDpapiLogger{}
-	out, err := dpapiExtractAsNetscape(logger, "")
+	out, err := dpapiExtractAsNetscape(logger, "", "")
 
 	if out != "" {
 		t.Errorf("no cookies can come out on a non-Windows host, got %q", out)

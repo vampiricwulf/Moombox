@@ -247,6 +247,29 @@ type CookiesConfig struct {
 	// surface that the user has to consciously enable. DECISIONS #6.
 	DpapiFallback bool `toml:"dpapi_fallback,omitempty" json:"dpapi_fallback,omitempty"`
 
+	// DpapiProfileDir names a Chromium-family PROFILE directory for the DPAPI
+	// fallback to read, taking precedence over discovery.
+	//
+	// Discovery walks eleven fixed %LOCALAPPDATA% "User Data" layouts, so a
+	// portable Chromium, a --user-data-dir-relocated profile, and Opera (whose
+	// layout shape is deliberately excluded) are all invisible to it — and the
+	// pass then answers "no Chromium-family profiles found under LOCALAPPDATA"
+	// even when cookies.browser_path names the very binary. The configured
+	// path carries no profile location, so nothing let the operator supply one.
+	//
+	// The PROFILE dir, not the User Data root: "…/User Data/Default", not
+	// "…/User Data". dpapi.ValidateProfileDir checks the three structural
+	// facts the reader needs — a real directory that is not a symlink or
+	// junction; a `Local State` beside it (Chromium's User Data root) or
+	// inside it (Opera, which has no root above the profile); and `Cookies` or
+	// `Network/Cookies` inside. A User Data root fails the last one and is
+	// told so by name.
+	//
+	// Windows-only in effect, like dpapi_fallback itself, and read LIVE through
+	// AutoCookieService.DpapiProfileDir — so it is NOT restart-required and is
+	// deliberately absent from both restart-required lists.
+	DpapiProfileDir string `toml:"dpapi_profile_dir,omitempty" json:"dpapi_profile_dir,omitempty"`
+
 	// Acquisition selects HOW a cookie REFRESH acquires credentials.
 	//
 	//   "auto"    — the default, and exactly the behaviour that shipped before

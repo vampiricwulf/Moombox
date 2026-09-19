@@ -23,13 +23,21 @@ import (
 //
 // The table is deliberately shared rather than split per platform: the two arms
 // had already diverged once, and one table is what stops them diverging again.
+//
+// Mutants for the three unreadable-file rows:
+//   - drop `case fileUnreadable` from cookieBadgeFor -> the first row reports
+//     NONE (never configured) and the second UNKNOWN (a network blip), which
+//     are the two wrong remedies this state was added to stop.
+//   - rank fileUnreadable ABOVE authenticated -> the third row reddens a badge
+//     whose requests are demonstrably working.
 func TestCookieBadgeForSeparatesRejectedFromUnchecked(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		authenticated bool
-		hasCookies    bool
-		verdict       cookies.RefreshVerdict
-		want          tui.CookieStatus
+		name           string
+		authenticated  bool
+		hasCookies     bool
+		fileUnreadable bool
+		verdict        cookies.RefreshVerdict
+		want           tui.CookieStatus
 	}{
 		{
 			name: "signed in", authenticated: true, hasCookies: true,
@@ -63,12 +71,36 @@ func TestCookieBadgeForSeparatesRejectedFromUnchecked(t *testing.T) {
 			// produce a red alert.
 			name: "verdict left unset", hasCookies: true, want: tui.CookieStatusUnknown,
 		},
+		{
+			// COOKIES-6. A cookies.txt that is present and cannot be read
+			// loaded NOTHING, so hasCookies is false and this used to report
+			// NONE — "never configured", which sends the operator back through
+			// a cookie setup they already did instead of to the permission.
+			name: "the cookie file could not be read", fileUnreadable: true,
+			verdict: cookies.RefreshFailed, want: tui.CookieStatusFileUnreadable,
+		},
+		{
+			// Same file, a jar that kept the rows it had loaded earlier. The
+			// other state this used to render as: UNKNOWN, which is dropped at
+			// tierEssential and reads as a network blip.
+			name:       "the cookie file could not be re-read over a stale jar",
+			hasCookies: true, fileUnreadable: true,
+			verdict: cookies.RefreshUnknown, want: tui.CookieStatusFileUnreadable,
+		},
+		{
+			// `authenticated` still wins. A jar doing authenticated work is
+			// not a credential problem, whatever a later reload failed to do —
+			// the same rank the Web badge gives it.
+			name: "authenticated despite a failed re-read", authenticated: true,
+			hasCookies: true, fileUnreadable: true,
+			verdict: cookies.RefreshOK, want: tui.CookieStatusOK,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := cookieBadgeFor(tc.authenticated, tc.hasCookies, tc.verdict)
+			got := cookieBadgeFor(tc.authenticated, tc.hasCookies, tc.fileUnreadable, tc.verdict)
 			if got != tc.want {
-				t.Errorf("cookieBadgeFor(auth=%v, cookies=%v, %v) = %v, want %v",
-					tc.authenticated, tc.hasCookies, tc.verdict, got, tc.want)
+				t.Errorf("cookieBadgeFor(auth=%v, cookies=%v, unreadable=%v, %v) = %v, want %v",
+					tc.authenticated, tc.hasCookies, tc.fileUnreadable, tc.verdict, got, tc.want)
 			}
 			// THE INVARIANT, asserted on every row rather than only on the
 			// unknown ones: CookiesOnly is the red badge that survives every

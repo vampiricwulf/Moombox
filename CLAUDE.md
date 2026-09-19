@@ -98,7 +98,7 @@ Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate
 
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
-Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler (live/upcoming and newly published content never waits in `Queued`).
+Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler (live/upcoming and newly published content never waits in `Queued`); a backlog VOD parked in `COOKIES?` returns to `Queued` (when its feed row still exists), not `Upcoming`, so a cookie repair re-admits it through the same pacing.
 Error paths: any → `Error`, `Cancelled`, or `COOKIES?`
 
 `JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings. Optional numerics use pointers.

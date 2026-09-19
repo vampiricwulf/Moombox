@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -963,5 +964,243 @@ func TestFeed_ANominatedChannelThatKeepsErroringIsNotRenominated(t *testing.T) {
 	fm.doCheck(context.Background())
 	if len(order) == 0 {
 		t.Fatal("cycle 6 attempted no membership fetch at all — when every memoized channel has errored the nomination must fall back to trying one anyway, or the errored set can never clear")
+	}
+}
+
+// storeWithOneYouTubeChannel builds the smallest config store that gets a
+// feed/DECAPI monitor past scheduleNext's "no channels" early return.
+func storeWithOneYouTubeChannel(t *testing.T) *config.Store {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.Channels = []config.ChannelConfig{{ID: "UC_x", Name: "x", Platform: "youtube"}}
+	return config.NewStore(cfg, "")
+}
+
+func storeWithOneTwitchChannel(t *testing.T) *config.Store {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.Channels = []config.ChannelConfig{{ID: "tw_x", Name: "x", Platform: "twitch"}}
+	return config.NewStore(cfg, "")
+}
+
+// storeWithNoChannels is the other side of scheduleNext's channel-count read:
+// the "no channels configured" early return, which writes NextCheckAt = 0 and
+// publishes OnSchedule(0) before any context check the guard could make.
+func storeWithNoChannels(t *testing.T) *config.Store {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.Channels = nil
+	return config.NewStore(cfg, "")
+}
+
+// reArmProbe records what a monitor chain actually DID, in fields that
+// outlive the cycle that did them.
+//
+// This is deliberately NOT an assertion on the `checking` latch. runCycle
+// clears `checking` in its own deferred cleanup before it returns, so by the
+// time a test can read it the answer is false whether or not the guard is
+// there — a `checking` assertion is vacuous and kills no mutant. What survives
+// runCycle is what it CALLED: OnSchedule (runCycle publishes the -1 "checking
+// now" sentinel before doCheck, and scheduleNext publishes the countdown
+// after) and the IsOnline gate, which is doCheck's first statement and
+// therefore the exact witness of "did this chain enter a cycle".
+type reArmProbe struct {
+	mu sync.Mutex
+	// scheduled is every value handed to OnSchedule, in order.
+	scheduled []int64
+	// doCheckEntries counts IsOnline calls: doCheck's first statement.
+	doCheckEntries int
+}
+
+func (p *reArmProbe) onSchedule(next int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scheduled = append(p.scheduled, next)
+}
+
+// offline is the IsOnline hook. Returning false short-circuits doCheck at its
+// first statement, so a mutant's dead-chain cycle is recorded without it
+// reaching a nil db or the network.
+func (p *reArmProbe) offline() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.doCheckEntries++
+	return false
+}
+
+func (p *reArmProbe) snapshot() ([]int64, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]int64, len(p.scheduled))
+	copy(out, p.scheduled)
+	return out, p.doCheckEntries
+}
+
+// TestMonitors_ACancelledChainNeverReArms is MON-5. Stop() cancels the chain's
+// context but leaves the AfterFunc armed, and Start() then installs a NEW
+// cancel. The old chain's cycle therefore still passed scheduleNext's only
+// guard (`cancel == nil`) and re-armed the SHARED timer field every interval —
+// stopping the live chain's pending cycle each time. Polling would die
+// silently while the dead chain kept running a full cycle.
+//
+// Mutants, each failing in all three subtests:
+//   - drop runCycle's ctx guard -> the dead chain publishes the -1 "checking
+//     now" sentinel through OnSchedule and enters doCheck (IsOnline called),
+//     and NextCheckAt is left at -1 instead of the live chain's countdown.
+//   - drop scheduleNext's ctx guard -> the dead chain overwrites the timer and
+//     NextCheckAt and publishes a countdown, so the live chain's pending cycle
+//     is cancelled.
+//   - put scheduleNext's ctx guard back BELOW the channel-count read (where it
+//     first landed) -> the "no channels configured" subtest fails: that early
+//     return writes NextCheckAt = 0 and publishes OnSchedule(0), which is
+//     exactly what the guard exists to stop, and it is reached first.
+func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// stopTimer disarms whatever a mutant managed to arm, so a failing run
+	// cannot leave a cycle re-arming itself for the rest of the binary.
+	stopTimer := func(t *testing.T, mu *sync.Mutex, timer **time.Timer) {
+		t.Cleanup(func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if *timer != nil {
+				(*timer).Stop()
+				*timer = nil
+			}
+		})
+	}
+
+	t.Run("feed", func(t *testing.T) {
+		p := &reArmProbe{}
+		fm := &FeedMonitor{
+			logger:        silentLogger{},
+			configStore:   storeWithOneYouTubeChannel(t),
+			health:        newHealthTracker(),
+			ProbeCooldown: NewProbeCooldown(0),
+			OnSchedule:    p.onSchedule,
+			IsOnline:      p.offline,
+		}
+		fm.cancel = func() {} // a LIVE chain owns the monitor now
+		fm.NextCheckAt = 4242
+		stopTimer(t, &fm.mu, &fm.timer)
+
+		fm.scheduleNext(dead, time.Time{})
+		assertNoReArm(t, "feed scheduleNext", p, func() (bool, int64) {
+			fm.mu.Lock()
+			defer fm.mu.Unlock()
+			return fm.timer != nil, fm.NextCheckAt
+		})
+
+		fm.runCycle(dead)
+		assertNoReArm(t, "feed runCycle", p, func() (bool, int64) {
+			fm.mu.Lock()
+			defer fm.mu.Unlock()
+			return fm.timer != nil, fm.NextCheckAt
+		})
+	})
+
+	// The same chain, with nothing configured. scheduleNext reads the channel
+	// list before it does anything else, and its empty-list arm is a second
+	// writer of NextCheckAt and a second publisher to OnSchedule — so the
+	// guard only covers the function if it runs ABOVE that read.
+	t.Run("feed with no channels configured", func(t *testing.T) {
+		p := &reArmProbe{}
+		fm := &FeedMonitor{
+			logger:        silentLogger{},
+			configStore:   storeWithNoChannels(t),
+			health:        newHealthTracker(),
+			ProbeCooldown: NewProbeCooldown(0),
+			OnSchedule:    p.onSchedule,
+			IsOnline:      p.offline,
+		}
+		fm.cancel = func() {}
+		fm.NextCheckAt = 4242
+		stopTimer(t, &fm.mu, &fm.timer)
+
+		fm.scheduleNext(dead, time.Time{})
+		assertNoReArm(t, "feed scheduleNext (no channels)", p, func() (bool, int64) {
+			fm.mu.Lock()
+			defer fm.mu.Unlock()
+			return fm.timer != nil, fm.NextCheckAt
+		})
+	})
+
+	t.Run("decapi", func(t *testing.T) {
+		p := &reArmProbe{}
+		dm := &DecapiMonitor{
+			logger:        silentLogger{},
+			configStore:   storeWithOneYouTubeChannel(t),
+			health:        newHealthTracker(),
+			ProbeCooldown: NewProbeCooldown(0),
+			OnSchedule:    p.onSchedule,
+			IsOnline:      p.offline,
+		}
+		dm.cancel = func() {}
+		dm.NextCheckAt = 4242
+		stopTimer(t, &dm.mu, &dm.timer)
+
+		dm.scheduleNext(dead, time.Time{})
+		assertNoReArm(t, "decapi scheduleNext", p, func() (bool, int64) {
+			dm.mu.Lock()
+			defer dm.mu.Unlock()
+			return dm.timer != nil, dm.NextCheckAt
+		})
+
+		dm.runCycle(dead)
+		assertNoReArm(t, "decapi runCycle", p, func() (bool, int64) {
+			dm.mu.Lock()
+			defer dm.mu.Unlock()
+			return dm.timer != nil, dm.NextCheckAt
+		})
+	})
+
+	t.Run("twitch", func(t *testing.T) {
+		p := &reArmProbe{}
+		tm := &TwitchMonitor{
+			logger:      silentLogger{},
+			configStore: storeWithOneTwitchChannel(t),
+			health:      newHealthTracker(),
+			OnSchedule:  p.onSchedule,
+			IsOnline:    p.offline,
+		}
+		tm.cancel = func() {}
+		tm.NextCheckAt = 4242
+		stopTimer(t, &tm.mu, &tm.timer)
+
+		tm.scheduleNext(dead, time.Time{})
+		assertNoReArm(t, "twitch scheduleNext", p, func() (bool, int64) {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			return tm.timer != nil, tm.NextCheckAt
+		})
+
+		tm.runCycle(dead)
+		assertNoReArm(t, "twitch runCycle", p, func() (bool, int64) {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			return tm.timer != nil, tm.NextCheckAt
+		})
+	})
+}
+
+// assertNoReArm is the whole contract in one place: a cancelled chain arms no
+// timer, rewrites none of the live chain's countdown (4242 is the sentinel the
+// live chain owns), publishes no schedule to the UI, and enters no cycle.
+func assertNoReArm(t *testing.T, stage string, p *reArmProbe, read func() (armed bool, nextCheckAt int64)) {
+	t.Helper()
+	armed, next := read()
+	if armed {
+		t.Errorf("%s: a cancelled chain armed the timer — it would cancel the live chain's pending cycle every interval", stage)
+	}
+	if next != 4242 {
+		t.Errorf("%s: NextCheckAt = %d, want 4242 — a dead chain must not rewrite the live chain's countdown", stage, next)
+	}
+	scheduled, entries := p.snapshot()
+	if len(scheduled) != 0 {
+		t.Errorf("%s: a cancelled chain published %v to OnSchedule — the UI countdown belongs to the live chain", stage, scheduled)
+	}
+	if entries != 0 {
+		t.Errorf("%s: a cancelled chain entered doCheck %d time(s) — a retired chain must run no cycle at all", stage, entries)
 	}
 }

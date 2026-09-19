@@ -1,6 +1,8 @@
 package notifications
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -288,4 +290,148 @@ func TestHasTargetsWithTarget(t *testing.T) {
 	if !m.HasTargets() {
 		t.Error("expected HasTargets() == true when targets exist")
 	}
+}
+
+// --- dedupe tests ---
+
+// countingLogger records the Info lines buildTargets emits so the dedupe's
+// one-per-config-load summary can be asserted — including that it never
+// carries a URL (the webhook path IS the secret).
+type countingLogger struct {
+	infos []string
+	args  [][]any
+}
+
+func (l *countingLogger) Debug(string, ...any) {}
+func (l *countingLogger) Info(msg string, args ...any) {
+	l.infos = append(l.infos, msg)
+	l.args = append(l.args, args)
+}
+func (l *countingLogger) Warn(string, ...any)  {}
+func (l *countingLogger) Error(string, ...any) {}
+
+// TestBuildTargetsDedupesByResolvedURL is MON-6. parseTarget already
+// normalises discord://ID/TOKEN and the full https:// form to the same
+// DiscordWebhook.URL, so a config carrying both spellings — or a hand-edited
+// duplicate — built two targets over one webhook and posted every embed twice.
+//
+// The FIRST occurrence wins: its sender and its slot in the ordered target
+// list are what survive. The one per-target option, the event filter, UNIONs,
+// and a nil filter wins outright: nil means "every event", so a target listed
+// once unfiltered and once filtered must keep the wider subscription the
+// operator configured. Narrowing instead would silently drop alerts the config
+// asked for.
+//
+// Mutants:
+//   - drop the dedupe -> row 1 builds 2 targets and every embed posts twice.
+//   - key on the CONFIGURED url instead of the resolved one -> row 1 builds 2
+//     (the two spellings differ) while row 3 still builds 1, so only the
+//     literal-duplicate case is fixed.
+//   - intersect the filters instead of unioning -> row 2's merged target no
+//     longer matches "found".
+//   - let a filtered entry narrow a nil one -> row 4 fails.
+//   - dedupe two DIFFERENT webhooks together -> row 5 collapses to 1.
+func TestBuildTargetsDedupesByResolvedURL(t *testing.T) {
+	const id, tok = "123456789012345678", "abcdefghijklmnopqrstuvwxyz0123456789-_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	full := "https://discord.com/api/webhooks/" + id + "/" + tok
+	short := "discord://" + id + "/" + tok
+
+	for _, tc := range []struct {
+		name        string
+		notifs      []config.NotificationConfig
+		wantTargets int
+		wantMatches map[string]bool // event -> the single merged target must match it
+	}{
+		{
+			"the two spellings of one webhook",
+			[]config.NotificationConfig{{URL: full}, {URL: short}},
+			1, map[string]bool{"found": true, "error": true},
+		},
+		{
+			"filters union",
+			[]config.NotificationConfig{
+				{URL: full, Events: []string{"found"}},
+				{URL: short, Events: []string{"error"}},
+			},
+			1, map[string]bool{"found": true, "error": true},
+		},
+		{
+			"a literal duplicate",
+			[]config.NotificationConfig{{URL: full}, {URL: full}},
+			1, map[string]bool{"found": true},
+		},
+		{
+			"a nil filter wins over a narrow one, in either order",
+			[]config.NotificationConfig{
+				{URL: full, Events: []string{"found"}},
+				{URL: short},
+			},
+			1, map[string]bool{"found": true, "error": true},
+		},
+		{
+			"two genuinely different webhooks stay two",
+			[]config.NotificationConfig{{URL: full}, {URL: "https://discord.com/api/webhooks/987654321098765432/" + tok}},
+			2, nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.MoomboxConfig{Notifications: tc.notifs}
+			targets := buildTargets(cfg, testLogger{})
+			if len(targets) != tc.wantTargets {
+				t.Fatalf("built %d targets, want %d — a webhook listed twice receives every embed twice", len(targets), tc.wantTargets)
+			}
+			for event, want := range tc.wantMatches {
+				got := targets[0].events == nil || targets[0].events[event]
+				if got != want {
+					t.Errorf("merged target matches %q = %v, want %v", event, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildTargetsLogsTheCollapsedCountOnce pins the dedupe's report: ONE Info
+// line per config load carrying the COUNT, and no URL anywhere in it. The
+// webhook path is the credential — a per-duplicate line naming it (even
+// redacted to scheme://host, which for Discord is the same string every time)
+// tells the operator nothing the count does not.
+//
+// Mutants:
+//   - log per duplicate instead of once -> two lines for three duplicates of
+//     one webhook.
+//   - pass the url (or its redacted form) as a log arg -> the "no URL in the
+//     args" assertion fails.
+//   - log unconditionally -> the clean-config subtest sees a line.
+func TestBuildTargetsLogsTheCollapsedCountOnce(t *testing.T) {
+	const url = "https://discord.com/api/webhooks/123456789012345678/tok-en_ABC"
+
+	t.Run("three duplicates report once, by count", func(t *testing.T) {
+		lg := &countingLogger{}
+		cfg := &config.MoomboxConfig{Notifications: []config.NotificationConfig{
+			{URL: url}, {URL: url}, {URL: url}, {URL: url},
+		}}
+		if got := len(buildTargets(cfg, lg)); got != 1 {
+			t.Fatalf("built %d targets, want 1", got)
+		}
+		if len(lg.infos) != 1 {
+			t.Fatalf("logged %d Info lines, want exactly 1 per config load: %q", len(lg.infos), lg.infos)
+		}
+		if !strings.Contains(fmt.Sprint(lg.args[0]...), "3") {
+			t.Errorf("the summary does not carry the collapsed count 3: %v", lg.args[0])
+		}
+		for _, a := range lg.args[0] {
+			if s, ok := a.(string); ok && strings.Contains(s, "discord.com") {
+				t.Errorf("the summary carries a URL (%q) — the webhook path is the secret", s)
+			}
+		}
+	})
+
+	t.Run("a clean config logs nothing", func(t *testing.T) {
+		lg := &countingLogger{}
+		cfg := &config.MoomboxConfig{Notifications: []config.NotificationConfig{{URL: url}}}
+		buildTargets(cfg, lg)
+		if len(lg.infos) != 0 {
+			t.Errorf("a config with no duplicates logged %q", lg.infos)
+		}
+	})
 }

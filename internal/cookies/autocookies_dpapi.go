@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -23,10 +24,19 @@ var (
 )
 
 // dpapiExtractAsNetscape reads cookies from exactly ONE Chromium-family
-// profile that dpapi.FindBrowserProfiles can see, runs its rows through
+// profile — the one explicitProfileDir names, or, when that is empty, one of
+// those dpapi.FindBrowserProfiles can see — runs its rows through
 // deduplicateAndFormat (which keeps only the YouTube / Google / Twitch
 // essentials and prefers youtube.com over google.com on dedup conflicts),
 // and returns the Netscape cookies.txt content ready for writeFileAtomic.
+//
+// explicitProfileDir is cookies.dpapi_profile_dir, read live by the caller
+// (COOKIES-7). Non-empty, it REPLACES the discovery walk and the browser-type
+// filtering below — the eleven fixed %LOCALAPPDATA% layouts cannot see a
+// portable Chromium, a --user-data-dir profile or Opera — and a directory that
+// fails dpapi.ValidateProfileDir is an error, never a fall-back to discovery.
+// It is still ONE profile and ONE pass: the standing "DPAPI two-pass is NEVER"
+// ruling is untouched.
 //
 // Used as a fallback when the CDP refresh path can't acquire the profile
 // lock — DPAPI doesn't launch a browser, so it sidesteps the "Chromium
@@ -109,7 +119,7 @@ func dpapiExtractAsNetscape(logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
-}, configuredBrowserType string) (string, error) {
+}, configuredBrowserType, explicitProfileDir string) (string, error) {
 	if runtimeGOOS() != "windows" {
 		// Said ONCE, at Debug. Falling through produced "no Chromium-family
 		// profiles found under LOCALAPPDATA" — a Windows-shaped sentence about
@@ -121,54 +131,116 @@ func dpapiExtractAsNetscape(logger interface {
 		return "", dpapi.ErrNotSupported
 	}
 
-	allProfiles := dpapiFindBrowserProfiles()
-	if len(allProfiles) == 0 {
-		return "", fmt.Errorf("DPAPI fallback: no Chromium-family profiles found under LOCALAPPDATA")
-	}
-
-	profiles := allProfiles
-	switch {
-	case configuredBrowserType == "":
-		// Auto-detect: every profile is a candidate.
-	case configuredBrowserType == DpapiChromiumFamilyValue:
-		// Finding 1 (Arc 8 fix round 1): the Web UI's ONLY Chromium option
-		// stores this literal value for "some Chromium-family browser",
-		// not "Google Chrome specifically" — see the doc comment above.
-		// Narrowing to it would exclude every Brave/Edge/Vivaldi profile a
-		// Web UI user configured. dpapi.FindBrowserProfiles only returns
-		// Chromium-family profiles anyway, so "the whole family" and "no
-		// filter" are the same set — no Debug line needed, this is the
-		// expected common case, not a fallback from a broken one.
-	case !slices.Contains(dpapi.KnownBrowserFamilies(), configuredBrowserType):
-		// Finding 2: a browser_type browser_validate.go accepts (Opera,
-		// Thorium) but dpapi has no profile layout for at all — filtering
-		// would always yield zero candidates on every machine, which is a
-		// dpapi coverage gap, not "this browser isn't installed". Falling
-		// back to unfiltered scoring instead of a hard error here is what
-		// the OLD code effectively did (it never filtered by browser at
-		// all), so this restores that behavior for exactly the types H7
-		// cannot filter for.
+	// COOKIES-7: an operator-named profile directory REPLACES discovery rather
+	// than joining it. Discovery knows eleven fixed %LOCALAPPDATA% layouts, so
+	// a portable Chromium, a --user-data-dir profile and Opera are invisible to
+	// it; naming a directory is a stronger statement than a scoring pass over
+	// whatever else happens to be installed, and scoring the named one against
+	// discovered siblings could silently pick a different profile than the one
+	// asked for.
+	//
+	// A directory that does not validate is an ERROR, not a fall-back to
+	// discovery: falling back would answer "no profiles found under
+	// LOCALAPPDATA" about a setting the operator had just written, which is
+	// the exact confusion this setting exists to remove.
+	//
+	// This is ONE pass either way. The explicit directory is the profile this
+	// pass reads, not an extra profile read after the discovered one — the
+	// standing "DPAPI two-pass is NEVER" ruling holds: one profile is the
+	// design.
+	//
+	// The mechanism is deliberately the SMALLEST one that says it: the
+	// configured directory becomes the one-element candidate list the existing
+	// scoring loop below already knows how to run over. The read, the
+	// per-reason failure counting and the "no relevant cookies" verdict are
+	// therefore literally the same code on both entry points, not a second
+	// copy that can drift.
+	var profiles []dpapi.BrowserProfile
+	if explicitProfileDir != "" {
+		// Only the STRUCTURAL check. The launch-boundary deny-list
+		// (dangerousProfilePathSubstrings, autocookies_browser_resolve.go) is
+		// deliberately not applied here: it exists so the headless refresh
+		// never LAUNCHES a browser against a real user profile, and this
+		// directory is only ever read — a mode=ro SQLite open plus a
+		// `Local State` read, pinned by TestDpapiProfileDirNeverReachesALaunch.
+		// Running it here bought no security (discovery below reads the same
+		// real profiles with no deny-list at all) and refused a portable
+		// Chromium under a `Chromium\User Data` path and every Opera — the
+		// exact profiles this setting exists to reach.
+		if err := dpapi.ValidateProfileDir(explicitProfileDir); err != nil {
+			return "", fmt.Errorf("DPAPI fallback: %w", err)
+		}
 		if logger != nil {
-			logger.Debug("DPAPI fallback: configured browser has no dpapi profile layout — scoring every profile instead of filtering",
-				"configured", configuredBrowserType)
+			logger.Debug("DPAPI fallback: using the configured profile directory instead of discovery",
+				"dir", explicitProfileDir)
 		}
-	default:
-		var filtered []dpapi.BrowserProfile
-		for _, p := range allProfiles {
-			if dpapiBrowserMatchesConfigured(configuredBrowserType, p.Browser) {
-				filtered = append(filtered, p)
-				continue
-			}
+		// A configured directory carries no browser family of its own.
+		// configuredBrowserType is the operator's own answer when they gave
+		// one; "chromium" stands in when they did not, so the log lines and
+		// the "no relevant cookies in chosen profile …" error still name
+		// something rather than reading as "/Default". Nothing FILTERS on it
+		// here — the browser-type switch below belongs to discovery, which
+		// this branch has replaced.
+		browser := configuredBrowserType
+		if browser == "" {
+			browser = "chromium"
+		}
+		profiles = []dpapi.BrowserProfile{{
+			Browser:   browser,
+			Name:      filepath.Base(explicitProfileDir),
+			Path:      explicitProfileDir,
+			IsDefault: filepath.Base(explicitProfileDir) == "Default",
+		}}
+	} else {
+		allProfiles := dpapiFindBrowserProfiles()
+		if len(allProfiles) == 0 {
+			return "", fmt.Errorf("DPAPI fallback: no Chromium-family profiles found under LOCALAPPDATA")
+		}
+
+		profiles = allProfiles
+		switch {
+		case configuredBrowserType == "":
+			// Auto-detect: every profile is a candidate.
+		case configuredBrowserType == DpapiChromiumFamilyValue:
+			// Finding 1 (Arc 8 fix round 1): the Web UI's ONLY Chromium option
+			// stores this literal value for "some Chromium-family browser",
+			// not "Google Chrome specifically" — see the doc comment above.
+			// Narrowing to it would exclude every Brave/Edge/Vivaldi profile a
+			// Web UI user configured. dpapi.FindBrowserProfiles only returns
+			// Chromium-family profiles anyway, so "the whole family" and "no
+			// filter" are the same set — no Debug line needed, this is the
+			// expected common case, not a fallback from a broken one.
+		case !slices.Contains(dpapi.KnownBrowserFamilies(), configuredBrowserType):
+			// Finding 2: a browser_type browser_validate.go accepts (Opera,
+			// Thorium) but dpapi has no profile layout for at all — filtering
+			// would always yield zero candidates on every machine, which is a
+			// dpapi coverage gap, not "this browser isn't installed". Falling
+			// back to unfiltered scoring instead of a hard error here is what
+			// the OLD code effectively did (it never filtered by browser at
+			// all), so this restores that behavior for exactly the types H7
+			// cannot filter for.
 			if logger != nil {
-				logger.Debug("DPAPI fallback: skipping profile — does not match configured browser",
-					"browser", p.Browser, "profile", p.Name, "configured", configuredBrowserType)
+				logger.Debug("DPAPI fallback: configured browser has no dpapi profile layout — scoring every profile instead of filtering",
+					"configured", configuredBrowserType)
 			}
+		default:
+			var filtered []dpapi.BrowserProfile
+			for _, p := range allProfiles {
+				if dpapiBrowserMatchesConfigured(configuredBrowserType, p.Browser) {
+					filtered = append(filtered, p)
+					continue
+				}
+				if logger != nil {
+					logger.Debug("DPAPI fallback: skipping profile — does not match configured browser",
+						"browser", p.Browser, "profile", p.Name, "configured", configuredBrowserType)
+				}
+			}
+			if len(filtered) == 0 {
+				return "", fmt.Errorf("DPAPI fallback: configured browser %q has no profiles under LOCALAPPDATA (found: %s)",
+					configuredBrowserType, dpapiBrowsersFound(allProfiles))
+			}
+			profiles = filtered
 		}
-		if len(filtered) == 0 {
-			return "", fmt.Errorf("DPAPI fallback: configured browser %q has no profiles under LOCALAPPDATA (found: %s)",
-				configuredBrowserType, dpapiBrowsersFound(allProfiles))
-		}
-		profiles = filtered
 	}
 
 	type candidate struct {
@@ -284,6 +356,66 @@ func dpapiExtractAsNetscape(logger interface {
 	lines = append(lines, "")
 	lines = append(lines, filtered...)
 	return strings.Join(lines, "\n") + "\n", nil
+}
+
+// LogDpapiProfileDirVerdict says once, at boot, what cookies.dpapi_profile_dir
+// will do. It is the ONLY check on that setting before a pass runs, and it is
+// a Warn — never a boot failure.
+//
+// config.Validate checks the path's SHAPE alone (no ".." traversal) and never
+// its existence, because a container writes its config.toml before the volume
+// that holds the profile is mounted, and a Validate that stat'd the path would
+// fail the save that configures it. That leaves every structural fact a
+// RUNTIME one, which without this line first surfaces at the next failed
+// refresh — long after the operator typed the path and moved on.
+//
+// This reads DpapiProfileDir() for a MESSAGE only. The pass asks again, so a
+// config hot-reload still changes the directory the next pass uses with no
+// restart; nothing here is cached.
+//
+// THREE ways the setting can be inert, and each gets its own sentence, in the
+// order of how fundamental the obstacle is: the host has no DPAPI at all; the
+// fallback that would read the directory is switched off; the directory itself
+// is unusable. The middle one is the likeliest of all — cookies.dpapi_fallback
+// defaults to FALSE, so an operator who sets only this key gets a clean boot
+// and a directory nothing ever consults. That is exactly the silence the
+// off-Windows arm exists to break.
+//
+// CALL ORDER MATTERS: s.DpapiFallback is mirrored from the config by
+// cmd/moombox AFTER the service is built, so this must be called after that
+// assignment or the middle arm reads the zero value and warns on every boot.
+// TestDpapiProfileDirVerdictIsLoggedAfterTheFallbackFlagIsMirrored pins it.
+//
+// Silent when the key is unset, and silent when the directory is usable.
+// Called from cmd/moombox beside LogProfileDirVerdict.
+func (s *AutoCookieService) LogDpapiProfileDirVerdict() {
+	if s.DpapiProfileDir == nil || s.logger == nil {
+		return
+	}
+	dir := s.DpapiProfileDir()
+	if dir == "" {
+		return
+	}
+	if !isWindows() {
+		// Accepted and ignored, out loud. The key is not rejected off Windows
+		// — one config.toml is shared between hosts, and refusing it would
+		// break the save on the Linux one — but a setting that is silently
+		// inert reads as a broken setting.
+		s.logger.Warn("cookies.dpapi_profile_dir is set, but the DPAPI fallback is Windows-only; "+
+			"the directory is accepted and ignored on this host",
+			"dir", dir)
+		return
+	}
+	if !s.DpapiFallback {
+		s.logger.Warn("cookies.dpapi_profile_dir is set, but cookies.dpapi_fallback is off; "+
+			"the directory will never be read — set dpapi_fallback = true to use it",
+			"dir", dir)
+		return
+	}
+	if err := dpapi.ValidateProfileDir(dir); err != nil {
+		s.logger.Warn("cookies.dpapi_profile_dir is not usable as written; the DPAPI fallback will refuse it",
+			"err", err)
+	}
 }
 
 // DpapiChromiumFamilyValue is the browser_type value the Web UI's

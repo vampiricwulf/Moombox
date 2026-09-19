@@ -241,6 +241,12 @@ func SendTest(url string) error {
 // buildTargets converts the configured notification list into live targets,
 // warn-skipping invalid URLs (with secrets redacted) and warning on
 // unknown event-filter entries. Shared by NewManager and Reload.
+//
+// Duplicates collapse on the RESOLVED webhook URL. parseTarget normalises
+// discord://ID/TOKEN and the full https://discord.com/api/webhooks/ID/TOKEN
+// form to the same DiscordWebhook.URL, so the two spellings of one webhook —
+// and a hand-edited literal duplicate — are ONE destination that used to build
+// two targets and post every embed twice.
 func buildTargets(cfg *config.MoomboxConfig, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -248,6 +254,11 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 	Error(msg string, args ...any)
 }) []notificationTarget {
 	var targets []notificationTarget
+	// resolved webhook URL -> index into targets. Discord is the only sender
+	// today, so every built target has a key; a future sender without one
+	// simply never dedupes rather than colliding on "".
+	seen := make(map[string]int, len(cfg.Notifications))
+	collapsed := 0
 	for _, nc := range cfg.Notifications {
 		url := nc.URL
 		if url == "" {
@@ -288,10 +299,47 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			}
 		}
 
+		// Dedupe on the RESOLVED webhook URL, not the configured string: the
+		// two spellings of one webhook differ as text and resolve to the same
+		// destination. The FIRST occurrence wins — its sender and its slot in
+		// the ordered list are what survive.
+		key := ""
+		if d, ok := s.(*DiscordWebhook); ok {
+			key = d.URL
+		}
+		if key != "" {
+			if idx, dup := seen[key]; dup {
+				collapsed++
+				// UNION the one per-target option, with a nil filter winning
+				// outright. nil means "every event", so a webhook listed once
+				// unfiltered and once filtered keeps the wider subscription the
+				// operator configured; narrowing it would silently drop alerts
+				// the config asked for.
+				switch {
+				case targets[idx].events == nil || events == nil:
+					targets[idx].events = nil
+				default:
+					for e := range events {
+						targets[idx].events[e] = true
+					}
+				}
+				continue
+			}
+			seen[key] = len(targets)
+		}
+
 		targets = append(targets, notificationTarget{
 			sender: s,
 			events: events,
 		})
+	}
+	// One line per config load, carrying the COUNT and nothing else. The
+	// webhook path IS the credential, and even the redacted scheme://host form
+	// is the same string for every Discord webhook — it would name nothing
+	// while inviting a later edit to log the real URL "just this once".
+	if collapsed > 0 {
+		logger.Info("collapsed duplicate notification targets — a webhook listed more than once posts once",
+			"duplicates", collapsed, "targets", len(targets))
 	}
 	return targets
 }

@@ -380,6 +380,50 @@ func logConfigSource(log interface {
 		slog.String("path", storePath))
 }
 
+// archiveSlotsResolver builds the per-channel archive-slots resolver the
+// backlog scheduler consults on every admission sweep (spec §10): "how many
+// backlog downloads may channel X run". The per-channel archive_slots override
+// falls back to monitors.archive_slots, and the config store is re-read on
+// every call so config edits take effect without a restart — channels are few,
+// the scan is cheap.
+//
+// A DISABLED channel gets 0, by owner decision O-J: disabling PAUSES the
+// channel's queued backlog. Every discovery path already reads disabling that
+// way (the three monitors skip the channel, and internal/monitor/backfill.go
+// keeps it in `active` while never scanning it, calling that "a pause, not a
+// removal"), while this resolver kept handing out slots — so the scheduler went
+// on admitting Queued rows M at a time for a channel the operator had just
+// switched off. In-flight jobs are untouched: they have already left Queued, and
+// the count this feeds is an admission budget, not a kill switch.
+//
+// A channel with NO config entry still gets the global default. That is a
+// removed channel with leftover Queued rows, and returning 0 for it would
+// strand them with no path out of Queued at all — the opposite failure to the
+// one O-J fixes.
+func archiveSlotsResolver(store *config.Store) func(channelID string) int {
+	return func(channelID string) int {
+		slots := 0
+		store.Read(func(c *config.MoomboxConfig) {
+			slots = c.Monitors.ArchiveSlots
+			for i := range c.Channels {
+				ch := &c.Channels[i]
+				if ch.ID != channelID {
+					continue
+				}
+				if !ch.IsEnabled() {
+					slots = 0
+					return
+				}
+				if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
+					slots = *ch.ArchiveSlots
+				}
+				return
+			}
+		})
+		return slots
+	}
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -795,29 +839,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	})
 	s.dlWorker = dlWorker
 
-	// Archive-slots resolver (spec §10): the backlog scheduler asks "how many
-	// backlog downloads may channel X run" on every admission sweep. The
-	// per-channel archive_slots override falls back to monitors.archive_slots,
-	// and the config store is re-read on every call so config edits take
-	// effect without restart — channels are few, the scan is cheap. A channel
-	// with no config entry (a removed channel with leftover Queued rows) gets
-	// the global default.
-	dlWorker.SetArchiveSlotsResolver(func(channelID string) int {
-		slots := 0
-		s.configStore.Read(func(c *config.MoomboxConfig) {
-			slots = c.Monitors.ArchiveSlots
-			for i := range c.Channels {
-				ch := &c.Channels[i]
-				if ch.ID == channelID {
-					if ch.ArchiveSlots != nil && *ch.ArchiveSlots > 0 {
-						slots = *ch.ArchiveSlots
-					}
-					break
-				}
-			}
-		})
-		return slots
-	})
+	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
 
 	// =========================================================================
 	// 11. Trim service
@@ -1105,6 +1127,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 		})
 		return mode
 	}
+	// cookies.dpapi_profile_dir, read LIVE. Same shape and same reason as
+	// AcquisitionMode above: a snapshot here would make the setting
+	// restart-required with nothing in either UI saying so, and the directory
+	// is consulted once per pass, so there is nothing to cache.
+	autoCookieSvc.DpapiProfileDir = func() string {
+		var dir string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			dir = c.Cookies.DpapiProfileDir
+		})
+		return dir
+	}
 	// The launch guard's verdict, said once, at the level the mode earns.
 	//
 	// HERE and not in the constructor, and the ORDER is the whole point: the
@@ -1209,6 +1242,22 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.configStore.Read(func(c *config.MoomboxConfig) {
 		autoCookieSvc.DpapiFallback = c.Cookies.DpapiFallback
 	})
+
+	// The other configured-directory verdict, and the ORDER is the whole point:
+	// it must come after the DpapiFallback mirror directly above, because one
+	// of its three arms fires when cookies.dpapi_profile_dir is set while
+	// cookies.dpapi_fallback is off — the likeliest misconfiguration there is,
+	// that flag defaulting to false. Hoisted above this block it would read the
+	// zero value and warn on every boot;
+	// TestDpapiProfileDirVerdictIsLoggedAfterTheFallbackFlagIsMirrored fails if
+	// it moves. It reads DpapiProfileDir() for the message only — the pass asks
+	// again, so the key stays live.
+	//
+	// A Warn, never a boot failure: config.Validate checks that path's shape
+	// and never its existence, so without this line a typo (or a directory
+	// nothing will read) first surfaces at the next failed refresh. Silent
+	// unless the key is set AND something makes it inert.
+	autoCookieSvc.LogDpapiProfileDirVerdict()
 
 	// Wire the account fingerprint the worker records on a membership park, so
 	// the credential sweep can later tell whether the account actually changed.

@@ -41,10 +41,14 @@ import (
 //     defer must build its context from a ROOT (kills the second), and
 //     `req.Context` must not appear inside the defer at all (kills the third,
 //     which satisfies both of the others).
-//   - drop the Flush: jsonResponse writes into net/http's bufio writer and does
-//     not flush, and the handler does not return until the defer completes — so
-//     the browser waits out the whole re-check on a request it has already been
-//     answered for, and a fetch with a timeout aborts an import that succeeded.
+//   - drop the Flush: the sized writers write into net/http's bufio writer and
+//     do not flush it, and the handler does not return until the defer
+//     completes — so the answer sits in that buffer for the whole re-check.
+//     Since O-L the Content-Length is the half that makes the body
+//     self-terminating and this Flush is the half that makes it PROMPT; the
+//     length without the flush still leaves the bytes in the buffer, so both
+//     are load-bearing and each has its own assertion (the length's lives in
+//     TestCookieWritersSetContentLength).
 //   - drop the `!result.Wrote` guard: a rejected paste spends a full in-process
 //     re-check, two validate round-trips, on a file nobody touched.
 func TestCookieImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
@@ -131,9 +135,10 @@ func TestCookieImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
 			"validate round-trips on a file nobody touched")
 	}
 	if !callsFlush {
-		t.Error("the deferred re-check does not Flush before running. jsonResponse writes into a " +
-			"bufio writer that is not flushed and the handler does not return until this defer " +
-			"completes, so the client waits out the whole re-check")
+		t.Error("the deferred re-check does not Flush before running. jsonResponseSized writes into " +
+			"a bufio writer that it does not flush and the handler does not return until this defer " +
+			"completes, so the answer sits in that buffer for the whole re-check — the " +
+			"Content-Length it sets makes the body self-terminating, not prompt")
 	}
 	if !passesAnIdent {
 		t.Error("CheckNow is called with an expression rather than a context identifier — if that is " +
@@ -243,9 +248,18 @@ func unwritableCaseClause(block *ast.BlockStmt) *ast.CaseClause {
 }
 
 // caseAnswersWithStatus reports whether the case clause's body calls
-// jsonError(rw, <anything>, http.<statusName>) — the third argument is the
-// status code and must be that exact selector, not merely a call to jsonError
+// jsonErrorSized(rw, <anything>, http.<statusName>) — the third argument is the
+// status code and must be that exact selector, not merely a call to the writer
 // at all (which would pass a mutation that changed only the status).
+//
+// jsonErrorSized, not jsonError: since COOKIES-4 / owner decision O-L both
+// re-check handlers answer through the sized writers, because the unsized ones
+// set no Content-Length and net/http then holds the chunked body until the
+// handler returns — after the re-check. Matching the old name here would make
+// this test silently vacuous rather than red, which is why the name is the
+// contract and is asserted rather than inferred (see
+// TestBothRecheckHandlersAnswerThroughTheSizedWriters, which is what actually
+// polices the writer choice).
 func caseAnswersWithStatus(cc *ast.CaseClause, statusName string) bool {
 	found := false
 	for _, stmt := range cc.Body {
@@ -258,7 +272,7 @@ func caseAnswersWithStatus(cc *ast.CaseClause, statusName string) bool {
 				return true
 			}
 			fn, ok := call.Fun.(*ast.Ident)
-			if !ok || fn.Name != "jsonError" || len(call.Args) != 3 {
+			if !ok || fn.Name != "jsonErrorSized" || len(call.Args) != 3 {
 				return true
 			}
 			sel, ok := call.Args[2].(*ast.SelectorExpr)

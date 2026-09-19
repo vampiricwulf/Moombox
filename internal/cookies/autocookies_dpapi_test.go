@@ -1,7 +1,14 @@
 package cookies
 
 import (
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +27,7 @@ type dpapiTestLogger struct {
 	debugs []string
 	infos  []string
 	warns  []string
+	errors []string
 }
 
 func (l *dpapiTestLogger) format(msg string, args ...any) string {
@@ -148,7 +156,7 @@ func TestDpapiExtractChoosesHigherScoringProfile(t *testing.T) {
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "")
+	out, err := dpapiExtractAsNetscape(log, "", "")
 	if err != nil {
 		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
 	}
@@ -197,7 +205,7 @@ func TestDpapiExtractChoosesHigherScoringProfileRegardlessOfScanOrder(t *testing
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "")
+	out, err := dpapiExtractAsNetscape(log, "", "")
 	if err != nil {
 		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
 	}
@@ -236,7 +244,7 @@ func TestDpapiExtractConfiguredBrowserFilterOverridesScore(t *testing.T) {
 	log := &dpapiTestLogger{}
 
 	// "edge" matches only dpapiProfileB (dpapiProfileA is "chrome").
-	out, err := dpapiExtractAsNetscape(log, "edge")
+	out, err := dpapiExtractAsNetscape(log, "edge", "")
 	if err != nil {
 		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
 	}
@@ -279,7 +287,7 @@ func TestDpapiExtractConfiguredBrowserFilterMatchesChannelSiblings(t *testing.T)
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "edge")
+	out, err := dpapiExtractAsNetscape(log, "edge", "")
 	if err != nil {
 		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
 	}
@@ -312,7 +320,7 @@ func TestDpapiExtractChromeMeansWholeChromiumFamily(t *testing.T) {
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "chrome")
+	out, err := dpapiExtractAsNetscape(log, "chrome", "")
 	if err != nil {
 		t.Fatalf(`dpapiExtractAsNetscape(_, "chrome") = %v, want nil error on a Brave-only machine`, err)
 	}
@@ -336,7 +344,7 @@ func TestDpapiExtractChromeMeansWholeChromiumFamilyScoresAcrossIt(t *testing.T) 
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "chrome")
+	out, err := dpapiExtractAsNetscape(log, "chrome", "")
 	if err != nil {
 		t.Fatalf(`dpapiExtractAsNetscape(_, "chrome") = %v, want nil error`, err)
 	}
@@ -364,7 +372,7 @@ func TestDpapiExtractPerBrowserValueStillNarrowsDespiteLowerScore(t *testing.T) 
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "brave")
+	out, err := dpapiExtractAsNetscape(log, "brave", "")
 	if err != nil {
 		t.Fatalf(`dpapiExtractAsNetscape(_, "brave") = %v, want nil error`, err)
 	}
@@ -395,7 +403,7 @@ func TestDpapiExtractUnknownDpapiLayoutFallsBackToUnfiltered(t *testing.T) {
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "opera")
+	out, err := dpapiExtractAsNetscape(log, "opera", "")
 	if err != nil {
 		t.Fatalf(`dpapiExtractAsNetscape(_, "opera") = %v, want nil error (unfiltered fallback)`, err)
 	}
@@ -421,7 +429,7 @@ func TestDpapiExtractTieLogsBothProfilesAndFirstWins(t *testing.T) {
 	)
 	log := &dpapiTestLogger{}
 
-	out, err := dpapiExtractAsNetscape(log, "")
+	out, err := dpapiExtractAsNetscape(log, "", "")
 	if err != nil {
 		t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
 	}
@@ -450,7 +458,7 @@ func TestDpapiExtractNoProfilesForConfiguredBrowser(t *testing.T) {
 	)
 	log := &dpapiTestLogger{}
 
-	_, err := dpapiExtractAsNetscape(log, "brave")
+	_, err := dpapiExtractAsNetscape(log, "brave", "")
 	if err == nil {
 		t.Fatal("dpapiExtractAsNetscape = nil error, want an error naming the configured browser has no profiles")
 	}
@@ -597,5 +605,525 @@ func TestBrowserOverrideConfigured(t *testing.T) {
 				t.Errorf("browserOverrideConfigured(%q, %q) = %v, want %v", tc.path, tc.btype, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- COOKIES-7: cookies.dpapi_profile_dir ---
+
+// Error completes dpapiTestLogger's logger interface so it can stand in for an
+// AutoCookieService's own logger (which needs all four levels), not just for
+// the three-level interface dpapiExtractAsNetscape takes.
+func (l *dpapiTestLogger) Error(msg string, args ...any) {
+	l.errors = append(l.errors, l.format(msg, args...))
+}
+
+// mkDpapiProfileDir builds a throwaway Chromium PROFILE directory shaped the
+// way dpapi.ValidateProfileDir insists on: "Local State" one level up, and a
+// "Cookies" store inside. The bytes are irrelevant — no test here opens the
+// store, the dpapiReadChromeCookiesStats seam answers for it — only the SHAPE
+// matters, and it has to be a real directory because validation stats it.
+func mkDpapiProfileDir(t *testing.T) string {
+	t.Helper()
+	userData := filepath.Join(t.TempDir(), "User Data")
+	profile := filepath.Join(userData, "Default")
+	if err := os.MkdirAll(profile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userData, "Local State"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "Cookies"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return profile
+}
+
+// dpapiSeamCalls records what each dpapi seam was ASKED, which is the whole
+// assertion for COOKIES-7's routing: "discovery did not run" is not visible in
+// the returned cookies, only in whether the seam was called at all.
+type dpapiSeamCalls struct {
+	discovered bool
+	readPaths  []string
+}
+
+// stubDpapiSeamsRecording is stubDpapiProfiles' recording cousin: same forced
+// Windows GOOS, but discovery answers with one profile AND records that it was
+// consulted, and the read records every path handed to it.
+func stubDpapiSeamsRecording(t *testing.T) *dpapiSeamCalls {
+	t.Helper()
+	realGOOS := runtimeGOOS
+	runtimeGOOS = func() string { return "windows" }
+	prevFind, prevRead := dpapiFindBrowserProfiles, dpapiReadChromeCookiesStats
+	calls := &dpapiSeamCalls{}
+	dpapiFindBrowserProfiles = func() []dpapi.BrowserProfile {
+		calls.discovered = true
+		return []dpapi.BrowserProfile{dpapiProfileA}
+	}
+	dpapiReadChromeCookiesStats = func(profilePath, originFilter string) ([]dpapi.ChromeCookie, dpapi.ChromeReadStats, error) {
+		calls.readPaths = append(calls.readPaths, profilePath)
+		rows := dpapiFullYouTubeSet("X")
+		return rows, dpapi.ChromeReadStats{Rows: len(rows), Decrypted: len(rows)}, nil
+	}
+	t.Cleanup(func() {
+		runtimeGOOS = realGOOS
+		dpapiFindBrowserProfiles, dpapiReadChromeCookiesStats = prevFind, prevRead
+	})
+	return calls
+}
+
+// TestDpapiExplicitProfileDirTakesPrecedence is COOKIES-7's routing half. The
+// discovery walk knows eleven fixed %LOCALAPPDATA% layouts, so a portable
+// Chromium, a --user-data-dir profile or Opera is invisible to it — and the
+// pass answered "no Chromium-family profiles found under LOCALAPPDATA" even
+// when browser_path named the binary. An explicit directory must SKIP the walk
+// entirely, not be appended to it: the operator naming a directory is a
+// stronger statement than a scoring pass over whatever else is installed.
+//
+// Mutants:
+//   - append instead of replacing -> the discovery seam is still called.
+//   - skip dpapi.ValidateProfileDir -> the bad-directory subtest's error no
+//     longer names the directory, and the operator gets "no cookies came out".
+//   - fall back to discovery when validation fails -> the bad-directory
+//     subtest sees the discovery seam called.
+func TestDpapiExplicitProfileDirTakesPrecedence(t *testing.T) {
+	t.Run("a valid directory replaces discovery", func(t *testing.T) {
+		calls := stubDpapiSeamsRecording(t)
+		dir := mkDpapiProfileDir(t)
+		log := &dpapiTestLogger{}
+
+		out, err := dpapiExtractAsNetscape(log, "", dir)
+		if err != nil {
+			t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
+		}
+		if calls.discovered {
+			t.Error("dpapiFindBrowserProfiles was called — the configured directory must REPLACE the " +
+				"discovery walk, not be appended to it and scored against whatever else is installed")
+		}
+		if len(calls.readPaths) != 1 || calls.readPaths[0] != dir {
+			t.Errorf("read paths = %v, want exactly [%q]", calls.readPaths, dir)
+		}
+		if !strings.Contains(out, "X-SAPISID") {
+			t.Errorf("the configured profile's rows are missing from the output:\n%s", out)
+		}
+		if !dpapiLinesContain(log.debugs, "configured profile directory", dir) {
+			t.Errorf("expected a Debug line naming the configured directory; debugs=%v", log.debugs)
+		}
+	})
+
+	t.Run("an invalid directory is an error, never a fall-back to discovery", func(t *testing.T) {
+		calls := stubDpapiSeamsRecording(t)
+		missing := filepath.Join(t.TempDir(), "Default")
+		log := &dpapiTestLogger{}
+
+		if _, err := dpapiExtractAsNetscape(log, "", missing); err == nil {
+			t.Fatal("dpapiExtractAsNetscape = nil error for a directory that does not exist")
+		} else if !strings.Contains(err.Error(), missing) {
+			t.Errorf("error must name the directory the operator configured, got: %v", err)
+		}
+		if calls.discovered {
+			t.Error("discovery ran after the configured directory was refused — the operator would be " +
+				"told \"no profiles found under LOCALAPPDATA\" about a setting they had just written, " +
+				"which is the exact confusion this setting exists to remove")
+		}
+		if len(calls.readPaths) != 0 {
+			t.Errorf("nothing may be read after validation fails; read paths = %v", calls.readPaths)
+		}
+	})
+
+	t.Run("an empty directory leaves discovery exactly as it was", func(t *testing.T) {
+		calls := stubDpapiSeamsRecording(t)
+
+		if _, err := dpapiExtractAsNetscape(&dpapiTestLogger{}, "", ""); err != nil {
+			t.Fatalf("dpapiExtractAsNetscape = %v, want nil error", err)
+		}
+		if !calls.discovered {
+			t.Error("discovery must still run when no directory is configured")
+		}
+		if len(calls.readPaths) != 1 || calls.readPaths[0] != dpapiProfileA.Path {
+			t.Errorf("read paths = %v, want exactly [%q]", calls.readPaths, dpapiProfileA.Path)
+		}
+	})
+}
+
+// TestDpapiExplicitProfileDirAcceptsWhatDiscoveryCannotSee is I-1's pin, and it
+// is the feature's motivating case finally having a test.
+//
+// The first shipping version ran the LAUNCH-boundary deny-list
+// (dangerousProfilePathSubstrings) over the explicitly configured directory.
+// That list exists so the headless refresh never LAUNCHES a browser against a
+// real user profile; cookies.dpapi_profile_dir is a READ location — the value
+// reaches a log sentence and a mode=ro SQLite open, and nothing else (pinned by
+// TestDpapiProfileDirNeverReachesALaunch below). Applying it here bought
+// nothing — discovery walks and reads the same real profiles with no deny-list
+// at all — and refused exactly the three profiles the key was built for: a
+// portable Chromium under a `Chromium\User Data` path, and any Opera, whose
+// standard and portable locations both match `/opera software/opera stable`.
+//
+// Mutant: re-apply the deny-list to the explicit directory (call
+// validateBrowserProfileDirForLaunch, or any equivalent, before the read) ->
+// both subtests fail, and the operator's only escape is to rename their
+// directory.
+func TestDpapiExplicitProfileDirAcceptsWhatDiscoveryCannotSee(t *testing.T) {
+	t.Run("a portable Chromium", func(t *testing.T) {
+		calls := stubDpapiSeamsRecording(t)
+		// …/Chromium/User Data/Default — matches the deny-list's
+		// `/chromium/user data` entry, and is NOT under %LOCALAPPDATA%, so the
+		// discovery walk cannot see it either. This is COOKIES-7 case one.
+		userData := filepath.Join(t.TempDir(), "Chromium", "User Data")
+		dir := filepath.Join(userData, "Default")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userData, "Local State"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "Cookies"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := dpapiExtractAsNetscape(&dpapiTestLogger{}, "", dir); err != nil {
+			t.Fatalf("dpapiExtractAsNetscape = %v, want nil — a portable Chromium is the case this key exists for", err)
+		}
+		if len(calls.readPaths) != 1 || calls.readPaths[0] != dir {
+			t.Errorf("read paths = %v, want exactly [%q]", calls.readPaths, dir)
+		}
+	})
+
+	t.Run("a portable Opera", func(t *testing.T) {
+		calls := stubDpapiSeamsRecording(t)
+		// …/Opera Software/Opera Stable — matches the deny-list's
+		// `/opera software/opera stable` entry, and has its Local State INSIDE
+		// (I-2). Opera is COOKIES-7 case three, and it needs both fixes.
+		dir := filepath.Join(t.TempDir(), "Opera Software", "Opera Stable")
+		if err := os.MkdirAll(filepath.Join(dir, "Network"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, rel := range []string{"Local State", filepath.Join("Network", "Cookies")} {
+			if err := os.WriteFile(filepath.Join(dir, rel), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if _, err := dpapiExtractAsNetscape(&dpapiTestLogger{}, "opera", dir); err != nil {
+			t.Fatalf("dpapiExtractAsNetscape = %v, want nil for Opera's layout", err)
+		}
+		if len(calls.readPaths) != 1 || calls.readPaths[0] != dir {
+			t.Errorf("read paths = %v, want exactly [%q]", calls.readPaths, dir)
+		}
+	})
+}
+
+// TestDpapiProfileDirNeverReachesALaunch is the structural half of I-1: the
+// REASON the launch deny-list does not apply here is that this value never
+// reaches a launch, and that is a property of the code, not of a comment.
+//
+// It taints every identifier assigned from something mentioning
+// DpapiProfileDir and then records which functions those tainted values are
+// passed to, over every non-test .go file in internal/cookies and cmd/moombox.
+// The allowed set below IS the consumer trace: a log sentence, the structural
+// validator, and the read. Anything else — the refresh launcher, StartSetup,
+// exec.Command, validateBrowserProfileDirForLaunch — means the value crossed
+// the launch boundary and the deny-list question is open again.
+//
+// Mutants:
+//   - pass the directory to validateBrowserProfileDirForLaunch (or to any
+//     launcher/exec call) -> the new callee is not in the allowlist and this
+//     fails, naming it.
+//   - pass it INSIDE an expression — `exec.Command(bin, "--user-data-dir="+dir)`
+//     is the real shape — -> taintedCallees walks each argument's whole subtree
+//     for a tainted identifier, so the concatenation is caught too. Matching a
+//     bare *ast.Ident only, which is what this did until the Arc M close
+//     review, let that shape through silently, and it is the ONE shape a
+//     Chromium launch actually takes.
+func TestDpapiProfileDirNeverReachesALaunch(t *testing.T) {
+	// Every function a value derived from DpapiProfileDir may legitimately be
+	// handed to. Keep this list SHORT and argue for every addition.
+	allowed := map[string]string{
+		"dpapiExtractAsNetscape":   "the DPAPI read itself — mode=ro, launches nothing",
+		"dpapi.ValidateProfileDir": "the structural check on the directory",
+		"s.logger.Warn":            "the boot verdict's message",
+		"fmt.Errorf":               "wrapping the directory into an error string",
+		"filepath.Base":            "the profile NAME for the log line",
+		"filepath.Join":            "building a path under the directory",
+		"logger.Debug":             "the \"using the configured profile directory\" line",
+		"configStore.Read":         "reading the config that holds it",
+		"s.configStore.Read":       "reading the config that holds it",
+	}
+
+	root := moduleRoot(t)
+	var offenders []string
+	for _, dir := range []string{
+		filepath.Join(root, "internal", "cookies"),
+		filepath.Join(root, "cmd", "moombox"),
+	} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", path, err)
+			}
+			for _, callee := range taintedCallees(fset, file, "DpapiProfileDir") {
+				if _, ok := allowed[callee]; !ok {
+					offenders = append(offenders, name+": "+callee)
+				}
+			}
+		}
+	}
+	if len(offenders) > 0 {
+		t.Errorf("cookies.dpapi_profile_dir is passed to %v — it is a READ location, and the launch-boundary "+
+			"deny-list (dangerousProfilePathSubstrings) is deliberately NOT applied to it. Either revert the "+
+			"new consumer or re-open I-1", offenders)
+	}
+}
+
+// moduleRoot walks up from the test's working directory to the directory
+// holding go.mod, so this test can read files in a sibling package without
+// importing it.
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the test's working directory")
+		}
+		dir = parent
+	}
+}
+
+// taintedCallees returns the printed name of every function that is handed an
+// expression mentioning `field`, or a local identifier assigned from one.
+//
+// One hop of taint is enough here and deliberately so: the real flows are
+// `dir := s.DpapiProfileDir()` and `explicitProfileDir = s.DpapiProfileDir()`,
+// and a second hop would start reporting the whole program. A future consumer
+// that laundered the value through two variables to get past this would be
+// doing so on purpose, which is a different conversation.
+func taintedCallees(fset *token.FileSet, file *ast.File, field string) []string {
+	render := func(n ast.Node) string {
+		var b bytes.Buffer
+		if err := printer.Fprint(&b, fset, n); err != nil {
+			return ""
+		}
+		return b.String()
+	}
+
+	var out []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		tainted := map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for i, rhs := range assign.Rhs {
+				if i >= len(assign.Lhs) || !strings.Contains(render(rhs), field) {
+					continue
+				}
+				// A field ASSIGNMENT (autoCookieSvc.DpapiProfileDir = …) is
+				// the wiring, not a consumer; only plain locals are tainted.
+				if id, ok := assign.Lhs[i].(*ast.Ident); ok {
+					tainted[id.Name] = true
+				}
+			}
+			return true
+		})
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			for _, arg := range call.Args {
+				hit := strings.Contains(render(arg), field)
+				if !hit {
+					// The whole ARGUMENT EXPRESSION, not just a bare
+					// identifier: `"--user-data-dir="+dir` is how a directory
+					// actually reaches a launcher, and a check that only
+					// matched `dir` on its own let exactly that shape past.
+					// Same for `[]string{"--profile", dir}`, `&opts{Dir: dir}`
+					// and `filepath.Join(dir, x)` handed straight on.
+					ast.Inspect(arg, func(n ast.Node) bool {
+						if id, ok := n.(*ast.Ident); ok && tainted[id.Name] {
+							hit = true
+							return false
+						}
+						return !hit
+					})
+				}
+				if hit {
+					out = append(out, render(call.Fun))
+					break
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// TestLogDpapiProfileDirVerdict is the boot-time half of COOKIES-7 and the
+// ONLY place the setting is checked before a pass runs. It is a Warn and never
+// a boot failure: config.Validate checks the path's SHAPE alone and never its
+// existence, because a container writes its config.toml before the volume that
+// holds the profile is mounted.
+//
+// Mutants:
+//   - stay silent off Windows -> "off Windows the key is accepted and ignored"
+//     fails; a Linux operator's setting is accepted and then inert with
+//     nothing saying so.
+//   - make an unusable directory an ERROR (or a boot failure) -> "an unusable
+//     directory warns and does not fail the boot" fails.
+//   - warn unconditionally -> "unset is silent" and "a usable directory is
+//     silent" fail.
+//   - drop the dpapi_fallback arm -> "the key is set but dpapi_fallback is off"
+//     fails, and the operator in the DEFAULT configuration is told nothing at
+//     all (I-3).
+func TestLogDpapiProfileDirVerdict(t *testing.T) {
+	forceGOOS := func(t *testing.T, goos string) {
+		t.Helper()
+		real := runtimeGOOS
+		runtimeGOOS = func() string { return goos }
+		t.Cleanup(func() { runtimeGOOS = real })
+	}
+	// DpapiFallback true throughout except in the subtest that is about it:
+	// the flag is what decides whether the directory is ever read, so a
+	// service built without it would make every other arm unreachable.
+	svc := func(log *dpapiTestLogger, dir string) *AutoCookieService {
+		return &AutoCookieService{
+			logger:          log,
+			DpapiProfileDir: func() string { return dir },
+			DpapiFallback:   true,
+		}
+	}
+
+	t.Run("unset is silent", func(t *testing.T) {
+		forceGOOS(t, "windows")
+		log := &dpapiTestLogger{}
+		svc(log, "").LogDpapiProfileDirVerdict()
+		if len(log.warns) != 0 || len(log.errors) != 0 {
+			t.Errorf("an unset key must say nothing; warns=%v errors=%v", log.warns, log.errors)
+		}
+	})
+
+	t.Run("off Windows the key is accepted and ignored, out loud", func(t *testing.T) {
+		forceGOOS(t, "linux")
+		log := &dpapiTestLogger{}
+		dir := mkDpapiProfileDir(t)
+		svc(log, dir).LogDpapiProfileDirVerdict()
+		if !dpapiLinesContain(log.warns, "Windows-only", dir) {
+			t.Errorf("expected one Warn saying the key is ignored on this host and naming the directory; warns=%v", log.warns)
+		}
+		if len(log.errors) != 0 {
+			t.Errorf("a Windows-only setting on Linux is not an error; errors=%v", log.errors)
+		}
+	})
+
+	t.Run("an unusable directory warns and does not fail the boot", func(t *testing.T) {
+		forceGOOS(t, "windows")
+		log := &dpapiTestLogger{}
+		missing := filepath.Join(t.TempDir(), "Default")
+		svc(log, missing).LogDpapiProfileDirVerdict()
+		if !dpapiAnyContains(log.warns, missing) {
+			t.Errorf("expected one Warn naming the unusable directory; warns=%v", log.warns)
+		}
+		if len(log.errors) != 0 {
+			t.Errorf("a missing directory at boot is a Warn, not an error; errors=%v", log.errors)
+		}
+	})
+
+	t.Run("a usable directory is silent", func(t *testing.T) {
+		forceGOOS(t, "windows")
+		log := &dpapiTestLogger{}
+		svc(log, mkDpapiProfileDir(t)).LogDpapiProfileDirVerdict()
+		if len(log.warns) != 0 || len(log.errors) != 0 {
+			t.Errorf("a usable directory must say nothing; warns=%v errors=%v", log.warns, log.errors)
+		}
+	})
+
+	t.Run("the key is set but dpapi_fallback is off", func(t *testing.T) {
+		// I-3, and the likeliest misconfiguration there is:
+		// cookies.dpapi_fallback DEFAULTS TO FALSE, and the DPAPI branch in
+		// refreshCookiesDetailed is gated on it, so an operator who sets only
+		// this key gets a clean boot and a directory nothing ever reads. The
+		// Warn names BOTH keys, because naming only the broken one leaves the
+		// reader to guess which of the two to change.
+		forceGOOS(t, "windows")
+		log := &dpapiTestLogger{}
+		dir := mkDpapiProfileDir(t) // perfectly usable — the flag is the problem
+		(&AutoCookieService{
+			logger:          log,
+			DpapiProfileDir: func() string { return dir },
+			DpapiFallback:   false,
+		}).LogDpapiProfileDirVerdict()
+		if !dpapiLinesContain(log.warns, "dpapi_fallback", dir) {
+			t.Errorf("expected one Warn naming cookies.dpapi_fallback and the directory; warns=%v", log.warns)
+		}
+		if len(log.errors) != 0 {
+			t.Errorf("an unused setting is not an error; errors=%v", log.errors)
+		}
+	})
+}
+
+// TestDpapiProfileDirIsReadLivePerConsultation pins the one property that
+// keeps cookies.dpapi_profile_dir out of BOTH restart-required lists
+// (restartRequiredKeys in internal/tui/settings.go, RESTART_REQUIRED_FIELDS in
+// web/public/modules/settings.js, pinned against each other by
+// TestRestartRequiredListsAgree): the value is a closure read on EVERY
+// consultation, never a string snapshotted when the service was built.
+//
+// Mutant: snapshot at construction (a `dpapiProfileDir string` field filled in
+// by cmd/moombox, or a memoised first answer here) -> the second consultation
+// still names the OLD directory, and an operator who fixes the path in either
+// UI is told nothing changed until they restart — with no UI saying a restart
+// is needed, because the key is deliberately in neither list.
+func TestDpapiProfileDirIsReadLivePerConsultation(t *testing.T) {
+	realGOOS := runtimeGOOS
+	runtimeGOOS = func() string { return "windows" }
+	t.Cleanup(func() { runtimeGOOS = realGOOS })
+
+	before := filepath.Join(t.TempDir(), "BeforeTheEdit")
+	after := filepath.Join(t.TempDir(), "AfterTheEdit")
+	dirs := []string{before, after}
+	reads := 0
+
+	log := &dpapiTestLogger{}
+	svc := &AutoCookieService{logger: log, DpapiFallback: true, DpapiProfileDir: func() string {
+		d := dirs[min(reads, len(dirs)-1)]
+		reads++
+		return d
+	}}
+
+	svc.LogDpapiProfileDirVerdict()
+	svc.LogDpapiProfileDirVerdict()
+
+	if reads != 2 {
+		t.Errorf("DpapiProfileDir was consulted %d time(s) over two passes, want 2 — a cached answer is a "+
+			"restart-required setting with nothing saying so", reads)
+	}
+	if !dpapiAnyContains(log.warns, before) {
+		t.Errorf("the first verdict must name %q; warns=%v", before, log.warns)
+	}
+	if !dpapiAnyContains(log.warns, after) {
+		t.Errorf("the second verdict must name the edited directory %q, not the one read at construction; warns=%v",
+			after, log.warns)
 	}
 }

@@ -44,7 +44,12 @@ var dangerousProfilePathSubstrings = []string{
 	`/thunderbird/profiles`,
 	`/librewolf/profiles`,
 	// Linux: ~/.mozilla, ~/.config and the dotfile trees; snap keeps the same
-	// ~/.mozilla tree under ~/snap/firefox/common, which these still match.
+	// ~/.mozilla tree under ~/snap/firefox/common, which these still match,
+	// and snap Brave/Opera keep their ~/.config trees under
+	// ~/snap/<name>/current. Snap CHROMIUM is the one snap layout with no
+	// .config anywhere in it — ~/snap/chromium/common/chromium/<profile> — so
+	// it needs its own entry, and it is Ubuntu's DEFAULT Chromium since 20.04.
+	`/snap/chromium/common/chromium/`,
 	`/.mozilla/firefox/`,
 	`/.mozilla/firefox-esr/`,
 	`/.config/google-chrome/`,
