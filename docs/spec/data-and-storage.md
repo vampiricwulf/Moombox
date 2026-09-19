@@ -507,7 +507,7 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | ArchiveSlots | int | 3 | `archive_slots` | Valid: 1-100. Max backlog (Queued) VOD downloads per channel running at once; new/live content never waits on a slot. |
 | FeedCheckInterval | FlexDuration | 10 (minutes) | `feed_check_interval` | |
 | DecapiCheckInterval | *int | nil | `decapi_check_interval` | Seconds, valid: 15-3600 |
-| TwitchCheckInterval | *int | nil | `twitch_check_interval` | Seconds, valid: 1-3600 |
+| TwitchCheckInterval | *int | nil | `twitch_check_interval` | Seconds, valid: 5-3600 |
 | HideFinishedAgeDays | FlexDuration | 30 (days) | `hide_finished_age_days` | |
 | ProbeCooldown | FlexDuration | 0 (seconds, disabled) | `probe_cooldown` | Min seconds between re-probing the same video's metadata. 0 = every cycle re-probes; no max. |
 | MembershipDiscovery | *bool | nil (→ true) | `membership_discovery` | Members-only `/membership`-tab discovery. Absent/nil = enabled; needs YouTube auth cookies to do anything. |
@@ -663,7 +663,7 @@ Handles backward compatibility with older flat config formats. All migrations ar
 - FeedCheckInterval: min 1 minute
 - HideFinishedAgeDays: min 0
 - DecapiCheckInterval: 15-3600 seconds (or nil)
-- TwitchCheckInterval: 1-3600 seconds (or nil)
+- TwitchCheckInterval: 5-3600 seconds (or nil)
 - NumParallelDownloads: min 1
 - SegmentWorkers: min 1, no max (values above `SegmentWorkersWarnThreshold`, 16, log a startup warning instead of failing validation)
 - MaxVideoResolution: min 1

@@ -69,6 +69,26 @@ func validateDigitsOnly(s string) error {
 	return nil
 }
 
+// validateDecimal accepts a bare non-negative decimal number — digits and at
+// most one ".". The six FlexDuration-backed number fields need it: "0.5" is
+// a valid twelve-hour / thirty-second value that the config file and the Web
+// UI both accept, and validateDigitsOnly made it untypeable in the terminal
+// (CORE-7). Range and NaN/Inf checking stays in applyValues; this is only
+// the keystroke filter.
+func validateDecimal(s string) error {
+	seenDot := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r == '.' && !seenDot:
+			seenDot = true
+		default:
+			return fmt.Errorf("only digits and one decimal point allowed")
+		}
+	}
+	return nil
+}
+
 // renderInactiveInput renders a text value styled but without a cursor.
 func renderInactiveInput(value string, w int, c color.Color) string {
 	display := value
