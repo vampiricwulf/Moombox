@@ -2,7 +2,6 @@ package routes
 
 import (
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -29,27 +28,17 @@ const monitorCheckDebounce = 30 * time.Second
 // with {"success":false,"debounced":true,"retryAfterMs":N} rather than
 // re-kicking.
 func MonitorRoutes(r chi.Router, deps *MonitorRouteDeps) {
-	var lastCheckUnixNano atomic.Int64
+	debounce := newCallDebouncer(monitorCheckDebounce)
 
 	r.Post("/api/monitors/check-now", func(w http.ResponseWriter, req *http.Request) {
 		if deps.CheckNow == nil {
 			jsonError(w, "monitors unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		now := time.Now().UnixNano()
-		prev := lastCheckUnixNano.Load()
-		if prev != 0 && now-prev < int64(monitorCheckDebounce) {
-			// CAS-free read is fine: worst case two racers both see stale
-			// prev and both kick — harmless (pendingKick coalesces).
-			wait := monitorCheckDebounce - time.Duration(now-prev)
-			jsonResponse(w, map[string]any{
-				"success":      false,
-				"debounced":    true,
-				"retryAfterMs": wait.Milliseconds(),
-			})
+		if ok, wait := debounce.allow(time.Now()); !ok {
+			writeDebounced(w, wait)
 			return
 		}
-		lastCheckUnixNano.Store(now)
 		deps.CheckNow()
 		jsonResponse(w, map[string]any{"success": true})
 	})

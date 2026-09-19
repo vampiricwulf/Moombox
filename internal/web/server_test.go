@@ -5,16 +5,26 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // staticFixture mounts three assets on a real server + middleware chain.
 // RemoteAddr matters: IPGateMiddleware is in the chain and the default
-// network_access is "localhost", so a request must arrive from loopback.
+// network_access is "localhost", so a request must arrive from loopback —
+// which is true only because a route is registered below. chi builds its
+// middleware chain lazily, in handle(): with no route at all, Mux.ServeHTTP
+// short-circuits to the NotFound handler (chi mux.go:63-68) and every
+// middleware the server installs is bypassed, so a fixture without one
+// silently exercises none of them. authStaticFixture carries the same route
+// for the same reason.
 func staticFixture(t *testing.T, commit string) (*Server, fstest.MapFS) {
 	t.Helper()
 	s := NewServer(config.NewStore(config.Defaults(), ""), testWSLogger{})
@@ -28,6 +38,10 @@ func staticFixture(t *testing.T, commit string) (*Server, fstest.MapFS) {
 		"favicon.svg": {Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
 	}
 	s.MountStaticFiles(fsys)
+	s.Router().Get("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("pong"))
+	})
 	return s, fsys
 }
 
@@ -310,5 +324,201 @@ func TestRootAnswersConditionalGET(t *testing.T) {
 	}
 	if second.Body.Len() != 0 {
 		t.Fatalf("304 carried %d body bytes, want 0", second.Body.Len())
+	}
+}
+
+// TestOpenPathCommandSwitchesOnGOOS is the WEB-6 pin.
+//
+// The open-folder route hard-coded the Windows file manager by name while
+// openBrowserURL a few hundred lines away already branched on runtime.GOOS. On
+// a Linux desktop the button appears (the host is loopback), explorer is not on
+// PATH, cmd.Start() returns exec.ErrNotFound, and the route 500s — silently,
+// because the client never read response.ok.
+//
+// Nothing here is started: a real Start() would pop a window on the developer's
+// desktop, so every assertion below is structural (R3).
+//
+// THE MUTANT: return the Windows command unconditionally — on a Linux build
+// this asserts the wrong program name.
+func TestOpenPathCommandSwitchesOnGOOS(t *testing.T) {
+	cmd := OpenPathCommand("/some/dir")
+	if cmd == nil {
+		t.Fatal("OpenPathCommand returned nil")
+	}
+	want := "xdg-open"
+	switch runtime.GOOS {
+	case "windows":
+		want = "explorer.exe"
+	case "darwin":
+		want = "open"
+	}
+	if got := filepath.Base(cmd.Path); !strings.EqualFold(got, want) {
+		t.Errorf("program: want %q on %s, got %q (cmd.Path=%q) — a hard-coded file manager makes the "+
+			"dashboard's Open Folder button a no-op on Linux", want, runtime.GOOS, got, cmd.Path)
+	}
+	if len(cmd.Args) < 2 || cmd.Args[len(cmd.Args)-1] != "/some/dir" {
+		t.Errorf("args: want the target last, got %v", cmd.Args)
+	}
+}
+
+// TestOpenPathCommandIsTheSameOnBothHosts pins BOTH shapes from EITHER host.
+//
+// The test above can only assert the platform it runs on, so on this project's
+// Windows-primary desktop it cannot see the Linux half — which is the half
+// WEB-6 is about — and a Linux CI runner cannot see that the Windows behaviour
+// this change must leave byte-identical is still byte-identical. Injecting the
+// GOOS is what makes both assertable in one run.
+//
+// THE MUTANT: return the Windows command unconditionally (or drop the goos
+// parameter and read runtime.GOOS) — the linux row fails here on Windows, where
+// TestOpenPathCommandSwitchesOnGOOS alone would still pass.
+func TestOpenPathCommandIsTheSameOnBothHosts(t *testing.T) {
+	const target = `C:\Moombox\output\stream`
+
+	for _, tc := range []struct {
+		goos    string
+		program string
+	}{
+		{"windows", "explorer.exe"},
+		{"linux", "xdg-open"},
+		{"darwin", "open"},      // macOS is not a supported target, but the TUI chord folded onto this helper had an `open` arm and folding must not delete it
+		{"freebsd", "xdg-open"}, // every other target takes the freedesktop path
+	} {
+		cmd := openPathCommandFor(tc.goos, target)
+		if cmd == nil {
+			t.Fatalf("%s: openPathCommandFor returned nil", tc.goos)
+		}
+		// Args is what the child is handed and is identical on both hosts;
+		// cmd.Path additionally resolves through LookPath, which only finds
+		// the program when the test host IS that platform.
+		want := []string{tc.program, target}
+		if len(cmd.Args) != 2 || cmd.Args[0] != want[0] || cmd.Args[1] != want[1] {
+			t.Errorf("goos=%s: args %v, want %v — the Windows spawn must stay exactly what it was "+
+				"while Linux gains its own", tc.goos, cmd.Args, want)
+		}
+		if got := filepath.Base(cmd.Path); !strings.EqualFold(got, tc.program) {
+			t.Errorf("goos=%s: program %q, want %q", tc.goos, got, tc.program)
+		}
+	}
+}
+
+// TestOpenBrowserURLUsesTheSharedCommand pins that the two call sites share one
+// switch rather than carrying two copies that can drift again. Structural: a
+// real Start() would pop a window on the developer's desktop.
+//
+// THE MUTANT: openBrowserURL rebuilds its own if runtime.GOOS == "windows"
+// block — the delegation check fails, and so does the count below, because that
+// block spells the program inline.
+func TestOpenBrowserURLUsesTheSharedCommand(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	if !strings.Contains(text, "func openBrowserURL(url string) {\n\tcmd := OpenPathCommand(url)") {
+		t.Error("openBrowserURL does not delegate to OpenPathCommand — the GOOS switch has been copied " +
+			"again, which is how WEB-6 happened")
+	}
+	if n := strings.Count(text, `exec.Command("explorer`); n != 0 {
+		t.Errorf("server.go still spells explorer directly %d time(s); the only switch belongs in "+
+			"OpenPathCommand, which names the program through a variable so a second literal is "+
+			"always a second copy", n)
+	}
+
+	// The literal count above cannot see a copy written in the SHAPE this file
+	// chose — `program := "explorer.exe"` inside a second helper spells no
+	// literal next to exec.Command. Counting the spawn primitives themselves
+	// closes that: this file builds one command, starts it once, and releases
+	// one handle, all inside OpenPathCommand/StartDetached. Any second of any
+	// of them is a second copy of a rule that exists once.
+	//
+	// THE MUTANT: paste a new `program := …; exec.Command(program, target)`
+	// helper anywhere in the file, or inline Start+Release at a call site.
+	for _, c := range []struct {
+		needle string
+		want   int
+		what   string
+	}{
+		{"exec.Command(", 1, "builds a command"},
+		{"cmd.Start()", 1, "starts one"},
+		{".Process.Release()", 1, "releases a handle"},
+	} {
+		if n := strings.Count(text, c.needle); n != c.want {
+			t.Errorf("server.go %s %d time(s) (%q), want %d — the spawn rules live in exactly one "+
+				"place each, which is what WEB-6 and the Unix zombie fix both cost to learn",
+				c.what, n, c.needle, c.want)
+		}
+	}
+
+	if !strings.Contains(text, "\tcmd := OpenPathCommand(url)\n\t_ = StartDetached(cmd)\n}") {
+		t.Error("openBrowserURL does not hand its child to StartDetached — on Unix an unwaited child " +
+			"is a zombie for the life of the process")
+	}
+}
+
+// fakeChild stands in for a started child process. The two arms of
+// detachStarted are Release and Wait, and a real child here would be a file
+// manager window on the developer's desktop (R3), so the arms are recorded
+// instead of performed. Buffered so neither call can block the code under test.
+type fakeChild struct {
+	released chan struct{}
+	waited   chan struct{}
+}
+
+func newFakeChild() *fakeChild {
+	return &fakeChild{released: make(chan struct{}, 1), waited: make(chan struct{}, 1)}
+}
+
+func (f *fakeChild) Wait() error    { f.waited <- struct{}{}; return nil }
+func (f *fakeChild) Release() error { f.released <- struct{}{}; return nil }
+
+// TestDetachStartedReapsOnUnixAndReleasesOnWindows pins the halves of the
+// detach contract that are OPPOSITE on the two platforms.
+//
+// Windows: Release() hands the process HANDLE back to the kernel, which would
+// otherwise leak one per Open Folder click (audit Q-6) — and Windows has no
+// zombies, so there is nothing to reap. A Wait there would park a goroutine for
+// as long as the window stays open, on a session where explorer.exe IS the
+// shell that is forever.
+//
+// Unix: os.Process.Release closes the pidfd and never calls wait4, so a child
+// nobody Waits for stays a ZOMBIE in the process table until Moombox exits —
+// and Moombox runs for weeks. Before the Linux arm of OpenPathCommand existed,
+// the route resolved no program on Linux and no child was ever created, so this
+// only became reachable when WEB-6 was fixed.
+//
+// THE MUTANT: give the Unix arm Release() (or drop the goroutine entirely) —
+// the linux and darwin rows report nothing reaped the child.
+func TestDetachStartedReapsOnUnixAndReleasesOnWindows(t *testing.T) {
+	win := newFakeChild()
+	detachStarted("windows", win)
+	select {
+	case <-win.released:
+	default:
+		t.Error("the Windows arm did not release the process handle — one handle leaks per Open " +
+			"Folder click (audit Q-6)")
+	}
+	select {
+	case <-win.waited:
+		t.Error("the Windows arm waited for the child; that parks a goroutine for as long as the " +
+			"window is open, which is what Q-6 removed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	for _, goos := range []string{"linux", "darwin"} {
+		child := newFakeChild()
+		detachStarted(goos, child)
+		select {
+		case <-child.waited:
+		case <-time.After(5 * time.Second):
+			t.Errorf("goos=%s: nothing reaped the child — Release does not wait4 on Unix, so every "+
+				"Open Folder click leaves a zombie for the life of the process", goos)
+		}
+		select {
+		case <-child.released:
+			t.Errorf("goos=%s: the Unix arm called Release, which closes the pidfd and reaps nothing",
+				goos)
+		default:
+		}
 	}
 }

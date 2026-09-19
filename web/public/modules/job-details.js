@@ -154,8 +154,8 @@ export class JobDetailsController {
     }
 
     // Update status badge. Every write below is diffed first: this method runs
-    // on the ~60 Hz job_update path, and re-assigning an identical string still
-    // dirties layout (the pattern app.js:1382 established). Sweep T2-21.
+    // on the ~60 Hz job_progress path, and re-assigning an identical string
+    // still dirties layout (the pattern app.js established). Sweep T2-21.
     if (statusBadge) {
       const statusClass = `status ${job.status.toLowerCase().replace("?", "")}`;
       if (statusBadge.className !== statusClass) statusBadge.className = statusClass;
@@ -213,12 +213,12 @@ export class JobDetailsController {
       }
       // Update message count — text node after the badge.
       //
-      // toLocaleString is an Intl format, and this runs on every job_update
-      // (~60 Hz per active job) while the count moves once per chat flush — so
-      // the STRING is rebuilt only when the source number changes, the same
-      // way the updated row's title is gated on data-timestamp below. The last
-      // count is stashed on the field itself; dataset values are strings, so
-      // the comparison is against the String form.
+      // toLocaleString is an Intl format, and this runs on every job_progress
+      // frame (~60 Hz per active job) while the count moves once per chat
+      // flush — so the STRING is rebuilt only when the source number changes,
+      // the same way the updated row's title is gated on data-timestamp below.
+      // The last count is stashed on the field itself; dataset values are
+      // strings, so the comparison is against the String form.
       const countKey = job.totalChatMessages ? String(job.totalChatMessages) : "";
       if (chatField.dataset.chatCount !== countKey) {
         chatField.dataset.chatCount = countKey;

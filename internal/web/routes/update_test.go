@@ -1,9 +1,11 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -394,5 +396,147 @@ func TestUpdateDismissPersistsToDisk(t *testing.T) {
 	}
 	if !reloaded.Updates.AutoCheckUpdates {
 		t.Error("on-disk AutoCheckUpdates must remain true after a version-scoped dismiss")
+	}
+}
+
+// --- /api/update/check quota gate + /api/update/release-notes validation ---
+
+// TestUpdateCheckIsDebounced is the WEB-12 pin. Each call spends one of
+// GitHub's 60/h unauthenticated requests, and a held key (unauthenticated on a
+// lan install) could exhaust the quota and suppress the daily auto-check for an
+// hour — on a box whose YouTube/Twitch extractors rot without updates. The
+// SCHEDULED check is unaffected: checkAndBroadcastUpdate (cmd/moombox/helpers.go)
+// calls upd.CheckForUpdate directly and never travels this route.
+//
+// The request context is cancelled so CheckForUpdate fails before it dials:
+// deps.Updater is a concrete *updater.Updater whose API base is unexported, so
+// there is no way to point it at a test server from this package, and a real
+// network call has no place in a unit test. What matters is that the quota gate
+// stamped on the ATTEMPT — the request that spent the quota — and refused the
+// second call.
+//
+// THE MUTANT: no debounce — the second call returns 500 (another attempted
+// GitHub request) instead of a 200 debounced answer.
+func TestUpdateCheckIsDebounced(t *testing.T) {
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0-test"})
+
+	call := func() *httptest.ResponseRecorder {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // the HTTP transport returns before it dials
+		req := httptest.NewRequest("POST", "/api/update/check", nil).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if got := call().Code; got != http.StatusInternalServerError {
+		t.Fatalf("first call: want 500 from the cancelled check, got %d", got)
+	}
+
+	rec := call()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second call: want 200 with a debounced body, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["debounced"] != true {
+		t.Errorf("second call inside the window: want debounced:true, got %v — every call spends one of "+
+			"GitHub's 60/h", resp)
+	}
+	if ms, _ := resp["retryAfterMs"].(float64); ms <= 0 {
+		t.Errorf("retryAfterMs: want a positive wait, got %v", resp["retryAfterMs"])
+	}
+}
+
+// TestReleaseNotesRejectsANonVersionParam — the value is interpolated into the
+// GitHub API path (updater.FetchReleaseNotes builds
+// ".../releases/tags/v"+version) with no escaping. The host is fixed and the
+// method is GET, so this is hygiene, not a hole; validating it keeps it that
+// way. MUTANT: drop the regex — the request is made and the answer is a 502
+// from GitHub instead of a 400 from us.
+func TestReleaseNotesRejectsANonVersionParam(t *testing.T) {
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0-test"})
+
+	// "2.6.0?x=1" is the one that is not merely untidy: unvalidated, it made
+	// the route answer 200 with v2.6.0's real notes, because the `?` ended
+	// GitHub's PATH and everything after it became a query string. The others
+	// reached the network as bogus tags (502).
+	for _, bad := range []string{"../../../../users/attacker", "2.6", "latest", "2.6.0 ", "2.6.0/x", "2.6.0?x=1", "2.6.0%2f..", "v", "2.6.0.1"} {
+		req := httptest.NewRequest("GET", "/api/update/release-notes?version="+url.QueryEscape(bad), nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("version=%q: want 400, got %d — the value reaches api.github.com's path unescaped",
+				bad, rec.Code)
+		}
+	}
+}
+
+// TestReleaseNotesValidatesTheDefaultedVersionToo pins the ORDER: the regex runs
+// AFTER the "no ?version= means the running version" default, so a build whose
+// version string is malformed (this fixture's "2.6.0 beta") fails loudly here
+// instead of quietly querying a tag GitHub has never had.
+//
+// The fixture is a version the regex still refuses. It used to be "2.6.0-test",
+// which the pre-release widening (W-CW7) turned into a VALID version — and the
+// request below carries an uncancelled context, so this committed test would
+// have started dialling api.github.com. The fixture moves with the regex.
+//
+// MUTANT: validate before the default — an empty ?version= skips the check
+// entirely and the malformed running version reaches the GitHub path anyway.
+func TestReleaseNotesValidatesTheDefaultedVersionToo(t *testing.T) {
+	upd, err := updater.New("2.6.0 beta", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0 beta"})
+
+	req := httptest.NewRequest("GET", "/api/update/release-notes", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("no ?version= with a malformed running version: want 400, got %d", rec.Code)
+	}
+}
+
+// TestReleaseNotesAcceptsEveryPublishedTagShape — the regex must not reject a
+// version Moombox has actually shipped. The corpus is the real `git tag` set's
+// shapes (v2.6.4 … v2.8.8) written both with and without the leading v, since
+// the Web sends the bare version and the TUI's release-notes overlay sends the
+// tag. An accepted value must NOT 400; it goes on to fail at the network
+// (502 here, since the request context is cancelled before it dials).
+//
+// The last three rows are the pre-release shapes release.yml preserves into
+// main.version: a build tagged v2.6.0-test.1 sends its own version here, and
+// before W-CW7 it was answered "invalid version" for a tag that exists.
+//
+// MUTANT: tighten the regex to `^\d+\.\d+\.\d+$` — every tag-shaped value the
+// TUI sends starts 400ing. MUTANT: drop the `(?:-[0-9A-Za-z.-]+)?` group — the
+// three pre-release rows 400.
+func TestReleaseNotesAcceptsEveryPublishedTagShape(t *testing.T) {
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0-test"})
+
+	for _, good := range []string{"2.6.4", "v2.6.4", "2.6.30", "v2.6.32", "2.7.0", "v2.8.8", "2.8.8", "10.0.0",
+		"v2.6.0-test.1", "3.0.0-rc.1", "v3.0.0-rc1"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // never dials; a 400 here would be the regex, not the network
+		req := httptest.NewRequest("GET", "/api/update/release-notes?version="+url.QueryEscape(good), nil).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code == http.StatusBadRequest {
+			t.Errorf("version=%q: rejected as malformed, but Moombox has published that shape", good)
+		}
 	}
 }

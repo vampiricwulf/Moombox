@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -84,17 +85,86 @@ func (l *muxedListener) Close() error {
 
 func (l *muxedListener) Addr() net.Addr { return l.addr }
 
+// acceptRetryMinDelay / acceptRetryMaxDelay mirror net/http's Serve loop
+// (5 ms doubling to a 1 s ceiling). Same numbers on purpose: the sniff loop is
+// standing in for that loop on this socket, and an operator reading one should
+// not have to learn a second set of constants.
+const (
+	acceptRetryMinDelay = 5 * time.Millisecond
+	acceptRetryMaxDelay = 1 * time.Second
+)
+
+// temporaryError is net.Error's Temporary() reached through a LOCAL interface.
+//
+// net.Error.Temporary is marked Deprecated in Go 1.27, and staticcheck is a
+// hard gate here; resolving the method against this declaration keeps the call
+// deprecation-free without a lint directive. The semantics are exactly
+// net/http's: its Serve loop makes this same call to decide whether an accept
+// error is worth retrying.
+type temporaryError interface{ Temporary() bool }
+
+// isTemporaryAcceptError reports whether err is an accept failure net/http's
+// Serve loop would retry rather than return on. *net.OpError answers true for
+// accept-time ECONNRESET/ECONNABORTED and for EMFILE/ENFILE (via the wrapped
+// *os.SyscallError); a closed listener answers false, so shutdown still ends
+// the loop.
+func isTemporaryAcceptError(err error) bool {
+	var te temporaryError
+	return errors.As(err, &te) && te.Temporary()
+}
+
+// waitBeforeAcceptRetry waits out one backoff rung, reporting true when the
+// wait finished and false when cancel fired first.
+//
+// A select and not a time.Sleep on purpose: this listener is deliberately the
+// one whose Accept can keep failing, so an uncancellable wait would leave
+// shutdown holding a goroutine that wakes, fails, and sleeps again — and even
+// on a well-behaved socket it would delay Close by up to a full
+// acceptRetryMaxDelay.
+func waitBeforeAcceptRetry(d time.Duration, cancel <-chan struct{}) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-cancel:
+		return false
+	}
+}
+
 // newSchemeMux splits real's accepted connections by protocol: connections
 // whose first byte is a TLS handshake go to the first returned listener,
 // everything else to the second. The sniff happens on a per-connection
 // goroutine so a slow client can't stall the accept loop.
 func newSchemeMux(real net.Listener, logger interface {
 	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) (tlsLn, plainLn net.Listener) {
+	return newSchemeMuxWithRetryWait(real, logger, waitBeforeAcceptRetry)
+}
+
+// newSchemeMuxWithRetryWait is newSchemeMux with the accept-backoff wait
+// injected. Production always passes waitBeforeAcceptRetry; tests pass a
+// recorder so the ladder can be pinned rung by rung without spending 1.275 s
+// climbing it.
+func newSchemeMuxWithRetryWait(real net.Listener, logger interface {
+	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, waitRetry func(d time.Duration, cancel <-chan struct{}) bool) (tlsLn, plainLn net.Listener) {
 	done := make(chan struct{})
+	// closed fires on Close, done when the accept loop has actually exited.
+	// They are separate channels because the loop itself closes done — it
+	// needs a signal it does not own to cut a backoff wait short.
+	closed := make(chan struct{})
 	var closeOnce sync.Once
-	closeReal := func() { closeOnce.Do(func() { real.Close() }) }
+	closeReal := func() {
+		closeOnce.Do(func() {
+			close(closed)
+			real.Close()
+		})
+	}
 
 	tlsML := &muxedListener{conns: make(chan net.Conn), addr: real.Addr(), closeReal: closeReal, done: done}
 	plainML := &muxedListener{conns: make(chan net.Conn), addr: real.Addr(), closeReal: closeReal, done: done}
@@ -106,11 +176,38 @@ func newSchemeMux(real net.Listener, logger interface {
 			}
 		}()
 		defer close(done)
+		var retryDelay time.Duration
 		for {
 			conn, err := real.Accept()
 			if err != nil {
+				// A transient accept failure (EMFILE/ENFILE on a busy box)
+				// used to end this goroutine, close(done), and make every
+				// muxedListener.Accept answer net.ErrClosed — the dashboard
+				// stayed dead until the process restarted. net/http's own
+				// Serve loop backs off and continues instead, and so does
+				// this one (WEB-3 / O-N). A permanent error — a closed
+				// listener at shutdown — still returns immediately.
+				if isTemporaryAcceptError(err) {
+					if retryDelay == 0 {
+						retryDelay = acceptRetryMinDelay
+					} else {
+						retryDelay *= 2
+					}
+					retryDelay = min(retryDelay, acceptRetryMaxDelay)
+					// Warn, not Error: the loop recovers from this unaided,
+					// and at the 1 s ceiling a sustained EMFILE storm writes
+					// one line per second (the hub's own lagging-client line
+					// is Warn for the same reason). A permanent failure still
+					// returns below and is reported by the caller.
+					logger.Warn("scheme mux accept error; retrying", "err", err, "retryIn", retryDelay)
+					if !waitRetry(retryDelay, closed) {
+						return // Close landed mid-backoff
+					}
+					continue
+				}
 				return // listener closed (shutdown) or fatal accept error
 			}
+			retryDelay = 0
 			go func(conn net.Conn) {
 				defer func() {
 					if r := recover(); r != nil {

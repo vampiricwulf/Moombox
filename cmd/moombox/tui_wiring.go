@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/tui"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
@@ -171,17 +171,13 @@ func (s *runState) runTUI() {
 			}
 		}
 
-		// Open folder in file manager (cross-platform)
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "windows":
-			cmd = exec.Command("explorer", dir)
-		case "darwin":
-			cmd = exec.Command("open", dir)
-		default:
-			cmd = exec.Command("xdg-open", dir)
-		}
-		if err := cmd.Start(); err != nil {
+		// Open folder in file manager. The dashboard's open-folder route and
+		// this chord are the same action, so they share one switch
+		// (web.OpenPathCommand) and one detach rule (web.StartDetached:
+		// Windows releases the process handle, Unix reaps the child with Wait
+		// — this path used to do neither).
+		cmd := web.OpenPathCommand(dir)
+		if err := web.StartDetached(cmd); err != nil {
 			s.log.Debug("Failed to open folder in file manager", slog.String("error", err.Error()))
 		}
 	}

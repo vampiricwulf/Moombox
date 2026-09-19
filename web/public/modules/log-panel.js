@@ -46,15 +46,25 @@ export class LogPanelController {
       });
     }
 
-    // Resume auto-scroll pill click handler
-    document.getElementById("log-autoscroll-pill")?.addEventListener("click", () => {
-      const viewer = document.getElementById("logs-viewer");
-      if (viewer) {
-        viewer.scrollTop = viewer.scrollHeight;
-        this._logAutoScroll = true;
-      }
-      document.getElementById("log-autoscroll-pill").style.display = "none";
-    });
+    // Resume auto-scroll pill — click or Enter/Space (it is a role="button"
+    // div, so the key half is ours to provide). One `resume` for both paths:
+    // a second copy that only hid the pill would leave the log frozen with
+    // nothing on screen to say so.
+    const pill = document.getElementById("log-autoscroll-pill");
+    if (pill) {
+      const resume = () => {
+        const viewer = document.getElementById("logs-viewer");
+        if (viewer) {
+          viewer.scrollTop = viewer.scrollHeight;
+          this._logAutoScroll = true;
+        }
+        pill.style.display = "none";
+      };
+      pill.addEventListener("click", resume);
+      pill.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); resume(); }
+      });
+    }
 
     // Log search
     let logSearchTimeout = null;

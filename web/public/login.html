@@ -12,26 +12,8 @@
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
         <title>Moombox - Login</title>
 
-        <!-- Theme bootstrap — runs before stylesheets resolve to avoid FOUC on light theme.
-             Mirrors the logic in app.js setTheme() so a returning user sees their saved
-             preference on first paint instead of the dark-themed default flashing first. -->
-        <script>
-            (function () {
-                try {
-                    var saved = localStorage.getItem("moombox-theme");
-                    var theme = saved || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-                    document.documentElement.className = theme === "light" ? "sl-theme-light" : "sl-theme-dark";
-                    var meta = document.querySelector('meta[name="theme-color"]');
-                    if (meta) meta.content = theme === "light" ? "#ffffff" : "#1C1B22";
-                    window.__moomboxBootTheme = theme;
-                } catch (e) {
-                    // localStorage/matchMedia unavailable — leave default sl-theme-dark class intact.
-                }
-            })();
-        </script>
-
         <!-- Shoelace UI Components — SRI-pinned; hashes match those in index.html.
-             Both themes loaded so the preference-aware bootstrap above can pick. -->
+             Both themes loaded so the preference-aware bootstrap below can pick. -->
         <link
             rel="stylesheet"
             id="sl-theme-dark"
@@ -43,20 +25,15 @@
             rel="stylesheet"
             id="sl-theme-light"
             href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/light.css"
+            integrity="sha384-VNjXcWTFgkXi1VXtuRlXBLNB44AvISAfti9WbOPCBCiNPnUpJ6dHx1Y3XmTii9pB"
             crossorigin="anonymous"
             media="not all"
         />
-        <script>
-            // Swap which theme stylesheet is active based on the bootstrap result above.
-            (function () {
-                var theme = window.__moomboxBootTheme;
-                if (theme !== "light") return;
-                var dark = document.getElementById("sl-theme-dark");
-                var light = document.getElementById("sl-theme-light");
-                if (dark) dark.media = "not all";
-                if (light) light.media = "";
-            })();
-        </script>
+        <!-- Theme bootstrap — a file, not an inline script, so script-src can
+             be 'self' with no 'unsafe-inline'. Parser-blocking and placed
+             after the two theme <link> tags so it runs before first paint and
+             can swap which stylesheet is active. -->
+        <script src="/boot-theme.js"></script>
         <script
             type="module"
             src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/shoelace-autoloader.js"
@@ -150,63 +127,6 @@
             </div>
         </main>
 
-        <script>
-            document.addEventListener("DOMContentLoaded", () => {
-                const passwordInput = document.getElementById("login-password");
-                const submitBtn = document.getElementById("login-submit");
-                const errorAlert = document.getElementById("login-error");
-                const errorText = document.getElementById("login-error-text");
-
-                async function doLogin() {
-                    if (submitBtn.disabled) return;
-                    const password = passwordInput.value;
-                    if (!password) {
-                        passwordInput.focus();
-                        return;
-                    }
-
-                    submitBtn.loading = true;
-                    submitBtn.disabled = true;
-                    errorAlert.style.display = "none";
-
-                    let success = false;
-                    try {
-                        const response = await fetch("/api/auth/login", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ password }),
-                        });
-
-                        if (response.ok) {
-                            // Redirect to dashboard — keep button in loading state
-                            // to avoid a flicker before navigation completes
-                            success = true;
-                            window.location.href = "/";
-                        } else {
-                            const data = await response.json().catch(() => ({ error: response.statusText }));
-                            errorText.textContent = data.error || "Login failed";
-                            // "block", not "" — clearing the inline style falls back
-                            // to the stylesheet's #login-error { display: none; }
-                            errorAlert.style.display = "block";
-                            passwordInput.value = "";
-                            passwordInput.focus();
-                        }
-                    } catch (e) {
-                        errorText.textContent = "Connection error: " + e.message;
-                        errorAlert.style.display = "block";
-                    } finally {
-                        if (!success) {
-                            submitBtn.loading = false;
-                            submitBtn.disabled = false;
-                        }
-                    }
-                }
-
-                submitBtn.addEventListener("click", doLogin);
-                passwordInput.addEventListener("keydown", (e) => {
-                    if (e.key === "Enter") doLogin();
-                });
-            });
-        </script>
+        <script src="/login.js"></script>
     </body>
 </html>

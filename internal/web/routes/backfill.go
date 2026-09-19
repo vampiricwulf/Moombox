@@ -2,7 +2,6 @@ package routes
 
 import (
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -32,28 +31,17 @@ const backfillRescanDebounce = 30 * time.Second
 // {"success":false,"debounced":true,"retryAfterMs":N} rather than
 // re-kicking.
 func BackfillRoutes(r chi.Router, deps *BackfillRouteDeps) {
-	var lastRescanUnixNano atomic.Int64
+	debounce := newCallDebouncer(backfillRescanDebounce)
 
 	r.Post("/api/backfill/rescan", func(w http.ResponseWriter, req *http.Request) {
 		if deps.Rescan == nil {
 			jsonError(w, "backfill unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		now := time.Now().UnixNano()
-		prev := lastRescanUnixNano.Load()
-		if prev != 0 && now-prev < int64(backfillRescanDebounce) {
-			// CAS-free read is fine: worst case two racers both see stale
-			// prev and both kick — harmless (the sweep is idempotent and
-			// in-flight scans dedupe).
-			wait := backfillRescanDebounce - time.Duration(now-prev)
-			jsonResponse(w, map[string]any{
-				"success":      false,
-				"debounced":    true,
-				"retryAfterMs": wait.Milliseconds(),
-			})
+		if ok, wait := debounce.allow(time.Now()); !ok {
+			writeDebounced(w, wait)
 			return
 		}
-		lastRescanUnixNano.Store(now)
 		deps.Rescan()
 		jsonResponse(w, map[string]any{"success": true})
 	})
