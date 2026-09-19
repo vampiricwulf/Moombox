@@ -769,7 +769,7 @@ Sliding window rate limiter keyed on the effective client IP (trusted-proxy awar
 
 ```
 default-src 'self';
-script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+script-src 'self' https://cdn.jsdelivr.net;
 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
 font-src 'self' https://cdn.jsdelivr.net;
 img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com;

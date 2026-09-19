@@ -182,12 +182,20 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Unauthenticated paths (login page, auth endpoints, POT read-only, favicon)
+		// Unauthenticated paths (login page and the two files it loads, auth
+		// endpoints, POT read-only, favicon).
+		//
+		// /boot-theme.js and /login.js are here because this middleware answers
+		// every OTHER path with login.html itself: without them the browser
+		// would be handed an HTML document for the login page's own script and
+		// the form would never wire up (sweep 2 row #91). Both are static,
+		// credential-free assets.
 		p := r.URL.Path
 		if p == "/api/auth/login" ||
 			p == "/api/auth/status" ||
 			p == "/ping" || p == "/minter_cache" ||
-			p == "/favicon.svg" || p == "/login.html" {
+			p == "/favicon.svg" || p == "/login.html" ||
+			p == "/boot-theme.js" || p == "/login.js" {
 			next.ServeHTTP(w, r)
 			return
 		}
