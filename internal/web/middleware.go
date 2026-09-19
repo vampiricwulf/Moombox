@@ -89,7 +89,12 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		// Content Security Policy
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
+				// No 'unsafe-inline': every script the pages load is a file
+				// (/app.js, /boot-theme.js, /login.js, Shoelace's autoloader
+				// from the CDN), so the policy needs neither a nonce nor a
+				// hash. style-src below KEEPS it — Shoelace's shadow DOM and
+				// its generated styles need it, and that is a different risk.
+				"script-src 'self' https://cdn.jsdelivr.net; "+
 				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"font-src 'self' https://cdn.jsdelivr.net; "+
 				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com; "+

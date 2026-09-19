@@ -1,0 +1,14 @@
+{
+  "id": "dQw4w9WgXcQ",
+  "status": "Downloading",
+  "progress": "V:12345 A:12345 C:67890",
+  "percent": 37.5,
+  "speed": "12.3 MB/s",
+  "eta": "01:23:45",
+  "lastVideoSeq": 12345,
+  "lastAudioSeq": 12345,
+  "totalVideoSeq": 20000,
+  "totalAudioSeq": 20000,
+  "totalChatMessages": 67890,
+  "updatedAt": "2026-09-17T11:23:45Z"
+}

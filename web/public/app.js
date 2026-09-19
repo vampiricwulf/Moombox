@@ -353,21 +353,49 @@ export class MoomboxApp {
       reload: () => window.location.reload(),
     });
 
-    // Status warnings — delegated click (text on desktop)
+    // Status warnings — delegated click and keydown (text on desktop).
+    //
+    // One `activate` for both input paths, not two copies: a keyboard user
+    // whose Enter does something other than the click is worse off than one
+    // whose Enter does nothing, and a copy is how that drift starts.
     const warningsEl = document.getElementById("status-warnings");
     if (warningsEl) {
-      warningsEl.addEventListener("click", (e) => {
-        const warning = e.target.closest(".status-warning");
-        if (!warning) return;
+      const activate = (target) => {
+        const warning = target?.closest?.(".status-warning");
+        // Not every warning is a button. The sidecar alert carries no action
+        // (updateStatusBar leaves its data-action unset), so it is neither
+        // focusable nor activatable — and saying so here is what lets the
+        // keydown leave Space to the browser instead of swallowing the page
+        // scroll for a span that does nothing.
+        if (!warning?.dataset.action) return false;
         this.answerReloginPrompt(warning.dataset.action);
+        return true;
+      };
+      warningsEl.addEventListener("click", (e) => { activate(e.target); });
+      // Delegated, like the click: the spans are rebuilt on every status
+      // update, so per-span listeners would have to be re-bound each time.
+      warningsEl.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        if (activate(e.target)) e.preventDefault();
       });
     }
 
-    // Status warnings — collapsed icon click (mobile)
+    // Status warnings — collapsed icon (mobile): click or Enter/Space
     const warningsIconEl = document.getElementById("status-warnings-icon");
     if (warningsIconEl) {
-      warningsIconEl.addEventListener("click", () => {
+      // Mirrors `activate` above, for the same reason: the icon stands in for
+      // whichever warning is first, and that warning may be the action-less
+      // sidecar alert. When it is, the icon is not a button (updateStatusBar
+      // strips its role/tabindex) and this must not claim the key either.
+      const trigger = () => {
+        if (!warningsIconEl.dataset.action) return false;
         this.answerReloginPrompt(warningsIconEl.dataset.action);
+        return true;
+      };
+      warningsIconEl.addEventListener("click", () => { trigger(); });
+      warningsIconEl.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        if (trigger()) e.preventDefault();
       });
     }
 
@@ -843,7 +871,16 @@ export class MoomboxApp {
       for (const w of warningItems) {
         const span = document.createElement("span");
         span.className = "status-warning";
-        if (w.action) span.dataset.action = w.action;
+        if (w.action) {
+          span.dataset.action = w.action;
+          // A clickable non-control: without these a keyboard user cannot
+          // reach it and a screen reader announces it as text (#check-countdown
+          // is the pattern this copies). Only the ACTIONABLE warnings get
+          // them — the sidecar alert below is a statement, and a Tab stop
+          // that does nothing is the failure this whole change removes.
+          span.setAttribute("role", "button");
+          span.setAttribute("tabindex", "0");
+        }
         span.title = w.title || "Click to re-login";
         span.textContent = w.label;
         warningsEl.appendChild(span);
@@ -858,15 +895,29 @@ export class MoomboxApp {
         icon.name = "exclamation-triangle";
         warningsIcon.appendChild(icon);
         warningsIcon.title = warningItems.map(w => w.label).join(", ");
+        // The icon is glyph-only, so its accessible name is the title — and
+        // aria-label WINS over title for a screen reader, which is why it is
+        // kept in step here rather than left at the markup's static
+        // "Warnings": a stale label would hide the very warnings it stands for.
+        warningsIcon.setAttribute("aria-label", warningsIcon.title);
         if (warningItems[0].action) {
           warningsIcon.dataset.action = warningItems[0].action;
+          warningsIcon.setAttribute("role", "button");
+          warningsIcon.setAttribute("tabindex", "0");
         } else {
+          // The same rule the spans follow (C5): a warning with no action is a
+          // statement, so the icon standing in for it is not a button and not
+          // a Tab stop. Before this it was neither — creating a dead Tab stop
+          // here would have been a regression of the very failure being fixed.
           delete warningsIcon.dataset.action;
+          warningsIcon.removeAttribute("role");
+          warningsIcon.removeAttribute("tabindex");
         }
       } else {
         // Clear stale children, title, and dataset from previous warnings
         warningsIcon.textContent = "";
         warningsIcon.title = "";
+        warningsIcon.setAttribute("aria-label", "Warnings");
         delete warningsIcon.dataset.action;
       }
     }
@@ -1161,7 +1212,11 @@ export class MoomboxApp {
           // the _evaluateArchiveBoundary() below re-archives it.
           this.jobs.push(updatedJob);
           if (this._pruneArchivedAgainstActive()) this.renderArchivedJobs();
-          this.renderJobs();
+          // One discovered job costs one card, not a rebuild of every card in
+          // the list — backfill adds them one broadcast at a time. The helper
+          // declines (and we fall back) whenever the fast path is not exactly
+          // equivalent to the full render.
+          if (!this._insertJobCard(updatedJob)) this.renderJobs();
           this._evaluateArchiveBoundary();
         }
         // Outside both branches on purpose: a park arrives either as a status
@@ -1169,6 +1224,65 @@ export class MoomboxApp {
         // the badge owes the same answer to both. The change gate inside is
         // what keeps this off the DOM on a progress tick.
         this._syncParkedBadge();
+        break;
+      }
+
+      case "job_progress": {
+        // The ~60 Hz frame (sweep 2 row #40 / O-O): only the columns a
+        // progress tick writes. MERGE it onto the row already held — the frame
+        // carries twelve fields and the row has fifty, and job_update is now
+        // the only frame that restates the rest (title, channel, thumbnail,
+        // description, output paths, gaps) as well as the client-computed
+        // hasStaging / hasSegments flags.
+        const patch = p;
+        if (!patch?.id) break;
+        const idx = this.jobs.findIndex((j) => j.id === patch.id);
+        // Unknown id: drop it, never upsert. Pushing a twelve-field frame in as
+        // a new job would put an untitled, thumbnail-less row in the list; the
+        // job_update that announces a job carries the whole row, and a resync
+        // restates it. It is also what stops a tick that raced a delete from
+        // resurrecting the row the way job_update's upsert branch would.
+        if (idx === -1) break;
+
+        const oldStatus = this.jobs[idx].status;
+        // Trust the wire: every key the frame carries is merged as-is, including
+        // one outside the twelve (an additive wire change reaches the row
+        // without a client release). The key set is pinned on the SERVER, by
+        // newJobProgressFrame and its frame-size test, and job_update already
+        // takes a whole row from the same authenticated socket — a client-side
+        // allow-list would buy nothing and would break additive evolution.
+        const merged = { ...this.jobs[idx], ...patch };
+        // Replaced, not mutated in place, exactly as job_update does it:
+        // nothing holds a reference to an element of this.jobs — every reader
+        // looks the row up by id at the moment it needs it.
+        this.jobs[idx] = merged;
+
+        // The server does not send a status-changing progress frame
+        // (isProgressOnlyChange excludes "status"); `status` rides the frame so
+        // this can be CHECKED rather than assumed. Not dead code: the read-back
+        // is under the write lock but the broadcast is not (UpdateJobFields
+        // unlocks before notifying), so a tick that raced a transition can
+        // carry the new status ahead of its own job_update — which would then
+        // see no change and skip the re-sort. A transition re-sorts the list
+        // and can cross the archive threshold, so it takes the same path
+        // job_update gives it.
+        if (merged.status !== oldStatus) {
+          this.renderJobs();
+          this._evaluateArchiveBoundary();
+          this._syncParkedBadge();
+        } else {
+          this.updateJobCard(merged);
+          this.stats.updateActiveIndicator(this.jobs);
+        }
+        // Update details dialog if this job is selected
+        if (this.selectedJobId === merged.id) {
+          this.details.updateJobDetails(merged);
+        }
+        // Nothing else on the fast path: a park is a status change, so
+        // _syncParkedBadge() belongs to the branch above, and jobs age by TIME,
+        // which the 60s sweep interval already covers — archive evaluation
+        // stays off the per-tick path for exactly the reason the job_update
+        // handler states.
         break;
       }
 
@@ -1596,6 +1710,73 @@ export class MoomboxApp {
   }
 
   /**
+   * Splice ONE new row into the already-rendered list instead of rebuilding
+   * every card (and every Shoelace shadow root) in it.
+   *
+   * Feed, DECAPI and backfill discovery each add one job per broadcast, so a
+   * backfill page that finds K jobs used to run K consecutive full renders.
+   *
+   * Returns false — and the caller must fall back to renderJobs() — whenever
+   * the fast path cannot be trusted:
+   *   - the container is absent,
+   *   - a filter is active (the match set and the "N of M" count both have to
+   *     be recomputed),
+   *   - nothing is rendered yet (first job, skeleton, or an empty state),
+   *   - the job is not in this.jobs,
+   *   - the rendered cards are not this.jobs minus exactly this job, in order
+   *     — which is also what catches a card that is somehow already on screen.
+   * @param {object} job
+   * @returns {boolean}
+   */
+  _insertJobCard(job) {
+    const container = document.getElementById("jobs-container");
+    if (!container) return false;
+    if (this.filterBar.tokens("jobs").length > 0) return false;
+
+    const cards = [...container.querySelectorAll(".video-item")];
+    if (cards.length === 0) return false;
+
+    const sorted = this._sortJobs(this.jobs);
+    if (cards.length !== sorted.length - 1) return false;
+    const index = sorted.findIndex((j) => j.id === job.id);
+    if (index < 0) return false;
+    // The counts agreeing is not the same as the lists agreeing: walk the
+    // rendered ids against the sort MINUS the newcomer, so the splice is only
+    // taken when the result is provably what renderJobs() would have drawn.
+    for (let i = 0, k = 0; i < sorted.length; i++) {
+      if (i === index) continue;
+      if (cards[k++].dataset.jobId !== sorted[i].id) return false;
+    }
+
+    const html = this.renderJobItem(job);
+    if (index >= cards.length) {
+      container.insertAdjacentHTML("beforeend", html);
+    } else {
+      // renderJobs() JOINS the chunks before parsing, so each card's trailing
+      // indentation and the next card's leading indentation land in ONE text
+      // node between them. insertAdjacentHTML cannot split that node, so the
+      // chunk's leading run is moved to its tail instead — which is what makes
+      // the spliced list byte-identical to a rebuild (pinned by the
+      // differential test) rather than merely equivalent, on a list no card has
+      // ticked yet: `data-progress` below is per-card update state, not
+      // rendered content, so a ticked card carries an attribute a fresh render
+      // does not until its own first tick.
+      const lead = html.slice(0, html.length - html.trimStart().length);
+      const trail = html.slice(html.trimEnd().length);
+      cards[index].insertAdjacentHTML("beforebegin", html.trim() + trail + lead);
+    }
+
+    // Everything renderJobs() would have refreshed for an ADD. Selection and
+    // focus markers on the existing cards survive untouched because those
+    // cards were not rebuilt; the new one is neither selected nor focused. The
+    // focused INDEX is positional, so a card spliced at or above it shifts it.
+    if (this.focusedJobIndex >= index) this.focusedJobIndex += 1;
+    this.filterBar.refreshChannels("jobs", this.jobs);
+    this.stats.updateActiveIndicator(this.jobs);
+    return true;
+  }
+
+  /**
    * Move Finished jobs in `this.jobs` that have aged past hideFinishedAgeDays
    * into `this.archivedJobs`. Mirrors the server's filterJobsByAge logic and
    * the TUI's isJobArchived check so the active panel reclassifies as time
@@ -1974,9 +2155,21 @@ export class MoomboxApp {
     // Update progress text
     const progressText = card.querySelector(".job-progress-text");
     if (progressText) {
-      const progress = this.formatProgress(job);
-      progressText.innerHTML = this.formatProgressHtml(job);
-      progressText.title = this.formatProgressTooltip(job) || progress;
+      // ~60 Hz per active job, and this is the highest-frequency DOM write in
+      // the app: the cell's text node was destroyed and recreated on every
+      // tick even when the string had not moved (measured 60/60). Stash the
+      // rendered markup on the element and write only when it differs — the
+      // same diff updateJobDetails uses. The title is diffed separately
+      // because the tooltip can move while the visible string does not.
+      const progressHtml = this.formatProgressHtml(job);
+      if (progressText.dataset.progress !== progressHtml) {
+        progressText.innerHTML = progressHtml;
+        progressText.dataset.progress = progressHtml;
+      }
+      const tooltip = this.formatProgressTooltip(job) || this.formatProgress(job);
+      if (progressText.title !== tooltip) {
+        progressText.title = tooltip;
+      }
       if (job.status === "Upcoming" && job.lastRecheckAt) {
         progressText.dataset.timestamp = job.lastRecheckAt;
         progressText.dataset.timestampPrefix = "Last check: ";
@@ -2388,11 +2581,19 @@ export class MoomboxApp {
   async openJobFolder() {
     if (!this.selectedJobId) return;
     try {
-      await fetch(`/api/jobs/${this.selectedJobId}/open-folder`, {
+      const response = await fetch(`/api/jobs/${this.selectedJobId}/open-folder`, {
         method: "POST",
       });
+      // The answer was thrown away, so every refusal was a button that did
+      // nothing and said nothing — including the Linux case, where the host
+      // has no file manager the route can spawn and says exactly that (WEB-6).
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({ error: response.statusText }));
+        this.showToast(data?.error || "Failed to open folder", "danger");
+      }
     } catch (e) {
       console.error("Failed to open folder:", e);
+      this.showToast("Failed to open folder: " + e.message, "danger");
     }
   }
 
@@ -2671,6 +2872,15 @@ export class MoomboxApp {
     document.addEventListener("keydown", (e) => {
       // Skip when typing in input fields (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
+
+      // A control that already handled this key consumed it. The status bar's
+      // role="button" elements (#check-countdown, the re-login warnings, the
+      // warnings icon, the version indicator) preventDefault() on Enter/Space
+      // and deliberately do NOT stopPropagation() — the warning spans' handler
+      // is delegated on #status-warnings, so the event has to keep bubbling.
+      // Without this line Enter on one of them ALSO opens the focused job's
+      // details, which the same control's click does not do.
+      if (e.defaultPrevented) return;
 
       // If a dialog is open, block all shortcuts and let Shoelace
       // handle Escape natively (respects sl-request-close prevention)

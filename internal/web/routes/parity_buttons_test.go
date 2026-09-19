@@ -1,8 +1,12 @@
 package routes
 
 import (
+	"io/fs"
+	"regexp"
 	"strings"
 	"testing"
+
+	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
 // TestParityButtonsArePinned pins the two Arc F web buttons the way the
@@ -44,5 +48,54 @@ func TestParityButtonsArePinned(t *testing.T) {
 	}
 	if !strings.Contains(detailsJS, `data-copy="${this.app.escapeHtml(streamUrl(job))}"`) {
 		t.Error("the details dialog has no Copy stream URL button")
+	}
+}
+
+// TestNoAlertInTheWebUI — every other failure in the dashboard surfaces as a
+// toast; one alert survived in the View Release Notes handler, where it blocks
+// the whole tab and looks like a browser error rather than a Moombox one.
+//
+// The file list is the embedded tree itself rather than a hand-written roster,
+// so a module added later is covered the day it lands. Full-line comments are
+// skipped: the replacement comment at the fixed site names the call it
+// replaced, and a test that reads its own justification as the defect is a
+// test nobody can write a comment next to.
+//
+// MUTANT: restore the alert( call anywhere under web/public — this finds it and
+// names the file and line.
+func TestNoAlertInTheWebUI(t *testing.T) {
+	// A bare alert(...) or window.alert(...) call, never the sl-alert element
+	// name (the `-` is excluded from the leading class) and never a property
+	// access like foo.alert(.
+	bareAlert := regexp.MustCompile(`(^|[^\w$.\-])alert\s*\(`)
+	windowAlert := regexp.MustCompile(`\bwindow\.alert\s*\(`)
+
+	var scanned int
+	err := fs.WalkDir(webassets.PublicFS, "public", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || (!strings.HasSuffix(p, ".js") && !strings.HasSuffix(p, ".html")) {
+			return nil
+		}
+		scanned++
+		for i, line := range strings.Split(readEmbeddedModule(t, p), "\n") {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(trimmed, "//"), strings.HasPrefix(trimmed, "/*"),
+				strings.HasPrefix(trimmed, "*"):
+				continue
+			}
+			if bareAlert.MatchString(line) || windowAlert.MatchString(line) {
+				t.Errorf("%s:%d uses alert(): %s — every other failure toasts", p, i+1, trimmed)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the embedded public tree: %v", err)
+	}
+	if scanned < 20 {
+		t.Fatalf("only %d embedded .js/.html files scanned — the walk is not reaching web/public", scanned)
 	}
 }

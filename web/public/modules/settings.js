@@ -100,6 +100,7 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "logs.log_max_file_size", id: "cfg-log-max-size" },
   { path: "logs.log_max_files", id: "cfg-log-max-files" },
   { path: "cookies.cookie_file", id: "cfg-cookie-file" },
+  { path: "cookies.refresh_interval", id: "cfg-cookie-refresh-interval" },
   { path: "cookies.auto_enabled", id: "cfg-auto-cookies-enabled" },
   { path: "cookies.browser_profile_dir", id: "cfg-auto-cookies-profile-dir" },
   { path: "connectivity.probe_targets", id: "cfg-probe-targets" },
@@ -303,7 +304,16 @@ export class SettingsController {
         const resp = await fetch("/api/update/check", { method: "POST" });
         if (!resp.ok) throw new Error(resp.statusText);
         const data = await resp.json();
-        if (data.available) {
+        if (data.debounced) {
+          // The server spends one of GitHub's 60/h unauthenticated requests
+          // per check, so it answers 200 {debounced, retryAfterMs} inside its
+          // 30 s window. Same sentence the Tasks panel's force-check uses for
+          // /api/monitors/check-now (app.js) — one debounce, one wording —
+          // rendered in this button's own result span, where "Up to date" and
+          // "Check failed" already go.
+          result.textContent = `Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`;
+          result.style.color = "var(--sl-color-neutral-500)";
+        } else if (data.available) {
           result.textContent = `v${data.version} available!`;
           result.style.color = "var(--sl-color-success-600)";
           this.app._updateAvailable = data;
@@ -330,8 +340,10 @@ export class SettingsController {
         try {
           const resp = await fetch("/api/update/release-notes");
           if (!resp.ok) {
-            const err = await resp.text();
-            alert("Failed to fetch release notes: " + err);
+            // Every other failure in this dashboard toasts; a blocking
+            // browser alert reads as a page fault rather than a Moombox
+            // message, and it freezes the whole tab while it is up.
+            this.app.showToast("Failed to fetch release notes", "danger");
             return;
           }
           const data = await resp.json();

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -398,5 +399,135 @@ func TestImportTruncatesOverlongHeaders(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&job)
 	if len(job.Title) > 500 {
 		t.Errorf("title length: want <= 500 (cap before sanitize/extension), got %d", len(job.Title))
+	}
+}
+
+// --- chat-metadata videoId containment (WEB-1 / O-AA) ---
+
+// TestImportRejectsATraversalVideoIDFromChatMetadata is the WEB-1 pin.
+//
+// The route takes videoId out of the UPLOADED chat.json and interpolates it
+// into filepath.Join(outputDir, "imports", "<title> [<id>]"+ext). Join CLEANS
+// what it joins, so an id beginning "/.." promotes the following ".." elements
+// to real path segments and walks out of imports/, out of outputDir, or into a
+// sibling channel folder — where os.Create TRUNCATES whatever it finds.
+//
+// THE MUTANTS, one assertion each:
+//   - drop the utils.IsVideoID guard: the traversal string becomes the job id
+//     (assertion 1) and the file lands outside imports/ (assertion 2).
+//   - keep the guard but drop the validatePathTraversal calls: assertion 2 is
+//     what a reviewer re-runs after also reverting the guard.
+func TestImportRejectsATraversalVideoIDFromChatMetadata(t *testing.T) {
+	f := newImportFixture(t)
+
+	chatJSON, _ := json.Marshal(map[string]any{
+		"videoId":  "/../../../pwned",
+		"messages": []map[string]any{{"offsetMs": 0, "message": "x"}},
+	})
+	zipBytes := makeImportZip(t, map[string][]byte{
+		"plain-video.mp4":       []byte("fake mp4"),
+		"plain-video.chat.json": chatJSON,
+	})
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, importRequest(zipBytes))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: want 201 (O-AA: an invalid id FALLS BACK, it does not 400), got %d (body: %s)",
+			rec.Code, rec.Body.String())
+	}
+
+	var job database.Job
+	if err := json.NewDecoder(rec.Body).Decode(&job); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+
+	if !strings.HasPrefix(job.VideoID, "imp_") {
+		t.Errorf("videoId: want the generated imp_ fallback, got %q — the traversal string reached the job row",
+			job.VideoID)
+	}
+
+	importsDir := filepath.Join(f.outputDir, "imports")
+	abs, err := filepath.Abs(filepath.Join(f.outputDir, job.Filename))
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	if !strings.HasPrefix(abs, importsDir+string(filepath.Separator)) {
+		t.Errorf("written file %q escaped %q — this is the arbitrary-write primitive", abs, importsDir)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Errorf("the import wrote nothing at %q: %v", abs, err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(f.outputDir), "pwned].mp4")); err == nil {
+		t.Error("a file was created OUTSIDE the output directory")
+	}
+}
+
+// TestImportDoesNotOverwriteAnExistingArchive is the destructive half. The
+// written name always ends "].mp4" / "].chat.json" — exactly Moombox's own
+// "Title [videoID].mp4" naming — so a crafted id aims the truncating os.Create
+// at a real archive. MUTANT: drop the IsVideoID guard; the victim's bytes
+// become the zip entry's.
+func TestImportDoesNotOverwriteAnExistingArchive(t *testing.T) {
+	f := newImportFixture(t)
+
+	victimDir := filepath.Join(f.outputDir, "Channel")
+	if err := os.MkdirAll(victimDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	victim := filepath.Join(victimDir, "2026-01-01 Title [dQw4w9WgXcQ].mp4")
+	if err := os.WriteFile(victim, []byte("ORIGINAL-ARCHIVE-CONTENT"), 0o644); err != nil {
+		t.Fatalf("seed victim: %v", err)
+	}
+
+	chatJSON, _ := json.Marshal(map[string]any{
+		"videoId":    "/../../Channel/2026-01-01 Title [dQw4w9WgXcQ",
+		"videoTitle": "2026-01-01 Title",
+		"messages":   []map[string]any{{"offsetMs": 0, "message": "x"}},
+	})
+	zipBytes := makeImportZip(t, map[string][]byte{
+		"plain-video.mp4":       []byte("ATTACKER"),
+		"plain-video.chat.json": chatJSON,
+	})
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, importRequest(zipBytes))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: want 201, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(got) != "ORIGINAL-ARCHIVE-CONTENT" {
+		t.Errorf("an existing archive was overwritten with %q — arbitrary file overwrite", got)
+	}
+}
+
+// TestImportKeepsAValidChatMetadataVideoID is the "guarding must not BREAK the
+// feature" half. MUTANT: validate with the wrong pattern (or reject every
+// meta.VideoID) — real provenance is lost and every metadata-only import
+// becomes an imp_ id.
+func TestImportKeepsAValidChatMetadataVideoID(t *testing.T) {
+	f := newImportFixture(t)
+
+	chatJSON, _ := json.Marshal(map[string]any{
+		"videoId":  "dQw4w9WgXcQ",
+		"messages": []map[string]any{{"offsetMs": 0, "message": "x"}},
+	})
+	zipBytes := makeImportZip(t, map[string][]byte{
+		"plain-video.mp4":       []byte("fake mp4"),
+		"plain-video.chat.json": chatJSON,
+	})
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, importRequest(zipBytes))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: want 201, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var job database.Job
+	json.NewDecoder(rec.Body).Decode(&job)
+	if job.VideoID != "dQw4w9WgXcQ" {
+		t.Errorf("videoId: want dQw4w9WgXcQ, got %q — a VALID metadata id must still win", job.VideoID)
 	}
 }

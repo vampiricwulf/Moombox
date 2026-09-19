@@ -2,11 +2,18 @@ package web
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/coder/websocket"
 )
 
 type testWSLogger struct{}
@@ -38,63 +45,118 @@ func TestWebSocketHubBroadcastNoClients(t *testing.T) {
 	hub.BroadcastCheckTimers(map[string]any{})
 }
 
-func TestWebSocketHubLogBuffer(t *testing.T) {
+// TestWebSocketReadLimitRefusesAnOversizedClientFrame is the WEB-11 pin.
+//
+// The only message a client ever sends is {"type":"ping"} — 15 bytes
+// (web/public/app.js) — and the read limit was 1 MiB. On a lan install the
+// upgrade needs no credential, so that was an unauthenticated megabyte per
+// socket, json.Unmarshal'ed in full.
+//
+// THE MUTANT: wsMaxMessageSize back to 1024*1024. The 8 KiB frame is then
+// ACCEPTED and fails as invalid JSON instead, so the close status is
+// StatusInvalidFramePayloadData rather than StatusMessageTooBig — which is
+// exactly what this asserts, and it is deterministic either way.
+func TestWebSocketReadLimitRefusesAnOversizedClientFrame(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
+	hub.InitialState = func() map[string]any { return map[string]any{} }
+	srv := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	t.Cleanup(func() { srv.Close(); hub.Close() })
 
-	// Add some log lines
-	for range 10 {
-		hub.BroadcastLog("line")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Drain the initial_state frame the server writes on accept.
+	if _, _, err := conn.Read(ctx); err != nil {
+		t.Fatalf("read initial_state: %v", err)
 	}
 
-	buf := hub.GetLogBuffer()
-	if len(buf) != 10 {
-		t.Errorf("expected 10 log lines, got %d", len(buf))
+	// The real protocol still works.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("write ping: %v", err)
+	}
+	_, pong, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read pong: %v", err)
+	}
+	if !strings.Contains(string(pong), `"pong"`) {
+		t.Fatalf("want a pong, got %q — the new limit must not break the one message clients send", pong)
+	}
+
+	// 8 KiB, twice the new limit and not valid JSON either.
+	if err := conn.Write(ctx, websocket.MessageText, bytes.Repeat([]byte("x"), 8<<10)); err != nil {
+		t.Fatalf("write oversized: %v", err)
+	}
+	_, _, err = conn.Read(ctx)
+	if err == nil {
+		t.Fatal("the server accepted an 8 KiB client frame")
+	}
+	if got := websocket.CloseStatus(err); got != websocket.StatusMessageTooBig {
+		t.Errorf("close status: want StatusMessageTooBig (%d), got %d — the frame was read and parsed "+
+			"instead of refused at the limit", websocket.StatusMessageTooBig, got)
 	}
 }
 
-func TestWebSocketHubLogBufferTruncation(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-
-	// The buffer trims when it exceeds 400 entries, keeping the last 200.
-	// Adding 500 lines: at 401 it trims to 200, then 99 more are added = 299.
-	for range 500 {
-		hub.BroadcastLog("line")
+// TestBroadcastLogClipsAnOverlongLine keeps the one behaviour the deleted ring
+// tests actually covered. MUTANT: drop the clip — a multi-megabyte panic dump
+// goes out whole to every connected tab.
+func TestBroadcastLogClipsAnOverlongLine(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	got := clipLogLine(long)
+	if len(got) <= 4096 || len(got) > 4200 {
+		t.Errorf("clipped length %d, want just over 4096", len(got))
+	}
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Errorf("a clipped line must say so; got %q…", got[:40])
+	}
+	if short := clipLogLine("hello"); short != "hello" {
+		t.Errorf("a short line must pass through unchanged, got %q", short)
 	}
 
-	buf := hub.GetLogBuffer()
-	if len(buf) > 400 {
-		t.Errorf("expected log buffer to be bounded, got %d lines", len(buf))
+	// A rune straddling the cut: 4095 ASCII bytes then a 3-byte CJK rune, so
+	// byte 4096 is that rune's SECOND byte. A byte-index cut leaves invalid
+	// UTF-8 that json.Marshal silently repairs to U+FFFD — visible garbage at
+	// the boundary of a CJK log line rather than a clean truncation.
+	//
+	// MUTANT: cut at the byte index (`line[:maxLineLen]`) — utf8.ValidString
+	// fails here.
+	straddling := strings.Repeat("x", 4095) + "日" + strings.Repeat("y", 100)
+	got = clipLogLine(straddling)
+	if !utf8.ValidString(got) {
+		t.Errorf("clipped line is not valid UTF-8 — the cut landed inside a rune")
 	}
-
-	// Adding enough to trigger a second trim
-	for range 200 {
-		hub.BroadcastLog("line")
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Errorf("the rune-safe cut must still mark itself truncated; got %q…", got[:40])
 	}
-
-	buf = hub.GetLogBuffer()
-	// After 700 total: first trim at 401 -> 200, continues to 400+99=499 -> second trim at 500 -> 200, then 200 more = never exceeds 400
-	if len(buf) > 400 {
-		t.Errorf("expected log buffer to stay bounded after multiple trims, got %d lines", len(buf))
+	if want := strings.Repeat("x", 4095) + "... (truncated)"; got != want {
+		t.Errorf("clipped line = %q…, want the 4095 bytes before the straddling rune", got[:len(got)-15])
 	}
 }
 
-func TestWebSocketHubLogLineTruncation(t *testing.T) {
+// TestInitialStateCarriesOnlyTheProviderLogs pins the ring's removal: the hub
+// no longer invents a "logs" key. In production ws_wiring.go always supplies
+// one from the logger's own ring, so nothing observable changes.
+//
+// MUTANT: keep the dead ring and its fallback — "logs" appears in a payload the
+// provider did not put it in.
+func TestInitialStateCarriesOnlyTheProviderLogs(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
+	hub.InitialState = func() map[string]any { return map[string]any{"jobs": []any{}} }
+	hub.BroadcastLog("a line the hub must not be storing")
 
-	// Add a very long log line (over 4096 chars)
-	var longLine strings.Builder
-	for range 5000 {
-		longLine.WriteString("x")
+	var payload struct {
+		Payload map[string]any `json:"payload"`
 	}
-	hub.BroadcastLog(longLine.String())
-
-	buf := hub.GetLogBuffer()
-	if len(buf) != 1 {
-		t.Fatalf("expected 1 log line, got %d", len(buf))
+	if err := json.Unmarshal(hub.initialStateBytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	// Should be truncated with marker
-	if len(buf[0]) > 4200 {
-		t.Errorf("expected log line to be truncated, got length %d", len(buf[0]))
+	if _, ok := payload.Payload["logs"]; ok {
+		t.Error("initial_state carries a logs key the provider did not supply — the hub is still " +
+			"keeping a second log ring")
 	}
 }
 

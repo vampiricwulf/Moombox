@@ -157,7 +157,7 @@ test("canResumeJob: requireKnownStaging hides the button until the details fetch
   assert.equal(canResumeJob({ ...yt("Error"), hasStaging: undefined }), true);
 });
 
-// The fifteen restart-required paths, copied literally from
+// The sixteen restart-required paths, copied literally from
 // RESTART_REQUIRED_FIELDS in web/public/modules/settings.js. They cannot be
 // imported (the goja harness in internal/tui/settings_js_vm_test.go strips
 // `export` from that module), so they are duplicated here; the Go test
@@ -173,6 +173,7 @@ const RESTART_FIELDS = [
   { path: "logs.log_max_file_size" },
   { path: "logs.log_max_files" },
   { path: "cookies.cookie_file" },
+  { path: "cookies.refresh_interval" },
   { path: "cookies.auto_enabled" },
   { path: "cookies.browser_profile_dir" },
   { path: "connectivity.probe_targets" },
@@ -187,7 +188,7 @@ const makeRestartConfig = () => ({
   network: { port: 774, network_access: "localhost", https_enabled: false, tls_cert_path: "", tls_key_path: "" },
   paths: { database_path: "./moombox.db", log_file_path: "./logs/moombox.log" },
   logs: { log_max_file_size: 10, log_max_files: 5 },
-  cookies: { cookie_file: "./cookies.txt", auto_enabled: false, browser_profile_dir: "" },
+  cookies: { cookie_file: "./cookies.txt", refresh_interval: 360, auto_enabled: false, browser_profile_dir: "" },
   connectivity: { probe_targets: ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"] },
   memory: { sidecar_hard_limit_mb: 512 },
   bgutils: { use_sidecar: true },
@@ -202,10 +203,10 @@ test("resolveConfigPath: dotted lookup, undefined for absent branches", () => {
   assert.equal(resolveConfigPath(undefined, "network.port"), undefined);
 });
 
-test("restartValuesChanged: an unchanged save over all fifteen paths prompts nothing", () => {
-  assert.equal(RESTART_FIELDS.length, 15, "the Web restart list has fifteen paths");
+test("restartValuesChanged: an unchanged save over all sixteen paths prompts nothing", () => {
+  assert.equal(RESTART_FIELDS.length, 16, "the Web restart list has sixteen paths");
   const snap = snapshotRestartValues(makeRestartConfig(), RESTART_FIELDS);
-  assert.equal(Object.keys(snap).length, 15, "every path is snapshotted, not just the network/log nine");
+  assert.equal(Object.keys(snap).length, 16, "every path is snapshotted, not just the network/log nine");
   const current = snapshotRestartValues(makeRestartConfig(), RESTART_FIELDS);
   assert.equal(restartValuesChanged(snap, current, RESTART_FIELDS), false, "an unchanged save must not prompt for a restart");
 });
@@ -235,6 +236,14 @@ test("restartValuesChanged: real edits to the six formerly-unsnapshotted paths a
   const hardLimit = makeRestartConfig();
   hardLimit.memory.sidecar_hard_limit_mb = 1024;
   assert.equal(restartValuesChanged(snap, snapshotRestartValues(hardLimit, RESTART_FIELDS), RESTART_FIELDS), true, "sidecar_hard_limit_mb");
+
+  // cookies.refresh_interval feeds a ticker built once at boot, so a save
+  // without a restart changes nothing — the prompt is the only thing that says
+  // so (WEB-7). MUTANT: drop its row from the list above — the snapshot stops
+  // carrying the path, restartValuesChanged sees nothing move, and this fails.
+  const refresh = makeRestartConfig();
+  refresh.cookies.refresh_interval = 60;
+  assert.equal(restartValuesChanged(snap, snapshotRestartValues(refresh, RESTART_FIELDS), RESTART_FIELDS), true, "refresh_interval");
 });
 
 test("channelTermsForSave: an untouched field keeps whatever shape the config holds", () => {
