@@ -264,6 +264,25 @@ func (m *SettingsModel) snapshotConfig() config.MoomboxConfig {
 // have typed, deliberately: applyValues writes every section, and a
 // hand-maintained undo list would drift the first time a field was added to
 // applyValues and not to it.
+//
+// The one shape that would defeat the shallow copy: applyValues ends with
+// `m.cfg.Channels = m.channels` (and the same for Notifications), so after a
+// SUCCESSFUL save the live config ALIASES the model's own slice — and the
+// channel/notification editors write elements in place
+// (m.channels[i] = ch). That combination is unreachable today only because a
+// successful save closes the panel and Open re-copies both slices on the way
+// back in. If the panel is ever left open and editable after a save,
+// Channels and Notifications must be deep-copied into the snapshot.
+//
+// Known window: a background writer (cookie refresh, a Web PUT) can commit
+// through config.Store.Update between snapshotConfig and this restore; the
+// whole-struct write then reverts that change in memory while it is already
+// on disk. Closing it would mean holding the store's write lock across
+// snapshot → applyValues → OnSave → restore, which deadlocks: applyValues
+// takes that same lock, and so does OnSaveConfig (around config.Save, then
+// Snapshot's RLock). It is the identical caveat Store.Update's own rollback
+// documents, and the window is one refused save concurrent with a background
+// Update.
 func (m *SettingsModel) restoreConfig(snapshot config.MoomboxConfig) {
 	if m.cfg == nil {
 		return

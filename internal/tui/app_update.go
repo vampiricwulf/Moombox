@@ -782,9 +782,29 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// validated this ffmpeg and needs it for the rest of the
 					// session — but they are told it did not persist, rather
 					// than finding it gone after a restart (CORE-4).
+					//
+					// It has to be told on the OVERLAY: this handler leaves
+					// the overlay up ("Press any key to continue" below), and
+					// App.View renders the overlay INSTEAD of the dashboard,
+					// so the dashboard's feedback line would never be seen —
+					// and it self-clears after 3s besides. Folded into
+					// msg.Warning before the assignment below, which is the
+					// row the overlay already prints, and which would
+					// otherwise overwrite anything set here.
 					if err := saveCb(cfgSnapshot); err != nil {
-						a.setFeedback("Failed to save FFmpeg path: " + err.Error())
+						msg.Warning = strings.TrimSpace(msg.Warning +
+							"\nFFmpeg path not saved (it will not survive a restart): " + err.Error())
 					}
+				}
+				// Both outcomes. The path is live for this session either way,
+				// so the muxing consumers that captured it at construction
+				// (the download orchestrator, the trim service) must get it
+				// either way: OnSaveConfig's own hot-reload block is skipped
+				// on a save error, deliberately, because the settings panel
+				// rolls its config back after that callback returns. On the
+				// success path this re-applies the identical value.
+				if a.OnFfmpegPathChange != nil {
+					a.OnFfmpegPathChange(msg.Path)
 				}
 			}
 			a.ffmpegCheck.warning = msg.Warning

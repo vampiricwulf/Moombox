@@ -564,14 +564,20 @@ type App struct {
 	// OnSaveConfig persists the settings model's config. It returns the save
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).
-	OnSaveConfig     func(cfg *config.MoomboxConfig) error
-	OnRestart        func()
-	OnHashPassword   func(password string) string
-	OnVerifyPassword func(password, hash string) bool
-	OnFetchFormats   func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
-	OnImportFile     func(path, title, channel string) (string, error) // optional: import zip, returns title
-	OnListOrphans    func() ([]OrphanedFileEntry, error)               // list orphaned files
-	OnDeleteOrphan   func(path string) error                           // delete orphaned file
+	OnSaveConfig func(cfg *config.MoomboxConfig) error
+	// OnFfmpegPathChange re-applies paths.ffmpeg_path to the services that
+	// captured it when their muxers were built. Separate from OnSaveConfig
+	// because the FFmpeg overlay deliberately keeps a validated path live
+	// even when the disk write is refused, and OnSaveConfig skips its own
+	// hot-reload block on that error (CORE-4).
+	OnFfmpegPathChange func(path string)
+	OnRestart          func()
+	OnHashPassword     func(password string) string
+	OnVerifyPassword   func(password, hash string) bool
+	OnFetchFormats     func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile       func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans      func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan     func(path string) error                           // delete orphaned file
 	// Orphaned processing-history rows (no matching job) shown in the same overlay.
 	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
 	OnDeleteHistoryEntry  func(videoID string) error

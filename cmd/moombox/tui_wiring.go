@@ -312,6 +312,13 @@ func (s *runState) runTUI() {
 		s.kickMonitors()
 		return nil
 	}
+	// The FFmpeg overlay's own path applier. OnSaveConfig returns above
+	// before the hot-reload block when the write is refused (the settings
+	// panel rolls its config back after that return), but the overlay keeps
+	// a validated path live for the session — so it re-applies the path
+	// itself, whichever way the save went. Pinned by
+	// tui_wiring_ffmpeg_callsite_test.go.
+	app.OnFfmpegPathChange = s.applyFfmpegPath
 	app.OnRestart = func() { s.triggerRestart("TUI settings") }
 	app.OnForceCheck = func() {
 		if s.kickMonitors != nil {
