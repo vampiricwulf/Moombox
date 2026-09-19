@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -360,52 +361,190 @@ func TestClipboardFeedbackHedgesOSC52(t *testing.T) {
 	}
 }
 
-// The chord itself, driven through the osClipboard seam so neither branch
-// spawns a real helper or writes the developer's clipboard on any platform.
-//
-// Helper declines — every non-Windows build, and Windows Terminal, where
-// osClipboardFallback stands down because the terminal's own OSC 52 support
-// is authoritative: the URL goes to the terminal and the wording hedges.
-// Helper takes it — Windows outside Windows Terminal: the copy really
-// happened, it is claimed, and OSC 52 is not sent on top.
-//
-// Mutant: restoring the unconditional a.setFeedback("Copied: " + url).
-// Mutant: sending tea.SetClipboard on both arms.
-func TestCopyChordSaysWhatItActuallyDid(t *testing.T) {
-	job := &database.Job{ID: "j1", Title: "a job", Status: database.StatusFinished, Platform: "youtube", VideoID: "aaaaaaaaaaa"}
-	url := streamURL(job)
-
-	orig := osClipboard
-	t.Cleanup(func() { osClipboard = orig })
-
-	osClipboard = func(string) bool { return false }
+// copyApp is an App sized for the O C tests, with a job that has a stream
+// URL. The osClipboard seam is swapped by each caller, so no test on any
+// platform reaches a real clip.exe or the developer's own clipboard.
+func copyApp(t *testing.T) (*App, *database.Job, string) {
+	t.Helper()
 	a := NewApp()
 	a.width, a.height = 120, 40
 	a.recalcLayout()
-	_, cmd := a.dispatchAction("O C", job)
+	job := &database.Job{ID: "j1", Title: "a job", Status: database.StatusFinished, Platform: "youtube", VideoID: "aaaaaaaaaaa"}
+	return a, job, streamURL(job)
+}
+
+// flattenCmd runs cmd and returns every message it produced, unwrapping one
+// level of tea.Batch. O C returns a batch — the OSC 52 write and the OS
+// helper are independent — so a test that only called cmd() would see the
+// BatchMsg envelope and nothing inside it.
+func flattenCmd(cmd tea.Cmd) []tea.Msg {
 	if cmd == nil {
-		t.Fatal("with no OS helper, O C produced no command — the URL never reached the terminal")
+		return nil
 	}
-	if got, want := cmd(), tea.SetClipboard(url)(); got != want {
-		t.Errorf("O C must emit the OSC 52 clipboard command for %q, got %#v", url, got)
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{msg}
 	}
-	if want := clipboardFeedback(url, true); a.feedback.msg != want {
-		t.Errorf("O C feedback on the OSC 52 path = %q, want %q", a.feedback.msg, want)
+	var out []tea.Msg
+	for _, c := range batch {
+		if c != nil {
+			out = append(out, c())
+		}
+	}
+	return out
+}
+
+// hasMsg reports whether want is among msgs.
+func hasMsg(msgs []tea.Msg, want tea.Msg) bool {
+	for _, m := range msgs {
+		if m == want {
+			return true
+		}
+	}
+	return false
+}
+
+// findClipboardResult returns the clipboardResultMsg among msgs.
+func findClipboardResult(msgs []tea.Msg) (clipboardResultMsg, bool) {
+	for _, m := range msgs {
+		if r, ok := m.(clipboardResultMsg); ok {
+			return r, true
+		}
+	}
+	return clipboardResultMsg{}, false
+}
+
+// B1: the clip.exe spawn must not run on bubbletea's update goroutine. A
+// blocking call inside Update stalls EVERYTHING for as long as the child
+// takes — the ~60 Hz progress frames this project protects explicitly, the
+// key queue, the marquee ticks — and the 3 s bound is precisely the case
+// where the freeze is longest and least explicable. The work belongs in the
+// returned tea.Cmd, which bubbletea runs off the update goroutine.
+//
+// The fake helper sleeps 500 ms: far longer than any dispatch may take, far
+// shorter than the real bound.
+//
+// Mutant: calling osClipboard inline in dispatchAction again — the dispatch
+// itself takes >= 500 ms and this fails.
+func TestCopyChordDoesNotBlockTheUpdateGoroutine(t *testing.T) {
+	a, job, url := copyApp(t)
+
+	orig := osClipboard
+	t.Cleanup(func() { osClipboard = orig })
+	var handed string
+	osClipboard = func(text string) bool {
+		time.Sleep(500 * time.Millisecond)
+		handed = text
+		return true
 	}
 
-	handed := ""
-	osClipboard = func(text string) bool { handed = text; return true }
-	a = NewApp()
-	a.width, a.height = 120, 40
-	a.recalcLayout()
-	if _, cmd := a.dispatchAction("O C", job); cmd != nil {
-		t.Errorf("the OS helper took the text, so nothing more is owed to the terminal, got %#v", cmd())
+	start := time.Now()
+	_, cmd := a.dispatchAction("O C", job)
+	if blocked := time.Since(start); blocked >= 50*time.Millisecond {
+		t.Errorf("dispatchAction blocked the update goroutine for %v — the spawn must run inside the returned Cmd", blocked)
+	}
+	if cmd == nil {
+		t.Fatal("O C returned no command, so the helper runs nowhere at all")
+	}
+
+	// Not vacuous: the helper really does run, inside the Cmd.
+	start = time.Now()
+	msgs := flattenCmd(cmd)
+	if ran := time.Since(start); ran < 400*time.Millisecond {
+		t.Errorf("the Cmd completed in %v — the 500 ms helper did not run inside it", ran)
 	}
 	if handed != url {
 		t.Errorf("the OS helper was handed %q, want %q", handed, url)
 	}
+	if res, ok := findClipboardResult(msgs); !ok || !res.Copied || res.URL != url {
+		t.Errorf("the Cmd produced %#v, want a clipboardResultMsg{URL: %q, Copied: true}", msgs, url)
+	}
+}
+
+// B2: the OSC 52 write goes out on EVERY press, on every platform, as it
+// did before the clip.exe fallback existed. Over SSH into a Windows host the
+// old shape skipped it whenever clip.exe reported success — and clip.exe
+// there is the SERVER's clipboard, so the operator's own terminal, which
+// would have taken the OSC 52, got nothing.
+//
+// Mutant: returning early (no tea.SetClipboard) when the helper takes the
+// text — the "helper took it" row fails.
+func TestCopyChordAlwaysSendsOSC52(t *testing.T) {
+	orig := osClipboard
+	t.Cleanup(func() { osClipboard = orig })
+
+	for _, helperTook := range []bool{false, true} {
+		a, job, url := copyApp(t)
+		osClipboard = func(string) bool { return helperTook }
+
+		_, cmd := a.dispatchAction("O C", job)
+		if cmd == nil {
+			t.Fatalf("helper took it = %v: O C returned no command", helperTook)
+		}
+		if !hasMsg(flattenCmd(cmd), tea.SetClipboard(url)()) {
+			t.Errorf("helper took it = %v: O C must still emit the OSC 52 clipboard command for %q", helperTook, url)
+		}
+	}
+}
+
+// The wording. The press itself can only claim what it has already done —
+// handed the URL to the terminal — so the immediate line hedges on every
+// platform. "Copied" is claimed only once the OS helper has come back
+// saying it took the text, which is a fact rather than a hope (CORE-15,
+// O-W).
+//
+// Mutant: restoring the unconditional a.setFeedback("Copied: " + url).
+// Mutant: dropping the clipboardResultMsg arm from Update — the line never
+// upgrades.
+func TestCopyChordSaysWhatItActuallyDid(t *testing.T) {
+	orig := osClipboard
+	t.Cleanup(func() { osClipboard = orig })
+
+	// The helper declines (every non-Windows build; Windows Terminal; any
+	// SSH session): the hedge is the final word.
+	a, job, url := copyApp(t)
+	osClipboard = func(string) bool { return false }
+	_, cmd := a.dispatchAction("O C", job)
+	if want := clipboardFeedback(url, true); a.feedback.msg != want {
+		t.Errorf("the immediate O C feedback = %q, want %q", a.feedback.msg, want)
+	}
+	for _, m := range flattenCmd(cmd) {
+		a.Update(m)
+	}
+	if want := clipboardFeedback(url, true); a.feedback.msg != want {
+		t.Errorf("a declining helper must leave the hedge standing, got %q, want %q", a.feedback.msg, want)
+	}
+
+	// The helper takes it (Windows, local, outside Windows Terminal): the
+	// line upgrades to the claim when the result lands.
+	a, job, url = copyApp(t)
+	osClipboard = func(string) bool { return true }
+	_, cmd = a.dispatchAction("O C", job)
+	if want := clipboardFeedback(url, true); a.feedback.msg != want {
+		t.Errorf("the immediate O C feedback = %q, want %q (the press cannot know yet)", a.feedback.msg, want)
+	}
+	for _, m := range flattenCmd(cmd) {
+		a.Update(m)
+	}
 	if want := clipboardFeedback(url, false); a.feedback.msg != want {
-		t.Errorf("O C feedback after a successful OS copy = %q, want %q", a.feedback.msg, want)
+		t.Errorf("a successful OS copy must upgrade the line, got %q, want %q", a.feedback.msg, want)
+	}
+}
+
+// A slow helper must not clobber a newer line. The result arrives up to the
+// 3 s bound after the press, by which time the operator may have pressed
+// something else entirely; the upgrade only replaces the exact hedge it is
+// upgrading.
+//
+// Mutant: dropping the "is the hedge still on screen" guard from the
+// clipboardResultMsg arm.
+func TestCopyResultDoesNotClobberANewerFeedbackLine(t *testing.T) {
+	a, _, url := copyApp(t)
+	a.setFeedback("Something else entirely")
+	a.Update(clipboardResultMsg{URL: url, Copied: true})
+	if a.feedback.msg != "Something else entirely" {
+		t.Errorf("a late clipboard result overwrote a newer line: %q", a.feedback.msg)
 	}
 }
 

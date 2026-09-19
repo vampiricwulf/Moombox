@@ -282,7 +282,7 @@ The chord system is a three-state finite automaton:
 | `O F` | Open Folder (explorer) | Yes | Job has an openable folder |
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
-| `O C` | Copy Stream URL to clipboard. On Windows outside Windows Terminal (`WT_SESSION` unset) the URL goes through a `clip.exe` child fed on stdin and the feedback reads `Copied: <url>`; everywhere else — and inside Windows Terminal, whose own OSC 52 support is authoritative across SSH — it is handed to the terminal with OSC 52, which conhost and tmux-without-`set-clipboard` may silently drop, so the feedback reads `Sent to terminal clipboard (OSC 52): <url>` and claims nothing more (`clipboardFeedback`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL |
+| `O C` | Copy Stream URL to clipboard. The OSC 52 write (`tea.SetClipboard`) goes out on **every** press, on every platform — it is the only mechanism that reaches the terminal the operator is actually sitting at, which over SSH is not the machine Moombox runs on — and the feedback line reads `Sent to terminal clipboard (OSC 52): <url>`, claiming nothing more, because conhost and tmux-without-`set-clipboard` drop OSC 52 in silence. On a **local Windows console** a `clip.exe` child fed on stdin runs in addition, inside a `tea.Cmd` so a wedged child cannot freeze rendering or input; if it reports that it took the text the line upgrades to `Copied: <url>`. That backup stands down for Windows Terminal (`WT_SESSION`, whose own OSC 52 handling is authoritative) and for any SSH session (`SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT`), where it would write the server's clipboard (`clipboardFeedback` in `internal/tui/app_actions.go`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL |
 | `O G` | Open GitHub Page (browser) | No | — |
 
 **Single-key shortcuts:**
@@ -1007,7 +1007,7 @@ Every major feature exists in both UIs:
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
 | yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
-| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`); the browser has a real clipboard API, the terminal has OSC 52 and a `clip.exe` fallback, so only the TUI side hedges its wording |
+| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`); the browser has a real clipboard API, the terminal has OSC 52 plus a local-Windows `clip.exe` backup, so only the TUI side hedges its wording |
 | Filter language | `filter-parser.js` / `filter-engine.js` | `internal/jobfilter` behind the Tasks panel's `/` box |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.

@@ -53,33 +53,76 @@ func TestClipboardHelperCommandIsContextBound(t *testing.T) {
 	if clipboardHelperTimeout <= 0 {
 		t.Errorf("clipboardHelperTimeout = %v, want a positive bound", clipboardHelperTimeout)
 	}
+	// cmd.Stdin is a strings.Reader, not an *os.File, so exec copies it
+	// through an OS pipe in a goroutine and Wait waits for that goroutine
+	// too. Killing the child normally breaks the pipe and unwinds the copy,
+	// but WaitDelay is the documented guard for the case where it does not:
+	// without it the bound is on the CHILD, not on Wait (B4).
+	//
+	// Mutant: leaving WaitDelay at its zero value (wait forever).
+	if cmd := clipboardHelperCmd(ctx, "x"); cmd.WaitDelay <= 0 {
+		t.Errorf("helper WaitDelay = %v, want a positive bound on Wait itself", cmd.WaitDelay)
+	}
 }
 
-// Windows Terminal handles OSC 52 itself — including across SSH, where a
-// local clip.exe would write the wrong machine's clipboard — so the fallback
-// stands down whenever WT_SESSION is set (CORE-15, O-W).
+// clip.exe writes the clipboard of the machine Moombox is RUNNING on, which
+// is only the operator's clipboard when the session is local. Two shapes are
+// not local, and the helper stands down for both (CORE-15, O-W; B2):
 //
-// Mutant: dropping the WT_SESSION check — the helper is spawned in Windows
-// Terminal too and the first case fails.
-func TestOSClipboardFallbackStandsDownInWindowsTerminal(t *testing.T) {
-	calls := 0
+//   - Windows Terminal (WT_SESSION) handles OSC 52 itself, including across
+//     SSH, so its own integration is authoritative and a second write is at
+//     best redundant.
+//   - An SSH session (SSH_CONNECTION / SSH_TTY / SSH_CLIENT) is the operator
+//     sitting at ANOTHER machine. WT_SESSION is not inherited through
+//     OpenSSH — it is set only for Windows Terminal's own children — so
+//     without this check an SSH login would fall straight through to
+//     clip.exe and put the URL on the server's clipboard while telling the
+//     operator it was copied. OSC 52, which the chord always sends, reaches
+//     the terminal they are actually sitting at.
+//
+// Mutant: dropping the SSH check — the three SSH rows spawn a helper.
+// Mutant: dropping the WT_SESSION check — the first row spawns a helper.
+// Mutant: inverting either check — the "local console" row stops spawning,
+// which is the one shape clip.exe exists for.
+func TestOSClipboardFallbackStandsDownWhenClipExeIsTheWrongClipboard(t *testing.T) {
 	orig := clipboardHelper
 	t.Cleanup(func() { clipboardHelper = orig })
-	clipboardHelper = func(string) bool { calls++; return true }
 
-	t.Setenv("WT_SESSION", "1")
-	if osClipboardFallback("x") {
-		t.Error("in Windows Terminal the fallback must decline and leave OSC 52 to the terminal")
-	}
-	if calls != 0 {
-		t.Errorf("the helper was spawned %d times inside Windows Terminal, want 0", calls)
-	}
+	// The four variables this gate reads, cleared for every row by t.Setenv
+	// and restored when the test ends.
+	env := []string{"WT_SESSION", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"}
 
-	t.Setenv("WT_SESSION", "")
-	if !osClipboardFallback("x") {
-		t.Error("outside Windows Terminal a helper that took the text must report the copy")
+	rows := []struct {
+		name      string
+		set       string // the one variable this row sets, "" for none
+		wantSpawn bool
+	}{
+		{"local console (conhost)", "", true},
+		{"Windows Terminal", "WT_SESSION", false},
+		{"SSH_CONNECTION", "SSH_CONNECTION", false},
+		{"SSH_TTY", "SSH_TTY", false},
+		{"SSH_CLIENT", "SSH_CLIENT", false},
 	}
-	if calls != 1 {
-		t.Errorf("the helper ran %d times outside Windows Terminal, want 1", calls)
+	for _, row := range rows {
+		calls := 0
+		clipboardHelper = func(string) bool { calls++; return true }
+		for _, name := range env {
+			if name == row.set {
+				t.Setenv(name, "1")
+			} else {
+				t.Setenv(name, "")
+			}
+		}
+		got := osClipboardFallback("x")
+		if got != row.wantSpawn {
+			t.Errorf("%s: osClipboardFallback = %v, want %v", row.name, got, row.wantSpawn)
+		}
+		want := 0
+		if row.wantSpawn {
+			want = 1
+		}
+		if calls != want {
+			t.Errorf("%s: the helper ran %d times, want %d", row.name, calls, want)
+		}
 	}
 }

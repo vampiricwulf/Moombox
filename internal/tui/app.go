@@ -350,6 +350,18 @@ type (
 		Err string
 	}
 
+	// clipboardResultMsg carries the outcome of the OS clipboard helper the
+	// O C chord dispatches. The helper is a child process (clip.exe, on a
+	// local Windows console) and must not run on the update goroutine — a
+	// wedged child would freeze rendering and input for the whole of its
+	// bound — so the chord returns a Cmd and the wording is finalised here.
+	// Copied is true only when something reported that it really took the
+	// text; the OSC 52 write the chord always sends can never report that.
+	clipboardResultMsg struct {
+		URL    string
+		Copied bool
+	}
+
 	// panicRecoveryMsg is sent when a tea.Cmd closure recovers from a panic.
 	panicRecoveryMsg struct {
 		Text string

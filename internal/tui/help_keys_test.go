@@ -66,13 +66,18 @@ func TestHelpClaimsTaskPanelPaging(t *testing.T) {
 	}
 }
 
-// O C hands the URL to the terminal over OSC 52 and, on Windows outside
-// Windows Terminal, to clip.exe — neither of which is a copy the TUI can
+// O C hands the URL to the terminal over OSC 52 and, on a local Windows
+// console, to clip.exe as well — neither of which is a copy the TUI can
 // promise in advance. The menu label is the one place the chord announces
-// itself before it runs, so it must not promise one either (CORE-15, O-W).
+// itself BEFORE it runs, so it must hedge; and it must hedge without naming
+// a mechanism, because the label renders identically on every platform and
+// each mechanism is absent on some of them — naming OSC 52 is wrong on the
+// local Windows console the fallback was written for, and naming clip.exe
+// is wrong everywhere else (CORE-15, O-W; B6).
 //
 // Mutant: restoring the bare "Copy Stream URL" label.
-func TestCopyChordLabelNamesTheMechanism(t *testing.T) {
+// Mutant: putting "(OSC 52)" (or "clip.exe") back in the label.
+func TestCopyChordLabelIsHedged(t *testing.T) {
 	app := NewApp()
 	var label string
 	for _, item := range app.buildMenuItems() {
@@ -83,7 +88,12 @@ func TestCopyChordLabelNamesTheMechanism(t *testing.T) {
 	if label == "" {
 		t.Fatal("no O C item in buildMenuItems()")
 	}
-	if !strings.Contains(label, "OSC 52") {
-		t.Errorf("O C label = %q, want it to name the mechanism it actually uses", label)
+	if label == "Copy Stream URL" {
+		t.Errorf("O C label = %q, want a hedge — the press cannot promise a completed copy", label)
+	}
+	for _, mechanism := range []string{"OSC 52", "clip.exe"} {
+		if strings.Contains(label, mechanism) {
+			t.Errorf("O C label = %q, must not name %q — it is not the mechanism on every platform", label, mechanism)
+		}
 	}
 }

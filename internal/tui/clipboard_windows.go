@@ -10,20 +10,34 @@ import (
 	"time"
 )
 
-// clipboardHelperTimeout bounds the wait on clip.exe. The helper normally
-// returns in milliseconds, but O C runs on bubbletea's update goroutine, so
-// an unbounded Wait on a wedged child would freeze the whole TUI. The bound
-// is the feedback line's own lifetime: a helper still running after it could
-// not have produced a message the operator would see attached to the press.
-const clipboardHelperTimeout = 3 * time.Second
+// clipboardHelperTimeout bounds the wait on clip.exe, and clipboardWaitDelay
+// bounds the Wait that follows the kill. The helper normally returns in
+// milliseconds; the bound exists for a wedged console or a clipboard another
+// process is holding open. O C runs this inside a tea.Cmd, off the update
+// goroutine, so what the bound protects is the feedback line rather than the
+// frame rate: the timeout is that line's own lifetime, because a helper
+// still running after it could not produce a message the operator would
+// still connect to the press.
+const (
+	clipboardHelperTimeout = 3 * time.Second
+	clipboardWaitDelay     = time.Second
+)
 
 // clipboardHelperCmd builds the clip.exe invocation: the text goes in on
 // STDIN, never as an argument. An argv element would be word-split by the
 // Windows command line and would leak the URL into the process table, and
 // clip.exe reads stdin by design.
+//
+// WaitDelay bounds Wait itself. Stdin is a strings.Reader rather than an
+// *os.File, so os/exec copies it through an OS pipe on a goroutine and Wait
+// waits for that copy as well as for the process; killing the child normally
+// breaks the pipe and unwinds it, but WaitDelay is the documented guard for
+// when it does not, and without it the context bounds the CHILD rather than
+// the call.
 func clipboardHelperCmd(ctx context.Context, text string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "clip.exe")
 	cmd.Stdin = strings.NewReader(text)
+	cmd.WaitDelay = clipboardWaitDelay
 	return cmd
 }
 
@@ -52,17 +66,31 @@ func runClipboardHelper(text string) bool {
 // checks drive this variable instead.
 var clipboardHelper = runClipboardHelper
 
-// osClipboardFallback copies text with clip.exe when the terminal is NOT
-// Windows Terminal. tea.SetClipboard speaks OSC 52, which conhost (and
-// legacy consoles generally) silently drop — so on those terminals "Copied"
-// was a promise nothing kept (CORE-15, O-W). WT_SESSION is Windows
-// Terminal's own marker; when it is set OSC 52 works and this is skipped, so
-// the terminal's own clipboard integration — which honours the remote end of
-// an SSH session, where a local clip.exe would not — stays authoritative.
+// osClipboardFallback copies text with clip.exe on a LOCAL Windows console.
+// It is a backup for the OSC 52 write the chord always sends, not a
+// replacement for it: conhost (and legacy consoles generally) drop OSC 52 in
+// silence, so on those terminals clip.exe is the only thing that can put the
+// URL anywhere at all (CORE-15, O-W).
 //
-// Returns whether the text reached the system clipboard.
+// It stands down in two shapes, because clip.exe writes the clipboard of the
+// machine MOOMBOX RUNS ON, which is the operator's clipboard only when the
+// session is local:
+//
+//   - WT_SESSION set — Windows Terminal handles OSC 52 itself, including
+//     across SSH, so its own integration is authoritative and a second write
+//     would at best duplicate it.
+//   - SSH_CONNECTION / SSH_TTY / SSH_CLIENT set — the operator is sitting at
+//     another machine. WT_SESSION is NOT inherited through OpenSSH (Windows
+//     Terminal sets it only for its own children), so without this check an
+//     SSH login falls straight through to clip.exe and writes the server's
+//     clipboard while reporting a copy (B2).
+//
+// Returns whether the text reached THIS machine's system clipboard.
 func osClipboardFallback(text string) bool {
 	if os.Getenv("WT_SESSION") != "" {
+		return false
+	}
+	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" || os.Getenv("SSH_CLIENT") != "" {
 		return false
 	}
 	return clipboardHelper(text)

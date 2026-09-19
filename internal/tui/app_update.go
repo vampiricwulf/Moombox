@@ -920,6 +920,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case clipboardResultMsg:
+		// The OS helper came back. Only a REPORTED copy upgrades the
+		// wording; a helper that declined or failed leaves the OSC 52 hedge
+		// the press already set, which is still the whole truth.
+		//
+		// Guarded on the hedge still being the line on screen: the helper is
+		// bounded at three seconds, and the operator may have pressed
+		// something else in the meantime — a late upgrade must not overwrite
+		// a newer message (and must not resurrect a line that has already
+		// expired).
+		if msg.Copied && a.feedback.msg == clipboardFeedback(msg.URL, true) {
+			a.setFeedback(clipboardFeedback(msg.URL, false))
+		}
+		return a, nil
+
 	case panicRecoveryMsg:
 		// Clear setup wizard async state if a panic occurred during save or cookie extraction
 		if a.setupWiz.IsVisible() && (a.setupWiz.saving || a.setupWiz.cookieFinishing) {
