@@ -212,6 +212,21 @@
 # needed, unlike auto_enabled above.
 # acquisition = "auto"
 
+# dpapi_profile_dir names a Chromium-family PROFILE directory for the
+# Windows DPAPI fallback to read, taking precedence over the automatic
+# discovery walk. Set it when your profile is somewhere the walk cannot
+# see: a portable Chromium, a --user-data-dir install, or Opera.
+#
+# Name the PROFILE directory, not the User Data root — Moombox checks for
+# "Local State" one level up and for "Cookies" (or "Network/Cookies")
+# inside, and refuses with a message naming what was missing. A directory
+# inside a real installed browser's own profile tree is refused too; the
+# discovery walk already covers those.
+#
+# Windows-only in effect, like dpapi_fallback. Read live — no restart
+# needed.
+# dpapi_profile_dir = 'C:\PortableChrome\User Data\Default'
+
 # ─── BotGuard PO Token Sidecar ─────────────────────────────────────────────
 # Moombox bundles a Node.js + JSDOM + bgutils-js subprocess that produces
 # real PO tokens for YouTube. The sidecar binds locally only and runs

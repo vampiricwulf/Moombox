@@ -1271,3 +1271,81 @@ func TestNormalizeRewritesPortZero(t *testing.T) {
 		t.Errorf("network.port 0 normalised to %d, want the 774 default", cfg.Network.Port)
 	}
 }
+
+// TestValidateRejectsATraversingDpapiProfileDir pins the one validation rule
+// the new key carries. Existence is deliberately NOT checked: a container's
+// config is written before the volume is mounted, and a Validate that refused a
+// not-yet-mounted path would fail the save that configures it. What IS checked
+// is the shape — a path with ".." segments is either a mistake or an attempt to
+// walk out of wherever the operator meant, and the DPAPI reader opens whatever
+// it is given. Everything else about the directory is a RUNTIME fact, checked
+// by dpapi.ValidateProfileDir on the pass and reported at boot by
+// AutoCookieService.LogDpapiProfileDirVerdict as a Warn, never a boot failure.
+//
+// Both arms are asserted together for the same reason the acquisition table
+// above asserts both: reportOnly=true feeds PUT /api/config's error surface and
+// Save's refusal, reportOnly=false is what stops a hand-edited config.toml from
+// handing the DPAPI fallback a traversing path.
+//
+// Mutants:
+//   - drop the rule -> row 2 reports no error.
+//   - reject every non-absolute path -> row 3 fails; Chromium's own
+//     --user-data-dir accepts relative paths and so must this.
+//   - check existence too -> row 3 and row 4 fail, and a container that writes
+//     its config before mounting the volume can never save it.
+func TestValidateRejectsATraversingDpapiProfileDir(t *testing.T) {
+	absolute := filepath.Join(string(filepath.Separator), "srv", "chromium", "Default")
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+		why     string
+	}{
+		{"unset", "", "", false, "the key is empty by default and there is nothing to report"},
+		{
+			"traverses out", filepath.FromSlash("../../etc"), "", true,
+			"a path that walks above its own root is a mistake or an escape attempt, and the " +
+				"DPAPI reader opens whatever it is handed",
+		},
+		{
+			"relative stays legal", filepath.FromSlash("profiles/Default"), filepath.FromSlash("profiles/Default"), false,
+			"Chromium's own --user-data-dir accepts a relative path; refusing one here would be a " +
+				"rule the operator has no way to learn",
+		},
+		{
+			"absolute, and not yet on disk", absolute, absolute, false,
+			"existence is a RUNTIME fact: a container writes config.toml before the volume that " +
+				"holds the profile is mounted, so a Validate that stat'd the path would fail the " +
+				"save that configures it",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reported := Defaults()
+			reported.Cookies.DpapiProfileDir = tc.in
+			errs := Validate(reported)
+			var mentioned bool
+			for _, err := range errs {
+				if strings.Contains(err.Error(), "cookies.dpapi_profile_dir") {
+					mentioned = true
+				}
+			}
+			if mentioned != tc.wantErr {
+				t.Errorf("Validate mentioned cookies.dpapi_profile_dir = %v, want %v — %s (errs: %v)",
+					mentioned, tc.wantErr, tc.why, errs)
+			}
+			if reported.Cookies.DpapiProfileDir != tc.in {
+				t.Errorf("Validate mutated the config: dpapi_profile_dir = %q, want %q left alone",
+					reported.Cookies.DpapiProfileDir, tc.in)
+			}
+
+			normalised := Defaults()
+			normalised.Cookies.DpapiProfileDir = tc.in
+			Normalize(normalised)
+			if normalised.Cookies.DpapiProfileDir != tc.want {
+				t.Errorf("Normalize left dpapi_profile_dir = %q, want %q — %s",
+					normalised.Cookies.DpapiProfileDir, tc.want, tc.why)
+			}
+		})
+	}
+}

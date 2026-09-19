@@ -301,7 +301,15 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 				cfgBrowserType = btype
 			}
 		}
-		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType)
+		// COOKIES-7: cookies.dpapi_profile_dir, read LIVE at the moment the
+		// pass needs it, never snapshotted — that is what keeps the setting off
+		// both restart-required lists. Empty means "walk %LOCALAPPDATA% as
+		// before"; non-empty REPLACES that walk.
+		explicitProfileDir := ""
+		if s.DpapiProfileDir != nil {
+			explicitProfileDir = s.DpapiProfileDir()
+		}
+		fallbackCookies, fallbackErr := dpapiExtractAsNetscape(s.logger, cfgBrowserType, explicitProfileDir)
 		if fallbackErr != nil {
 			// ErrNotSupported is not a failure: the fallback does not exist on
 			// this platform and has already said so once, at Debug. Everything

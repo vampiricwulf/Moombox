@@ -157,15 +157,6 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 	return jobs, nil
 }
 
-// UpdateJobSync synchronously updates a job in the database.
-func (db *Database) UpdateJobSync(job *Job) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return updateJobExec(db.getCtx(), db.db, job)
-}
-
 // BatchSetWatched marks multiple jobs as watched or unwatched and clears
 // their resume_position. Only affects Finished jobs. Triggers OnJobsChange
 // for a full list refresh.
@@ -329,6 +320,10 @@ func (db *Database) CountBacklogInFlight(channelID string) (int, error) {
 //
 // Admission order: published DESC — no priority term (only backlog is ever Queued).
 // INNER JOIN is guaranteed to hit: only the archival pass creates Queued rows.
+// A cookie repair also returns priority-1 rows to Queued, and those were created
+// by the archival pass too — the prune deletes {Queued, Upcoming, COOKIES?} jobs
+// before it deletes feed_items (backfill.go), so no resumed row can outlive its
+// JOIN partner.
 func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()

@@ -867,49 +867,6 @@ func TestSubscriberSliceTrim(t *testing.T) {
 	}
 }
 
-func TestUpdateJobSync(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	job := &Job{
-		ID:      "yt_sync1",
-		VideoID: "sync1",
-		URL:     "https://youtube.com/watch?v=sync1",
-		Status:  StatusUpcoming,
-		Title:   "Sync Test",
-	}
-	db.AddJob(job)
-
-	// Update synchronously
-	job.Status = StatusDownloading
-	job.Title = "Updated Sync"
-	err = db.UpdateJobSync(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := db.GetJob("yt_sync1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != StatusDownloading {
-		t.Errorf("expected Downloading, got %s", got.Status)
-	}
-	if got.Title != "Updated Sync" {
-		t.Errorf("expected 'Updated Sync', got %q", got.Title)
-	}
-	if got.UpdatedAt == "" {
-		t.Error("expected updated_at to be set after UpdateJobSync")
-	}
-}
-
 func TestSegments(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

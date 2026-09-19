@@ -94,20 +94,42 @@ func validateBrowserProfileDirForLaunch(profileDir string) error {
 	if profileDir == "" {
 		return nil
 	}
-	abs, err := filepath.Abs(profileDir)
+	abs, dangerous, err := profileDirInsideBrowserTree(profileDir)
 	if err != nil {
 		return fmt.Errorf("resolve profile dir: %w", err)
 	}
-	// Separators are normalised to "/" before matching: filepath.Abs keeps
-	// backslashes on Windows, and a Linux path may carry them as ordinary
-	// filename bytes; one form lets a single list serve every OS.
+	if dangerous {
+		return fmt.Errorf("profile dir %q points at a known browser profile path; refusing to launch a headless session against it (audit cookies.md #26)", abs)
+	}
+	return nil
+}
+
+// profileDirInsideBrowserTree is the deny-list MATCH, separated from the
+// launch guard's sentence so a second caller can reuse the rule without
+// claiming a launch that never happens — exactly the distinction audit G3 drew
+// for the read-only sites. dpapiValidateProfileDir
+// (autocookies_dpapi.go) is that second caller: cookies.dpapi_profile_dir names
+// a directory the DPAPI reader opens, so it must refuse the same shapes, and a
+// second copy of a security list is how two copies drift.
+//
+// Returns the absolute form it judged, so the caller's message can name the
+// resolved path rather than the relative one the operator typed.
+//
+// Separators are normalised to "/" before matching: filepath.Abs keeps
+// backslashes on Windows, and a Linux path may carry them as ordinary
+// filename bytes; one form lets a single list serve every OS.
+func profileDirInsideBrowserTree(profileDir string) (abs string, dangerous bool, err error) {
+	abs, err = filepath.Abs(profileDir)
+	if err != nil {
+		return "", false, err
+	}
 	lower := strings.ToLower(strings.ReplaceAll(abs, `\`, "/"))
 	for _, pat := range dangerousProfilePathSubstrings {
 		if strings.Contains(lower, pat) {
-			return fmt.Errorf("profile dir %q points at a known browser profile path; refusing to launch a headless session against it (audit cookies.md #26)", abs)
+			return abs, true, nil
 		}
 	}
-	return nil
+	return abs, false, nil
 }
 
 // browserOverrideConfigured reports whether a (path, browserType) pair

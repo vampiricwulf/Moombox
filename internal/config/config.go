@@ -733,6 +733,31 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	// cookies.dpapi_profile_dir: the path's SHAPE, and nothing else.
+	//
+	// Existence is NOT checked. A container's config.toml is written before
+	// the volume that holds the profile is mounted, and a Validate that
+	// refused a not-yet-present path would fail the save that configures it —
+	// the same reason browser_profile_dir is not checked here either. Every
+	// structural fact about the directory is a RUNTIME one, re-checked on each
+	// pass by dpapi.ValidateProfileDir and reported once at boot, as a Warn
+	// and never a boot failure, by AutoCookieService.LogDpapiProfileDirVerdict.
+	//
+	// What is checked is the shape: a traversing path is a mistake or an
+	// attempt to walk out of wherever the operator meant, and the DPAPI reader
+	// opens whatever it is handed. Relative paths stay legal (Chromium's own
+	// --user-data-dir accepts them).
+	if cfg.Cookies.DpapiProfileDir != "" {
+		cleaned := filepath.Clean(cfg.Cookies.DpapiProfileDir)
+		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) ||
+			strings.HasPrefix(cleaned, "../") {
+			fail("cookies.dpapi_profile_dir %q must not traverse above its own root", cfg.Cookies.DpapiProfileDir)
+			if !reportOnly {
+				cfg.Cookies.DpapiProfileDir = ""
+			}
+		}
+	}
+
 	// Disk thresholds
 	if cfg.Disk.WarnPercent < 1 || cfg.Disk.WarnPercent > 99 {
 		fail("disk.warn_percent %d out of range 1..99", cfg.Disk.WarnPercent)

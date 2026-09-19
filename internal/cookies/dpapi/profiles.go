@@ -1,6 +1,11 @@
 package dpapi
 
-import "strings"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // BrowserProfile identifies one Chromium-family profile directory on disk.
 // The Path is the absolute path to the profile dir (e.g.
@@ -100,4 +105,62 @@ func KnownBrowserFamilies() []string {
 		out = append(out, base)
 	}
 	return out
+}
+
+// ValidateProfileDir reports whether dir looks like a Chromium-family PROFILE
+// directory the DPAPI reader can work with. It exists for
+// cookies.dpapi_profile_dir, the one place an operator names a profile
+// directory by hand: pointing the reader at the wrong directory produces "no
+// cookies came out", a sentence that has several causes needing different
+// responses, so the wrong directory is caught here and named.
+//
+// Every check below is a RUNTIME check — it stats the filesystem. config.Validate
+// deliberately runs none of them: a container writes its config.toml before the
+// volume holding the profile is mounted, so a boot-time existence check would
+// fail the save that configures it. config.Validate checks the path's SHAPE
+// (no ".." traversal) and nothing else; this is what the pass re-checks, and
+// what AutoCookieService.LogDpapiProfileDirVerdict reports at boot as a Warn.
+//
+// Three facts:
+//
+//   - dir EXISTS, is a DIRECTORY, and is NOT A SYMLINK. The symlink case is
+//     refused rather than followed, which is why this uses Lstat and not Stat:
+//     every other judgement made about this setting — the caller's
+//     browser-profile-tree deny-list, and the `Local State` lookup below — is
+//     made on the path AS WRITTEN, and a link pointing out of that path would
+//     leave both of them describing a different directory than the one the
+//     reader opens.
+//   - `Local State` ONE LEVEL UP. That is where Chromium keeps the
+//     DPAPI-protected master key; a profile dir without it has no key to
+//     decrypt the cookie values with, and the read would fail late with
+//     "nothing came out".
+//   - a cookie store INSIDE: `Cookies` on older Chromium, `Network/Cookies`
+//     since the network-service move. Either satisfies it.
+//
+// The error names the directory and which fact was missing, because the whole
+// point of the setting is an operator pointing at a directory by hand and
+// needing to know when they pointed at the wrong one — the User Data root
+// instead of the profile inside it being the likely mistake.
+func ValidateProfileDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q is a symlink; name the real profile directory, "+
+			"because every check made here is made on the path as written", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q is not a directory", dir)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "Local State")); err != nil {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q has no \"Local State\" beside its parent — "+
+			"name the PROFILE directory (…/User Data/Default), not the User Data root", dir)
+	}
+	for _, rel := range []string{"Cookies", filepath.Join("Network", "Cookies")} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("cookies.dpapi_profile_dir %q holds neither \"Cookies\" nor \"Network/Cookies\"", dir)
 }

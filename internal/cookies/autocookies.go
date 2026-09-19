@@ -477,6 +477,19 @@ type AutoCookieService struct {
 	// nil = "auto", so every existing caller and test keeps today's behaviour.
 	AcquisitionMode func() string
 
+	// DpapiProfileDir returns cookies.dpapi_profile_dir from the ACTIVE config,
+	// or "" when the operator set none. Injected by cmd/moombox and read LIVE,
+	// the same shape as AcquisitionMode above and for the same reason: this
+	// package cannot import config, and a value snapshotted at construction
+	// would make the setting restart-required with nothing in either UI saying
+	// so. Nil is treated as "".
+	//
+	// Consulted twice, and both are one-shot reads rather than a cached copy:
+	// LogDpapiProfileDirVerdict says at boot what the directory will do, and
+	// refreshCookiesDetailed hands the value to dpapiExtractAsNetscape once per
+	// pass, where it REPLACES the %LOCALAPPDATA% discovery walk.
+	DpapiProfileDir func() string
+
 	// profileDirErr captures any validation failure on the configured
 	// profile directory (e.g. it points at a real browser's profile
 	// tree). Computed once at construction so all subprocess-launching

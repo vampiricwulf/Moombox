@@ -1090,6 +1090,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 		})
 		return mode
 	}
+	// cookies.dpapi_profile_dir, read LIVE. Same shape and same reason as
+	// AcquisitionMode above: a snapshot here would make the setting
+	// restart-required with nothing in either UI saying so, and the directory
+	// is consulted once per pass, so there is nothing to cache.
+	autoCookieSvc.DpapiProfileDir = func() string {
+		var dir string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			dir = c.Cookies.DpapiProfileDir
+		})
+		return dir
+	}
 	// The launch guard's verdict, said once, at the level the mode earns.
 	//
 	// HERE and not in the constructor, and the ORDER is the whole point: the
@@ -1102,6 +1113,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// arc-close F1; TestProfileDirVerdictIsLoggedAfterTheModeIsWired fails if
 	// it moves. Silent unless the directory is actually refused.
 	autoCookieSvc.LogProfileDirVerdict()
+	// The other configured-directory verdict, and for the same reason it comes
+	// AFTER its own closure: LogDpapiProfileDirVerdict reads DpapiProfileDir()
+	// to decide whether there is anything to say. A Warn, never a boot failure
+	// — config.Validate checks that path's shape and never its existence, so
+	// without this line a typo first surfaces at the next failed refresh.
+	// Silent unless the key is set and the directory is unusable (or the host
+	// is not Windows, where the key is accepted and ignored).
+	autoCookieSvc.LogDpapiProfileDirVerdict()
 	s.autoCookieSvc = autoCookieSvc
 
 	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
