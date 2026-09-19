@@ -23,6 +23,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
@@ -81,9 +82,13 @@ type TwitchJobMetadata struct {
 }
 
 // filterJobsByAge splits jobs into active vs archived based on the
-// hide_finished_age_days config setting. Non-finished jobs are always active.
-// Finished jobs are archived when their age exceeds the threshold.
-// If hideAgeDays is 0, all finished jobs are immediately archived.
+// hide_finished_age_days config setting, through the one shared predicate
+// (jobfilter.ArchiveCutoff + jobfilter.IsArchived) that the WS broadcast
+// gate, the cmd/moombox list filter, the TUI list and the Web UI's
+// _evaluateArchiveBoundary also classify by. Non-finished jobs are always
+// active. The boundary is EXCLUSIVE: a Finished job whose updated_at sits
+// exactly on the cutoff stays active. hideAgeDays == 0 archives every
+// Finished job whose updated_at is strictly in the past; < 0 never archives.
 func filterJobsByAge(jobs []*database.Job, archived bool, store *config.Store) []*database.Job {
 	var hideAgeDays float64
 	store.Read(func(c *config.MoomboxConfig) {
@@ -98,36 +103,15 @@ func filterJobsByAge(jobs []*database.Job, archived bool, store *config.Store) [
 		return jobs
 	}
 
-	hideAge := time.Duration(hideAgeDays*24) * time.Hour
-	now := time.Now()
+	cutoff := jobfilter.ArchiveCutoff(time.Now(), hideAgeDays)
 
 	var result []*database.Job
 	for _, j := range jobs {
-		if j.Status != database.StatusFinished {
-			// Non-finished jobs are always in the active list
-			if !archived {
-				result = append(result, j)
-			}
-			continue
-		}
-		// Finished job: check age
-		updatedAt, err := time.Parse(time.RFC3339, j.UpdatedAt)
-		if err != nil {
-			// If we can't parse the date, treat as active
-			if !archived {
-				result = append(result, j)
-			}
-			continue
-		}
-		age := now.Sub(updatedAt)
-		if archived {
-			if age > hideAge {
-				result = append(result, j)
-			}
-		} else {
-			if age <= hideAge {
-				result = append(result, j)
-			}
+		// jobfilter.IsArchived is false for non-Finished rows and for an
+		// unparseable updated_at, which is exactly the "treat as active"
+		// rule this loop applied by hand.
+		if jobfilter.IsArchived(j, cutoff) == archived {
+			result = append(result, j)
 		}
 	}
 	return result

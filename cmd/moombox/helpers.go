@@ -11,6 +11,7 @@ import (
 	isatty "github.com/mattn/go-isatty"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -195,11 +196,11 @@ func filterJobsByAge(jobs []*database.Job, store *config.Store) []*database.Job 
 	return filterJobsByAgeThreshold(jobs, hideAgeDays)
 }
 
-// filterJobsByAgeThreshold removes finished jobs older than hideAgeDays from the
-// slice using the same float-precision, strict-greater-than semantics as the
-// REST archived filter (internal/web/routes/jobs.go filterJobsByAge) and the
-// Web UI (_evaluateArchiveBoundary in app.js), so all three classify a given
-// job identically:
+// filterJobsByAgeThreshold removes finished jobs older than hideAgeDays from
+// the slice using jobfilter.ArchiveCutoff + jobfilter.IsArchived — the one
+// predicate the REST archived filter, the WS broadcast gate, the TUI list
+// and the Web UI's _evaluateArchiveBoundary all classify by, so a given job
+// is archived in all four or in none:
 //   - hideAgeDays < 0 : never archive (returns the slice unchanged)
 //   - hideAgeDays == 0: archive every finished job whose updated_at is strictly
 //     in the past (cutoff == now)
@@ -214,10 +215,10 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 	if hideAgeDays < 0 {
 		return jobs
 	}
-	cutoff := time.Now().Add(-time.Duration(hideAgeDays*24) * time.Hour)
+	cutoff := jobfilter.ArchiveCutoff(time.Now(), hideAgeDays)
 	anyFiltered := false
 	for _, j := range jobs {
-		if jobArchivedAt(j, cutoff) {
+		if jobfilter.IsArchived(j, cutoff) {
 			anyFiltered = true
 			break
 		}
@@ -227,7 +228,7 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 	}
 	filtered := make([]*database.Job, 0, len(jobs))
 	for _, j := range jobs {
-		if jobArchivedAt(j, cutoff) {
+		if jobfilter.IsArchived(j, cutoff) {
 			continue
 		}
 		filtered = append(filtered, j)
@@ -267,21 +268,6 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 	return pendingTag != "" &&
 		pendingTag != "v"+currentVersion &&
 		failureMarkerPresent
-}
-
-// jobArchivedAt is the single-job archive classification shared by
-// filterJobsByAgeThreshold and the WS job_update broadcast gate. Keeping one
-// predicate prevents the two from drifting (an earlier int-truncated copy of
-// this logic suppressed broadcasts for jobs the list filter still showed).
-func jobArchivedAt(j *database.Job, cutoff time.Time) bool {
-	if j.Status != database.StatusFinished || j.UpdatedAt == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, j.UpdatedAt)
-	if err != nil {
-		return false
-	}
-	return t.Before(cutoff)
 }
 
 // cookieFilePath returns the configured Netscape cookie file path for use in

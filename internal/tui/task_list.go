@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"io"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -134,7 +133,7 @@ type TaskListModel struct {
 	width, height       int
 	focused             bool
 	archiveExpanded     bool
-	hideFinishedAgeDays int // from config, default 30
+	hideFinishedAgeDays float64 // from config, default 30
 
 	// statusSummary is renderHeader's icon-count line ("3▼ 2✓"), computed when
 	// the rows are rebuilt instead of on every frame. buildStatusSummary walks
@@ -338,8 +337,14 @@ func (m *TaskListModel) newTaskList() list.Model {
 	return l
 }
 
-// SetHideFinishedAgeDays updates the archive threshold.
-func (m *TaskListModel) SetHideFinishedAgeDays(days int) {
+// SetHideFinishedAgeDays updates the archive threshold. A FLOAT: 0.5 is a
+// valid twelve-hour threshold the config file and the Web UI both accept,
+// and int() turned it into 0, which this file's own archive rule reads as
+// "instantly archive all finished jobs" (CORE-8).
+//
+// Ends in a rebuild, which is also what moves rebuildSeq — the render cache
+// keys on it, so a threshold change can never serve a stale frame.
+func (m *TaskListModel) SetHideFinishedAgeDays(days float64) {
 	m.hideFinishedAgeDays = days
 	m.rebuildVirtualList()
 }
@@ -746,22 +751,31 @@ func isCompletedStatus(status database.JobStatus) bool {
 	return status == database.StatusFinished || status == database.StatusCancelled
 }
 
-// isJobArchived returns true if a finished job should be in the archive section
-// based on the hide_finished_age_days setting.
-// Only Finished jobs are archived — Cancelled jobs stay in the active list since
-// they may need user attention (retry, investigate, etc.).
-// ageDays == 0: instantly archive all finished jobs.
-// ageDays < 0: never archive (all stay active).
-// ageDays > 0: archive finished jobs older than N days.
-func isJobArchived(j *database.Job, ageDays int, now time.Time) bool {
-	if ageDays < 0 || j.Status != database.StatusFinished || j.UpdatedAt == "" {
+// archiveCutoff is the list's one cutoff computation, shared with the REST
+// filter, the WS broadcast gate and the Web UI through
+// jobfilter.ArchiveCutoff. Returns the zero time for a negative threshold
+// ("never archive"), which isJobArchived reads as "nothing is archived".
+func archiveCutoff(ageDays float64, now time.Time) time.Time {
+	if ageDays < 0 {
+		return time.Time{}
+	}
+	return jobfilter.ArchiveCutoff(now, ageDays)
+}
+
+// isJobArchived reports whether a finished job belongs in the archive
+// section. Only Finished jobs archive — Cancelled jobs stay in the active
+// list since they may need user attention (retry, investigate).
+//
+// The boundary is EXCLUSIVE: a job whose updated_at sits exactly on the
+// cutoff stays active, matching jobfilter.IsArchived and the Web UI's
+// _evaluateArchiveBoundary. ageDays == 0 puts the cutoff at now, which
+// archives every Finished job with a past updated_at; ageDays < 0 yields a
+// zero cutoff, which archives nothing (see archiveCutoff).
+func isJobArchived(j *database.Job, cutoff time.Time) bool {
+	if cutoff.IsZero() {
 		return false
 	}
-	if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
-		diffDays := int(math.Ceil(now.Sub(t).Hours() / 24))
-		return ageDays == 0 || diffDays > ageDays
-	}
-	return false
+	return jobfilter.IsArchived(j, cutoff)
 }
 
 // archiveBucketsDirty reports whether any displayed job's archive
@@ -777,11 +791,12 @@ func (m *TaskListModel) archiveBucketsDirty() bool {
 		return false
 	}
 	now := time.Now()
+	cutoff := archiveCutoff(m.hideFinishedAgeDays, now)
 	for _, j := range m.jobs {
 		if !m.passes(j) {
 			continue
 		}
-		if isJobArchived(j, m.hideFinishedAgeDays, now) != m.archivedSet[j.ID] {
+		if isJobArchived(j, cutoff) != m.archivedSet[j.ID] {
 			return true
 		}
 	}
@@ -811,7 +826,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 	prevSelectedID := m.captureSelection()
 
 	now := time.Now()
-	ageDays := m.hideFinishedAgeDays
+	cutoff := archiveCutoff(m.hideFinishedAgeDays, now)
 
 	active := make([]*database.Job, 0, len(m.jobs))
 	archived := make([]*database.Job, 0, len(m.jobs)/4)
@@ -821,7 +836,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 			continue
 		}
 
-		if isJobArchived(j, ageDays, now) {
+		if isJobArchived(j, cutoff) {
 			m.archivedSet[j.ID] = true
 			archived = append(archived, j)
 			continue
@@ -1143,10 +1158,10 @@ func (m *TaskListModel) renderHeader(w int) string {
 // Counts exclude archived finished jobs (match TS which counts from allSortedJobs).
 func (m *TaskListModel) buildStatusSummary() string {
 	now := time.Now()
-	ageDays := m.hideFinishedAgeDays
+	cutoff := archiveCutoff(m.hideFinishedAgeDays, now)
 	counts := make(map[database.JobStatus]int)
 	for _, j := range m.jobs {
-		if isJobArchived(j, ageDays, now) {
+		if isJobArchived(j, cutoff) {
 			continue
 		}
 		counts[j.Status]++

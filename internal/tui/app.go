@@ -749,7 +749,7 @@ func (a *App) SetSidecarDown(down bool) {
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
-	a.taskList.SetHideFinishedAgeDays(int(cfg.Monitors.HideFinishedAgeDays.Days()))
+	a.taskList.SetHideFinishedAgeDays(cfg.Monitors.HideFinishedAgeDays.Days())
 }
 
 // SetConfigStore wires the unified config Store into the App and its

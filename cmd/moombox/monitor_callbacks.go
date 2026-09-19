@@ -11,6 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
@@ -1548,19 +1549,16 @@ func (s *runState) wireMonitorCallbacks() {
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
 		// Skip broadcasting updates for archived (old finished) jobs — same
-		// classification as the list filter, via the shared jobArchivedAt
-		// predicate so the two can never disagree about which jobs are
-		// archived.
+		// classification as the list filter, via the shared
+		// jobfilter.IsArchivedAt predicate so the two can never disagree
+		// about which jobs are archived.
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
 			var hideAgeDays float64
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
 			})
-			if hideAgeDays >= 0 {
-				cutoff := time.Now().Add(-time.Duration(hideAgeDays*24) * time.Hour)
-				if jobArchivedAt(job, cutoff) {
-					return
-				}
+			if jobfilter.IsArchivedAt(job, hideAgeDays, time.Now()) {
+				return
 			}
 		}
 		s.wsHub.BroadcastJobUpdate(job)

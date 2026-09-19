@@ -25,9 +25,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// under the store lock — HTTP handlers mutate config via
 			// configStore.Update concurrently (matches getPort/apiBaseURL).
 			if a.configStore != nil {
-				var days int
+				var days float64
 				a.configStore.Read(func(c *config.MoomboxConfig) {
-					days = int(c.Monitors.HideFinishedAgeDays.Days())
+					days = c.Monitors.HideFinishedAgeDays.Days()
 				})
 				a.taskList.SetHideFinishedAgeDays(days)
 			}
