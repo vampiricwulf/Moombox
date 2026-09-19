@@ -203,13 +203,35 @@ func (s *runState) wireRoutes() func() {
 // ConfigRoutesCallbacks.OnHideFinishedAgeChanged above and the TUI's
 // OnSaveConfig (tui_wiring.go). Before that pairing a TUI save never reached
 // the dashboard at all (CORE-11).
+//
+// The change gate is here rather than at the call sites for the same reason:
+// the Web route gates before it calls (newHideAge != oldHideAge), but the TUI
+// cannot — the settings model mutates the live config before OnSaveConfig
+// runs, so there is no pre-mutation value on that side. s.hideAgeBroadcast
+// carries it instead, written by whichever caller last published, so an
+// unrelated TUI save (log level, output directory) costs nothing and a real
+// change is never swallowed.
 func (s *runState) broadcastHideFinishedAge() {
 	var hideAge float64
 	s.configStore.Read(func(c *config.MoomboxConfig) {
 		hideAge = c.Monitors.HideFinishedAgeDays.Value
 	})
+	if last := s.hideAgeBroadcast.Load(); last != nil && *last == hideAge {
+		return
+	}
 	s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
-	jobs, _ := s.db.GetAllJobs()
+	s.hideAgeBroadcast.Store(&hideAge)
+	jobs, err := s.db.GetAllJobs()
+	if err != nil {
+		// Never broadcast the empty slice a failed read returns:
+		// jobs_update REPLACES the dashboard's list, so a transient DB
+		// error would blank every open dashboard until some unrelated
+		// event refilled it. The config_update above is already out, so
+		// the clients re-filter the list they hold with the new threshold.
+		s.log.Warn("Could not read jobs for the hide_finished_age_days broadcast — dashboards keep their current list",
+			slog.String("error", err.Error()))
+		return
+	}
 	s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
 }
 

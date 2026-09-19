@@ -93,6 +93,15 @@ type runState struct {
 	passwordRL *web.RateLimiter
 	authSvc    *web.AuthService
 	startTime  time.Time
+	// hideAgeBroadcast remembers the hide_finished_age_days value the
+	// dashboards were last told about, so broadcastHideFinishedAge can skip
+	// a save that did not move it — the gate the Web PUT applies before it
+	// calls (routes/config_routes.go), which the TUI's OnSaveConfig cannot
+	// apply itself because the settings model mutates the live config before
+	// the callback runs. Shared by BOTH callers on purpose: a memo only one
+	// of them updated would go stale the moment the other changed the
+	// threshold. nil until the first broadcast.
+	hideAgeBroadcast atomic.Pointer[float64]
 
 	// --- Lifecycle control ---
 	restartRequested atomic.Bool

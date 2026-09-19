@@ -61,14 +61,15 @@ func cookieBadgeFor(authenticated, hasCookies bool, verdict cookies.RefreshVerdi
 // row for the rest of the session while user-interfaces.md claimed a resync
 // existed (CORE-6).
 //
-// The returned func is free when nothing was dropped (one atomic load). When
-// a drop IS pending it takes the flag, fetches a full snapshot and pushes it
-// down the full-list channel the TUI already handles; if either the fetch or
-// the push fails the flag is re-armed so the next caller tries again —
-// clearing it there would turn one dropped update into a permanent
-// divergence. Taking the flag first is what makes this ONE refresh per streak
-// of drops rather than one per dropped message: it is a catch-up, not a poll,
-// and it leaves the ~60 Hz forwarding path exactly as it was.
+// The returned func costs one failed compare-and-swap when nothing was
+// dropped. When a drop IS pending it takes the flag, fetches a full snapshot
+// and pushes it down the full-list channel the TUI already handles; if either
+// the fetch or the push fails the flag is re-armed so the next caller tries
+// again — clearing it there would turn one dropped update into a permanent
+// divergence. Taking the flag first, and calling this only from a forwarder's
+// SUCCESSFUL send, is what makes it ONE refresh per streak of drops rather
+// than one per dropped message: it is a catch-up, not a poll, and it leaves
+// the ~60 Hz forwarding path exactly as it was.
 func newTUIResync(needed *atomic.Bool, jobsCh chan []*database.Job, getAll func() ([]*database.Job, error)) func() {
 	return func() {
 		if !needed.CompareAndSwap(true, false) {
@@ -323,7 +324,11 @@ func (s *runState) runTUI() {
 		// has always broadcast this, the TUI never did, so a threshold
 		// changed in the terminal left every open dashboard filtering on
 		// the old one (CORE-11). The same method both sides call, so the
-		// two directions cannot drift.
+		// two directions cannot drift. Called unconditionally like its
+		// neighbours above, for the same reason: there is no pre-mutation
+		// snapshot on this side to diff against. The method itself carries
+		// the change gate the Web route applies before calling, so a save
+		// that did not move the threshold still costs nothing.
 		s.broadcastHideFinishedAge()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
 		if updatedCfg.Logs.LogLevel != "" {
@@ -800,14 +805,19 @@ func (s *runState) runTUI() {
 	// expensive list/detail rebuilds (see hasDisplayChange in
 	// app_update.go). DECISIONS #21 / audit tui.md F20.
 	//
-	// Each forwarder runs resyncTUIJobs() on the way in: a drop recorded by
-	// an earlier event is replayed as a full snapshot by the next one, which
-	// is what makes a dropped terminal transition recoverable instead of a
-	// stale row for the session (CORE-6).
+	// Each forwarder runs resyncTUIJobs() from its SUCCESSFUL-send branch: a
+	// drop recorded by an earlier event is replayed as a full snapshot by
+	// the first event that gets through, which is what makes a dropped
+	// terminal transition recoverable instead of a stale row for the session
+	// (CORE-6). On the way IN it would instead fire once per DROPPED event —
+	// a full GetAllJobs on this, the ~60 Hz UpdateJobFields writer
+	// goroutine, for every message the stalled TUI could not take, feeding
+	// the very backlog it is recovering from. While the channel stays full
+	// the 1 s backstop below is the replay path.
 	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
-		resyncTUIJobs()
 		select {
 		case jobUpdateCh <- ev:
+			resyncTUIJobs()
 		default:
 			tuiDroppedJobs.Add(1)
 			if tuiResyncNeeded.CompareAndSwap(false, true) {
@@ -822,9 +832,9 @@ func (s *runState) runTUI() {
 	// the task list instead of clearing + rebuilding from a fresh
 	// snapshot. DECISIONS #21 consumer migration.
 	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
-		resyncTUIJobs()
 		select {
 		case jobAddedCh <- ev:
+			resyncTUIJobs()
 		default:
 			tuiDroppedJobs.Add(1)
 			if tuiResyncNeeded.CompareAndSwap(false, true) {
@@ -839,9 +849,9 @@ func (s *runState) runTUI() {
 	// instead of clearing+rebuilding from a full-list snapshot.
 	// DECISIONS #21.
 	unsubTUIJobDeleted := s.db.OnJobDeleted(func(ev *database.JobDeleted) {
-		resyncTUIJobs()
 		select {
 		case jobDeletedCh <- ev:
+			resyncTUIJobs()
 		default:
 			tuiDroppedJobs.Add(1)
 			if tuiResyncNeeded.CompareAndSwap(false, true) {
@@ -855,13 +865,13 @@ func (s *runState) runTUI() {
 	// affected job here (so its Trims field is current) and forward
 	// the refreshed pointer to the TUI handler. DECISIONS #21.
 	unsubTUITrimsChanged := s.db.OnTrimsChanged(func(ev *database.TrimsChanged) {
-		resyncTUIJobs()
 		job, err := s.db.GetJob(ev.JobID)
 		if err != nil || job == nil {
 			return
 		}
 		select {
 		case jobTrimsChangedCh <- job:
+			resyncTUIJobs()
 		default:
 			tuiDroppedJobs.Add(1)
 			if tuiResyncNeeded.CompareAndSwap(false, true) {
@@ -872,23 +882,24 @@ func (s *runState) runTUI() {
 	})
 	// This one already carries a full list, so its own drop is harmless (a
 	// snapshot is queued when a snapshot cannot be queued) and its default
-	// stays empty. The replay call at the top still matters: the list it is
-	// about to deliver is NEWER than the snapshot a pending resync would
-	// fetch, so a queued replay is satisfied here rather than re-read a
-	// moment later.
+	// stays empty. A DELIVERED list IS the refresh — it is newer than
+	// anything a pending replay would fetch — so the success branch clears
+	// the flag instead of calling the replay, which would fetch and push a
+	// second snapshot into the channel that just took one.
 	unsubTUIJobsChange := s.db.OnJobsChange(func(jobs []*database.Job) {
-		resyncTUIJobs()
 		select {
 		case jobsUpdateCh <- jobs:
+			tuiResyncNeeded.Store(false)
 		default:
 		}
 	})
 
 	// 1 s backstop for the resync: the forwarders above cover the common
 	// case (drops happen under event pressure, so more events follow), but a
-	// drop whose job then goes quiet would otherwise never be replayed. One
-	// atomic load per second when nothing is pending — this is a discovery
-	// bound on a pending catch-up, not a poll of the database.
+	// drop whose job then goes quiet would otherwise never be replayed, and
+	// neither would one whose channel stays full. One failed compare-and-swap
+	// per second when nothing is pending — this is a discovery bound on a
+	// pending catch-up, not a poll of the database.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

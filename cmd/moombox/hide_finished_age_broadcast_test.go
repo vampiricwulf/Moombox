@@ -5,10 +5,12 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -122,4 +124,109 @@ func TestBroadcastHideFinishedAgeRunsAgainstALiveStore(t *testing.T) {
 		t.Fatalf("store threshold = %v, want 0.5", live)
 	}
 	s.broadcastHideFinishedAge()
+}
+
+// hideAgeTestState builds the runState the broadcast needs — a real store, a
+// real database, a client-less hub and a real logger whose Subscribe channel
+// is the only seam this package has for observing what the method DID.
+func hideAgeTestState(t *testing.T, days float64) (*runState, *database.Database, chan string) {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	log, err := logger.New(filepath.Join(t.TempDir(), "broadcast.log"), "info", 4096, 1)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	t.Cleanup(func() { log.Close() })
+
+	cfg := config.Defaults()
+	cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: days}
+	store := config.NewStore(cfg, "")
+	s := &runState{
+		db:          db,
+		wsHub:       web.NewWebSocketHub(sweepTestLogger{}),
+		configStore: store,
+		log:         log,
+	}
+	return s, db, log.Subscribe()
+}
+
+// drainFor counts the lines already published to a logger subscription that
+// contain want. Publication is synchronous inside the log call, so a
+// non-blocking drain after the call under test is deterministic.
+func drainFor(lines chan string, want string) int {
+	n := 0
+	for {
+		select {
+		case line := <-lines:
+			if strings.Contains(line, want) {
+				n++
+			}
+		default:
+			return n
+		}
+	}
+}
+
+// A settings save that did not move hide_finished_age_days must broadcast
+// nothing. The Web PUT gates this way before it calls (newHideAge !=
+// oldHideAge in routes/config_routes.go); the TUI's OnSaveConfig cannot diff,
+// because the settings model mutates the live config before the callback
+// runs, so the gate lives in the shared method and remembers what the
+// dashboards were last told. Without it every unrelated TUI save (log level,
+// output directory) costs a full GetAllJobs and two broadcasts to every
+// client.
+//
+// Observed through the DB: the database is closed after the first broadcast,
+// so a second broadcast that does any work reports a failed read. Silence
+// means the gate skipped it.
+//
+// Mutant: delete the gate (or never record the memo) — the unchanged save
+// reaches the jobs read and the warning appears.
+func TestBroadcastHideFinishedAgeSkipsAnUnchangedThreshold(t *testing.T) {
+	s, db, lines := hideAgeTestState(t, 30)
+
+	s.broadcastHideFinishedAge()
+	drainFor(lines, "")
+	db.Close()
+
+	s.broadcastHideFinishedAge()
+	if n := drainFor(lines, "hide_finished_age_days broadcast"); n != 0 {
+		t.Errorf("an unchanged threshold did %d units of broadcast work, want 0 — the Web PUT gates "+
+			"the same way, and a TUI save of an unrelated setting must not re-read the jobs table "+
+			"and re-push the list to every dashboard", n)
+	}
+
+	if err := s.configStore.Update(func(c *config.MoomboxConfig) {
+		c.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: 0.5}
+	}); err != nil {
+		t.Fatalf("store.Update: %v", err)
+	}
+	s.broadcastHideFinishedAge()
+	if n := drainFor(lines, "hide_finished_age_days broadcast"); n != 1 {
+		t.Errorf("a CHANGED threshold produced %d job-read reports, want 1 — the gate must let a "+
+			"real change through", n)
+	}
+}
+
+// A jobs_update REPLACES the dashboard's list, so broadcasting the empty
+// slice a failed GetAllJobs returns blanks every open dashboard until some
+// unrelated event refills it. On a read error the method reports it and
+// leaves the list alone; the config_update has already gone out, so clients
+// re-filter what they hold with the new threshold.
+//
+// Mutant: restore jobs, _ := s.db.GetAllJobs() (the empty push) — no warning
+// is logged and the empty list goes out.
+func TestBroadcastHideFinishedAgeReportsAFailedJobRead(t *testing.T) {
+	s, db, lines := hideAgeTestState(t, 30)
+	db.Close()
+
+	s.broadcastHideFinishedAge()
+	if n := drainFor(lines, "Could not read jobs for the hide_finished_age_days broadcast"); n != 1 {
+		t.Errorf("a failed jobs read produced %d warnings, want 1 — silently broadcasting the empty "+
+			"result blanks every dashboard's job list", n)
+	}
 }

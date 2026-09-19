@@ -4,10 +4,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/logger"
 )
 
 // A TUI job update dropped on a full channel must be replayed: the flag is
@@ -80,52 +84,149 @@ func TestResyncStaysArmedWhenItCannotDeliver(t *testing.T) {
 	}
 }
 
-// The replay is ONE-SHOT, not a poll: a streak of N drops arms the flag once
-// (which is also why the warning is logged once per streak, not N times) and
-// the events that follow satisfy it with a single full snapshot. The ~60 Hz
-// progress pipeline is untouched by this — a drop stays a drop and still
-// increments the counter; only the catching-up is added.
+// The replay is ONE-SHOT and it runs on the SUCCESSFUL send: a streak of K
+// drops arms the flag once and costs nothing else, and the first event that
+// gets through satisfies it with a single full snapshot carrying the
+// transition the streak swallowed.
 //
-// Mutant: re-arming (or never clearing) the flag after a delivered snapshot —
-// every later event re-reads the whole jobs table and pushes it again, which
-// is the periodic poll this must not become.
+// Measured end to end — a real database (so the fetch is the real
+// GetAllJobs), a real logger (so the warning count is the real one), the
+// production channel shapes, and the forwarder body in its production form.
+// The forwarder here is a copy; that the copy is faithful is what
+// TestEveryTUIJobForwarderReplaysOnTheSuccessfulSend below pins, and the two
+// together are the pin. This is the interleaving the earlier version of this
+// test failed to model: drops and forwards ALTERNATE, so a replay at the top
+// of the body is taken by the very next dropped event.
+//
+// Mutant: move resync() back to the top of the forwarder body — the streak
+// then runs K full-table reads on the ~60 Hz UpdateJobFields writer goroutine
+// (3.15 ms each over 500 rows), queues K full-list rebuilds into the TUI it
+// is already failing to keep up with, and logs K warnings. Both the
+// during-streak assertion and the "want 1" assertions fail.
 func TestNDroppedUpdatesProduceExactlyOneRefresh(t *testing.T) {
-	var needed atomic.Bool
-	jobsCh := make(chan []*database.Job, 4)
-	fetches := 0
-	resync := newTUIResync(&needed, jobsCh, func() ([]*database.Job, error) {
-		fetches++
-		return []*database.Job{{ID: "a"}}, nil
-	})
+	db, err := database.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.AddJob(&database.Job{
+		ID: "a", VideoID: "a", URL: "https://example.invalid/a",
+		Platform: "youtube", Status: database.StatusDownloading,
+	}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
 
-	// Three drops in a row: the arming CompareAndSwap the forwarders run
-	// transitions once.
-	armed := 0
-	for i := 0; i < 3; i++ {
-		if needed.CompareAndSwap(false, true) {
-			armed++
+	log, err := logger.New(filepath.Join(t.TempDir(), "resync.log"), "info", 4096, 1)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	t.Cleanup(func() { log.Close() })
+	lines := log.Subscribe()
+
+	// Production shapes: the job-change channel is the one that fills, the
+	// full-list channel is the one the replay pushes down.
+	jobUpdateCh := make(chan *database.JobChange, 1)
+	jobsUpdateCh := make(chan []*database.Job, 10)
+	var dropped atomic.Int64
+	var needed atomic.Bool
+	fetches := 0
+	resync := newTUIResync(&needed, jobsUpdateCh, func() ([]*database.Job, error) {
+		fetches++
+		return db.GetAllJobs()
+	})
+	forward := func(ev *database.JobChange) {
+		select {
+		case jobUpdateCh <- ev:
+			resync()
+		default:
+			dropped.Add(1)
+			if needed.CompareAndSwap(false, true) {
+				log.Warn("TUI job update dropped — a full refresh is queued",
+					slog.String("job", ev.Job.ID))
+			}
 		}
 	}
-	if armed != 1 {
-		t.Errorf("three drops armed the resync %d times, want 1 (one log line per streak)", armed)
+
+	// Fill the channel: the TUI's Update loop is stalled, so every send below
+	// drops.
+	jobUpdateCh <- &database.JobChange{Job: &database.Job{ID: "filler"}}
+
+	const K = 6
+	for i := 0; i < K; i++ {
+		forward(&database.JobChange{
+			Job:     &database.Job{ID: "a", Status: database.StatusDownloading},
+			Changes: []string{"status"},
+		})
+	}
+	// The transition the streak swallowed.
+	if db.UpdateJobFields("a", map[string]any{"status": database.StatusFinished}) == nil {
+		t.Fatal("UpdateJobFields returned no row")
 	}
 
-	// Three later events all run the replay.
-	for i := 0; i < 3; i++ {
-		resync()
+	if got := dropped.Load(); got != K {
+		t.Errorf("K=%d events on a full channel dropped %d, want %d", K, got, K)
 	}
-	if got := len(jobsCh); got != 1 {
-		t.Errorf("three drops then three events pushed %d snapshots, want exactly 1", got)
+	if fetches != 0 {
+		t.Errorf("the writer goroutine ran GetAllJobs %d times while the channel was full, want 0 — "+
+			"the replay belongs on the successful send, not on every dropped event", fetches)
 	}
+	if got := len(jobsUpdateCh); got != 0 {
+		t.Errorf("%d full-list snapshots were queued mid-streak, want 0", got)
+	}
+
+	// The TUI drains one slot and the next event gets through.
+	<-jobUpdateCh
+	forward(&database.JobChange{Job: &database.Job{ID: "a"}, Changes: []string{"status"}})
+
 	if fetches != 1 {
-		t.Errorf("GetAllJobs ran %d times, want 1 — the replay is one-shot, not a poll", fetches)
+		t.Errorf("K=%d drops then one successful send ran %d refreshes, want exactly 1", K, fetches)
 	}
+	if got := len(jobsUpdateCh); got != 1 {
+		t.Errorf("K=%d drops then one successful send queued %d snapshots, want exactly 1", K, got)
+	}
+	var status database.JobStatus
+	select {
+	case snap := <-jobsUpdateCh:
+		for _, j := range snap {
+			if j.ID == "a" {
+				status = j.Status
+			}
+		}
+	default:
+		t.Error("the successful send did not deliver the pending snapshot")
+	}
+	if status != database.StatusFinished {
+		t.Errorf("the replayed snapshot carries status %q, want %q — the whole point is that the "+
+			"dropped transition is recovered", status, database.StatusFinished)
+	}
+	if needed.Load() {
+		t.Error("a delivered snapshot must clear the pending flag")
+	}
+
+	warns := 0
+	for draining := true; draining; {
+		select {
+		case line := <-lines:
+			if strings.Contains(line, "TUI job update dropped") {
+				warns++
+			}
+		default:
+			draining = false
+		}
+	}
+	if warns != 1 {
+		t.Errorf("a streak of %d drops logged %d warnings, want 1 — one line per streak, not per "+
+			"dropped message (a stall would otherwise flood the 200-slot log channel)", K, warns)
+	}
+	t.Logf("K=%d drops then one successful send: refreshes=%d warnings=%d snapshots=1 status=%q",
+		K, fetches, warns, status)
 }
 
 // resyncForwarders are the five DB subscriptions runTUI forwards to the TUI.
-// The four that count a drop must also arm the replay; the fifth
-// (OnJobsChange) already carries a full list, so it only has to satisfy a
-// pending replay on the way in.
+// The four that count a drop must arm the replay there and run it from the
+// SUCCESSFUL send; the fifth (OnJobsChange) delivers a full list, which IS
+// the refresh, so it clears the flag in its own success branch instead of
+// fetching a second snapshot.
 var resyncForwarders = map[string]bool{ // name -> counts a drop
 	"OnJobChange":    true,
 	"OnJobAdded":     true,
@@ -134,17 +235,20 @@ var resyncForwarders = map[string]bool{ // name -> counts a drop
 	"OnJobsChange":   false,
 }
 
-// TestEveryTUIJobForwarderRunsAndArmsTheResync pins the wiring the unit tests
-// above cannot reach: runTUI builds the whole TUI and runs the bubbletea
-// program, so this package cannot drive it and the seam is the shape of each
-// forwarder — structural for the reason the FFmpeg callsite test beside it is.
+// TestEveryTUIJobForwarderReplaysOnTheSuccessfulSend pins the wiring the unit
+// tests above cannot reach: runTUI builds the whole TUI and runs the
+// bubbletea program, so this package cannot drive it and the seam is the
+// shape of each forwarder — structural for the reason the FFmpeg callsite
+// test beside it is. It is also what makes the measured forwarder in
+// TestNDroppedUpdatesProduceExactlyOneRefresh a faithful copy.
 //
-// Mutants: delete the resyncTUIJobs() call from one forwarder (a drop on that
-// channel is never replayed); delete the CompareAndSwap arm (the counter
-// still counts and nothing catches up, which is exactly CORE-6); send a
-// snapshot from inside a drop branch (one refresh per drop — the poll this
-// must not become).
-func TestEveryTUIJobForwarderRunsAndArmsTheResync(t *testing.T) {
+// Mutants: move resyncTUIJobs() back to the top of a forwarder body (the
+// replay then fires once per DROPPED event — K full-table reads on the
+// writer goroutine); delete the call entirely (a drop on that channel is
+// never replayed); delete the CompareAndSwap arm (the counter still counts
+// and nothing catches up, which is exactly CORE-6); send a snapshot from
+// inside a drop branch (one refresh per drop).
+func TestEveryTUIJobForwarderReplaysOnTheSuccessfulSend(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "tui_wiring.go", nil, 0)
 	if err != nil {
@@ -183,12 +287,35 @@ func TestEveryTUIJobForwarderRunsAndArmsTheResync(t *testing.T) {
 		}
 		seen[sel.Sel.Name] = true
 
-		if !callsResync(lit.Body.List[0]) {
-			t.Errorf("the s.db.%s forwarder does not run resyncTUIJobs() first — a drop on its "+
-				"channel is never replayed and the row stays stale for the session", sel.Sel.Name)
+		sent := successClause(lit.Body)
+		if sent == nil {
+			t.Errorf("the s.db.%s forwarder has no select clause that sends the event", sel.Sel.Name)
+			return true
 		}
 		if !counts {
+			// OnJobsChange: its own delivered list satisfies a pending
+			// replay, so it clears the flag rather than fetching again.
+			if countResyncCalls(lit.Body) != 0 {
+				t.Errorf("the s.db.%s forwarder calls resyncTUIJobs — the full list it just "+
+					"delivered IS the refresh; a second snapshot into the same channel is waste",
+					sel.Sel.Name)
+			}
+			if !hasCallTo(sent, "tuiResyncNeeded", "Store") {
+				t.Errorf("the s.db.%s forwarder does not clear tuiResyncNeeded on a delivered "+
+					"list — the next event would fetch a snapshot older than the one just sent",
+					sel.Sel.Name)
+			}
 			return true
+		}
+		if n := countResyncCalls(lit.Body); n != 1 {
+			t.Errorf("the s.db.%s forwarder calls resyncTUIJobs %d times, want exactly 1 (in the "+
+				"successful-send branch)", sel.Sel.Name, n)
+		}
+		if countResyncCalls(sent) != 1 {
+			t.Errorf("the s.db.%s forwarder does not run resyncTUIJobs() from its successful-send "+
+				"branch — at the top of the body the replay fires once per DROPPED event, running a "+
+				"full GetAllJobs on the ~60 Hz writer goroutine for every message the stalled TUI "+
+				"could not take", sel.Sel.Name)
 		}
 		drop := dropBranch(lit.Body)
 		if drop == nil {
@@ -213,18 +340,37 @@ func TestEveryTUIJobForwarderRunsAndArmsTheResync(t *testing.T) {
 	}
 }
 
-// callsResync reports whether stmt is a bare resyncTUIJobs() call.
-func callsResync(stmt ast.Stmt) bool {
-	expr, ok := stmt.(*ast.ExprStmt)
-	if !ok {
-		return false
-	}
-	call, ok := expr.X.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	ident, ok := call.Fun.(*ast.Ident)
-	return ok && ident.Name == "resyncTUIJobs"
+// countResyncCalls counts bare resyncTUIJobs() calls under n.
+func countResyncCalls(n ast.Node) int {
+	count := 0
+	ast.Inspect(n, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "resyncTUIJobs" {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+// successClause returns the select clause that SENDS — the branch taken when
+// the TUI channel had room.
+func successClause(body *ast.BlockStmt) *ast.CommClause {
+	var found *ast.CommClause
+	ast.Inspect(body, func(n ast.Node) bool {
+		clause, ok := n.(*ast.CommClause)
+		if !ok || found != nil {
+			return true
+		}
+		if _, isSend := clause.Comm.(*ast.SendStmt); isSend {
+			found = clause
+		}
+		return true
+	})
+	return found
 }
 
 // dropBranch returns the first select-default clause under body that counts a
