@@ -884,43 +884,115 @@ func RecoveryMiddleware(logger interface {
 // OpenPathCommand builds the command that hands `target` — a URL or a
 // directory — to the desktop shell: explorer.exe on Windows, xdg-open on the
 // supported Linux targets (the freedesktop standard, and what opens a file
-// manager for a directory there). The caller starts it; nothing here spawns.
+// manager for a directory there), `open` on macOS. The caller starts it
+// (StartDetached, below); nothing here spawns.
 //
-// Exported so internal/web/routes' open-folder handler shares this ONE switch.
-// It did not: that handler named the Windows file manager inline with no switch
-// at all, so on a Linux desktop the dashboard's Open Folder button appeared
-// (the host is loopback), found no explorer, and 500'd into a client that never
-// read response.ok (WEB-6).
+// Exported so every open-path site in the program shares this ONE switch —
+// internal/web/routes' open-folder handler and cmd/moombox's `O F` chord as
+// well as openBrowserURL. They did not: the route named the Windows file
+// manager inline with no switch at all, so on a Linux desktop the dashboard's
+// Open Folder button appeared (the host is loopback), found no explorer, and
+// 500'd into a client that never read response.ok (WEB-6).
+//
+// macOS is not a supported target. The arm exists because the TUI chord folded
+// onto this helper had one, and folding must not delete working code.
 func OpenPathCommand(target string) *exec.Cmd {
 	return openPathCommandFor(runtime.GOOS, target)
 }
 
-// openPathCommandFor is OpenPathCommand with the platform injected, so both
-// shapes are assertable from either host: the Windows spawn this change must
+// openPathCommandFor is OpenPathCommand with the platform injected, so every
+// shape is assertable from either host: the Windows spawn this change must
 // leave byte-identical cannot be checked from a Linux CI runner otherwise, and
 // the Linux spawn it adds cannot be checked from the Windows desktop this
 // project is developed on.
 //
 // The program is a variable rather than one exec.Command call per branch,
-// because a second literal is exactly how the two copies of this switch drifted
-// apart — TestOpenBrowserURLUsesTheSharedCommand counts them and wants zero.
+// because a second literal is exactly how the copies of this switch drifted
+// apart — TestOpenBrowserURLUsesTheSharedCommand counts both the literals and
+// the spawn primitives, and wants one of each in the whole file.
 func openPathCommandFor(goos, target string) *exec.Cmd {
 	program := "xdg-open"
-	if goos == "windows" {
+	switch goos {
+	case "windows":
 		program = "explorer.exe"
+	case "darwin":
+		program = "open"
 	}
 	return exec.Command(program, target)
 }
 
+// StartDetached starts cmd and hands the child back to the OS. The caller never
+// waits: every site that uses this opens a desktop window that outlives the
+// request.
+//
+// The two platforms need OPPOSITE things, which is why this is a helper and not
+// a Start() at each call site:
+//
+//   - Windows: Process.Release() returns the process HANDLE to the kernel.
+//     Without it one handle leaks per call for the life of Moombox (audit
+//     reports/web.md Q-6). There is nothing to reap — Windows has no zombies —
+//     and a Wait here would park a goroutine for as long as the window is open,
+//     which on a session where explorer.exe IS the shell is forever.
+//   - Everywhere else: Release() closes the pidfd and never calls wait4, so a
+//     child nobody Waits for stays a ZOMBIE in the process table until the
+//     parent exits, and Moombox runs for weeks. The Wait goes in a goroutine so
+//     the HTTP handler answers immediately.
+//
+// Returns Start's error only; the detach itself is best-effort.
+func StartDetached(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	detachStarted(runtime.GOOS, cmdChild{cmd})
+	return nil
+}
+
+// startedChild is the half of a started *exec.Cmd that detachStarted uses. An
+// interface because the two arms cannot otherwise be exercised: a real child
+// here is a file-manager window on the developer's desktop.
+type startedChild interface {
+	Wait() error
+	Release() error
+}
+
+// cmdChild adapts *exec.Cmd — Wait is the Cmd's, Release is its Process's.
+type cmdChild struct{ cmd *exec.Cmd }
+
+func (c cmdChild) Wait() error { return c.cmd.Wait() }
+
+func (c cmdChild) Release() error {
+	if c.cmd.Process == nil {
+		return nil
+	}
+	return c.cmd.Process.Release()
+}
+
+// detachStarted is StartDetached's platform decision with the child injected.
+// See StartDetached for why the arms differ.
+func detachStarted(goos string, child startedChild) {
+	if goos == "windows" {
+		_ = child.Release()
+		return
+	}
+	go func() {
+		// The project's inline-recover rule (CLAUDE.md). There is no logger on
+		// this path — every caller is a fire-and-forget spawn with no Server in
+		// hand — and waiting on an already-started child does not panic in
+		// practice, so this is a backstop against taking the process down, not
+		// a report.
+		defer func() {
+			if r := recover(); r != nil {
+				_ = r
+			}
+		}()
+		_ = child.Wait()
+	}()
+}
+
 // openBrowserURL opens the default browser to the given URL. Failure is silent
 // best-effort: the dashboard is already listening, and the URL is in the log.
-//
-// Process.Release() returns the OS handle to the kernel so we don't
-// leak one process handle per Moombox lifetime. Symmetric with the
-// open-folder handler's Q-6 fix (audit reports/web.md).
+// StartDetached owns what happens to the child afterwards, per platform.
 func openBrowserURL(url string) {
 	cmd := OpenPathCommand(url)
-	if err := cmd.Start(); err == nil && cmd.Process != nil {
-		_ = cmd.Process.Release()
-	}
+	_ = StartDetached(cmd)
 }

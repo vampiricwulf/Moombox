@@ -1174,21 +1174,18 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			dir = stagingDir
 		}
 
-		// One GOOS switch, shared with the browser-open path in internal/web:
-		// this handler used to name the Windows file manager inline, so on a
-		// Linux desktop the button was a silent no-op (WEB-6).
+		// One GOOS switch, shared with every other open-path site: this handler
+		// used to name the Windows file manager inline, so on a Linux desktop
+		// the button was a silent no-op (WEB-6). StartDetached then hands the
+		// child back to the OS the way each platform needs — Windows releases
+		// the process handle, which would otherwise leak one per click (audit
+		// reports/web.md Q-6), and Unix reaps with Wait, without which every
+		// click leaves an xdg-open zombie for the life of the process.
 		cmd := web.OpenPathCommand(dir)
-		if err := cmd.Start(); err != nil {
+		if err := web.StartDetached(cmd); err != nil {
 			msg, status := openFolderFailure(cmd, err)
 			jsonError(rw, msg, status)
 			return
-		}
-		// Release the OS process handle immediately — we don't call
-		// cmd.Wait() (explorer.exe detaches and runs independently),
-		// and without Release() the handle leaks until the Moombox
-		// process exits, accumulating for every open-folder request.
-		if cmd.Process != nil {
-			_ = cmd.Process.Release()
 		}
 
 		jsonResponse(rw, map[string]bool{"success": true})

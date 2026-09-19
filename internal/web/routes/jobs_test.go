@@ -1526,6 +1526,22 @@ func TestOpenFolderRouteUsesTheSharedCommand(t *testing.T) {
 	if strings.Contains(text, `exec.Command("explorer`) {
 		t.Error("jobs.go still spells explorer directly; the GOOS switch lives in web.OpenPathCommand")
 	}
+
+	// The detach half, which is OPPOSITE on the two platforms: Windows releases
+	// the process handle (audit Q-6), Unix must Wait or the child is a zombie
+	// for the life of the process. Both live in web.StartDetached.
+	//
+	// THE MUTANT: inline `cmd.Start()` + `cmd.Process.Release()` here again —
+	// that is the shape this handler shipped with, and it leaks one zombie per
+	// click on a Linux desktop.
+	if !strings.Contains(text, "web.StartDetached(cmd)") {
+		t.Error("the open-folder handler does not start through web.StartDetached — Release() does " +
+			"not reap on Unix, so every click leaves a zombie behind")
+	}
+	if strings.Contains(text, ".Process.Release()") {
+		t.Error("jobs.go releases the process handle itself; that is the Windows half of a rule whose " +
+			"Unix half is a Wait, and both belong in web.StartDetached")
+	}
 }
 
 // TestOpenFolderFailureNamesTheMissingProgram pins the message the dashboard

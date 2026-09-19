@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -335,8 +336,11 @@ func TestOpenPathCommandSwitchesOnGOOS(t *testing.T) {
 		t.Fatal("OpenPathCommand returned nil")
 	}
 	want := "xdg-open"
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		want = "explorer.exe"
+	case "darwin":
+		want = "open"
 	}
 	if got := filepath.Base(cmd.Path); !strings.EqualFold(got, want) {
 		t.Errorf("program: want %q on %s, got %q (cmd.Path=%q) — a hard-coded file manager makes the "+
@@ -367,7 +371,8 @@ func TestOpenPathCommandIsTheSameOnBothHosts(t *testing.T) {
 	}{
 		{"windows", "explorer.exe"},
 		{"linux", "xdg-open"},
-		{"freebsd", "xdg-open"}, // every non-Windows target takes the freedesktop path
+		{"darwin", "open"},      // macOS is not a supported target, but the TUI chord folded onto this helper had an `open` arm and folding must not delete it
+		{"freebsd", "xdg-open"}, // every other target takes the freedesktop path
 	} {
 		cmd := openPathCommandFor(tc.goos, target)
 		if cmd == nil {
@@ -408,5 +413,102 @@ func TestOpenBrowserURLUsesTheSharedCommand(t *testing.T) {
 		t.Errorf("server.go still spells explorer directly %d time(s); the only switch belongs in "+
 			"OpenPathCommand, which names the program through a variable so a second literal is "+
 			"always a second copy", n)
+	}
+
+	// The literal count above cannot see a copy written in the SHAPE this file
+	// chose — `program := "explorer.exe"` inside a second helper spells no
+	// literal next to exec.Command. Counting the spawn primitives themselves
+	// closes that: this file builds one command, starts it once, and releases
+	// one handle, all inside OpenPathCommand/StartDetached. Any second of any
+	// of them is a second copy of a rule that exists once.
+	//
+	// THE MUTANT: paste a new `program := …; exec.Command(program, target)`
+	// helper anywhere in the file, or inline Start+Release at a call site.
+	for _, c := range []struct {
+		needle string
+		want   int
+		what   string
+	}{
+		{"exec.Command(", 1, "builds a command"},
+		{"cmd.Start()", 1, "starts one"},
+		{".Process.Release()", 1, "releases a handle"},
+	} {
+		if n := strings.Count(text, c.needle); n != c.want {
+			t.Errorf("server.go %s %d time(s) (%q), want %d — the spawn rules live in exactly one "+
+				"place each, which is what WEB-6 and the Unix zombie fix both cost to learn",
+				c.what, n, c.needle, c.want)
+		}
+	}
+
+	if !strings.Contains(text, "\tcmd := OpenPathCommand(url)\n\t_ = StartDetached(cmd)\n}") {
+		t.Error("openBrowserURL does not hand its child to StartDetached — on Unix an unwaited child " +
+			"is a zombie for the life of the process")
+	}
+}
+
+// fakeChild stands in for a started child process. The two arms of
+// detachStarted are Release and Wait, and a real child here would be a file
+// manager window on the developer's desktop (R3), so the arms are recorded
+// instead of performed. Buffered so neither call can block the code under test.
+type fakeChild struct {
+	released chan struct{}
+	waited   chan struct{}
+}
+
+func newFakeChild() *fakeChild {
+	return &fakeChild{released: make(chan struct{}, 1), waited: make(chan struct{}, 1)}
+}
+
+func (f *fakeChild) Wait() error    { f.waited <- struct{}{}; return nil }
+func (f *fakeChild) Release() error { f.released <- struct{}{}; return nil }
+
+// TestDetachStartedReapsOnUnixAndReleasesOnWindows pins the halves of the
+// detach contract that are OPPOSITE on the two platforms.
+//
+// Windows: Release() hands the process HANDLE back to the kernel, which would
+// otherwise leak one per Open Folder click (audit Q-6) — and Windows has no
+// zombies, so there is nothing to reap. A Wait there would park a goroutine for
+// as long as the window stays open, on a session where explorer.exe IS the
+// shell that is forever.
+//
+// Unix: os.Process.Release closes the pidfd and never calls wait4, so a child
+// nobody Waits for stays a ZOMBIE in the process table until Moombox exits —
+// and Moombox runs for weeks. Before the Linux arm of OpenPathCommand existed,
+// the route resolved no program on Linux and no child was ever created, so this
+// only became reachable when WEB-6 was fixed.
+//
+// THE MUTANT: give the Unix arm Release() (or drop the goroutine entirely) —
+// the linux and darwin rows report nothing reaped the child.
+func TestDetachStartedReapsOnUnixAndReleasesOnWindows(t *testing.T) {
+	win := newFakeChild()
+	detachStarted("windows", win)
+	select {
+	case <-win.released:
+	default:
+		t.Error("the Windows arm did not release the process handle — one handle leaks per Open " +
+			"Folder click (audit Q-6)")
+	}
+	select {
+	case <-win.waited:
+		t.Error("the Windows arm waited for the child; that parks a goroutine for as long as the " +
+			"window is open, which is what Q-6 removed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	for _, goos := range []string{"linux", "darwin"} {
+		child := newFakeChild()
+		detachStarted(goos, child)
+		select {
+		case <-child.waited:
+		case <-time.After(5 * time.Second):
+			t.Errorf("goos=%s: nothing reaped the child — Release does not wait4 on Unix, so every "+
+				"Open Folder click leaves a zombie for the life of the process", goos)
+		}
+		select {
+		case <-child.released:
+			t.Errorf("goos=%s: the Unix arm called Release, which closes the pidfd and reaps nothing",
+				goos)
+		default:
+		}
 	}
 }

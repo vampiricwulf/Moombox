@@ -279,7 +279,7 @@ The chord system is a three-state finite automaton:
 
 | Chord | Action | Requires Job | Job Filter |
 |-------|--------|:------------:|------------|
-| `O F` | Open Folder (explorer) | Yes | Job has an openable folder |
+| `O F` | Open Folder (desktop file manager) | Yes | Job has an openable folder |
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
 | `O C` | Copy Stream URL to clipboard (OSC 52) | Yes | Job has a stream URL |
@@ -597,7 +597,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `POST` | `/api/jobs` | Create a new job. Rate limited. Body contains URL, format preferences, timestamps. |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
 | `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job. |
-| `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` (`internal/web/server.go`) that the browser-open path also uses. A host with no file manager answers `501` naming the missing program, which the dashboard shows as a toast rather than swallowing. **Loopback only.** |
+| `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` (`internal/web/server.go`) that the browser-open path and the TUI's `O F` chord also use, and started through `StartDetached` (`internal/web/server.go`) — Windows releases the process handle (audit Q-6), every other platform reaps the child with `Wait`, which `Release` does not do there. A host with no file manager answers `501` naming the missing program, which the dashboard shows as a toast rather than swallowing. **Loopback only.** |
 | `DELETE` | `/api/jobs/{id}` | Delete a job and optionally its files. |
 
 ### Watch Tracking

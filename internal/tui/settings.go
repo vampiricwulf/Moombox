@@ -149,12 +149,12 @@ var sections = []settingsSection{
 	{
 		name: "Cookies",
 		fields: []fieldDef{
-			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt", nil},
+			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt (requires restart)", nil},
 			{"active_youtube", "YouTube cookies", fieldToggle, nil, "YouTube cookie indicator in status bar", nil},
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar", nil},
-			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer + one browser retry on auth failure; R F imports either way", nil},
+			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer + one browser retry on auth failure; R F imports either way (requires restart)", nil},
 			{"acquisition", "Cookie source", fieldCycle, []string{"auto", "profile"}, "how a refresh gets cookies: auto = launch a browser when one is available, else read the profile; profile = never launch, read browser_profile_dir read-only (also allows a real browser's profile dir, which auto refuses). Takes effect immediately.", nil},
-			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data", nil},
+			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data (requires restart)", nil},
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
 			{"browser_type", "Browser type", fieldText, nil, "firefox/chrome/brave/edge/etc. (required if path set)", nil},
 			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes (default: 360 = 6h) (requires restart)", nil},
