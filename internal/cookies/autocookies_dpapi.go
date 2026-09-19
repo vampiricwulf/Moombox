@@ -34,7 +34,7 @@ var (
 // (COOKIES-7). Non-empty, it REPLACES the discovery walk and the browser-type
 // filtering below — the eleven fixed %LOCALAPPDATA% layouts cannot see a
 // portable Chromium, a --user-data-dir profile or Opera — and a directory that
-// fails dpapiValidateProfileDir is an error, never a fall-back to discovery.
+// fails dpapi.ValidateProfileDir is an error, never a fall-back to discovery.
 // It is still ONE profile and ONE pass: the standing "DPAPI two-pass is NEVER"
 // ruling is untouched.
 //
@@ -157,7 +157,17 @@ func dpapiExtractAsNetscape(logger interface {
 	// copy that can drift.
 	var profiles []dpapi.BrowserProfile
 	if explicitProfileDir != "" {
-		if err := dpapiValidateProfileDir(explicitProfileDir); err != nil {
+		// Only the STRUCTURAL check. The launch-boundary deny-list
+		// (dangerousProfilePathSubstrings, autocookies_browser_resolve.go) is
+		// deliberately not applied here: it exists so the headless refresh
+		// never LAUNCHES a browser against a real user profile, and this
+		// directory is only ever read — a mode=ro SQLite open plus a
+		// `Local State` read, pinned by TestDpapiProfileDirNeverReachesALaunch.
+		// Running it here bought no security (discovery below reads the same
+		// real profiles with no deny-list at all) and refused a portable
+		// Chromium under a `Chromium\User Data` path and every Opera — the
+		// exact profiles this setting exists to reach.
+		if err := dpapi.ValidateProfileDir(explicitProfileDir); err != nil {
 			return "", fmt.Errorf("DPAPI fallback: %w", err)
 		}
 		if logger != nil {
@@ -348,40 +358,6 @@ func dpapiExtractAsNetscape(logger interface {
 	return strings.Join(lines, "\n") + "\n", nil
 }
 
-// dpapiValidateProfileDir is the gate on cookies.dpapi_profile_dir: the
-// browser-profile-tree deny-list FIRST, then dpapi.ValidateProfileDir's
-// structural checks.
-//
-// The deny-list runs first on purpose. It matches on the path's SHAPE, so a
-// directory inside a real installed browser's profile tree is refused whether
-// or not it exists — the verdict never depends on what happens to be on disk
-// at the moment the pass runs, and the refusal names the right reason instead
-// of "no Local State beside its parent".
-//
-// It lives HERE rather than inside dpapi.ValidateProfileDir because
-// dangerousProfilePathSubstrings (autocookies_browser_resolve.go) covers the
-// Firefox, Thunderbird and flatpak trees as well as the Chromium ones, this
-// package imports internal/cookies/dpapi and not the other way round, and a
-// second copy of a security list is how the two copies drift. This is the one
-// place cookies.dpapi_profile_dir enters the fallback, so one call covers it.
-//
-// The sentence is NOT validateBrowserProfileDirForLaunch's: that one says
-// "refusing to launch a headless session against it", and the DPAPI fallback
-// launches nothing — the same distinction audit G3 drew when the read-only
-// sites stopped reading the launch guard's cached verdict.
-func dpapiValidateProfileDir(dir string) error {
-	abs, dangerous, err := profileDirInsideBrowserTree(dir)
-	if err != nil {
-		return fmt.Errorf("cookies.dpapi_profile_dir %q: resolve: %w", dir, err)
-	}
-	if dangerous {
-		return fmt.Errorf("cookies.dpapi_profile_dir %q sits inside a real installed browser's profile tree; "+
-			"refusing to read it (audit cookies.md #26). The %%LOCALAPPDATA%% discovery walk already covers the "+
-			"standard install locations — this setting is for a profile the walk cannot see", abs)
-	}
-	return dpapi.ValidateProfileDir(dir)
-}
-
 // LogDpapiProfileDirVerdict says once, at boot, what cookies.dpapi_profile_dir
 // will do. It is the ONLY check on that setting before a pass runs, and it is
 // a Warn — never a boot failure.
@@ -396,6 +372,19 @@ func dpapiValidateProfileDir(dir string) error {
 // This reads DpapiProfileDir() for a MESSAGE only. The pass asks again, so a
 // config hot-reload still changes the directory the next pass uses with no
 // restart; nothing here is cached.
+//
+// THREE ways the setting can be inert, and each gets its own sentence, in the
+// order of how fundamental the obstacle is: the host has no DPAPI at all; the
+// fallback that would read the directory is switched off; the directory itself
+// is unusable. The middle one is the likeliest of all — cookies.dpapi_fallback
+// defaults to FALSE, so an operator who sets only this key gets a clean boot
+// and a directory nothing ever consults. That is exactly the silence the
+// off-Windows arm exists to break.
+//
+// CALL ORDER MATTERS: s.DpapiFallback is mirrored from the config by
+// cmd/moombox AFTER the service is built, so this must be called after that
+// assignment or the middle arm reads the zero value and warns on every boot.
+// TestDpapiProfileDirVerdictIsLoggedAfterTheFallbackFlagIsMirrored pins it.
 //
 // Silent when the key is unset, and silent when the directory is usable.
 // Called from cmd/moombox beside LogProfileDirVerdict.
@@ -417,7 +406,13 @@ func (s *AutoCookieService) LogDpapiProfileDirVerdict() {
 			"dir", dir)
 		return
 	}
-	if err := dpapiValidateProfileDir(dir); err != nil {
+	if !s.DpapiFallback {
+		s.logger.Warn("cookies.dpapi_profile_dir is set, but cookies.dpapi_fallback is off; "+
+			"the directory will never be read — set dpapi_fallback = true to use it",
+			"dir", dir)
+		return
+	}
+	if err := dpapi.ValidateProfileDir(dir); err != nil {
 		s.logger.Warn("cookies.dpapi_profile_dir is not usable as written; the DPAPI fallback will refuse it",
 			"err", err)
 	}

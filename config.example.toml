@@ -217,14 +217,23 @@
 # discovery walk. Set it when your profile is somewhere the walk cannot
 # see: a portable Chromium, a --user-data-dir install, or Opera.
 #
-# Name the PROFILE directory, not the User Data root — Moombox checks for
-# "Local State" one level up and for "Cookies" (or "Network/Cookies")
-# inside, and refuses with a message naming what was missing. A directory
-# inside a real installed browser's own profile tree is refused too; the
-# discovery walk already covers those.
+# Name the PROFILE directory, not the User Data root. Moombox checks for a
+# "Local State" beside it (Chromium's User Data root) or inside it (Opera,
+# which has no root above the profile), and for "Cookies" or
+# "Network/Cookies" inside, and refuses with a message naming what was
+# missing. A relative path is resolved against Moombox's working
+# directory, the same as the paths.* settings.
 #
-# Windows-only in effect, like dpapi_fallback. Read live — no restart
-# needed.
+# It needs dpapi_fallback = true above: that flag is what turns the DPAPI
+# read on at all, and it is off by default. With the flag off, this
+# directory is never read and Moombox says so once at startup.
+#
+# Windows-only in effect, like dpapi_fallback. The DPAPI pass re-reads this
+# value every time it runs, so it needs no restart once something can
+# change it — but today it is config.toml-only (no UI control, no API
+# setter), so edit it and restart, and make the edit while Moombox is
+# stopped: a settings save from either UI writes the in-memory config back
+# and would put the old value there.
 # dpapi_profile_dir = 'C:\PortableChrome\User Data\Default'
 
 # ─── BotGuard PO Token Sidecar ─────────────────────────────────────────────

@@ -1113,14 +1113,6 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// arc-close F1; TestProfileDirVerdictIsLoggedAfterTheModeIsWired fails if
 	// it moves. Silent unless the directory is actually refused.
 	autoCookieSvc.LogProfileDirVerdict()
-	// The other configured-directory verdict, and for the same reason it comes
-	// AFTER its own closure: LogDpapiProfileDirVerdict reads DpapiProfileDir()
-	// to decide whether there is anything to say. A Warn, never a boot failure
-	// — config.Validate checks that path's shape and never its existence, so
-	// without this line a typo first surfaces at the next failed refresh.
-	// Silent unless the key is set and the directory is unusable (or the host
-	// is not Windows, where the key is accepted and ignored).
-	autoCookieSvc.LogDpapiProfileDirVerdict()
 	s.autoCookieSvc = autoCookieSvc
 
 	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
@@ -1213,6 +1205,22 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.configStore.Read(func(c *config.MoomboxConfig) {
 		autoCookieSvc.DpapiFallback = c.Cookies.DpapiFallback
 	})
+
+	// The other configured-directory verdict, and the ORDER is the whole point:
+	// it must come after the DpapiFallback mirror directly above, because one
+	// of its three arms fires when cookies.dpapi_profile_dir is set while
+	// cookies.dpapi_fallback is off — the likeliest misconfiguration there is,
+	// that flag defaulting to false. Hoisted above this block it would read the
+	// zero value and warn on every boot;
+	// TestDpapiProfileDirVerdictIsLoggedAfterTheFallbackFlagIsMirrored fails if
+	// it moves. It reads DpapiProfileDir() for the message only — the pass asks
+	// again, so the key stays live.
+	//
+	// A Warn, never a boot failure: config.Validate checks that path's shape
+	// and never its existence, so without this line a typo (or a directory
+	// nothing will read) first surfaces at the next failed refresh. Silent
+	// unless the key is set AND something makes it inert.
+	autoCookieSvc.LogDpapiProfileDirVerdict()
 
 	// Wire the account fingerprint the worker records on a membership park, so
 	// the credential sweep can later tell whether the account actually changed.

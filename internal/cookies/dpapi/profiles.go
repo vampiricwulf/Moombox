@@ -120,20 +120,23 @@ func KnownBrowserFamilies() []string {
 // fail the save that configures it. config.Validate checks the path's SHAPE
 // (no ".." traversal) and nothing else; this is what the pass re-checks, and
 // what AutoCookieService.LogDpapiProfileDirVerdict reports at boot as a Warn.
+// A relative value resolves against Moombox's WORKING directory — the same as
+// paths.* and cookies.browser_profile_dir, and nothing here rewrites it.
 //
 // Three facts:
 //
-//   - dir EXISTS, is a DIRECTORY, and is NOT A SYMLINK. The symlink case is
-//     refused rather than followed, which is why this uses Lstat and not Stat:
-//     every other judgement made about this setting — the caller's
-//     browser-profile-tree deny-list, and the `Local State` lookup below — is
-//     made on the path AS WRITTEN, and a link pointing out of that path would
-//     leave both of them describing a different directory than the one the
-//     reader opens.
-//   - `Local State` ONE LEVEL UP. That is where Chromium keeps the
-//     DPAPI-protected master key; a profile dir without it has no key to
-//     decrypt the cookie values with, and the read would fail late with
-//     "nothing came out".
+//   - dir EXISTS and is a real DIRECTORY — not a symlink, and not a Windows
+//     junction (see linkLike). THE SYMLINK RULE, stated once: it applies to
+//     the profile directory ITSELF, which is refused rather than followed,
+//     because that directory is the path every other judgement here is made
+//     about and a link out of it would describe somewhere else entirely.
+//     Files beside or inside it are resolved exactly as the reader resolves
+//     them — following links — since the reader is what opens them.
+//   - a `Local State` that ChromeLocalStatePath can find: beside the directory
+//     (Chromium's `User Data` root) or inside it (Opera's self-contained
+//     layout). That is where Chromium keeps the DPAPI-protected master key; a
+//     profile dir with neither has no key to decrypt the cookie values with,
+//     and the read would fail late with "nothing came out".
 //   - a cookie store INSIDE: `Cookies` on older Chromium, `Network/Cookies`
 //     since the network-service move. Either satisfies it.
 //
@@ -146,16 +149,16 @@ func ValidateProfileDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("cookies.dpapi_profile_dir %q: %w", dir, err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("cookies.dpapi_profile_dir %q is a symlink; name the real profile directory, "+
-			"because every check made here is made on the path as written", dir)
+	if linkLike(info.Mode()) {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q is a symlink or junction; name the real profile "+
+			"directory, because the directory itself is judged as written", dir)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("cookies.dpapi_profile_dir %q is not a directory", dir)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "Local State")); err != nil {
-		return fmt.Errorf("cookies.dpapi_profile_dir %q has no \"Local State\" beside its parent — "+
-			"name the PROFILE directory (…/User Data/Default), not the User Data root", dir)
+	if _, err := ChromeLocalStatePath(dir); err != nil {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q: %w — name the PROFILE directory "+
+			"(…/User Data/Default), not the User Data root", dir, err)
 	}
 	for _, rel := range []string{"Cookies", filepath.Join("Network", "Cookies")} {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err == nil {
@@ -163,4 +166,52 @@ func ValidateProfileDir(dir string) error {
 		}
 	}
 	return fmt.Errorf("cookies.dpapi_profile_dir %q holds neither \"Cookies\" nor \"Network/Cookies\"", dir)
+}
+
+// linkLike reports whether an Lstat mode describes a reparse point rather than
+// the directory the path names.
+//
+// os.ModeSymlink alone is not enough on Windows: Go reports a directory
+// JUNCTION — `mklink /J`, which needs no Developer Mode and is therefore the
+// likelier shape of this mistake — as os.ModeIrregular. Without the second bit
+// a junction fell through to ValidateProfileDir's IsDir() arm and the operator
+// was told their directory was not a directory, which it visibly is.
+func linkLike(mode os.FileMode) bool {
+	return mode&(os.ModeSymlink|os.ModeIrregular) != 0
+}
+
+// ChromeLocalStatePath returns the `Local State` file that holds the
+// DPAPI-protected master key for profileDir, and is the SINGLE rule for that
+// question: ValidateProfileDir decides whether a directory is usable and
+// loadChromeMasterKey (dpapi_windows.go) decides where the key is, and while
+// those were two separate judgements they could disagree — they both hard-coded
+// "one level up", so Opera, which keeps `Local State` INSIDE the profile
+// directory with no User Data root above it, was refused by one and would have
+// failed in the other.
+//
+// Two layouts, and the PARENT is tried first:
+//
+//   - `<profileDir>/../Local State` — Chromium, Edge, Brave, Vivaldi: one
+//     `User Data` root with `Default` / `Profile N` children.
+//   - `<profileDir>/Local State` — Opera, which collapses the root into the
+//     profile directory itself.
+//
+// The order is not cosmetic. A normal Chromium profile directory that happens
+// to contain a stray `Local State` (a copied file, a half-finished profile
+// move) must still decrypt against the real root key beside it; preferring the
+// inner file would silently pick the wrong key and every row would fail to
+// decrypt.
+//
+// Untagged on purpose: the reader is Windows-only, but this rule is the half
+// that can be pinned on both CI legs.
+func ChromeLocalStatePath(profileDir string) (string, error) {
+	beside := filepath.Join(filepath.Dir(profileDir), "Local State")
+	if _, err := os.Stat(beside); err == nil {
+		return beside, nil
+	}
+	inside := filepath.Join(profileDir, "Local State")
+	if _, err := os.Stat(inside); err == nil {
+		return inside, nil
+	}
+	return "", fmt.Errorf("no \"Local State\" beside the profile directory (%q) or inside it (%q)", beside, inside)
 }
