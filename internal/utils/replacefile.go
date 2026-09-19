@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// ReplaceFile renames tmp over path — the last step of every atomic write in
-// Moombox (cookies.txt, chat files, resume sidecars, config.toml). On Windows
+// ReplaceFile renames tmp over path — the last step of the atomic writes that
+// go through it (cookies.txt, chat files, resume sidecars, config.toml,
+// worker-downloaded assets, and now WriteFileAtomic). On Windows
 // an antivirus or indexer briefly holds a freshly written file open and the
 // replace is refused with ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION even
 // though nothing is wrong with either file; those two are retried with a

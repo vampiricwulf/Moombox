@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -294,21 +295,15 @@ func (pc *PlayerCache) PutPreprocessed(playerURL string, code string) error {
 	return pc.atomicWrite(pc.FilePathPreprocessed(playerURL), code)
 }
 
-// atomicWrite writes data to path via a temp file + rename. Holds pc.mu.Lock
-// so concurrent writes don't race on the same target.
+// atomicWrite writes data to path through utils.WriteFileAtomic, which gives
+// the cache what its own copy lacked: a unique temp name (so two writers can
+// never interleave into one temp), an fsync before the rename, and the
+// Windows AV/indexer rename retry. pc.mu still serialises writers within this
+// process; the unique name is what makes a second process safe too.
 func (pc *PlayerCache) atomicWrite(path string, data string) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(data), 0o644); err != nil {
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename: %w", err)
-	}
-	return nil
+	return utils.WriteFileAtomic(path, []byte(data), 0o644)
 }
 
 // FetchResult reports the outcome of a Fetch. JS is the (raw) player JS to
