@@ -220,10 +220,22 @@ func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visito
 	return p.fetchWithAndroidVR(withProbeOnlyCall(ctx), videoID, visitorData)
 }
 
-// ProbeVideoDate fetches ONLY a video's publish date via one anonymous
-// WEB-family player call. The status probes cannot supply dates: microformat
-// (the source of publishDate AND liveBroadcastDetails.startTimestamp) is a
-// WEB-client response feature, and ANDROID_VR/TV probe responses omit it
+// ProbeVideoDate fetches ONLY a video's publish date via one WEB-family player
+// call, carrying whatever credentials the jar holds.
+//
+// NOT anonymous, and the distinction is load-bearing for members-only content:
+// this goes through fetchWithClientProbe, so Auth.GenerateAPIHeaders attaches
+// the jar's Cookie header and the SAPISIDHASH Authorization whenever YouTube
+// auth is configured — the probe-only flag (owner decision O-R) skips the
+// PLAYER PO token and nothing else. (ProbeVideoStatus is the anonymous one —
+// ANDROID_VR through fetchWithCookielessClient.) The comment here claimed
+// "anonymous" until 2026-09-18 and sent a sweep looking for a members-only
+// date-fetch bug that does not exist; TestProbeVideoDateSendsTheJarsCredentials
+// pins it.
+//
+// The status probes cannot supply dates: microformat (the source of
+// publishDate AND liveBroadcastDetails.startTimestamp) is a WEB-client
+// response feature, and ANDROID_VR/TV probe responses omit it
 // entirely — verified against live YouTube. The date parse rides the normal
 // parsePlayerResponse → extractPublishedAt path, so precision semantics
 // ("started"/"day", Z-normalized) are identical to every other probe.

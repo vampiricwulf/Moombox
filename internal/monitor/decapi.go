@@ -831,7 +831,8 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		if result.PublishedAt == "" && dm.ProbeDate != nil {
 			// Two-phase probe (§9): the status probe carries no microformat,
 			// so in production EVERY vod-family result lands here dateless.
-			// One WEB date fetch decides the window honestly; a fetch failure
+			// One WEB date fetch — authenticated when the jar holds
+			// credentials — decides the window honestly; a fetch failure
 			// falls through to the treated-as-outside arm below, which was
 			// always this path's failure mode — but now it is the exception,
 			// not the rule.
