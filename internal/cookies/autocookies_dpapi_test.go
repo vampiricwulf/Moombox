@@ -825,9 +825,16 @@ func TestDpapiExplicitProfileDirAcceptsWhatDiscoveryCannotSee(t *testing.T) {
 // exec.Command, validateBrowserProfileDirForLaunch — means the value crossed
 // the launch boundary and the deny-list question is open again.
 //
-// Mutant: pass the directory to validateBrowserProfileDirForLaunch (or to any
-// launcher/exec call) -> the new callee is not in the allowlist and this fails,
-// naming it.
+// Mutants:
+//   - pass the directory to validateBrowserProfileDirForLaunch (or to any
+//     launcher/exec call) -> the new callee is not in the allowlist and this
+//     fails, naming it.
+//   - pass it INSIDE an expression — `exec.Command(bin, "--user-data-dir="+dir)`
+//     is the real shape — -> taintedCallees walks each argument's whole subtree
+//     for a tainted identifier, so the concatenation is caught too. Matching a
+//     bare *ast.Ident only, which is what this did until the Arc M close
+//     review, let that shape through silently, and it is the ONE shape a
+//     Chromium launch actually takes.
 func TestDpapiProfileDirNeverReachesALaunch(t *testing.T) {
 	// Every function a value derived from DpapiProfileDir may legitimately be
 	// handed to. Keep this list SHORT and argue for every addition.
@@ -946,12 +953,21 @@ func taintedCallees(fset *token.FileSet, file *ast.File, field string) []string 
 				return true
 			}
 			for _, arg := range call.Args {
-				text := render(arg)
-				hit := strings.Contains(text, field)
+				hit := strings.Contains(render(arg), field)
 				if !hit {
-					if id, ok := arg.(*ast.Ident); ok && tainted[id.Name] {
-						hit = true
-					}
+					// The whole ARGUMENT EXPRESSION, not just a bare
+					// identifier: `"--user-data-dir="+dir` is how a directory
+					// actually reaches a launcher, and a check that only
+					// matched `dir` on its own let exactly that shape past.
+					// Same for `[]string{"--profile", dir}`, `&opts{Dir: dir}`
+					// and `filepath.Join(dir, x)` handed straight on.
+					ast.Inspect(arg, func(n ast.Node) bool {
+						if id, ok := n.(*ast.Ident); ok && tainted[id.Name] {
+							hit = true
+							return false
+						}
+						return !hit
+					})
 				}
 				if hit {
 					out = append(out, render(call.Fun))

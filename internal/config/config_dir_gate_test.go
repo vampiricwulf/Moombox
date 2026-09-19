@@ -130,21 +130,50 @@ func TestSaveTightensADedicatedConfigDir(t *testing.T) {
 
 // TestConfigDirGateIsTheSharedPredicate pins R3 from this side: Save's seam and
 // the cookie writer's seam are two references to one rule, not two opinions.
+//
+// The CONTENT verdict is asserted per fixture as well, and that half is what
+// makes this test mean anything on Windows: utils.DirTighteningAllowed answers
+// true for every directory there (O-K leaves icacls unchanged), so the
+// equivalence above compares true against true on the Windows leg and a seam
+// pointed at a local predicate would sail through it.
+//
+// Mutants:
+//   - point the seam at a local predicate, or at DirHoldsSharedData without the
+//     negation -> the two answers diverge on one fixture (POSIX only).
+//   - break the content rule itself (drop the directory-name check, stop
+//     stripping SQLite's -wal suffix) -> the wantShared column fails, on BOTH
+//     legs.
 func TestConfigDirGateIsTheSharedPredicate(t *testing.T) {
-	for _, dir := range []string{
-		configDirFixture(t, "config.toml", "output/", "staging/", "moombox.db"),
-		configDirFixture(t, "config.toml", "cookies.txt"),
-		configDirFixture(t),
+	for _, tc := range []struct {
+		name       string
+		dir        string
+		wantShared bool
+	}{
+		{"the data directory", configDirFixture(t, "config.toml", "output/", "staging/", "moombox.db"), true},
+		{"config.toml beside cookies.txt", configDirFixture(t, "config.toml", "cookies.txt"), false},
+		{"empty", configDirFixture(t), false},
 	} {
-		if got, want := dirTighteningAllowed(dir), utils.DirTighteningAllowed(dir); got != want {
-			t.Errorf("dirTighteningAllowed(%q) = %v, utils.DirTighteningAllowed = %v — both call sites must consult one rule", dir, got, want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := dirTighteningAllowed(tc.dir), utils.DirTighteningAllowed(tc.dir); got != want {
+				t.Errorf("dirTighteningAllowed(%q) = %v, utils.DirTighteningAllowed = %v — both call sites must consult one rule", tc.dir, got, want)
+			}
+			if got := utils.DirHoldsSharedData(tc.dir); got != tc.wantShared {
+				t.Errorf("utils.DirHoldsSharedData(%q) = %v, want %v — the CONTENT rule is what O-K is about, "+
+					"and it is the half the OS-conditional predicate above cannot pin on Windows", tc.dir, got, tc.wantShared)
+			}
+		})
 	}
 }
 
 // TestSaveLeavesTheDataDirectoryAloneOnPOSIX drives the REAL predicate over the
 // Docker image's /data shape. Differential by design: Windows icacls is
 // unchanged by O-K, POSIX must leave the operator's data volume traversable.
+//
+// Mutant: drop the gate from Save (or make DirTighteningAllowed content-tested
+// on Windows too) -> the POSIX leg sees one apply where it wants none, or the
+// Windows leg sees none where it wants one. A settings save is the gesture most
+// likely to be the FIRST one on a new container, so this is the path that used
+// to undo `chmod 777 /data` before any cookie was ever written.
 func TestSaveLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
 	dir := configDirFixture(t, "cookies.txt", "output/", "staging/", "moombox.db", "moombox.log")
 	var applies dirGateRecorder

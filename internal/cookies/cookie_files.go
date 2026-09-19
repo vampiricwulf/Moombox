@@ -90,6 +90,13 @@ var cookieTempFileSweepOnce sync.Once
 // utils.ApplyUserOnlyDACL's non-Windows implementation, which chmods to
 // 0700/0600 rather than no-op'ing — not just Windows; idempotent once
 // applied.
+//
+// CONDITIONAL on POSIX since owner decision O-K: tightenCookieDirOnce asks
+// utils.DirTighteningAllowed first, and a parent that also holds the output
+// tree, the staging tree, the database or the log is left alone there (the
+// Docker image's /data). Windows is unchanged. The FILE is 0600 either way —
+// that is the Chmod on the temp file below, which no gate touches — so what a
+// shared directory gives up is only the untraversable parent.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name

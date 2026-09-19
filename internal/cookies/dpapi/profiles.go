@@ -143,7 +143,11 @@ func KnownBrowserFamilies() []string {
 // The error names the directory and which fact was missing, because the whole
 // point of the setting is an operator pointing at a directory by hand and
 // needing to know when they pointed at the wrong one — the User Data root
-// instead of the profile inside it being the likely mistake.
+// instead of the profile inside it being the likely mistake. That mistake is
+// named on the COOKIE-STORE arm, which is the one it lands on: a User Data root
+// holds its own `Local State`, and since Opera's layout was accepted
+// ChromeLocalStatePath takes an inside one, so the root passes the key check
+// and fails for want of a cookie store.
 func ValidateProfileDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -157,15 +161,58 @@ func ValidateProfileDir(dir string) error {
 		return fmt.Errorf("cookies.dpapi_profile_dir %q is not a directory", dir)
 	}
 	if _, err := ChromeLocalStatePath(dir); err != nil {
-		return fmt.Errorf("cookies.dpapi_profile_dir %q: %w — name the PROFILE directory "+
-			"(…/User Data/Default), not the User Data root", dir, err)
+		return fmt.Errorf("cookies.dpapi_profile_dir %q: %w — that file holds the DPAPI master key "+
+			"the cookie values are encrypted with", dir, err)
 	}
 	for _, rel := range []string{"Cookies", filepath.Join("Network", "Cookies")} {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err == nil {
 			return nil
 		}
 	}
+	// The User Data ROOT is the likely mistake, and this is the arm it lands
+	// on — NOT the Local State arm above, which the root sails through: Opera's
+	// layout put `Local State` INSIDE the profile dir, so ChromeLocalStatePath
+	// now accepts a root holding its own. What a root does not hold is a cookie
+	// store; what it does hold is `Default` or `Profile N`. Naming that turns
+	// "holds neither" into an instruction.
+	if child := chromiumProfileChild(dir); child != "" {
+		return fmt.Errorf("cookies.dpapi_profile_dir %q holds neither \"Cookies\" nor \"Network/Cookies\", "+
+			"but it does hold %q — name the PROFILE directory (…/User Data/Default), not the User Data root",
+			dir, child)
+	}
 	return fmt.Errorf("cookies.dpapi_profile_dir %q holds neither \"Cookies\" nor \"Network/Cookies\"", dir)
+}
+
+// chromiumProfileChild returns the name of a Chromium PROFILE subdirectory of
+// dir — `Default` or `Profile N` — or "" if there is none.
+//
+// Used only to word ValidateProfileDir's cookie-store refusal: a directory with
+// those children and no cookie store of its own is a User Data root, which is
+// the one mistake the setting invites. Case-insensitively, because the
+// filesystems this runs on are, and best-effort — an unreadable directory
+// simply produces the shorter sentence.
+func chromiumProfileChild(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.EqualFold(name, "Default") {
+			return name
+		}
+		rest, ok := strings.CutPrefix(strings.ToLower(name), "profile ")
+		if !ok || rest == "" {
+			continue
+		}
+		if strings.IndexFunc(rest, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+			return name
+		}
+	}
+	return ""
 }
 
 // linkLike reports whether an Lstat mode describes a reparse point rather than

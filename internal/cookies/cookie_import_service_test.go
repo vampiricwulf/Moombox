@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // importService builds an AutoCookieService pointed at a real cookies.txt in a
@@ -565,4 +566,138 @@ func TestImportCookiesIsRefusedWhileARefreshHoldsTheSlot(t *testing.T) {
 	if held != nil {
 		t.Error("ImportCookies did not release the refresh slot — every later refresh, setup and import would be refused for the life of the process")
 	}
+}
+
+// TestADeclinedRefreshNamesTheHolderAtInfo is the close review's M-CW1(b), the
+// operator-visible half of owner decision O-D.
+//
+// O-D made the import and the refresh pass mutually exclusive over ONE slot, so
+// a paste now costs the 30-minute tick that collides with it: the pass declines
+// silently, and the operator who pasted a fresh cookies.txt by hand sees a
+// dashboard that does not refresh for up to half an hour with nothing in the
+// log saying why. The decline is correct; being silent about it is not.
+//
+// Info, not Debug: the operator running at the default level is exactly the
+// person who needs it, and "the refresh you are waiting for did not run, and
+// here is what held it" is not a line to go looking for. The holder is named
+// because the two holders have different stories — a pass declining behind
+// another pass is the pre-existing single-flight and costs nothing, while a
+// pass declining behind an IMPORT is the new trade O-D bought.
+//
+// The holder is identified by the sentinel VALUE, not a new field:
+// importSlotSentinel is a package-level *exec.Cmd ImportCookies assigns in
+// place of a fresh literal, and killRefreshProcess only ever reads .Process,
+// which is nil for either one.
+//
+// Driven through the REAL slot: the import is held inside its own pre-write
+// verification while the refresh runs, exactly as driveImportDuringRefresh does
+// it on the route side.
+//
+// Mutants:
+//   - keep the decline at Debug -> no Info line is captured.
+//   - name "refresh pass" unconditionally -> the holder assertion fails.
+//   - claim a fresh &exec.Cmd{} in ImportCookies instead of the sentinel ->
+//     the holder reads "refresh pass" for an import, same failure.
+func TestADeclinedRefreshNamesTheHolderAtInfo(t *testing.T) {
+	const declineMsg = "skipping cookie refresh — the refresh slot is held"
+
+	t.Run("an import holds it", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "cookies.txt")
+		if err := os.WriteFile(path, []byte(importRollbackSeed), 0o600); err != nil {
+			t.Fatalf("seed cookies.txt: %v", err)
+		}
+		log := &captureLogger{}
+		jar := NewCookieJar()
+		if err := jar.Load(path); err != nil {
+			t.Fatalf("jar.Load: %v", err)
+		}
+		s := NewAutoCookieService(dir, path, jar, log)
+
+		// The import parks inside snapshotPlatformAuth's YouTube check, which
+		// runs only because the seed gives the jar a YouTube credential to
+		// check. Twitch answers immediately so the WaitGroup is not what holds.
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		s.VerifyYouTubeAuth = func(ctx context.Context) (bool, error) {
+			once.Do(func() { close(entered) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return true, nil
+		}
+		s.VerifyTwitchAuth = func(context.Context) (bool, error) { return true, nil }
+
+		done := make(chan struct{})
+		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("the holding import panicked: %v", p)
+				}
+				close(done)
+			}()
+			if _, err := s.ImportCookies(context.Background(), importRollbackPaste); err != nil {
+				t.Errorf("the holding import failed: %v", err)
+			}
+		}()
+
+		select {
+		case <-entered:
+		case <-done:
+			t.Fatal("the import finished before it reached its pre-write verification — the " +
+				"collision this test needs never happened")
+		case <-time.After(60 * time.Second):
+			t.Fatal("the import never reached its pre-write verification")
+		}
+
+		out, err := s.RefreshCookiesDetailed(context.Background())
+		close(release)
+		<-done
+
+		if err != nil {
+			t.Fatalf("a declined pass is not an error: %v", err)
+		}
+		if out.Ran {
+			t.Error("the pass RAN while an import held the slot — O-D makes the two mutually exclusive")
+		}
+		if n := log.infoContaining(declineMsg); n != 1 {
+			t.Errorf("the decline produced %d Info lines containing %q, want exactly 1 — an operator "+
+				"who just pasted a cookies.txt by hand watches the badge stay stale for up to 30 "+
+				"minutes and the log says nothing", n, declineMsg)
+		}
+		if n := log.debugContaining(declineMsg); n != 0 {
+			t.Errorf("the decline also landed at Debug (%d lines). The LEVEL is the point: a line an "+
+				"operator has to raise the log level to find is a line they do not have", n)
+		}
+		if n := log.infoContaining("holder=cookie import"); n != 1 {
+			t.Errorf("the decline does not name the import as the holder (%d lines) — a pass declining "+
+				"behind another pass costs nothing and is the pre-existing single-flight; a pass "+
+				"declining behind an import is the trade O-D bought, and only the holder tells them "+
+				"apart", n)
+		}
+	})
+
+	t.Run("another pass holds it", func(t *testing.T) {
+		dir := t.TempDir()
+		log := &captureLogger{}
+		s := NewAutoCookieService(dir, filepath.Join(dir, "cookies.txt"), NewCookieJar(), log)
+
+		// The slot as RefreshCookiesDetailed claims it: a fresh sentinel, not
+		// the import's package-level one.
+		s.mu.Lock()
+		s.refreshCmd = &exec.Cmd{}
+		s.mu.Unlock()
+
+		if _, err := s.RefreshCookiesDetailed(context.Background()); err != nil {
+			t.Fatalf("a declined pass is not an error: %v", err)
+		}
+		if n := log.infoContaining("holder=refresh pass"); n != 1 {
+			t.Errorf("a pass declining behind another pass named the holder %d times, want 1", n)
+		}
+		if n := log.infoContaining("holder=cookie import"); n != 0 {
+			t.Errorf("a pass declining behind another PASS blamed an import (%d lines)", n)
+		}
+	})
 }

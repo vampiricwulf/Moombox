@@ -238,7 +238,8 @@ func jsonErrorCause(w http.ResponseWriter, msg, cause string, code int) {
 // returns, not when the body is flushed. The Flush those handlers perform
 // therefore released the headers and nothing else, and `fetch().json()`, which
 // awaits the body, sat through the whole re-check: measured at 1.204 s against
-// a 1.2 s stand-in over a real server, and at 1 ms with the header set. The
+// a 1.2 s stand-in over a real server, and at ~10 ms for the body with the
+// header set. The
 // setup dialog's 60 s AbortController has to cover FinishSetup as well, so that
 // was a real budget.
 //
@@ -255,8 +256,9 @@ func jsonErrorCause(w http.ResponseWriter, msg, cause string, code int) {
 // sent — invisible to a JSON parse, which is exactly why it is written down.
 //
 // Safe under the gzip wrapper for the bodies these handlers actually produce:
-// only startGzip() deletes Content-Length, and at 233 bytes for the widest of
-// them (a two-map import success) they stay under internal/web's 1024-byte
+// only startGzip() deletes Content-Length, and at ~282 bytes for the widest of
+// them (an import success carrying three maps — the status snapshot, the
+// relogin map and activePlatforms) they stay under internal/web's 1024-byte
 // gzipMinSize, where commitPlain() sends them identity with the header intact.
 // A body at or over that threshold WOULD be re-chunked and would wait out the
 // re-check again; TestSizedCookieAnswersSurviveTheGzipWrapper states both
@@ -322,8 +324,8 @@ func jsonErrorSized(w http.ResponseWriter, msg string, code int) {
 //
 // jsonErrorSized, not jsonError: the finish handler runs a deferred BLOCKING
 // auth re-check, so every JSON any of its exits writes must carry a length or
-// the client waits the re-check out for the body. The other two use the same
-// writer so one reader's mapping holds for all three.
+// the client waits the re-check out for the body. The other three use the same
+// writer so one reader's mapping holds for all four.
 func requireLoopbackForBrowserSetup(rw http.ResponseWriter, req *http.Request) bool {
 	if web.IsLoopbackRequest(req) {
 		return true
@@ -736,7 +738,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// answered for — the Flush alone could not: with no length net/http
 		// chunks the body and writes the terminating chunk only when the handler
 		// RETURNS, so fetch().json() sat through the whole re-check (measured
-		// 1.204 s for a 1.2 s stand-in, 1 ms with the header).
+		// 1.204 s for a 1.2 s stand-in, ~10 ms for the body with the header).
 		//
 		// Deferred rather than placed after the response so it covers the
 		// jar-reload error exit too — the one error path that runs over a file

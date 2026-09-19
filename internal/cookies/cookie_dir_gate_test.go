@@ -201,17 +201,36 @@ func TestTightenCookieDirOnceAppliesWhenTheGateAllows(t *testing.T) {
 // as a second opinion — so its production value has to answer exactly what
 // utils.DirTighteningAllowed answers.
 //
-// Mutant: point the seam at a local predicate (or at DirHoldsSharedData without
-// the negation) -> the answers diverge on one of the two fixtures.
+// The CONTENT verdict is asserted per fixture as well, and that half is what
+// makes this test mean anything on Windows: utils.DirTighteningAllowed answers
+// true for every directory there (O-K leaves icacls unchanged), so the
+// equivalence compares true against true on the Windows leg and a seam pointed
+// at a local predicate would sail through it.
+//
+// Mutants:
+//   - point the seam at a local predicate (or at DirHoldsSharedData without
+//     the negation) -> the answers diverge on one fixture (POSIX only).
+//   - break the content rule itself -> the wantShared column fails, on BOTH
+//     legs.
 func TestCookieDirGateIsTheSharedPredicate(t *testing.T) {
-	for _, dir := range []string{
-		cookieDirFixture(t, "cookies.txt", "output/", "moombox.db", "moombox.log"),
-		cookieDirFixture(t, "cookies.txt"),
-		cookieDirFixture(t),
+	for _, tc := range []struct {
+		name       string
+		dir        string
+		wantShared bool
+	}{
+		{"the data directory", cookieDirFixture(t, "cookies.txt", "output/", "moombox.db", "moombox.log"), true},
+		{"cookies.txt alone", cookieDirFixture(t, "cookies.txt"), false},
+		{"empty", cookieDirFixture(t), false},
 	} {
-		if got, want := dirTighteningAllowed(dir), utils.DirTighteningAllowed(dir); got != want {
-			t.Errorf("dirTighteningAllowed(%q) = %v, utils.DirTighteningAllowed = %v — both call sites must consult one rule", dir, got, want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := dirTighteningAllowed(tc.dir), utils.DirTighteningAllowed(tc.dir); got != want {
+				t.Errorf("dirTighteningAllowed(%q) = %v, utils.DirTighteningAllowed = %v — both call sites must consult one rule", tc.dir, got, want)
+			}
+			if got := utils.DirHoldsSharedData(tc.dir); got != tc.wantShared {
+				t.Errorf("utils.DirHoldsSharedData(%q) = %v, want %v — the CONTENT rule is what O-K is about, "+
+					"and it is the half the OS-conditional predicate above cannot pin on Windows", tc.dir, got, tc.wantShared)
+			}
+		})
 	}
 }
 

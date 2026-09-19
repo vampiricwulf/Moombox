@@ -210,9 +210,12 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time)
 	}
 
 	tm.mu.Lock()
-	// Don't schedule if monitor was stopped (cancel set to nil). Clear the
-	// checking sentinel so a stopped monitor never reports -1 forever (a
-	// late cycle racing Stop set NextCheckAt=-1 before doCheck returned).
+	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
+	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
+	// this no longer clears the -1 sentinel for a late cycle racing Stop().
+	// Kept as defence for a future cancel-without-cancel path: a monitor that
+	// nils cancel without cancelling its context would otherwise arm a timer
+	// and publish a countdown for a chain nothing owns.
 	if tm.cancel == nil {
 		tm.NextCheckAt = 0
 		tm.mu.Unlock()

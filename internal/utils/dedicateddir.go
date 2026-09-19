@@ -18,9 +18,13 @@ import (
 // is, not that — so hitting the limit disqualifies rather than truncating.
 const dedicatedDirScanLimit = 512
 
-// sharedDataDirNames are the subdirectory names that mark a directory as
-// Moombox's DATA directory rather than a dedicated secrets directory. Matched
-// case-insensitively because Windows and macOS filesystems are.
+// sharedDataDirNames are the names that mark a directory as Moombox's DATA
+// directory rather than a dedicated secrets directory. Matched
+// case-insensitively because Windows and macOS filesystems are, and matched
+// against EVERY entry rather than against subdirectories only: the name is the
+// marker, and an `output` that presents as a file or a dangling symlink (an
+// unmounted bind target, an entry that cannot be stat'd) is still the
+// operator's output tree.
 var sharedDataDirNames = map[string]bool{
 	"output":  true,
 	"staging": true,
@@ -99,10 +103,17 @@ func DirHoldsSharedData(dir string) bool {
 	}
 	for _, e := range entries {
 		name := strings.ToLower(e.Name())
+		// The NAME is the marker, whatever the entry turns out to be. Tested
+		// before the IsDir() branch on purpose: a dangling symlink at a bind
+		// mount whose target is not mounted yet, or an entry ReadDir cannot
+		// stat, presents as a non-directory while still being the operator's
+		// output tree by every name that matters — and the fail-safe direction
+		// here is SHARED (a missed hardening on a host whose files are already
+		// 0600, against reinstating the container bug).
+		if sharedDataDirNames[name] {
+			return true
+		}
 		if e.IsDir() {
-			if sharedDataDirNames[name] {
-				return true
-			}
 			continue
 		}
 		base := strings.TrimSuffix(strings.TrimSuffix(name, "-wal"), "-shm")

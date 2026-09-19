@@ -90,6 +90,22 @@ func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool
 //     over-counting until they drained.
 //   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
 //     scheduler never admits a priority-0 row, so Queued would strand it.
+//   - priority 1 with NO feed_items partner also resumes to Upcoming — the
+//     pre-MON-4 path — because Queued would strand it just as surely.
+//     CancelAndPrune (channel REMOVAL) deletes the channel's never-started
+//     jobs and then its feed_items rows, but deliberately leaves a RUNNING
+//     download alone; a backlog VOD that was Downloading at that moment
+//     therefore survives with no partner, and it is exactly the row that
+//     parks in COOKIES? later. NextQueuedJobs INNER-JOINs feed_items, so the
+//     scheduler would return it on no sweep ever, /retry and /resume both
+//     refuse Queued, and ShouldProcess(Queued) is false — the row would be
+//     lost permanently and silently. Pacing is not a property worth having
+//     for a channel that no longer exists.
+//
+// The partner check is the EXISTING GetFeedItem read (nil, nil for no row) —
+// no new query, no schema change, no UpdateJobFields change. A read that
+// ERRORS resumes to Upcoming too: the cheap answer is the one that can still
+// finish the download.
 //
 // wake is the scheduler's Wake (production: runState.schedulerWake). Called
 // once, after the loop, and only when something was resumed: Wake coalesces
@@ -113,8 +129,15 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 			continue
 		}
 		status := database.StatusUpcoming
-		if job.QueuePriority == 1 {
-			status = database.StatusQueued
+		if job.QueuePriority == 1 && job.ChannelID != nil {
+			it, err := db.GetFeedItem(*job.ChannelID, job.VideoID)
+			switch {
+			case err != nil:
+				log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
+					"job", job.ID, "platform", platform, "err", err)
+			case it != nil:
+				status = database.StatusQueued
+			}
 		}
 		db.UpdateJobFields(job.ID, map[string]any{
 			"status":        status,

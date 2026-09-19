@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +44,10 @@ func mkTree(t *testing.T, entries ...string) string {
 //     directory we cannot even list is assumed dedicated.
 //   - treat io.EOF from ReadDir as a failed listing -> the "empty" row answers
 //     true, and a brand-new secrets directory never earns the hardening.
+//   - test the marker NAMES only inside the IsDir() branch -> the "a FILE named
+//     output" row answers false. `output` is a marker whatever its type: on a
+//     bind mount an unreadable or dangling `output` entry can present as a
+//     non-directory, and the fail-safe direction here is SHARED.
 func TestDirHoldsSharedData(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -60,6 +65,8 @@ func TestDirHoldsSharedData(t *testing.T) {
 		{"holds a WAL sidecar only", []string{"cookies.txt", "moombox.db-wal"}, true},
 		{"case-insensitive directory name", []string{"cookies.txt", "Output/"}, true},
 		{"a temp sibling of cookies.txt is not shared data", []string{"cookies.txt", "cookies.txt.1234.tmp"}, false},
+		{"a FILE named output", []string{"cookies.txt", "output"}, true},
+		{"a FILE named Staging", []string{"cookies.txt", "Staging"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := DirHoldsSharedData(mkTree(t, tc.entries...)); got != tc.want {
@@ -71,6 +78,51 @@ func TestDirHoldsSharedData(t *testing.T) {
 	t.Run("a directory that cannot be listed is not assumed dedicated", func(t *testing.T) {
 		if got := DirHoldsSharedData(filepath.Join(t.TempDir(), "does-not-exist")); !got {
 			t.Error("DirHoldsSharedData = false for an unlistable directory — a dir we cannot inspect must never be chmodded 0700")
+		}
+	})
+
+	// A DANGLING symlink named `output` is the shape a bind mount produces
+	// when the target is not mounted yet: ReadDir reports it, IsDir() is
+	// false, and the entry is still the operator's output tree by every name
+	// that matters. Creating a symlink needs Developer Mode or an elevated
+	// shell on Windows, so a failure to create one is a skip, not a verdict.
+	t.Run("a symlink named output", func(t *testing.T) {
+		dir := mkTree(t, "cookies.txt")
+		if err := os.Symlink(filepath.Join(dir, "nowhere"), filepath.Join(dir, "output")); err != nil {
+			t.Skipf("cannot create a symlink on this host: %v", err)
+		}
+		if !DirHoldsSharedData(dir) {
+			t.Error("DirHoldsSharedData = false for a directory holding a symlink named output — " +
+				"the name is the marker, not the inode type")
+		}
+	})
+
+	// dedicatedDirScanLimit, stated by execution at both sides of the edge:
+	// one entry under it is still judged on its contents, and hitting it
+	// disqualifies whatever else the directory holds.
+	//
+	// Mutant: raise the limit, or truncate instead of disqualifying -> the
+	// "at the limit" row answers false and a directory with hundreds of
+	// entries is called a dedicated secrets directory.
+	t.Run("the scan limit disqualifies rather than truncating", func(t *testing.T) {
+		fill := func(t *testing.T, n int) string {
+			t.Helper()
+			dir := t.TempDir()
+			for i := range n {
+				if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("harmless-%03d.txt", i)), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return dir
+		}
+		if got := DirHoldsSharedData(fill(t, dedicatedDirScanLimit-1)); got {
+			t.Errorf("DirHoldsSharedData = true at %d harmless entries, one under the %d-entry limit — "+
+				"nothing here is another Moombox surface", dedicatedDirScanLimit-1, dedicatedDirScanLimit)
+		}
+		if got := DirHoldsSharedData(fill(t, dedicatedDirScanLimit)); !got {
+			t.Errorf("DirHoldsSharedData = false at the %d-entry limit — a directory with that many "+
+				"entries is not one Moombox keeps only its secrets in, whatever the listing shows",
+				dedicatedDirScanLimit)
 		}
 	})
 }

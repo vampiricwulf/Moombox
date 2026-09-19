@@ -126,3 +126,84 @@ func TestBrowserRefreshRollbackReportsAJarReloadThatFails(t *testing.T) {
 			"process, not the file, is what is stale", last)
 	}
 }
+
+// TestRollbackIncompleteBodyIsBoundedByConstruction is the close review's
+// M-CW5 (M-1). The import's rollback-incomplete failure is answered as an HTTP
+// 500 whose body is the error's own sentence (internal/web/routes/cookies.go),
+// and that body has to stay under internal/web's 1024-byte gzipMinSize: above
+// it CompressionMiddleware's startGzip DELETES the Content-Length O-L added and
+// re-chunks the answer, so the client waits out the whole blocking re-check for
+// a body it has already been sent the headers for.
+//
+// Every other exit of that handler is bounded by the phrase it carries. This
+// one was bounded by nothing: the wrapped write failure is an *os.LinkError
+// from the rename inside writeFileAtomic, whose Error() prints BOTH absolute
+// paths — and one of those is cookies.cookie_file, an operator config value
+// with no length limit. A path of a few hundred characters (a deep Windows
+// profile, a long bind-mount prefix) put the body over the ceiling on its own.
+//
+// So the cause is rendered "op: errno" rather than "op path path: errno". The
+// error CHAIN is untouched — errors.Is still finds both the sentinel and the
+// cause — and the log line beside it still carries the raw error with its
+// paths, which is where an operator who needs them looks.
+//
+// Mutants:
+//   - restore the plain %w on the cause -> the body carries both absolute
+//     paths and goes over 1024 bytes.
+//   - render only the errno and drop the Op -> "the operator is told what
+//     failed" fails; "permission denied" with no verb names nothing.
+//   - unwrap the chain instead of wrapping a bounded renderer -> the
+//     errors.Is assertions fail.
+func TestRollbackIncompleteBodyIsBoundedByConstruction(t *testing.T) {
+	// A long cookies.txt path — a legal config value, and the input that used
+	// to blow the ceiling on its own.
+	longDir := filepath.Join(t.TempDir(), strings.Repeat("d", 200), strings.Repeat("e", 150))
+	cookiePath := filepath.Join(longDir, "cookies.txt")
+
+	s := NewAutoCookieService(t.TempDir(), cookiePath, NewCookieJar(), nopAutoCookieLogger{})
+
+	// What writeFileAtomic's rename really returns: an *os.LinkError carrying
+	// both absolute paths.
+	renameErr := &os.LinkError{
+		Op:  "rename",
+		Old: cookiePath + ".3141592653.tmp",
+		New: cookiePath,
+		Err: errors.New("Access is denied."),
+	}
+	real := writeCookieFile
+	t.Cleanup(func() { writeCookieFile = real })
+	writeCookieFile = func(string, []byte, os.FileMode) error { return renameErr }
+
+	fail := s.restorePreviousCookies("restored", []string{"twitch"}, rollbackMessages{
+		sentinel:   ErrImportRollbackIncomplete,
+		writeHead:  "Twitch did not verify and the previous cookies could not be restored",
+		reloadHead: "Twitch's previous cookies were restored but could not be reloaded",
+		writeLog:   "could not restore the previous cookies.txt after a rejected import",
+	})
+	if fail == nil {
+		t.Fatal("restorePreviousCookies reported success although the write failed")
+	}
+
+	body := fail.err.Error()
+	const ceiling = 512
+	if len(body) >= ceiling {
+		t.Errorf("the rollback-incomplete sentence is %d bytes for a %d-character cookie path, at or "+
+			"over the %d-byte bound. The route answers it as a 500 body, and above internal/web's "+
+			"1024-byte gzipMinSize startGzip deletes the Content-Length O-L added and re-chunks the "+
+			"answer — which puts the client back behind the blocking re-check:\n%s",
+			len(body), len(cookiePath), ceiling, body)
+	}
+	if n := strings.Count(body, cookiePath); n != 0 {
+		t.Errorf("the sentence carries the cookie path %d times; it is an unbounded operator config "+
+			"value and the message is bounded by construction or not at all:\n%s", n, body)
+	}
+	if !strings.Contains(body, "rename") || !strings.Contains(body, "Access is denied.") {
+		t.Errorf("the sentence no longer says WHAT failed and why (want the op and the errno): %s", body)
+	}
+	if !errors.Is(fail.err, ErrImportRollbackIncomplete) {
+		t.Error("the sentinel no longer survives — the route's 500 arm matches on it")
+	}
+	if !errors.Is(fail.err, renameErr) {
+		t.Error("the cause no longer survives in the chain — bounding the TEXT must not unwrap the error")
+	}
+}

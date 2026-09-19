@@ -174,16 +174,21 @@ func TestValidateProfileDir(t *testing.T) {
 		// config.LoadedFrom has to argue with a test — it would make this the
 		// only config path in the project that behaves differently.
 		//
-		// Mutant: resolve against anything but the CWD -> this fails.
-		abs := mk(t, "Cookies", true)
-		cwd, err := os.Getwd()
-		if err != nil {
-			t.Fatal(err)
-		}
-		rel, err := filepath.Rel(cwd, abs)
-		if err != nil {
-			t.Skipf("no relative path from the test's working directory to %q: %v", abs, err)
-		}
+		// Mutant R9: resolve against anything but the CWD (os.TempDir(), the
+		// config file's directory) -> "User Data/Default" names nothing and
+		// this fails.
+		//
+		// t.Chdir rather than filepath.Rel from the test's own working
+		// directory: under GOTMPDIR on another volume there IS no relative
+		// path, and the subtest then SKIPPED — on the one host the chain runs
+		// on, so R9 was unpinned exactly where it was being checked. Moving
+		// the working directory makes the relative value trivial and the
+		// assertion unconditional. (t.Chdir forbids t.Parallel; nothing in
+		// this package uses it.)
+		userData := filepath.Dir(mk(t, "Cookies", true))
+		t.Chdir(filepath.Dir(userData))
+
+		rel := filepath.Join("User Data", "Default")
 		if err := ValidateProfileDir(rel); err != nil {
 			t.Errorf("ValidateProfileDir(%q) = %v, want nil — a relative value resolves against the working directory", rel, err)
 		}
@@ -191,6 +196,51 @@ func TestValidateProfileDir(t *testing.T) {
 	t.Run("no cookie store", func(t *testing.T) {
 		if err := ValidateProfileDir(mk(t, "", true)); err == nil {
 			t.Error("ValidateProfileDir = nil for a profile holding neither Cookies nor Network/Cookies")
+		}
+	})
+	t.Run("the User Data root is named as the likely mistake", func(t *testing.T) {
+		// THE mistake this setting invites, and the arm it actually lands on.
+		// A User Data root holds its own `Local State`, and since Opera's
+		// layout was accepted (I-2) ChromeLocalStatePath takes an inside one —
+		// so the root sails past the key check and fails for want of a cookie
+		// store, where the message used to say only "holds neither", with the
+		// "name the PROFILE directory" advice sitting on an arm the root never
+		// reaches.
+		//
+		// Mutants:
+		//   - leave the advice on the Local State arm -> this fails; the root
+		//     never takes that arm.
+		//   - drop the Default / Profile N test -> this fails, and the operator
+		//     is told what is missing with no hint where to look.
+		//   - fire the hint unconditionally -> the "no cookie store" row above
+		//     is blamed on a root it is not, since mk builds …/User Data/Default
+		//     with no profile children of its own.
+		userData := filepath.Dir(mk(t, "Cookies", true))
+		err := ValidateProfileDir(userData)
+		if err == nil {
+			t.Fatal("ValidateProfileDir = nil for a User Data root — it holds no cookie store of its own")
+		}
+		for _, want := range []string{"Default", "name the PROFILE directory", "not the User Data root"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %q", err, want)
+			}
+		}
+	})
+	t.Run("a Profile N child counts too", func(t *testing.T) {
+		userData := filepath.Join(t.TempDir(), "User Data")
+		if err := os.MkdirAll(filepath.Join(userData, "Profile 2"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userData, "Local State"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := ValidateProfileDir(userData)
+		if err == nil {
+			t.Fatal("ValidateProfileDir = nil for a User Data root")
+		}
+		if !strings.Contains(err.Error(), "Profile 2") {
+			t.Errorf("error = %v, want it to name the Profile 2 child — a second Chrome profile is "+
+				"exactly the case an operator reaches for this setting over discovery", err)
 		}
 	})
 	t.Run("a file, not a directory", func(t *testing.T) {

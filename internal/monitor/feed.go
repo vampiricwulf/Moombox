@@ -423,8 +423,12 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	}
 
 	fm.mu.Lock()
-	// Don't schedule if monitor was stopped; clear the checking sentinel so
-	// a stopped monitor never reports -1 forever.
+	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
+	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
+	// this no longer clears the -1 sentinel for a cycle racing Stop(). Kept as
+	// defence for a future cancel-without-cancel path: a monitor that nils
+	// cancel without cancelling its context would otherwise arm a timer and
+	// publish a countdown for a chain nothing owns.
 	if fm.cancel == nil {
 		fm.NextCheckAt = 0
 		fm.mu.Unlock()

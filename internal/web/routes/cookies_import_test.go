@@ -67,6 +67,17 @@ func (l *recordingLogger) all() string {
 // handler's deferred CheckNow short-circuits before any network call.
 func importRouter(t *testing.T, seed string, rl *web.RateLimiter) (chi.Router, string, *recordingLogger, *cookies.AutoCookieService) {
 	t.Helper()
+	return importRouterWithPlatforms(t, seed, rl, nil)
+}
+
+// importRouterWithPlatforms is importRouter with the getActivePlatforms
+// callback wired, which is how cmd/moombox builds the real route: the success
+// payload then carries the third map (`activePlatforms`) beside the status
+// snapshot and the relogin map, and is the WIDEST body either sized handler
+// produces. A width test driven through a nil callback measures a payload
+// production never sends.
+func importRouterWithPlatforms(t *testing.T, seed string, rl *web.RateLimiter, getActivePlatforms func() map[string]bool) (chi.Router, string, *recordingLogger, *cookies.AutoCookieService) {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookies.txt")
 	if seed != "" {
@@ -87,7 +98,7 @@ func importRouter(t *testing.T, seed string, rl *web.RateLimiter) (chi.Router, s
 	svc.VerifyTwitchAuth = func(context.Context) (bool, error) { return true, nil }
 
 	r := chi.NewRouter()
-	CookieRoutes(r, cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log), svc, nil, rl)
+	CookieRoutes(r, cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log), svc, getActivePlatforms, rl)
 	return r, path, log, svc
 }
 

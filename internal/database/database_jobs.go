@@ -321,9 +321,11 @@ func (db *Database) CountBacklogInFlight(channelID string) (int, error) {
 // Admission order: published DESC — no priority term (only backlog is ever Queued).
 // INNER JOIN is guaranteed to hit: only the archival pass creates Queued rows.
 // A cookie repair also returns priority-1 rows to Queued, and those were created
-// by the archival pass too — the prune deletes {Queued, Upcoming, COOKIES?} jobs
-// before it deletes feed_items (backfill.go), so no resumed row can outlive its
-// JOIN partner.
+// by the archival pass too — the cookie sweep checks for the partner
+// (GetFeedItem) before choosing Queued, so no Queued row lacks one. It has to:
+// the prune deletes {Queued, Upcoming, COOKIES?} jobs before it deletes
+// feed_items (backfill.go) but leaves a RUNNING download alone, and that is the
+// row that parks in COOKIES? afterwards with no partner left.
 func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()

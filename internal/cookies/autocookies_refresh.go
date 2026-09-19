@@ -123,8 +123,20 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		return refreshDeclined(), nil
 	}
 	if s.refreshCmd != nil {
+		// Named, and at Info. Since owner decision O-D an IMPORT can hold this
+		// slot, so a tick can now be lost to the operator's own paste — and an
+		// operator who has just pasted a fresh cookies.txt by hand and watches
+		// the badge stay stale for up to 30 minutes is exactly the person who
+		// should not have to raise the log level to find out why. A pass
+		// declining behind another PASS is the pre-existing single-flight and
+		// costs nothing; the two are told apart by the sentinel VALUE, so this
+		// needs no new field.
+		holder := "refresh pass"
+		if s.refreshCmd == importSlotSentinel {
+			holder = "cookie import"
+		}
 		s.mu.Unlock()
-		s.logger.Debug("skipping cookie refresh — already refreshing")
+		s.logger.Info("skipping cookie refresh — the refresh slot is held", "holder", holder)
 		return refreshDeclined(), nil
 	}
 	s.refreshCmd = &exec.Cmd{} // sentinel to claim slot

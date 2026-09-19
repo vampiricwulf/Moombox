@@ -11,6 +11,23 @@ import (
 	"strings"
 )
 
+// importSlotSentinel is the value ImportCookies parks in AutoCookieService's
+// refreshCmd while it holds the refresh slot (owner decision O-D).
+//
+// It exists so a DECLINING refresh pass can name what is holding the slot in
+// one Info line without a second field to keep in step with the first: the
+// slot is claimed by exactly two kinds of caller, and pointer identity against
+// this one separates them. It is deliberately a bare *exec.Cmd, because the
+// only thing any reader of refreshCmd touches is .Process — nil here, nil in
+// the refresh path's own `&exec.Cmd{}`, so killRefreshProcess behaves
+// identically for both.
+//
+// SHARED, and it must be: a per-call value would be a different pointer and
+// the comparison would never hold. Nothing writes through it, and concurrent
+// imports cannot both hold the slot anyway — the second is refused before it
+// gets here.
+var importSlotSentinel = &exec.Cmd{}
+
 // prepareCookieImport validates an operator-supplied Netscape cookie file and
 // returns the exact text that must be written to cookies.txt.
 //
@@ -348,6 +365,12 @@ type ImportResult struct {
 // refresh caught inside its launch window — a bounded shutdown delay, not a
 // new one.
 //
+// The sentinel it claims is importSlotSentinel rather than a fresh &exec.Cmd{},
+// and that is the whole of how a declining pass can say WHO holds the slot
+// (autocookies_refresh.go). No new field, and nothing else changes: the only
+// thing any reader of refreshCmd ever touches is .Process, which is nil on a
+// bare *exec.Cmd whichever one it is.
+//
 // The caller runs the auth re-check. Every gesture that can write cookies.txt
 // must end in one (Arc 10 R4) and this one has TWO callers: the Web import
 // route in internal/web/routes, and the TUI's R I wiring in
@@ -367,7 +390,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		// the two surfaces cannot drift; the Web route maps it to 409.
 		return ImportResult{}, fmt.Errorf("please try again shortly: %w", ErrRefreshInProgress)
 	}
-	s.refreshCmd = &exec.Cmd{} // sentinel to claim the slot (see RefreshCookiesDetailed)
+	s.refreshCmd = importSlotSentinel // claims the slot (see RefreshCookiesDetailed)
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

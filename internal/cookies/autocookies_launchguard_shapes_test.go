@@ -22,6 +22,16 @@ func TestLaunchGuardRecognisesEveryPlatformProfileShape(t *testing.T) {
 		"/home/test/.var/app/org.mozilla.firefox/.mozilla/firefox/xxxxx.default",
 		"/home/test/.config/google-chrome/Default",
 		"/home/test/.config/chromium/Default",
+		// Ubuntu's default Chromium since 20.04 is the snap, and it is the one
+		// snap layout with no ~/.config tree to catch it: snap Firefox keeps
+		// ~/.mozilla under ~/snap/firefox/common, snap Brave and Opera keep
+		// their ~/.config trees under ~/snap/<name>/current. Chromium's is
+		// ~/snap/chromium/common/chromium/<profile> and matched nothing.
+		// Mutant: drop the /snap/chromium/common/chromium/ entry -> this row
+		// validates, and a hostile browser_profile_dir launches a headless
+		// Chromium against the operator's real signed-in snap profile and
+		// exports it through cookies.txt.
+		"/home/test/snap/chromium/common/chromium/Default",
 		"/home/test/.config/BraveSoftware/Brave-Browser/Default",
 		"/home/test/.config/microsoft-edge/Default",
 		"/home/test/.config/vivaldi/Default",

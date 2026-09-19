@@ -257,9 +257,12 @@ type CookiesConfig struct {
 	// path carries no profile location, so nothing let the operator supply one.
 	//
 	// The PROFILE dir, not the User Data root: "…/User Data/Default", not
-	// "…/User Data". dpapi.ValidateProfileDir checks the two structural facts
-	// the reader needs — `Local State` one level up, and `Cookies` or
-	// `Network/Cookies` inside.
+	// "…/User Data". dpapi.ValidateProfileDir checks the three structural
+	// facts the reader needs — a real directory that is not a symlink or
+	// junction; a `Local State` beside it (Chromium's User Data root) or
+	// inside it (Opera, which has no root above the profile); and `Cookies` or
+	// `Network/Cookies` inside. A User Data root fails the last one and is
+	// told so by name.
 	//
 	// Windows-only in effect, like dpapi_fallback itself, and read LIVE through
 	// AutoCookieService.DpapiProfileDir — so it is NOT restart-required and is
