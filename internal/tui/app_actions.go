@@ -118,6 +118,27 @@ func cookieRefreshMechanismLabel(mechanism, mode string) string {
 	return "Browser cookie refresh"
 }
 
+// osClipboard is the OS-helper seam the O C case calls. A variable rather
+// than a direct call so a test can drive BOTH branches on every platform
+// without spawning a real helper or overwriting the developer's own
+// clipboard; production always holds the build-tagged osClipboardFallback
+// (clipboard_windows.go / clipboard_other.go).
+var osClipboard = osClipboardFallback
+
+// clipboardFeedback words the O C result honestly. tea.SetClipboard is OSC
+// 52 — the terminal may accept it, ignore it, or be a multiplexer that needs
+// `set-clipboard on` first — so on that path the TUI cannot claim a
+// completed copy, only that it handed the URL over. sentViaOSC52 is false
+// only where something ELSE already took the text and reported success
+// (clip.exe, via osClipboardFallback), which is a copy worth claiming
+// (CORE-15, O-W).
+func clipboardFeedback(url string, sentViaOSC52 bool) string {
+	if sentViaOSC52 {
+		return "Sent to terminal clipboard (OSC 52): " + url
+	}
+	return "Copied: " + url
+}
+
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
@@ -462,7 +483,15 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "O C":
 		if job != nil {
 			if url := streamURL(job); url != "" {
-				a.setFeedback("Copied: " + url)
+				// The OS helper first, where there is one: it either put the
+				// text on the clipboard or it did not, and it says which.
+				// OSC 52 can only be sent and hoped for, so it is the
+				// fallback and the wording changes with it (CORE-15, O-W).
+				if osClipboard(url) {
+					a.setFeedback(clipboardFeedback(url, false))
+					return a, nil
+				}
+				a.setFeedback(clipboardFeedback(url, true))
 				return a, tea.SetClipboard(url)
 			}
 			a.setFeedback("No URL to copy")
@@ -785,7 +814,11 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O W", Label: "Open Web UI", HintLabel: "Web", Category: "Open"},
-		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
+		// The label names the mechanism because the mechanism is the caveat:
+		// OSC 52 is a request to the terminal, which conhost and
+		// tmux-without-set-clipboard drop in silence. The feedback line says
+		// which path the press actually took (CORE-15, O-W).
+		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL (OSC 52)", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O G", Label: "Open GitHub Page", HintLabel: "GitHub", Category: "Open"},

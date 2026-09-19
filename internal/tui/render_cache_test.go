@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -259,9 +260,15 @@ func runSteps[M any](t *testing.T, m M, steps []renderStep[M], view func() strin
 // marqueeOffset, summary, justSetup, nextFeed, nextDecapi, nextTwitch — makes
 // the step that names it below serve a stale frame that differs from the
 // fresh one. The remaining three (items, page, query) are redundant insurance
-// with no isolated production mover: every writer of the list's items, of the
-// paginator's page and of m.tokens ends in rebuildVirtualList, so rebuildSeq
-// already covers them and no step here claims them. sec has its own test.
+// and no step here claims them, though page's reason changed with O-X: the
+// four paging keys now move the paginator directly (PrevPage/NextPage/
+// GoToStart/GoToEnd), so it is no longer a field nothing touches — but
+// list.Index() is Page*PerPage+cursor, so every move of the page moves
+// cursor too and the two cannot be told apart by a frame. The paging steps
+// below are therefore realistic traffic that claims nothing. items and query
+// keep the original reason: every writer of the list's items and of m.tokens
+// ends in rebuildVirtualList, so rebuildSeq already covers them. sec has its
+// own test.
 func TestTaskListCachedFramesMatchFreshFrames(t *testing.T) {
 	m := NewTaskListModel()
 	m.SetSize(60, 12)
@@ -332,6 +339,27 @@ func TestTaskListCachedFramesMatchFreshFrames(t *testing.T) {
 		{"query", "", func(m *TaskListModel) { m.applyQuery("c") }},
 		{"query cleared", "", func(m *TaskListModel) { m.applyQuery("") }},
 		{"archive toggle", "", func(m *TaskListModel) { m.ToggleArchive() }},
+		// The paging keys (O-X) need more rows than the three-job fixture
+		// has; the header's [start-end/total] range is what moves with the
+		// page, and it only renders once the list overflows its panel.
+		{"many rows", "", func(m *TaskListModel) {
+			jobs := make([]*database.Job, 0, 80)
+			for i := range 80 {
+				jobs = append(jobs, &database.Job{
+					ID:     "p" + strconv.Itoa(i),
+					Title:  strings.Repeat("paging title ", 4) + strconv.Itoa(i),
+					Status: database.StatusLive,
+				})
+			}
+			m.SetJobs(jobs)
+			if m.list.Paginator.TotalPages < 3 {
+				t.Fatalf("the paging steps need several pages, got %d", m.list.Paginator.TotalPages)
+			}
+		}},
+		{"page down", "", func(m *TaskListModel) { m.NextPage() }},
+		{"page up", "", func(m *TaskListModel) { m.PrevPage() }},
+		{"jump to end", "", func(m *TaskListModel) { m.GoToEnd() }},
+		{"jump to start", "", func(m *TaskListModel) { m.GoToStart() }},
 		{"empty", "", func(m *TaskListModel) { m.SetJobs(nil) }},
 		// Only reachable on an empty list with no query: View() reads the
 		// flag inside that branch alone, which is why this step follows

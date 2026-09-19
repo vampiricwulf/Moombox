@@ -16,6 +16,28 @@ import (
 func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	// Ctrl+C ALWAYS quits — checked before ANY overlay intercept (O-M).
+	// bubbletea v2 delivers Ctrl+C as a plain key (tea.InterruptMsg comes
+	// only from a real SIGINT), and fourteen overlays consume every key
+	// before it reaches the rest of this function, so twelve of them
+	// swallowed the "Ctrl+C  Quit immediately" help.go promises. No text
+	// input in the TUI binds Ctrl+C — both search boxes already hand it
+	// back — so hoisting it costs nothing (CORE-5).
+	//
+	// The wizard's cookie step is the one thing that needs doing on the way
+	// out: AutoCookieService holds the acquisition slot until someone
+	// cancels, so quitting with a headed browser open would orphan the
+	// window and meet the next login with ErrSetupInProgress for the whole
+	// grace window. This is the same release closeCookieLogin performs; it
+	// lives here because the hoist returns before the wizard's own handler
+	// is ever reached.
+	if key == keyCtrlC {
+		if a.setupWiz.IsVisible() && a.setupWiz.cookieActive && a.setupWiz.OnCancelAutoCookie != nil {
+			a.setupWiz.OnCancelAutoCookie()
+		}
+		return a, tea.Quit
+	}
+
 	// Settings panel intercepts all keys (before normalization to preserve case for text input)
 	if a.settings.IsVisible() {
 		action := a.settings.HandleKey(key)
@@ -101,11 +123,6 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// FFmpeg check overlay takes priority over all other dialogs
 	if a.ffmpegCheck.IsVisible() {
-		// Allow Ctrl+C even during install/check (HandleKey blocks all input
-		// in those states, so the normal Ctrl+C handler at line 220 is unreachable).
-		if key == keyCtrlC {
-			return a, tea.Quit
-		}
 		action := a.ffmpegCheck.HandleKey(key)
 		switch {
 		case action == "skip":
@@ -142,14 +159,6 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Setup wizard
 	if a.setupWiz.IsVisible() {
-		// Allow Ctrl+C to quit even during setup wizard
-		if key == keyCtrlC {
-			// Cancel any in-progress cookie setup before quitting
-			if a.setupWiz.cookieActive && a.setupWiz.OnCancelAutoCookie != nil {
-				a.setupWiz.OnCancelAutoCookie()
-			}
-			return a, tea.Quit
-		}
 		action := a.setupWiz.HandleKey(key)
 		if action == "save" {
 			// Dispatch async config save so the "Saving..." overlay is rendered
@@ -400,11 +409,6 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key = strings.ToLower(key)
 	}
 
-	// Ctrl+C: immediate quit (bypass chord)
-	if key == keyCtrlC {
-		return a, tea.Quit
-	}
-
 	// Esc: clear batch selection if any (takes priority over chord reset)
 	if key == keyEsc {
 		if a.taskList.SelectedCount() > 0 {
@@ -500,6 +504,22 @@ func (a *App) handleTaskKey(key string) (tea.Model, tea.Cmd) {
 		a.updateSelectedJob()
 	case keyDown:
 		a.taskList.MoveDown()
+		a.updateSelectedJob()
+	// The four paging keys the list's KeyMap has always been configured for
+	// and never received (CORE-16, O-X). Each refreshes the details panel
+	// exactly as the arrow keys do, so the selected row and the panel beside
+	// it cannot disagree.
+	case keyPgUp:
+		a.taskList.PrevPage()
+		a.updateSelectedJob()
+	case keyPgDown:
+		a.taskList.NextPage()
+		a.updateSelectedJob()
+	case keyHome:
+		a.taskList.GoToStart()
+		a.updateSelectedJob()
+	case keyEnd:
+		a.taskList.GoToEnd()
 		a.updateSelectedJob()
 	case keyEnter:
 		if a.taskList.SelectedIsDivider() {

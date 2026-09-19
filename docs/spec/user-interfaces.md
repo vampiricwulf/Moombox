@@ -163,7 +163,7 @@ Example: Logs focused (100% width, 75% height)
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility. A watched job carries a dim `•` between the platform tag and the title (`watchedGlyph`, counted in `titleWidth`).
+**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate one row at a time; `PgUp`/`PgDn` move a page and `Home`/`End` jump to the first/last row, all four through the embedded bubbles list's own paginator (`PrevPage`/`NextPage`/`GoToStart`/`GoToEnd` in `internal/tui/task_list.go`), so the header's `[start-end/total]` range follows the cursor. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility. A watched job carries a dim `•` between the platform tag and the title (`watchedGlyph`, counted in `titleWidth`).
 
 **Job Details (top right):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
@@ -282,7 +282,7 @@ The chord system is a three-state finite automaton:
 | `O F` | Open Folder (explorer) | Yes | Job has an openable folder |
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
-| `O C` | Copy Stream URL to clipboard (OSC 52) | Yes | Job has a stream URL |
+| `O C` | Copy Stream URL to clipboard. On Windows outside Windows Terminal (`WT_SESSION` unset) the URL goes through a `clip.exe` child fed on stdin and the feedback reads `Copied: <url>`; everywhere else — and inside Windows Terminal, whose own OSC 52 support is authoritative across SSH — it is handed to the terminal with OSC 52, which conhost and tmux-without-`set-clipboard` may silently drop, so the feedback reads `Sent to terminal clipboard (OSC 52): <url>` and claims nothing more (`clipboardFeedback`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL |
 | `O G` | Open GitHub Page (browser) | No | — |
 
 **Single-key shortcuts:**
@@ -296,7 +296,10 @@ The chord system is a three-state finite automaton:
 | `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:` tokens, `-` negation, `a\|b` OR groups, quoted values. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs). `Enter` applies and closes; losing panel focus closes the box but keeps the applied query. Log panel: enter search mode. `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
 | `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together — then any armed chord. |
 | `Space` | Tasks panel: toggle the focused row's batch selection. The status bar shows the count, and every batch-capable chord (`A R`, `A I`, `A C`, `A D`, `A W`) then acts on the selection instead of the cursor row, re-applying its own status filter to it. |
+| `PgUp` / `PgDn` | Page scroll: the Details and Logs viewports, and the Tasks panel's list (a whole page of rows per press). |
+| `Home` / `End` | Tasks panel: jump to the first / last row. |
 | `Ctrl+U` / `Ctrl+D` | Half-page scroll in the focused panel's viewport (Details, Logs) and in the Help and Release Notes overlays. |
+| `Ctrl+C` | Quit immediately, from anywhere. bubbletea v2 delivers it as an ordinary key press (`tea.InterruptMsg` arrives only from a real SIGINT), so `handleKey` tests for it **before every overlay intercept** — no overlay, dialog, settings form, search box or armed chord can swallow it. Quitting out of the setup wizard's cookie step cancels the browser it opened first (`OnCancelAutoCookie`), so no headed browser is orphaned holding the acquisition slot. |
 | `End` | Log panel: resume auto-scroll (jump to the newest line and follow it again). |
 | `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 
@@ -308,7 +311,7 @@ The chord system is a three-state finite automaton:
 
 ### Overlays (Modal Dialogs)
 
-Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays.
+Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays — the FFmpeg-not-found overlay is the exception and QUITS on `Escape`, because FFmpeg is required for the muxing half of the pipeline and an overlay that merely dismissed itself would leave a Moombox that cannot finish a download. `Ctrl+C` is checked ahead of every overlay and always quits (see the single-key table above).
 
 | Overlay | Trigger | Description |
 |---------|---------|-------------|
@@ -1004,7 +1007,7 @@ Every major feature exists in both UIs:
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
 | yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
-| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`) |
+| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`); the browser has a real clipboard API, the terminal has OSC 52 and a `clip.exe` fallback, so only the TUI side hedges its wording |
 | Filter language | `filter-parser.js` / `filter-engine.js` | `internal/jobfilter` behind the Tasks panel's `/` box |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.

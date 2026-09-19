@@ -577,6 +577,40 @@ func (m *TaskListModel) MoveDown() {
 	m.resetMarquee()
 }
 
+// PrevPage / NextPage / GoToStart / GoToEnd forward the four paging keys to
+// the embedded bubbles list. Its KeyMap has had pgup/pgdown/home/end
+// configured since the list was built (newTaskList rebinds all four), but
+// nothing ever delivered a message to it — handleTaskKey handled only
+// up/down/enter — so at 1,000 rows navigation was one row at a time, or a
+// three-row wheel (CORE-16, O-X).
+//
+// Each moves the list's OWN paginator rather than selecting an index, so the
+// header's [start-end/total] range follows the cursor instead of staying on
+// whatever page it was left on. The marquee re-anchors like every other
+// selection change.
+func (m *TaskListModel) PrevPage() {
+	m.list.PrevPage()
+	m.resetMarquee()
+}
+
+// NextPage moves the selection one page down.
+func (m *TaskListModel) NextPage() {
+	m.list.NextPage()
+	m.resetMarquee()
+}
+
+// GoToStart jumps to the first row of the first page.
+func (m *TaskListModel) GoToStart() {
+	m.list.GoToStart()
+	m.resetMarquee()
+}
+
+// GoToEnd jumps to the last row of the last page.
+func (m *TaskListModel) GoToEnd() {
+	m.list.GoToEnd()
+	m.resetMarquee()
+}
+
 // SelectAtOffset selects the item at the given Y offset within the visible page.
 // Returns true if a valid item was selected.
 func (m *TaskListModel) SelectAtOffset(y int) bool {
