@@ -191,6 +191,14 @@ func sweepStaleCookieTempFiles(dir, base string, maxAge time.Duration) {
 // CI. Mirrors writeCookieFile/readCookieFile/statProfileDir above.
 var applyUserOnlyDACL = utils.ApplyUserOnlyDACL
 
+// dirTighteningAllowed is utils.DirTighteningAllowed behind a seam, for the
+// same reason as applyUserOnlyDACL above: the real predicate answers true for
+// EVERY directory on Windows — owner decision O-K leaves icacls unchanged — so
+// on a Windows host nothing but a substituted verdict can drive the refusal arm
+// of tightenCookieDirOnce. config.Save holds a seam over the same function for
+// its own twin; both are references to one rule, not two opinions.
+var dirTighteningAllowed = utils.DirTighteningAllowed
+
 // dirTightenState is tightenCookieDirOnce's per-directory memo. Two states,
 // not one boolean, because "an apply is running right now" and "an apply
 // already succeeded" must be told apart: the first still says "don't spawn
@@ -231,12 +239,30 @@ const (
 // handful of shell-outs an hour. No failure cap, no backoff — either would
 // be a mechanism to contain a mechanism, and nothing has profiled the plain
 // retry as costing anything.
+//
+// GATED on dirTighteningAllowed (owner decision O-K): on POSIX a directory
+// that also holds the output tree, the staging tree, the database or the log
+// is left alone, so a refused directory never appears in the memo at all —
+// do not go looking for an entry for /data that will never be written.
 var (
 	tightenedCookieDirsMu sync.Mutex
 	tightenedCookieDirs   = make(map[string]dirTightenState)
 )
 
 func tightenCookieDirOnce(dir string) {
+	// Owner decision O-K: on POSIX the 0700 applies only to a DEDICATED
+	// directory. In the Docker image this parent is /data — the bind mount
+	// holding output/, staging/, the database and the log — and the first
+	// cookie write used to undo the Dockerfile's deliberate `chmod 777 /data`.
+	// Windows is unchanged. Checked ahead of the memo claim rather than inside
+	// the goroutine so a refused directory is never recorded as in-flight; the
+	// listing costs a readdir per cookie write, which happens on the 30-minute
+	// refresh cadence and on imports. Files stay 0600 either way —
+	// writeFileAtomic chmods the temp file before the rename.
+	if !dirTighteningAllowed(dir) {
+		return
+	}
+
 	tightenedCookieDirsMu.Lock()
 	if _, ok := tightenedCookieDirs[dir]; ok {
 		tightenedCookieDirsMu.Unlock()

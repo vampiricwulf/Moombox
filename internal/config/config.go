@@ -34,6 +34,21 @@ var (
 	dacledDirs   = make(map[string]struct{})
 )
 
+// applyUserOnlyDACL and dirTighteningAllowed are the two functions Save's
+// tightening block goes through, behind seams so a test can observe the
+// decision without shelling out to a real icacls or depending on chmod modes
+// this host cannot show. Mirrors the pair internal/cookies keeps over the same
+// two functions for the cookie file's parent — the twin this block is of.
+//
+// The gate one is a seam for a specific reason: utils.DirTighteningAllowed
+// answers true for EVERY directory on Windows (owner decision O-K leaves icacls
+// unchanged), so on a Windows host nothing but a substituted verdict can drive
+// the refusal arm.
+var (
+	applyUserOnlyDACL    = utils.ApplyUserOnlyDACL
+	dirTighteningAllowed = utils.DirTighteningAllowed
+)
+
 // Defaults returns a new MoomboxConfig with all default values applied.
 // boolPtr returns a pointer to b. Used for *bool config fields whose default is
 // a concrete value (a feature that is on unless explicitly disabled), where a
@@ -872,7 +887,17 @@ func Save(cfg *MoomboxConfig, path string) error {
 		// anyway, so a startup WARN there is pure noise. A multi-user
 		// operator who genuinely cares about the tightening can raise the
 		// log level to Debug to see the miss.
-		if daclErr := utils.ApplyUserOnlyDACL(dir); daclErr != nil {
+		// Owner decision O-K: on POSIX the 0700 applies only to a DEDICATED
+		// directory. config.toml sits at /data/config.toml in the image, so
+		// this is the same /data the cookie writer used to chmod — and a
+		// settings save is the gesture most likely to be the FIRST one on a new
+		// container. Windows icacls is unchanged. The config file itself is
+		// still written 0600 (the temp file's Chmod below), so what is given up
+		// on a shared data volume is only the untraversable parent.
+		// See utils.DirTighteningAllowed.
+		if !dirTighteningAllowed(dir) {
+			slog.Debug("config dir also holds the output/staging/database/log surfaces — leaving its mode alone", "dir", dir)
+		} else if daclErr := applyUserOnlyDACL(dir); daclErr != nil {
 			slog.Debug("could not restrict config dir to current user", "dir", dir, "err", daclErr)
 		}
 	}
