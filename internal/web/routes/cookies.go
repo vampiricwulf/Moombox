@@ -288,6 +288,46 @@ func jsonErrorSized(w http.ResponseWriter, msg string, code int) {
 	_, _ = w.Write(buf)
 }
 
+// requireLoopbackForBrowserSetup refuses an /auto-setup/* request that did not
+// come from the host, and reports whether it did so.
+//
+// These three endpoints START, FINISH and CANCEL A HEADED BROWSER WINDOW ON THE
+// HOST'S SCREEN. On a network_access=lan install there is no authentication at
+// all, so before this any LAN device could open one on a screen its user cannot
+// see, bounded only by the API rate limiter — and the only thing standing in
+// the way was reloginPromptTarget, a CLIENT-side predicate in utils.js whose
+// own comment said so. The remedy that works from anywhere is the paste import
+// (POST /api/cookies/import), which stays ungated by the Arc 11 ruling for
+// exactly the deployment this one refuses — so the refusal names it.
+//
+// The SHAPE is the first-run wizard's gate (an inline web.IsLoopbackRequest
+// answered before anything else runs, including the service guard). The STATUS
+// is 403 and deliberately not the wizard's 401: app.js installs a global
+// window.fetch interceptor that treats any 401 outside /api/auth/ as an expired
+// session and reloads the page, so a 401 here would throw the operator out of
+// the dashboard instead of telling them where to click.
+//
+// IsLoopbackRequest, not IsLocalOrPrivateRequest: a private LAN address is
+// precisely the population this refuses. An operator at the machine over
+// RDP/VNC is still loopback. And IsLoopbackRequest reads the DIRECT PEER,
+// ignoring trusted_proxies — the rule every loopback gate in this tree follows
+// (docs/spec/security.md § What stays on the direct peer address): a
+// forwarded header may never confer
+// "arrived over this machine's loopback interface".
+//
+// jsonErrorSized, not jsonError: the finish handler runs a deferred BLOCKING
+// auth re-check, so every JSON any of its exits writes must carry a length or
+// the client waits the re-check out for the body. The other two use the same
+// writer so one reader's mapping holds for all three.
+func requireLoopbackForBrowserSetup(rw http.ResponseWriter, req *http.Request) bool {
+	if web.IsLoopbackRequest(req) {
+		return true
+	}
+	jsonErrorSized(rw, "browser cookie setup opens a window on the host, so run this on the host — "+
+		"from anywhere else, paste a cookies.txt with Import instead", http.StatusForbidden)
+	return false
+}
+
 // writeBrowserReadError answers the two browser-read sentinels and reports
 // whether it did. Nothing is written when it returns false.
 //
@@ -560,8 +600,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// both messages and each says which cookie source was missing.
 			//
 			// The auto-setup/start handler below keeps the static string, and
-			// correctly: StartSetup is never gated, so there the sentinel means
-			// exactly one thing.
+			// correctly: StartSetup is never gated on cookies.auto_enabled, so
+			// there the sentinel means exactly one thing. (Its own loopback
+			// gate is a different question and answers before it.)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
 				jsonError(rw, err.Error(), http.StatusFailedDependency)
 			case errors.Is(err, cookies.ErrProfileNotFound):
@@ -786,6 +827,10 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 	// POST /api/cookies/auto-setup/start
 	heavy.Post("/api/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		var body struct {
 			Platform string `json:"platform"`
 		}
@@ -797,7 +842,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -805,24 +850,36 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			switch {
 			case errors.Is(err, cookies.ErrSetupInProgress),
 				errors.Is(err, cookies.ErrRefreshInProgress):
-				jsonError(rw, err.Error(), http.StatusConflict)
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
-				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
+				jsonErrorSized(rw, "no supported browser installed", http.StatusFailedDependency)
+			// A wrong INPUT, not a server fault and not a condition that
+			// clears: 400 with the sentinel's own sentence, which names the
+			// two accepted values and the one it was given. StartSetup owns
+			// the rule — the TUI's R L chord and the first-run wizard call it
+			// directly — so this arm renders that decision rather than
+			// repeating its list here, where the copy would be free to drift.
+			case errors.Is(err, cookies.ErrUnsupportedPlatform):
+				jsonErrorSized(rw, err.Error(), http.StatusBadRequest)
 			// Shutdown, not a fault: the service latched stopped and will not
 			// launch another browser. 503 rather than the 409 the two
 			// in-progress cases get, because this one never clears.
 			case errors.Is(err, cookies.ErrServiceStopped):
-				jsonError(rw, err.Error(), http.StatusServiceUnavailable)
+				jsonErrorSized(rw, err.Error(), http.StatusServiceUnavailable)
 			default:
-				jsonError(rw, "failed to start setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to start setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{"success": true})
+		jsonResponseSized(rw, map[string]any{"success": true})
 	})
 
 	// POST /api/cookies/auto-setup/finish
 	heavy.Post("/api/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		if autoCookieSvc == nil {
 			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
@@ -934,8 +991,12 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 	// POST /api/cookies/auto-setup/cancel
 	heavy.Post("/api/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -949,13 +1010,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		if err := autoCookieSvc.CancelSetup(); err != nil {
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
-				jsonError(rw, err.Error(), http.StatusNotFound)
+				jsonErrorSized(rw, err.Error(), http.StatusNotFound)
 			default:
-				jsonError(rw, "failed to cancel setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to cancel setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{"success": true})
+		jsonResponseSized(rw, map[string]any{"success": true})
 	})
 
 	// POST /api/cookies/auto-setup/abandon

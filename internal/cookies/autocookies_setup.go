@@ -19,6 +19,27 @@ import (
 
 // StartSetup launches a browser for the user to log in.
 func (s *AutoCookieService) StartSetup(platform string) error {
+	// Validated BEFORE the lock and before the claim: a wrong value must never
+	// take the setup slot, and the two callers that are not the HTTP route —
+	// the TUI's R L chord and the first-run wizard — reach this and nothing
+	// else. The empty string is not an error; it is what a caller that omits
+	// the field sends, and it has always meant YouTube.
+	//
+	// Ahead of the stopped and in-progress gates too, and deliberately: a value
+	// this service could never act on is wrong whatever state the service is
+	// in, and answering "try again shortly" to it would send the caller back
+	// with the same unusable input.
+	//
+	// The error wraps the value. Safe: platform arrives from a JSON field the
+	// operator controls, never from a credential, and both dashboards render
+	// sentinel text verbatim.
+	if platform == "" {
+		platform = "youtube"
+	}
+	if platform != "youtube" && platform != "twitch" {
+		return fmt.Errorf("%w (got %q)", ErrUnsupportedPlatform, platform)
+	}
+
 	s.mu.Lock()
 	// Checked before the in-progress gate: a stopped service is not "busy",
 	// and telling the caller to try again shortly would be wrong — Stop is
@@ -100,9 +121,9 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	// or a cleanup has already zeroed it on every path that reaches here; the
 	// pairing is so the two can never be read out of step.
 	s.setupRetainedSince = time.Time{}
-	if platform == "" {
-		platform = "youtube"
-	}
+	// Already normalised and validated at the top of this function — one of
+	// "youtube" or "twitch" by here, which is what the loginTarget choice
+	// below and every finish branch compare against literally.
 	s.targetPlatform = platform
 	s.mu.Unlock()
 

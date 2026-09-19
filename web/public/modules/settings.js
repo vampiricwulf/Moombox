@@ -14,6 +14,7 @@ import {
   restartValuesChanged,
   serverErrorMessage,
   snapshotRestartValues,
+  viewerIsAtTheHost,
 } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
@@ -2507,6 +2508,28 @@ export class SettingsController {
 
   async startAutoCookieSetup(platform) {
     if (!platform) return;
+
+    // The browser this opens appears ON THE HOST. A remote viewer who clicks
+    // would see nothing happen and have no way to learn that a login window is
+    // waiting on a screen they cannot see — so say it here rather than let the
+    // server's 403 arrive as a bare failure. The server refuses it either way
+    // (requireLoopbackForBrowserSetup, internal/web/routes/cookies.go); this is
+    // the explanation, not the enforcement. The import panel is the remedy that
+    // works from anywhere.
+    //
+    // A TOAST, not the inline #auto-cookie-setup-result this function clears
+    // below: that element lives inside the setup dialog, which this path never
+    // opens, so writing the sentence there would hide it from the one viewer it
+    // is written for. Both "Set up" buttons call this one function, so the
+    // guard belongs here rather than duplicated at each registration.
+    if (!viewerIsAtTheHost(window.location.hostname)) {
+      this.app.showToast(
+        "Browser login opens a window on the host, so run this on the host. " +
+          "From here, use Import cookies.txt instead.",
+        "danger",
+      );
+      return;
+    }
 
     const resultEl = document.getElementById("auto-cookie-setup-result");
     if (resultEl) {

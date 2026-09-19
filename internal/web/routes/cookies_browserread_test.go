@@ -146,7 +146,7 @@ func TestFinishSetupStillAnswersItsOtherArms(t *testing.T) {
 	CookieRoutes(r, refreshSvc, autoSvc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/finish", nil))
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/finish", nil)))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("finish with no setup in progress: status %d, want 404, body %s",

@@ -281,15 +281,18 @@ function defineShoelaceStubs(window) {
  *                                        { setup, config, status, auth, cookieAutoStatus }
  * @param {object}   [opts.storage]       localStorage seed, applied BEFORE the app is constructed
  * @param {boolean}  [opts.lightTheme]    make the prefers-color-scheme: light query match
+ * @param {string}   [opts.url]           the page's own URL. The default is the
+ *   host's own dashboard; pass a LAN address to build the viewer the cookie
+ *   setup buttons refuse (window.location.hostname is what they read).
  */
-export async function makeApp({ routes = {}, initialState = {}, storage = {}, lightTheme = false } = {}) {
+export async function makeApp({ routes = {}, initialState = {}, storage = {}, lightTheme = false, url = "http://localhost/" } = {}) {
   // One app is live at a time (one per test), so close the previous window
   // here instead of holding every jsdom instance of the run open until
   // teardownAll. Each makeApp republishes its own globals.
   closeOpenWindows();
 
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
-    url: "http://localhost/",
+    url,
     pretendToBeVisual: true, // document.hidden must be false; the 1 Hz tick early-returns otherwise
   });
   const { window } = dom;

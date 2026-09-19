@@ -566,9 +566,9 @@ All API routes use the `/api/` prefix (no version). Non-API routes exist for POT
 **Cookies:**
 - `POST /api/cookies/recheck` — Force cookie auth recheck
 - `POST /api/cookies/auto-refresh` — Trigger browser cookie refresh
-- `POST /api/cookies/auto-setup/start` — Start auto-cookie browser setup
-- `POST /api/cookies/auto-setup/finish` — Complete auto-cookie setup
-- `POST /api/cookies/auto-setup/cancel` — Cancel auto-cookie setup
+- `POST /api/cookies/auto-setup/start` — Start auto-cookie browser setup (loopback only; `platform` must be `youtube` or `twitch`)
+- `POST /api/cookies/auto-setup/finish` — Complete auto-cookie setup (loopback only)
+- `POST /api/cookies/auto-setup/cancel` — Cancel auto-cookie setup (loopback only)
 - `GET /api/cookies/auto-status` — Auto-cookie service status
 
 **Updates:**

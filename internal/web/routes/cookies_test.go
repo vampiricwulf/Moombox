@@ -49,7 +49,7 @@ func TestCancelSetupRouteAnswers404WhenThereIsNothingToCancel(t *testing.T) {
 	CookieRoutes(r, nil, svc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/cancel", nil))
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/cancel", nil)))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cancel with nothing in progress: status %d, want %d", rec.Code, http.StatusNotFound)
@@ -86,7 +86,7 @@ func TestCancelSetupRouteReusesTheFinishHandlerShape(t *testing.T) {
 	bodies := map[string]string{}
 	for _, path := range []string{"/api/cookies/auto-setup/cancel", "/api/cookies/auto-setup/finish"} {
 		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, path, nil)))
 		statuses[path] = rec.Code
 		var body map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &body)
@@ -132,7 +132,7 @@ func TestStartSetupRouteMapsServiceStopped(t *testing.T) {
 	CookieRoutes(r, nil, svc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start", nil))
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start", nil)))
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("start on a stopped service: status %d, want %d — a 500 would read as a bug "+
@@ -902,7 +902,7 @@ func driveFinishNoSetup(t *testing.T) *httptest.ResponseRecorder {
 func postFinish(t *testing.T, r chi.Router) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/finish", nil))
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/finish", nil)))
 	return rec
 }
 
@@ -1277,4 +1277,255 @@ func TestSizedCookieAnswersSurviveTheGzipWrapper(t *testing.T) {
 				"ruling for R3 should be revisited", got)
 		}
 	})
+}
+
+// fromTheHost stamps a synthetic request with a loopback peer.
+//
+// httptest.NewRequest's default RemoteAddr is 192.0.2.1:1234 — TEST-NET-1,
+// which is neither loopback nor private — so every request in this package now
+// arrives at the auto-setup trio as a REMOTE client and is refused. Each call
+// site below says, by calling this, that its subject is not the gate.
+func fromTheHost(req *http.Request) *http.Request {
+	req.RemoteAddr = "127.0.0.1:5555"
+	return req
+}
+
+// unlaunchableSetupService builds an AutoCookieService that can answer the
+// auto-setup trio and can never open a browser.
+//
+// Every test that POSTs to /auto-setup/start needs this and it is not
+// decoration: a regression anywhere above the launch lets StartSetup fall
+// through to browser detection, and on any machine with a browser installed —
+// every developer machine, and the owner's, which runs real browser windows on
+// other profiles — the test OPENS ONE instead of failing.
+// ConfiguredBrowserOverride is the exported seam resolvedBrowser consults
+// first; Stop() is the second belt, latching the service so StartSetup returns
+// before it detects anything.
+func unlaunchableSetupService(t *testing.T) *cookies.AutoCookieService {
+	t.Helper()
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser.exe")
+	svc.ConfiguredBrowserOverride = func() (string, string) { return unlaunchable, "chrome" }
+	svc.Stop()
+	return svc
+}
+
+// TestAutoSetupTrioIsLoopbackGated is the owner's "Auto-setup gate" decision.
+//
+// These three endpoints START, FINISH and CANCEL A HEADED BROWSER WINDOW ON THE
+// HOST'S SCREEN. On a network_access=lan install there is no authentication at
+// all, so any LAN device could open one on a screen its user cannot see,
+// bounded only by the API rate limiter — and the only thing standing in the way
+// was reloginPromptTarget, a CLIENT-side predicate in utils.js whose own
+// comment said so.
+//
+// 403, never 401: app.js installs a global window.fetch interceptor that treats
+// any 401 outside /api/auth/ as an expired session and calls
+// window.location.reload(). A 401 here would throw the operator out of the
+// dashboard instead of telling them where to click.
+//
+// THE PEER, NEVER THE HEADER. The rows below are the client shapes that differ,
+// and they encode docs/spec/security.md's rule that a loopback gate reads the
+// DIRECT peer and ignores trusted_proxies entirely: "arrived over this
+// machine's loopback interface" is a physical-access signal no forwarded header
+// may confer. The two X-Forwarded-For rows are what that buys and what it
+// costs — a forged header can never turn a LAN device into the host (the
+// direction that matters), while a reverse proxy running ON the host still
+// presents its own loopback peer and is admitted (the direction that is
+// accepted, here and at /api/setup/complete alike). Changing the second would
+// mean changing web.IsLoopbackRequest for every loopback surface at once, which
+// is a decision above this handler.
+//
+// Mutants:
+//   - drop the gate from any one of the three -> that row answers its ordinary
+//     status from a LAN address instead of 403.
+//   - answer 401 -> the status assertion fails, and a remote click would reload
+//     the dashboard instead of explaining itself.
+//   - gate on web.IsLocalOrPrivateRequest instead of web.IsLoopbackRequest ->
+//     the LAN rows pass the gate, which is the exact population this refuses.
+//   - gate on the effective client IP (web.EffectiveClientIP) -> the forged-XFF
+//     row admits a LAN device that claims to be the host.
+//   - refuse AFTER the autoCookieSvc == nil guard -> a deployment with no
+//     service tells a remote caller 503, which reads as "configure me" rather
+//     than "not from there".
+func TestAutoSetupTrioIsLoopbackGated(t *testing.T) {
+	for _, path := range []string{
+		"/api/cookies/auto-setup/start",
+		"/api/cookies/auto-setup/finish",
+		"/api/cookies/auto-setup/cancel",
+	} {
+		t.Run(path, func(t *testing.T) {
+			post := func(remoteAddr, xff string) *httptest.ResponseRecorder {
+				r := chi.NewRouter()
+				CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.RemoteAddr = remoteAddr
+				if xff != "" {
+					req.Header.Set("X-Forwarded-For", xff)
+				}
+				rec := httptest.NewRecorder()
+				r.ServeHTTP(rec, req)
+				return rec
+			}
+
+			// The answer this endpoint gives the operator at the machine. Every
+			// admitted row must match it exactly — "not 403" would also be
+			// satisfied by a gate that refused with some other status.
+			atTheHost := post("127.0.0.1:5555", "")
+			if atTheHost.Code == http.StatusForbidden {
+				t.Fatalf("the host itself was refused: %d %s", atTheHost.Code, atTheHost.Body.String())
+			}
+
+			for _, tc := range []struct {
+				name       string
+				remoteAddr string
+				xff        string
+				refused    bool
+			}{
+				{"at the host", "127.0.0.1:5555", "", false},
+				{"at the host over IPv6 loopback", "[::1]:5555", "", false},
+				{"a LAN device", "192.168.1.20:5555", "", true},
+				{"a LAN device forging the host's address", "192.168.1.20:5555", "127.0.0.1", true},
+				{"a reverse proxy on the host forwarding a LAN client", "127.0.0.1:5555", "192.168.1.20", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					rec := post(tc.remoteAddr, tc.xff)
+
+					if !tc.refused {
+						if rec.Code != atTheHost.Code {
+							t.Fatalf("status %d, want %d — the same answer the host gets (body %q)",
+								rec.Code, atTheHost.Code, rec.Body.String())
+						}
+						return
+					}
+
+					if rec.Code != http.StatusForbidden {
+						t.Fatalf("status %d, want %d. A LAN device can otherwise open a browser "+
+							"window on a screen it cannot see (body %q)",
+							rec.Code, http.StatusForbidden, rec.Body.String())
+					}
+					got := decodeErrorBody(t, rec)["error"]
+					if !strings.Contains(got, "on the host") {
+						t.Errorf("refusal = %q, want it to say where to run this instead — a bare "+
+							"'Forbidden' leaves the operator with no next move", got)
+					}
+					if !strings.Contains(got, "Import") {
+						t.Errorf("refusal = %q, want it to name the remedy that works from here "+
+							"(POST /api/cookies/import stays ungated for exactly this viewer)", got)
+					}
+				})
+			}
+
+			// BEFORE anything else runs, including the service guard. An
+			// install with no AutoCookieService wired must not tell a LAN
+			// caller 503 — that reads as "configure me", and the caller's
+			// problem is not the configuration.
+			t.Run("a LAN device of an install with no service", func(t *testing.T) {
+				r := chi.NewRouter()
+				CookieRoutes(r, nil, nil, nil, nil)
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.RemoteAddr = "192.168.1.20:5555"
+				rec := httptest.NewRecorder()
+				r.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusForbidden {
+					t.Errorf("status %d, want %d (body %q)", rec.Code, http.StatusForbidden,
+						rec.Body.String())
+				}
+			})
+		})
+	}
+}
+
+// TestTheLoopbackRefusalCarriesALength keeps the Task 6 rule on the exit this
+// task adds. The finish handler runs a deferred, BLOCKING auth re-check, so
+// every JSON any of its exits writes must carry a Content-Length or the client
+// waits out the re-check for the body — and this refusal is answered by a
+// SHARED HELPER, which is exactly the shape the per-handler source sweep
+// (TestBothRecheckHandlersAnswerThroughTheSizedWriters) cannot see.
+//
+// Mutant: write the refusal through jsonError -> none of the three carries a
+// length.
+func TestTheLoopbackRefusalCarriesALength(t *testing.T) {
+	for _, path := range []string{
+		"/api/cookies/auto-setup/start",
+		"/api/cookies/auto-setup/finish",
+		"/api/cookies/auto-setup/cancel",
+	} {
+		r := chi.NewRouter()
+		CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "192.168.1.20:5555"
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(rec.Body.Len()) {
+			t.Errorf("%s refusal: Content-Length = %q for a %d-byte body",
+				path, got, rec.Body.Len())
+		}
+	}
+}
+
+// TestAutoSetupStartRejectsAnUnknownPlatform is COOKIES-8 at the wire.
+//
+// The handler forwarded any string and StartSetup proceeded with the YouTube
+// login URL under targetPlatform="anything", so the Chromium finish skipped
+// cdpEnsurePageTarget and the wizard judged both platforms as if youtube had
+// been asked — a wrong input silently accepted.
+//
+// There is ONE rule and it lives in StartSetup, where the callers that are not
+// this route reach it (the TUI's R L chord, the first-run wizard). The route's
+// share is to render the sentinel as a wrong INPUT — 400, not the 500 its
+// default arm gave — so a second hard-coded platform list here would be a copy
+// free to drift from the one that decides.
+//
+// Mutants:
+//   - drop the 400 arm -> "mastodon" answers 500 "failed to start setup", which
+//     reads as a server fault for a value the caller chose.
+//   - drop the StartSetup check -> "mastodon" gets past the rule entirely and
+//     this fails on the status; the service-level twin
+//     (TestStartSetupRejectsAnUnknownPlatform) names the same mutant for every
+//     non-HTTP caller.
+//   - reject "" or an absent field -> the last three rows fail; both the
+//     dashboard and the first-run wizard omit the field, and it has always
+//     meant youtube.
+func TestAutoSetupStartRejectsAnUnknownPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"a platform Moombox does not support", `{"platform":"mastodon"}`, http.StatusBadRequest},
+		{"the right word in the wrong case", `{"platform":"YouTube"}`, http.StatusBadRequest},
+		{"an empty platform means youtube", `{"platform":""}`, http.StatusServiceUnavailable},
+		{"no platform key at all means youtube", `{}`, http.StatusServiceUnavailable},
+		{"an unparseable body means youtube", `not json`, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := chi.NewRouter()
+			// Stopped, so every row that gets PAST the platform rule lands on
+			// ErrServiceStopped's 503 — a status this package can produce
+			// without a browser, and one no platform refusal shares.
+			CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+			req := httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start",
+				strings.NewReader(tc.body))
+			req.RemoteAddr = "127.0.0.1:5555"
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d (body %q)", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want != http.StatusBadRequest {
+				return
+			}
+			got := decodeErrorBody(t, rec)["error"]
+			for _, accepted := range []string{"youtube", "twitch"} {
+				if !strings.Contains(got, accepted) {
+					t.Errorf("400 body = %q, want it to name %q — the caller cannot fix an input "+
+						"whose accepted values are not stated", got, accepted)
+				}
+			}
+		})
+	}
 }
