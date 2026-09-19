@@ -31,6 +31,17 @@ var (
 // that it should respawn. Used for both config restarts and update restarts.
 const exitCodeRestart = 42
 
+// exitCodeStartupError is the exit code the child uses for a DETERMINISTIC
+// startup failure — a config the process cannot load, a database it refuses,
+// a web bind that cannot succeed in headless mode. The launcher treats it as
+// "this install's environment is wrong", never as "the update is broken": no
+// automatic rollback, no skipped version, the rollback artifact preserved
+// with instructions. Before this, the classification depended on whether the
+// operator pressed Enter at waitForKeypress inside postUpdateFailureWindow
+// (CORE-23). Launchers that predate this constant have no case for it and
+// fall through to exactly today's behaviour, so the change is forward-only.
+const exitCodeStartupError = 3
+
 func init() {
 	// Strip "v" prefix from version if set via -ldflags (tag name includes it)
 	version = strings.TrimPrefix(version, "v")
@@ -207,12 +218,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// connectivity, cookies, platform services, worker, monitors, cookie
 	// refresh, web server, rate limiters, auth, shared closures). On a fatal
 	// startup failure, skip deferred cleanup — matches the pre-refactor
-	// behaviour where os.Exit(1) jumps past any defers that may not even
-	// have been registered yet.
+	// behaviour where the exit jumps past any defers that may not even
+	// have been registered yet. exitCodeStartupError (not 1) tells a
+	// launcher that this is the environment failing deterministically, so a
+	// first-post-update boot that lands here is never mistaken for a broken
+	// release.
 	if err := s.initServices(logLevelOverride); err != nil {
 		fmt.Fprintf(os.Stderr, "Startup error: %v\n", err)
 		waitForKeypress()
-		os.Exit(1)
+		os.Exit(exitCodeStartupError)
 	}
 
 	defer s.closeLog()
@@ -378,7 +392,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
 				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
 				waitForKeypress()
-				os.Exit(1)
+				// Deterministic: the port is taken or the bind address is
+				// unusable on this host. Never "the update is broken".
+				os.Exit(exitCodeStartupError)
 			}
 			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
 			webBindFailed = true

@@ -5,6 +5,19 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// decimalValueFields are the fieldNumber keys backed by config.FlexDuration,
+// where a fractional value is legal config the TUI must be able to type and
+// must not round away on save. Every other fieldNumber keeps the digits-only
+// filter.
+var decimalValueFields = map[string]bool{
+	"feed_check_interval":            true,
+	"probe_cooldown":                 true,
+	"interruption_timeout":           true,
+	"incomplete_staging_expiry_days": true,
+	"refresh_interval":               true,
+	"hide_finished_age_days":         true,
+}
+
 // updateTextInputForField configures the textInput based on the current state.
 func (m *SettingsModel) updateTextInputForField() {
 	sec := sections[m.sectionIndex]
@@ -63,9 +76,12 @@ func (m *SettingsModel) updateTextInputForField() {
 		field := sec.fields[m.fieldIndex]
 		if field.ftype == fieldText || field.ftype == fieldNumber {
 			m.textInput.EchoMode = textinput.EchoNormal
-			if field.ftype == fieldNumber {
+			switch {
+			case field.ftype == fieldNumber && decimalValueFields[field.key]:
+				m.textInput.Validate = validateDecimal
+			case field.ftype == fieldNumber:
 				m.textInput.Validate = validateDigitsOnly
-			} else {
+			default:
 				m.textInput.Validate = nil
 			}
 			m.textInput.SetValue(m.values[field.key])

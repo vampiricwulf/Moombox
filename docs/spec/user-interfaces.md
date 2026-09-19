@@ -120,7 +120,7 @@ The TUI is built on the [Charmbracelet](https://github.com/charmbracelet) ecosys
 |---------|-------|
 | `charm.land/bubbletea/v2` | Core framework. Elm architecture: `Model` (state), `View` (render), `Update` (message dispatch). All state transitions happen through message passing. |
 | `charm.land/bubbles/v2` | Pre-built components: `list` (task list), `viewport` (log viewer, detail scrolling), `spinner` (loading indicators), `paginator` (page navigation), `key` (key binding definitions). |
-| `charm.land/huh/v2` | Form builder framework. Used for the Settings dialog and the Setup Wizard. Provides multi-step forms with inputs, selects, confirms, and validation. |
+| `charm.land/huh/v2` | Form builder framework. Used by the Setup Wizard and the FFmpeg check overlay (and by `styles.go`, which supplies both with the Moombox theme) — those three files are the package's only importers. Provides multi-step forms with inputs, selects, confirms, and validation. |
 | `charm.land/lipgloss/v2` | Styling engine. Colors, borders, padding, margin, alignment, and layout composition. Every visual element in the TUI is styled through lipgloss. |
 
 ### Layout: Two-Over-One Panel Design with Focus Expansion
@@ -163,11 +163,11 @@ Example: Logs focused (100% width, 75% height)
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility. A watched job carries a dim `•` between the platform tag and the title (`watchedGlyph`, counted in `titleWidth`).
+**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate one row at a time; `PgUp`/`PgDn` move a page and `Home`/`End` jump to the first/last row, all four through the embedded bubbles list's own paginator (`PrevPage`/`NextPage`/`GoToStart`/`GoToEnd` in `internal/tui/task_list.go`), so the header's `[start-end/total]` range follows the cursor. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility. A watched job carries a dim `•` between the platform tag and the title (`watchedGlyph`, counted in `titleWidth`).
 
 **Job Details (top right):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
-**Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and vim-style regex search (`/` to enter search, `n`/`N` to navigate matches, `Esc` to clear). Matched lines are highlighted in the viewport. Long lines soft-wrap within the available width. Auto-scrolls to newest entries unless the user has manually scrolled up.
+**Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and vim-style search over the literal text typed (`/` to enter search, `n`/`N` to navigate matches, `Esc` to clear; the query is `QuoteMeta`-escaped, so a `.` matches a dot). Matched lines are highlighted in the viewport. **Long lines are hard-wrapped once, at insertion** — `wrapLogLine` and `rebuildFiltered` (`internal/tui/log_viewer.go`) split each survivor of the level filter to the panel's content width and the viewport runs with `SoftWrap` off, and `View` itself is memoised behind a render cache keyed on everything it reads. The viewport's own soft-wrap called `ansi.StringWidth` over every buffered line on every render — 2.35 ms and 6,192 allocations at the 1,000-line cap, 60% of a whole TUI frame — and that pass now runs about ten times a second on the insertion path instead of sixty times a second on the render path (CORE-2). One accepted consequence: search runs `FindAllStringIndex` over the already-wrapped viewport content, so **a term that straddles a wrap boundary no longer matches** — the same term matches on any line that fits, and widening the panel restores it. Auto-scrolls to newest entries unless the user has manually scrolled up.
 
 **Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
 
@@ -175,30 +175,78 @@ Example: Logs focused (100% width, 75% height)
 
 ### Source Files
 
+All 43 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 41.
+
+**The application model** — `App` is split across seven files rather than one; `app.go` holds the struct and its wiring only.
+
 | File | Purpose |
 |------|---------|
-| `app.go` | Main application model. Init, Update, View. Chord state machine. Menu builder. Action dispatcher. Message routing. Tick management. |
-| `task_list.go` | Task list panel (top left). Job list rendering, selection, filtering, archive toggle, status icons. |
+| `app.go` | Application model and its wiring: fields, constructor, backend callbacks and channel plumbing, tick scheduling, `View` delegation. |
+| `app_update.go` | `Update`: the message switch over every backend, tick, overlay and async-result message, plus the feedback line and the job add/update/delete appliers. |
+| `app_keys.go` | Key dispatch: the `Ctrl+C` test that runs ahead of every overlay intercept, overlay routing, the per-panel handlers, and the chord state machine. |
+| `app_actions.go` | `buildMenuItems` — the single source of truth for chords, the action menu, the hints and the help overlay — and `dispatchAction`, the one handler every chord lands in. |
+| `app_commands.go` | The `tea.Cmd` layer: the internal-token HTTP client and every `/api/` call the TUI makes, plus `Run`. |
+| `app_layout.go` | Panel geometry, `View` composition, the minimum-terminal-size floor, the restart and security banners, feedback colouring. |
+| `app_mouse.go` | Top-level mouse routing: active overlay first, then the panels. |
+
+**Panels**
+
+| File | Purpose |
+|------|---------|
+| `task_list.go` | Task list panel (top left). Job list rendering, selection, filtering, paging, archive toggle, status icons. |
 | `job_details.go` | Job details panel (top right). Metadata display, description toggle, progress rendering. |
-| `log_viewer.go` | Log viewer panel (bottom). Log line buffering, level filtering, regex search, auto-scroll logic. |
-| `status_bar.go` | Bottom bar. Chord hints (left), disk usage, active download count, cookie status (right). |
-| `action_menu.go` | Command palette overlay (M key). Searchable list of all available actions. |
-| `help.go` | Help overlay (? key). Displays all chords grouped by category. |
-| `add_video.go` | Add Video overlay. Multi-step flow: URL input, format selection, timestamp configuration, confirmation. |
-| `import_dialog.go` | Import overlay. Zip file upload with title/channel override fields. |
-| `trim_dialog.go` | Trim overlay. Start/end time input, async encoding with progress display. |
-| `files_dialog.go` | Orphaned files overlay. Browse and delete files that have no corresponding job. |
-| `client_tokens_dialog.go` | Client token management overlay. List and delete persistent auth tokens. |
-| `settings.go` | Settings overlay. Built with `huh` form framework. Full config editing. |
-| `settings_mouse.go` | Mouse support for the Settings overlay: click tabs, fields, toggles/cycles, and action buttons. |
+| `log_viewer.go` | Log viewer panel (bottom). Log line buffering, level filtering, insertion-time hard wrapping, literal search, auto-scroll logic, the `View` render cache. |
+| `status_bar.go` | Bottom bar. Chord hints (left), disk usage, active download count, cookie status (right), and the `barTier` width ladder both halves descend. |
+
+**Overlays**
+
+| File | Purpose |
+|------|---------|
+| `action_menu.go` | Command palette overlay (`M`). A categorised list of every available action; selecting an entry executes it. |
+| `help.go` | Help overlay (`?`). Displays all chords grouped by category. |
+| `add_video.go` | Add Video overlay (`A A`). Multi-step flow: URL input, format selection, timestamp configuration, confirmation. |
+| `import_dialog.go` | Import overlay (`A Z`). Zip file upload with title/channel override fields. |
+| `cookie_import_dialog.go` | Cookie file import overlay (`R I`). Path prompt with `~` expansion and an existence check, then the per-platform import outcome. Only the path is ever displayed. |
+| `trim_dialog.go` | Trim overlay (`A T`). Start/end time input, async encoding with progress display. |
+| `files_dialog.go` | Orphaned files and history overlay (`A O`). Browse and delete files and history rows that have no corresponding job. |
+| `client_tokens_dialog.go` | Client token management overlay (`A K`). List and delete persistent auth tokens. |
+| `stats_dialog.go` | Statistics overlay (`R T`). Renders the `stats.Snapshot` the Web Stats tab reads, with a 60 s refresh tick while open. |
+| `ytdlp_dialog.go` | yt-dlp plugin overlay (`R Y`). Renders `ytdlpplugin.Info` verbatim; `I` installs for the live port. |
+| `release_notes_overlay.go` | Release notes overlay (`R N`). `glamour`-rendered Markdown in a `bubbles/viewport`; `U` applies the update, `S` skips a pending version. |
+| `ffmpeg_check.go` | FFmpeg validation/installation overlay. Built with `huh`. `Esc` quits Moombox here rather than dismissing, because FFmpeg is required for muxing. |
 | `setup_wizard.go` | First-run setup overlay, and — via `R L` — the standalone cookie-login step on a configured install. Built with `huh`. Config, FFmpeg, yt-dlp plugin, cookies. |
-| `ffmpeg_check.go` | FFmpeg validation/installation overlay. |
-| `styles.go` | Lipgloss style definitions. Colors, borders, padding for all visual elements. |
-| `keys.go` | Key binding definitions using `bubbles/key`. |
+
+**The Settings overlay** — eight files, none of which uses `huh`: the editor is built from the package's own section and field tables over `text_input.go`.
+
+| File | Purpose |
+|------|---------|
+| `settings.go` | Settings model: the section/field tables, `Open`/`Close`, `loadValues`/`applyValues`, dirty and restart-required tracking. |
+| `settings_view.go` | Settings rendering: header, hint line, action buttons, field rows, and each sub-editor's view. |
+| `settings_keys.go` | Settings key handling: section and field navigation, edit mode, save/close routing. |
+| `settings_channels.go` | Channel sub-editor: add, edit, delete, and the four per-channel overrides. |
+| `settings_notifications.go` | Notification sub-editor: webhook list, per-event toggles, test send. |
+| `settings_security.go` | Security sub-editor: password set/remove, network access, and the external-access predicate `isExternalAccess`. |
+| `settings_components.go` | The overlay's `textinput` components, including the decimal-capable fields backed by `config.FlexDuration`. |
+| `settings_mouse.go` | Mouse support for the Settings overlay: click tabs, fields, toggles/cycles, and action buttons. |
+
+**Shared infrastructure**
+
+| File | Purpose |
+|------|---------|
+| `styles.go` | Lipgloss style definitions — colors, borders, padding for all visual elements — and the `huh` theme the two form overlays share. |
+| `keys.go` | Key name constants shared by the chord system and the panel handlers. |
 | `mouse.go` | Mouse event handling. Click-to-focus, scroll delegation, region hit testing. |
 | `marquee.go` | Scrolling text animation for long strings that do not fit in available width. |
 | `text_input.go` | Custom text input component (extends bubbles). |
 | `progress_store.go` | Tracks download progress state for active jobs. |
+| `monitor_checking.go` | The "a check is running right now" sentinel (`MonitorCheckingSentinelMs`, rendered as `…`), kept distinct from "no channels" and from a real future timestamp. |
+
+**Platform-specific pairs** — each is a build-tagged two-file pair, so exactly one of each compiles.
+
+| File | Purpose |
+|------|---------|
+| `openbrowser_windows.go` / `openbrowser_other.go` | Builds the browser-open command. Windows uses `explorer.exe` (not `cmd /c start`) so a cold-started browser is re-parented outside the launcher's kill-on-close Job Object. |
+| `clipboard_windows.go` / `clipboard_other.go` | The `O C` system-clipboard backup. Windows spawns `clip.exe` on a local console only; everywhere else there is no dependency-free equivalent and the function reports false, leaving OSC 52 as the sole mechanism. |
 
 ### The Chord System
 
@@ -282,7 +330,7 @@ The chord system is a three-state finite automaton:
 | `O F` | Open Folder (desktop file manager) | Yes | Job has an openable folder |
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
-| `O C` | Copy Stream URL to clipboard (OSC 52) | Yes | Job has a stream URL |
+| `O C` | Copy Stream URL to clipboard. The OSC 52 write (`tea.SetClipboard`) goes out on **every** press, on every platform — it is the only mechanism that reaches the terminal the operator is actually sitting at, which over SSH is not the machine Moombox runs on — and the feedback line reads `Sent to terminal clipboard (OSC 52): <url>`, claiming nothing more, because conhost and tmux-without-`set-clipboard` drop OSC 52 in silence. On a **local Windows console** a `clip.exe` child fed on stdin runs in addition, inside a `tea.Cmd` so a wedged child cannot freeze rendering or input; if it reports that it took the text the line upgrades to `Copied: <url>`. That backup stands down for Windows Terminal (`WT_SESSION`, whose own OSC 52 handling is authoritative) and for any SSH session (`SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT`), where it would write the server's clipboard (`clipboardFeedback` in `internal/tui/app_actions.go`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL |
 | `O G` | Open GitHub Page (browser) | No | — |
 
 **Single-key shortcuts:**
@@ -296,7 +344,10 @@ The chord system is a three-state finite automaton:
 | `/` | Tasks panel: open the filter query box, which speaks the dashboard's filter language — free text plus `status:`/`channel:`/`platform:` tokens, `-` negation, `a\|b` OR groups, quoted values. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs). `Enter` applies and closes; losing panel focus closes the box but keeps the applied query. Log panel: enter search mode. `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
 | `Esc` | Clear, in this order: the batch selection, then the active filter (Tasks panel) — the typed text and the `F`-set status token are one state, so this drops both together — then any armed chord. |
 | `Space` | Tasks panel: toggle the focused row's batch selection. The status bar shows the count, and every batch-capable chord (`A R`, `A I`, `A C`, `A D`, `A W`) then acts on the selection instead of the cursor row, re-applying its own status filter to it. |
+| `PgUp` / `PgDn` | Page scroll: the Details and Logs viewports, and the Tasks panel's list (a whole page of rows per press). |
+| `Home` / `End` | Tasks panel: jump to the first / last row. |
 | `Ctrl+U` / `Ctrl+D` | Half-page scroll in the focused panel's viewport (Details, Logs) and in the Help and Release Notes overlays. |
+| `Ctrl+C` | Quit immediately, from anywhere. bubbletea v2 delivers it as an ordinary key press (`tea.InterruptMsg` arrives only from a real SIGINT), so `handleKey` tests for it **before every overlay intercept** — no overlay, dialog, settings form, search box or armed chord can swallow it. Quitting out of the setup wizard's cookie step cancels the browser it opened first (`OnCancelAutoCookie`), so no headed browser is orphaned holding the acquisition slot. |
 | `End` | Log panel: resume auto-scroll (jump to the newest line and follow it again). |
 | `c` | Clear the log view (log panel focused only). Drops history, the filtered view, and any active search; the level filter is kept. |
 
@@ -308,18 +359,18 @@ The chord system is a three-state finite automaton:
 
 ### Overlays (Modal Dialogs)
 
-Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays.
+Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays — the FFmpeg-not-found overlay is the exception and QUITS on `Escape`, because FFmpeg is required for the muxing half of the pipeline and an overlay that merely dismissed itself would leave a Moombox that cannot finish a download. `Ctrl+C` is checked ahead of every overlay and always quits (see the single-key table above).
 
 | Overlay | Trigger | Description |
 |---------|---------|-------------|
 | Help | `?` | Displays all chords grouped by category with descriptions. Read-only. |
-| Action Menu | `M` | Command palette. Searchable list of all available actions. Selecting an item executes it. |
+| Action Menu | `M` | Command palette. A categorised list of every available action; selecting an entry executes it. Filtering is disabled (`SetFilteringEnabled(false)`) — the list is short enough to scroll, and `PgUp`/`PgDn`/`Home`/`End` page it. |
 | Add Video | `A A` | Multi-step form: (1) enter URL, (2) fetch and select format, (3) set timestamps, (4) confirm. Format fetch is async with a spinner. On error, auto-advances past format selection after a timeout. |
 | Import | `A Z` | Zip import form with title and channel override fields. |
 | Trim | `A T` | Clip creation. Enter start/end seconds. Encoding runs asynchronously with a progress callback that updates the UI. |
 | Orphaned Files & History | `A O` | Two sections in one list (with a divider): orphaned files in the output directory with no corresponding job, and orphaned processing-history rows (history entries with no matching job, which otherwise block re-discovery). Each section loads independently — a failure in one is shown inline without hiding the other. Delete with confirmation. `A` deletes every entry in the half the cursor is in (files or history) after the same two-press confirm as `D`; per-item failures are collected and listed in the dialog. |
 | Client Tokens | `A K` | List of persistent client authentication tokens. Delete individual tokens. |
-| Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. Both channel editors expose the four per-channel overrides (`num_desc_lookbehind`, `output_directory`, `archive_window_days`, `archive_slots`); blank means the global value, and the TUI editor now preserves every field it does not show (it rebuilt the channel from the visible fields before Arc B). |
+| Settings | `` ` `` | Full config editor built from the package's own section/field tables (`internal/tui/settings.go`) over `text_input.go` — not `huh`. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. Both channel editors expose the four per-channel overrides (`num_desc_lookbehind`, `output_directory`, `archive_window_days`, `archive_slots`); blank means the global value, and the TUI editor now preserves every field it does not show (it rebuilt the channel from the visible fields before Arc B). |
 | Setup Wizard | First run, `R L` | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. `R L` opens the same overlay in **cookie-only** mode: the cookie step with no stages around it, `Esc` and the third row close it instead of advancing, and leaving cancels any browser it opened. |
 | FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. On Linux, also shows the distro-appropriate package manager command (`apt`, `dnf`, `pacman`, etc.) from `GET /api/ffmpeg/install-suggestion`. |
 | yt-dlp Plugin | `R Y` | Async status overlay for the yt-dlp PO-token plugin (`YtdlpDialogModel`, `internal/tui/ytdlp_dialog.go`). Renders `ytdlpplugin.Info` verbatim rather than re-deriving it for the terminal. `I` installs/reinstalls for the live port and reloads, `R` refreshes, `Esc` closes. |
@@ -337,7 +388,7 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 | `JobAddedMsg` | Database subscriber | A newly added job (lifecycle event) — appended directly to local state instead of triggering a full job-list rebuild. Contains `*database.JobAdded`. |
 | `JobDeletedMsg` | Database subscriber | The ID of a removed job (lifecycle event) — the row is removed from local state directly instead of reloading a fresh full-list snapshot. Contains `*database.JobDeleted`. |
 | `TrimsChangedMsg` | Database subscriber (re-fetched via `tui_wiring`) | A refreshed `*database.Job` snapshot after a trim was added or deleted; applied to the cached row and, if selected, the detail panel. |
-| `JobsUpdateMsg` | Database subscriber | Full job list changed (job added or deleted). Contains `[]*database.Job`. |
+| `JobsUpdateMsg` | Wiring, resync, and the two bulk writes | Full job list snapshot, sent in three situations: the initial list when the TUI is wired, the catch-up after a dropped update (see §Non-Blocking Channel Communication), and the two remaining `OnJobsChange` producers — `BatchSetWatched` and `DeleteJobsAndHistoryForChannel` (`internal/database/database_jobs.go`), both of which can touch 100+ rows at once. An ordinary add or delete does NOT come this way: `JobAddedMsg` and `JobDeletedMsg` are their own lifecycle events. Contains `[]*database.Job`. |
 | `LogBatchMsg` | Logger subscriber | Batch of log lines accumulated over a 250ms flush window. Contains `[]string`. |
 | `CheckTimersMsg` | Monitor callbacks | Next check times for Feed, DECAPI, and Twitch monitors. |
 | `CookieStatusMsg` | Cookie service | `{YT, TW, YTActive, TWActive}` — one `CookieStatus` per platform (`None`, `OK`, `CookiesOnly`, `Relogin`, `Unknown`, `FileUnreadable`) plus each platform's active flag. There is no *expired* state: expiry has no UI reader at all. See §Status Bar. |
@@ -351,7 +402,7 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 
 | Message Type | Interval | Purpose |
 |--------------|----------|---------|
-| `tickMsg` | 1 second | Main tick. Updates clocks, checks chord timeouts, refreshes dynamic content. |
+| `tickMsg` | 1 second | Main tick. Updates clocks, checks chord timeouts, refreshes dynamic content. Once a minute it also runs the archive sweep, which re-reads `hide_finished_age_days` from the config store (`syncHideFinishedAge` in `internal/tui/app.go`) before re-bucketing aged rows — a threshold changed from the dashboard reaches the TUI through no event at all, so this sweep is the whole Web → TUI direction and bounds its latency at 60 s. A change made in the TUI travels the other way immediately, through the shared `broadcastHideFinishedAge`. |
 | `progressTickMsg` | 16ms (active) / 500ms (idle) | Progress bar animation. Runs at ~60fps during active downloads, drops to 2fps when idle to save CPU. |
 | `logFlushMsg` | 250ms | Triggers flushing accumulated log lines from the buffer to the viewport. |
 | `marqueeTickMsg` | 150ms | Advances scrolling marquee text for overflowed labels. |
@@ -415,7 +466,7 @@ default:
 }
 ```
 
-If a send is dropped, a drop counter increments. The next successful send triggers a full state refresh (re-fetching all jobs from the database) so the TUI catches up on missed intermediate updates. This ensures the TUI never blocks a backend goroutine, even if the Bubble Tea event loop is busy processing a complex view update.
+If a send is dropped, a drop counter increments **and a replay flag is armed** (`newTUIResync` in `cmd/moombox/tui_wiring.go`), with one warning line per streak. **The next SUCCESSFUL send** — the first event that gets through once the Bubble Tea loop drains a slot — takes the flag and triggers a full state refresh (re-fetching all jobs from the database and pushing that snapshot down the full-list channel), so the TUI catches up on the missed intermediate updates in one pass. A 1 s backstop ticker covers the two cases no successful send reaches: a job that goes quiet after the drop, and a channel that stays full. The replay deliberately does NOT run on the way into a forwarder: the forwarders are called inline on the ~60 Hz `UpdateJobFields` writer goroutine, so a replay there would fire once per *dropped* message and charge a full-table read to the download workers for every message the stalled TUI could not take — feeding the backlog it is recovering from. Taking the flag with a compare-and-swap is what makes it one catch-up refresh per streak rather than one per dropped message, and a refresh whose fetch or whose delivery fails re-arms the flag instead of clearing it — a dropped `Downloading → Finished` can therefore never leave a stale row for the rest of the session. A full list delivered by `OnJobsChange` (the two bulk writes) does not clear the flag either: **a delivered list is NOT assumed newer than a pending replay** — it is the bulk write's own time-of-write snapshot, so an update that landed after it and was then dropped is not in it. The four drop-counting forwarders share one body, `forwardOrDrop` in the same file, so the replay, the drop counter and the once-per-streak warning cannot drift between them. This ensures the TUI never blocks a backend goroutine, even if the Bubble Tea event loop is busy processing a complex view update.
 
 ### Backend Communication
 
@@ -430,9 +481,11 @@ This means the TUI has the same API surface as the Web UI — it calls the same 
 
 The status bar occupies the bottom row of the terminal. It displays at-a-glance system health and state:
 
-The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?) — compact mode when width < 100 chars. The right side shows metrics and status.
+The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?) — the left side sheds its labels along the same width-tier ladder as the right (see below). The right side shows metrics and status.
 
-**Everything on the right is rendered against a width tier** (`barTier` in `internal/tui/status_bar.go`): `tierFull` → `tierCompact` → `tierKeys` → `tierTight` → `tierEssential` → `tierNone`. The tier decides both the label length and whether an element appears at all, and the rule the cookie indicators follow is that **reassurance is dropped before an alarm is**.
+**Both halves are rendered against a width tier** (`barTier` in `internal/tui/status_bar.go`): `tierFull` → `tierCompact` → `tierKeys` → `tierTight` → `tierEssential` → `tierNone`. The tier decides both the label length and whether an element appears at all, and the rule the cookie indicators follow is that **reassurance is dropped before an alarm is**.
+
+The two halves do not descend together. `statusBarDescent` is a fixed eleven-step ladder of `(left, right)` tier pairs: the right steps down alone as far as `tierKeys` (status verbosity is the cheapest thing to lose), then the left follows down to `tierKeys` shedding its chord labels, and from there the two alternate, right first, to `tierNone`. `fitTiers` renders both ladders and returns the first pair whose combined width plus the one-column gap fits — which is also the richest pair that fits, because every step lowers exactly one side by exactly one rung and both ladders narrow monotonically (pinned by `TestStatusBarTiersNarrowMonotonically`). There is no width threshold anywhere in this: the bar measures its own rendered content.
 
 | Element | Content | Behavior |
 |---------|---------|----------|
@@ -528,7 +581,7 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | `job_progress` | `{ id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt }` | Every progress tick of an active download (~60 Hz per job). Carries only the columns the tick writes; the client MERGES it onto the row it already holds (`{...old, ...patch}`) rather than replacing it. Sent when `JobChange.Changes` names progress columns ONLY — anything else, `status` included, goes out as `job_update`. The frame is a tenth of the row it replaces; the cadence is identical (`isProgressOnlyChange` / `newJobProgressFrame`, `cmd/moombox/job_progress.go`). On the client (`case "job_progress"`, `web/public/app.js`) a frame whose `id` the tab does not hold is DROPPED rather than upserted the way `job_update` upserts one — a twelve-field frame would draw an untitled, thumbnail-less row, and the next `job_update` or `jobs_update` carries the whole row anyway — and a frame whose `status` differs from the held one takes `job_update`'s full-render path (re-sort, archive boundary, parked badge) instead of the single-card fast path. |
 | `jobs_update` | Full job array | When a job is added or deleted (full list, not incremental) |
 | `job_deleted` | `{ id }` | When a job row is removed from the database |
-| `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes |
+| `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes — from the dashboard's own `PUT /api/config` or from a TUI settings save, both through one `broadcastHideFinishedAge` in `cmd/moombox/routes_wiring.go`, which gates on the value actually having moved since the last broadcast, sends this first, and then sends a `jobs_update` re-filtered with the same captured threshold (skipped, with a warning, if the jobs read fails — an empty list would blank every dashboard) |
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
 | `backfill_status` | `{ channel, tab, pages, state }` | Feed-history backfill scan progress per channel (`state`: scanning / error / done / idle). Active scans are also seeded via `initial_state`. |
@@ -1032,7 +1085,7 @@ Every major feature exists in both UIs:
 | Orphaned files | `app.js` (inline) | `files_dialog.go` |
 | Client tokens | `app.js` (inline) | `client_tokens_dialog.go` |
 | yt-dlp plugin | Settings → Integrations card (`settings.js` `loadYtdlpPluginStatus`) | `YtdlpDialogModel` (`internal/tui/ytdlp_dialog.go`) |
-| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`) |
+| Copy stream URL (job details) | `app.js` details dialog, `streamUrl` in `web/public/modules/utils.js` | `O C` chord (`streamURL`, `internal/tui/app_actions.go`); the browser has a real clipboard API, the terminal has OSC 52 plus a local-Windows `clip.exe` backup, so only the TUI side hedges its wording |
 | Filter language | `filter-parser.js` / `filter-engine.js` | `internal/jobfilter` behind the Tasks panel's `/` box |
 
 **Note on video playback:** The TUI cannot play video inline (it is a terminal). The `O W` chord opens the Web UI in the default browser, where the user can access the player. This is the intended design — video playback is a Web UI strength, and the TUI defers to it rather than attempting a degraded experience.

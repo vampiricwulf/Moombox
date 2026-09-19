@@ -1,13 +1,13 @@
 # Frontend JS tests
 
 Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. Twelve
+dependencies, no DOM — and just import from `../public/modules/`. Thirteen
 suites drive their module inside a jsdom document:
 `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`,
-`boot-and-login.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`,
-`open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`,
-`render-diff.test.mjs`, `sidecar-warning.test.mjs` and
-`update-check-debounce.test.mjs`.
+`archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-progress.test.mjs`,
+`log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`,
+`release-notes-toast.test.mjs`, `render-diff.test.mjs`, `sidecar-warning.test.mjs`
+and `update-check-debounce.test.mjs`.
 jsdom is the only dev dependency, and it is **optional**.
 
 ## Running
@@ -33,7 +33,7 @@ modules.
 
 ## The DOM suites (jsdom)
 
-The twelve suites listed above are the ones that need a DOM. Install jsdom
+The thirteen suites listed above are the ones that need a DOM. Install jsdom
 **inside `web/tests/`** — never at the repo root:
 
 ```bash
@@ -50,21 +50,22 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 116
+checkout without `npm ci` reports them as **skipped**, never failed — the 119
 DOM tests (player 37, render-diff 16, app 13, a11y-controls 12, boot-and-login 12,
 job-progress 8, log-panel 4, open-folder 4, update-check-debounce 4,
-sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 123 tests that
-need no DOM — the eight pure suites plus the stylesheet-text test in
-`a11y-controls.test.mjs`, which reads `moombox.css` and asserts on its text:
+archive-boundary 3, sidecar-warning 3, app-resync 2, release-notes-toast 1),
+leaving 123 tests that need no DOM — the eight pure suites plus the
+stylesheet-text test in `a11y-controls.test.mjs`, which reads `moombox.css`
+and asserts on its text:
 
 ```
-ℹ tests 239
+ℹ tests 242
 ℹ pass 123
 ℹ fail 0
-ℹ skipped 116
+ℹ skipped 119
 ```
 
-With jsdom installed the same command reports `tests 239` / `pass 239` /
+With jsdom installed the same command reports `tests 242` / `pass 242` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
@@ -74,7 +75,7 @@ than a silent skip.
 | Suite | Needs jsdom |
 |-------|-------------|
 | `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
-| `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `boot-and-login.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
+| `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
 
 ## The player harness
 

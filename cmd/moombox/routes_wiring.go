@@ -76,27 +76,8 @@ func (s *runState) wireRoutes() func() {
 		OnMaxParallelChange: func(n int) {
 			s.dlWorker.SetParallelDownloads(n)
 		},
-		OnHideFinishedAgeChanged: func() {
-			// Send config_update FIRST so the Web UI's hideFinishedAgeDays is
-			// already up to date by the time the jobs_update payload (filtered
-			// with the new threshold) arrives. Otherwise the per-client FIFO
-			// queue would deliver jobs_update first, and the Web UI's archive
-			// re-eval would run with the stale threshold and undo the server's
-			// widening on a threshold increase.
-			// Capture the threshold ONCE and reuse it for both the
-			// config_update payload and the job filtering below. Re-reading
-			// the store for the filter (via filterJobsByAge) would race a
-			// concurrent config change and could broadcast a hideFinishedAgeDays
-			// that disagrees with the threshold the jobs_update was filtered by.
-			var hideAge float64
-			s.configStore.Read(func(c *config.MoomboxConfig) {
-				hideAge = c.Monitors.HideFinishedAgeDays.Value
-			})
-			s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
-			jobs, _ := s.db.GetAllJobs()
-			s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
-		},
-		OnChannelChange: s.kickMonitors,
+		OnHideFinishedAgeChanged: s.broadcastHideFinishedAge,
+		OnChannelChange:          s.kickMonitors,
 		OnNotificationsChange: func() {
 			// Hot-reload notification targets so edits apply immediately —
 			// previously they silently required a restart nothing asked for.
@@ -211,6 +192,71 @@ func (s *runState) wireRoutes() func() {
 	routes.WatchRoutes(s.r, s.db)
 
 	return importCleanup
+}
+
+// broadcastHideFinishedAge pushes a hide_finished_age_days change to every
+// dashboard: the config_update first, then the re-filtered job list.
+//
+// Send config_update FIRST so the Web UI's hideFinishedAgeDays is already up
+// to date by the time the jobs_update payload (filtered with the new
+// threshold) arrives. Otherwise the per-client FIFO queue would deliver
+// jobs_update first, and the Web UI's archive re-eval would run with the
+// stale threshold and undo the server's widening on a threshold increase.
+// Capture the threshold ONCE and reuse it for both the config_update payload
+// and the job filtering below. Re-reading the store for the filter (via
+// filterJobsByAge) would race a concurrent config change and could broadcast
+// a hideFinishedAgeDays that disagrees with the threshold the jobs_update was
+// filtered by.
+//
+// TWO callers, deliberately one method: the Web PUT's
+// ConfigRoutesCallbacks.OnHideFinishedAgeChanged above and the TUI's
+// OnSaveConfig (tui_wiring.go). Before that pairing a TUI save never reached
+// the dashboard at all (CORE-11).
+//
+// The change gate is here rather than at the call sites for the same reason:
+// the Web route gates before it calls (newHideAge != oldHideAge), but the TUI
+// cannot — the settings model mutates the live config before OnSaveConfig
+// runs, so there is no pre-mutation value on that side. s.hideAgeBroadcast
+// carries it instead, written by whichever caller last published, so an
+// unrelated TUI save (log level, output directory) costs nothing and a real
+// change is never swallowed.
+// Serialised end to end by hideAgeBroadcastMu (see runstate.go): the gate is
+// a load-compare-broadcast-store sequence whose two callers are independent,
+// and interleaving them can leave the memo holding a value no dashboard was
+// told. The lock covers the config read, the jobs read and both broadcasts;
+// nothing under it writes the config store.
+func (s *runState) broadcastHideFinishedAge() {
+	s.hideAgeBroadcastMu.Lock()
+	defer s.hideAgeBroadcastMu.Unlock()
+
+	var hideAge float64
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		hideAge = c.Monitors.HideFinishedAgeDays.Value
+	})
+	if last := s.hideAgeBroadcast.Load(); last != nil && *last == hideAge {
+		return
+	}
+	s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
+	jobs, err := s.db.GetAllJobs()
+	if err != nil {
+		// Never broadcast the empty slice a failed read returns:
+		// jobs_update REPLACES the dashboard's list, so a transient DB
+		// error would blank every open dashboard until some unrelated
+		// event refilled it. The config_update above is already out, so
+		// the clients re-filter the list they hold with the new threshold.
+		//
+		// The memo is deliberately NOT updated here: a client re-filter
+		// cannot widen the list a raised threshold makes longer (only the
+		// server holds the archived rows), so the identical save the
+		// operator retries must reach this read again rather than be
+		// swallowed as "unchanged".
+		s.log.Warn("Could not read jobs for the hide_finished_age_days broadcast — dashboards keep their current list",
+			slog.String("error", err.Error()))
+		return
+	}
+	s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
+	// Recorded only once the dashboards really have the new list.
+	s.hideAgeBroadcast.Store(&hideAge)
 }
 
 // currentWebPort resolves the port this process is actually serving on.

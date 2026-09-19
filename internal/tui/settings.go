@@ -117,11 +117,11 @@ var sections = []settingsSection{
 		fields: []fieldDef{
 			{"archive_window_days", "Archive window (days)", fieldNumber, nil, "how many days back to archive; upcoming/live always covered (default: 3)", nil},
 			{"archive_slots", "Archive slots", fieldNumber, nil, "backlog downloads per channel at once; new content never waits (default: 3)", nil},
-			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes (default: 10)", nil},
+			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes; fractions allowed, e.g. 0.5 (default: 10)", nil},
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic", nil},
-			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds (default: 15, range: 1-3600)", nil},
+			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds, 5-3600 or empty for dynamic (default: 15)", nil},
 			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)", nil},
-			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle (default: 0, no max)", nil},
+			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle; fractions allowed (default: 0, no max)", nil},
 			{"membership_discovery", "Membership discovery", fieldToggle, nil, "scan each YouTube channel's members-only tab for members-only streams (+ their VODs for channels that archive uploads & premieres); needs YouTube cookies (default: on)", nil},
 		},
 	},
@@ -306,7 +306,14 @@ type SettingsModel struct {
 	configStore *config.Store
 
 	// Callbacks
-	OnSave    func(cfg *config.MoomboxConfig)
+	//
+	// OnSave persists cfg and returns the save error. The error is not
+	// decoration: applyValues (and the two security commits) have already
+	// written into the live *MoomboxConfig by the time it is called, so a
+	// refused write is the moment the running process and config.toml
+	// diverge — the caller reports it and rolls the live struct back
+	// (CORE-4).
+	OnSave    func(cfg *config.MoomboxConfig) error
 	OnRestart func()
 	// OnRestartRequired fires when a settings save commits a value
 	// flagged in restartRequiredKeys, regardless of whether the user
@@ -480,7 +487,14 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	// Monitors
 	m.values["archive_window_days"] = strconv.Itoa(cfg.Monitors.ArchiveWindowDays)
 	m.values["archive_slots"] = strconv.Itoa(cfg.Monitors.ArchiveSlots)
-	m.values["feed_check_interval"] = fmt.Sprintf("%.0f", cfg.Monitors.FeedCheckInterval.Minutes())
+	// FormatFloat with -1 precision round-trips fractional values ("0.5"
+	// stays "0.5", "30" stays "30") — %.0f and int() silently rounded them
+	// away on EVERY save, touched field or not (CORE-7). The form carries
+	// the CANONICAL FLOAT in the field's documented unit, never the string
+	// form a config.toml may spell it with: ParseFlexDuration has already
+	// turned "90s" into 1.5 minutes before the overlay sees the struct, and
+	// FlexDuration.MarshalTOML writes it back with this exact spelling.
+	m.values["feed_check_interval"] = strconv.FormatFloat(cfg.Monitors.FeedCheckInterval.Minutes(), 'f', -1, 64)
 	if cfg.Monitors.DecapiCheckInterval != nil {
 		m.values["decapi_check_interval"] = strconv.Itoa(*cfg.Monitors.DecapiCheckInterval)
 	} else {
@@ -491,10 +505,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	} else {
 		m.values["twitch_check_interval"] = ""
 	}
-	// FormatFloat with -1 precision round-trips fractional values ("0.5"
-	// stays "0.5", "30" stays "30") — %.0f silently rounded them away.
 	m.values["hide_finished_age_days"] = strconv.FormatFloat(cfg.Monitors.HideFinishedAgeDays.Days(), 'f', -1, 64)
-	m.values["probe_cooldown"] = strconv.Itoa(int(cfg.Monitors.ProbeCooldown.Value))
+	m.values["probe_cooldown"] = strconv.FormatFloat(cfg.Monitors.ProbeCooldown.Value, 'f', -1, 64)
 	// nil normalizes to true (default on) — matches config validation.
 	m.values["membership_discovery"] = boolToDisplay(cfg.Monitors.MembershipDiscoveryEnabled())
 
@@ -506,8 +518,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	m.values["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
 	m.values["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
-	m.values["interruption_timeout"] = fmt.Sprintf("%.0f", cfg.Downloader.InterruptionTimeout.Minutes())
-	m.values["incomplete_staging_expiry_days"] = fmt.Sprintf("%.0f", cfg.Downloader.IncompleteStagingExpiryDays.Days())
+	m.values["interruption_timeout"] = strconv.FormatFloat(cfg.Downloader.InterruptionTimeout.Minutes(), 'f', -1, 64)
+	m.values["incomplete_staging_expiry_days"] = strconv.FormatFloat(cfg.Downloader.IncompleteStagingExpiryDays.Days(), 'f', -1, 64)
 
 	// Cookies
 	m.values["cookie_file"] = cfg.Cookies.CookieFile
@@ -518,7 +530,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
 	m.values["browser_path"] = cfg.Cookies.BrowserPath
 	m.values["browser_type"] = cfg.Cookies.BrowserType
-	m.values["refresh_interval"] = fmt.Sprintf("%.0f", cfg.Cookies.RefreshInterval.Minutes())
+	m.values["refresh_interval"] = strconv.FormatFloat(cfg.Cookies.RefreshInterval.Minutes(), 'f', -1, 64)
 	m.values["dpapi_fallback"] = boolToDisplay(cfg.Cookies.DpapiFallback)
 	m.values["acquisition"] = cfg.Cookies.Acquisition
 
@@ -633,15 +645,10 @@ func (m *SettingsModel) applyValues() {
 		{"log_max_files", "Max log files must be 1-100", 1, 100},
 		{"archive_window_days", "Archive window must be 1-3650 days", 1, 3650},
 		{"archive_slots", "Archive slots must be 1-100", 1, 100},
-		{"feed_check_interval", "Feed check interval must be 1-1440 minutes", 1, 1440},
-		{"probe_cooldown", "Probe cooldown must be >= 0 seconds (0 disables)", 0, math.MaxInt},
 		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
 		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
 		{"segment_workers", "Segment workers must be at least 1", 1, math.MaxInt},
 		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
-		{"interruption_timeout", "Interruption resume timeout must be >= 0 minutes (0 disables)", 0, math.MaxInt},
-		{"incomplete_staging_expiry_days", "Incomplete staging expiry must be >= 0 days (0 preserves forever)", 0, math.MaxInt},
-		{"refresh_interval", "Cookie refresh interval must be 10-10080 minutes", 10, 10080},
 		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
 		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
 	} {
@@ -659,18 +666,56 @@ func (m *SettingsModel) applyValues() {
 		m.status = saveError
 		return
 	}
-	// hide_finished_age_days is a FLOAT — fractional days (0.5 = 12h) are
-	// valid config that the Web UI and config file accept. Parsing it as an
-	// int here would silently rewrite 0.5 → 0 on any unrelated TUI save.
-	// The explicit NaN/Inf rejection matters: ParseFloat accepts "nan" (and
-	// TOML 1.0 has nan/inf literals a hand-edited config could carry), and
-	// NaN slips through a min/max range check because both comparisons are
-	// false.
-	hideAge, hideAgeErr := strconv.ParseFloat(m.values["hide_finished_age_days"], 64)
-	if hideAgeErr != nil || math.IsNaN(hideAge) || math.IsInf(hideAge, 0) || hideAge < 0 || hideAge > 365 {
-		m.errorMsg = "Hide finished after must be 0-365 days"
-		m.status = saveError
-		return
+	// The FlexDuration-backed fields are FLOATS. Fractional days/minutes are
+	// valid config the Web UI and the config file both accept, and parsing
+	// them as ints here silently rewrote them on any unrelated TUI save
+	// (CORE-7). The explicit NaN/Inf rejection matters: ParseFloat accepts
+	// "nan" (and TOML 1.0 has nan/inf literals a hand-edited config could
+	// carry), and NaN slips through a min/max range check because both
+	// comparisons are false.
+	flex := make(map[string]float64, 6)
+	for _, c := range []struct {
+		key, msg string
+		min, max float64
+	}{
+		{"feed_check_interval", "Feed check interval must be 1-1440 minutes", 1, 1440},
+		{"probe_cooldown", "Probe cooldown must be >= 0 seconds (0 disables)", 0, math.MaxFloat64},
+		{"interruption_timeout", "Interruption resume timeout must be >= 0 minutes (0 disables)", 0, math.MaxFloat64},
+		{"incomplete_staging_expiry_days", "Incomplete staging expiry must be >= 0 days (0 preserves forever)", 0, math.MaxFloat64},
+		{"refresh_interval", "Cookie refresh interval must be 10-10080 minutes", 10, 10080},
+		{"hide_finished_age_days", "Hide finished after must be 0-365 days", 0, 365},
+	} {
+		v, err := strconv.ParseFloat(strings.TrimSpace(m.values[c.key]), 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < c.min || v > c.max {
+			m.errorMsg = c.msg
+			m.status = saveError
+			return
+		}
+		flex[c.key] = v
+	}
+
+	// The two optional interval overrides: empty means "dynamic". A value
+	// OUT of range used to be silently nil'ed here too, which read as the
+	// operator having asked for dynamic — the Web path returns a field error
+	// instead, and the TUI's help text advertised a floor of 1 that
+	// config.Validate refuses (CORE-20).
+	for _, c := range []struct {
+		key, msg string
+		min, max int
+	}{
+		{"decapi_check_interval", "DECAPI check interval must be 15-3600 seconds (or empty for dynamic)", 15, 3600},
+		{"twitch_check_interval", "Twitch check interval must be 5-3600 seconds (or empty for dynamic)", 5, 3600},
+	} {
+		v := strings.TrimSpace(m.values[c.key])
+		if v == "" {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < c.min || n > c.max {
+			m.errorMsg = c.msg
+			m.status = saveError
+			return
+		}
 	}
 	// Text fields config.Validate refuses to save empty.
 	for _, c := range []struct{ key, msg string }{
@@ -753,31 +798,21 @@ func (m *SettingsModel) applyValues() {
 	// Monitors
 	m.cfg.Monitors.ArchiveWindowDays, _ = strconv.Atoi(m.values["archive_window_days"])
 	m.cfg.Monitors.ArchiveSlots, _ = strconv.Atoi(m.values["archive_slots"])
-	feedMin, _ := strconv.Atoi(m.values["feed_check_interval"])
-	m.cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(feedMin)}
-	if v := m.values["decapi_check_interval"]; v != "" {
-		if d, err := strconv.Atoi(v); err == nil && d >= 15 && d <= 3600 {
-			m.cfg.Monitors.DecapiCheckInterval = &d
-		} else {
-			m.cfg.Monitors.DecapiCheckInterval = nil
-		}
+	m.cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: flex["feed_check_interval"]}
+	if v := strings.TrimSpace(m.values["decapi_check_interval"]); v != "" {
+		d, _ := strconv.Atoi(v) // range-checked above
+		m.cfg.Monitors.DecapiCheckInterval = &d
 	} else {
 		m.cfg.Monitors.DecapiCheckInterval = nil
 	}
-	// Lower bound 5 matches config.Validate — a 1-4s value would make
-	// Save refuse to persist the whole config.
-	if v := m.values["twitch_check_interval"]; v != "" {
-		if t, err := strconv.Atoi(v); err == nil && t >= 5 && t <= 3600 {
-			m.cfg.Monitors.TwitchCheckInterval = &t
-		} else {
-			m.cfg.Monitors.TwitchCheckInterval = nil
-		}
+	if v := strings.TrimSpace(m.values["twitch_check_interval"]); v != "" {
+		tv, _ := strconv.Atoi(v) // range-checked above
+		m.cfg.Monitors.TwitchCheckInterval = &tv
 	} else {
 		m.cfg.Monitors.TwitchCheckInterval = nil
 	}
-	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: hideAge}
-	probeCd, _ := strconv.Atoi(m.values["probe_cooldown"])
-	m.cfg.Monitors.ProbeCooldown = config.FlexDuration{Value: float64(probeCd)}
+	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: flex["hide_finished_age_days"]}
+	m.cfg.Monitors.ProbeCooldown = config.FlexDuration{Value: flex["probe_cooldown"]}
 	membershipOn := m.values["membership_discovery"] == "Yes"
 	m.cfg.Monitors.MembershipDiscovery = &membershipOn
 
@@ -789,10 +824,8 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Downloader.DownloadChat = m.values["download_chat"] == "Yes"
 	m.cfg.Downloader.Prefer60fps = m.values["prefer_60fps"] == "Yes"
 	m.cfg.Downloader.MaximumTimeout, _ = strconv.Atoi(m.values["maximum_timeout"])
-	interruptionMin, _ := strconv.Atoi(m.values["interruption_timeout"])
-	m.cfg.Downloader.InterruptionTimeout = config.FlexDuration{Value: float64(interruptionMin)}
-	expiryDays, _ := strconv.Atoi(m.values["incomplete_staging_expiry_days"])
-	m.cfg.Downloader.IncompleteStagingExpiryDays = config.FlexDuration{Value: float64(expiryDays)}
+	m.cfg.Downloader.InterruptionTimeout = config.FlexDuration{Value: flex["interruption_timeout"]}
+	m.cfg.Downloader.IncompleteStagingExpiryDays = config.FlexDuration{Value: flex["incomplete_staging_expiry_days"]}
 
 	// Cookies
 	m.cfg.Cookies.CookieFile = m.values["cookie_file"]
@@ -813,8 +846,7 @@ func (m *SettingsModel) applyValues() {
 	// "fork/exec  /usr/bin/firefox  : no such file or directory".
 	m.cfg.Cookies.BrowserPath = strings.TrimSpace(m.values["browser_path"])
 	m.cfg.Cookies.BrowserType = strings.TrimSpace(m.values["browser_type"])
-	refreshMin, _ := strconv.Atoi(m.values["refresh_interval"])
-	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: float64(refreshMin)}
+	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: flex["refresh_interval"]}
 	m.cfg.Cookies.DpapiFallback = m.values["dpapi_fallback"] == "Yes"
 	m.cfg.Cookies.Acquisition = m.values["acquisition"]
 

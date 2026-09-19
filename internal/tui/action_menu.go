@@ -31,6 +31,14 @@ type ActionMenuItem struct {
 	SupportsBatch  bool                     // true → dispatchAction implements a batch path for selected jobs
 	JobFilter      func(*database.Job) bool // filter for job selector (nil = show all)
 	DisabledReason string                   // shown when NeedsJob && no matching jobs
+
+	// StatusFilter is a CHEAP, status-only twin of JobFilter, used only to
+	// decide whether the menu shows this entry as "no jobs". JobFilter may
+	// touch the disk (A R's HasStagingFiles, A M's HasSegmentFiles are
+	// os.ReadDir per job), and running every filter over every job on the
+	// bubbletea goroutine froze the M key for seconds against a NAS staging
+	// directory (CORE-9). nil means JobFilter is already cheap and is used.
+	StatusFilter func(*database.Job) bool
 }
 
 // menuActionItem is a list.Item for the main action menu.
@@ -203,9 +211,15 @@ func (m *ActionMenuModel) Open(items []ActionMenuItem) {
 		}
 		noJobs := false
 		if items[i].NeedsJob {
+			// Status only: the disk is consulted when the ACTION is chosen
+			// and its job selector is built, not when the menu opens.
+			filter := items[i].JobFilter
+			if items[i].StatusFilter != nil {
+				filter = items[i].StatusFilter
+			}
 			count := 0
 			for _, j := range m.jobs {
-				if items[i].JobFilter == nil || items[i].JobFilter(j) {
+				if filter == nil || filter(j) {
 					count++
 				}
 			}
@@ -354,6 +368,19 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 			m.filtered = m.filterJobs(item.JobFilter)
 			m.jobConfirm = false
 			if len(m.filtered) == 0 {
+				// StatusFilter answered "there are candidates" from status
+				// alone, but JobFilter — which may consult the disk — found
+				// none. Without this the row stayed bright and Enter did
+				// nothing at all: no mode change, no feedback, the menu
+				// unchanged. The probe has JUST run, so the truth the cheap
+				// filter could not know is now known and free; dim the row
+				// with its DisabledReason exactly as the pre-CORE-9 menu did.
+				// No probe is added before selection — this is the result of
+				// the one selection already paid for.
+				if mi, ok := m.mainList.SelectedItem().(menuActionItem); ok && !mi.noJobs {
+					mi.noJobs = true
+					_ = m.mainList.SetItem(m.mainList.Index(), mi)
+				}
 				return ""
 			}
 			// Build job list items

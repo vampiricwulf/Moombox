@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
@@ -1614,11 +1616,12 @@ func (s *runState) wireMonitorCallbacks() {
 	s.decapiMon.SetOnChannelUnhealthy(unhealthyNotify("youtube", s.feedMon))
 	s.twitchMon.SetOnChannelUnhealthy(unhealthyNotify("twitch"))
 
-	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
+	// Initialize per-job log tracking with existing jobs (matches TS
+	// knownJobIds). Terminal rows are skipped by SyncJobLogTracking: their
+	// in-memory buffers are empty at boot anyway, and tracking them made
+	// every log line scan them (CORE-12).
 	if existingJobs, err := s.db.GetAllJobs(); err == nil {
-		for _, j := range existingJobs {
-			s.db.TrackJobForLogs(j.ID)
-		}
+		s.db.SyncJobLogTracking(existingJobs)
 	}
 
 	// Database -> WebSocket: broadcast job updates. Uses the
@@ -1632,20 +1635,21 @@ func (s *runState) wireMonitorCallbacks() {
 	// caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
+		// Follow the job's status for per-job log routing (CORE-12). Ahead
+		// of the archive gate below, which returns early for exactly the
+		// rows that most need it.
+		s.syncJobLogRoutingOnChange(ev)
 		// Skip broadcasting updates for archived (old finished) jobs — same
-		// classification as the list filter, via the shared jobArchivedAt
-		// predicate so the two can never disagree about which jobs are
-		// archived.
+		// classification as the list filter, via the shared
+		// jobfilter.IsArchivedAt predicate so the two can never disagree
+		// about which jobs are archived.
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
 			var hideAgeDays float64
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
 			})
-			if hideAgeDays >= 0 {
-				cutoff := time.Now().Add(-time.Duration(hideAgeDays*24) * time.Hour)
-				if jobArchivedAt(job, cutoff) {
-					return
-				}
+			if jobfilter.IsArchivedAt(job, hideAgeDays, time.Now()) {
+				return
 			}
 		}
 		// A tick that moved only progress columns is broadcast as the slim
@@ -1671,7 +1675,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// to do for ALL jobs on every fan-out.
 	s.unsubWSJobAdded = s.db.OnJobAdded(func(ev *database.JobAdded) {
 		job := ev.Job
-		s.db.TrackJobForLogs(job.ID)
+		s.syncJobLogRouting(job)
 		s.wsHub.BroadcastJobUpdate(job)
 	})
 
@@ -1698,12 +1702,13 @@ func (s *runState) wireMonitorCallbacks() {
 	})
 
 	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
-		// Keep per-job log tracking in sync (matches TS knownJobIds update)
+		// Keep per-job log tracking in sync (matches TS knownJobIds update):
+		// live jobs routed, terminal ones dropped from the scan (CORE-12).
 		activeIDs := make(map[string]struct{}, len(jobs))
 		for _, j := range jobs {
 			activeIDs[j.ID] = struct{}{}
-			s.db.TrackJobForLogs(j.ID)
 		}
+		s.db.SyncJobLogTracking(jobs)
 		s.db.PruneJobLogs(activeIDs)
 		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 	})
@@ -1763,6 +1768,49 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "connectivity_restored"},
 		)
 	})
+}
+
+// syncJobLogRouting starts or stops per-job log routing for one job, by its
+// status: a live job is routed to, a terminal one is not — and its buffer
+// stays readable either way, because the job that just failed is the one
+// whose log an operator opens next (CORE-12).
+//
+// The OnJobAdded seed and the OnJobChange transition both call this, so
+// "which statuses collect log lines" exists once. The add path needs the
+// untrack half too: the ZIP archive import (internal/web/routes/
+// import_routes.go) really does AddJob a Finished job, and tracking it would
+// leave a terminal ID in the routed set that nothing removes.
+func (s *runState) syncJobLogRouting(job *database.Job) {
+	if job.IsTerminal() {
+		s.db.UntrackJobForLogs(job.ID)
+		return
+	}
+	s.db.TrackJobForLogs(job.ID)
+}
+
+// syncJobLogRoutingOnChange is the OnJobChange half. A job that LEAVES a
+// terminal state must be routed to again: /retry (ReinitializeJob), /resume
+// (ResumeJob) and auto-retry each resurrect a job with a plain
+// UpdateJobFields(status=…), which fires only this event — an untrack-only
+// subscriber meant the whole re-run produced no per-job log lines until a
+// restart.
+//
+// Gated on the status column because OnJobChange also fires for every ~60 Hz
+// progress write, and only a status write can change the answer: the progress
+// pipeline never touches jobLogsMu.
+//
+// A nil Changes falls THROUGH the gate rather than into it. UpdateJobFields is
+// notifyJobUpdate's only caller today and always fills the column list, so
+// this costs nothing on the ~60 Hz path (+1.1 ns, 0 allocs, and it still
+// returns before any lock); but a future emitter that omits Changes would
+// otherwise silently stop re-routing, and a job resurrected by /retry,
+// /resume or auto-retry would produce no per-job log lines until a restart.
+// Paying the lock at that emitter's own rate is the safe side of that trade.
+func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
+	if ev.Changes != nil && !slices.Contains(ev.Changes, "status") {
+		return
+	}
+	s.syncJobLogRouting(ev.Job)
 }
 
 // onJobDeleted is the OnJobDeleted subscriber's body: drop exactly the deleted

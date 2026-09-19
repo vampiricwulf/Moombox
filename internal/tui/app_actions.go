@@ -118,6 +118,27 @@ func cookieRefreshMechanismLabel(mechanism, mode string) string {
 	return "Browser cookie refresh"
 }
 
+// osClipboard is the OS-helper seam the O C case calls. A variable rather
+// than a direct call so a test can drive BOTH branches on every platform
+// without spawning a real helper or overwriting the developer's own
+// clipboard; production always holds the build-tagged osClipboardFallback
+// (clipboard_windows.go / clipboard_other.go).
+var osClipboard = osClipboardFallback
+
+// clipboardFeedback words the O C result honestly. tea.SetClipboard is OSC
+// 52 — the terminal may accept it, ignore it, or be a multiplexer that needs
+// `set-clipboard on` first — so on that path the TUI cannot claim a
+// completed copy, only that it handed the URL over, which is what every
+// press says at the moment it happens. sentViaOSC52 is false only once
+// something ELSE has come back reporting that it took the text (clip.exe,
+// via osClipboardFallback), which is a copy worth claiming (CORE-15, O-W).
+func clipboardFeedback(url string, sentViaOSC52 bool) string {
+	if sentViaOSC52 {
+		return "Sent to terminal clipboard (OSC 52): " + url
+	}
+	return "Copied: " + url
+}
+
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
@@ -462,8 +483,30 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "O C":
 		if job != nil {
 			if url := streamURL(job); url != "" {
-				a.setFeedback("Copied: " + url)
-				return a, tea.SetClipboard(url)
+				// TWO independent things, and the order matters.
+				//
+				// The OSC 52 write goes out on every press, on every
+				// platform, unconditionally — it is the only mechanism that
+				// reaches the terminal the operator is actually sitting at,
+				// which over SSH is not the machine Moombox runs on.
+				//
+				// The OS helper (clip.exe, on a local Windows console) is a
+				// CHILD PROCESS, so it runs inside the Cmd rather than here:
+				// blocking the update goroutine would freeze rendering and
+				// input — the ~60 Hz progress frames included — for as long
+				// as the child takes. Its result upgrades the wording when
+				// it lands (clipboardResultMsg in app_update.go).
+				//
+				// The line shown now therefore hedges: at this instant the
+				// press has handed the URL over and nothing more
+				// (CORE-15, O-W).
+				a.setFeedback(clipboardFeedback(url, true))
+				return a, tea.Batch(
+					tea.SetClipboard(url),
+					safeCmd(func() tea.Msg {
+						return clipboardResultMsg{URL: url, Copied: osClipboard(url)}
+					}),
+				)
 			}
 			a.setFeedback("No URL to copy")
 		}
@@ -680,6 +723,13 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 					return a.HasStagingFiles(j.ID)
 				}
 				return false
+			},
+			// The menu's "no jobs" question is answered from status alone;
+			// the HasStagingFiles probe above runs when A R is chosen and
+			// its job selector is built (CORE-9).
+			StatusFilter: func(j *database.Job) bool {
+				return (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
+					j.Platform == "youtube"
 			}},
 		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no jobs to reinitialize",
@@ -694,6 +744,10 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 					return a.HasSegmentFiles(j.ID)
 				}
 				return false
+			},
+			// Status-only twin of the filter above — see A R (CORE-9).
+			StatusFilter: func(j *database.Job) bool {
+				return j.Status == database.StatusCancelled || j.Status == database.StatusError
 			}},
 		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no active jobs",
@@ -785,7 +839,13 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O W", Label: "Open Web UI", HintLabel: "Web", Category: "Open"},
-		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
+		// The label hedges without naming a mechanism. It renders the same
+		// on every platform, and each mechanism is missing on some of them:
+		// OSC 52 is not what a local Windows console uses, and clip.exe is
+		// not what anything else uses. What the press can promise in advance
+		// is the attempt; the feedback line names the outcome afterwards
+		// (CORE-15, O-W).
+		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL (best effort)", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O G", Label: "Open GitHub Page", HintLabel: "GitHub", Category: "Open"},

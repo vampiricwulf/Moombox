@@ -350,6 +350,18 @@ type (
 		Err string
 	}
 
+	// clipboardResultMsg carries the outcome of the OS clipboard helper the
+	// O C chord dispatches. The helper is a child process (clip.exe, on a
+	// local Windows console) and must not run on the update goroutine — a
+	// wedged child would freeze rendering and input for the whole of its
+	// bound — so the chord returns a Cmd and the wording is finalised here.
+	// Copied is true only when something reported that it really took the
+	// text; the OSC 52 write the chord always sends can never report that.
+	clipboardResultMsg struct {
+		URL    string
+		Copied bool
+	}
+
 	// panicRecoveryMsg is sent when a tea.Cmd closure recovers from a panic.
 	panicRecoveryMsg struct {
 		Text string
@@ -561,14 +573,23 @@ type App struct {
 	OnCreateTrim      func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim      func(jobID, trimID string) error
 	OnOpenFolder      func(jobID string)
-	OnSaveConfig      func(cfg *config.MoomboxConfig)
-	OnRestart         func()
-	OnHashPassword    func(password string) string
-	OnVerifyPassword  func(password, hash string) bool
-	OnFetchFormats    func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
-	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
-	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
-	OnDeleteOrphan    func(path string) error                           // delete orphaned file
+	// OnSaveConfig persists the settings model's config. It returns the save
+	// error so the overlay can report a failure instead of showing "Saved"
+	// over a write that never landed (CORE-4).
+	OnSaveConfig func(cfg *config.MoomboxConfig) error
+	// OnFfmpegPathChange re-applies paths.ffmpeg_path to the services that
+	// captured it when their muxers were built. Separate from OnSaveConfig
+	// because the FFmpeg overlay deliberately keeps a validated path live
+	// even when the disk write is refused, and OnSaveConfig skips its own
+	// hot-reload block on that error (CORE-4).
+	OnFfmpegPathChange func(path string)
+	OnRestart          func()
+	OnHashPassword     func(password string) string
+	OnVerifyPassword   func(password, hash string) bool
+	OnFetchFormats     func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile       func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans      func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan     func(path string) error                           // delete orphaned file
 	// Orphaned processing-history rows (no matching job) shown in the same overlay.
 	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
 	OnDeleteHistoryEntry  func(videoID string) error
@@ -746,7 +767,36 @@ func (a *App) SetSidecarDown(down bool) {
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
-	a.taskList.SetHideFinishedAgeDays(int(cfg.Monitors.HideFinishedAgeDays.Days()))
+	a.taskList.SetHideFinishedAgeDays(cfg.Monitors.HideFinishedAgeDays.Days())
+}
+
+// syncHideFinishedAge re-reads hide_finished_age_days from the config store
+// and pushes it to the list when it moved.
+//
+// The TUI's own settings save applies it on overlay close (app_keys.go), but
+// a change made from the DASHBOARD produces no TUI-side event at all — so
+// before this the two UIs disagreed about which Finished jobs are archived
+// until the operator happened to open and close the TUI settings overlay
+// (CORE-11). Called from the same 60 s archive sweep that already re-buckets
+// aged rows, so it costs one store read a minute.
+//
+// Read under the store lock, like getPort/apiBaseURL: HTTP handlers mutate
+// the config through configStore.Update concurrently. The equality gate is
+// what keeps this off the render path — SetHideFinishedAgeDays ends in a
+// rebuild (and so moves the render cache key), which an unchanged threshold
+// must not do once a minute for nothing.
+func (a *App) syncHideFinishedAge() {
+	if a.configStore == nil {
+		return
+	}
+	var days float64
+	a.configStore.Read(func(c *config.MoomboxConfig) {
+		days = c.Monitors.HideFinishedAgeDays.Days()
+	})
+	if days == a.taskList.HideFinishedAgeDays() {
+		return
+	}
+	a.taskList.SetHideFinishedAgeDays(days)
 }
 
 // SetConfigStore wires the unified config Store into the App and its

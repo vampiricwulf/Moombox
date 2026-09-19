@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -80,6 +81,11 @@ type setupFieldType int
 const (
 	setupFieldText setupFieldType = iota
 	setupFieldNumber
+	// setupFieldDecimal is a number field whose config home is a
+	// config.FlexDuration, so it accepts "0.5" the way the settings overlay
+	// and the Web UI do. validateDigitsOnly made the fraction untypeable here
+	// while both twins took it (CORE-7).
+	setupFieldDecimal
 	setupFieldToggle
 	setupFieldCycle
 	setupFieldPassword
@@ -141,8 +147,8 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"archiveWindowDays", "Archive window (days)", "3", "How many days back to archive; upcoming/live always covered", setupFieldNumber, nil},
 			{"archiveSlots", "Archive slots", "3", "Backlog downloads per channel at once; new content never waits", setupFieldNumber, nil},
-			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks", setupFieldNumber, nil},
-			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived", setupFieldNumber, nil},
+			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks; fractions allowed, e.g. 0.5", setupFieldDecimal, nil},
+			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived; fractions allowed, e.g. 0.5", setupFieldDecimal, nil},
 		},
 	},
 	{
@@ -382,14 +388,20 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 						Placeholder(f.defaultDisplay).
 						Accessor(&MapAccessor{M: m.values, Key: f.key}),
 				)
-			case setupFieldNumber:
+			case setupFieldNumber, setupFieldDecimal:
+				// The keystroke filter is per field type: a FlexDuration-backed
+				// field takes one decimal point, an int field does not.
+				validate := validateDigitsOnly
+				if f.ftype == setupFieldDecimal {
+					validate = validateDecimal
+				}
 				fields = append(fields,
 					huh.NewInput().
 						Key(f.key).
 						Title(f.label).
 						Description(f.help).
 						Placeholder(f.defaultDisplay).
-						Validate(func(s string) error { return validateDigitsOnly(s) }).
+						Validate(validate).
 						Accessor(&MapAccessor{M: m.values, Key: f.key}),
 				)
 			case setupFieldPassword:
@@ -1173,6 +1185,20 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		n, _ := strconv.Atoi(s)
 		return n
 	}
+	// vFloat is vNum for the two FlexDuration-backed fields. Empty (and
+	// unparseable, which validateDecimal already refuses at the keystroke)
+	// means "leave the default alone", the same contract vNum has.
+	vFloat := func(key string) float64 {
+		s := v(key)
+		if s == "" {
+			return 0
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return 0
+		}
+		return f
+	}
 	vBool := func(key string, defaultVal bool) bool {
 		s, ok := m.values[key]
 		if !ok {
@@ -1219,8 +1245,12 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Monitors: Archive slots must be between 1 and 100"
 		return ""
 	}
-	if n := vNum("feedCheckInterval"); n != 0 && (n < 1 || n > 1440) {
+	if f := vFloat("feedCheckInterval"); f != 0 && (f < 1 || f > 1440) {
 		m.errorMsg = "Monitors: Feed check interval must be between 1 and 1440 minutes"
+		return ""
+	}
+	if f := vFloat("hideAge"); f != 0 && (f < 0 || f > 365) {
+		m.errorMsg = "Monitors: Hide finished after must be between 0 and 365 days"
 		return ""
 	}
 	if n := vNum("numParallel"); n != 0 && n < 1 {
@@ -1310,13 +1340,12 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	if n := vNum("archiveSlots"); n > 0 {
 		cfg.Monitors.ArchiveSlots = n
 	}
-	if n := vNum("feedCheckInterval"); n > 0 {
-		cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(n)}
+	if f := vFloat("feedCheckInterval"); f > 0 {
+		cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: f}
 	}
 	if s := v("hideAge"); s != "" {
-		hideAge, _ := strconv.Atoi(s)
-		if hideAge >= 0 {
-			cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+		if hideAge := vFloat("hideAge"); hideAge >= 0 {
+			cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: hideAge}
 		}
 	}
 

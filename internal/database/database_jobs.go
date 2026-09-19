@@ -952,21 +952,32 @@ func (db *Database) GetJobLogs(jobID string) []string {
 	return dst
 }
 
-// ClearJobLogs removes the per-job log buffer.
+// ClearJobLogs removes the per-job log buffer and stops routing to it.
 func (db *Database) ClearJobLogs(jobID string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
 	delete(db.jobLogs, jobID)
+	delete(db.logRouted, jobID)
 }
 
-// RouteLogToJobs checks if a log line contains any known job ID and routes
-// it to the corresponding per-job log buffer. Matches the TypeScript server's
-// knownJobIds-based log routing behavior. Each log line belongs to at most one job.
+// RouteLogToJobs checks if a log line contains any TRACKED job ID and routes
+// it to the corresponding per-job log buffer. Only non-terminal jobs are
+// tracked (see SyncJobLogTracking / UntrackJobForLogs), so the scan is over
+// the jobs that are actually producing log lines rather than over every row
+// the database has ever held — years of Finished jobs used to be scanned per
+// line, under this lock (CORE-12). Each log line belongs to at most one job.
+//
+// The cost per line is still a substring scan per tracked ID — proportional
+// to the number of LIVE jobs, not constant: 5 live measures ~99 ns, 5,000
+// live measures ~76 µs, which is the pre-CORE-12 cost. Live jobs are bounded
+// by the archive slots and num_parallel_downloads, so that ceiling is not
+// reachable in practice; keeping a terminal job tracked is what used to make
+// it so.
 func (db *Database) RouteLogToJobs(line string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
 
-	for jobID := range db.jobLogs {
+	for jobID := range db.logRouted {
 		if strings.Contains(line, jobID) {
 			db.jobLogs[jobID] = capLogLines(append(db.jobLogs[jobID], line))
 			return // Each log line belongs to at most one job
@@ -974,24 +985,67 @@ func (db *Database) RouteLogToJobs(line string) {
 	}
 }
 
-// TrackJobForLogs ensures a job ID is tracked for log routing.
-// Called when jobs are created or loaded, matching TS knownJobIds behavior.
+// TrackJobForLogs starts routing log lines to a job's buffer. Callers gate
+// this on the job being non-terminal; SyncJobLogTracking does it for a whole
+// list.
 func (db *Database) TrackJobForLogs(jobID string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
+	db.trackForLogsLocked(jobID)
+}
+
+// UntrackJobForLogs stops routing to a job while KEEPING its buffer: a job
+// that just failed is exactly the one whose log the operator opens next
+// (CORE-12). ClearJobLogs is what drops the buffer.
+func (db *Database) UntrackJobForLogs(jobID string) {
+	db.jobLogsMu.Lock()
+	defer db.jobLogsMu.Unlock()
+	delete(db.logRouted, jobID)
+}
+
+// SyncJobLogTracking brings the routed set in line with a job list: every
+// non-terminal job is tracked, every terminal one untracked (buffer kept).
+// Both callers in cmd/moombox — the boot seed over GetAllJobs and the
+// OnJobsChange fan-out — used to track EVERY row, which is what made
+// RouteLogToJobs scan the whole history per log line (CORE-12). One lock
+// acquisition for the list, not one per job.
+func (db *Database) SyncJobLogTracking(jobs []*Job) {
+	db.jobLogsMu.Lock()
+	defer db.jobLogsMu.Unlock()
+	for _, j := range jobs {
+		if j == nil {
+			continue
+		}
+		if j.IsTerminal() {
+			delete(db.logRouted, j.ID)
+			continue
+		}
+		db.trackForLogsLocked(j.ID)
+	}
+}
+
+// trackForLogsLocked is TrackJobForLogs' body; callers hold jobLogsMu.
+func (db *Database) trackForLogsLocked(jobID string) {
+	db.logRouted[jobID] = struct{}{}
 	if _, ok := db.jobLogs[jobID]; !ok {
 		db.jobLogs[jobID] = nil
 	}
 }
 
-// PruneJobLogs removes log entries for job IDs not in the provided set.
-// Called on jobsChange to keep the log map in sync with the database.
+// PruneJobLogs removes log entries — and routing — for job IDs not in the
+// provided set. Called on jobsChange to keep the log maps in sync with the
+// database.
 func (db *Database) PruneJobLogs(activeIDs map[string]struct{}) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
 	for id := range db.jobLogs {
 		if _, ok := activeIDs[id]; !ok {
 			delete(db.jobLogs, id)
+		}
+	}
+	for id := range db.logRouted {
+		if _, ok := activeIDs[id]; !ok {
+			delete(db.logRouted, id)
 		}
 	}
 }

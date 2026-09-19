@@ -355,6 +355,31 @@ func cookiesLoadedFields(jar *cookies.CookieJar, now int64) []any {
 	}, jar.HorizonLogFields()...)
 }
 
+// logConfigSource names the config file this boot is actually using: the one
+// config.Load read, or — when nothing was found — the path a later save will
+// create.
+//
+// O-Y made an explicit -config path authoritative, which closed the
+// wrong-file-adopted bug and opened a quieter one: a typo'd
+// `-config C:/mooombox.toml` no longer matches anything, so the run starts on
+// defaults and the first save creates a SECOND config beside the intended one.
+// Nothing in the log named either path, so the operator's only clue was
+// settings that kept reverting. Two shapes on purpose — a loaded file and a
+// path that does not exist yet must not read the same.
+//
+// storePath is the run's save target (config.storePathFor's answer), which is
+// the asked-for path exactly when LoadedFrom is empty.
+func logConfigSource(log interface {
+	Info(msg string, args ...any)
+}, cfg *config.MoomboxConfig, storePath string) {
+	if cfg.LoadedFrom != "" {
+		log.Info("Configuration loaded", slog.String("path", cfg.LoadedFrom))
+		return
+	}
+	log.Info("No configuration file found — running on defaults; a save will create one",
+		slog.String("path", storePath))
+}
+
 // archiveSlotsResolver builds the per-channel archive-slots resolver the
 // backlog scheduler consults on every admission sweep (spec §10): "how many
 // backlog downloads may channel X run". The per-channel archive_slots override
@@ -408,9 +433,12 @@ func archiveSlotsResolver(store *config.Store) func(channelID string) int {
 // closeLimiters) are ready for run() to defer.
 //
 // Returns a wrapped error from the three fatal-exit points (config.Load,
-// logger.New, database.Open). The caller prints the error and calls
-// os.Exit(1) to preserve the pre-refactor behaviour where deferred cleanup
-// is skipped on a fatal startup failure.
+// logger.New, database.Open). The caller prints the error and exits with
+// exitCodeStartupError (3), which both preserves the pre-refactor behaviour
+// where deferred cleanup is skipped on a fatal startup failure AND tells the
+// launcher this is the environment failing deterministically, so a
+// first-post-update boot that lands here is never rolled back as a broken
+// release (CORE-23).
 func (s *runState) initServices(logLevelOverride string) error {
 	if !s.useTUI {
 		fmt.Println("Loading configuration...")
@@ -424,9 +452,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	s.cfg = cfg
-	// Save where we loaded. config.Load searches the cwd, ./config/ and
-	// ~/.config/moombox/ after the flag path, so the file it read is often NOT
-	// the path we asked for — and s.configPath is what the store below, the
+	// Save where we loaded. With no -config flag config.Load searches the cwd,
+	// ./config/ and ~/.config/moombox/, so the file it read is often NOT the
+	// path we asked for — and s.configPath is what the store below, the
 	// auto-persist a few lines down and the TUI's two config.Save calls
 	// (tui_wiring.go) all write to.
 	s.configPath = storePathFor(s.configPath, cfg)
@@ -434,14 +462,22 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// caller now goes through Store APIs per DECISIONS #8 wave 4-7).
 	s.configStore = config.NewStore(cfg, s.configPath)
 
-	if logLevelOverride != "" {
-		cfg.Logs.LogLevel = logLevelOverride
-	}
-
 	// =========================================================================
 	// 2. Initialize logger
 	// =========================================================================
-	log, err := logger.New(cfg.Paths.LogFilePath, cfg.Logs.LogLevel, cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
+	// The -log-level override is a one-off diagnostic: it reaches the LOGGER
+	// and nothing else. Writing it into cfg.Logs.LogLevel (as this used to)
+	// made the boot auto-persist below, the password auto-hash Store.Update
+	// and every later UI save write the override to disk, so a single
+	// `-log-level=debug` run permanently changed the configured level, and
+	// the operator's only clue was a level that never went back (CORE-10).
+	// A later TUI settings save legitimately re-applies the CONFIGURED level
+	// via Logger.SetLevel and so drops the override — that is the operator
+	// having chosen a level explicitly. The Web PUT only does so when the
+	// level itself changed (config_routes.go gates OnLogLevelChange on
+	// newLogLevel != oldLogLevel), so an unrelated web save leaves the
+	// running logger on the override for the rest of the session.
+	log, err := logger.New(cfg.Paths.LogFilePath, effectiveLogLevel(cfg.Logs.LogLevel, logLevelOverride), cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
@@ -453,6 +489,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.closeLog = func() { logCloseOnce.Do(func() { log.Close() }) }
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
+	logConfigSource(log, cfg, s.configPath)
 
 	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
 	// no silent clamp — see config.SegmentWorkers doc). Past

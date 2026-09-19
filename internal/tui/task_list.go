@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"io"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -134,7 +133,7 @@ type TaskListModel struct {
 	width, height       int
 	focused             bool
 	archiveExpanded     bool
-	hideFinishedAgeDays int // from config, default 30
+	hideFinishedAgeDays float64 // from config, default 30
 
 	// statusSummary is renderHeader's icon-count line ("3▼ 2✓"), computed when
 	// the rows are rebuilt instead of on every frame. buildStatusSummary walks
@@ -175,6 +174,20 @@ type TaskListModel struct {
 
 	// Transient flag: set when setup wizard completes, shown once in empty state.
 	JustCompletedSetup bool
+
+	// rebuildSeq increments in rebuildVirtualList — the ONE funnel every
+	// content change (SetJobs, AddJob, RemoveJob, UpdateJob, CycleFilter,
+	// ToggleArchive, applyQuery, SetHideFinishedAgeDays, and ResweepArchive
+	// when and only when the buckets are dirty) ends in. Everything else the
+	// frame depends on is read directly off the model or the embedded list
+	// in taskListKey, so no mutator can forget to invalidate the cache — see
+	// that key's summary field for the sweep's early-return path, which
+	// changes the header without rebuilding anything.
+	rebuildSeq uint64
+	// renderCache / cacheKey memoise View(). bubbletea renders after every
+	// message (~120/s with one active download); most carry no list change.
+	renderCache string
+	cacheKey    taskListKey
 }
 
 // NewTaskListModel creates a new task list model.
@@ -324,11 +337,23 @@ func (m *TaskListModel) newTaskList() list.Model {
 	return l
 }
 
-// SetHideFinishedAgeDays updates the archive threshold.
-func (m *TaskListModel) SetHideFinishedAgeDays(days int) {
+// SetHideFinishedAgeDays updates the archive threshold. A FLOAT: 0.5 is a
+// valid twelve-hour threshold the config file and the Web UI both accept,
+// and int() turned it into 0, which this file's own archive rule reads as
+// "instantly archive all finished jobs" (CORE-8).
+//
+// Ends in a rebuild, which is also what moves rebuildSeq — the render cache
+// keys on it, so a threshold change can never serve a stale frame.
+func (m *TaskListModel) SetHideFinishedAgeDays(days float64) {
 	m.hideFinishedAgeDays = days
 	m.rebuildVirtualList()
 }
+
+// HideFinishedAgeDays returns the archive threshold the list is currently
+// bucketing with. Read by the App's periodic config resync so a threshold
+// changed from the dashboard can be applied without an unconditional rebuild
+// (App.syncHideFinishedAge).
+func (m *TaskListModel) HideFinishedAgeDays() float64 { return m.hideFinishedAgeDays }
 
 // SetJobs updates the job list and re-sorts.
 func (m *TaskListModel) SetJobs(jobs []*database.Job) {
@@ -552,6 +577,40 @@ func (m *TaskListModel) MoveDown() {
 	m.resetMarquee()
 }
 
+// PrevPage / NextPage / GoToStart / GoToEnd forward the four paging keys to
+// the embedded bubbles list. Its KeyMap has had pgup/pgdown/home/end
+// configured since the list was built (newTaskList rebinds all four), but
+// nothing ever delivered a message to it — handleTaskKey handled only
+// up/down/enter — so at 1,000 rows navigation was one row at a time, or a
+// three-row wheel (CORE-16, O-X).
+//
+// Each moves the list's OWN paginator rather than selecting an index, so the
+// header's [start-end/total] range follows the cursor instead of staying on
+// whatever page it was left on. The marquee re-anchors like every other
+// selection change.
+func (m *TaskListModel) PrevPage() {
+	m.list.PrevPage()
+	m.resetMarquee()
+}
+
+// NextPage moves the selection one page down.
+func (m *TaskListModel) NextPage() {
+	m.list.NextPage()
+	m.resetMarquee()
+}
+
+// GoToStart jumps to the first row of the first page.
+func (m *TaskListModel) GoToStart() {
+	m.list.GoToStart()
+	m.resetMarquee()
+}
+
+// GoToEnd jumps to the last row of the last page.
+func (m *TaskListModel) GoToEnd() {
+	m.list.GoToEnd()
+	m.resetMarquee()
+}
+
 // SelectAtOffset selects the item at the given Y offset within the visible page.
 // Returns true if a valid item was selected.
 func (m *TaskListModel) SelectAtOffset(y int) bool {
@@ -732,22 +791,30 @@ func isCompletedStatus(status database.JobStatus) bool {
 	return status == database.StatusFinished || status == database.StatusCancelled
 }
 
-// isJobArchived returns true if a finished job should be in the archive section
-// based on the hide_finished_age_days setting.
-// Only Finished jobs are archived — Cancelled jobs stay in the active list since
-// they may need user attention (retry, investigate, etc.).
-// ageDays == 0: instantly archive all finished jobs.
-// ageDays < 0: never archive (all stay active).
-// ageDays > 0: archive finished jobs older than N days.
-func isJobArchived(j *database.Job, ageDays int, now time.Time) bool {
-	if ageDays < 0 || j.Status != database.StatusFinished || j.UpdatedAt == "" {
+// archiveCutoff is the list's one cutoff computation, shared with the REST
+// filter, the WS broadcast gate and the Web UI through
+// jobfilter.ArchiveCutoff — which is total, so a negative threshold ("never
+// archive") comes back as the zero time that isJobArchived reads as "nothing
+// is archived". The argument order is the list's (ageDays first); that, and
+// the single import site, is all this wrapper is for.
+func archiveCutoff(ageDays float64, now time.Time) time.Time {
+	return jobfilter.ArchiveCutoff(now, ageDays)
+}
+
+// isJobArchived reports whether a finished job belongs in the archive
+// section. Only Finished jobs archive — Cancelled jobs stay in the active
+// list since they may need user attention (retry, investigate).
+//
+// The boundary is EXCLUSIVE: a job whose updated_at sits exactly on the
+// cutoff stays active, matching jobfilter.IsArchived and the Web UI's
+// _evaluateArchiveBoundary. ageDays == 0 puts the cutoff at now, which
+// archives every Finished job with a past updated_at; ageDays < 0 yields a
+// zero cutoff, which archives nothing (see archiveCutoff).
+func isJobArchived(j *database.Job, cutoff time.Time) bool {
+	if cutoff.IsZero() {
 		return false
 	}
-	if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
-		diffDays := int(math.Ceil(now.Sub(t).Hours() / 24))
-		return ageDays == 0 || diffDays > ageDays
-	}
-	return false
+	return jobfilter.IsArchived(j, cutoff)
 }
 
 // archiveBucketsDirty reports whether any displayed job's archive
@@ -763,11 +830,12 @@ func (m *TaskListModel) archiveBucketsDirty() bool {
 		return false
 	}
 	now := time.Now()
+	cutoff := archiveCutoff(m.hideFinishedAgeDays, now)
 	for _, j := range m.jobs {
 		if !m.passes(j) {
 			continue
 		}
-		if isJobArchived(j, m.hideFinishedAgeDays, now) != m.archivedSet[j.ID] {
+		if isJobArchived(j, cutoff) != m.archivedSet[j.ID] {
 			return true
 		}
 	}
@@ -793,10 +861,11 @@ func (m *TaskListModel) ResweepArchive() bool {
 }
 
 func (m *TaskListModel) rebuildVirtualList() {
+	m.rebuildSeq++
 	prevSelectedID := m.captureSelection()
 
 	now := time.Now()
-	ageDays := m.hideFinishedAgeDays
+	cutoff := archiveCutoff(m.hideFinishedAgeDays, now)
 
 	active := make([]*database.Job, 0, len(m.jobs))
 	archived := make([]*database.Job, 0, len(m.jobs)/4)
@@ -806,7 +875,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 			continue
 		}
 
-		if isJobArchived(j, ageDays, now) {
+		if isJobArchived(j, cutoff) {
 			m.archivedSet[j.ID] = true
 			archived = append(archived, j)
 			continue
@@ -894,8 +963,90 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 	return jobfilter.Match(m.tokens, j)
 }
 
+// taskListKey is every input TaskListModel.View() reads, as a comparable
+// struct so a cache hit is one ==.
+//
+//   - rebuildSeq covers the rows themselves (rebuildVirtualList is the only
+//     writer of m.list's items).
+//   - progressRev covers each active row's live percent, which is read from
+//     the progress store at render time by a code path the model never sees.
+//   - sec covers renderHeader's monitor countdowns (time.Until) — without it
+//     the countdown would freeze for as long as nothing else moved
+//     (spec §5 ruling).
+//   - marqueeOffset covers the scrolling selected title.
+//   - selectedCount is faithful because ToggleSelection always moves the
+//     count by one.
+//   - summary covers ResweepArchive's once-a-minute header refresh, which
+//     changes the counts WITHOUT rebuilding: the header counts every job,
+//     while the sweep's dirty check only looks at rows the filter passes, so
+//     a hidden Finished row aging past the boundary moves the counts and
+//     nothing else. It is the only input here with no rebuildSeq behind it.
+//   - nextFeed/nextDecapi/nextTwitch are compared with == like every other
+//     field, which on a time.Time compares the monotonic reading too. A
+//     re-derived "same" instant therefore compares unequal and costs one
+//     extra full render — the safe direction, since two different instants
+//     can never compare equal. Do not reach for Equal(): it would break the
+//     one-== comparable-struct design this key is built on.
+type taskListKey struct {
+	rebuildSeq    uint64
+	progressRev   uint64
+	sec           int64
+	width         int
+	height        int
+	focused       bool
+	cursor        int
+	page          int
+	items         int
+	selectedCount int
+	marqueeOffset int
+	summary       string
+	query         string
+	justSetup     bool
+	nextFeed      time.Time
+	nextDecapi    time.Time
+	nextTwitch    time.Time
+}
+
+func (m *TaskListModel) taskListKey() taskListKey {
+	var rev uint64
+	if m.progressStore != nil {
+		rev = m.progressStore.Rev()
+	}
+	return taskListKey{
+		rebuildSeq:    m.rebuildSeq,
+		progressRev:   rev,
+		sec:           time.Now().Unix(),
+		width:         m.width,
+		height:        m.height,
+		focused:       m.focused,
+		cursor:        m.list.Index(),
+		page:          m.list.Paginator.Page,
+		items:         len(m.list.Items()),
+		selectedCount: len(m.selected),
+		marqueeOffset: m.marquee.offset,
+		summary:       m.statusSummary,
+		query:         m.queryText,
+		justSetup:     m.JustCompletedSetup,
+		nextFeed:      m.NextFeedCheck,
+		nextDecapi:    m.NextDecapiCheck,
+		nextTwitch:    m.NextTwitchCheck,
+	}
+}
+
+// invalidate drops the memoised frame.
+func (m *TaskListModel) invalidate() {
+	m.renderCache = ""
+}
+
 // View renders the task list panel.
 func (m *TaskListModel) View() string {
+	// The search box renders a blinking textinput cursor whose state is not
+	// in the key, so while it is open the panel is rendered every frame.
+	if !m.searching {
+		if k := m.taskListKey(); m.renderCache != "" && k == m.cacheKey {
+			return m.renderCache
+		}
+	}
 	contentW := max(m.width-2, 1)
 
 	header := m.renderHeader(contentW)
@@ -926,7 +1077,14 @@ func (m *TaskListModel) View() string {
 		style = FocusedBorder
 	}
 
-	return style.Width(m.width).Height(m.height).Render(content)
+	out := style.Width(m.width).Height(m.height).Render(content)
+	if !m.searching {
+		m.renderCache = out
+		m.cacheKey = m.taskListKey()
+	} else {
+		m.renderCache = ""
+	}
+	return out
 }
 
 func (m *TaskListModel) renderHeader(w int) string {
@@ -1039,10 +1197,10 @@ func (m *TaskListModel) renderHeader(w int) string {
 // Counts exclude archived finished jobs (match TS which counts from allSortedJobs).
 func (m *TaskListModel) buildStatusSummary() string {
 	now := time.Now()
-	ageDays := m.hideFinishedAgeDays
+	cutoff := archiveCutoff(m.hideFinishedAgeDays, now)
 	counts := make(map[database.JobStatus]int)
 	for _, j := range m.jobs {
-		if isJobArchived(j, ageDays, now) {
+		if isJobArchived(j, cutoff) {
 			continue
 		}
 		counts[j.Status]++

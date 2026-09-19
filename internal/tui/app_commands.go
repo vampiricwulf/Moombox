@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -80,19 +81,25 @@ func (a *App) apiClient() *http.Client {
 	if a.cachedClient != nil && a.cachedClientHTTPS == httpsEnabled {
 		return a.cachedClient
 	}
-	base := http.DefaultTransport
+	// The shared transport shape lives in internal/httpx, which declares
+	// itself the single source of truth for Moombox's *http.Client shapes;
+	// this was the one hand-built &http.Transport{} outside it (TOOL-18).
+	// A fresh transport per HTTPS toggle matches the previous behaviour (the
+	// HTTPS branch already built one each time) and the client is cached, so
+	// a toggle is the only thing that builds another; its idle connections
+	// expire on the shared 90 s IdleConnTimeout.
+	base := httpx.NewTransport(httpx.TransportOptions{})
 	if httpsEnabled {
-		base = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
+		// The web server presents a self-signed certificate on loopback.
+		base.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
-	a.cachedClient = &http.Client{
-		Transport: &internalTokenTransport{base: base, token: a.internalToken},
+	a.cachedClient = httpx.ClientWithTransport(
 		// 30s is generous for a loopback call; chi has its own server-side
 		// timeouts but defence-in-depth keeps a silent pipe stall from
 		// hanging the TUI until the user force-quits.
-		Timeout: 30 * time.Second,
-	}
+		30*time.Second,
+		&internalTokenTransport{base: base, token: a.internalToken},
+	)
 	a.cachedClientHTTPS = httpsEnabled
 	return a.cachedClient
 }

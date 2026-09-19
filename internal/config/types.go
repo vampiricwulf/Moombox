@@ -22,8 +22,9 @@ type MoomboxConfig struct {
 	ConfigLoaded bool `toml:"-" json:"-"`
 	// LoadedFrom is the file Load actually read this config out of, or "" when
 	// nothing was found and Defaults() answered. NOT the path that was asked
-	// for: Load searches the cwd, ./config/ and ~/.config/moombox/ after the
-	// -config flag, and the location that answers is the one every later save
+	// for: with no -config flag Load searches the cwd, ./config/ and
+	// ~/.config/moombox/ (an explicit -config path is authoritative and skips
+	// the search), and the location that answers is the one every later save
 	// has to write back to. Saving anywhere else forks the user's configuration
 	// into a second file that then shadows the original on the next boot (the
 	// first save is often the boot-time NeedsAutoPersist flush, so the fork

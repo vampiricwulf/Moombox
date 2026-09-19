@@ -63,6 +63,82 @@ func cookieBadgeFor(authenticated, hasCookies, fileUnreadable bool, verdict cook
 	}
 }
 
+// newTUIResync builds the replay for a dropped TUI job update. The forwarders
+// in runTUI send non-blocking on their 100-slot channels and count the drop;
+// nothing ever replayed it, so a dropped Downloading->Finished left a stale
+// row for the rest of the session while user-interfaces.md claimed a resync
+// existed (CORE-6).
+//
+// The returned func costs one failed compare-and-swap when nothing was
+// dropped. When a drop IS pending it takes the flag, fetches a full snapshot
+// and pushes it down the full-list channel the TUI already handles; if either
+// the fetch or the push fails the flag is re-armed so the next caller tries
+// again — clearing it there would turn one dropped update into a permanent
+// divergence. Taking the flag first, and calling this only from a forwarder's
+// SUCCESSFUL send, is what makes it ONE refresh per streak of drops rather
+// than one per dropped message: it is a catch-up, not a poll, and it leaves
+// the ~60 Hz forwarding path exactly as it was.
+func newTUIResync(needed *atomic.Bool, jobsCh chan []*database.Job, getAll func() ([]*database.Job, error)) func() {
+	return func() {
+		if !needed.CompareAndSwap(true, false) {
+			return
+		}
+		jobs, err := getAll()
+		if err != nil {
+			needed.Store(true)
+			return
+		}
+		select {
+		case jobsCh <- jobs:
+		default:
+			needed.Store(true)
+		}
+	}
+}
+
+// forwardOrDrop hands one DB event to a TUI channel without ever blocking the
+// caller — the four job forwarders in runTUI run INLINE on the ~60 Hz
+// UpdateJobFields writer goroutine — and carries the CORE-6 replay
+// bookkeeping all four of them need identically.
+//
+// On a SUCCESSFUL send it runs resync, so a drop recorded by an earlier event
+// is replayed as one full snapshot by the first event that gets through. On a
+// drop it counts the message and arms the flag, warning once per STREAK: the
+// compare-and-swap is that gate, and moving the Warn out of it would put one
+// line per dropped message into the 200-slot log channel exactly when the TUI
+// is already too far behind to drain it.
+//
+// One generic function rather than the four hand-copied seven-line blocks it
+// replaces (the channels carry four different element types): the measured
+// pin in tui_resync_test.go then drives THIS body instead of a copy of it,
+// which is what lets it catch a warning moved out of the CAS or a coalescing
+// check added ahead of the select.
+func forwardOrDrop[T any](
+	ch chan T,
+	ev T,
+	jobID string,
+	resync func(),
+	dropped *atomic.Int64,
+	needed *atomic.Bool,
+	log interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	},
+) {
+	select {
+	case ch <- ev:
+		resync()
+	default:
+		dropped.Add(1)
+		if needed.CompareAndSwap(false, true) {
+			log.Warn("TUI job update dropped — a full refresh is queued",
+				slog.String("job", jobID))
+		}
+	}
+}
+
 // runTUI starts the BubbleTea TUI, wires every callback (job actions,
 // trim service, orphan scanner, client-token management, setup wizard,
 // FFmpeg check, cookie controls, update check, etc.), runs the TUI
@@ -81,7 +157,7 @@ func (s *runState) runTUI() {
 	app.SetConfigStore(s.configStore)
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())
-	app.IsFirstRun = !s.cfg.ConfigLoaded
+	app.IsFirstRun = !s.configLoaded()
 
 	// Wire TUI callbacks
 	app.OnAddVideo = func(url string) {
@@ -257,7 +333,7 @@ func (s *runState) runTUI() {
 		snap.Uptime = time.Since(s.startTime)
 		return snap, nil
 	}
-	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) {
+	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) error {
 		// Serialize on the store lock like every other saver (web routes,
 		// Store.Update-driven background saves, and the setup-wizard callback
 		// below). config.Save writes through a shared temp file and encodes the
@@ -270,23 +346,37 @@ func (s *runState) runTUI() {
 		mu.Unlock()
 		if saveErr != nil {
 			s.log.Error("Failed to save config from TUI", slog.String("error", saveErr.Error()))
-		} else {
-			s.log.Info("Config saved from TUI settings")
-			// Invalidate the browser-detection caches on every TUI settings
-			// save, unconditionally — not gated on browser_path/browser_type
-			// actually changing. The settings model mutates the SAME
-			// *config.MoomboxConfig the store holds live (Open stores the
-			// store's own pointer; applyValues writes straight into it) before
-			// this callback ever runs, so by the time updatedCfg reaches here
-			// there is no pre-mutation snapshot left to diff against from
-			// this side of the package boundary. Invalidating on every save
-			// costs one extra detection scan on a rare, human-triggered
-			// event; a missed invalidation would instead leave a stale
-			// browser list for up to browserDetectCacheTTL, silently. See
-			// the validate-browser-path handler in routes/cookies.go for the
-			// other, precisely-targeted invalidation site.
-			cookies.InvalidateBrowserDetection()
+			// Return before the hot-reload block: applying runtime settings
+			// from a config that is not on disk would make the process and
+			// the file diverge in the OTHER direction (CORE-4). The caller
+			// reports the error and rolls the live struct back.
+			return saveErr
 		}
+		s.log.Info("Config saved from TUI settings")
+		// Invalidate the browser-detection caches on every TUI settings
+		// save, unconditionally — not gated on browser_path/browser_type
+		// actually changing. The settings model mutates the SAME
+		// *config.MoomboxConfig the store holds live (Open stores the
+		// store's own pointer; applyValues writes straight into it) before
+		// this callback ever runs, so by the time updatedCfg reaches here
+		// there is no pre-mutation snapshot left to diff against from
+		// this side of the package boundary. Invalidating on every save
+		// costs one extra detection scan on a rare, human-triggered
+		// event; a missed invalidation would instead leave a stale
+		// browser list for up to browserDetectCacheTTL, silently. See
+		// the validate-browser-path handler in routes/cookies.go for the
+		// other, precisely-targeted invalidation site.
+		cookies.InvalidateBrowserDetection()
+		// A TUI settings save must reach the dashboards too — the Web PUT
+		// has always broadcast this, the TUI never did, so a threshold
+		// changed in the terminal left every open dashboard filtering on
+		// the old one (CORE-11). The same method both sides call, so the
+		// two directions cannot drift. Called unconditionally like its
+		// neighbours above, for the same reason: there is no pre-mutation
+		// snapshot on this side to diff against. The method itself carries
+		// the change gate the Web route applies before calling, so a save
+		// that did not move the threshold still costs nothing.
+		s.broadcastHideFinishedAge()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
 		if updatedCfg.Logs.LogLevel != "" {
 			s.log.SetLevel(updatedCfg.Logs.LogLevel)
@@ -310,7 +400,15 @@ func (s *runState) runTUI() {
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
+		return nil
 	}
+	// The FFmpeg overlay's own path applier. OnSaveConfig returns above
+	// before the hot-reload block when the write is refused (the settings
+	// panel rolls its config back after that return), but the overlay keeps
+	// a validated path live for the session — so it re-applies the path
+	// itself, whichever way the save went. Pinned by
+	// tui_wiring_ffmpeg_callsite_test.go.
+	app.OnFfmpegPathChange = s.applyFfmpegPath
 	app.OnRestart = func() { s.triggerRestart("TUI settings") }
 	app.OnForceCheck = func() {
 		if s.kickMonitors != nil {
@@ -568,10 +666,10 @@ func (s *runState) runTUI() {
 	// the dashboard cannot disagree about which port the plugin should point
 	// at or whether the one on disk matches.
 	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
-		return routes.YtdlpPluginStatus(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+		return routes.YtdlpPluginStatus(s.currentWebPort(), s.httpsEnabled())
 	}
 	app.OnInstallYtdlpPlugin = func() error {
-		return routes.InstallYtdlpPlugin(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+		return routes.InstallYtdlpPlugin(s.currentWebPort(), s.httpsEnabled())
 	}
 
 	app.OnHashPassword = func(password string) string {
@@ -666,11 +764,7 @@ func (s *runState) runTUI() {
 
 	// Wire setup wizard FFmpeg status check
 	app.SetupWizFFmpegCheck(func() (bool, string) {
-		path := s.cfg.Paths.FfmpegPath
-		if path == "" {
-			path = "ffmpeg"
-		}
-		valid, ver, _ := routes.CheckFFmpegCached(path)
+		valid, ver, _ := routes.CheckFFmpegCached(s.ffmpegPathOrDefault())
 		return valid, ver
 	})
 
@@ -696,12 +790,11 @@ func (s *runState) runTUI() {
 		return chocoAvail, wingetAvail
 	}
 
-	// Check FFmpeg on startup (after config is loaded)
-	if s.cfg.ConfigLoaded {
-		ffmpegPath := s.cfg.Paths.FfmpegPath
-		if ffmpegPath == "" {
-			ffmpegPath = "ffmpeg"
-		}
+	// Check FFmpeg on startup (after config is loaded). Both reads go through
+	// the store: ConfigLoaded is not a load-time constant — config.Save sets
+	// it — so an unlocked read here races a web handler's save (CORE-24).
+	if s.configLoaded() {
+		ffmpegPath := s.ffmpegPathOrDefault()
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer checkCancel()
 		if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
@@ -723,6 +816,10 @@ func (s *runState) runTUI() {
 
 	// Dropped-message counters — track silent drops on TUI channels
 	var tuiDroppedJobs, tuiDroppedLogs atomic.Int64
+	// tuiResyncNeeded arms the full-snapshot replay after a dropped job
+	// event (CORE-6). See newTUIResync.
+	var tuiResyncNeeded atomic.Bool
+	resyncTUIJobs := newTUIResync(&tuiResyncNeeded, jobsUpdateCh, s.db.GetAllJobs)
 
 	// Push initial disk status to TUI
 	if ds := routes.SharedDiskStatus.Load(); ds != nil {
@@ -749,12 +846,19 @@ func (s *runState) runTUI() {
 	// gives us the changed-columns list, which the TUI uses to gate
 	// expensive list/detail rebuilds (see hasDisplayChange in
 	// app_update.go). DECISIONS #21 / audit tui.md F20.
+	//
+	// The four that can drop share one body, forwardOrDrop, which runs
+	// resyncTUIJobs() from its SUCCESSFUL-send branch: a drop recorded by an
+	// earlier event is replayed as a full snapshot by the first event that
+	// gets through, which is what makes a dropped terminal transition
+	// recoverable instead of a stale row for the session (CORE-6). On the way
+	// IN it would instead fire once per DROPPED event — a full GetAllJobs on
+	// this, the ~60 Hz UpdateJobFields writer goroutine, for every message
+	// the stalled TUI could not take, feeding the very backlog it is
+	// recovering from. While the channel stays full the 1 s backstop below is
+	// the replay path.
 	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
-		select {
-		case jobUpdateCh <- ev:
-		default:
-			tuiDroppedJobs.Add(1)
-		}
+		forwardOrDrop(jobUpdateCh, ev, ev.Job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
 	// writer-side dispatch was dropped); the TUI now learns of new jobs
@@ -762,11 +866,7 @@ func (s *runState) runTUI() {
 	// the task list instead of clearing + rebuilding from a fresh
 	// snapshot. DECISIONS #21 consumer migration.
 	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
-		select {
-		case jobAddedCh <- ev:
-		default:
-			tuiDroppedJobs.Add(1)
-		}
+		forwardOrDrop(jobAddedCh, ev, ev.Job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnJobDeleted subscriber: DeleteJob no longer fires OnJobsChange
 	// (writer-side dispatch dropped). The TUI's surgical-removal path
@@ -774,11 +874,7 @@ func (s *runState) runTUI() {
 	// instead of clearing+rebuilding from a full-list snapshot.
 	// DECISIONS #21.
 	unsubTUIJobDeleted := s.db.OnJobDeleted(func(ev *database.JobDeleted) {
-		select {
-		case jobDeletedCh <- ev:
-		default:
-			tuiDroppedJobs.Add(1)
-		}
+		forwardOrDrop(jobDeletedCh, ev, ev.JobID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
 	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
 	// OnJobsChange (writer-side dispatch dropped). Re-fetch the
@@ -789,18 +885,49 @@ func (s *runState) runTUI() {
 		if err != nil || job == nil {
 			return
 		}
-		select {
-		case jobTrimsChangedCh <- job:
-		default:
-			tuiDroppedJobs.Add(1)
-		}
+		forwardOrDrop(jobTrimsChangedCh, job, job.ID, resyncTUIJobs, &tuiDroppedJobs, &tuiResyncNeeded, s.log)
 	})
+	// This one already carries a full list, so its own drop is harmless (a
+	// snapshot is queued when a snapshot cannot be queued) and its default
+	// stays empty. It neither calls the replay nor CLEARS it: the list it
+	// delivers is a time-of-write snapshot taken inside the bulk write, so an
+	// UpdateJobFields that lands after that snapshot and is then dropped by a
+	// full jobUpdateCh is NOT in it. Clearing the flag there discarded that
+	// replay — a delivered list is not assumed newer than a pending one — and
+	// the dropped transition was never recovered. Leaving it armed costs one
+	// redundant GetAllJobs in the rare coincidence of a bulk write with a
+	// pending drop, and the next successful send (or the 1 s backstop) does
+	// the catch-up (CORE-6).
 	unsubTUIJobsChange := s.db.OnJobsChange(func(jobs []*database.Job) {
 		select {
 		case jobsUpdateCh <- jobs:
 		default:
 		}
 	})
+
+	// 1 s backstop for the resync: the forwarders above cover the common
+	// case (drops happen under event pressure, so more events follow), but a
+	// drop whose job then goes quiet would otherwise never be replayed, and
+	// neither would one whose channel stays full. One failed compare-and-swap
+	// per second when nothing is pending — this is a discovery bound on a
+	// pending catch-up, not a poll of the database.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("[Main] Panic in TUI resync backstop", "panic", fmt.Sprint(r))
+			}
+		}()
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-t.C:
+				resyncTUIJobs()
+			}
+		}
+	}()
 
 	// Forward log lines to TUI
 	tuiLogSub := s.log.Subscribe()
@@ -979,11 +1106,52 @@ func (s *runState) runTUI() {
 	unsubConnTUI()
 	unsubSidecarTUI()
 
-	// Report dropped messages (helps diagnose missed TUI updates)
+	// Report dropped messages (helps diagnose missed TUI updates). A dropped
+	// job event is no longer a silently stale row — each streak of drops was
+	// replayed by a full refresh (newTUIResync) — so this count is a
+	// pressure signal, not a correctness one.
 	if n := tuiDroppedJobs.Load(); n > 0 {
-		s.log.Warn("TUI dropped job update messages", slog.Int64("count", n))
+		s.log.Warn("TUI dropped job update messages (each streak replayed by a full refresh)",
+			slog.Int64("count", n))
 	}
 	if n := tuiDroppedLogs.Load(); n > 0 {
 		s.log.Warn("TUI dropped log messages", slog.Int64("count", n))
 	}
+}
+
+// httpsEnabled and ffmpegPathOrDefault read through the config store.
+// Closures that outlive wiring must never touch s.cfg's fields directly:
+// PUT /api/config assigns *cfg = cfgCopy under the store's lock, so an
+// unlocked field read races a whole-struct replacement (CORE-24).
+func (s *runState) httpsEnabled() bool {
+	enabled := false
+	s.configStore.Read(func(c *config.MoomboxConfig) { enabled = c.Network.HTTPSEnabled })
+	return enabled
+}
+
+// ffmpegPathOrDefault returns the configured FFmpeg path, or "ffmpeg" for
+// the PATH lookup when none is set — the fallback every caller applied
+// itself.
+func (s *runState) ffmpegPathOrDefault() string {
+	path := ""
+	s.configStore.Read(func(c *config.MoomboxConfig) { path = c.Paths.FfmpegPath })
+	if path == "" {
+		return "ffmpeg"
+	}
+	return path
+}
+
+// configLoaded reports whether this run has a config file behind it.
+//
+// It is NOT a load-time constant: config.Save's last statement is
+// `cfg.ConfigLoaded = true`, and Store.SaveLocked / Store.Update call Save on
+// the very pointer s.cfg holds. The web handlers reach SaveLocked under the
+// store's write lock while runTUI's body is still running — the HTTP server is
+// up before the TUI starts — so the direct reads this replaced were a genuine
+// data race, which the race detector confirms. The transition is only ever
+// false -> true, so no caller's decision changes; the lock is what changes.
+func (s *runState) configLoaded() bool {
+	loaded := false
+	s.configStore.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
+	return loaded
 }

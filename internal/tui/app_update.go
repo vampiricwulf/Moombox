@@ -13,6 +13,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+// maxOverlayReasonRunes caps an error string appended to an overlay's warning
+// row. The FFmpeg overlay is already 20 rows at minTermHeight, so an uncapped
+// reason (a save error naming a 300-character path) grew it to 26 and pushed
+// the dismissal hint off the frame. 80 runes is roughly one wrapped line at
+// minTermWidth; the untruncated text is in moombox.log.
+const maxOverlayReasonRunes = 80
+
 // Update implements tea.Model.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -74,8 +81,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Finished job can age across hide_finished_age_days while the
 		// dashboard sits idle with no rebuild-triggering event; without
 		// this it lingers in the active rows until the next unrelated one.
+		// The same sweep re-reads hide_finished_age_days: a change made
+		// from the dashboard reaches the TUI through no event at all, so
+		// without this the two UIs disagree about which Finished jobs are
+		// archived until the settings overlay is next opened and closed
+		// (CORE-11). One store read a minute, and a rebuild only when the
+		// threshold actually moved.
 		if now := time.Now(); now.Sub(a.lastArchiveSweep) >= time.Minute {
 			a.lastArchiveSweep = now
+			a.syncHideFinishedAge()
 			a.taskList.ResweepArchive()
 		}
 		// Backstop for the demand-driven marquee and progress loops: if a
@@ -141,7 +155,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.marqueeTicking = false
 			return a, nil
 		}
-		a.taskList.marquee.Tick()
+		if a.taskList.marquee.Tick() {
+			// The offset is part of taskListKey, so the cache already
+			// follows it; invalidate explicitly so the dependency is stated
+			// at the mutation site rather than inferred from the key.
+			a.taskList.invalidate()
+		}
 		// The details panel bakes its title frame into the viewport content
 		// (renderRow runs from updateViewportContent, not per render frame) —
 		// re-render it when the offset moved so the scrolling title advances
@@ -762,7 +781,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// construction aren't stalled behind disk IO. Matches
 			// settings_security.go:121-131. Audit reports/tui.md Finding 2.
 			if (a.ffmpegCheck.mode == ffmpegCustom || a.ffmpegCheck.mode == ffmpegManual) && msg.Path != "" && a.cfg != nil {
-				var saveCb func(*config.MoomboxConfig)
+				var saveCb func(*config.MoomboxConfig) error
 				var cfgSnapshot *config.MoomboxConfig
 				mu := a.configStore.RWMutex()
 				mu.Lock()
@@ -773,7 +792,43 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				mu.Unlock()
 				if saveCb != nil {
-					saveCb(cfgSnapshot)
+					// The path stays live on a failed write — the user just
+					// validated this ffmpeg and needs it for the rest of the
+					// session — but they are told it did not persist, rather
+					// than finding it gone after a restart (CORE-4).
+					//
+					// It has to be told on the OVERLAY: this handler leaves
+					// the overlay up ("Press any key to continue" below), and
+					// App.View renders the overlay INSTEAD of the dashboard,
+					// so the dashboard's feedback line would never be seen —
+					// and it self-clears after 3s besides. Folded into
+					// msg.Warning before the assignment below, which is the
+					// row the overlay already prints, and which would
+					// otherwise overwrite anything set here.
+					if err := saveCb(cfgSnapshot); err != nil {
+						// Capped: the overlay is already 20 rows at the
+						// minimum terminal size (60x20), and an uncapped
+						// reason — a 300-character path, say — pushed it to
+						// 26 and dropped the dismissal hint below the frame.
+						// The full text is in moombox.log; OnSaveConfig logs
+						// it before returning.
+						reason := err.Error()
+						if r := []rune(reason); len(r) > maxOverlayReasonRunes {
+							reason = string(r[:maxOverlayReasonRunes]) + "…"
+						}
+						msg.Warning = strings.TrimSpace(msg.Warning +
+							"\nFFmpeg path not saved (it will not survive a restart): " + reason)
+					}
+				}
+				// Both outcomes. The path is live for this session either way,
+				// so the muxing consumers that captured it at construction
+				// (the download orchestrator, the trim service) must get it
+				// either way: OnSaveConfig's own hot-reload block is skipped
+				// on a save error, deliberately, because the settings panel
+				// rolls its config back after that callback returns. On the
+				// success path this re-applies the identical value.
+				if a.OnFfmpegPathChange != nil {
+					a.OnFfmpegPathChange(msg.Path)
 				}
 			}
 			a.ffmpegCheck.warning = msg.Warning
@@ -879,6 +934,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// set twice.
 			a.setupWiz.errorMsg, a.setupWiz.successMsg = "", verdict
 			a.setFeedback(verdict)
+		}
+		return a, nil
+
+	case clipboardResultMsg:
+		// The OS helper came back. Only a REPORTED copy upgrades the
+		// wording; a helper that declined or failed leaves the OSC 52 hedge
+		// the press already set, which is still the whole truth.
+		//
+		// Guarded on the hedge still being the line on screen: the helper is
+		// bounded at three seconds, and the operator may have pressed
+		// something else in the meantime — a late upgrade must not overwrite
+		// a newer message (and must not resurrect a line that has already
+		// expired).
+		if msg.Copied && a.feedback.msg == clipboardFeedback(msg.URL, true) {
+			a.setFeedback(clipboardFeedback(msg.URL, false))
 		}
 		return a, nil
 

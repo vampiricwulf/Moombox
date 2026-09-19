@@ -423,10 +423,13 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 The database maintains in-memory per-job log buffers (`jobLogs map[string][]string`) for real-time log viewing in the Web UI and TUI. These are not persisted to SQLite.
 
 - `AddJobLog(jobID, line)` appends a line. Capped at 200 lines; when exceeded, trimmed to last 100.
-- `RouteLogToJobs(line)` scans all tracked job IDs and routes the line to the first matching buffer (substring match on job ID in log line).
-- `TrackJobForLogs(jobID)` initializes the buffer for a job (nil slice).
-- `PruneJobLogs(activeIDs)` removes buffers for jobs no longer in the database.
-- `ClearJobLogs(jobID)` removes a specific buffer.
+- `RouteLogToJobs(line)` scans the ROUTED SET of job IDs (`logRouted`, a second map beside `jobLogs`) and routes the line to the first matching buffer (substring match on job ID in log line).
+- `TrackJobForLogs(jobID)` starts routing to a job and initializes its buffer (nil slice).
+- `UntrackJobForLogs(jobID)` stops routing to a job and KEEPS its buffer — the job that just failed is the one whose log an operator opens next.
+- `SyncJobLogTracking(jobs)` applies both rules to a whole list: non-terminal jobs tracked, terminal ones untracked. The boot seed and the `OnJobsChange` fan-out both call it (`cmd/moombox/monitor_callbacks.go`), while single-job transitions go through that file's `syncJobLogRouting` — from `OnJobAdded` (the ZIP import really does add a `Finished` job) and from `OnJobChange` whenever the `status` column was written, which is what re-routes a job that LEAVES a terminal state: `/retry`, `/resume` and auto-retry each resurrect a job with a plain `UpdateJobFields(status=…)`.
+- The per-line cost is a substring scan per TRACKED id — proportional to the number of LIVE jobs, not constant, and not to the size of the `jobs` table: ~99 ns at 5 live, ~76 µs at 5,000 live (the pre-fix cost, when every row the database had ever held was tracked). Live jobs are bounded by the archive slots and `num_parallel_downloads`; a long-lived tracked set is what must never come back.
+- `PruneJobLogs(activeIDs)` removes buffers — and routing — for jobs no longer in the database.
+- `ClearJobLogs(jobID)` removes a specific buffer and its routing.
 
 ### Auxiliary Data Operations
 
@@ -446,14 +449,21 @@ Configuration is TOML, parsed via `BurntSushi/toml`. The full config type is `Mo
 
 ### File Search Order
 
-When loading configuration (via `Load(customPath)` in `internal/config/config.go`), files are checked in
-order:
+`Load(customPath)` (`internal/config/config.go`) has two modes, and the flag decides which.
 
-1. `--config` flag path (if provided)
-2. `<cwd>/config.toml`
-3. `<cwd>/config/config.toml`
-4. `~/.config/moombox/config.toml`
-5. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
+**An explicit `-config <path>` is AUTHORITATIVE.** That file is the only one considered. If it exists it
+is loaded; if it does not, `Load` returns `Defaults()` and the named path stays the save target, so the
+first write creates the file exactly where it was asked for. There is no fall-through — before O-Y the
+search paths were appended unconditionally, so `-config /not/yet/there` silently adopted
+`~/.config/moombox/config.toml` when one happened to exist, and the operator asked for one file and got
+another (CORE-17).
+
+**Without the flag** the search runs in order, first hit wins:
+
+1. `<cwd>/config.toml`
+2. `<cwd>/config/config.toml`
+3. `~/.config/moombox/config.toml`
+4. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
 
 **Saves go back to the file that answered.** The location that was read is recorded in `LoadedFrom`
 (`internal/config/types.go`), and `cmd/moombox/services.go` points the run's config path at it before
@@ -507,7 +517,7 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | ArchiveSlots | int | 3 | `archive_slots` | Valid: 1-100. Max backlog (Queued) VOD downloads per channel running at once; new/live content never waits on a slot. |
 | FeedCheckInterval | FlexDuration | 10 (minutes) | `feed_check_interval` | |
 | DecapiCheckInterval | *int | nil | `decapi_check_interval` | Seconds, valid: 15-3600 |
-| TwitchCheckInterval | *int | nil | `twitch_check_interval` | Seconds, valid: 1-3600 |
+| TwitchCheckInterval | *int | nil | `twitch_check_interval` | Seconds, valid: 5-3600 |
 | HideFinishedAgeDays | FlexDuration | 30 (days) | `hide_finished_age_days` | |
 | ProbeCooldown | FlexDuration | 0 (seconds, disabled) | `probe_cooldown` | Min seconds between re-probing the same video's metadata. 0 = every cycle re-probes; no max. |
 | MembershipDiscovery | *bool | nil (→ true) | `membership_discovery` | Members-only `/membership`-tab discovery. Absent/nil = enabled; needs YouTube auth cookies to do anything. |
@@ -664,7 +674,7 @@ Handles backward compatibility with older flat config formats. All migrations ar
 - FeedCheckInterval: min 1 minute
 - HideFinishedAgeDays: min 0
 - DecapiCheckInterval: 15-3600 seconds (or nil)
-- TwitchCheckInterval: 1-3600 seconds (or nil)
+- TwitchCheckInterval: 5-3600 seconds (or nil)
 - NumParallelDownloads: min 1
 - SegmentWorkers: min 1, no max (values above `SegmentWorkersWarnThreshold`, 16, log a startup warning instead of failing validation)
 - MaxVideoResolution: min 1
@@ -1189,6 +1199,10 @@ Log output is sent to both:
 
 Rotation is checked after every write. The `currentSize` counter tracks bytes written since the last rotation.
 
+**A rotation whose renames fail backs off for `rotateBackoff`** (`internal/logger/logger.go`, 60 s) and reports the error once per failure STREAK rather than once per attempt. On Windows any process holding `<log>.1` open — a tail, an editor, an antivirus scanner — makes both renames fail, and re-attempting after every write past the cap turned that into a WARN diagnostic per log line, into the ring buffer, every WebSocket subscriber and the TUI log panel, while the live file kept growing (reproduced at 7.4× the cap). While the back-off runs the live file is allowed to grow past `log_max_file_size`; no log line is ever dropped for it. A rotation that succeeds clears both the window and the streak, so the next failure reports again.
+
+**While the streak lasts the logger repeats itself once per `rotateReportInterval`** (1 h), naming how long the rotation has been blocked and how large the un-rotated file has become. That reminder exists because the one error line is easy to lose: rotation diagnostics go through `diagf`, which writes to **stderr** when the TUI is not holding the terminal — so they never reach `moombox.log` itself — and into the 200-entry ring buffer when it is, where a busy instance recycles them within minutes. Measured on a rename failing for 48 h: one error line and 2,879 silent attempts before, 48 lines after, with the file at 2,135× the cap either way.
+
 ### Ring Buffer
 
 A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent log lines in memory. Used to populate the TUI log panel and Web UI log view on initial load (before real-time subscription kicks in).
@@ -1197,7 +1211,7 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 
 ### Per-Job Log Buffers
 
-The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs).
+The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs). Only NON-TERMINAL jobs are scanned for — see § Per-Job Log Buffers above for the routed set.
 
 The Logger type once carried a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` buffer API; nothing in production ever wired it (the buffers stayed permanently empty at runtime), and it was removed in 2026-07. Per-job log consumers use the database pipeline above.
 

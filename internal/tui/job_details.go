@@ -55,6 +55,15 @@ type JobDetailsModel struct {
 	// Version display
 	version    string
 	updateInfo *UpdateStatusMsg
+
+	// contentSeq increments in updateViewportContent — the single funnel for
+	// every row change (SetJob, SetProgress, RefreshMarqueeFrame,
+	// RefreshRelativeTimes, SetSize, ToggleDescription all end there).
+	contentSeq uint64
+	// renderCache / cacheKey memoise View(); bubbletea renders after every
+	// message and most carry no change to this panel.
+	renderCache string
+	cacheKey    jobDetailsKey
 }
 
 type rowKind int
@@ -268,6 +277,7 @@ func (m *JobDetailsModel) UpdateViewport(msg tea.Msg) tea.Cmd {
 
 // updateViewportContent rebuilds the viewport's string content from m.rows.
 func (m *JobDetailsModel) updateViewportContent() {
+	m.contentSeq++
 	contentW := max(m.width-2, 1)
 	if m.job == nil {
 		m.viewport.SetContent(DimStyle.Render("Select a job to view details"))
@@ -793,8 +803,63 @@ func (m *JobDetailsModel) addFieldLink(label, value, link string) {
 	m.rows = append(m.rows, detailRow{kind: rowField, label: label, value: value, link: link})
 }
 
+// jobDetailsKey is every input JobDetailsModel.View() reads.
+//
+// sec is insurance, not a live dependency: unlike the task list's header,
+// this panel renders no wall-clock text of its own — the relative suffixes
+// ("5m ago") are baked into the viewport lines by buildRows, so contentSeq
+// already carries them. Spec §5 puts the second in every panel's key, and it
+// is what makes a frame here free to change once a second whatever a future
+// renderer starts reading the clock for. The cost is one full render per
+// second on an otherwise idle panel.
+//
+// status is defensive in the same way: every production path that changes a
+// job's status replaces the *database.Job pointer and rebuilds the rows, so
+// job and contentSeq cover it — the field is here to catch a future in-place
+// mutation, and TestJobDetailsCacheFollowsAnInPlaceStatusChange pins it.
+type jobDetailsKey struct {
+	contentSeq uint64
+	sec        int64
+	width      int
+	height     int
+	focused    bool
+	hideDesc   bool
+	job        *database.Job
+	status     database.JobStatus
+	version    string
+	update     *UpdateStatusMsg
+	yOffset    int
+	totalLines int
+	vpHeight   int
+}
+
+func (m *JobDetailsModel) jobDetailsKey() jobDetailsKey {
+	var status database.JobStatus
+	if m.job != nil {
+		status = m.job.Status
+	}
+	return jobDetailsKey{
+		contentSeq: m.contentSeq,
+		sec:        time.Now().Unix(),
+		width:      m.width,
+		height:     m.height,
+		focused:    m.focused,
+		hideDesc:   m.hideDescription,
+		job:        m.job,
+		status:     status,
+		version:    m.version,
+		update:     m.updateInfo,
+		yOffset:    m.viewport.YOffset(),
+		totalLines: m.viewport.TotalLineCount(),
+		vpHeight:   m.viewport.Height(),
+	}
+}
+
 // View renders the job details panel.
 func (m *JobDetailsModel) View() string {
+	if k := m.jobDetailsKey(); m.renderCache != "" && k == m.cacheKey {
+		return m.renderCache
+	}
 	contentW := max(m.width-2, 1)
 
 	// Title and border color: status-colored when focused + job selected (match TS)
@@ -852,7 +917,10 @@ func (m *JobDetailsModel) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor)
 
-	return style.Width(m.width).Height(m.height).Render(content)
+	out := style.Width(m.width).Height(m.height).Render(content)
+	m.renderCache = out
+	m.cacheKey = m.jobDetailsKey()
+	return out
 }
 
 func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
