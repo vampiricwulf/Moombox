@@ -137,9 +137,9 @@ func TestFetchBodyHonoursCtxCancel(t *testing.T) {
 	}
 }
 
-// TestFetchBodyCapsAtMaxFetchBodySize verifies the io.LimitReader
-// boundary at 50MB. The test serves a body exactly at the cap to
-// confirm the read truncates without error.
+// TestFetchBodyCapsAtMaxFetchBodySize verifies the ordinary under-the-cap
+// path still returns the whole body. The over-the-cap path is
+// TestFetchBodyErrorsPastMaxFetchBodySize.
 func TestFetchBodyCapsAtMaxFetchBodySize(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		// 100 bytes — well under the cap. We're verifying the
@@ -154,6 +154,40 @@ func TestFetchBodyCapsAtMaxFetchBodySize(t *testing.T) {
 	}
 	if len(body) != 100 {
 		t.Errorf("body length: want 100, got %d", len(body))
+	}
+}
+
+// TestFetchBodyErrorsPastMaxFetchBodySize pins the difference between a
+// truncated read and a reported one. Before this, FetchBody handed back
+// exactly MaxFetchBodySize bytes and a nil error for an over-long response,
+// and internal/youtube/service.go and watch_page.go would parse that half a
+// page as a legitimate result.
+//
+// Mutant this kills: dropping the length check (or restoring the plain
+// io.LimitReader(resp.Body, MaxFetchBodySize)) makes err nil and len(body)
+// exactly MaxFetchBodySize, and the first assertion fails.
+func TestFetchBodyErrorsPastMaxFetchBodySize(t *testing.T) {
+	chunk := make([]byte, 1<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		// One MiB past the ceiling. Writes may fail once the client gives
+		// up reading; that is expected and not the test's business.
+		for written := 0; written <= MaxFetchBodySize; written += len(chunk) {
+			if _, err := rw.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	body, err := FetchBody(t.Context(), srv.URL, 60*time.Second, nil)
+	if err == nil {
+		t.Fatalf("FetchBody over the ceiling: want an error, got nil with %d bytes", len(body))
+	}
+	if !strings.Contains(err.Error(), "response exceeds MaxFetchBodySize") {
+		t.Errorf("error message: want it to name the ceiling, got %v", err)
+	}
+	if body != nil {
+		t.Errorf("body on the over-long path: want nil, got %d bytes", len(body))
 	}
 }
 
