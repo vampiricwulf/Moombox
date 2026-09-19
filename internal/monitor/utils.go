@@ -232,12 +232,18 @@ type ProcessYouTubeVideoResult struct {
 	// date at all (§12). DECAPI reads it for the archive-window check on
 	// vod-family results (§13).
 	PublishedAt string
-	// Denied is true when the probe COMPLETED and isDenied flagged it: YouTube
-	// refused us (upcoming + members_only/login_required) rather than telling
-	// us about a stream. ShouldProcess is always false alongside it. DECAPI
-	// reads it to latch the verdict in its terminal memo — the classification
-	// rides on "upcoming", which decapiTerminalStatus can never treat as
-	// terminal, so without this flag the refusal is re-probed every cycle.
+	// Denied is true when the probe COMPLETED, isDenied flagged it, AND the
+	// refusal is one an anonymous prober can never see change —
+	// members_only, see deniedIsSettled. It is the LATCH flag, not the
+	// refusal flag: DECAPI writes it into its terminal memo and then stops
+	// probing that video, because the classification rides on "upcoming",
+	// which decapiTerminalStatus can never treat as terminal.
+	//
+	// ShouldProcess is false for EVERY refusal, latched or not. A
+	// login_required refusal therefore returns ShouldProcess=false with
+	// Denied=false: no job, no notification, and still re-probed next cycle
+	// (bounded by DECAPI's 429 limiter and the poll interval), because that
+	// pushback clears on its own and the latch would not.
 	Denied bool
 }
 
@@ -270,6 +276,29 @@ func nonLiveSkipReason(includeNonLive, isReprobe bool) (skip bool, reason string
 func isDenied(streamStatus, playabilityError string) bool {
 	return streamStatus == "upcoming" &&
 		(playabilityError == "members_only" || playabilityError == "login_required")
+}
+
+// deniedIsSettled splits the two refusals isDenied recognises by whether
+// asking again could ever produce a different answer for a prober that has no
+// credentials to retry with. Callers reach it only for a refusal (it does not
+// re-test isDenied's status half); it decides whether the verdict may be
+// REMEMBERED, never whether a job is created — no refusal creates a job.
+//
+//   - members_only: settled. The video IS members-only; an anonymous player
+//     call says so every time. DECAPI has no authenticated probe at all (the
+//     feed path owns that escalation, walk.go's probeRow), so its re-asking
+//     buys nothing but ~240 player calls an hour.
+//   - login_required: NOT settled. That is transient anti-bot pushback on a
+//     PUBLIC video and it clears on its own — but the memo that would hold it
+//     is released only by a new newest video, PruneHealth or a restart, so
+//     remembering it would disable the RSS redundancy for that video long
+//     after YouTube started answering again.
+//
+// age_restricted never reaches here: isDenied excludes it deliberately (the
+// spec rejects "any non-ok" because it would refuse downloadable
+// age-restricted VODs), so it stays an ordinary classification.
+func deniedIsSettled(playabilityError string) bool {
+	return playabilityError == "members_only"
 }
 
 // ProbeOutcome classifies the result of a single probeAndClassify call.
@@ -460,8 +489,13 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		//
 		// The cost of routing login_required away is that a channel under
 		// sustained anti-bot pushback gets its upcoming streams from the feed
-		// path only — which already lives with that, for exactly the window
-		// YouTube is refusing anonymous probes anyway.
+		// path only — which already lives with that, and only while the
+		// pushback lasts, because Denied is deliberately NOT set for it
+		// (deniedIsSettled): DECAPI keeps probing it, at the pre-fix cost,
+		// bounded by the 429 limiter. Only members_only is remembered, and
+		// what DECAPI remembers it stops asking about until the channel's
+		// newest video changes, PruneHealth drops the channel, or the process
+		// restarts — never because the refusal ended.
 		deniedLog := p.Logger.Info
 		if p.IsReprobe {
 			deniedLog = p.Logger.Debug
@@ -470,7 +504,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 			cr.PlayabilityError, p.Title, p.VideoID))
 		return ProcessYouTubeVideoResult{
 			ShouldProcess: false,
-			Denied:        true,
+			Denied:        deniedIsSettled(cr.PlayabilityError),
 			Title:         p.Title,
 			StreamStatus:  cr.StreamStatus,
 		}

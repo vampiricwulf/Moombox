@@ -702,33 +702,53 @@ func (silentLogger) Error(msg string, args ...any) {}
 // job, a "Stream Found" notification, and then a COOKIES? park the config
 // never asked for.
 //
+// Denied is the narrower fact and is set for members_only ONLY (see
+// deniedIsSettled): it is the flag DECAPI's terminal memo latches on, and a
+// latch outlives the refusal that caused it. A login_required refusal is
+// transient anti-bot pushback on a PUBLIC video, so it creates no job either
+// but must stay re-probable.
+//
 // Mutants each assertion kills:
 //   - drop the OutcomeDenied arm from ProcessYouTubeVideo -> ShouldProcess
 //     comes back true for both playability values (the shipped bug).
-//   - return ShouldProcess=false but forget Denied -> the memo half in
+//   - return ShouldProcess=false but forget Denied (or make deniedIsSettled
+//     always false) -> the members_only subtest fails: the memo half in
 //     decapi.go can never latch, so TestDecapi_DeniedVerdictIsLatched's
 //     production wiring is dead and the refusal is re-probed every 15 s.
+//   - latch every refusal (deniedIsSettled -> always true, or `Denied: true`)
+//     -> the login_required subtest fails: one unlucky cycle would park
+//     DECAPI on a public video until the channel publishes something new.
 //   - write history on the denied arm -> histCalls becomes 1; a refusal is
 //     not "we dealt with this video", and a history row would make the
 //     members-only escalation's later sighting read as a re-probe.
 func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
-	for _, playability := range []string{"members_only", "login_required"} {
-		t.Run(playability, func(t *testing.T) {
+	for _, tc := range []struct {
+		playability string
+		wantDenied  bool
+	}{
+		{"members_only", true},
+		{"login_required", false},
+	} {
+		t.Run(tc.playability, func(t *testing.T) {
 			var histCalls int
 			res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
 				Ctx: context.Background(), VideoID: "v", Title: "T",
 				Channel: &config.ChannelConfig{Name: "c"},
 				ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
-					return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: playability}, nil
+					return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: tc.playability}, nil
 				},
 				AddToHistory: func(id string) error { histCalls++; return nil },
 				Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
 			})
 			if res.ShouldProcess {
-				t.Errorf("ShouldProcess = true for a %s refusal — DECAPI would create an Upcoming job and park it in COOKIES?", playability)
+				t.Errorf("ShouldProcess = true for a %s refusal — DECAPI would create an Upcoming job and park it in COOKIES?", tc.playability)
 			}
-			if !res.Denied {
-				t.Errorf("Denied = false — the DECAPI terminal memo latches on this flag; without it the refusal is re-probed every 15 s")
+			if res.Denied != tc.wantDenied {
+				if tc.wantDenied {
+					t.Errorf("Denied = false for members_only — the DECAPI terminal memo latches on this flag; without it the settled refusal is re-probed every 15 s")
+				} else {
+					t.Errorf("Denied = true for login_required — that is transient anti-bot pushback on a PUBLIC video; latching it parks DECAPI on the video until the channel publishes something new")
+				}
 			}
 			if res.StreamStatus != "upcoming" {
 				t.Errorf("StreamStatus = %q, want %q — the memo records what the probe said", res.StreamStatus, "upcoming")
