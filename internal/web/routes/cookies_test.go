@@ -1,16 +1,26 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -722,4 +732,549 @@ func TestCookieStatusPayloadsCarryTheFileError(t *testing.T) {
 			t.Errorf("%s fileError = %v for a jar that loaded, want empty", name, got)
 		}
 	}
+}
+
+// --- COOKIES-4 / owner decision O-L: Content-Length before the blocking re-check ---
+
+// gzipIdentityCeiling is internal/web's gzipMinSize, repeated here because that
+// const is unexported.
+//
+// It is the width at which CompressionMiddleware stops being harmless to this
+// fix. Below it, a Flush before the threshold sends the buffered bytes through
+// commitPlain, which does NOT touch Content-Length — the header the two
+// handlers set survives and the body is identity and self-terminating. At or
+// above it, startGzip deletes Content-Length, sets Content-Encoding: gzip and
+// re-chunks, and the gzip trailer is written by the middleware's
+// `defer gz.Close()` — which runs after the handler returns, i.e. after the
+// re-check. Both halves are asserted by
+// TestSizedCookieAnswersSurviveTheGzipWrapper.
+const gzipIdentityCeiling = 1024
+
+// recheckStandIn is how long the stand-in re-check blocks the handler goroutine
+// in TestSizedCookieAnswerLandsBeforeTheBlockingRecheck, and
+// sizedAnswerArrivalBound is how long the client may take to have the whole
+// body in hand.
+//
+// The real thing is bounded at 45 s and a real pass spends two auth-check
+// windows; a second is enough to make the two outcomes unmistakable — a body at
+// single-digit milliseconds against one at the full block — while keeping the
+// test cheap enough to run under -race -count=3.
+const (
+	recheckStandIn          = 1200 * time.Millisecond
+	sizedAnswerArrivalBound = 300 * time.Millisecond
+)
+
+// sizedWriterRouter is importRouter's twin for the timing test, and it exists
+// for the one thing importRouter cannot hand back: the RefreshService.
+//
+// The property under test is what the client holds WHILE that service's pass is
+// still running on the handler goroutine, and OnAuthChange is the only seam
+// this package can reach into a pass with — youtubeGuideURL, twitchValidateURL
+// and refreshPassHook are all unexported in internal/cookies.
+//
+// The jar handed to the RefreshService is EMPTY and is not the import service's
+// jar, so the pass costs no network however successful the import was:
+// youtubeGuideExchange returns before it builds a request when
+// HasAnyYouTubeAuthCookie is false, and checkTwitchAuth does the same on an
+// empty auth-token. It still reaches OnAuthChange, because
+// verdictFromCheck(false, nil) is RefreshFailed against a zero AuthStatus's
+// RefreshUnknown and authStatusChanged compares that field — so the hook fires
+// on the first pass of an empty jar, which is exactly the pass this test runs.
+func sizedWriterRouter(t *testing.T, seed string) (chi.Router, *cookies.RefreshService) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	if seed != "" {
+		if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+			t.Fatalf("seed cookies.txt: %v", err)
+		}
+	}
+	jar := cookies.NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("jar.Load: %v", err)
+	}
+	svc := cookies.NewAutoCookieService(dir, path, jar, nopRouteLogger{})
+	svc.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	svc.VerifyTwitchAuth = func(context.Context) (bool, error) { return true, nil }
+
+	rs := cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, nopRouteLogger{})
+
+	r := chi.NewRouter()
+	CookieRoutes(r, rs, svc, nil, nil)
+	return r, rs
+}
+
+// driveImportSuccess answers 200 through cookieImportOutcome.
+func driveImportSuccess(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r, _, _, _ := importRouter(t, importHeader+importTwitch, nil)
+	return postImport(t, r, "text/plain", importPaste())
+}
+
+// driveImportRejected answers 422 through the ErrImportNotNetscape arm. This is
+// the row that matters most after the success one: it is an error exit, and a
+// fix applied to the success write alone would leave every refusal chunked.
+func driveImportRejected(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r, _, _, _ := importRouter(t, importHeader+importTwitch, nil)
+	return postImport(t, r, "text/plain", `[{"name":"SAPISID"}]`)
+}
+
+// driveImportDuringRefresh answers 409 through Task 3's ErrRefreshInProgress
+// arm. The collision is reproduced through the REAL slot — refreshCmd is an
+// unexported field of internal/cookies — by holding the first import inside its
+// pre-write verification until the second has been answered.
+func driveImportDuringRefresh(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r, _, _, svc := importRouter(t, importHeader+importYouTube+importTwitch, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	gate := func(ctx context.Context) (bool, error) {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			return true, nil
+		}
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return true, nil
+	}
+	svc.VerifyYouTubeAuth = gate
+	svc.VerifyTwitchAuth = gate
+
+	held := make(chan struct{})
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("the holding import panicked: %v", p)
+			}
+			close(held)
+		}()
+		postImport(t, r, "text/plain", importPaste())
+	}()
+
+	select {
+	case <-entered:
+	case <-held:
+		t.Fatal("the first import finished before it reached its pre-write verification — the " +
+			"collision this row needs never happened")
+	case <-time.After(60 * time.Second):
+		t.Fatal("the first import never reached its pre-write verification")
+	}
+
+	rec := postImport(t, r, "text/plain", importPaste())
+	close(release)
+	<-held
+	return rec
+}
+
+// driveImportNoService and driveFinishNoService answer 503 through each
+// handler's `autoCookieSvc == nil` guard — the one exit on each that is taken
+// before anything else runs.
+func driveImportNoService(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, nil, nil, nil)
+	return postImport(t, r, "text/plain", importPaste())
+}
+
+func driveFinishNoService(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, nil, nil, nil)
+	return postFinish(t, r)
+}
+
+// driveFinishNoSetup answers 404 through the ErrNoSetupInProgress arm.
+func driveFinishNoSetup(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, svc, nil, nil)
+	return postFinish(t, r)
+}
+
+func postFinish(t *testing.T, r chi.Router) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/finish", nil))
+	return rec
+}
+
+// TestCookieWritersSetContentLength is COOKIES-4 / owner decision O-L. Both
+// handlers Flush and then run a <=45 s auth re-check on the handler goroutine.
+// Without Content-Length net/http uses chunked encoding and the terminating
+// chunk is written only when the handler RETURNS, so the Flush released the
+// headers and nothing else: fetch().json() awaited the body for the whole
+// re-check, inside a dialog with a 60 s abort budget that also has to cover
+// FinishSetup.
+//
+// The property is asserted on the RECORDED HEADER here rather than by timing:
+// Content-Length is exactly what makes net/http send an identity body it can
+// terminate without waiting for the handler, and a recorder can cover every
+// exit cheaply. TestSizedCookieAnswerLandsBeforeTheBlockingRecheck pins the
+// same property by execution over a real server and a real blocking re-check.
+//
+// SIX EXITS, chosen so each handler contributes a success (or its nearest
+// reachable equivalent), an error switch arm and its no-service guard. A
+// successful finish is not reachable from this package — FinishSetupDetailed
+// needs a browser this test must never launch — so the import's
+// ErrRefreshInProgress 409 takes that slot, exactly as the brief allows.
+//
+// Mutants:
+//   - revert either handler to jsonResponse/jsonError -> that row's
+//     Content-Length is empty.
+//   - set Content-Length on the success exit only -> the four error rows fail,
+//     and those are the exits the re-check matters most on (the jar-reload
+//     error runs over a cookies.txt that has already been replaced).
+//   - drop the trailing newline the sized writers keep -> nothing here fails,
+//     which is why TestSizedCookieBodiesAreByteIdenticalToTheEncoder exists.
+func TestCookieWritersSetContentLength(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		want  int
+		drive func(*testing.T) *httptest.ResponseRecorder
+	}{
+		{"import/success", http.StatusOK, driveImportSuccess},
+		{"import/rejected-paste", http.StatusUnprocessableEntity, driveImportRejected},
+		{"import/refresh-in-progress", http.StatusConflict, driveImportDuringRefresh},
+		{"import/no-service", http.StatusServiceUnavailable, driveImportNoService},
+		{"finish/no-setup", http.StatusNotFound, driveFinishNoSetup},
+		{"finish/no-service", http.StatusServiceUnavailable, driveFinishNoService},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := tc.drive(t)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d — this row no longer reaches the exit it names: %s",
+					rec.Code, tc.want, rec.Body.String())
+			}
+			got := rec.Header().Get("Content-Length")
+			if got == "" {
+				t.Fatalf("no Content-Length on a %d from %s. net/http falls back to chunked "+
+					"encoding and writes the terminating chunk only when the HANDLER returns, so "+
+					"the deferred Flush releases the headers and fetch().json() — which awaits the "+
+					"body — sits through the whole re-check", tc.want, tc.name)
+			}
+			if want := strconv.Itoa(rec.Body.Len()); got != want {
+				t.Errorf("Content-Length = %q for a %d-byte body. A length that does not match the "+
+					"bytes is worse than none: net/http truncates the body to it, or the client "+
+					"blocks waiting for bytes that never come", got, rec.Body.Len())
+			}
+			if rec.Body.Len() >= gzipIdentityCeiling {
+				t.Errorf("this exit's body is %d bytes, at or over internal/web's %d-byte gzip "+
+					"threshold — CompressionMiddleware's startGzip deletes Content-Length above it "+
+					"and the gzip trailer is written after the handler returns, which puts the "+
+					"client back behind the re-check. See TestSizedCookieAnswersSurviveTheGzipWrapper",
+					rec.Body.Len(), gzipIdentityCeiling)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Errorf("body is not JSON any more: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestSizedCookieBodiesAreByteIdenticalToTheEncoder is the differential O-L
+// does not license: the fix is about a header, so not one byte of any exit's
+// body may move.
+//
+// json.Encoder.Encode appends a newline and json.Marshal does not, so a sized
+// writer built on Marshal alone silently drops the last byte of every body this
+// endpoint has ever sent. Nothing would notice at the JSON layer, which is
+// precisely why it is asserted here rather than left to a parse.
+//
+// Mutant: delete the `'\n'` from either sized writer -> the matching row's
+// bytes differ from the encoder's by one.
+func TestSizedCookieBodiesAreByteIdenticalToTheEncoder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		drive func(*testing.T) *httptest.ResponseRecorder
+		want  func() *httptest.ResponseRecorder
+	}{
+		{
+			name:  "error body",
+			drive: driveFinishNoService,
+			want: func() *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				jsonError(rec, "auto-cookie service not configured", http.StatusServiceUnavailable)
+				return rec
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.drive(t).Body.String()
+			want := tc.want().Body.String()
+			if got != want {
+				t.Errorf("the sized writer's body is %q where the unsized writer sent %q — the "+
+					"Content-Length fix moved bytes it has no licence to move", got, want)
+			}
+		})
+	}
+}
+
+// TestBothRecheckHandlersAnswerThroughTheSizedWriters is the exit sweep the
+// wire table cannot be: several exits of both handlers have no fixture in this
+// package at all — the jar-reload 500 needs a file that loads once and then
+// does not, ErrCookieFileUnwritable needs an unexported package var stubbed,
+// and every browser-profile arm needs a browser. Structure covers them.
+//
+// Both handlers run a deferred, BLOCKING re-check that holds the connection
+// open, so the rule is per HANDLER and not per exit: every JSON any exit of
+// these two writes must carry a length. A single surviving jsonResponse or
+// jsonError is a single exit whose client waits out the re-check, and it is the
+// likeliest regression — a new arm added by copying an older one.
+//
+// writeBrowserReadError and readCookieImportBody are deliberately not counted:
+// they are CALLS from these handlers, shared with the refresh handler and with
+// the request-shape refusals respectively, and every exit they own leaves
+// result.Wrote false, so the deferred re-check returns without running and no
+// body is held.
+//
+// Mutants:
+//   - leave any one exit on jsonResponse/jsonError -> that handler's list of
+//     unsized calls is non-empty and the failure names the function.
+//   - delete a handler's success write -> the sized-response count is zero.
+func TestBothRecheckHandlersAnswerThroughTheSizedWriters(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "cookies.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse cookies.go: %v", err)
+	}
+
+	for _, route := range []string{"/api/cookies/import", "/api/cookies/auto-setup/finish"} {
+		t.Run(route, func(t *testing.T) {
+			handler := routeHandlerLit(t, file, route)
+			counts := map[string]int{}
+			ast.Inspect(handler, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if fn, ok := call.Fun.(*ast.Ident); ok {
+					counts[fn.Name]++
+				}
+				return true
+			})
+
+			for _, unsized := range []string{"jsonResponse", "jsonError"} {
+				if counts[unsized] > 0 {
+					t.Errorf("%s still answers %d exit(s) through %s. That writer streams through "+
+						"a json.Encoder and sets no length, so net/http chunks the body and writes "+
+						"the terminating chunk when the HANDLER returns — after the <=45 s re-check "+
+						"this handler defers", route, counts[unsized], unsized)
+				}
+			}
+			if counts["jsonResponseSized"] == 0 {
+				t.Errorf("%s has no jsonResponseSized call — its success exit either went back to "+
+					"the unsized writer or stopped answering at all", route)
+			}
+			if counts["jsonErrorSized"] == 0 {
+				t.Errorf("%s has no jsonErrorSized call — its error exits either went back to the "+
+					"unsized writer or stopped answering at all", route)
+			}
+		})
+	}
+}
+
+// TestSizedCookieAnswerLandsBeforeTheBlockingRecheck is O-L pinned BY
+// EXECUTION, over a real net/http server, a real client and a real blocking
+// re-check on the handler goroutine.
+//
+// The re-check STAYS BLOCKING — that is the decision, not an accident: a
+// goroutine would make the client fast and delete the property the AST
+// call-site test protects (a detached pass whose result nothing waits for is a
+// pass nothing can be sure ran). What changes is only that the body is complete
+// on the wire before the re-check starts.
+//
+// The stand-in duration is injected through RefreshService.OnAuthChange, which
+// the pass calls synchronously on this very goroutine. The unsized arm below is
+// the mutant, run live rather than described: the same handler shape answering
+// through jsonResponse, whose body the client cannot finish reading until the
+// handler returns.
+func TestSizedCookieAnswerLandsBeforeTheBlockingRecheck(t *testing.T) {
+	t.Run("sized", func(t *testing.T) {
+		r, rs := sizedWriterRouter(t, "")
+
+		var once sync.Once
+		entered := make(chan struct{})
+		finished := make(chan time.Time, 1)
+		rs.OnAuthChange = func(cookies.AuthStatus) {
+			once.Do(func() {
+				close(entered)
+				time.Sleep(recheckStandIn)
+				finished <- time.Now()
+			})
+		}
+
+		srv := httptest.NewServer(r)
+		defer srv.Close()
+
+		start := time.Now()
+		resp, err := http.Post(srv.URL+"/api/cookies/import", "text/plain", strings.NewReader(importPaste()))
+		if err != nil {
+			t.Fatalf("POST /api/cookies/import: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d, want 200", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		bodyAt := time.Since(start)
+
+		if resp.ContentLength < 0 {
+			t.Errorf("the transport reports no Content-Length (transfer-encoding %v) — the answer "+
+				"went out chunked, and a chunked body is only terminated when the handler returns",
+				resp.TransferEncoding)
+		}
+		if len(resp.TransferEncoding) != 0 {
+			t.Errorf("Transfer-Encoding = %v, want identity", resp.TransferEncoding)
+		}
+		if got := int64(len(body)); resp.ContentLength >= 0 && got != resp.ContentLength {
+			t.Errorf("read %d body bytes against a Content-Length of %d", got, resp.ContentLength)
+		}
+		if bodyAt >= sizedAnswerArrivalBound {
+			t.Errorf("the whole body took %v to arrive, over the %v bound — the client is still "+
+				"being held by the re-check", bodyAt.Round(time.Millisecond), sizedAnswerArrivalBound)
+		}
+
+		select {
+		case <-entered:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the deferred re-check never ran, so this test proved nothing: the body it " +
+				"timed was not racing anything")
+		}
+		var endedAt time.Time
+		select {
+		case endedAt = <-finished:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the deferred re-check never finished")
+		}
+		if held := endedAt.Sub(start); held < recheckStandIn {
+			t.Fatalf("the handler was inside its re-check for only %v — the fixture did not block "+
+				"the handler goroutine, so the %v body arrival above is not evidence of anything",
+				held.Round(time.Millisecond), bodyAt.Round(time.Millisecond))
+		}
+		t.Logf("body complete at %v; the handler stayed inside the re-check until %v",
+			bodyAt.Round(time.Millisecond), endedAt.Sub(start).Round(time.Millisecond))
+	})
+
+	// THE MUTANT, executed. jsonResponse is the writer both handlers used
+	// before O-L; everything else here is the production defer's shape.
+	t.Run("unsized-is-the-bug", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			defer func() {
+				if f, ok := rw.(http.Flusher); ok {
+					f.Flush()
+				}
+				time.Sleep(recheckStandIn)
+			}()
+			jsonResponse(rw, map[string]any{"success": true})
+		}))
+		defer srv.Close()
+
+		start := time.Now()
+		resp, err := http.Get(srv.URL)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		headersAt := time.Since(start)
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		bodyAt := time.Since(start)
+
+		if bodyAt < recheckStandIn {
+			t.Fatalf("the unsized answer's body arrived at %v, inside the %v block — net/http no "+
+				"longer holds a flushed chunked body until the handler returns, so the mutant this "+
+				"fix exists for is not reproducible and the assertions above guard nothing",
+				bodyAt.Round(time.Millisecond), recheckStandIn)
+		}
+		t.Logf("unsized: headers at %v, body at %v (the %v block)",
+			headersAt.Round(time.Millisecond), bodyAt.Round(time.Millisecond), recheckStandIn)
+	})
+}
+
+// TestSizedCookieAnswersSurviveTheGzipWrapper is R3: the two handlers sit
+// behind CompressionMiddleware in the real server (internal/web/server.go), and
+// that wrapper is the one thing that can take the header away again.
+//
+// Below internal/web's 1024-byte threshold it cannot: a Flush before the
+// threshold goes through commitPlain, which sends the buffered bytes identity
+// and leaves Content-Length alone. At or above it, startGzip deletes the header
+// by design — the length changes with compression — and the response is chunked
+// again, with the gzip trailer written by the middleware's `defer gz.Close()`
+// after the handler returns. So above the threshold the client is back behind
+// the re-check.
+//
+// That is ACCEPTED rather than exempted, because no exit of either handler can
+// reach it: the widest body they produce is a two-map import success at a few
+// hundred bytes, and TestCookieWritersSetContentLength asserts every driven
+// exit stays under the ceiling. The alternative — adding these two paths to
+// shouldSkipCompression — would trade a real invariant for a skip nobody can
+// see from the handler.
+func TestSizedCookieAnswersSurviveTheGzipWrapper(t *testing.T) {
+	t.Run("sub-threshold keeps the length", func(t *testing.T) {
+		r, _, _, _ := importRouter(t, importHeader+importTwitch, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/cookies/import", strings.NewReader(importPaste()))
+		req.Header.Set("Content-Type", "text/plain")
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		web.CompressionMiddleware(r).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+			t.Fatalf("Content-Encoding = %q — this body is meant to be under the %d-byte threshold "+
+				"and was compressed instead", enc, gzipIdentityCeiling)
+		}
+		got := rec.Header().Get("Content-Length")
+		if want := strconv.Itoa(rec.Body.Len()); got != want {
+			t.Errorf("Content-Length = %q through CompressionMiddleware for a %d-byte body — the "+
+				"wrapper took the header away, and the import answer is chunked again behind the "+
+				"re-check", got, rec.Body.Len())
+		}
+	})
+
+	// The ceiling, stated by execution so the paragraph above is not a claim
+	// nobody checked. Not a handler: no exit of either one can produce a body
+	// this wide.
+	t.Run("over-threshold loses it", func(t *testing.T) {
+		wide := strings.Repeat("x", gzipIdentityCeiling*2)
+		h := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.Header().Set("Content-Length", strconv.Itoa(len(wide)))
+			_, _ = io.WriteString(rw, wide)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		web.CompressionMiddleware(h).ServeHTTP(rec, req)
+
+		if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+			t.Fatalf("Content-Encoding = %q for a %d-byte body, want gzip — internal/web's "+
+				"threshold moved and this test's premise with it", enc, len(wide))
+		}
+		if got := rec.Header().Get("Content-Length"); got != "" {
+			t.Errorf("Content-Length = %q survived startGzip. If that is now true, the ceiling "+
+				"documented on gzipIdentityCeiling no longer exists and the accept-and-document "+
+				"ruling for R3 should be revisited", got)
+		}
+	})
 }
