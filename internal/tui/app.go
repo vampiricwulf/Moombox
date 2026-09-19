@@ -561,14 +561,17 @@ type App struct {
 	OnCreateTrim      func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim      func(jobID, trimID string) error
 	OnOpenFolder      func(jobID string)
-	OnSaveConfig      func(cfg *config.MoomboxConfig)
-	OnRestart         func()
-	OnHashPassword    func(password string) string
-	OnVerifyPassword  func(password, hash string) bool
-	OnFetchFormats    func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
-	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
-	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
-	OnDeleteOrphan    func(path string) error                           // delete orphaned file
+	// OnSaveConfig persists the settings model's config. It returns the save
+	// error so the overlay can report a failure instead of showing "Saved"
+	// over a write that never landed (CORE-4).
+	OnSaveConfig     func(cfg *config.MoomboxConfig) error
+	OnRestart        func()
+	OnHashPassword   func(password string) string
+	OnVerifyPassword func(password, hash string) bool
+	OnFetchFormats   func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile     func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans    func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan   func(path string) error                           // delete orphaned file
 	// Orphaned processing-history rows (no matching job) shown in the same overlay.
 	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
 	OnDeleteHistoryEntry  func(videoID string) error

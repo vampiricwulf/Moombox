@@ -40,6 +40,17 @@ func mergeChannelHealth(lists ...[]monitor.ChannelHealth) []monitor.ChannelHealt
 	return out
 }
 
+// effectiveLogLevel picks the level the logger starts at: the -log-level
+// override when one was given, otherwise the configured level. Deliberately
+// a pure function of the two strings so the "the override never reaches the
+// config struct" rule can be asserted without a boot (CORE-10).
+func effectiveLogLevel(configured, override string) string {
+	if override != "" {
+		return override
+	}
+	return configured
+}
+
 // waitForKeypress waits for a keypress before exiting (prevents .exe window
 // from vanishing on Windows when the process hit a startup error). Matches
 // the TS waitForKeypress() in index.ts — only blocks on a TTY so scripted

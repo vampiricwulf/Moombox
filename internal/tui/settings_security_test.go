@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -50,7 +51,7 @@ func TestRemovePasswordResetsExternalAndPublic(t *testing.T) {
 			m, cfg := newSecuritySettingsModel(t, tt.access, "scrypt:salt:hash")
 			m.OnVerifyPassword = func(password, hash string) bool { return true }
 			saved := 0
-			m.OnSave = func(*config.MoomboxConfig) { saved++ }
+			m.OnSave = func(*config.MoomboxConfig) error { saved++; return nil }
 			m.secRemovePw = "correct-horse"
 
 			m.handleRemovePassword()
@@ -221,4 +222,73 @@ func TestRenderSecurityRemoveWarnsForExternalAndPublic(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSecuritySaveFailureIsReportedAndRolledBack: both security commits
+// mutate the live config BEFORE they save it, so a refused write used to
+// leave the running process authenticating against a hash (or a password
+// removal) that is not in config.toml — announced as "Password set
+// successfully" / "Password removed". A refusal must name itself, must not
+// announce a security change, and must put the live config back (CORE-4).
+//
+// Mutant: ignoring OnSave's error at either site — the success message
+// stands and the live hash keeps the value the disk does not have.
+func TestSecuritySaveFailureIsReportedAndRolledBack(t *testing.T) {
+	t.Run("set password", func(t *testing.T) {
+		m, cfg := newSecuritySettingsModel(t, "localhost", "")
+		m.OnHashPassword = func(string) string { return "scrypt:salt:hash" }
+		notified := 0
+		m.OnSecurityChanged = func() { notified++ }
+		m.OnSave = func(*config.MoomboxConfig) error { return errors.New("nope") }
+		m.secNewPw = "correct-horse"
+		m.secConfirmPw = "correct-horse"
+
+		m.handleSetPassword()
+
+		if !strings.Contains(m.secMessage, "nope") {
+			t.Errorf("secMessage = %q, want the save error", m.secMessage)
+		}
+		if strings.Contains(m.secMessage, "successfully") {
+			t.Errorf("secMessage = %q, want no success wording", m.secMessage)
+		}
+		if cfg.Network.PasswordHash != "" {
+			t.Errorf("PasswordHash = %q after a refused save, want the pre-save empty value", cfg.Network.PasswordHash)
+		}
+		if notified != 0 {
+			t.Errorf("OnSecurityChanged called %d times for a refused save, want 0", notified)
+		}
+	})
+
+	t.Run("remove password", func(t *testing.T) {
+		m, cfg := newSecuritySettingsModel(t, "external", "scrypt:salt:hash")
+		m.OnVerifyPassword = func(string, string) bool { return true }
+		notified := 0
+		m.OnSecurityChanged = func() { notified++ }
+		m.OnSave = func(*config.MoomboxConfig) error { return errors.New("nope") }
+		m.secRemovePw = "correct-horse"
+
+		m.handleRemovePassword()
+
+		if !strings.Contains(m.secMessage, "nope") {
+			t.Errorf("secMessage = %q, want the save error", m.secMessage)
+		}
+		if strings.Contains(m.secMessage, "removed") {
+			t.Errorf("secMessage = %q, want no removal wording", m.secMessage)
+		}
+		if cfg.Network.PasswordHash != "scrypt:salt:hash" {
+			t.Errorf("PasswordHash = %q after a refused save, want the pre-save hash", cfg.Network.PasswordHash)
+		}
+		// The same write drops external access to localhost; the rollback
+		// has to take that with it, or the process is on localhost while
+		// config.toml still says external.
+		if cfg.Network.NetworkAccess != "external" {
+			t.Errorf("NetworkAccess = %q after a refused save, want external", cfg.Network.NetworkAccess)
+		}
+		if m.values["network_access"] != "external" {
+			t.Errorf("values[network_access] = %q after a refused save, want external", m.values["network_access"])
+		}
+		if notified != 0 {
+			t.Errorf("OnSecurityChanged called %d times for a refused save, want 0", notified)
+		}
+	})
 }

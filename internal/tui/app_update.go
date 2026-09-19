@@ -767,7 +767,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// construction aren't stalled behind disk IO. Matches
 			// settings_security.go:121-131. Audit reports/tui.md Finding 2.
 			if (a.ffmpegCheck.mode == ffmpegCustom || a.ffmpegCheck.mode == ffmpegManual) && msg.Path != "" && a.cfg != nil {
-				var saveCb func(*config.MoomboxConfig)
+				var saveCb func(*config.MoomboxConfig) error
 				var cfgSnapshot *config.MoomboxConfig
 				mu := a.configStore.RWMutex()
 				mu.Lock()
@@ -778,7 +778,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				mu.Unlock()
 				if saveCb != nil {
-					saveCb(cfgSnapshot)
+					// The path stays live on a failed write — the user just
+					// validated this ffmpeg and needs it for the rest of the
+					// session — but they are told it did not persist, rather
+					// than finding it gone after a restart (CORE-4).
+					if err := saveCb(cfgSnapshot); err != nil {
+						a.setFeedback("Failed to save FFmpeg path: " + err.Error())
+					}
 				}
 			}
 			a.ffmpegCheck.warning = msg.Warning

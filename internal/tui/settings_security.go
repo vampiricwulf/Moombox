@@ -126,12 +126,21 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
+		// Snapshot before the write for the same reason saveAndClose does:
+		// a refused save would otherwise leave the process authenticating
+		// against a hash config.toml does not have (CORE-4).
+		snapshot := m.snapshotConfig()
 		mu := m.configStore.RWMutex()
 		mu.Lock()
 		m.cfg.Network.PasswordHash = hash
 		mu.Unlock()
 		if m.OnSave != nil {
-			m.OnSave(m.cfg)
+			if err := m.OnSave(m.cfg); err != nil {
+				m.restoreConfig(snapshot)
+				m.secMessage = "Save failed: " + err.Error()
+				m.secMessageColor = ColorRed
+				return
+			}
 		}
 		if m.OnSecurityChanged != nil {
 			m.OnSecurityChanged()
@@ -176,6 +185,8 @@ func (m *SettingsModel) handleRemovePassword() {
 	}
 
 	// Remove password
+	snapshot := m.snapshotConfig()
+	prevDirty, prevStructDirty := m.dirty, m.structDirty
 	mu := m.configStore.RWMutex()
 	mu.Lock()
 	// Removing the password while external/public would leave the dashboard
@@ -193,7 +204,19 @@ func (m *SettingsModel) handleRemovePassword() {
 		m.structDirty = true
 	}
 	if m.OnSave != nil {
-		m.OnSave(m.cfg)
+		if err := m.OnSave(m.cfg); err != nil {
+			// Roll the whole commit back — the cleared hash, the access
+			// reset that rode along with it, and the panel's own field map
+			// (which the next save would otherwise write through).
+			m.restoreConfig(snapshot)
+			if networkReset {
+				m.values["network_access"] = snapshot.Network.NetworkAccess
+				m.dirty, m.structDirty = prevDirty, prevStructDirty
+			}
+			m.secMessage = "Save failed: " + err.Error()
+			m.secMessageColor = ColorRed
+			return
+		}
 	}
 	if m.OnSecurityChanged != nil {
 		m.OnSecurityChanged()

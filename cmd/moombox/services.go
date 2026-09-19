@@ -390,14 +390,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// caller now goes through Store APIs per DECISIONS #8 wave 4-7).
 	s.configStore = config.NewStore(cfg, s.configPath)
 
-	if logLevelOverride != "" {
-		cfg.Logs.LogLevel = logLevelOverride
-	}
-
 	// =========================================================================
 	// 2. Initialize logger
 	// =========================================================================
-	log, err := logger.New(cfg.Paths.LogFilePath, cfg.Logs.LogLevel, cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
+	// The -log-level override is a one-off diagnostic: it reaches the LOGGER
+	// and nothing else. Writing it into cfg.Logs.LogLevel (as this used to)
+	// made the boot auto-persist below, the password auto-hash Store.Update
+	// and every later UI save write the override to disk, so a single
+	// `-log-level=debug` run permanently changed the configured level, and
+	// the operator's only clue was a level that never went back (CORE-10).
+	// A later settings save legitimately re-applies the CONFIGURED level via
+	// Logger.SetLevel and drops the override — that is the operator having
+	// chosen a level explicitly.
+	log, err := logger.New(cfg.Paths.LogFilePath, effectiveLogLevel(cfg.Logs.LogLevel, logLevelOverride), cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)
 	}

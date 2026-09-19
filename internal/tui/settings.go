@@ -305,7 +305,14 @@ type SettingsModel struct {
 	configStore *config.Store
 
 	// Callbacks
-	OnSave    func(cfg *config.MoomboxConfig)
+	//
+	// OnSave persists cfg and returns the save error. The error is not
+	// decoration: applyValues (and the two security commits) have already
+	// written into the live *MoomboxConfig by the time it is called, so a
+	// refused write is the moment the running process and config.toml
+	// diverge — the caller reports it and rolls the live struct back
+	// (CORE-4).
+	OnSave    func(cfg *config.MoomboxConfig) error
 	OnRestart func()
 	// OnRestartRequired fires when a settings save commits a value
 	// flagged in restartRequiredKeys, regardless of whether the user

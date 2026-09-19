@@ -253,7 +253,7 @@ func (s *runState) runTUI() {
 		snap.Uptime = time.Since(s.startTime)
 		return snap, nil
 	}
-	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) {
+	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) error {
 		// Serialize on the store lock like every other saver (web routes,
 		// Store.Update-driven background saves, and the setup-wizard callback
 		// below). config.Save writes through a shared temp file and encodes the
@@ -266,23 +266,27 @@ func (s *runState) runTUI() {
 		mu.Unlock()
 		if saveErr != nil {
 			s.log.Error("Failed to save config from TUI", slog.String("error", saveErr.Error()))
-		} else {
-			s.log.Info("Config saved from TUI settings")
-			// Invalidate the browser-detection caches on every TUI settings
-			// save, unconditionally — not gated on browser_path/browser_type
-			// actually changing. The settings model mutates the SAME
-			// *config.MoomboxConfig the store holds live (Open stores the
-			// store's own pointer; applyValues writes straight into it) before
-			// this callback ever runs, so by the time updatedCfg reaches here
-			// there is no pre-mutation snapshot left to diff against from
-			// this side of the package boundary. Invalidating on every save
-			// costs one extra detection scan on a rare, human-triggered
-			// event; a missed invalidation would instead leave a stale
-			// browser list for up to browserDetectCacheTTL, silently. See
-			// the validate-browser-path handler in routes/cookies.go for the
-			// other, precisely-targeted invalidation site.
-			cookies.InvalidateBrowserDetection()
+			// Return before the hot-reload block: applying runtime settings
+			// from a config that is not on disk would make the process and
+			// the file diverge in the OTHER direction (CORE-4). The caller
+			// reports the error and rolls the live struct back.
+			return saveErr
 		}
+		s.log.Info("Config saved from TUI settings")
+		// Invalidate the browser-detection caches on every TUI settings
+		// save, unconditionally — not gated on browser_path/browser_type
+		// actually changing. The settings model mutates the SAME
+		// *config.MoomboxConfig the store holds live (Open stores the
+		// store's own pointer; applyValues writes straight into it) before
+		// this callback ever runs, so by the time updatedCfg reaches here
+		// there is no pre-mutation snapshot left to diff against from
+		// this side of the package boundary. Invalidating on every save
+		// costs one extra detection scan on a rare, human-triggered
+		// event; a missed invalidation would instead leave a stale
+		// browser list for up to browserDetectCacheTTL, silently. See
+		// the validate-browser-path handler in routes/cookies.go for the
+		// other, precisely-targeted invalidation site.
+		cookies.InvalidateBrowserDetection()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
 		if updatedCfg.Logs.LogLevel != "" {
 			s.log.SetLevel(updatedCfg.Logs.LogLevel)
@@ -306,6 +310,7 @@ func (s *runState) runTUI() {
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
+		return nil
 	}
 	app.OnRestart = func() { s.triggerRestart("TUI settings") }
 	app.OnForceCheck = func() {

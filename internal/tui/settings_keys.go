@@ -3,6 +3,8 @@ package tui
 import (
 	"maps"
 	"strings"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // HandleKey processes key input in the settings panel.
@@ -232,15 +234,77 @@ func (m *SettingsModel) handleClose() string {
 	return "close"
 }
 
+// snapshotConfig copies the live config under the store's read lock, for the
+// callers that mutate it before a save that can be refused.
+//
+// The copy is SHALLOW — the same shape config.Store.Update's own rollback
+// takes, for the same reason: every writer here REPLACES the slice fields it
+// touches (Channels, Notifications, TrustedProxies, ProbeTargets,
+// ActivePlatforms) rather than mutating elements in place, so the headers in
+// the copy still point at the pre-save backing arrays. A writer that ever
+// needs to mutate a slice element in place must deep-copy it first.
+func (m *SettingsModel) snapshotConfig() config.MoomboxConfig {
+	if m.cfg == nil {
+		return config.MoomboxConfig{}
+	}
+	if m.configStore != nil {
+		mu := m.configStore.RWMutex()
+		mu.RLock()
+		defer mu.RUnlock()
+		return *m.cfg
+	}
+	return *m.cfg
+}
+
+// restoreConfig puts the live config back to a snapshotConfig copy, under the
+// store's write lock so a concurrent reader never observes the half-rolled
+// struct.
+//
+// It restores the WHOLE struct rather than the fields the caller happens to
+// have typed, deliberately: applyValues writes every section, and a
+// hand-maintained undo list would drift the first time a field was added to
+// applyValues and not to it.
+func (m *SettingsModel) restoreConfig(snapshot config.MoomboxConfig) {
+	if m.cfg == nil {
+		return
+	}
+	if m.configStore != nil {
+		mu := m.configStore.RWMutex()
+		mu.Lock()
+		*m.cfg = snapshot
+		mu.Unlock()
+		return
+	}
+	*m.cfg = snapshot
+}
+
 // saveAndClose applies changes, saves config, and closes.
 func (m *SettingsModel) saveAndClose() string {
 	if m.dirty && m.status != saveError {
+		// Snapshot BEFORE applyValues. applyValues writes straight into the
+		// live *MoomboxConfig the store holds (Open stores the store's own
+		// pointer), so without a snapshot a refused save leaves the running
+		// process on values that are not on disk while the overlay says
+		// "Saved" (CORE-4).
+		snapshot := m.snapshotConfig()
 		m.applyValues()
 		if m.status == saveError {
+			// Today every check in applyValues runs before its write block,
+			// so this restore is a no-op on the validation path; it is here
+			// so the two refusal paths cannot drift apart if a check ever
+			// lands after a write.
+			m.restoreConfig(snapshot)
 			return "" // Validation failed, show error
 		}
 		if m.OnSave != nil {
-			m.OnSave(m.cfg)
+			if err := m.OnSave(m.cfg); err != nil {
+				m.restoreConfig(snapshot)
+				m.errorMsg = "Save failed: " + err.Error()
+				m.status = saveError
+				// dirty stays set: the typed values are still in m.values,
+				// so the user can fix the cause and press Save again.
+				return ""
+			}
 		}
 		m.status = saveSaved
 		m.dirty = false
