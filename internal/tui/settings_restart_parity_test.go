@@ -90,6 +90,23 @@ func TestRestartRequiredListsAgree(t *testing.T) {
 	}
 }
 
+// TestCookieRefreshIntervalIsRestartRequired — cookies.refresh_interval feeds a
+// ticker built once at boot (internal/cookies/autocookies_periodic.go), and
+// cmd/moombox decides whether to start the loop at all from the same value, so
+// nothing about a saved change takes effect until a restart. It was in NEITHER
+// list, which is the one gap TestRestartRequiredListsAgree cannot see: that
+// test compares the lists to each other, not to reality.
+//
+// MUTANT: drop the key from restartRequiredKeys — this fails, and
+// TestRestartRequiredListsAgree fails too (the Web list still has it).
+func TestCookieRefreshIntervalIsRestartRequired(t *testing.T) {
+	if !restartRequiredKeys["refresh_interval"] {
+		t.Error("cookies.refresh_interval is not marked restart-required — both settings pages save it " +
+			"as if the new cadence took effect, and the browser keeps refreshing on the old one until " +
+			"the next restart (up to a week's worth of wrong cadence)")
+	}
+}
+
 // TestRestartRequiredKeysAreRealFields is the premise the test above rests on.
 //
 // restartRequiredKeys is consulted as `restartRequiredKeys[fd.key]` while
@@ -123,7 +140,7 @@ func TestRestartRequiredKeysAreRealFields(t *testing.T) {
 // missing prompt. `id` drives nothing but the "Restart" badge, inserted with
 // `document.getElementById(id)` followed by `if (!el) continue` — so a typo,
 // a renamed element or a copied-from-the-wrong-row id produces no error, no
-// console warning and no badge. The three cookie ids added here are exactly
+// console warning and no badge. The four cookie ids added here are exactly
 // where that is easiest to get wrong: they do not follow the `cfg-<key>`
 // pattern the network rows use (`cookies.auto_enabled` is `cfg-auto-cookies-
 // enabled`, not `cfg-auto-enabled`).
@@ -166,7 +183,7 @@ func TestRestartRequiredWebIdsExist(t *testing.T) {
 // actually reads.
 //
 // Both UIs summarise the list as a handful of CATEGORIES rather than enumerate
-// fifteen keys, and that summary went stale the moment the cookie settings were
+// sixteen keys, and that summary went stale the moment the cookie settings were
 // added: an operator who changed only a cookie setting was shown a prompt
 // naming port, network access, database path and log settings — four things
 // they had not touched — which reads as a prompt about something else and gets
@@ -178,7 +195,7 @@ func TestRestartRequiredWebIdsExist(t *testing.T) {
 // DOM-coupled method, so it cannot be executed here, but the literal is
 // extracted by its own opening rather than searched for file-wide.
 func TestRestartOverlayNamesEveryCategoryItCovers(t *testing.T) {
-	// The categories the fifteen keys fall into, each paired with a word the
+	// The categories the sixteen keys fall into, each paired with a word the
 	// summary must contain. Derived from restartRequiredKeys rather than
 	// listed, so a future key in a fifth category fails here instead of
 	// quietly widening the gap between the list and the sentence.
@@ -188,6 +205,7 @@ func TestRestartOverlayNamesEveryCategoryItCovers(t *testing.T) {
 		"database_path": "database", "log_file_path": "log",
 		"log_max_file_size": "log", "log_max_files": "log",
 		"cookie_file": "cookie", "auto_enabled": "cookie", "browser_profile_dir": "cookie",
+		"refresh_interval":      "cookie",
 		"probe_targets":         "connectivity",
 		"sidecar_hard_limit_mb": "sidecar", "use_sidecar": "sidecar",
 	}

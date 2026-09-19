@@ -2521,11 +2521,19 @@ export class MoomboxApp {
   async openJobFolder() {
     if (!this.selectedJobId) return;
     try {
-      await fetch(`/api/jobs/${this.selectedJobId}/open-folder`, {
+      const response = await fetch(`/api/jobs/${this.selectedJobId}/open-folder`, {
         method: "POST",
       });
+      // The answer was thrown away, so every refusal was a button that did
+      // nothing and said nothing — including the Linux case, where the host
+      // has no file manager the route can spawn and says exactly that (WEB-6).
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({ error: response.statusText }));
+        this.showToast(data?.error || "Failed to open folder", "danger");
+      }
     } catch (e) {
       console.error("Failed to open folder:", e);
+      this.showToast("Failed to open folder: " + e.message, "danger");
     }
   }
 

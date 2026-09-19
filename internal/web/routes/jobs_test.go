@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1505,6 +1507,61 @@ func TestJobChatIsNotReadIntoMemory(t *testing.T) {
 	if got := res.AllocedBytesPerOp(); got > fileSize/4 {
 		t.Errorf("serving a %d-byte chat file allocates %d B/op; want well under a quarter of the "+
 			"file — the handler must stream it, not copy it", fileSize, got)
+	}
+}
+
+// TestOpenFolderRouteUsesTheSharedCommand — the route is loopback-only and
+// spawning a file manager in a test would open a window, so this pins the call
+// structurally. MUTANT: the inline Windows-only spawn comes back.
+func TestOpenFolderRouteUsesTheSharedCommand(t *testing.T) {
+	src, err := os.ReadFile("jobs.go")
+	if err != nil {
+		t.Fatalf("read jobs.go: %v", err)
+	}
+	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	if !strings.Contains(text, "cmd := web.OpenPathCommand(dir)") {
+		t.Error("the open-folder handler does not use web.OpenPathCommand — on Linux the button is a " +
+			"silent no-op (WEB-6)")
+	}
+	if strings.Contains(text, `exec.Command("explorer`) {
+		t.Error("jobs.go still spells explorer directly; the GOOS switch lives in web.OpenPathCommand")
+	}
+}
+
+// TestOpenFolderFailureNamesTheMissingProgram pins the message the dashboard
+// shows when the host has no file manager — the Linux desktop case WEB-6 is
+// about, where xdg-open is simply not installed. A generic 500 reads as "the
+// server broke"; it is neither a server fault nor fixed by retrying, and
+// CLAUDE.md's Linux promise is "degrade gracefully with CLEAR UI messaging".
+//
+// The mapping is a function precisely so it can be asserted without a spawn:
+// exercising the handler's error arm would need a real file manager to be
+// missing, and exercising its success arm would open a window (R3). Nothing
+// here is started — exec.Command only resolves a name.
+//
+// MUTANT: return the generic 500 for every error — the first row's message
+// assertion fails.
+func TestOpenFolderFailureNamesTheMissingProgram(t *testing.T) {
+	missing := &exec.Error{Name: "xdg-open", Err: exec.ErrNotFound}
+
+	msg, status := openFolderFailure(exec.Command("xdg-open", "/srv/out"), missing)
+	if status == http.StatusInternalServerError {
+		t.Error("a host with no file manager answers a bare 500, which reads as a server fault the " +
+			"operator should retry")
+	}
+	if status < 400 || status > 599 {
+		t.Errorf("status %d is not an error status", status)
+	}
+	if !strings.Contains(msg, "xdg-open") {
+		t.Errorf("message %q does not name the missing program, so the operator cannot tell what to "+
+			"install", msg)
+	}
+
+	// Any other spawn failure keeps the message the route has always sent.
+	otherMsg, otherStatus := openFolderFailure(exec.Command("xdg-open", "/srv/out"), errors.New("permission denied"))
+	if otherStatus != http.StatusInternalServerError || otherMsg != "failed to open folder" {
+		t.Errorf("an unrelated spawn failure answered %d %q, want 500 %q", otherStatus, otherMsg,
+			"failed to open folder")
 	}
 }
 

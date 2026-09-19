@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1173,9 +1174,13 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			dir = stagingDir
 		}
 
-		cmd := exec.Command("explorer", dir)
+		// One GOOS switch, shared with the browser-open path in internal/web:
+		// this handler used to name the Windows file manager inline, so on a
+		// Linux desktop the button was a silent no-op (WEB-6).
+		cmd := web.OpenPathCommand(dir)
 		if err := cmd.Start(); err != nil {
-			jsonError(rw, "failed to open folder", http.StatusInternalServerError)
+			msg, status := openFolderFailure(cmd, err)
+			jsonError(rw, msg, status)
 			return
 		}
 		// Release the OS process handle immediately — we don't call
@@ -1305,6 +1310,31 @@ func validatePathTraversal(filePath, outputDir string) (string, bool) {
 		return "", false
 	}
 	return resolvedFile, true
+}
+
+// openFolderFailure maps a failed open-folder spawn to the message and status
+// the dashboard shows, in jsonError's own argument order.
+//
+// A host with no file manager on PATH — every headless or minimal Linux
+// install, where the command is xdg-open — is not a server fault and is not
+// fixed by retrying, so it gets its own answer NAMING the missing program
+// rather than the generic 500 the route sent for everything. That message is
+// the "clear UI messaging" half of WEB-6: the button now says what is wrong
+// instead of doing nothing.
+//
+// It is a function so the mapping can be asserted without a spawn — reaching
+// this arm through the handler would need a real file manager to be missing,
+// and reaching the success arm would open a window on the developer's desktop.
+func openFolderFailure(cmd *exec.Cmd, err error) (string, int) {
+	if errors.Is(err, exec.ErrNotFound) {
+		program := "the desktop file manager"
+		if len(cmd.Args) > 0 {
+			program = cmd.Args[0]
+		}
+		return "Cannot open the folder: " + program + " is not installed on this host",
+			http.StatusNotImplemented
+	}
+	return "failed to open folder", http.StatusInternalServerError
 }
 
 func jsonResponse(w http.ResponseWriter, data any) {

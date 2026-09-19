@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -310,5 +313,100 @@ func TestRootAnswersConditionalGET(t *testing.T) {
 	}
 	if second.Body.Len() != 0 {
 		t.Fatalf("304 carried %d body bytes, want 0", second.Body.Len())
+	}
+}
+
+// TestOpenPathCommandSwitchesOnGOOS is the WEB-6 pin.
+//
+// The open-folder route hard-coded the Windows file manager by name while
+// openBrowserURL a few hundred lines away already branched on runtime.GOOS. On
+// a Linux desktop the button appears (the host is loopback), explorer is not on
+// PATH, cmd.Start() returns exec.ErrNotFound, and the route 500s — silently,
+// because the client never read response.ok.
+//
+// Nothing here is started: a real Start() would pop a window on the developer's
+// desktop, so every assertion below is structural (R3).
+//
+// THE MUTANT: return the Windows command unconditionally — on a Linux build
+// this asserts the wrong program name.
+func TestOpenPathCommandSwitchesOnGOOS(t *testing.T) {
+	cmd := OpenPathCommand("/some/dir")
+	if cmd == nil {
+		t.Fatal("OpenPathCommand returned nil")
+	}
+	want := "xdg-open"
+	if runtime.GOOS == "windows" {
+		want = "explorer.exe"
+	}
+	if got := filepath.Base(cmd.Path); !strings.EqualFold(got, want) {
+		t.Errorf("program: want %q on %s, got %q (cmd.Path=%q) — a hard-coded file manager makes the "+
+			"dashboard's Open Folder button a no-op on Linux", want, runtime.GOOS, got, cmd.Path)
+	}
+	if len(cmd.Args) < 2 || cmd.Args[len(cmd.Args)-1] != "/some/dir" {
+		t.Errorf("args: want the target last, got %v", cmd.Args)
+	}
+}
+
+// TestOpenPathCommandIsTheSameOnBothHosts pins BOTH shapes from EITHER host.
+//
+// The test above can only assert the platform it runs on, so on this project's
+// Windows-primary desktop it cannot see the Linux half — which is the half
+// WEB-6 is about — and a Linux CI runner cannot see that the Windows behaviour
+// this change must leave byte-identical is still byte-identical. Injecting the
+// GOOS is what makes both assertable in one run.
+//
+// THE MUTANT: return the Windows command unconditionally (or drop the goos
+// parameter and read runtime.GOOS) — the linux row fails here on Windows, where
+// TestOpenPathCommandSwitchesOnGOOS alone would still pass.
+func TestOpenPathCommandIsTheSameOnBothHosts(t *testing.T) {
+	const target = `C:\Moombox\output\stream`
+
+	for _, tc := range []struct {
+		goos    string
+		program string
+	}{
+		{"windows", "explorer.exe"},
+		{"linux", "xdg-open"},
+		{"freebsd", "xdg-open"}, // every non-Windows target takes the freedesktop path
+	} {
+		cmd := openPathCommandFor(tc.goos, target)
+		if cmd == nil {
+			t.Fatalf("%s: openPathCommandFor returned nil", tc.goos)
+		}
+		// Args is what the child is handed and is identical on both hosts;
+		// cmd.Path additionally resolves through LookPath, which only finds
+		// the program when the test host IS that platform.
+		want := []string{tc.program, target}
+		if len(cmd.Args) != 2 || cmd.Args[0] != want[0] || cmd.Args[1] != want[1] {
+			t.Errorf("goos=%s: args %v, want %v — the Windows spawn must stay exactly what it was "+
+				"while Linux gains its own", tc.goos, cmd.Args, want)
+		}
+		if got := filepath.Base(cmd.Path); !strings.EqualFold(got, tc.program) {
+			t.Errorf("goos=%s: program %q, want %q", tc.goos, got, tc.program)
+		}
+	}
+}
+
+// TestOpenBrowserURLUsesTheSharedCommand pins that the two call sites share one
+// switch rather than carrying two copies that can drift again. Structural: a
+// real Start() would pop a window on the developer's desktop.
+//
+// THE MUTANT: openBrowserURL rebuilds its own if runtime.GOOS == "windows"
+// block — the delegation check fails, and so does the count below, because that
+// block spells the program inline.
+func TestOpenBrowserURLUsesTheSharedCommand(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	if !strings.Contains(text, "func openBrowserURL(url string) {\n\tcmd := OpenPathCommand(url)") {
+		t.Error("openBrowserURL does not delegate to OpenPathCommand — the GOOS switch has been copied " +
+			"again, which is how WEB-6 happened")
+	}
+	if n := strings.Count(text, `exec.Command("explorer`); n != 0 {
+		t.Errorf("server.go still spells explorer directly %d time(s); the only switch belongs in "+
+			"OpenPathCommand, which names the program through a variable so a second literal is "+
+			"always a second copy", n)
 	}
 }

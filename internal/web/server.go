@@ -881,20 +881,45 @@ func RecoveryMiddleware(logger interface {
 	}
 }
 
-// openBrowserURL opens the default browser to the given URL — explorer.exe
-// on Windows, xdg-open on other platforms (the freedesktop standard on the
-// supported Linux targets). Failure is silent best-effort either way.
+// OpenPathCommand builds the command that hands `target` — a URL or a
+// directory — to the desktop shell: explorer.exe on Windows, xdg-open on the
+// supported Linux targets (the freedesktop standard, and what opens a file
+// manager for a directory there). The caller starts it; nothing here spawns.
+//
+// Exported so internal/web/routes' open-folder handler shares this ONE switch.
+// It did not: that handler named the Windows file manager inline with no switch
+// at all, so on a Linux desktop the dashboard's Open Folder button appeared
+// (the host is loopback), found no explorer, and 500'd into a client that never
+// read response.ok (WEB-6).
+func OpenPathCommand(target string) *exec.Cmd {
+	return openPathCommandFor(runtime.GOOS, target)
+}
+
+// openPathCommandFor is OpenPathCommand with the platform injected, so both
+// shapes are assertable from either host: the Windows spawn this change must
+// leave byte-identical cannot be checked from a Linux CI runner otherwise, and
+// the Linux spawn it adds cannot be checked from the Windows desktop this
+// project is developed on.
+//
+// The program is a variable rather than one exec.Command call per branch,
+// because a second literal is exactly how the two copies of this switch drifted
+// apart — TestOpenBrowserURLUsesTheSharedCommand counts them and wants zero.
+func openPathCommandFor(goos, target string) *exec.Cmd {
+	program := "xdg-open"
+	if goos == "windows" {
+		program = "explorer.exe"
+	}
+	return exec.Command(program, target)
+}
+
+// openBrowserURL opens the default browser to the given URL. Failure is silent
+// best-effort: the dashboard is already listening, and the URL is in the log.
 //
 // Process.Release() returns the OS handle to the kernel so we don't
 // leak one process handle per Moombox lifetime. Symmetric with the
 // open-folder handler's Q-6 fix (audit reports/web.md).
 func openBrowserURL(url string) {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("explorer.exe", url)
-	} else {
-		cmd = exec.Command("xdg-open", url)
-	}
+	cmd := OpenPathCommand(url)
 	if err := cmd.Start(); err == nil && cmd.Process != nil {
 		_ = cmd.Process.Release()
 	}

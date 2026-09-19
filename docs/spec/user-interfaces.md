@@ -597,7 +597,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `POST` | `/api/jobs` | Create a new job. Rate limited. Body contains URL, format preferences, timestamps. |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
 | `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job. |
-| `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in Windows Explorer. **Loopback only.** |
+| `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` (`internal/web/server.go`) that the browser-open path also uses. A host with no file manager answers `501` naming the missing program, which the dashboard shows as a toast rather than swallowing. **Loopback only.** |
 | `DELETE` | `/api/jobs/{id}` | Delete a job and optionally its files. |
 
 ### Watch Tracking
@@ -816,9 +816,9 @@ The rung-3 sentence and its Web twin (`No browser profile found, running a norma
 
 #### Restart-required cookie settings
 
-Three cookie keys are labelled restart-required in **both** settings UIs — `cookie_file`, `auto_enabled`, `browser_profile_dir`. The Web UI inserts a `Restart` badge after the named element (`RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`) and offers a restart on save; the TUI colours the change marker yellow instead of green for these keys (`restartRequiredKeys` in `internal/tui/settings.go`, rendered in `settings_view.go`). The two lists are pinned against each other by `TestRestartRequiredListsAgree`. What `auto_enabled` does **not** need a restart for is the manual triggers: `R F` and the dashboard's shift+click read it live. See `data-and-storage.md §[cookies]` for why the three are restart-required at all.
+Four cookie keys are labelled restart-required in **both** settings UIs — `cookie_file`, `refresh_interval`, `auto_enabled`, `browser_profile_dir`. The Web UI inserts a `Restart` badge after the named element (`RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`) and offers a restart on save; the TUI colours the change marker yellow instead of green for these keys (`restartRequiredKeys` in `internal/tui/settings.go`, rendered in `settings_view.go`). The two lists are pinned against each other by `TestRestartRequiredListsAgree`. What `auto_enabled` does **not** need a restart for is the manual triggers: `R F` and the dashboard's shift+click read it live. See `data-and-storage.md §[cookies]` for why the four are restart-required at all.
 
-The same two lists carry every other restart-required key — `port`, `network_access`, `https_enabled`, `tls_cert_path`, `tls_key_path`, `database_path`, `log_file_path`, `log_max_file_size`, `log_max_files`, and (since Arc B of the 2026-09-04 improvement chain) `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar` — fifteen in all; both restart prompts name the categories: port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings.
+The same two lists carry every other restart-required key — `port`, `network_access`, `https_enabled`, `tls_cert_path`, `tls_key_path`, `database_path`, `log_file_path`, `log_max_file_size`, `log_max_files`, and (since Arc B of the 2026-09-04 improvement chain) `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar` — sixteen in all; both restart prompts name the categories: port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings.
 
 #### Facts these surfaces deliberately do not carry
 

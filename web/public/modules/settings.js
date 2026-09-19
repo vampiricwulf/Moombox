@@ -100,6 +100,7 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "logs.log_max_file_size", id: "cfg-log-max-size" },
   { path: "logs.log_max_files", id: "cfg-log-max-files" },
   { path: "cookies.cookie_file", id: "cfg-cookie-file" },
+  { path: "cookies.refresh_interval", id: "cfg-cookie-refresh-interval" },
   { path: "cookies.auto_enabled", id: "cfg-auto-cookies-enabled" },
   { path: "cookies.browser_profile_dir", id: "cfg-auto-cookies-profile-dir" },
   { path: "connectivity.probe_targets", id: "cfg-probe-targets" },
