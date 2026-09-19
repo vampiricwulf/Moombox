@@ -463,6 +463,12 @@ func TestRecheckReportOnlySaysFailedWhenItIs(t *testing.T) {
 // surface input in its own right; whether today's producers can move one
 // without the other is a fact about the producers, and the day one of them can
 // is not the day to discover the comparison was never pinned.
+//
+// Mutant for the cookie-file row:
+//   - drop `next.CookieFileError != prev.CookieFileError` from the gate -> a
+//     cookies.txt becoming unreadable (or readable again) fires no push, so the
+//     TUI bar keeps its previous badge until some unrelated flip happens to
+//     fire the callback.
 func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 	base := AuthStatus{
 		YouTubeAuthenticated: false,

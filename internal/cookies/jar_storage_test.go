@@ -1,6 +1,7 @@
 package cookies
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"unicode/utf8"
 )
@@ -1211,17 +1213,23 @@ func TestCompareCookieDomainsIsATotalOrder(t *testing.T) {
 var netscapeWithYouTubeAuth = "# Netscape HTTP Cookie File\n" +
 	cookieRow(".youtube.com", "0", "SAPISID", "synthetic-sapisid-value") + "\n"
 
-// makeUnreadable swaps the jar's read seam for one that fails with
-// fs.ErrPermission for this path, and returns the restore func. The seam
-// rather than a real chmod: 0o000 is a no-op for the file's owner on Windows
-// and for root on Linux, so a real permission change cannot drive this branch
-// portably — and this test must run on both CI legs.
+// makeUnreadable swaps the jar's read seam for one that fails the way
+// os.ReadFile does over a file the process may not open, and returns the
+// restore func. The seam rather than a real chmod: 0o000 is a no-op for the
+// file's owner on Windows and for root on Linux, so a real permission change
+// cannot drive this branch portably — and this test must run on both CI legs.
+//
+// syscall.EACCES rather than fs.ErrPermission, because the SHAPE is what is
+// under test: os.ReadFile always yields a *fs.PathError whose Err is a
+// syscall.Errno, and since fix round 1 that is the only cause
+// cookieLoadErrorSentence will quote. A sentinel driven by a non-errno cause
+// would exercise the fallback instead of the production path.
 func makeUnreadable(t *testing.T, path string) (restore func()) {
 	t.Helper()
 	real := cookieJarReadFile
 	cookieJarReadFile = func(p string) ([]byte, error) {
 		if p == path {
-			return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrPermission}
+			return nil, &fs.PathError{Op: "open", Path: p, Err: syscall.EACCES}
 		}
 		return real(p)
 	}
@@ -1332,6 +1340,14 @@ func loadThroughFailingRead(t *testing.T, path string, readErr error) string {
 //     sentinel stops being valid UTF-8.
 //   - render the sentence as fmt.Sprintf("%v", err) -> the embedded-line row
 //     puts a cookie row in a badge title.
+//   - quote pathErr.Err.Error() instead of narrowing to syscall.Errno -> the
+//     PathError row puts a cookie row in a badge title. That shape is not
+//     reachable through os.ReadFile today, which is exactly why the guarantee
+//     has to be structural: cookieJarReadFile is a seam, and an os.Root open,
+//     a decrypting reader or a network-mount shim would each bring their own
+//     error type with them.
+//   - drop the errno arm altogether -> the errno row renders the fallback and
+//     the operator is never told it was a permission.
 func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
 	// Three paddings, because ONE path proves nothing here: where the cut
 	// lands inside the multi-byte run depends on the prefix length, and a
@@ -1356,6 +1372,41 @@ func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
 		})
 	}
 
+	t.Run("an errno keeps the OS's own wording", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		sentinel := loadThroughFailingRead(t, path,
+			&fs.PathError{Op: "open", Path: path, Err: syscall.EACCES})
+
+		if !strings.Contains(sentinel, syscall.EACCES.Error()) {
+			t.Errorf("LastLoadError() = %q — an errno is os's own closed vocabulary and is "+
+				"quoted verbatim, so the operator reads the platform's own words", sentinel)
+		}
+		if strings.Contains(sentinel, cookieLoadErrorUnknownCause) {
+			t.Errorf("LastLoadError() = %q — it fell back to the fixed phrase over a cause it "+
+				"could have named", sentinel)
+		}
+	})
+
+	t.Run("a PathError whose cause carries a cookie row is not echoed", func(t *testing.T) {
+		row := cookieRow(".youtube.com", "0", "SAPISID", "synthetic-secret-value")
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		sentinel := loadThroughFailingRead(t, path,
+			&fs.PathError{Op: "open", Path: path, Err: errors.New(row)})
+
+		if strings.Contains(sentinel, "SAPISID") {
+			t.Errorf("LastLoadError() = %q — a *fs.PathError's Err is an ERROR, not a closed "+
+				"vocabulary, so quoting it verbatim puts whatever it carries on two dashboards",
+				sentinel)
+		}
+		if !strings.Contains(sentinel, cookieLoadErrorUnknownCause) {
+			t.Errorf("LastLoadError() = %q — a cause it will not quote must still say that it "+
+				"could not read the file", sentinel)
+		}
+		if !strings.Contains(sentinel, "cookies.txt") {
+			t.Errorf("LastLoadError() = %q — it must still name the file to fix", sentinel)
+		}
+	})
+
 	t.Run("an error that embeds a line of the file is not echoed", func(t *testing.T) {
 		secret := "SAPISID=synthetic-secret-value"
 		path := filepath.Join(t.TempDir(), "cookies.txt")
@@ -1369,4 +1420,42 @@ func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
 			t.Errorf("LastLoadError() = %q — it must still name the file to fix", sentinel)
 		}
 	})
+}
+
+// TestBoundStringSurvivesATinyBound is fix round 1's Minor 1. boundString is an
+// unexported general helper in a package that does a lot of string work, and
+// `cut := n - 3` goes negative for any bound under the ellipsis's own width —
+// the `for cut > 0` guard is false immediately and `s[:cut]` panics. Only
+// cookieLoadErrorMaxLen reaches it today; the next caller is the problem.
+//
+// Mutant:
+//   - drop the n < len(ellipsis) guard -> boundString(s, 0) panics with a
+//     slice bounds error instead of returning a bounded string.
+func TestBoundStringSurvivesATinyBound(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"permission denied", 0, ""},
+		{"permission denied", 1, "p"},
+		{"permission denied", 2, "pe"},
+		{"permission denied", 3, "..."},
+		{"私の-cookies", 2, ""},     // no room for even one rune: cut back to nothing
+		{"私の-cookies", 4, "..."},  // the marker fits; its one spare byte cannot hold a rune
+		{"私の-cookies", 6, "私..."}, // the marker plus exactly one rune
+		{"abc", 3, "abc"},         // exactly n: returned whole, no ellipsis
+		{"permission denied", -1, ""},
+	} {
+		got := boundString(tc.s, tc.n)
+		if got != tc.want {
+			t.Errorf("boundString(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+		}
+		if tc.n >= 0 && len(got) > tc.n {
+			t.Errorf("boundString(%q, %d) is %d bytes — the bound is the whole contract", tc.s, tc.n, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("boundString(%q, %d) = %q — the cut split a rune", tc.s, tc.n, got)
+		}
+	}
 }

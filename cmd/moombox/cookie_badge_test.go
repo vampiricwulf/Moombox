@@ -23,6 +23,13 @@ import (
 //
 // The table is deliberately shared rather than split per platform: the two arms
 // had already diverged once, and one table is what stops them diverging again.
+//
+// Mutants for the three unreadable-file rows:
+//   - drop `case fileUnreadable` from cookieBadgeFor -> the first row reports
+//     NONE (never configured) and the second UNKNOWN (a network blip), which
+//     are the two wrong remedies this state was added to stop.
+//   - rank fileUnreadable ABOVE authenticated -> the third row reddens a badge
+//     whose requests are demonstrably working.
 func TestCookieBadgeForSeparatesRejectedFromUnchecked(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

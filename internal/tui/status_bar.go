@@ -36,6 +36,17 @@ var (
 	statusBarGrnStyle = lipgloss.NewStyle().Foreground(ColorGreen)
 	statusBarWrnStyle = lipgloss.NewStyle().Foreground(ColorWarning)
 	statusBarYelStyle = lipgloss.NewStyle().Foreground(ColorYellow)
+	// statusBarCookieStyle is the unreadable-cookie-file alert, and the only
+	// alert on this bar that is not red. It has to be distinguishable from the
+	// other two at the tight tiers, where every label collapses to a bare "YT"
+	// and colour is the ONLY thing left — a red "YT" already means "the
+	// credentials were rejected, or a job parked", whose remedy is a
+	// re-export, and "YT!" already means "sign in again". A third remedy needs
+	// a third rendering, and a longer label is exactly what these tiers do not
+	// have room for. ColorCookies rather than a new value: it is already this
+	// program's "a cookie file is the problem" colour (the COOKIES? job
+	// status), so the bar borrows a meaning the operator has already seen.
+	statusBarCookieStyle = lipgloss.NewStyle().Foreground(ColorCookies)
 )
 
 // CookieStatus represents the authentication state for a platform.
@@ -475,8 +486,14 @@ func cookieUnknownLabel(code string, t barTier) string {
 // cookieFileErrorLabel is cookieUnknownLabel's sibling for the unreadable-file
 // state. Abbreviates at tierTight like the others, but to the BARE code rather
 // than to "YT!" — that spelling belongs to the re-login prompt, whose remedy is
-// a browser login and not a permission fix, and two red alerts that render
+// a browser login and not a permission fix, and two alerts that render
 // identically are one alert.
+//
+// The bare code collides with the CookiesOnly arm, which renders one too; what
+// separates them at those tiers is the COLOUR (statusBarCookieStyle, not red),
+// because the label is the scarce resource there and a third glyph would have
+// to be learnt. Pinned across all four tiers by
+// TestUnreadableBadgeIsDistinctFromRejectedCredentials.
 func cookieFileErrorLabel(code string, t barTier) string {
 	if t >= tierTight {
 		return code
@@ -630,8 +647,11 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 			// Above the parked/CookiesOnly arm: a cookies.txt that cannot be
 			// read explains every symptom below it, and it is the one remedy
 			// the other arms would send the operator away from. Not gated on
-			// `healthy` — conclusive and actionable, like Re-login.
-			parts = append(parts, statusBarRedStyle.Render(cookieFileErrorLabel("YT", t)))
+			// `healthy` — conclusive and actionable, like Re-login. Rendered in
+			// statusBarCookieStyle, not red: at tierTight and below the label
+			// is a bare "YT" and colour is all that separates this from the
+			// rejected-credentials badge beneath it.
+			parts = append(parts, statusBarCookieStyle.Render(cookieFileErrorLabel("YT", t)))
 		case ytRejected || m.ytCookie == CookieStatusCookiesOnly:
 			// ytRejected stays ahead of the unknown arm on purpose: a job
 			// parked in COOKIES? is evidence from a real download attempt, and
@@ -677,7 +697,7 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 			// Same rank and the same reason as the YouTube arm above; the two
 			// ladders stay the same SHAPE so the next divergence is visible.
 			// One cookies.txt holds both platforms, so both badges can carry it.
-			parts = append(parts, statusBarRedStyle.Render(cookieFileErrorLabel("TW", t)))
+			parts = append(parts, statusBarCookieStyle.Render(cookieFileErrorLabel("TW", t)))
 		case twRejected || m.twCookie == CookieStatusCookiesOnly:
 			// Same precedence as YouTube's, and for the same reason: a parked
 			// job is evidence from a real download attempt and outranks a check
