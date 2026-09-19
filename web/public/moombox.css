@@ -998,6 +998,21 @@ body.batch-bar-active {
     }
 }
 
+/* Keyboard focus ring for the status bar's and log panel's role="button"
+   controls. They are spans and divs, so without this the ring is whatever the
+   UA picks; this matches the app's existing :focus-visible convention
+   (#player-chat-offset, .setup-mode-card, .segment-indicator-block). The
+   offset is positive rather than the blocks' -2px — these are small inline
+   glyphs and an inset ring would sit on the text. */
+#check-countdown:focus-visible,
+#status-warnings-icon:focus-visible,
+#version-indicator:focus-visible,
+#log-autoscroll-pill:focus-visible,
+.status-warning:focus-visible {
+    outline: 2px solid var(--sl-color-primary-500);
+    outline-offset: 2px;
+}
+
 /* Dialog adjustments */
 sl-dialog::part(body) {
     padding: var(--sl-spacing-medium);

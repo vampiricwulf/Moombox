@@ -12,6 +12,9 @@
 // state) AFTER the listeners are bound and asserts both paths see the patch.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 let jsdomMissing = null;
 try {
@@ -291,4 +294,121 @@ test("every control has an accessible name", { skip }, async () => {
   assert.match(version.title, /^Moombox v2\.8\.8/);
   assert.equal(version.getAttribute("aria-label"), version.title,
     "the version indicator's name must say what pressing it does");
+});
+
+// ── Fix round 1: the key must not do two things at once ────────────────────
+
+// The controls and the app's global keydown shortcut share one document, and
+// the delegated span handler NEEDS the event to keep bubbling to
+// #status-warnings — so stopPropagation() is not available and the global
+// handler is the one that has to stand aside. Without that, a keyboard user
+// who arrowed down the job list and then tabbed to the status bar opens the
+// focused job's details dialog every time they press Enter on a control,
+// which a click on the same control does not do.
+//
+// MUTANT: drop `if (e.defaultPrevented) return;` from setupKeyboardShortcuts —
+// every row below reports the focused job's details opened as well.
+test("Enter on a status-bar control never also opens the focused job", { skip }, async () => {
+  const h = await booted();
+  h.document.querySelector('sl-tab-panel[name="tasks"]').setAttribute("active", "");
+  h.app.jobs = [{ id: "JOB1", status: "Live", title: "one", channelName: "c", platform: "youtube" }];
+  h.app.focusedJobIndex = 0;
+
+  const opened = [];
+  h.app.details.showJobDetails = (job) => opened.push(job.id);
+
+  // The shortcut itself must still work, or this test would pass for the
+  // wrong reason — a fixture that never reaches the Enter case at all.
+  press(h, h.document.body, "Enter");
+  assert.deepEqual(opened, ["JOB1"], "the global Enter shortcut must still open the focused job");
+
+  // Each control's own action, stubbed so what is asserted below is the
+  // SECOND thing the key used to cause, not the first.
+  const activated = [];
+  h.app.answerReloginPrompt = (a) => activated.push(a);
+  h.app.checkMonitorsNow = () => activated.push("check-now");
+  h.window.open = () => activated.push("github");
+  const pill = h.el("log-autoscroll-pill");
+  pill.style.display = "";
+
+  for (const [name, el, expected] of [
+    ["a re-login warning span", warningSpans(h)[0], ["yt-relogin"]],
+    ["#status-warnings-icon", h.el("status-warnings-icon"), ["yt-relogin"]],
+    // The first press only arms the click-twice-to-open confirm.
+    ["#version-indicator", h.el("version-indicator"), []],
+    // The pill's resume touches none of the stubs; its effect is asserted after the loop.
+    ["#log-autoscroll-pill", pill, []],
+    // Pre-existing, and fixed for free by the same guard.
+    ["#check-countdown", h.el("check-countdown"), ["check-now"]],
+  ]) {
+    opened.length = 0;
+    activated.length = 0;
+    const ev = press(h, el, "Enter");
+    assert.equal(ev.defaultPrevented, true, `${name}: the control must handle Enter itself`);
+    assert.deepEqual(activated, expected, `${name}: Enter must still do the control's own job`);
+    assert.deepEqual(opened, [], `${name}: Enter must not ALSO open the focused job's details`);
+  }
+  assert.equal(pill.style.display, "none", "the pill still resumed auto-scroll on its Enter");
+});
+
+// MUTANT: the shape before this round — static role/tabindex in the markup and
+// an unconditional trigger() — the icon reports role="button", tabindex="0",
+// swallows Space and does nothing, a Tab stop that did not exist before this
+// task created it (the pre-change icon carried neither attribute).
+test("the collapsed warnings icon is a button only while it stands for something actionable", { skip }, async () => {
+  const h = await booted({
+    autoCookieReloginRequired: { youtube: false, twitch: false },
+    botguardSidecar: { healthy: false, reason: "stdout EOF", restarts: 0 },
+  });
+
+  const icon = h.el("status-warnings-icon");
+  assert.ok(icon.classList.contains("active"), "the sidecar alert still raises the icon (the premise here)");
+  assert.equal(icon.dataset.action, undefined, "…and it carries no action");
+  assert.equal(icon.getAttribute("role"), null,
+    "the icon stands for a statement, so it must not be announced as a button");
+  assert.equal(icon.getAttribute("tabindex"), null,
+    "…nor be a Tab stop: there is nothing to activate");
+
+  const calls = [];
+  h.app.answerReloginPrompt = (a) => calls.push(a);
+  const inert = press(h, icon, " ");
+  assert.equal(inert.defaultPrevented, false,
+    "an inert icon must leave Space to the browser instead of swallowing the page scroll");
+  assert.deepEqual(calls, []);
+  icon.click();
+  assert.deepEqual(calls, [], "the click half is inert too — it always was");
+
+  // An actionable warning arrives: the same element becomes a button again.
+  h.app.autoCookieReloginRequired = { youtube: true, twitch: false };
+  h.app.updateStatusBar();
+  assert.equal(icon.dataset.action, "yt-relogin");
+  assert.equal(icon.getAttribute("role"), "button", "an actionable icon must be announced as a button");
+  assert.equal(icon.getAttribute("tabindex"), "0", "…and be reachable by Tab");
+  const live = press(h, icon, " ");
+  assert.equal(live.defaultPrevented, true);
+  assert.deepEqual(calls, ["yt-relogin"]);
+});
+
+// Reads the stylesheet as text, so it needs no jsdom and carries no `skip`.
+//
+// MUTANT: drop any one selector from the :focus-visible rule — that control
+// falls back to whatever ring the UA picks for a span or a div, which is the
+// very thing the app's existing :focus-visible convention (#player-chat-offset,
+// .setup-mode-card, .segment-indicator-block) exists to replace.
+test("every keyboard-reachable control has the app's focus ring, not the UA's", () => {
+  const css = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public", "moombox.css"),
+    "utf8",
+  );
+  const block = css.split("}").find((b) => b.includes("#check-countdown:focus-visible"));
+  assert.ok(block, "no :focus-visible rule covers #check-countdown");
+  const [selectors, body] = block.split("{");
+  for (const sel of [
+    "#check-countdown", "#status-warnings-icon", "#version-indicator",
+    "#log-autoscroll-pill", ".status-warning",
+  ]) {
+    assert.ok(selectors.includes(`${sel}:focus-visible`), `${sel} has no focus ring of its own`);
+  }
+  assert.match(body, /outline:\s*2px solid var\(--sl-color-primary-500\)/,
+    "the ring must match the app's convention (2px solid primary-500)");
 });

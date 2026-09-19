@@ -383,10 +383,19 @@ export class MoomboxApp {
     // Status warnings — collapsed icon (mobile): click or Enter/Space
     const warningsIconEl = document.getElementById("status-warnings-icon");
     if (warningsIconEl) {
-      const trigger = () => this.answerReloginPrompt(warningsIconEl.dataset.action);
-      warningsIconEl.addEventListener("click", trigger);
+      // Mirrors `activate` above, for the same reason: the icon stands in for
+      // whichever warning is first, and that warning may be the action-less
+      // sidecar alert. When it is, the icon is not a button (updateStatusBar
+      // strips its role/tabindex) and this must not claim the key either.
+      const trigger = () => {
+        if (!warningsIconEl.dataset.action) return false;
+        this.answerReloginPrompt(warningsIconEl.dataset.action);
+        return true;
+      };
+      warningsIconEl.addEventListener("click", () => { trigger(); });
       warningsIconEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); trigger(); }
+        if (e.key !== "Enter" && e.key !== " ") return;
+        if (trigger()) e.preventDefault();
       });
     }
 
@@ -893,8 +902,16 @@ export class MoomboxApp {
         warningsIcon.setAttribute("aria-label", warningsIcon.title);
         if (warningItems[0].action) {
           warningsIcon.dataset.action = warningItems[0].action;
+          warningsIcon.setAttribute("role", "button");
+          warningsIcon.setAttribute("tabindex", "0");
         } else {
+          // The same rule the spans follow (C5): a warning with no action is a
+          // statement, so the icon standing in for it is not a button and not
+          // a Tab stop. Before this it was neither — creating a dead Tab stop
+          // here would have been a regression of the very failure being fixed.
           delete warningsIcon.dataset.action;
+          warningsIcon.removeAttribute("role");
+          warningsIcon.removeAttribute("tabindex");
         }
       } else {
         // Clear stale children, title, and dataset from previous warnings
@@ -2852,6 +2869,15 @@ export class MoomboxApp {
     document.addEventListener("keydown", (e) => {
       // Skip when typing in input fields (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
+
+      // A control that already handled this key consumed it. The status bar's
+      // role="button" elements (#check-countdown, the re-login warnings, the
+      // warnings icon, the version indicator) preventDefault() on Enter/Space
+      // and deliberately do NOT stopPropagation() — the warning spans' handler
+      // is delegated on #status-warnings, so the event has to keep bubbling.
+      // Without this line Enter on one of them ALSO opens the focused job's
+      // details, which the same control's click does not do.
+      if (e.defaultPrevented) return;
 
       // If a dialog is open, block all shortcuts and let Shoelace
       // handle Escape natively (respects sl-request-close prevention)
