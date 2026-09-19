@@ -588,6 +588,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs/archived` | List archived jobs. |
 | `GET` | `/api/jobs/{id}` | Get a single job by ID. |
 | `GET` | `/api/jobs/{id}/video` | Stream the job's output video file. Supports HTTP Range requests for seeking. `Cache-Control: private, no-cache` + `Last-Modified` — retry/reinit, incomplete-tail resume and part merges rewrite the file behind the same URL, so it revalidates rather than caching immutably. |
+| `GET` | `/api/jobs/{id}/thumbnail` | Serve the locally stored thumbnail so the dashboard stops re-fetching `i.ytimg.com` / `static-cdn.jtvnw.net` for an asset already on disk. `404` when the job has no `thumbnail_file` or the file is gone, and the grid's `onerror` then falls back to the remote `thumbnailUrl`; `403` when the resolved path escapes the output directory. `Cache-Control: public, max-age=86400` — the only long-lived cache in the catalog, because a new thumbnail is a new file at the same path only when the job itself is re-run. |
 | `GET` | `/api/jobs/{id}/segments` | List segments for a multi-segment recording. `Cache-Control: private, no-cache` — part merges and incomplete-tail resume rewrite these rows behind the same URL even for a Finished job, same as `/video`. |
 | `GET` | `/api/jobs/{id}/segments/{index}/video` | Stream a specific segment's video file. Supports Range. `Cache-Control: private, no-cache` + `Last-Modified` (same revalidation rationale as `/video`). |
 | `GET` | `/api/jobs/{id}/segments/{index}/chat` | Get one part's chat file for a multi-segment (Twitch live) recording — the job-level `/chat` only ever covers part 1. Twitch rolls the chat at every part boundary with offsets rebased to that part's recording start; the player fetches each part and shifts by the part's start offset on the global timeline. Same 404/403/422 semantics as `/chat`, plus 404 when the segment has no `chatFile`. |
@@ -596,7 +597,10 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs/{id}/logs` | Get per-job log lines (worker-level logs specific to this job). |
 | `POST` | `/api/jobs` | Create a new job. Rate limited. Body contains URL, format preferences, timestamps. |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
-| `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job. |
+| `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job — backward-compatible alias that delegates to `ReinitializeJob`, so it DELETES the staging directory. Allowed from Error / Cancelled / COOKIES? only; a Finished job flagged `incompleteTail` is deliberately refused here, because the redownload would destroy the preserved staging and resume sidecar that flag exists to protect. |
+| `POST` | `/api/jobs/{id}/resume` | Resume a YouTube job, PRESERVING its staging files — the counterpart to `/retry` and `/reinitialize`, which delete them. Allowed from Error / Cancelled / COOKIES?, and from Finished when `incompleteTail` is set. `400` when the job is not YouTube, and `400` "No staging files found — use Reinitialize instead" when nothing survives in staging. |
+| `POST` | `/api/jobs/{id}/reinitialize` | Reset a job to a fresh state and re-enqueue it, DELETING its staging files. Allowed from Error / Cancelled / COOKIES? only. |
+| `POST` | `/api/jobs/{id}/mux` | Force a mux from the segment files already in staging, without re-downloading. Allowed from Error / Cancelled only; `400` when staging holds no segment files, `500` when the worker refuses the mux. |
 | `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` (`internal/web/server.go`) that the browser-open path and the TUI's `O F` chord also use, and started through `StartDetached` (`internal/web/server.go`) — Windows releases the process handle (audit Q-6), every other platform reaps the child with `Wait`, which `Release` does not do there. A host with no file manager answers `501` naming the missing program, which the dashboard shows as a toast rather than swallowing. **Loopback only.** |
 | `DELETE` | `/api/jobs/{id}` | Delete a job and optionally its files. |
 
@@ -648,9 +652,15 @@ Every route below that takes `{id}` in its path 404s with `{ error: "job not fou
 
 The two cookie blocks come from `routes`' own projections rather than being rebuilt here, and that is load-bearing: three hand-written copies of the `cookieStatus` map existed across two packages, and a field added to two of them left this endpoint — the one the dashboard reads on every load and reconnect — quietly serving the old meaning. Their field contract is documented under §Cookies.
 
-`autoCookieReloginRequired` calls `ReloginStatus()` and **not** `GetStatus()`, deliberately: the closure reads nothing but the relogin map, and `GetStatus`'s browser/registry detection scan would otherwise run on the dashboard's most frequent request for a field it never uses.
+`autoCookieReloginRequired` calls `ReloginStatus()` and **not** `GetStatus()`, deliberately: the closure reads nothing but the relogin map, and `GetStatus`'s browser/registry detection scan would otherwise run on every request to this route for a field it never uses. (This route is *not* polled on a timer — see the paragraph below — but it is fetched on every page load, every WebSocket reconnect, every settings save and every completed cookie setup, once per open tab.)
 
 **There is no cookie-status WebSocket event.** The Web UI's cookie state arrives only in responses the page asked for: this endpoint, plus the two manual triggers, which return the same two blocks. `loadStatus()` is not polled on a timer — it runs on page init, on every WebSocket (re)connect, after a settings save, and after an interactive setup finishes or aborts (both the settings dialog's paths and the first-run wizard's). The two manual triggers do not re-fetch it at all: they assign `cookieStatus` / `twitchAuthStatus` / `autoCookieReloginRequired` straight off their own response bodies and call `updateStatusBar()`. Status and reason therefore always arrive together in one fetch, which is why the header badge may render `youtubeError` / `twitchError` in its tooltip while the push-driven TUI status bar may not (see §Status Bar).
+
+### Monitors
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/monitors/check-now` | Force an immediate poll of all three monitors (feed / DECAPI / Twitch); the monitors coalesce a mid-cycle kick through their `pendingKick` latch, so this never stacks cycles. Debounced to one accepted kick per 30 s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}` (`callDebouncer`, `internal/web/routes/debounce.go`). `503` when no trigger is wired. Web: the clickable `#check-countdown` in the status bar. |
 
 ### Backfill
 
@@ -666,7 +676,14 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 | `PUT` | `/api/config` | Update configuration. Triggers config save and may trigger restart. |
 | `POST` | `/api/config/channels` | Add a monitored channel. |
 | `DELETE` | `/api/config/channels/{id}` | Remove a monitored channel. |
+| `PUT` | `/api/config/channels/reorder` | Reorder the monitored-channel list. Body `{ ids: [...] }` naming every configured channel exactly once; `400` on a count mismatch, a duplicate id, or an id that names no channel. The new order is saved under the config lock and rolled back if the save fails, then the channel-change callback re-seeds the monitors. |
 | `POST` | `/api/resolve-channel` | Resolve a channel URL or name to a canonical channel identifier. |
+
+### Notifications
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/notifications/test` | Synchronously deliver one test embed to `{ url }` — which may be an UNSAVED value, because both the web add dialog and the TUI editor test a staged webhook before committing it. Single attempt, no retries. `400` for a missing or invalid URL (Discord webhooks only — `ValidateURL`, `internal/notifications/manager.go`), `502` on a delivery failure; the error never echoes the URL. |
 
 ### Cookies
 
@@ -911,7 +928,8 @@ These routes provide PO token generation for external yt-dlp instances. They use
 | `POST` | `/invalidate_caches` | Loopback only | Invalidate all PO token caches. |
 | `POST` | `/invalidate_it` | Loopback only | Invalidate a specific identity token. |
 | `GET` | `/ping` | Public | Health check for yt-dlp plugin discovery. |
-| `GET` | `/minter_cache` | Public | List cached minter keys (diagnostic). |
+| `GET` | `/minter_cache` | Loopback only | List cached minter keys (diagnostic). The keys name internal PO token cache entries, so the route carries the same `LoopbackOnly` gate as the rest of the block (audit Q-23) even though only `/ping` has to stay public for plugin discovery. |
+| `GET` | `/pot_stats` | Loopback only | PO token observability counters — session/minter cache hits, minter create/evict/invalidate counts, generate errors, inflight waits, and the current cached-minter count. Monotonic; operators sample and diff externally. |
 
 ### System
 

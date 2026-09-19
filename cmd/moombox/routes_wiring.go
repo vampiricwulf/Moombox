@@ -37,8 +37,8 @@ func (s *runState) wireRoutes() func() {
 		// Both wire shapes come from routes' own projections rather than
 		// being rebuilt here. Three hand-written copies of the cookieStatus
 		// map existed across two packages and a field added to two of them
-		// leaves this endpoint — the one the dashboard polls — quietly
-		// serving the old meaning.
+		// leaves this endpoint — the one the dashboard reads on every load
+		// and reconnect — quietly serving the old meaning.
 		GetCookieStatus: func() map[string]any {
 			return routes.CookieStatusPayload(s.cookieRefresh.GetStatus())
 		},
@@ -47,9 +47,13 @@ func (s *runState) wireRoutes() func() {
 		},
 		GetAutoCookieReloginNeeded: func() any {
 			// ReloginStatus, not GetStatus: this closure reads nothing but
-			// NeedsManualRelogin, and GetStatus's browser/registry detection
-			// scan runs on every /api/status poll — the dashboard's most
-			// frequent request — for a field this never uses.
+			// NeedsManualRelogin, and GetStatus would run its browser and
+			// registry detection scan for a field that never uses it. The
+			// dashboard does NOT poll /api/status on a timer — it fetches it on
+			// init, on every WebSocket (re)connect, after a settings save and
+			// after an interactive cookie setup — so this is not the hottest
+			// route in the server; it is simply a filesystem-and-registry scan
+			// nothing here reads, once per open tab per reconnect.
 			return s.autoCookieSvc.ReloginStatus()
 		},
 		GetNextFeedCheck:   s.feedMon.GetNextCheckAt,

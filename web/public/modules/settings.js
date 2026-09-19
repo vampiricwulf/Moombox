@@ -340,8 +340,10 @@ export class SettingsController {
         try {
           const resp = await fetch("/api/update/release-notes");
           if (!resp.ok) {
-            const err = await resp.text();
-            alert("Failed to fetch release notes: " + err);
+            // Every other failure in this dashboard toasts; a blocking
+            // browser alert reads as a page fault rather than a Moombox
+            // message, and it freezes the whole tab while it is up.
+            this.app.showToast("Failed to fetch release notes", "danger");
             return;
           }
           const data = await resp.json();
