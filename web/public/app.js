@@ -1161,7 +1161,11 @@ export class MoomboxApp {
           // the _evaluateArchiveBoundary() below re-archives it.
           this.jobs.push(updatedJob);
           if (this._pruneArchivedAgainstActive()) this.renderArchivedJobs();
-          this.renderJobs();
+          // One discovered job costs one card, not a rebuild of every card in
+          // the list — backfill adds them one broadcast at a time. The helper
+          // declines (and we fall back) whenever the fast path is not exactly
+          // equivalent to the full render.
+          if (!this._insertJobCard(updatedJob)) this.renderJobs();
           this._evaluateArchiveBoundary();
         }
         // Outside both branches on purpose: a park arrives either as a status
@@ -1649,6 +1653,70 @@ export class MoomboxApp {
   }
 
   /**
+   * Splice ONE new row into the already-rendered list instead of rebuilding
+   * every card (and every Shoelace shadow root) in it.
+   *
+   * Feed, DECAPI and backfill discovery each add one job per broadcast, so a
+   * backfill page that finds K jobs used to run K consecutive full renders.
+   *
+   * Returns false — and the caller must fall back to renderJobs() — whenever
+   * the fast path cannot be trusted:
+   *   - the container is absent,
+   *   - a filter is active (the match set and the "N of M" count both have to
+   *     be recomputed),
+   *   - nothing is rendered yet (first job, skeleton, or an empty state),
+   *   - the job is not in this.jobs,
+   *   - the rendered cards are not this.jobs minus exactly this job, in order
+   *     — which is also what catches a card that is somehow already on screen.
+   * @param {object} job
+   * @returns {boolean}
+   */
+  _insertJobCard(job) {
+    const container = document.getElementById("jobs-container");
+    if (!container) return false;
+    if (this.filterBar.tokens("jobs").length > 0) return false;
+
+    const cards = [...container.querySelectorAll(".video-item")];
+    if (cards.length === 0) return false;
+
+    const sorted = this._sortJobs(this.jobs);
+    if (cards.length !== sorted.length - 1) return false;
+    const index = sorted.findIndex((j) => j.id === job.id);
+    if (index < 0) return false;
+    // The counts agreeing is not the same as the lists agreeing: walk the
+    // rendered ids against the sort MINUS the newcomer, so the splice is only
+    // taken when the result is provably what renderJobs() would have drawn.
+    for (let i = 0, k = 0; i < sorted.length; i++) {
+      if (i === index) continue;
+      if (cards[k++].dataset.jobId !== sorted[i].id) return false;
+    }
+
+    const html = this.renderJobItem(job);
+    if (index >= cards.length) {
+      container.insertAdjacentHTML("beforeend", html);
+    } else {
+      // renderJobs() JOINS the chunks before parsing, so each card's trailing
+      // indentation and the next card's leading indentation land in ONE text
+      // node between them. insertAdjacentHTML cannot split that node, so the
+      // chunk's leading run is moved to its tail instead — which is what makes
+      // the spliced list byte-identical to a rebuild (pinned by the
+      // differential test) rather than merely equivalent.
+      const lead = html.slice(0, html.length - html.trimStart().length);
+      const trail = html.slice(html.trimEnd().length);
+      cards[index].insertAdjacentHTML("beforebegin", html.trim() + trail + lead);
+    }
+
+    // Everything renderJobs() would have refreshed for an ADD. Selection and
+    // focus markers on the existing cards survive untouched because those
+    // cards were not rebuilt; the new one is neither selected nor focused. The
+    // focused INDEX is positional, so a card spliced at or above it shifts it.
+    if (this.focusedJobIndex >= index) this.focusedJobIndex += 1;
+    this.filterBar.refreshChannels("jobs", this.jobs);
+    this.stats.updateActiveIndicator(this.jobs);
+    return true;
+  }
+
+  /**
    * Move Finished jobs in `this.jobs` that have aged past hideFinishedAgeDays
    * into `this.archivedJobs`. Mirrors the server's filterJobsByAge logic and
    * the TUI's isJobArchived check so the active panel reclassifies as time
@@ -2027,9 +2095,21 @@ export class MoomboxApp {
     // Update progress text
     const progressText = card.querySelector(".job-progress-text");
     if (progressText) {
-      const progress = this.formatProgress(job);
-      progressText.innerHTML = this.formatProgressHtml(job);
-      progressText.title = this.formatProgressTooltip(job) || progress;
+      // ~60 Hz per active job, and this is the highest-frequency DOM write in
+      // the app: the cell's text node was destroyed and recreated on every
+      // tick even when the string had not moved (measured 60/60). Stash the
+      // rendered markup on the element and write only when it differs — the
+      // same diff updateJobDetails uses. The title is diffed separately
+      // because the tooltip can move while the visible string does not.
+      const progressHtml = this.formatProgressHtml(job);
+      if (progressText.dataset.progress !== progressHtml) {
+        progressText.innerHTML = progressHtml;
+        progressText.dataset.progress = progressHtml;
+      }
+      const tooltip = this.formatProgressTooltip(job) || this.formatProgress(job);
+      if (progressText.title !== tooltip) {
+        progressText.title = tooltip;
+      }
       if (job.status === "Upcoming" && job.lastRecheckAt) {
         progressText.dataset.timestamp = job.lastRecheckAt;
         progressText.dataset.timestampPrefix = "Last check: ";
