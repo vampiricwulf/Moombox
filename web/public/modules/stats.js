@@ -170,7 +170,9 @@ export class StatsController {
       j.status === "Downloading" || j.status === "Live" || j.status === "Muxing"
     ).length;
 
-    // renderJobs calls this on every job_update, i.e. ~60 Hz per active job.
+    // The ~60 Hz path is the job_progress frame, whose case in app.js calls
+    // this DIRECTLY — once per tick per active job; renderJobs calls it on
+    // job_update and on every full render.
     // Diff before writing (sweep T2-21).
     if (active > 0) {
       if (el.style.display !== "") el.style.display = "";

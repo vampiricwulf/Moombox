@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -185,5 +187,300 @@ func TestSchemeMuxHTTPSDisabledRedirectsTLS(t *testing.T) {
 	body, _ := io.ReadAll(resp2.Body)
 	if resp2.StatusCode != http.StatusOK || string(body) != "main" {
 		t.Errorf("plain GET: want 200 'main', got %d %q", resp2.StatusCode, body)
+	}
+}
+
+// tempAcceptErr is an accept error whose Temporary() is true — the shape
+// net/http's Serve loop retries. On a 24/7 downloader the realistic producers
+// are EMFILE / ENFILE / WSAEMFILE; poll.FD.Accept already swallows
+// ECONNABORTED internally.
+type tempAcceptErr struct{}
+
+func (tempAcceptErr) Error() string   { return "temporary accept failure" }
+func (tempAcceptErr) Timeout() bool   { return false }
+func (tempAcceptErr) Temporary() bool { return true }
+
+// flakyListener yields `remaining` temporary accept errors and then delegates
+// every later Accept to the real listener.
+type flakyListener struct {
+	net.Listener
+	remaining atomic.Int32
+	attempts  atomic.Int32
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.attempts.Add(1)
+	if l.remaining.Add(-1) >= 0 {
+		return nil, tempAcceptErr{}
+	}
+	return l.Listener.Accept()
+}
+
+// TestSchemeMuxRetriesATemporaryAcceptError is the WEB-3 pin (O-N).
+//
+// The sniff loop returned on ANY Accept error, so one transient EMFILE ended
+// it, close(done) made every muxedListener.Accept answer net.ErrClosed, both
+// http.Servers returned, and the dashboard was dead until the process
+// restarted — while net/http's own Serve loop would have slept 5 ms and
+// carried on. Only https_enabled installs (and ones with a leftover cert pair)
+// reach this code at all.
+//
+// THE MUTANT: restore the bare `return` on any error. The first Accept fails,
+// the loop ends, and the GET below never gets a response — the request hangs
+// until the client's 5 s timeout, which is the failure this test reports.
+func TestSchemeMuxRetriesATemporaryAcceptError(t *testing.T) {
+	real, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { real.Close() })
+
+	flaky := &flakyListener{Listener: real}
+	flaky.remaining.Store(1)
+
+	_, plainRaw := newSchemeMux(flaky, muxTestLogger{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("main"))
+	})}
+	go srv.Serve(plainRaw)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + real.Addr().String() + "/x")
+	if err != nil {
+		t.Fatalf("GET after one temporary accept error: %v — the loop gave up instead of retrying "+
+			"(net/http's Serve sleeps 5ms and continues)", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: want 200, got %d", resp.StatusCode)
+	}
+	if n := flaky.attempts.Load(); n < 2 {
+		t.Errorf("Accept attempts: want >= 2 (the failure plus the retry), got %d", n)
+	}
+}
+
+// TestSchemeMuxStopsOnAPermanentAcceptError is the other half: a closed
+// listener must still end the loop rather than spin. MUTANT: retry EVERY
+// error, not just the temporary ones — Close() would never stop the goroutine
+// and shutdown would spin at 1 Hz forever.
+func TestSchemeMuxStopsOnAPermanentAcceptError(t *testing.T) {
+	real, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	tlsRaw, plainRaw := newSchemeMux(real, muxTestLogger{})
+	real.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := plainRaw.Accept()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Accept on a torn-down mux: want an error, got nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the sniff loop never exited after the real listener closed — a permanent error is " +
+			"being retried")
+	}
+	tlsRaw.Close()
+}
+
+// muxFakeAddr is the address of the scripted listeners below — they never bind
+// a socket, but muxedListener publishes real.Addr() to both branches.
+type muxFakeAddr struct{}
+
+func (muxFakeAddr) Network() string { return "tcp" }
+func (muxFakeAddr) String() string  { return "127.0.0.1:0" }
+
+// alwaysTempListener fails every Accept with a temporary error and does NOT
+// notice its own Close — so the only thing that can end the accept loop is the
+// loop's own cancellation of the backoff wait.
+type alwaysTempListener struct {
+	attempted chan struct{}
+}
+
+func (l *alwaysTempListener) Accept() (net.Conn, error) {
+	select {
+	case l.attempted <- struct{}{}:
+	default:
+	}
+	return nil, tempAcceptErr{}
+}
+
+func (l *alwaysTempListener) Close() error   { return nil }
+func (l *alwaysTempListener) Addr() net.Addr { return muxFakeAddr{} }
+
+// TestSchemeMuxCloseDuringBackoffEndsTheLoop pins the shutdown half of the
+// backoff: a Close landing mid-sleep ends the accept goroutine promptly
+// instead of after up to acceptRetryMaxDelay — and, when the listener keeps
+// producing temporary errors, ends it AT ALL.
+//
+// THE MUTANT: back off with a plain time.Sleep(retryDelay) that ignores the
+// close signal. The loop wakes, calls Accept, gets another temporary error and
+// sleeps again forever; `exited` never fires and this test reports the 2 s
+// timeout.
+func TestSchemeMuxCloseDuringBackoffEndsTheLoop(t *testing.T) {
+	ln := &alwaysTempListener{attempted: make(chan struct{}, 1)}
+	tlsRaw, plainRaw := newSchemeMux(ln, muxTestLogger{})
+
+	exited := make(chan struct{})
+	go func() {
+		plainRaw.Accept() // returns once the loop closes done
+		close(exited)
+	}()
+
+	// Let the ladder climb a rung or two so the Close lands inside a sleep
+	// rather than between two Accepts.
+	for i := 0; i < 3; i++ {
+		select {
+		case <-ln.attempted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the accept loop stopped retrying the temporary error")
+		}
+	}
+	tlsRaw.Close()
+
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() during the backoff never ended the accept loop — the wait is not cancellable")
+	}
+}
+
+// muxDiscardConn is a connection the sniffer immediately throws away: the
+// first read returns EOF, so the per-connection goroutine closes it and
+// returns without forwarding it to either branch. It stands in for a
+// successful Accept in the ladder script.
+type muxDiscardConn struct{}
+
+func (muxDiscardConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (muxDiscardConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (muxDiscardConn) Close() error                     { return nil }
+func (muxDiscardConn) LocalAddr() net.Addr              { return muxFakeAddr{} }
+func (muxDiscardConn) RemoteAddr() net.Addr             { return muxFakeAddr{} }
+func (muxDiscardConn) SetDeadline(time.Time) error      { return nil }
+func (muxDiscardConn) SetReadDeadline(time.Time) error  { return nil }
+func (muxDiscardConn) SetWriteDeadline(time.Time) error { return nil }
+
+// scriptedListener plays a fixed sequence of Accept outcomes — true = a
+// temporary error, false = a connection — and then answers net.ErrClosed
+// forever, the permanent error that ends the loop.
+type scriptedListener struct {
+	mu     sync.Mutex
+	script []bool
+	idx    int
+}
+
+func (l *scriptedListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.idx >= len(l.script) {
+		return nil, net.ErrClosed
+	}
+	temporary := l.script[l.idx]
+	l.idx++
+	if temporary {
+		return nil, tempAcceptErr{}
+	}
+	return muxDiscardConn{}, nil
+}
+
+func (l *scriptedListener) Close() error   { return nil }
+func (l *scriptedListener) Addr() net.Addr { return muxFakeAddr{} }
+
+// TestSchemeMuxAcceptRetryLadder pins the backoff ladder itself against
+// net/http's Serve: 5 ms on the first temporary error, doubling, capped at
+// 1 s, back to zero after a successful Accept. The sleep is injected, so the
+// whole table runs without waiting out a single rung.
+//
+// THE MUTANTS, one per row: replace `retryDelay *= 2` with
+// `retryDelay = acceptRetryMinDelay` (row 1 sees 5 ms forever); drop the
+// `min(retryDelay, acceptRetryMaxDelay)` clamp (row 1's last two rungs come
+// back 1.28 s / 2.56 s); delete the `retryDelay = 0` after a successful
+// Accept (row 2's third rung comes back 20 ms instead of 5 ms); back off on
+// every error instead of only temporary ones (row 3 sleeps on the terminal
+// net.ErrClosed instead of returning).
+func TestSchemeMuxAcceptRetryLadder(t *testing.T) {
+	cases := []struct {
+		name string
+		// script: true = a temporary accept error, false = a connection.
+		script []bool
+		want   []time.Duration
+	}{
+		{
+			name:   "doubles from 5ms and holds at the 1s ceiling",
+			script: []bool{true, true, true, true, true, true, true, true, true, true},
+			want: []time.Duration{
+				5 * time.Millisecond,
+				10 * time.Millisecond,
+				20 * time.Millisecond,
+				40 * time.Millisecond,
+				80 * time.Millisecond,
+				160 * time.Millisecond,
+				320 * time.Millisecond,
+				640 * time.Millisecond,
+				1 * time.Second,
+				1 * time.Second,
+			},
+		},
+		{
+			name:   "a successful Accept resets the ladder",
+			script: []bool{true, true, false, true},
+			want: []time.Duration{
+				5 * time.Millisecond,
+				10 * time.Millisecond,
+				5 * time.Millisecond,
+			},
+		},
+		{
+			name:   "a permanent error never sleeps",
+			script: []bool{false},
+			want:   nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var got []time.Duration
+			sleep := func(d time.Duration, cancel <-chan struct{}) bool {
+				mu.Lock()
+				got = append(got, d)
+				mu.Unlock()
+				return true // the ladder is the assertion; never actually wait
+			}
+
+			_, plainRaw := newSchemeMuxWithRetryWait(&scriptedListener{script: tc.script}, muxTestLogger{}, sleep)
+
+			// The script ends in net.ErrClosed, so the loop returns and
+			// every muxedListener.Accept answers ErrClosed — that return is
+			// the signal that the script has been played out.
+			exited := make(chan struct{})
+			go func() {
+				plainRaw.Accept()
+				close(exited)
+			}()
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the accept loop never reached the end of the script")
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(got) != len(tc.want) {
+				t.Fatalf("backoff rungs: want %v, got %v", tc.want, got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("rung %d: want %v, got %v (full ladder %v)", i, tc.want[i], got[i], got)
+				}
+			}
+		})
 	}
 }

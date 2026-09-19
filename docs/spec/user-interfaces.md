@@ -327,7 +327,7 @@ The chord system is a three-state finite automaton:
 
 | Chord | Action | Requires Job | Job Filter |
 |-------|--------|:------------:|------------|
-| `O F` | Open Folder (explorer) | Yes | Job has an openable folder |
+| `O F` | Open Folder (desktop file manager) | Yes | Job has an openable folder |
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
 | `O C` | Copy Stream URL to clipboard. The OSC 52 write (`tea.SetClipboard`) goes out on **every** press, on every platform — it is the only mechanism that reaches the terminal the operator is actually sitting at, which over SSH is not the machine Moombox runs on — and the feedback line reads `Sent to terminal clipboard (OSC 52): <url>`, claiming nothing more, because conhost and tmux-without-`set-clipboard` drop OSC 52 in silence. On a **local Windows console** a `clip.exe` child fed on stdin runs in addition, inside a `tea.Cmd` so a wedged child cannot freeze rendering or input; if it reports that it took the text the line upgrades to `Copied: <url>`. That backup stands down for Windows Terminal (`WT_SESSION`, whose own OSC 52 handling is authoritative) and for any SSH session (`SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT`), where it would write the server's clipboard (`clipboardFeedback` in `internal/tui/app_actions.go`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL |
@@ -576,7 +576,8 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | Type | Payload | When Sent |
 |------|---------|-----------|
 | `initial_state` | `{ jobs, logs, config, monitors, hideFinishedAgeDays, ... }` | Once, immediately after WebSocket connection is accepted |
-| `job_update` | Single job object | When any field of a single job changes |
+| `job_update` | Single job object | When a job changes in any way a progress tick does not: a status transition, an error, a chat-status change, the mux naming its output, a new job, a trim edit. Progress-only ticks take `job_progress` instead. |
+| `job_progress` | `{ id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt }` | Every progress tick of an active download (~60 Hz per job). Carries only the columns the tick writes; the client MERGES it onto the row it already holds (`{...old, ...patch}`) rather than replacing it. Sent when `JobChange.Changes` names progress columns ONLY — anything else, `status` included, goes out as `job_update`. The frame is a tenth of the row it replaces; the cadence is identical (`isProgressOnlyChange` / `newJobProgressFrame`, `cmd/moombox/job_progress.go`). On the client (`case "job_progress"`, `web/public/app.js`) a frame whose `id` the tab does not hold is DROPPED rather than upserted the way `job_update` upserts one — a twelve-field frame would draw an untitled, thumbnail-less row, and the next `job_update` or `jobs_update` carries the whole row anyway — and a frame whose `status` differs from the held one takes `job_update`'s full-render path (re-sort, archive boundary, parked badge) instead of the single-card fast path. |
 | `jobs_update` | Full job array | When a job is added or deleted (full list, not incremental) |
 | `job_deleted` | `{ id }` | When a job row is removed from the database |
 | `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes — from the dashboard's own `PUT /api/config` or from a TUI settings save, both through one `broadcastHideFinishedAge` in `cmd/moombox/routes_wiring.go`, which gates on the value actually having moved since the last broadcast, sends this first, and then sends a `jobs_update` re-filtered with the same captured threshold (skipped, with a warning, if the jobs read fails — an empty list would blank every dashboard) |
@@ -593,7 +594,7 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 
 ### Broadcast Rate
 
-Job update broadcasts are not throttled in the WebSocket hub. The only high-frequency caller is `OnJobChange` driven by `ProgressTracker.maybeUpdate`, which is already gated to ~60 Hz per job by `progressUpdateInterval = 16ms` (see `internal/worker/progress.go`); every other `UpdateJobFields` caller is event-driven (state transitions, not loops). A previous per-job throttle in the hub created an ordering race — because `BroadcastJobDeleted` is not throttled, the trailing edge could arrive after a delete and resurrect the row via the client's upsert handler.
+The WebSocket hub throttles nothing. The only high-frequency caller is `OnJobChange` driven by `ProgressTracker.maybeUpdate`, which is already gated to ~60 Hz per job by `progressUpdateInterval = 16ms` (see `internal/worker/progress.go`) and now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and every other `UpdateJobFields` caller is event-driven (state transitions, not loops). A previous per-job throttle in the hub created an ordering race — because `BroadcastJobDeleted` is not throttled, the trailing edge could arrive after a delete and resurrect the row via the client's upsert handler.
 
 ### Connection Parameters
 
@@ -601,9 +602,9 @@ Job update broadcasts are not throttled in the WebSocket hub. The only high-freq
 |-----------|-------|
 | Ping interval | 30 seconds (server-initiated) |
 | Write timeout | 10 seconds per message |
-| Max message size (read limit) | 1 MB |
+| Max message size (read limit) | 4 KiB — a client only ever sends `{"type":"ping"}`, and on a `lan` install the upgrade needs no credential |
 | Backpressure limit | 16 queued frames per client (`wsWriteQueueSize`); on overflow the oldest is dropped and a later frame is replaced by a full `initial_state` snapshot — at most one per second per client (`wsResyncMinInterval`), flushed by the ping tick if no broadcast comes (`flushResync`) |
-| Log ring buffer | 200 lines (oldest evicted when full) |
+| Log ring buffer | None in the hub — the logger owns the only ring (`GetRecentLines`), which `ws_wiring.go` puts in every `initial_state`. A single broadcast line is clipped at 4096 characters (`clipLogLine`, `internal/web/websocket.go`) |
 
 ---
 
@@ -640,6 +641,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs/archived` | List archived jobs. |
 | `GET` | `/api/jobs/{id}` | Get a single job by ID. |
 | `GET` | `/api/jobs/{id}/video` | Stream the job's output video file. Supports HTTP Range requests for seeking. `Cache-Control: private, no-cache` + `Last-Modified` — retry/reinit, incomplete-tail resume and part merges rewrite the file behind the same URL, so it revalidates rather than caching immutably. |
+| `GET` | `/api/jobs/{id}/thumbnail` | Serve the locally stored thumbnail so the dashboard stops re-fetching `i.ytimg.com` / `static-cdn.jtvnw.net` for an asset already on disk. `404` when the job has no `thumbnail_file` or the file is gone, and the grid's `onerror` then falls back to the remote `thumbnailUrl`; `403` when the resolved path escapes the output directory. `Cache-Control: public, max-age=86400` — the only long-lived cache in the catalog, because a new thumbnail is a new file at the same path only when the job itself is re-run. |
 | `GET` | `/api/jobs/{id}/segments` | List segments for a multi-segment recording. `Cache-Control: private, no-cache` — part merges and incomplete-tail resume rewrite these rows behind the same URL even for a Finished job, same as `/video`. |
 | `GET` | `/api/jobs/{id}/segments/{index}/video` | Stream a specific segment's video file. Supports Range. `Cache-Control: private, no-cache` + `Last-Modified` (same revalidation rationale as `/video`). |
 | `GET` | `/api/jobs/{id}/segments/{index}/chat` | Get one part's chat file for a multi-segment (Twitch live) recording — the job-level `/chat` only ever covers part 1. Twitch rolls the chat at every part boundary with offsets rebased to that part's recording start; the player fetches each part and shifts by the part's start offset on the global timeline. Same 404/403/422 semantics as `/chat`, plus 404 when the segment has no `chatFile`. |
@@ -648,8 +650,11 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs/{id}/logs` | Get per-job log lines (worker-level logs specific to this job). |
 | `POST` | `/api/jobs` | Create a new job. Rate limited. Body contains URL, format preferences, timestamps. |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
-| `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job. |
-| `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in Windows Explorer. **Loopback only.** |
+| `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job — backward-compatible alias that delegates to `ReinitializeJob`, so it DELETES the staging directory. Allowed from Error / Cancelled / COOKIES? only; a Finished job flagged `incompleteTail` is deliberately refused here, because the redownload would destroy the preserved staging and resume sidecar that flag exists to protect. |
+| `POST` | `/api/jobs/{id}/resume` | Resume a YouTube job, PRESERVING its staging files — the counterpart to `/retry` and `/reinitialize`, which delete them. Allowed from Error / Cancelled / COOKIES?, and from Finished when `incompleteTail` is set. `400` when the job is not YouTube, and `400` "No staging files found — use Reinitialize instead" when nothing survives in staging. |
+| `POST` | `/api/jobs/{id}/reinitialize` | Reset a job to a fresh state and re-enqueue it, DELETING its staging files. Allowed from Error / Cancelled / COOKIES? only. |
+| `POST` | `/api/jobs/{id}/mux` | Force a mux from the segment files already in staging, without re-downloading. Allowed from Error / Cancelled only; `400` when staging holds no segment files, `500` when the worker refuses the mux. |
+| `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` (`internal/web/server.go`) that the browser-open path and the TUI's `O F` chord also use, and started through `StartDetached` (`internal/web/server.go`) — Windows releases the process handle (audit Q-6), every other platform reaps the child with `Wait`, which `Release` does not do there. A host with no file manager answers `501` naming the missing program, which the dashboard shows as a toast rather than swallowing. **Loopback only.** |
 | `DELETE` | `/api/jobs/{id}` | Delete a job and optionally its files. |
 
 ### Watch Tracking
@@ -700,9 +705,15 @@ Every route below that takes `{id}` in its path 404s with `{ error: "job not fou
 
 The two cookie blocks come from `routes`' own projections rather than being rebuilt here, and that is load-bearing: three hand-written copies of the `cookieStatus` map existed across two packages, and a field added to two of them left this endpoint — the one the dashboard reads on every load and reconnect — quietly serving the old meaning. Their field contract is documented under §Cookies.
 
-`autoCookieReloginRequired` calls `ReloginStatus()` and **not** `GetStatus()`, deliberately: the closure reads nothing but the relogin map, and `GetStatus`'s browser/registry detection scan would otherwise run on the dashboard's most frequent request for a field it never uses.
+`autoCookieReloginRequired` calls `ReloginStatus()` and **not** `GetStatus()`, deliberately: the closure reads nothing but the relogin map, and `GetStatus`'s browser/registry detection scan would otherwise run on every request to this route for a field it never uses. (This route is *not* polled on a timer — see the paragraph below — but it is fetched on every page load, every WebSocket reconnect, every settings save and every completed cookie setup, once per open tab.)
 
 **There is no cookie-status WebSocket event.** The Web UI's cookie state arrives only in responses the page asked for: this endpoint, plus the two manual triggers, which return the same two blocks. `loadStatus()` is not polled on a timer — it runs on page init, on every WebSocket (re)connect, after a settings save, and after an interactive setup finishes or aborts (both the settings dialog's paths and the first-run wizard's). The two manual triggers do not re-fetch it at all: they assign `cookieStatus` / `twitchAuthStatus` / `autoCookieReloginRequired` straight off their own response bodies and call `updateStatusBar()`. Status and reason therefore always arrive together in one fetch, which is why the header badge may render `youtubeError` / `twitchError` in its tooltip while the push-driven TUI status bar may not (see §Status Bar).
+
+### Monitors
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/monitors/check-now` | Force an immediate poll of all three monitors (feed / DECAPI / Twitch); the monitors coalesce a mid-cycle kick through their `pendingKick` latch, so this never stacks cycles. Debounced to one accepted kick per 30 s — a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}` (`callDebouncer`, `internal/web/routes/debounce.go`). `503` when no trigger is wired. Web: the clickable `#check-countdown` in the status bar. |
 
 ### Backfill
 
@@ -718,7 +729,14 @@ The two cookie blocks come from `routes`' own projections rather than being rebu
 | `PUT` | `/api/config` | Update configuration. Triggers config save and may trigger restart. |
 | `POST` | `/api/config/channels` | Add a monitored channel. |
 | `DELETE` | `/api/config/channels/{id}` | Remove a monitored channel. |
+| `PUT` | `/api/config/channels/reorder` | Reorder the monitored-channel list. Body `{ ids: [...] }` naming every configured channel exactly once; `400` on a count mismatch, a duplicate id, or an id that names no channel. The new order is saved under the config lock and rolled back if the save fails, then the channel-change callback re-seeds the monitors. |
 | `POST` | `/api/resolve-channel` | Resolve a channel URL or name to a canonical channel identifier. |
+
+### Notifications
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/notifications/test` | Synchronously deliver one test embed to `{ url }` — which may be an UNSAVED value, because both the web add dialog and the TUI editor test a staged webhook before committing it. Single attempt, no retries. `400` for a missing or invalid URL (Discord webhooks only — `ValidateURL`, `internal/notifications/manager.go`), `502` on a delivery failure; the error never echoes the URL. |
 
 ### Cookies
 
@@ -828,7 +846,7 @@ When no auto-cookie service is wired the handler answers a hand-built object tha
 
 `authenticated` is tested **before** `found`, and the `"unknown"` comparison is positive rather than `!== "ok"`. Both are the additive contract in the other direction: an older binary sends no `verification` and no Twitch `found`, and either inversion would render a healthy session as broken.
 
-The badge is repainted from four job events — `job_update`, `jobs_update`, `initial_state`, `job_deleted` — through `_syncParkedBadge`, which is **change-gated**: the scan over jobs already in memory runs every time (it is cheap and stops at the second platform) and only the DOM write is conditioned, so a 60 Hz progress tick never repaints. `job_deleted` matters because deleting the last parked job is the one gesture that *clears* the escalation. `updateStatusBar` re-computes `parkedCookiePlatforms` fresh rather than reading the memoised value, so the four pre-existing triggers (config load, status load, manual recheck, manual browser refresh) paint the same badge.
+The badge is repainted from five job events — `job_update`, `job_progress` (its status-change branch only), `jobs_update`, `initial_state`, `job_deleted` — through `_syncParkedBadge`, which is **change-gated**: the scan over jobs already in memory runs every time (it is cheap and stops at the second platform) and only the DOM write is conditioned, so a 60 Hz progress tick never repaints. `job_deleted` matters because deleting the last parked job is the one gesture that *clears* the escalation. `updateStatusBar` re-computes `parkedCookiePlatforms` fresh rather than reading the memoised value, so the four pre-existing triggers (config load, status load, manual recheck, manual browser refresh) paint the same badge.
 
 The **recheck toast** is worded by `cookieRecheckToast` from the two `verification` fields, filtered to the active platforms — deliberately not from `success`, which is `youtubeAuthenticated || twitchAuthenticated` and therefore false for a check that never reached the site. Its `message` is reproduced character for character from `cookies.RecheckReport` in Go and pinned by a test that runs both; only the Shoelace `variant` is web-only, and it ranks danger (a conclusive failure) over warning (nothing established) over success.
 
@@ -868,9 +886,9 @@ The rung-3 sentence and its Web twin (`No browser profile found, running a norma
 
 #### Restart-required cookie settings
 
-Three cookie keys are labelled restart-required in **both** settings UIs — `cookie_file`, `auto_enabled`, `browser_profile_dir`. The Web UI inserts a `Restart` badge after the named element (`RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`) and offers a restart on save; the TUI colours the change marker yellow instead of green for these keys (`restartRequiredKeys` in `internal/tui/settings.go`, rendered in `settings_view.go`). The two lists are pinned against each other by `TestRestartRequiredListsAgree`. What `auto_enabled` does **not** need a restart for is the manual triggers: `R F` and the dashboard's shift+click read it live. See `data-and-storage.md §[cookies]` for why the three are restart-required at all.
+Four cookie keys are labelled restart-required in **both** settings UIs — `cookie_file`, `refresh_interval`, `auto_enabled`, `browser_profile_dir`. The Web UI inserts a `Restart` badge after the named element (`RESTART_REQUIRED_FIELDS` in `web/public/modules/settings.js`) and offers a restart on save; the TUI colours the change marker yellow instead of green for these keys (`restartRequiredKeys` in `internal/tui/settings.go`, rendered in `settings_view.go`). The two lists are pinned against each other by `TestRestartRequiredListsAgree`. What `auto_enabled` does **not** need a restart for is the manual triggers: `R F` and the dashboard's shift+click read it live. See `data-and-storage.md §[cookies]` for why the four are restart-required at all.
 
-The same two lists carry every other restart-required key — `port`, `network_access`, `https_enabled`, `tls_cert_path`, `tls_key_path`, `database_path`, `log_file_path`, `log_max_file_size`, `log_max_files`, and (since Arc B of the 2026-09-04 improvement chain) `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar` — fifteen in all; both restart prompts name the categories: port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings.
+The same two lists carry every other restart-required key — `port`, `network_access`, `https_enabled`, `tls_cert_path`, `tls_key_path`, `database_path`, `log_file_path`, `log_max_file_size`, `log_max_files`, and (since Arc B of the 2026-09-04 improvement chain) `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar` — sixteen in all; both restart prompts name the categories: port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings.
 
 #### Facts these surfaces deliberately do not carry
 
@@ -903,8 +921,8 @@ The same two lists carry every other restart-required key — `port`, `network_a
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/update/status` | Get current update status (available version, if any). |
-| `GET` | `/api/update/release-notes` | Fetch release notes for a version. Query param `version=X.Y.Z`; defaults to current version. Returns sanitized HTML rendered from GitHub release body via goldmark + bluemonday (download-link section stripped). Used by the Web UI "View Release Notes" button. |
-| `POST` | `/api/update/check` | Manually check for updates. |
+| `GET` | `/api/update/release-notes` | Fetch release notes for a version. Query param `version=X.Y.Z` (validated against `^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$` — the pre-release suffix is there because `release.yml` preserves `-rc.N`/`-test.N` into the running version and the Web sends no `version=`, so such a build used to `400` its own notes; anything else is a `400`), defaulting to the current version. Returns sanitized HTML rendered from the GitHub release body via goldmark + bluemonday (download-link section stripped). Used by the Web UI "View Release Notes" button. |
+| `POST` | `/api/update/check` | Manually check for updates. Debounced to one accepted check per 30 s — every call spends one of GitHub's 60/h unauthenticated requests — and a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`, the same shape `/api/monitors/check-now` and `/api/backfill/rescan` use (`callDebouncer`, `internal/web/routes/debounce.go`). The 30 s window bounds a held key, not a scripted caller (≤ 120 accepted checks/h against GitHub's 60/h); the scheduled auto-check calls the updater in-process and is never gated. |
 | `POST` | `/api/update/apply` | Download and apply an available update. Triggers restart. |
 | `POST` | `/api/update/verify` | Verify the Ed25519 signature of the current binary. |
 | `POST` | `/api/update/dismiss` | Dismiss the update notification. Body shared with the TUI via `DismissUpdate`. |
@@ -915,7 +933,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 |--------|------|-------|
 | `GET` | `/api/ffmpeg/check` | Check if FFmpeg is on PATH and return version info. |
 | `GET` | `/api/ffmpeg/install-suggestion` | Returns the distro-appropriate package manager command for FFmpeg installation (e.g., `apt install ffmpeg`, `dnf install ffmpeg`, `pacman -S ffmpeg`). Linux only; returns empty on Windows. |
-| `POST` | `/api/ffmpeg/check` | Re-check FFmpeg availability. Rate limited. |
+| `POST` | `/api/ffmpeg/check` | Validate a specific FFmpeg path (`{ path }`) and, when it answers `-version`, persist it to `paths.ffmpeg_path` **and** re-apply it to the live trim service and download orchestrator through `FFmpegDeps.OnFfmpegPathChange` (`internal/web/routes/ffmpeg.go`). The post-boot FFmpeg overlay saves and resumes with no restart, so without that hot reload every mux and trim would keep the failing boot value. A path `PUT /api/config` would refuse — one carrying a `..` segment — is refused here too, with the same message and before anything is executed: answering `-version` is not a superset of that string rule, and `validateConfigUpdates` has no grandfather clause for paths, so a stored one made every later full-form save `400`. Rate limited. |
 | `GET` | `/api/ffmpeg/install-options` | Get available FFmpeg installation options (download sources). |
 | `POST` | `/api/ffmpeg/install` | Begin FFmpeg download/installation. Rate limited. |
 | `POST` | `/api/ffmpeg/install/confirm` | Confirm FFmpeg installation to a specific location. Rate limited. |
@@ -963,7 +981,8 @@ These routes provide PO token generation for external yt-dlp instances. They use
 | `POST` | `/invalidate_caches` | Loopback only | Invalidate all PO token caches. |
 | `POST` | `/invalidate_it` | Loopback only | Invalidate a specific identity token. |
 | `GET` | `/ping` | Public | Health check for yt-dlp plugin discovery. |
-| `GET` | `/minter_cache` | Public | List cached minter keys (diagnostic). |
+| `GET` | `/minter_cache` | Loopback only | List cached minter keys (diagnostic). The keys name internal PO token cache entries, so the route carries the same `LoopbackOnly` gate as the rest of the block (audit Q-23) even though only `/ping` has to stay public for plugin discovery. |
+| `GET` | `/pot_stats` | Loopback only | PO token observability counters — session/minter cache hits, minter create/evict/invalidate counts, generate errors, inflight waits, and the current cached-minter count. Monotonic; operators sample and diff externally. |
 
 ### System
 
@@ -996,6 +1015,8 @@ Both UIs display the same status information in a persistent status bar / footer
 | Cookie status | Per-platform badge, `cookieIndicatorState` | Per-platform indicator, `renderCookieStatus` |
 | Re-login required | `YT: Re-login` / `TW: Re-login` in the warnings area, clickable to start setup | Folded into the platform indicator as `YT: Re-login` / `YT!`, and at `tierFull` followed by `(R L)` — the chord that opens the same interactive setup the dashboard's click does |
 | Update indicator | New version badge | New version indicator |
+
+**Keyboard reachability (Web).** The status bar's clickable non-controls — the check countdown, the `YT: Re-login` / `TW: Re-login` warnings, the collapsed warnings icon and the version indicator — plus the log panel's resume-auto-scroll pill are all `role="button" tabindex="0"` and answer `Enter` and `Space` through the same handler their click uses, never a second copy of it; `Space` is `preventDefault()`ed so it activates the control instead of scrolling the page under the user. The glyph-only two — the warnings icon and the version indicator — take their accessible name from the title they already carry, kept in step as the title changes. The action-less `PO tokens: sidecar down` warning is deliberately none of this: it is a statement rather than a button, so it stays a plain span, is not a Tab stop, and leaves `Enter` and `Space` to the browser — and the collapsed warnings icon, which stands in for whichever warning is first, drops its own `role` and `tabindex` for as long as that warning is the action-less one, so it is never a Tab stop that does nothing. Because a control consumes the key by `preventDefault()` rather than by stopping propagation (the warning spans' handler is delegated on their container, so the event has to keep bubbling), the dashboard's global keydown shortcuts return early on an already-defaulted event: `Enter` on a status-bar control activates that control and does not also open the focused job's details dialog.
 
 **Cookie parity, and where it stops.** The two indicators agree on the facts that matter and are held to that by shared code and by tests, not by convention:
 

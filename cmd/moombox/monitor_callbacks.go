@@ -1567,6 +1567,15 @@ func (s *runState) wireMonitorCallbacks() {
 				return
 			}
 		}
+		// A tick that moved only progress columns is broadcast as the slim
+		// job_progress frame; everything else — every state transition,
+		// status included — stays on job_update, which the client handles
+		// exactly as before. The cadence is untouched: this makes each update
+		// cheaper, never rarer (WEB-5 / O-O).
+		if isProgressOnlyChange(ev.Changes) {
+			s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))
+			return
+		}
 		s.wsHub.BroadcastJobUpdate(job)
 	})
 

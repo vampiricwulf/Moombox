@@ -1,8 +1,13 @@
 # Frontend JS tests
 
 Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. Two suites
-(`player.test.mjs`, `app.test.mjs`) drive their module inside a jsdom document;
+dependencies, no DOM — and just import from `../public/modules/`. Twelve
+suites drive their module inside a jsdom document:
+`a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`,
+`boot-and-login.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`,
+`open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`,
+`render-diff.test.mjs`, `sidecar-warning.test.mjs` and
+`update-check-debounce.test.mjs`.
 jsdom is the only dev dependency, and it is **optional**.
 
 ## Running
@@ -28,8 +33,8 @@ modules.
 
 ## The DOM suites (jsdom)
 
-`player.test.mjs` and `app.test.mjs` are the suites that need a DOM. Install
-jsdom **inside `web/tests/`** — never at the repo root:
+The twelve suites listed above are the ones that need a DOM. Install jsdom
+**inside `web/tests/`** — never at the repo root:
 
 ```bash
 cd web/tests
@@ -45,14 +50,22 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 33
-DOM tests (23 player + 10 app):
+checkout without `npm ci` reports them as **skipped**, never failed — the 113
+DOM tests (player 37, render-diff 16, a11y-controls 12, boot-and-login 12,
+app 10, job-progress 8, log-panel 4, open-folder 4, update-check-debounce 4,
+sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 123 tests that
+need no DOM — the eight pure suites plus the stylesheet-text test in
+`a11y-controls.test.mjs`, which reads `moombox.css` and asserts on its text:
 
 ```
-ℹ pass 108
+ℹ tests 236
+ℹ pass 123
 ℹ fail 0
-ℹ skipped 33
+ℹ skipped 113
 ```
+
+With jsdom installed the same command reports `tests 236` / `pass 236` /
+`skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
 after the probe succeeds, so a genuine fault in the harness is a failure rather
@@ -61,7 +74,7 @@ than a silent skip.
 | Suite | Needs jsdom |
 |-------|-------------|
 | `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
-| `player.test.mjs`, `app.test.mjs` | yes |
+| `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `boot-and-login.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
 
 ## The player harness
 
@@ -155,9 +168,14 @@ fs.writeFileSync("fixtures/app-job-items.json", JSON.stringify({
 
 Pure modules under `web/public/modules/` — parsers, formatters, timeline math,
 the lane allocator, the overlay scheduler — are covered by the plain suites.
-`player.js` and `app.js` are covered by the jsdom suites above. The other
-UI-heavy modules (`settings.js`, `setup.js`, `trimmer.js`) have no harness yet;
-the two helpers are the pattern to extend if one is wanted.
+`player.js` and `app.js` — and the controllers `app.js` composes, reached
+through the app harness — are covered by the jsdom suites above, as are the two
+standalone page scripts `boot-theme.js` and `login.js` (`boot-and-login.test.mjs`,
+which evals them against the real `index.html` and `login.html`). The other
+UI-heavy modules (`settings.js`, `setup.js`, `trimmer.js`) have no harness of
+their own yet — `release-notes-toast.test.mjs` reaches one `settings.js` handler
+only because `MoomboxApp` constructs `SettingsController` and wires its
+listeners; the two helpers are the pattern to extend if a real one is wanted.
 
 ## Adding a test
 

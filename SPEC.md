@@ -506,7 +506,8 @@ The TUI uses a chord-based keybinding system with a single source of truth:
 The WebSocket connects on any path (upgrade handler intercepts before static file serving). Message format: `{"type": string, "payload": any}`.
 
 **Server-to-client message types:**
-- `job_update` — Single job changed (payload: job object with job ID as key)
+- `job_update` — A job changed in a way a progress tick does not (status transition, error, chat status, mux output, new job, trim edit)
+- `job_progress` — Progress-only tick of an active download, ~60 Hz per job (payload: `{id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt}`, merged client-side)
 - `jobs_update` — Full job list refresh (payload: array of all visible jobs)
 - `job_deleted` — A job row was removed (payload: `{id}`)
 - `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
@@ -516,12 +517,14 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `update_available` — New version found (payload: release info)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `cookie_status` — Cookie auth change (payload: auth status)
+- `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
+- `pong` — Reply to the client's `ping` (payload: none)
 
 The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives the Web UI's client-side archive re-evaluation: on every `job_update`/`jobs_update` and on a 60-second idle sweep, the Web UI moves Finished jobs that have aged past the threshold from the active panel into the Archived panel. This mirrors the TUI's `isJobArchived` reclassification (`internal/tui/task_list.go`) so the active panel stays in sync with wall-clock time without a page refresh. Every Go classifier — that TUI bucket, the REST `/api/jobs` split, the `job_update` broadcast gate and the `cmd/moombox` list filter — runs the one predicate in `internal/jobfilter/archive.go` (`ArchiveCutoff`, `IsArchived`), which scales the fractional day threshold exactly and treats the boundary as exclusive: a Finished job whose `updated_at` sits exactly on the cutoff stays active, as does one whose timestamp is missing or unparseable.
 
-**Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval` (16 ms gate in `internal/worker/progress.go`); the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
+**Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval` (16 ms gate in `internal/worker/progress.go`) and now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
 
-**Connection management:** 30-second ping interval, 10-second write timeout, 1MB max message size, 256KB backpressure limit.
+**Connection management:** 30-second ping interval, 10-second write timeout, 4 KiB client read limit (the only client message is `{"type":"ping"}`), 16-frame per-client backpressure queue.
 
 ### API Route Catalog
 
@@ -769,7 +772,7 @@ Sliding window rate limiter keyed on the effective client IP (trusted-proxy awar
 
 ```
 default-src 'self';
-script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+script-src 'self' https://cdn.jsdelivr.net;
 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
 font-src 'self' https://cdn.jsdelivr.net;
 img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com;

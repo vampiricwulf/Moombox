@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -18,9 +19,13 @@ const (
 	// broadcast to ride on (see flushResync), so on a completely quiet hub a
 	// ghost row survives up to one tick. That it equals wsLagLogInterval's 30 s
 	// is a coincidence — the two bound unrelated things and may be tuned apart.
-	wsPingInterval   = 30 * time.Second
-	wsMaxMessageSize = 1024 * 1024 // 1MB (match TS maxPayload)
-	maxLogBuffer     = 200         // Trim log ring buffer to this size
+	wsPingInterval = 30 * time.Second
+	// wsMaxMessageSize bounds a CLIENT frame. The only message a client sends
+	// is {"type":"ping"} — 15 bytes (web/public/app.js) — so 4 KiB is ~273×
+	// headroom; the old 1 MiB was an unauthenticated read budget per socket on
+	// a lan install, json.Unmarshal'ed in full (WEB-11). Server frames are
+	// unaffected — this is a read limit.
+	wsMaxMessageSize = 4 << 10 // 4 KiB
 	// wsReadIdleTimeout bounds how long a single Conn.Read may block
 	// waiting for a frame. Longer than 2× wsPingInterval (30s) so that
 	// a normally-responsive client — which keeps the peer alive via
@@ -51,9 +56,9 @@ type InitialStateProvider func() map[string]any
 
 // WebSocketHub manages WebSocket connections and broadcasts.
 //
-// hub.mu protects the clients map and closed flag. RWMutex matches
-// logBufMu's shape for consistency, and lets Broadcast's snapshot and
-// ClientCount use the cheaper RLock path. Audit reports/web.md Q-20.
+// hub.mu protects the clients map and closed flag. RWMutex rather than Mutex
+// so Broadcast's snapshot and ClientCount can use the cheaper RLock path.
+// Audit reports/web.md Q-20.
 type WebSocketHub struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
@@ -89,10 +94,6 @@ type WebSocketHub struct {
 	// wires the real check; only a WebSocketHub built outside it (test
 	// harnesses today) can leave this nil.
 	OriginCheck func(r *http.Request) (allowed bool, comparedHost string)
-
-	// Log buffer for initial state (ring buffer)
-	logBufMu sync.RWMutex
-	logBuf   []string
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -506,13 +507,16 @@ func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
 // path so a re-synced client is handed byte-for-byte what a new connection
 // gets — one payload shape, one client-side handler.
 //
-// Locking: takes only logBufMu, and callers must hold neither hub.mu nor
-// logBufMu. queueOrDrop reaches this from inside Broadcast, i.e. from inside a
-// database subscriber; that is safe because Database dispatches subscribers
-// AFTER releasing db.mu, Broadcast releases hub.mu before its enqueue loop,
-// BroadcastLog releases logBufMu before broadcasting, and the backfill producer
-// releases backfillMu before its Broadcast. Do not move any of those unlocks
-// inside a broadcast.
+// The payload is exactly what InitialState returns: the hub adds no "logs"
+// key of its own any more (WEB-14). ws_wiring.go's provider always carries one
+// from the logger's own ring, which is the only ring there is.
+//
+// Locking: takes no lock of its own, and callers must not hold hub.mu.
+// queueOrDrop reaches this from inside Broadcast, i.e. from inside a database
+// subscriber; that is safe because Database dispatches subscribers AFTER
+// releasing db.mu, Broadcast releases hub.mu before its enqueue loop, and the
+// backfill producer releases backfillMu before its Broadcast. Do not move any
+// of those unlocks inside a broadcast.
 func (hub *WebSocketHub) initialStateBytes() []byte {
 	var data map[string]any
 	if hub.InitialState != nil {
@@ -520,15 +524,6 @@ func (hub *WebSocketHub) initialStateBytes() []byte {
 	}
 	if data == nil {
 		data = make(map[string]any)
-	}
-
-	// Include log buffer (fallback if InitialState didn't provide logs)
-	if data["logs"] == nil {
-		hub.logBufMu.RLock()
-		if hub.logBuf != nil {
-			data["logs"] = hub.logBuf
-		}
-		hub.logBufMu.RUnlock()
 	}
 
 	msgBytes, err := json.Marshal(WSMessage{Type: "initial_state", Payload: data})
@@ -708,15 +703,29 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 	}
 }
 
-// BroadcastJobUpdate sends a single-job update to all clients. No per-job
-// throttle: the high-frequency caller (OnJobChange via ProgressTracker.maybeUpdate)
-// is already bounded to ~60Hz/job by progressUpdateInterval (16ms), and the
-// other callers (OnJobAdded, OnTrimsChanged) are event-driven and low rate.
+// BroadcastJobUpdate sends a single-job update to all clients: a whole job row,
+// for a change a progress tick does not make (status transition, error, chat
+// status, mux output, a new job, a trim edit).
+//
+// No per-job throttle, and none is owed: the ~60 Hz caller (OnJobChange via
+// ProgressTracker.maybeUpdate, bounded by progressUpdateInterval = 16ms) now
+// goes to BroadcastJobProgress below, and the callers left here (OnJobAdded,
+// OnTrimsChanged, the transition paths) are event-driven and low rate.
 // An earlier per-job throttle here raced against the unthrottled
 // BroadcastJobDeleted: a trailing-edge job_update could arrive after a delete
 // and resurrect the row via the client's upsert handler.
 func (hub *WebSocketHub) BroadcastJobUpdate(data any) {
 	hub.Broadcast("job_update", data)
+}
+
+// BroadcastJobProgress sends the slim per-tick frame: only the fields a
+// download's ~60 Hz progress write actually moves. The CADENCE is identical to
+// job_update's — this makes each update cheaper, never rarer (the protected
+// ruling) — and the client merges the frame onto the row it already holds. The
+// payload shape is the caller's (cmd/moombox/job_progress.go); this hub stays
+// deliberately ignorant of internal/database.
+func (hub *WebSocketHub) BroadcastJobProgress(data any) {
+	hub.Broadcast("job_progress", data)
 }
 
 // BroadcastJobsUpdate sends the full job list (on add/delete).
@@ -742,32 +751,33 @@ func (hub *WebSocketHub) BroadcastConnectivity(online bool) {
 	hub.Broadcast("connectivity", map[string]any{"online": online})
 }
 
-// BroadcastLog sends a log line to all clients and stores in buffer.
-func (hub *WebSocketHub) BroadcastLog(line string) {
-	// Truncate very long log lines to prevent buffer bloat
+// clipLogLine caps a single log line so one multi-megabyte panic dump cannot
+// be pushed whole to every connected tab.
+//
+// The cut walks back to a rune boundary: a byte index can land inside a
+// multi-byte rune (a CJK title in a job line, an em dash in an error), and
+// json.Marshal then repairs the broken tail to U+FFFD — visible garbage at the
+// boundary rather than a clean truncation. At most three bytes are given up.
+func clipLogLine(line string) string {
 	const maxLineLen = 4096
-	if len(line) > maxLineLen {
-		line = line[:maxLineLen] + "... (truncated)"
+	if len(line) <= maxLineLen {
+		return line
 	}
-
-	// Add to ring buffer
-	hub.logBufMu.Lock()
-	hub.logBuf = append(hub.logBuf, line)
-	if len(hub.logBuf) > maxLogBuffer*2 {
-		hub.logBuf = append([]string{}, hub.logBuf[len(hub.logBuf)-maxLogBuffer:]...)
+	n := maxLineLen
+	for n > 0 && !utf8.RuneStart(line[n]) {
+		n--
 	}
-	hub.logBufMu.Unlock()
-
-	hub.Broadcast("log", line)
+	return line[:n] + "... (truncated)"
 }
 
-// GetLogBuffer returns the current log buffer.
-func (hub *WebSocketHub) GetLogBuffer() []string {
-	hub.logBufMu.RLock()
-	defer hub.logBufMu.RUnlock()
-	result := make([]string, len(hub.logBuf))
-	copy(result, hub.logBuf)
-	return result
+// BroadcastLog sends a log line to all clients.
+//
+// The hub keeps NO buffer of its own: the logger owns the only ring
+// (logger.GetRecentLines), ws_wiring.go always puts it in the initial-state
+// payload, and the hub's copy was appended on every line and never read
+// (WEB-14).
+func (hub *WebSocketHub) BroadcastLog(line string) {
+	hub.Broadcast("log", clipLogLine(line))
 }
 
 // ClientCount returns the number of connected clients.
