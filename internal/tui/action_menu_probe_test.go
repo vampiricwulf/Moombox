@@ -2,6 +2,8 @@ package tui
 
 import (
 	"net/http"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,5 +180,118 @@ func TestApiClientUsesHttpxTransport(t *testing.T) {
 				t.Errorf("apiBaseURL = %q, want %q", got, wantURL)
 			}
 		})
+	}
+}
+
+// B1: StatusFilter answers "no jobs" from status alone, so an entry whose
+// JobFilter then yields nothing is a shape the menu cannot see at open time —
+// a COOKIES? or Error YouTube job with no staging directory, the common shape
+// for a failure that died before any bytes landed. The entry rendered as an
+// ordinary available row and Enter did NOTHING: no mode change, no feedback,
+// the menu unchanged. The parent dimmed it with "· no jobs to resume".
+//
+// The probe has just run when that happens, so the truth the cheap filter
+// could not know is known and free: the row is dimmed with its
+// DisabledReason there and then, and no probe happens before selection.
+//
+// Mutant: dropping the write-back in handleMainKey's len(m.filtered) == 0
+// branch — noJobs stays false and the rendered row carries no reason.
+func TestActionMenuDeadEndEntryDimsOnEnter(t *testing.T) {
+	a := NewApp()
+	// The job that makes the two filters disagree: resumable by status,
+	// nothing on disk to resume from.
+	a.HasStagingFiles = func(string) bool { return false }
+	a.HasSegmentFiles = func(string) bool { return false }
+	a.actionMenu.SetSize(100, 40)
+	a.actionMenu.SetJobs([]*database.Job{
+		{ID: "a", Title: "t", Status: database.StatusCookies, Platform: "youtube"},
+	})
+	a.actionMenu.Open(a.buildMenuItems())
+
+	idx, mi := findMenuItem(t, a, "A R")
+	if mi.noJobs {
+		t.Fatal("A R opened dimmed — this test needs the status-enabled/probe-empty shape to exist")
+	}
+	a.actionMenu.mainList.Select(idx)
+
+	if got := a.actionMenu.HandleKey(keyEnter); got != "" {
+		t.Fatalf("Enter returned %q, want \"\" — a dead-end entry must not dispatch", got)
+	}
+	if a.actionMenu.mode != menuMain {
+		t.Fatalf("mode = %v, want menuMain — the job selector must not open on an empty list", a.actionMenu.mode)
+	}
+
+	_, after := findMenuItem(t, a, "A R")
+	if !after.noJobs {
+		t.Error("A R is still rendered as available after Enter found no job — the operator is left pressing a live-looking row that does nothing")
+	}
+	if view := a.actionMenu.View(); !strings.Contains(view, "no jobs to resume") {
+		t.Errorf("the menu does not name the reason after Enter; view:\n%s", view)
+	}
+}
+
+// findMenuItem returns the index and item for a chord in the open main list.
+func findMenuItem(t *testing.T, a *App, chord string) (int, menuActionItem) {
+	t.Helper()
+	for i, it := range a.actionMenu.mainList.Items() {
+		mi, ok := it.(menuActionItem)
+		if ok && mi.action != nil && mi.action.Chord == chord {
+			return i, mi
+		}
+	}
+	t.Fatalf("%s was not in the menu", chord)
+	return -1, menuActionItem{}
+}
+
+// B4: the counted-callback guard above pins only the two probe seams that
+// exist today, so a future buildMenuItems() entry probing through a NEW
+// App callback reintroduces CORE-9 with every test green. This one is
+// structural: every settable func(string) bool field on App — the shape a
+// per-job disk probe has — is replaced with a counter, so a new seam is
+// covered the day it is added.
+//
+// Mutant: giving any NeedsJob entry a JobFilter that calls one of those
+// callbacks without a StatusFilter beside it (executed on A I) — the count
+// is non-zero.
+func TestActionMenuOpenCallsNoProbeSeamAtAll(t *testing.T) {
+	a := NewApp()
+	probes := 0
+	probeType := reflect.TypeOf(func(string) bool { return false })
+	counter := reflect.ValueOf(func(string) bool { probes++; return true })
+
+	v := reflect.ValueOf(a).Elem()
+	seams := 0
+	for i := range v.NumField() {
+		f := v.Field(i)
+		if f.Kind() == reflect.Func && f.Type() == probeType && f.CanSet() {
+			f.Set(counter)
+			seams++
+		}
+	}
+	if seams == 0 {
+		t.Fatal("no func(string) bool callbacks found on App — re-anchor this guard rather than letting it pass vacuously")
+	}
+
+	jobs := make([]*database.Job, 0, 200)
+	for i := range 200 {
+		st := database.StatusError
+		switch i % 4 {
+		case 1:
+			st = database.StatusCancelled
+		case 2:
+			st = database.StatusCookies
+		case 3:
+			st = database.StatusFinished
+		}
+		jobs = append(jobs, &database.Job{
+			ID: "j" + string(rune('a'+i%26)), Title: "t", Status: st, Platform: "youtube",
+			IncompleteTail: i%8 == 0, OutputFile: "out.mp4",
+		})
+	}
+	a.actionMenu.SetJobs(jobs)
+	a.actionMenu.Open(a.buildMenuItems())
+
+	if probes != 0 {
+		t.Errorf("opening the menu called %d probe callback(s) across %d seam(s), want 0 — every NeedsJob entry's open-time filter must be status-only", probes, seams)
 	}
 }

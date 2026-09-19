@@ -106,7 +106,7 @@ func (s *runState) runTUI() {
 	app.SetConfigStore(s.configStore)
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())
-	app.IsFirstRun = !s.cfg.ConfigLoaded
+	app.IsFirstRun = !s.configLoaded()
 
 	// Wire TUI callbacks
 	app.OnAddVideo = func(url string) {
@@ -743,11 +743,10 @@ func (s *runState) runTUI() {
 		return chocoAvail, wingetAvail
 	}
 
-	// Check FFmpeg on startup (after config is loaded)
-	// ConfigLoaded is written once at load and never mutated, so it stays a
-	// direct read; the path beside it is a live field and goes through the
-	// store (CORE-24).
-	if s.cfg.ConfigLoaded {
+	// Check FFmpeg on startup (after config is loaded). Both reads go through
+	// the store: ConfigLoaded is not a load-time constant — config.Save sets
+	// it — so an unlocked read here races a web handler's save (CORE-24).
+	if s.configLoaded() {
 		ffmpegPath := s.ffmpegPathOrDefault()
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer checkCancel()
@@ -1121,4 +1120,19 @@ func (s *runState) ffmpegPathOrDefault() string {
 		return "ffmpeg"
 	}
 	return path
+}
+
+// configLoaded reports whether this run has a config file behind it.
+//
+// It is NOT a load-time constant: config.Save's last statement is
+// `cfg.ConfigLoaded = true`, and Store.SaveLocked / Store.Update call Save on
+// the very pointer s.cfg holds. The web handlers reach SaveLocked under the
+// store's write lock while runTUI's body is still running — the HTTP server is
+// up before the TUI starts — so the direct reads this replaced were a genuine
+// data race, which the race detector confirms. The transition is only ever
+// false -> true, so no caller's decision changes; the lock is what changes.
+func (s *runState) configLoaded() bool {
+	loaded := false
+	s.configStore.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
+	return loaded
 }

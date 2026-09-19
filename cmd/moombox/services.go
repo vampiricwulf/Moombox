@@ -355,6 +355,31 @@ func cookiesLoadedFields(jar *cookies.CookieJar, now int64) []any {
 	}, jar.HorizonLogFields()...)
 }
 
+// logConfigSource names the config file this boot is actually using: the one
+// config.Load read, or — when nothing was found — the path a later save will
+// create.
+//
+// O-Y made an explicit -config path authoritative, which closed the
+// wrong-file-adopted bug and opened a quieter one: a typo'd
+// `-config C:/mooombox.toml` no longer matches anything, so the run starts on
+// defaults and the first save creates a SECOND config beside the intended one.
+// Nothing in the log named either path, so the operator's only clue was
+// settings that kept reverting. Two shapes on purpose — a loaded file and a
+// path that does not exist yet must not read the same.
+//
+// storePath is the run's save target (config.storePathFor's answer), which is
+// the asked-for path exactly when LoadedFrom is empty.
+func logConfigSource(log interface {
+	Info(msg string, args ...any)
+}, cfg *config.MoomboxConfig, storePath string) {
+	if cfg.LoadedFrom != "" {
+		log.Info("Configuration loaded", slog.String("path", cfg.LoadedFrom))
+		return
+	}
+	log.Info("No configuration file found — running on defaults; a save will create one",
+		slog.String("path", storePath))
+}
+
 // initServices runs the 16 numbered construction sections from the original
 // run() — config load, logger, updater, database, connectivity, cookies,
 // platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
@@ -420,6 +445,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.closeLog = func() { logCloseOnce.Do(func() { log.Close() }) }
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
+	logConfigSource(log, cfg, s.configPath)
 
 	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
 	// no silent clamp — see config.SegmentWorkers doc). Past

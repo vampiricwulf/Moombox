@@ -368,6 +368,19 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 			m.filtered = m.filterJobs(item.JobFilter)
 			m.jobConfirm = false
 			if len(m.filtered) == 0 {
+				// StatusFilter answered "there are candidates" from status
+				// alone, but JobFilter — which may consult the disk — found
+				// none. Without this the row stayed bright and Enter did
+				// nothing at all: no mode change, no feedback, the menu
+				// unchanged. The probe has JUST run, so the truth the cheap
+				// filter could not know is now known and free; dim the row
+				// with its DisabledReason exactly as the pre-CORE-9 menu did.
+				// No probe is added before selection — this is the result of
+				// the one selection already paid for.
+				if mi, ok := m.mainList.SelectedItem().(menuActionItem); ok && !mi.noJobs {
+					mi.noJobs = true
+					_ = m.mainList.SetItem(m.mainList.Index(), mi)
+				}
 				return ""
 			}
 			// Build job list items
