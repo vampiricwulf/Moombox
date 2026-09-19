@@ -70,6 +70,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+          # Both npm projects in the repo: the sidecar payload built on a
+          # cache miss, and web/tests' node suite whose `npm ci` runs on
+          # EVERY Linux run and is covered by no other cache key (the
+          # embed-blob cache keys off bgutil-sidecar/package-lock.json).
+          cache: npm
+          cache-dependency-path: |
+            bgutil-sidecar/package-lock.json
+            web/tests/package-lock.json
 
       - name: Build BotGuard sidecar payload
         # --ignore-scripts: a compromised dep's postinstall could exfiltrate
@@ -107,6 +115,22 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: modernc.org/libc pin matches the sqlite driver
+        # modernc.org/sqlite's doc.go requires downstream modules to pin the
+        # EXACT libc version its own go.mod names (gitlab.com/cznic/sqlite#177).
+        # A `go get -u` sweep broke that once and nothing noticed until a
+        # code review: build, vet, staticcheck and the full suite were all
+        # green with the wrong pin. This is the gate that notices.
+        run: |
+          ours=$(go list -m -f '{{.Version}}' modernc.org/libc)
+          want=$(sed -n 's#^[[:space:]]*modernc.org/libc \(v[^ ]*\).*#\1#p' "$(go list -m -f '{{.GoMod}}' modernc.org/sqlite)")
+          if [ "$ours" != "$want" ]; then
+            echo "modernc.org/libc is $ours but modernc.org/sqlite pins $want"
+            echo "Bump modernc.org/sqlite (preferred) or match its libc pin exactly."
+            exit 1
+          fi
+          echo "libc pin OK: $ours"
+
       - name: staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
@@ -118,6 +142,15 @@ jobs:
       - name: go test
         run: go test -count=1 ./...
 
+      - name: go test -race (logger, database, web)
+        # Owner ruling O-P. Three cheap packages, Linux only — the Windows
+        # leg is unchanged. internal/logger's lock-hierarchy comment, and the
+        # "run under -race" instructions in nine other test files, had never
+        # been checked by anything: `grep -rn -- "-race" .github/ docs/
+        # SPEC.md CLAUDE.md` returned zero hits before this step existed.
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./internal/logger/... ./internal/database/... ./internal/web/...
+
       - name: Cross-build linux/arm64
         if: runner.os == 'Linux'
         env:
@@ -125,6 +158,18 @@ jobs:
           GOOS: linux
           GOARCH: arm64
         run: go build -o /dev/null ./cmd/moombox
+
+      - name: Sidecar test suite
+        # bgutil-sidecar's wired `npm test` covers the homepage-ytcfg
+        # extraction and minter keying — the logic behind the open
+        # premiere-attestation field gate — and until now no workflow ran it.
+        # The `npm ci` guard is required because the sidecar build step above
+        # is skipped on an embed-cache HIT, which leaves node_modules absent.
+        if: runner.os == 'Linux'
+        working-directory: bgutil-sidecar
+        run: |
+          [ -d node_modules ] || npm ci --no-audit --no-fund --ignore-scripts
+          npm test
 
       - name: Frontend test suite
         if: runner.os == 'Linux'

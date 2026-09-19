@@ -67,6 +67,8 @@ jobs:
         if: steps.cache-embed.outputs.cache-hit != 'true'
         with:
           node-version: '24'
+          cache: npm
+          cache-dependency-path: bgutil-sidecar/package-lock.json
 
       - name: Build BotGuard sidecar payload
         # --ignore-scripts: a compromised dep's postinstall could
@@ -105,7 +107,11 @@ jobs:
           NUMERIC_BASE="${VERSION%%-*}"
           NUMERIC_VERSION="${NUMERIC_BASE}.0"
 
-          go install github.com/tc-hib/go-winres@latest
+          # Pinned to a released tag, like staticcheck in ci.yml: this runs
+          # inside the job that produces the .syso linked into the Windows
+          # binary the same job then signs, so an unpinned third-party
+          # `go install` here is a supply-chain hole in a signed artifact.
+          go install github.com/tc-hib/go-winres@v0.3.3
 
           jq --arg ver "$NUMERIC_VERSION" --arg vs "$VERSION_STRING" '
             .RT_MANIFEST."#1"."0409".identity.version = $ver
