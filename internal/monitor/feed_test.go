@@ -983,6 +983,16 @@ func storeWithOneTwitchChannel(t *testing.T) *config.Store {
 	return config.NewStore(cfg, "")
 }
 
+// storeWithNoChannels is the other side of scheduleNext's channel-count read:
+// the "no channels configured" early return, which writes NextCheckAt = 0 and
+// publishes OnSchedule(0) before any context check the guard could make.
+func storeWithNoChannels(t *testing.T) *config.Store {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.Channels = nil
+	return config.NewStore(cfg, "")
+}
+
 // reArmProbe records what a monitor chain actually DID, in fields that
 // outlive the cycle that did them.
 //
@@ -1040,6 +1050,10 @@ func (p *reArmProbe) snapshot() ([]int64, int) {
 //   - drop scheduleNext's ctx guard -> the dead chain overwrites the timer and
 //     NextCheckAt and publishes a countdown, so the live chain's pending cycle
 //     is cancelled.
+//   - put scheduleNext's ctx guard back BELOW the channel-count read (where it
+//     first landed) -> the "no channels configured" subtest fails: that early
+//     return writes NextCheckAt = 0 and publishes OnSchedule(0), which is
+//     exactly what the guard exists to stop, and it is reached first.
 func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1080,6 +1094,32 @@ func TestMonitors_ACancelledChainNeverReArms(t *testing.T) {
 
 		fm.runCycle(dead)
 		assertNoReArm(t, "feed runCycle", p, func() (bool, int64) {
+			fm.mu.Lock()
+			defer fm.mu.Unlock()
+			return fm.timer != nil, fm.NextCheckAt
+		})
+	})
+
+	// The same chain, with nothing configured. scheduleNext reads the channel
+	// list before it does anything else, and its empty-list arm is a second
+	// writer of NextCheckAt and a second publisher to OnSchedule — so the
+	// guard only covers the function if it runs ABOVE that read.
+	t.Run("feed with no channels configured", func(t *testing.T) {
+		p := &reArmProbe{}
+		fm := &FeedMonitor{
+			logger:        silentLogger{},
+			configStore:   storeWithNoChannels(t),
+			health:        newHealthTracker(),
+			ProbeCooldown: NewProbeCooldown(0),
+			OnSchedule:    p.onSchedule,
+			IsOnline:      p.offline,
+		}
+		fm.cancel = func() {}
+		fm.NextCheckAt = 4242
+		stopTimer(t, &fm.mu, &fm.timer)
+
+		fm.scheduleNext(dead, time.Time{})
+		assertNoReArm(t, "feed scheduleNext (no channels)", p, func() (bool, int64) {
 			fm.mu.Lock()
 			defer fm.mu.Unlock()
 			return fm.timer != nil, fm.NextCheckAt

@@ -264,6 +264,26 @@ func clearYouTubeMembershipMemo(platform string, clear func() int) int {
 	return clear()
 }
 
+// The two resume notifications' bodies, as format strings (count, platform).
+// Named constants rather than literals at the Send sites so that what an
+// operator actually reads can be pinned by a test —
+// notifications.Manager builds its targets from config and accepts Discord
+// webhook URLs only, so there is no fake target to install instead.
+//
+// BOTH CARRY THE PACING CLAUSE, and that is the load-bearing half. Before
+// MON-4 a repair sent every parked row to Upcoming and the heartbeat poller
+// started them all, so "Resumed N job(s)" and "N downloads are starting" were
+// the same sentence. Now a backlog row returns to Queued and the scheduler
+// re-admits it archive_slots at a time, so an operator with 40 parked rows and
+// archive_slots = 3 reads the count and then watches three downloads start.
+// The count is exactly right; only the text can keep it from being misread.
+// The log lines beside these two Sends make no such implication and stand
+// unchanged.
+const (
+	authRecoveredResumedBody       = "Resumed %d job(s) waiting on %s cookies — backlog re-queues and drains at archive_slots per channel"
+	credentialsObservedResumedBody = "Resumed %d job(s) parked on %s credentials after re-checking the saved credentials — backlog re-queues and drains at archive_slots per channel"
+)
+
 // wireCredentialRepairCallbacks installs the two RefreshService callbacks that
 // fire when a platform's credentials become usable again.
 //
@@ -337,7 +357,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			// emit — an empty Event would bypass every target's allowlist
 			// (unfilterable) since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
-				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				fmt.Sprintf(authRecoveredResumedBody, resumed, platform),
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},
@@ -410,7 +430,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			// Same "auth" event as the recovery notification above, for the
 			// same reason: an empty Event bypasses every target's allowlist.
 			s.notifyMgr.Send("Parked Jobs Re-evaluated",
-				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the saved credentials", resumed, platform),
+				fmt.Sprintf(credentialsObservedResumedBody, resumed, platform),
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},

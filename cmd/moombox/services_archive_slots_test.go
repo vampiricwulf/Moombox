@@ -51,8 +51,20 @@ func TestArchiveSlotsResolver_DisabledChannelGetsNone(t *testing.T) {
 // TestArchiveSlotsResolver_OverrideAndDefault keeps the pre-existing behaviour
 // honest alongside the new gate: an enabled channel's own archive_slots wins
 // over the global default, and a non-positive override falls back to it rather
-// than pausing the channel by accident (0 is what "unset" decodes to in TOML,
-// and 0 slots is the pause O-J reserves for `enabled = false`).
+// than pausing the channel by accident.
+//
+// 0 is NOT what an unset key decodes to: an omitted archive_slots leaves the
+// pointer nil, and an explicit `archive_slots = 0` is rejected by
+// config.Validate (channel archive_slots, range 1..100) and nilled on the
+// non-report-only path. So the `> 0` guard is defence against a 0 that reached
+// the struct WITHOUT passing validation — a hand-built store, a future decode
+// or migration path, an API write that skips Validate — not against an
+// ordinary unset key.
+//
+// Mutant: drop the `*ch.ArchiveSlots > 0` guard -> a 0 that bypassed
+// validation pauses an ENABLED channel, stealing the pause O-J reserves for
+// `enabled = false` (and the operator gets the disabled-channel behaviour with
+// the channel still switched on, which nothing in the UI explains).
 func TestArchiveSlotsResolver_OverrideAndDefault(t *testing.T) {
 	yes := true
 	seven, zero := 7, 0

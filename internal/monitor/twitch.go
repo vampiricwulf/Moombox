@@ -164,6 +164,19 @@ func (tm *TwitchMonitor) CheckNow() {
 // (~0.5s×N channels every cycle, permanently). Zero-value cycleStart
 // (initial Start scheduling) behaves as a plain interval.
 func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
+	// Same rule as runCycle's guard, for the path that arms the timer: a
+	// cancelled context means this chain was retired by Stop(), and a retired
+	// chain must arm nothing and publish nothing. Checked FIRST, above the
+	// channel-count read, because the "no channels" arm below writes
+	// NextCheckAt and publishes OnSchedule too — the two things this guard
+	// exists to prevent — so a guard placed after it covers only half the
+	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
+	// belongs to whichever chain is live now, and a dead chain zeroing it
+	// would blank the UI's next-check time for no reason.
+	if ctx.Err() != nil {
+		return
+	}
+
 	channels := tm.getTwitchChannels()
 	if len(channels) == 0 {
 		tm.mu.Lock()
@@ -200,14 +213,6 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time)
 	// late cycle racing Stop set NextCheckAt=-1 before doCheck returned).
 	if tm.cancel == nil {
 		tm.NextCheckAt = 0
-		tm.mu.Unlock()
-		return
-	}
-	// Same rule as runCycle's guard, for the path that arms the timer. Checked
-	// AFTER `cancel == nil` and deliberately WITHOUT touching NextCheckAt: the
-	// countdown belongs to whichever chain is live now, and a dead chain
-	// zeroing it would blank the UI's next-check time for no reason.
-	if ctx.Err() != nil {
 		tm.mu.Unlock()
 		return
 	}

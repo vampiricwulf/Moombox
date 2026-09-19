@@ -637,3 +637,58 @@ func TestScheduler_RunSweepsBeforeWaiting(t *testing.T) {
 		t.Fatalf("admitted %v, want [v_leftover] — Run must sweep once before it waits", got)
 	}
 }
+
+// TestScheduler_StartupSweepRunsOnlyOnce is the MON-9 review's M-4. Run's
+// panic-restart loop re-enters the same func literal, so a startup sweep that
+// is not gated turns a DETERMINISTICALLY panicking sweep() into a ~1 s loop
+// (panic -> recover -> 1 s restart sleep -> startup sweep -> panic) instead of
+// the ~61 s loop it used to be (the restart sleep plus the heartbeat wait).
+// That is ~60× the "scheduler panic, restarting" lines and ~60× the DB load on
+// a path that is already a bug and already hard to read.
+//
+// The seam is resolveSlots: sweep() calls it once per channel with Queued
+// rows, so a panicking resolver is a sweep that always panics, counted.
+//
+// Mutant: drop the `first` gate (sweep unconditionally at the top of every
+// restart) -> a second sweep lands ~1 s in, inside this test's window.
+func TestScheduler_StartupSweepRunsOnlyOnce(t *testing.T) {
+	s, db, _ := testSchedulerSetup(t, 2)
+	chID := "UC_wedged"
+	addSchedJob(t, db, &chID, "v_wedged", database.StatusQueued, 1)
+	addFeedItemRow(t, db, chID, "v_wedged", "2026-07-01T00:00:00Z")
+
+	var mu sync.Mutex
+	sweeps := 0
+	s.resolveSlots = func(string) int {
+		mu.Lock()
+		sweeps++
+		mu.Unlock()
+		panic("wedged sweep")
+	}
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return sweeps
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go s.Run(ctx)
+
+	waitForCond(t, 2*time.Second, "the startup sweep to run at all", func() bool {
+		return count() >= 1
+	})
+
+	// The restart sleep is 1 s and heartbeatInterval is 60 s, so an ungated
+	// startup sweep panics again at ~1 s and ~2 s while a gated one cannot
+	// sweep again until the heartbeat. Watch a window that spans two restarts,
+	// failing the moment a second sweep lands.
+	deadline := time.Now().Add(1800 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := count(); n > 1 {
+			t.Fatalf("sweep ran %d times while panicking — the startup sweep must run once per Run, "+
+				"or a wedged sweep restarts every second instead of every heartbeat", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

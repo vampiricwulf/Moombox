@@ -366,6 +366,19 @@ func (fm *FeedMonitor) CheckNow() {
 // each cycle (which can stretch by minutes when inline probes run).
 // Zero-value cycleStart behaves as a plain interval.
 func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
+	// Same rule as runCycle's guard, for the path that arms the timer: a
+	// cancelled context means this chain was retired by Stop(), and a retired
+	// chain must arm nothing and publish nothing. Checked FIRST, above the
+	// channel-count read, because the "no channels" arm below writes
+	// NextCheckAt and publishes OnSchedule too — the two things this guard
+	// exists to prevent — so a guard placed after it covers only half the
+	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
+	// belongs to whichever chain is live now, and a dead chain zeroing it
+	// would blank the UI's next-check time for no reason.
+	if ctx.Err() != nil {
+		return
+	}
+
 	channels := fm.getYouTubeChannels()
 	if len(channels) == 0 {
 		fm.mu.Lock()
@@ -412,14 +425,6 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	// a stopped monitor never reports -1 forever.
 	if fm.cancel == nil {
 		fm.NextCheckAt = 0
-		fm.mu.Unlock()
-		return
-	}
-	// Same rule as runCycle's guard, for the path that arms the timer. Checked
-	// AFTER `cancel == nil` and deliberately WITHOUT touching NextCheckAt: the
-	// countdown belongs to whichever chain is live now, and a dead chain
-	// zeroing it would blank the UI's next-check time for no reason.
-	if ctx.Err() != nil {
 		fm.mu.Unlock()
 		return
 	}

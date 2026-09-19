@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -345,5 +347,46 @@ func TestResumeCookieParkedJobs_RespectsQueuePriority(t *testing.T) {
 	}
 	if backlog.ParkReason != database.ParkReasonNone || backlog.ParkIdentity != "" || backlog.Error != "" {
 		t.Errorf("the park fields were not cleared on the Queued arm: %+v", backlog)
+	}
+}
+
+// TestResumeNotificationsSayTheBacklogIsPaced is the Task 2 review's M-2.
+//
+// MON-4 changed what the resumed count MEANS on the most visible surface
+// Moombox has. Before it, a cookie repair sent every parked row to Upcoming
+// and the worker's heartbeat poller started them all, so "Resumed 40 job(s)"
+// and "40 downloads are starting" were the same sentence. Now a channel's
+// parked backlog returns to Queued and drains archive_slots at a time, so an
+// operator with 40 parked rows and archive_slots = 3 reads "Resumed 40 job(s)"
+// and then watches three downloads start. The count is still exactly right;
+// what it IMPLIES is not, and the notification text is the only thing that can
+// say so — the adjacent log lines are accurate as they stand.
+//
+// Both bodies are pinned here rather than through notifyMgr because
+// notifications.Manager builds its targets from config and accepts Discord
+// webhook URLs only (notifications.parseTarget), so there is no fake target a
+// cmd/moombox test can install; the constants are the seam.
+//
+// Mutant: drop the pacing clause from either body -> the operator is handed a
+// number with nothing to reconcile it against when the dashboard starts three.
+func TestResumeNotificationsSayTheBacklogIsPaced(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"auth recovered", fmt.Sprintf(authRecoveredResumedBody, 40, "youtube")},
+		{"credentials observed", fmt.Sprintf(credentialsObservedResumedBody, 40, "youtube")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.body, "40 job(s)") {
+				t.Errorf("%q does not report the resumed count", tc.body)
+			}
+			if !strings.Contains(tc.body, "youtube") {
+				t.Errorf("%q does not name the platform — both platforms park jobs and the operator has to know which repaired", tc.body)
+			}
+			if !strings.Contains(tc.body, "archive_slots") {
+				t.Errorf("%q does not say the resumed backlog is PACED — an operator reading a bare count expects that many downloads to start, and since MON-4 they do not", tc.body)
+			}
+		})
 	}
 }
