@@ -130,13 +130,19 @@ func BenchmarkProgressFrameAtLogCap(b *testing.B) {
 // cost 20,623 allocations because all four panels re-rendered unconditionally;
 // with the CORE-2 caches it is three key comparisons, the status bar and two
 // lipgloss joins — 100, of which the status bar (the one panel with no cache,
-// because it tallies every job on every frame) is 70. The budget is 4x the
-// measured number: room for a Go or lipgloss release that allocates
-// differently, none for a panel that renders itself again.
+// because it tallies every job on every frame) is 70.
+//
+// The budget is 2x the measured number. The measurement is exactly 100 with
+// no variance at all — across repeated runs and across terminal/colour
+// environments — so the headroom is for a Go or lipgloss release that
+// allocates differently, not for drift in this code. 4x was too loose to be
+// a pin: a partial regression (one panel re-rendering a cheap part of itself,
+// say 250) would have passed silently, and the cheapest un-cached panel here
+// costs thousands, so nothing legitimate lives between 200 and 400.
 //
 // Asserted on allocations, not nanoseconds: allocation counts are
 // deterministic across machines and CI runners, wall time is not.
-const maxCachedFrameAllocs = 400
+const maxCachedFrameAllocs = 200
 
 // maxCachedLogPanelAllocs bounds the log panel ALONE on an unchanged frame.
 // Returning the memo allocates nothing at all (measured 0); the headroom is
@@ -200,8 +206,11 @@ func TestFrameCostAtLogCap(t *testing.T) {
 			frameAllocs, maxCachedFrameAllocs)
 	}
 
-	l := frameBenchApp(t)
-	logAllocs, logBytes := steadyStateAllocs(t, func() { l.logs.View() })
+	// The same fixture, not a second one: a.View() above has already
+	// rendered and memoised the log panel, which is exactly the "unchanged
+	// panel" state this probe measures, and building the 1,000-job /
+	// 1,000-line app twice bought nothing but runtime.
+	logAllocs, logBytes := steadyStateAllocs(t, func() { a.logs.View() })
 	t.Logf("cached log panel: %d allocs/op, %d B/op", logAllocs, logBytes)
 	if logAllocs > maxCachedLogPanelAllocs {
 		t.Errorf("an unchanged log panel allocates %d times, budget %d — LogViewerModel.View() is rendering instead of returning its memo",

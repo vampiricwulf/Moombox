@@ -178,10 +178,12 @@ type TaskListModel struct {
 
 	// rebuildSeq increments in rebuildVirtualList — the ONE funnel every
 	// content change (SetJobs, AddJob, RemoveJob, UpdateJob, CycleFilter,
-	// ToggleArchive, applyQuery, ResweepArchive, SetHideFinishedAgeDays)
-	// ends in. Everything else the frame depends on is read directly off the
-	// model or the embedded list in taskListKey, so no mutator can forget to
-	// invalidate the cache.
+	// ToggleArchive, applyQuery, SetHideFinishedAgeDays, and ResweepArchive
+	// when and only when the buckets are dirty) ends in. Everything else the
+	// frame depends on is read directly off the model or the embedded list
+	// in taskListKey, so no mutator can forget to invalidate the cache — see
+	// that key's summary field for the sweep's early-return path, which
+	// changes the header without rebuilding anything.
 	rebuildSeq uint64
 	// renderCache / cacheKey memoise View(). bubbletea renders after every
 	// message (~120/s with one active download); most carry no list change.
@@ -920,6 +922,17 @@ func (m *TaskListModel) passes(j *database.Job) bool {
 //   - marqueeOffset covers the scrolling selected title.
 //   - selectedCount is faithful because ToggleSelection always moves the
 //     count by one.
+//   - summary covers ResweepArchive's once-a-minute header refresh, which
+//     changes the counts WITHOUT rebuilding: the header counts every job,
+//     while the sweep's dirty check only looks at rows the filter passes, so
+//     a hidden Finished row aging past the boundary moves the counts and
+//     nothing else. It is the only input here with no rebuildSeq behind it.
+//   - nextFeed/nextDecapi/nextTwitch are compared with == like every other
+//     field, which on a time.Time compares the monotonic reading too. A
+//     re-derived "same" instant therefore compares unequal and costs one
+//     extra full render — the safe direction, since two different instants
+//     can never compare equal. Do not reach for Equal(): it would break the
+//     one-== comparable-struct design this key is built on.
 type taskListKey struct {
 	rebuildSeq    uint64
 	progressRev   uint64

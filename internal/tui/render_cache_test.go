@@ -213,27 +213,97 @@ func TestJobDetailsViewIsCachedBetweenIdenticalFrames(t *testing.T) {
 	}
 }
 
-// taskListSteps moves one keyed input at a time, starting from a warm cache.
-// Every entry is a real production mutator (or the one field the monitor
-// callbacks assign directly).
-func taskListSteps() []struct {
-	name  string
-	apply func(*TaskListModel)
-} {
-	return []struct {
-		name  string
-		apply func(*TaskListModel)
-	}{
-		{"resize", func(m *TaskListModel) { m.SetSize(48, 10) }},
-		{"focus", func(m *TaskListModel) { m.SetFocused(true) }},
-		{"cursor down", func(m *TaskListModel) { m.MoveDown() }},
-		{"batch select", func(m *TaskListModel) { m.ToggleSelection("b") }},
-		{"clear selection", func(m *TaskListModel) { m.ClearSelection() }},
-		{"progress write", func(m *TaskListModel) {
+// renderStep is one move of one panel's state, applied with the cache warm.
+// covers names the key field the step is claimed to pin; runSteps then fails
+// the step if it leaves the screen unchanged, because a step that renders
+// identically cannot distinguish a pinned field from a live one. Two steps
+// were vacuous exactly that way (review B1): a marquee tick on titles that
+// never overflow, and the setup flag on a non-empty list. Steps that move
+// several key fields at once are realistic traffic and claim nothing.
+type renderStep[M any] struct {
+	name   string
+	covers string
+	apply  func(M)
+}
+
+// runSteps drives one model through its steps, asserting after each that the
+// frame the operator sees (memoised) is byte-for-byte the frame a renderer
+// with no cache would produce. Equality across every step is also the
+// byte-identity claim against the pre-change renderer, which is exactly the
+// cache-defeated path. view/defeat are the model's View and its cache reset —
+// the two panels have no common interface, and a two-line closure pair is
+// cheaper than inventing one.
+func runSteps[M any](t *testing.T, m M, steps []renderStep[M], view func() string, defeat func()) {
+	t.Helper()
+	for _, step := range steps {
+		before := view() // warm the cache on the pre-step frame
+		step.apply(m)
+		got := view() // what the operator sees
+		defeat()
+		want := view() // the same frame with the cache defeated
+		if got != want {
+			t.Errorf("%s: the memoised frame differs from a fresh render\ncached:\n%s\nfresh:\n%s",
+				step.name, stripANSI(got), stripANSI(want))
+		}
+		if step.covers != "" && want == before {
+			t.Errorf("%s: the step renders identically, so it cannot cover %s — the claim is vacuous",
+				step.name, step.covers)
+		}
+	}
+}
+
+// The cache may change what a frame COSTS, never what it says.
+//
+// Mutant: pinning any of taskListKey's covered fields to a constant —
+// rebuildSeq, progressRev, width, height, focused, cursor, selectedCount,
+// marqueeOffset, summary, justSetup, nextFeed, nextDecapi, nextTwitch — makes
+// the step that names it below serve a stale frame that differs from the
+// fresh one. The remaining three (items, page, query) are redundant insurance
+// with no isolated production mover: every writer of the list's items, of the
+// paginator's page and of m.tokens ends in rebuildVirtualList, so rebuildSeq
+// already covers them and no step here claims them. sec has its own test.
+func TestTaskListCachedFramesMatchFreshFrames(t *testing.T) {
+	m := NewTaskListModel()
+	m.SetSize(60, 12)
+	// Every title overflows the column at every width used below, so
+	// whichever row the cursor is resting on has something to scroll — the
+	// rows are sorted by status priority, so which one is row 0 is not
+	// obvious from the order written here.
+	m.SetJobs([]*database.Job{
+		{ID: "a", Title: strings.Repeat("aaa scrolling title ", 6), Status: database.StatusLive},
+		{ID: "b", Title: strings.Repeat("bbb scrolling title ", 6), Status: database.StatusDownloading, Percent: 12},
+		{ID: "c", Title: strings.Repeat("ccc scrolling title ", 6), Status: database.StatusFinished, UpdatedAt: "2000-01-02T03:04:05Z"},
+	})
+
+	steps := []renderStep[*TaskListModel]{
+		// One dimension at a time: a resize that moves both leaves each
+		// field covering the other, and both pins survive.
+		{"narrower", "width", func(m *TaskListModel) { m.SetSize(48, 12) }},
+		{"shorter", "height", func(m *TaskListModel) { m.SetSize(48, 9) }},
+		{"focus", "focused", func(m *TaskListModel) { m.SetFocused(true) }},
+		{"cursor down", "cursor", func(m *TaskListModel) { m.MoveDown() }},
+		// Back onto the overflowing first row, which also re-anchors the
+		// marquee there for the step below.
+		{"cursor up", "cursor", func(m *TaskListModel) { m.MoveUp() }},
+		{"marquee step", "marqueeOffset", func(m *TaskListModel) {
+			// Reset arms a marqueeWaitTicks pause, so a single Tick only
+			// burns one tick of it and the offset never moves — which is
+			// what made the original step vacuous. Tick past the pause and
+			// insist the offset really advanced.
+			for range marqueeWaitTicks + 2 {
+				m.marquee.Tick()
+			}
+			if m.marquee.offset == 0 {
+				t.Fatalf("the marquee did not advance (needsScroll=%v) — the step is vacuous again",
+					m.marquee.NeedsScroll())
+			}
+		}},
+		{"batch select", "selectedCount", func(m *TaskListModel) { m.ToggleSelection("b") }},
+		{"clear selection", "selectedCount", func(m *TaskListModel) { m.ClearSelection() }},
+		{"progress write", "progressRev", func(m *TaskListModel) {
 			m.progressStore.Set("b", &ProgressData{Progress: "V:9 A:9", Percent: 73})
 		}},
-		{"marquee step", func(m *TaskListModel) { m.marquee.Tick() }},
-		{"archive sweep", func(m *TaskListModel) {
+		{"archive sweep", "summary", func(m *TaskListModel) {
 			// The once-a-minute sweep refreshes the header counts even when
 			// it does not rebuild (the header counts every job, the dirty
 			// check only looks at rows the filter passes), so statusSummary
@@ -241,65 +311,47 @@ func taskListSteps() []struct {
 			// in-place status change is the probe frame_counts_test.go uses.
 			m.Jobs()[0].Status = database.StatusMuxing
 			if m.ResweepArchive() {
-				panic("the fixture must not cross the archive boundary")
+				t.Fatal("the fixture must not cross the archive boundary — the sweep rebuilt, so this step no longer isolates summary")
 			}
 		}},
-		{"status change", func(m *TaskListModel) {
+		{"status change", "rebuildSeq", func(m *TaskListModel) {
 			m.UpdateJob(&database.Job{ID: "b", Title: "B", Status: database.StatusError})
 		}},
-		{"filter cycle", func(m *TaskListModel) { m.CycleFilter() }},
-		{"query", func(m *TaskListModel) { m.applyQuery("c") }},
-		{"archive toggle", func(m *TaskListModel) { m.ToggleArchive() }},
-		// The checking sentinel rather than a real future time: it moves
-		// nextFeed in the key exactly as a countdown does, but renders as a
-		// static "…" so the two frames below cannot disagree merely because
-		// the second rolled between them. A live countdown's dependency on
-		// the second is what TestTaskListCacheKeyCarriesTheWallClockSecond
-		// pins.
-		{"monitor checking", func(m *TaskListModel) { m.NextFeedCheck = MonitorCheckingTime() }},
-		{"setup flag", func(m *TaskListModel) { m.JustCompletedSetup = true }},
-		{"empty", func(m *TaskListModel) { m.SetJobs(nil) }},
+		// The three monitor countdowns are assigned straight onto the model
+		// by the monitor callbacks, so each is its own isolated mover. The
+		// checking sentinel rather than a real future time: it moves the
+		// field in the key exactly as a countdown does, but renders as a
+		// static "…" so the two frames cannot disagree merely because the
+		// second rolled between them. A live countdown's dependency on the
+		// second is what TestTaskListCacheKeyCarriesTheWallClockSecond pins.
+		{"feed checking", "nextFeed", func(m *TaskListModel) { m.NextFeedCheck = MonitorCheckingTime() }},
+		{"decapi checking", "nextDecapi", func(m *TaskListModel) { m.NextDecapiCheck = MonitorCheckingTime() }},
+		{"twitch checking", "nextTwitch", func(m *TaskListModel) { m.NextTwitchCheck = MonitorCheckingTime() }},
+		// Realistic traffic that moves several fields at once; claims none.
+		{"filter cycle", "", func(m *TaskListModel) { m.CycleFilter() }},
+		{"query", "", func(m *TaskListModel) { m.applyQuery("c") }},
+		{"query cleared", "", func(m *TaskListModel) { m.applyQuery("") }},
+		{"archive toggle", "", func(m *TaskListModel) { m.ToggleArchive() }},
+		{"empty", "", func(m *TaskListModel) { m.SetJobs(nil) }},
+		// Only reachable on an empty list with no query: View() reads the
+		// flag inside that branch alone, which is why this step follows
+		// "empty" and "query cleared" rather than preceding them.
+		{"setup flag", "justSetup", func(m *TaskListModel) { m.JustCompletedSetup = true }},
 	}
-}
 
-// The cache may change what a frame COSTS, never what it says. Each step
-// moves one input with the cache already warm; the memoised frame is then
-// compared byte-for-byte against the same model rendered with the cache
-// defeated. Equality across every step is also the byte-identity claim
-// against the pre-change renderer, which is exactly the cache-defeated path.
-//
-// Mutant: dropping any field from taskListKey (rebuildSeq, progressRev,
-// width, height, focused, cursor, selectedCount, marqueeOffset, summary,
-// query, justSetup, nextFeed) — the step that moves it then serves a stale
-// frame that differs from the fresh one. summary is the one with no
-// rebuildSeq behind it; the "archive sweep" step is what kills that mutant.
-func TestTaskListCachedFramesMatchFreshFrames(t *testing.T) {
-	m := NewTaskListModel()
-	m.SetSize(60, 12)
-	m.SetJobs([]*database.Job{
-		{ID: "a", Title: "aaa", Status: database.StatusLive},
-		{ID: "b", Title: "bbb", Status: database.StatusDownloading, Percent: 12},
-		{ID: "c", Title: "ccc", Status: database.StatusFinished, UpdatedAt: "2000-01-02T03:04:05Z"},
-	})
-
-	for _, step := range taskListSteps() {
-		m.View() // warm the cache on the pre-step frame
-		step.apply(m)
-		got := m.View()
-		m.renderCache = ""
-		want := m.View()
-		if got != want {
-			t.Errorf("%s: the memoised frame differs from a fresh render\ncached:\n%s\nfresh:\n%s",
-				step.name, stripANSI(got), stripANSI(want))
-		}
-	}
+	runSteps(t, m, steps, m.View, func() { m.renderCache = "" })
 }
 
 // The details twin of the differential above.
 //
-// Mutant: dropping any field from jobDetailsKey (contentSeq, width, height,
-// focused, hideDesc, job, status, version, update, yOffset, totalLines,
-// vpHeight) — the step that moves it serves a stale frame.
+// Mutant: pinning any of jobDetailsKey's covered fields to a constant —
+// contentSeq, focused, version, update, yOffset — makes the step that names
+// it serve a stale frame. Six more (width, height, job, hideDesc, totalLines,
+// vpHeight) are redundant insurance: every production path that moves one of
+// them goes through updateViewportContent, so contentSeq covers it and no
+// step here claims it. status is defensive rather than redundant — it has no
+// production mover at all — and is pinned on its own by
+// TestJobDetailsCacheFollowsAnInPlaceStatusChange. sec has its own test.
 func TestJobDetailsCachedFramesMatchFreshFrames(t *testing.T) {
 	m := NewJobDetailsModel()
 	m.SetSize(60, 14)
@@ -314,40 +366,74 @@ func TestJobDetailsCachedFramesMatchFreshFrames(t *testing.T) {
 	}
 	m.SetJob(job)
 
-	steps := []struct {
-		name  string
-		apply func(*JobDetailsModel)
-	}{
-		{"focus", func(m *JobDetailsModel) { m.SetFocused(true) }},
-		{"progress", func(m *JobDetailsModel) { m.SetProgress(&ProgressData{Progress: "V:5 A:5", Percent: 44}) }},
-		{"scroll", func(m *JobDetailsModel) { m.ScrollDown() }},
-		{"resize", func(m *JobDetailsModel) { m.SetSize(44, 12) }},
-		{"hide description", func(m *JobDetailsModel) { m.ToggleDescription() }},
-		{"version", func(m *JobDetailsModel) { m.version = "9.9.9" }},
-		{"update badge", func(m *JobDetailsModel) { m.updateInfo = &UpdateStatusMsg{Version: "9.9.9", TagName: "v9.9.9"} }},
-		{"marquee frame", func(m *JobDetailsModel) {
-			m.marquee.Tick()
+	steps := []renderStep[*JobDetailsModel]{
+		{"focus", "focused", func(m *JobDetailsModel) { m.SetFocused(true) }},
+		// Before the scroll: the Title row is the first line of the content,
+		// so once the viewport has scrolled off the top the marquee is no
+		// longer on screen and the step below renders identically.
+		{"marquee frame", "contentSeq", func(m *JobDetailsModel) {
+			// The one mover that touches contentSeq and nothing else: the
+			// same rows, the same line count, the same scroll offset, one
+			// step further into the scrolling title. Tick past the
+			// marqueeWaitTicks pause or the offset never moves and the
+			// re-render is identical.
+			for range marqueeWaitTicks + 2 {
+				m.marquee.Tick()
+			}
+			if m.marquee.offset == 0 {
+				t.Fatalf("the title marquee did not advance (needsScroll=%v) — the step is vacuous",
+					m.marquee.NeedsScroll())
+			}
 			m.RefreshMarqueeFrame()
 		}},
-		{"relative times", func(m *JobDetailsModel) { m.RefreshRelativeTimes() }},
-		{"status change", func(m *JobDetailsModel) {
+		{"scroll", "yOffset", func(m *JobDetailsModel) { m.ScrollDown() }},
+		{"version", "version", func(m *JobDetailsModel) { m.version = "9.9.9" }},
+		{"update badge", "update", func(m *JobDetailsModel) {
+			m.updateInfo = &UpdateStatusMsg{Version: "9.9.9", TagName: "v9.9.9"}
+		}},
+		// Realistic traffic that moves several fields at once; claims none.
+		{"progress", "", func(m *JobDetailsModel) { m.SetProgress(&ProgressData{Progress: "V:5 A:5", Percent: 44}) }},
+		{"resize", "", func(m *JobDetailsModel) { m.SetSize(44, 12) }},
+		{"hide description", "", func(m *JobDetailsModel) { m.ToggleDescription() }},
+		{"relative times", "", func(m *JobDetailsModel) { m.RefreshRelativeTimes() }},
+		{"status change", "", func(m *JobDetailsModel) {
 			next := *job
 			next.Status = database.StatusFinished
 			m.SetJob(&next)
 		}},
-		{"no job", func(m *JobDetailsModel) { m.SetJob(nil) }},
+		{"no job", "", func(m *JobDetailsModel) { m.SetJob(nil) }},
 	}
 
-	for _, step := range steps {
-		m.View() // warm the cache on the pre-step frame
-		step.apply(m)
-		got := m.View()
+	runSteps(t, m, steps, m.View, func() { m.renderCache = "" })
+}
+
+// jobDetailsKey.status is the one key field with no production mover: every
+// path that changes a job's status replaces the *database.Job pointer and
+// rebuilds the rows, so job and contentSeq already cover it. It is there to
+// catch a future in-place mutation — and an unpinned key field is what the
+// rest of this file exists to avoid, so here is its pin. The flip is
+// invisible to the rows (View() reads m.job.Status directly, for the border
+// and title colour), which is exactly the case the field guards.
+//
+// Mutant: pinning jobDetailsKey.status to "" — the frame keeps the Live
+// colours after the job goes to Error.
+func TestJobDetailsCacheFollowsAnInPlaceStatusChange(t *testing.T) {
+	m := NewJobDetailsModel()
+	m.SetSize(60, 20)
+	m.SetFocused(true) // the status colour reaches the border only when focused
+	job := &database.Job{ID: "a", Title: "A", Status: database.StatusLive}
+	m.SetJob(job)
+
+	var first, second string
+	observeInOneSecond(t, func() {
+		job.Status = database.StatusLive
 		m.renderCache = ""
-		want := m.View()
-		if got != want {
-			t.Errorf("%s: the memoised frame differs from a fresh render\ncached:\n%s\nfresh:\n%s",
-				step.name, stripANSI(got), stripANSI(want))
-		}
+		first = m.View()
+		job.Status = database.StatusError
+		second = m.View()
+	})
+	if second == first {
+		t.Error("an in-place status change must invalidate the details cache: the border and title are drawn in the job's status colour")
 	}
 }
 

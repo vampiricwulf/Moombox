@@ -803,10 +803,20 @@ func (m *JobDetailsModel) addFieldLink(label, value, link string) {
 	m.rows = append(m.rows, detailRow{kind: rowField, label: label, value: value, link: link})
 }
 
-// jobDetailsKey is every input JobDetailsModel.View() reads. sec is present
-// for the same reason the task list's is: the panel renders wall-clock text,
-// and the 1 Hz RefreshRelativeTimes that recomputes it is itself gated, so
-// the frame must be allowed to change once a second regardless (spec §5).
+// jobDetailsKey is every input JobDetailsModel.View() reads.
+//
+// sec is insurance, not a live dependency: unlike the task list's header,
+// this panel renders no wall-clock text of its own — the relative suffixes
+// ("5m ago") are baked into the viewport lines by buildRows, so contentSeq
+// already carries them. Spec §5 puts the second in every panel's key, and it
+// is what makes a frame here free to change once a second whatever a future
+// renderer starts reading the clock for. The cost is one full render per
+// second on an otherwise idle panel.
+//
+// status is defensive in the same way: every production path that changes a
+// job's status replaces the *database.Job pointer and rebuilds the rows, so
+// job and contentSeq cover it — the field is here to catch a future in-place
+// mutation, and TestJobDetailsCacheFollowsAnInPlaceStatusChange pins it.
 type jobDetailsKey struct {
 	contentSeq uint64
 	sec        int64
