@@ -177,9 +177,11 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // classification arrives DATELESS in production. When the row's own date is
 // only an estimate (coarse/assumed) — the rows the §10 window re-check and
 // the §8 exhaustion inference actually need truth for — one ProbeDate call
-// (an anonymous WEB player fetch) supplies it; the ladder makes the upgrade
-// one-time per video. Rows already holding day/exact/started dates never
-// fetch: their date is authoritative and the probe's absence costs nothing.
+// (a WEB player fetch that carries the jar's credentials — see
+// youtube.PlayerAPI.ProbeVideoDate; only the STATUS probes are anonymous)
+// supplies it; the ladder makes the upgrade one-time per video. Rows already
+// holding day/exact/started dates never fetch: their date is authoritative and
+// the probe's absence costs nothing.
 //
 // ok=false means the date fetch itself FAILED (transport error): callers
 // treat the row like an errored probe — no write, no FRESH, no exhaustion,

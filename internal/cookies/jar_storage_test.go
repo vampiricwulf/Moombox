@@ -1,14 +1,18 @@
 package cookies
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"unicode/utf8"
 )
 
 // cookieRow renders one Netscape cookie row. Values are synthetic
@@ -1199,6 +1203,259 @@ func TestCompareCookieDomainsIsATotalOrder(t *testing.T) {
 				t.Errorf("compareCookieDomains(%q, %q) = %d but rules 2-4 alone give %d — "+
 					"rule 1 fired inside the twitch jar", a, b, got, want)
 			}
+		}
+	}
+}
+
+// netscapeWithYouTubeAuth is the smallest cookies.txt that makes
+// HasAnyYouTubeAuthCookie answer true. The value is synthetic, like every
+// other row in this file — no real cookie value is ever written or read here.
+var netscapeWithYouTubeAuth = "# Netscape HTTP Cookie File\n" +
+	cookieRow(".youtube.com", "0", "SAPISID", "synthetic-sapisid-value") + "\n"
+
+// makeUnreadable swaps the jar's read seam for one that fails the way
+// os.ReadFile does over a file the process may not open, and returns the
+// restore func. The seam rather than a real chmod: 0o000 is a no-op for the
+// file's owner on Windows and for root on Linux, so a real permission change
+// cannot drive this branch portably — and this test must run on both CI legs.
+//
+// syscall.EACCES rather than fs.ErrPermission, because the SHAPE is what is
+// under test: os.ReadFile always yields a *fs.PathError whose Err is a
+// syscall.Errno, and since fix round 1 that is the only cause
+// cookieLoadErrorSentence will quote. A sentinel driven by a non-errno cause
+// would exercise the fallback instead of the production path.
+func makeUnreadable(t *testing.T, path string) (restore func()) {
+	t.Helper()
+	real := cookieJarReadFile
+	cookieJarReadFile = func(p string) ([]byte, error) {
+		if p == path {
+			return nil, &fs.PathError{Op: "open", Path: p, Err: syscall.EACCES}
+		}
+		return real(p)
+	}
+	restore = func() { cookieJarReadFile = real }
+	t.Cleanup(restore)
+	return restore
+}
+
+// TestLoadRecordsThePathEvenWhenTheReadFails is COOKIES-2. Only the ENOENT arm
+// recorded j.filePath, so a boot Load that failed with EACCES (the compose
+// `user:` uid mismatch the docs name as the likeliest container failure) left
+// filePath empty — and Reload() short-circuits on an empty path. Every later
+// credential read for the life of the process then silently read nothing:
+// the 30-minute pass, every SyncCookies before an extraction, twitch.Auth.Reload.
+// Repairing the permission on the host did nothing until a restart.
+//
+// Mutants:
+//   - drop `j.filePath = filePath` from the error arm -> Reload is a no-op and
+//     hasAuth stays false after the permission is repaired.
+//   - clear lastLoadErr in the error arm -> LastLoadError() is empty and both
+//     dashboards go back to reporting a mounted file as never-configured.
+//   - set lastLoadErr on the ENOENT arm -> the "absent" subtest fails; a file
+//     that does not exist is never-configured, not unreadable.
+func TestLoadRecordsThePathEvenWhenTheReadFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+
+	// Absent: recorded, no error sentinel. On ITS OWN jar, deliberately — the
+	// ENOENT arm records filePath too, so a jar that had already been pointed
+	// at this path could reload from what THAT arm left behind and the failure
+	// arm recording nothing would go unnoticed.
+	absent := NewCookieJar()
+	if err := absent.Load(path); err != nil {
+		t.Fatalf("an absent cookies.txt is not an error: %v", err)
+	}
+	if got := absent.LastLoadError(); got != "" {
+		t.Errorf("LastLoadError() = %q for an ABSENT file — that is never-configured, not unreadable", got)
+	}
+
+	// A BOOT load over a file that is present and unreadable: the failing Load
+	// is this jar's FIRST, which is the shape the defect had.
+	if err := os.WriteFile(path, []byte(netscapeWithYouTubeAuth), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restore := makeUnreadable(t, path)
+	jar := NewCookieJar()
+	err := jar.Load(path)
+	if err == nil {
+		t.Fatal("an unreadable cookies.txt must return an error")
+	}
+	sentinel := jar.LastLoadError()
+	if sentinel == "" {
+		t.Error("LastLoadError() is empty after a failed read — both dashboards would show the mounted file as never-configured")
+	}
+	if !strings.Contains(sentinel, "cookies.txt") {
+		t.Errorf("LastLoadError() = %q — it must name the path so the operator knows which file to fix", sentinel)
+	}
+	if len(sentinel) > cookieLoadErrorMaxLen {
+		t.Errorf("LastLoadError() is %d bytes — it reaches a status line and must stay bounded", len(sentinel))
+	}
+
+	// Repairing the permission is enough: Reload picks the file up with no restart.
+	restore()
+	if err := jar.Reload(); err != nil {
+		t.Fatalf("Reload after the repair: %v", err)
+	}
+	if !jar.HasAnyYouTubeAuthCookie() {
+		t.Error("Reload() read nothing — the failed boot Load never recorded the path, so it stays a no-op until a restart")
+	}
+	if got := jar.LastLoadError(); got != "" {
+		t.Errorf("LastLoadError() = %q after a successful reload — the sentinel must clear", got)
+	}
+}
+
+// loadThroughFailingRead points a fresh jar at path with a read seam that
+// returns readErr, and hands back whatever LastLoadError recorded.
+func loadThroughFailingRead(t *testing.T, path string, readErr error) string {
+	t.Helper()
+	realRead := cookieJarReadFile
+	t.Cleanup(func() { cookieJarReadFile = realRead })
+	cookieJarReadFile = func(string) ([]byte, error) { return nil, readErr }
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err == nil {
+		t.Fatal("a failed read must return an error")
+	}
+	return jar.LastLoadError()
+}
+
+// TestLastLoadErrorStaysBoundedAndPathOnly pins the two properties that make
+// the sentinel safe to project onto AuthStatus and render in a badge title on
+// both dashboards.
+//
+// BOUNDED, because a pathological path would otherwise push a badge title to
+// arbitrary length; and cut on a RUNE boundary, because a mount path is not
+// necessarily ASCII.
+//
+// PATH AND CAUSE ONLY, and that is a property of how the sentence is BUILT
+// rather than of what today's producer happens to say. The read fails before a
+// single byte is parsed, so no cookie value can be in the errno — but the
+// sentence is assembled from the path the CALLER passed in plus the innermost
+// cause, never copied out of the error's own message, so an error type that
+// one day embedded a line of the file could not put it on a badge either.
+//
+// Mutants:
+//   - drop the boundString call -> the long-path row exceeds the bound.
+//   - bound by slicing s[:n] -> the truncation splits a multi-byte rune and the
+//     sentinel stops being valid UTF-8.
+//   - render the sentence as fmt.Sprintf("%v", err) -> the embedded-line row
+//     puts a cookie row in a badge title.
+//   - quote pathErr.Err.Error() instead of narrowing to syscall.Errno -> the
+//     PathError row puts a cookie row in a badge title. That shape is not
+//     reachable through os.ReadFile today, which is exactly why the guarantee
+//     has to be structural: cookieJarReadFile is a seam, and an os.Root open,
+//     a decrypting reader or a network-mount shim would each bring their own
+//     error type with them.
+//   - drop the errno arm altogether -> the errno row renders the fallback and
+//     the operator is never told it was a permission.
+func TestLastLoadErrorStaysBoundedAndPathOnly(t *testing.T) {
+	// Three paddings, because ONE path proves nothing here: where the cut
+	// lands inside the multi-byte run depends on the prefix length, and a
+	// byte-slicing bound happens to produce valid UTF-8 whenever the offset
+	// divides by three. One of these three offsets is always misaligned,
+	// whatever the bound is set to. The path is synthetic rather than under
+	// t.TempDir() for the same determinism — the temp prefix has no fixed
+	// length — and it need not exist: the read seam answers before any open.
+	for pad := 0; pad < 3; pad++ {
+		t.Run(fmt.Sprintf("a pathological path is bounded on a rune boundary (pad %d)", pad), func(t *testing.T) {
+			path := "/mnt/" + strings.Repeat("x", pad) + strings.Repeat("私", 300) + "-cookies.txt"
+			sentinel := loadThroughFailingRead(t, path,
+				&fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission})
+
+			if len(sentinel) > cookieLoadErrorMaxLen {
+				t.Errorf("LastLoadError() is %d bytes, want at most %d — it reaches a status line",
+					len(sentinel), cookieLoadErrorMaxLen)
+			}
+			if !utf8.ValidString(sentinel) {
+				t.Errorf("LastLoadError() = %q — the bound split a rune", sentinel)
+			}
+		})
+	}
+
+	t.Run("an errno keeps the OS's own wording", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		sentinel := loadThroughFailingRead(t, path,
+			&fs.PathError{Op: "open", Path: path, Err: syscall.EACCES})
+
+		if !strings.Contains(sentinel, syscall.EACCES.Error()) {
+			t.Errorf("LastLoadError() = %q — an errno is os's own closed vocabulary and is "+
+				"quoted verbatim, so the operator reads the platform's own words", sentinel)
+		}
+		if strings.Contains(sentinel, cookieLoadErrorUnknownCause) {
+			t.Errorf("LastLoadError() = %q — it fell back to the fixed phrase over a cause it "+
+				"could have named", sentinel)
+		}
+	})
+
+	t.Run("a PathError whose cause carries a cookie row is not echoed", func(t *testing.T) {
+		row := cookieRow(".youtube.com", "0", "SAPISID", "synthetic-secret-value")
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		sentinel := loadThroughFailingRead(t, path,
+			&fs.PathError{Op: "open", Path: path, Err: errors.New(row)})
+
+		if strings.Contains(sentinel, "SAPISID") {
+			t.Errorf("LastLoadError() = %q — a *fs.PathError's Err is an ERROR, not a closed "+
+				"vocabulary, so quoting it verbatim puts whatever it carries on two dashboards",
+				sentinel)
+		}
+		if !strings.Contains(sentinel, cookieLoadErrorUnknownCause) {
+			t.Errorf("LastLoadError() = %q — a cause it will not quote must still say that it "+
+				"could not read the file", sentinel)
+		}
+		if !strings.Contains(sentinel, "cookies.txt") {
+			t.Errorf("LastLoadError() = %q — it must still name the file to fix", sentinel)
+		}
+	})
+
+	t.Run("an error that embeds a line of the file is not echoed", func(t *testing.T) {
+		secret := "SAPISID=synthetic-secret-value"
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		sentinel := loadThroughFailingRead(t, path, fmt.Errorf("read %s: %s", path, secret))
+
+		if strings.Contains(sentinel, secret) {
+			t.Errorf("LastLoadError() = %q — it echoed what the error embedded; the sentence is "+
+				"built from the path and the cause, never copied out of the message", sentinel)
+		}
+		if !strings.Contains(sentinel, "cookies.txt") {
+			t.Errorf("LastLoadError() = %q — it must still name the file to fix", sentinel)
+		}
+	})
+}
+
+// TestBoundStringSurvivesATinyBound is fix round 1's Minor 1. boundString is an
+// unexported general helper in a package that does a lot of string work, and
+// `cut := n - 3` goes negative for any bound under the ellipsis's own width —
+// the `for cut > 0` guard is false immediately and `s[:cut]` panics. Only
+// cookieLoadErrorMaxLen reaches it today; the next caller is the problem.
+//
+// Mutant:
+//   - drop the n < len(ellipsis) guard -> boundString(s, 0) panics with a
+//     slice bounds error instead of returning a bounded string.
+func TestBoundStringSurvivesATinyBound(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"permission denied", 0, ""},
+		{"permission denied", 1, "p"},
+		{"permission denied", 2, "pe"},
+		{"permission denied", 3, "..."},
+		{"私の-cookies", 2, ""},     // no room for even one rune: cut back to nothing
+		{"私の-cookies", 4, "..."},  // the marker fits; its one spare byte cannot hold a rune
+		{"私の-cookies", 6, "私..."}, // the marker plus exactly one rune
+		{"abc", 3, "abc"},         // exactly n: returned whole, no ellipsis
+		{"permission denied", -1, ""},
+	} {
+		got := boundString(tc.s, tc.n)
+		if got != tc.want {
+			t.Errorf("boundString(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+		}
+		if tc.n >= 0 && len(got) > tc.n {
+			t.Errorf("boundString(%q, %d) is %d bytes — the bound is the whole contract", tc.s, tc.n, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("boundString(%q, %d) = %q — the cut split a rune", tc.s, tc.n, got)
 		}
 	}
 }

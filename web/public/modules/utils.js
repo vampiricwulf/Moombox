@@ -570,6 +570,11 @@ export function parkedCookiePlatforms(jobs) {
  * It comes from the caller because it is computed from the job list rather than
  * from the status payload; see parkedCookiePlatforms.
  *
+ * `status.fileError` is the fifth state and ranks immediately under
+ * `authenticated`: cookies.txt is PRESENT and could not be read, which the
+ * `!found` arm below used to render as never-configured. See the arm itself for
+ * why it sits under the green one rather than over it.
+ *
  * The reason line is `youtubeError` / `twitchError` off the same payload, and
  * it is appended to whichever arm has one. Until Arc 10 that was the
  * inconclusive arm alone, on the belief that a conclusive verdict never
@@ -598,6 +603,20 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
   }
   if (status?.authenticated) {
     return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
+  }
+  // AFTER `authenticated` and BEFORE `!found`. A cookies.txt that cannot be
+  // read renders as never-configured on the `!found` arm — the container
+  // operator is told "no cookies" about a file sitting on the volume — but a
+  // jar that still authenticates is doing real work, and reddening that badge
+  // would report a stale-reload problem as a credential problem. `fileError`
+  // is path-and-cause only (see AuthStatus.CookieFileError); an older binary
+  // omits the key entirely and this arm never fires, which is the additive
+  // contract every other key here follows.
+  if (status?.fileError) {
+    return {
+      className: "indicator-error",
+      title: `${meta.name}: cookies.txt could not be read (${status.fileError})`,
+    };
   }
   if (!status?.found) {
     return meta.absent;
@@ -744,6 +763,30 @@ export function cookieRefreshMechanismLabel(mechanism, acquisition) {
 }
 
 /**
+ * Is the viewer sitting AT the host, as far as the page can tell?
+ *
+ * A strict SUBSET of what the server's isLoopback accepts
+ * (internal/web/middleware.go: net.ParseIP(ip).IsLoopback() plus the literal
+ * "localhost", so all of 127.0.0.0/8 and every spelling of ::1). The four below
+ * are the ones a browser actually puts in location.hostname; anything else a
+ * local viewer might have typed — 127.0.0.2, 127.1, foo.localhost — misses, and
+ * a miss errs toward "you are remote", which costs that viewer one extra step
+ * in a panel that holds both controls. Widen it only in that direction.
+ *
+ * ADVISORY ONLY. The server refuses the cookie setup trio from anywhere but
+ * loopback (requireLoopbackForBrowserSetup, internal/web/routes/cookies.go);
+ * this exists so the UI can say so BEFORE the click rather than surfacing a 403
+ * afterwards.
+ *
+ * @param {string} hostname - location.hostname of the page making the request
+ * @returns {boolean}
+ */
+export function viewerIsAtTheHost(hostname) {
+  return hostname === "localhost" || hostname === "127.0.0.1" ||
+    hostname === "::1" || hostname === "[::1]";
+}
+
+/**
  * Where the header's "Re-login" warning should take the operator.
  *
  * Two remedies exist and only one of them works from everywhere. The
@@ -754,12 +797,13 @@ export function cookieRefreshMechanismLabel(mechanism, acquisition) {
  *
  * 1. The viewer has to be AT the host, or a window opening there is no remedy —
  *    they would click, see nothing, and have no way to learn that a browser is
- *    waiting on a screen they cannot see. Nothing on the server stops them:
- *    /api/setup/complete (the FIRST-RUN wizard) is loopback-gated, but the
- *    cookie setup trio is not, so this predicate is the only thing between a
- *    remote click and a browser window on someone else's screen. It is the same
- *    shape as the server's IsLoopbackRequest deliberately, so the two read
- *    "local" the same way.
+ *    waiting on a screen they cannot see. Since 2026-09-17 the server refuses
+ *    them too — the cookie setup trio is loopback-gated alongside
+ *    /api/setup/complete — so this predicate is no longer the only thing
+ *    between a remote click and a browser window on someone else's screen. It
+ *    is still the same shape as the server's IsLoopbackRequest deliberately, so
+ *    the two read "local" the same way and the UI routes the viewer BEFORE the
+ *    403 rather than after it.
  * 2. The host has to HAVE a browser. /api/cookies/auto-status answers that, and
  *    the container case is its empty answer.
  *
@@ -773,15 +817,10 @@ export function cookieRefreshMechanismLabel(mechanism, acquisition) {
  * @returns {"wizard"|"import"}
  */
 export function reloginPromptTarget(status, hostname) {
-  // A strict SUBSET of what the server's isLoopback accepts
-  // (internal/web/middleware.go: net.ParseIP(ip).IsLoopback() plus the literal
-  // "localhost", so all of 127.0.0.0/8 and every spelling of ::1). The four
-  // below are the ones a browser actually puts in location.hostname; anything
-  // else a local viewer might have typed — 127.0.0.2, 127.1, foo.localhost —
-  // misses, and a miss errs toward "import", which costs that viewer one click
-  // in a panel that holds both controls. Widen it only in that direction.
-  const atTheHost = hostname === "localhost" || hostname === "127.0.0.1" ||
-    hostname === "::1" || hostname === "[::1]";
+  // One expression, two callers: the Settings panel's "Set up" buttons ask the
+  // same question before they POST. A miss errs toward "import" here, which
+  // costs a local viewer one click in a panel that holds both controls.
+  const atTheHost = viewerIsAtTheHost(hostname);
   if (!atTheHost) return "import";
   const available = status && Array.isArray(status.availableBrowsers) ? status.availableBrowsers.length : 0;
   return available > 0 ? "wizard" : "import";

@@ -32,6 +32,13 @@ const (
 	decapiProbeBudget = 60 * time.Second
 )
 
+// decapiDefaultRateLimitWindow is the window DECAPI's limiter assumes when the
+// server throttles us without telling us for how long. 60 s is not a new
+// number: it is the window fetchLatestVideo opens on every request and the one
+// waitForRateLimit's defensive arm already synthesises for a remaining=0 with
+// no resetAt.
+const decapiDefaultRateLimitWindow = 60 * time.Second
+
 // decapiLatestVideoURL is the latest-video endpoint as a printf template. A
 // package var so a test can aim checkChannel at an httptest server — the same
 // seam shape internal/youtube uses for membershipPageBase. Production never
@@ -72,6 +79,30 @@ type decapiTerminalMemo struct {
 	status        string
 	outsideWindow bool
 	windowDays    int
+	// denied records that the sighting ended because YouTube refused the probe
+	// AND the refusal is settled for a prober with no credentials to retry
+	// with — members_only only, never login_required (deniedIsSettled owns
+	// that split; ProcessYouTubeVideoResult.Denied already carries it
+	// narrowed). It is a separate fact from `status` because the status it
+	// rides on is "upcoming", which decapiTerminalStatus can never call
+	// terminal — so without this a settled refusal is re-probed at the 15 s
+	// interval floor forever, ~240 anonymous player calls an hour for an
+	// answer DECAPI cannot change.
+	//
+	// What it latches: this exact videoID, on this channel, indefinitely.
+	// What releases it: a DIFFERENT newest video (the videoID guard in
+	// terminalMemoHit), PruneHealth dropping a de-configured channel, or a
+	// process restart — the memo is in-process only. NOT the refusal ending,
+	// and NOT the operator fixing cookies.
+	//
+	// That is sound only because the answer genuinely cannot change from
+	// here: DECAPI probes anonymously and has no authenticated probe at all,
+	// so it could never be the monitor that picks a members-only stream back
+	// up. The feed monitor owns that answer and re-probes the same video on
+	// its own cadence (walk.go's probeRow escalates to the authenticated
+	// probe), which is what this latch relies on as cover — and which needs
+	// monitors.membership_discovery, default on.
+	denied bool
 }
 
 // decapiTerminalStatus reports whether a classification can no longer change.
@@ -248,6 +279,21 @@ func (dm *DecapiMonitor) CheckNow() {
 // targets it and the previous gap-scheduling ran BELOW the budget.
 // Zero-value cycleStart behaves as a plain interval.
 func (dm *DecapiMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
+	// Same rule as runCycle's guard, for the path that arms the timer: a
+	// cancelled context means this chain was retired by Stop(), and a retired
+	// chain must arm nothing and publish nothing. Checked FIRST, above the
+	// channel-count read, because the "no channels" arm below writes
+	// NextCheckAt and publishes OnSchedule too — the two things this guard
+	// exists to prevent — so a guard placed after it covers only half the
+	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
+	// belongs to whichever chain is live now, and a dead chain zeroing it
+	// would blank the UI's next-check time for no reason. A twin of this check
+	// sits inside the locked section below and covers what this one cannot —
+	// a Stop()+Start() landing after it; both are wanted.
+	if ctx.Err() != nil {
+		return
+	}
+
 	channels := dm.getYouTubeChannels()
 	if len(channels) == 0 {
 		dm.mu.Lock()
@@ -281,10 +327,23 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context, cycleStart time.Time)
 	}
 
 	dm.mu.Lock()
-	// Don't schedule if monitor was stopped; clear the checking sentinel so
-	// a stopped monitor never reports -1 forever.
+	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
+	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
+	// this no longer clears the -1 sentinel for a cycle racing Stop(). Kept as
+	// defence for a future cancel-without-cancel path: a monitor that nils
+	// cancel without cancelling its context would otherwise arm a timer and
+	// publish a countdown for a chain nothing owns.
 	if dm.cancel == nil {
 		dm.NextCheckAt = 0
+		dm.mu.Unlock()
+		return
+	}
+	// Kept beside the leading guard, not redundant with it: this closes the
+	// window between that check and this lock, in which a Stop()+Start() would
+	// install a NEW non-nil cancel — so `cancel == nil` above passes and this
+	// dead chain would write the LIVE chain's NextCheckAt and publish its
+	// OnSchedule. Re-reading ctx.Err() costs nothing; do not "simplify" it away.
+	if ctx.Err() != nil {
 		dm.mu.Unlock()
 		return
 	}
@@ -346,6 +405,17 @@ func (dm *DecapiMonitor) runCycle(ctx context.Context) {
 			dm.logger.Error("decapi monitor runCycle panic", "panic", r)
 		}
 	}()
+
+	// A cancelled context means this cycle belongs to a STOPPED chain. Stop()
+	// cancels the context but leaves the AfterFunc armed, and a later Start()
+	// installs a new cancel — so the dead chain's cycle used to pass every
+	// guard, run a full doCheck, and then re-arm the SHARED timer field,
+	// cancelling the live chain's pending cycle every interval. Returning here,
+	// before the `checking` latch and before the scheduleNext defer is
+	// installed, is what stops that. Latent today (Stop runs only at shutdown).
+	if ctx.Err() != nil {
+		return
+	}
 
 	cycleStart := time.Now()
 	dm.mu.Lock()
@@ -461,7 +531,7 @@ func (dm *DecapiMonitor) waitForRateLimit(ctx context.Context) {
 	// busy-loop. Treat missing resetAt as a fresh 60s window matching the
 	// default rate-limit cadence established in checkChannel.
 	if rl.resetAt.IsZero() {
-		rl.resetAt = time.Now().Add(60 * time.Second)
+		rl.resetAt = time.Now().Add(decapiDefaultRateLimitWindow)
 	}
 
 	// Need to wait
@@ -529,7 +599,7 @@ func (dm *DecapiMonitor) fetchLatestVideo(ctx context.Context, ch *config.Channe
 	// remaining count after response (matches TS fetchDecapi post-fetch).
 	dm.mu.Lock()
 	if dm.rateLimit.resetAt.IsZero() {
-		dm.rateLimit.resetAt = time.Now().Add(60 * time.Second)
+		dm.rateLimit.resetAt = time.Now().Add(decapiDefaultRateLimitWindow)
 	}
 	if dm.rateLimit.remaining > 0 {
 		dm.rateLimit.remaining--
@@ -542,13 +612,7 @@ func (dm *DecapiMonitor) fetchLatestVideo(ctx context.Context, ch *config.Channe
 	if resp.StatusCode == http.StatusTooManyRequests {
 		// 429 reached the server — explicit throttle, not a connectivity
 		// problem. Don't report as failure or success.
-		retryAfter := resp.Header.Get("Retry-After")
-		if secs, err := strconv.Atoi(retryAfter); err == nil {
-			dm.mu.Lock()
-			dm.rateLimit.resetAt = time.Now().Add(time.Duration(secs) * time.Second)
-			dm.rateLimit.remaining = 0
-			dm.mu.Unlock()
-		}
+		dm.note429(resp)
 		// Drain so the connection can be reused (closing an unread body
 		// discards the TCP connection — costly during a sustained 429 storm).
 		drainBounded(resp.Body)
@@ -568,6 +632,45 @@ func (dm *DecapiMonitor) fetchLatestVideo(ctx context.Context, ch *config.Channe
 		return "", err
 	}
 	return string(body), nil
+}
+
+// note429 applies an explicit throttle to the limiter.
+//
+// EVERY 429 sets remaining=0, not just one carrying a numeric Retry-After.
+// The header is optional, is often an HTTP-date, and decapi.me may send none
+// at all — and the old code touched `remaining` only inside the strconv.Atoi
+// success arm, so those shapes left the limiter fully stocked and the cycle
+// kept hitting a server that had just said stop.
+//
+// A non-positive or unparseable Retry-After falls back to
+// decapiDefaultRateLimitWindow — or, if a longer back-off is already on the
+// clock, to that (see below). The `secs > 0` guard matters: "-5" parses
+// cleanly and would put resetAt in the PAST, where waitForRateLimit's
+// proactive reset restores `remaining` on the very next call.
+//
+// The two arms treat resetAt DIFFERENTLY, and both readings are deliberate:
+//
+//   - An explicit numeric Retry-After is the server's own instruction for
+//     THIS response, so it is honoured exactly — shorter or longer than
+//     anything already on the clock.
+//   - Without one, the default window is a guess, and a guess must never
+//     SHORTEN a back-off updateRateLimit already accepted from this very
+//     response's X-RateLimit-Reset (it runs first, in fetchLatestVideo).
+//     Back-off never retreats — the rule updateRateLimit states two
+//     functions down. Assigning unconditionally here collapsed a 5-minute
+//     server-stated window to 60 s and resumed hitting decapi.me four
+//     minutes early, which is the failure MON-2 exists to remove.
+func (dm *DecapiMonitor) note429(resp *http.Response) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	dm.rateLimit.remaining = 0
+	if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
+		dm.rateLimit.resetAt = time.Now().Add(time.Duration(secs) * time.Second)
+		return
+	}
+	if until := time.Now().Add(decapiDefaultRateLimitWindow); until.After(dm.rateLimit.resetAt) {
+		dm.rateLimit.resetAt = until
+	}
 }
 
 func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
@@ -711,8 +814,11 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	})
 	// Record what the probe made of this ID so the next cycle can skip a
 	// classification that cannot change. An errored or cooled-down probe
-	// leaves StreamStatus empty, which is never terminal.
-	dm.recordTerminalMemo(ch.ID, videoID, result.StreamStatus)
+	// leaves StreamStatus empty, which is never terminal, and result.Denied
+	// arrives already narrowed to the refusals that are settled for an
+	// anonymous prober (deniedIsSettled) — a login_required refusal creates no
+	// job but is deliberately not remembered.
+	dm.recordTerminalMemo(ch.ID, videoID, result.StreamStatus, result.Denied)
 	// Window check (§13): "the newest video on the channel" is not the same
 	// as "recent" — on a dormant channel it can be a year old, and jobbing it
 	// is the headline bug through a second door. Vod-family results job only
@@ -729,7 +835,8 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		if result.PublishedAt == "" && dm.ProbeDate != nil {
 			// Two-phase probe (§9): the status probe carries no microformat,
 			// so in production EVERY vod-family result lands here dateless.
-			// One WEB date fetch decides the window honestly; a fetch failure
+			// One WEB date fetch — authenticated when the jar holds
+			// credentials — decides the window honestly; a fetch failure
 			// falls through to the treated-as-outside arm below, which was
 			// always this path's failure mode — but now it is the exception,
 			// not the rule.
@@ -785,12 +892,17 @@ func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 }
 
 // terminalMemoHit reports whether videoID is the exact video this channel's
-// last completed probe classified as terminal AND there is a live reason to
-// trust that classification again this cycle. A different ID — the channel
-// published something new — is a miss, and the fresh probe overwrites the memo.
+// last completed probe SETTLED — either classified as terminal with a live
+// reason to trust that classification again this cycle, or refused with an
+// answer DECAPI cannot change. A different ID — the channel published
+// something new — is a miss, and the fresh probe overwrites the memo.
 //
-// The live reason is one of two, and neither is redundant:
+// The reason to skip is one of three, and none is redundant:
 //
+//   - a denied verdict: YouTube refused the probe with a settled refusal
+//     (deniedIsSettled — members_only, never login_required). It rides on the
+//     non-terminal status "upcoming", so it is answered before the
+//     terminal-status test.
 //   - reprobe: history says the video was dealt with, read fresh every cycle
 //     so that clearing an orphaned row re-opens it immediately.
 //   - the memoized window skip, valid only while the window is the one the
@@ -800,7 +912,18 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	m, ok := dm.terminalMemo[channelID]
-	if !ok || m.videoID != videoID || !decapiTerminalStatus(m.status) {
+	if !ok || m.videoID != videoID {
+		return false
+	}
+	if m.denied {
+		// A settled refusal needs no second reason, and the two arms below
+		// cannot supply one: the status it rides on ("upcoming") is not
+		// terminal, so decapiTerminalStatus returns false before `reprobe` or
+		// the window verdict is ever consulted — for a verdict that is in
+		// fact settled until the channel publishes something new.
+		return true
+	}
+	if !decapiTerminalStatus(m.status) {
 		return false
 	}
 	return reprobe || (m.outsideWindow && m.windowDays == windowDays)
@@ -810,13 +933,13 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 // replacing any previous one. An empty status (probe errored, cooldown
 // suppressed it, or no probe is wired) is recorded as-is and is not terminal,
 // so the next cycle probes again.
-func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID, status string) {
+func (dm *DecapiMonitor) recordTerminalMemo(channelID, videoID, status string, denied bool) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	if dm.terminalMemo == nil {
 		dm.terminalMemo = make(map[string]decapiTerminalMemo)
 	}
-	dm.terminalMemo[channelID] = decapiTerminalMemo{videoID: videoID, status: status}
+	dm.terminalMemo[channelID] = decapiTerminalMemo{videoID: videoID, status: status, denied: denied}
 }
 
 // noteTerminalMemoOutsideWindow records that the memo recordTerminalMemo just

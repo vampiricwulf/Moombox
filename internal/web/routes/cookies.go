@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -153,6 +154,16 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 // can widen it. Anything added to any producer must keep that rule, or this
 // projection puts an intermediary's HTML on the dashboard.
 //
+//   - fileError — cookies.txt is PRESENT and could not be READ. It joins the
+//     keys above on the same additive terms, and on the same
+//     no-response-bodies rule: it is produced over a read that failed before
+//     any byte was parsed and is assembled from the path and the failure class
+//     alone (see AuthStatus.CookieFileError and CookieJar.LastLoadError), so it
+//     names a path and a cause and can carry no cookie value. It is
+//     platform-independent — one file holds both platforms — so both payloads
+//     carry it and either badge can name it. Without it the state rendered as
+//     `found: false`, i.e. as never-configured, about a file on the volume.
+//
 // `verification` (and, for Twitch, `found`) are ADDITIVE, by the precedent
 // `renewed` set and `ran`/`verdict` and the setup's two verification fields
 // followed: an older frontend ignores the extra keys and behaves exactly as it
@@ -169,6 +180,7 @@ func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
 		"authenticated": status.YouTubeAuthenticated,
 		"verification":  status.YouTubeVerification.String(),
 		"youtubeError":  status.YouTubeError,
+		"fileError":     status.CookieFileError,
 	}
 }
 
@@ -182,6 +194,7 @@ func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 		"authenticated": status.TwitchAuthenticated,
 		"verification":  status.TwitchVerification.String(),
 		"twitchError":   status.TwitchError,
+		"fileError":     status.CookieFileError,
 	}
 }
 
@@ -213,6 +226,113 @@ func jsonErrorCause(w http.ResponseWriter, msg, cause string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "cause": cause})
+}
+
+// jsonResponseSized and jsonErrorSized are jsonResponse / jsonError with an
+// explicit Content-Length.
+//
+// They exist for the two handlers that run a deferred, BLOCKING auth re-check
+// after answering (the cookie import and the setup-wizard finish). jsonResponse
+// streams through a json.Encoder and sets no length, so net/http falls back to
+// chunked encoding — and the terminating chunk is written when the HANDLER
+// returns, not when the body is flushed. The Flush those handlers perform
+// therefore released the headers and nothing else, and `fetch().json()`, which
+// awaits the body, sat through the whole re-check: measured at 1.204 s against
+// a 1.2 s stand-in over a real server, and at ~10 ms for the body with the
+// header set. The
+// setup dialog's 60 s AbortController has to cover FinishSetup as well, so that
+// was a real budget.
+//
+// Marshalling to a buffer first is what makes the length knowable. A marshal
+// error is answered as a 500 rather than silently writing a truncated body —
+// the encoder's silent `_ =` could not do that, because it had already written
+// a 200 status by then.
+//
+// The TRAILING NEWLINE is json.Encoder.Encode's, kept deliberately: this change
+// is about a header, and every byte of every exit's body must stay what it was
+// before it (pinned by TestSizedCookieBodiesAreByteIdenticalToTheEncoder).
+// json.Marshal does not add it, so a sized writer built on Marshal alone
+// silently drops the last byte of every answer these two endpoints have ever
+// sent — invisible to a JSON parse, which is exactly why it is written down.
+//
+// Safe under the gzip wrapper for the bodies these handlers actually produce:
+// only startGzip() deletes Content-Length, and at ~282 bytes for the widest of
+// them (an import success carrying three maps — the status snapshot, the
+// relogin map and activePlatforms) they stay under internal/web's 1024-byte
+// gzipMinSize, where commitPlain() sends them identity with the header intact.
+// A body at or over that threshold WOULD be re-chunked and would wait out the
+// re-check again; TestSizedCookieAnswersSurviveTheGzipWrapper states both
+// halves and TestCookieWritersSetContentLength holds every exit under the
+// ceiling.
+func jsonResponseSized(w http.ResponseWriter, data any) {
+	buf, err := json.Marshal(data)
+	if err != nil {
+		jsonErrorSized(w, "failed to encode response", http.StatusInternalServerError)
+		return
+	}
+	buf = append(buf, '\n')
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+	_, _ = w.Write(buf)
+}
+
+func jsonErrorSized(w http.ResponseWriter, msg string, code int) {
+	buf, err := json.Marshal(map[string]string{"error": msg})
+	if err != nil {
+		// Unreachable for a map[string]string, and handled anyway so this
+		// function has no path that writes a header it then contradicts.
+		buf = []byte(`{"error":"failed to encode response"}`)
+	}
+	buf = append(buf, '\n')
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+	w.WriteHeader(code)
+	_, _ = w.Write(buf)
+}
+
+// requireLoopbackForBrowserSetup refuses an /auto-setup/* request that did not
+// come from the host, and reports whether it did so.
+//
+// Three of the four endpoints it guards START, FINISH and CANCEL A HEADED
+// BROWSER WINDOW ON THE HOST'S SCREEN. On a network_access=lan install there is
+// no authentication at all, so before this any LAN device could open one on a
+// screen its user cannot see, bounded only by the API rate limiter — and the
+// only thing standing in the way was reloginPromptTarget, a CLIENT-side
+// predicate in utils.js whose own comment said so. The remedy that works from
+// anywhere is the paste import (POST /api/cookies/import), which stays ungated
+// by the Arc 11 ruling for exactly the deployment this one refuses — so the
+// refusal names it.
+//
+// The fourth is /auto-setup/abandon, which opens nothing and is guarded for the
+// opposite reason: it RELEASES the setup slot, so a LAN POST could destroy the
+// host's in-flight sign-in. Its handler comment carries that case in full.
+//
+// The SHAPE is the first-run wizard's gate (an inline web.IsLoopbackRequest
+// answered before anything else runs, including the service guard). The STATUS
+// is 403 and deliberately not the wizard's 401: app.js installs a global
+// window.fetch interceptor that treats any 401 outside /api/auth/ as an expired
+// session and reloads the page, so a 401 here would throw the operator out of
+// the dashboard instead of telling them where to click.
+//
+// IsLoopbackRequest, not IsLocalOrPrivateRequest: a private LAN address is
+// precisely the population this refuses. An operator at the machine over
+// RDP/VNC is still loopback. And IsLoopbackRequest reads the DIRECT PEER,
+// ignoring trusted_proxies — the rule every loopback gate in this tree follows
+// (docs/spec/security.md § What stays on the direct peer address): a
+// forwarded header may never confer
+// "arrived over this machine's loopback interface".
+//
+// jsonErrorSized, not jsonError: the finish handler runs a deferred BLOCKING
+// auth re-check, so every JSON any of its exits writes must carry a length or
+// the client waits the re-check out for the body. The other three use the same
+// writer so one reader's mapping holds for all four.
+func requireLoopbackForBrowserSetup(rw http.ResponseWriter, req *http.Request) bool {
+	if web.IsLoopbackRequest(req) {
+		return true
+	}
+	jsonErrorSized(rw, "browser cookie setup opens a window on the host, so run this on the host — "+
+		"from anywhere else, paste a cookies.txt with Import instead", http.StatusForbidden)
+	return false
 }
 
 // writeBrowserReadError answers the two browser-read sentinels and reports
@@ -388,7 +508,7 @@ var cookieImportOnlyKeys = map[string]bool{"youtubeImport": true, "twitchImport"
 
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
-// auto-setup start/finish/cancel trio) so a buggy or hostile client
+// auto-setup start/finish/cancel/abandon quartet) so a buggy or hostile client
 // can't trigger a flurry of browser process launches — an expensive
 // operation per audit reports/web.md S-7.
 func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter) {
@@ -487,8 +607,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// both messages and each says which cookie source was missing.
 			//
 			// The auto-setup/start handler below keeps the static string, and
-			// correctly: StartSetup is never gated, so there the sentinel means
-			// exactly one thing.
+			// correctly: StartSetup is never gated on cookies.auto_enabled, so
+			// there the sentinel means exactly one thing. (Its own loopback
+			// gate is a different question and answers before it.)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
 				jsonError(rw, err.Error(), http.StatusFailedDependency)
 			case errors.Is(err, cookies.ErrProfileNotFound):
@@ -596,7 +717,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	// path. Pinned by TestCookieImportRouteHasNoGET.
 	heavy.Post("/api/cookies/import", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -612,8 +733,12 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// derivation. In short: refresh's status block is the only place the
 		// credential fingerprint is compared and the Twitch auth mark cleared;
 		// a request-scoped context would let a closed tab cancel the comparison
-		// its own import caused; and the Flush is what stops the client waiting
-		// out a re-check it has already been answered for.
+		// its own import caused; and the Content-Length the response now carries
+		// is what stops the client waiting out a re-check it has already been
+		// answered for — the Flush alone could not: with no length net/http
+		// chunks the body and writes the terminating chunk only when the handler
+		// RETURNS, so fetch().json() sat through the whole re-check (measured
+		// 1.204 s for a 1.2 s stand-in, ~10 ms for the body with the header).
 		//
 		// Deferred rather than placed after the response so it covers the
 		// jar-reload error exit too — the one error path that runs over a file
@@ -633,26 +758,36 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		if err != nil {
 			switch {
+			// A CONDITION that clears on its own, so 409 and "try again
+			// shortly" — the identical answer /auto-setup/start gives for the
+			// identical sentinel. It must sit ahead of the `result.Wrote` and
+			// default arms: Wrote is false on this exit, so without its own
+			// case a refusal would read as a 500 server fault for something
+			// the operator fixes by waiting two minutes. Never 401 — app.js's
+			// global fetch interceptor treats 401 as an expired session and
+			// reloads the page, which would throw the paste away.
+			case errors.Is(err, cookies.ErrRefreshInProgress):
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			// The three refusals, verbatim. Each names the operator's next move
 			// and none of them quotes the submitted text; flattening them to a
 			// 500 would answer a bad export with a server fault.
 			case errors.Is(err, cookies.ErrImportNotNetscape),
 				errors.Is(err, cookies.ErrImportNoRows),
 				errors.Is(err, cookies.ErrImportNoCredential):
-				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+				jsonErrorSized(rw, err.Error(), http.StatusUnprocessableEntity)
 			// S9's abort: Moombox could not read the existing cookies.txt and
 			// deliberately did not write. Verbatim, for the reason the sentinel's
 			// doc gives — the fix is the permission or the mount, and this is the
 			// one message that must never read as "replace your cookies", over a
 			// file the endpoint just refused to touch.
 			case errors.Is(err, cookies.ErrCookieFileUnreadable):
-				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+				jsonErrorSized(rw, err.Error(), http.StatusUnprocessableEntity)
 			// A CONDITION the operator changes and then retries — the same shape
 			// as the locked cookie DB and the blocked ladder, and 409 for the
 			// same reason. The message names the single-file bind mount, which
 			// is what actually produces it in a container.
 			case errors.Is(err, cookies.ErrCookieFileUnwritable):
-				jsonError(rw, err.Error(), http.StatusConflict)
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			// The paste was REJECTED and the rollback did not finish. Verbatim,
 			// and AHEAD of the `result.Wrote` arm below, which is the arm both
 			// of these used to fall into: `Wrote` is true here (cookies.txt was
@@ -673,15 +808,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// import already ran, was rejected, and left two things disagreeing
 			// about which credentials are in force.
 			case errors.Is(err, cookies.ErrImportRollbackIncomplete):
-				jsonError(rw, err.Error(), http.StatusInternalServerError)
+				jsonErrorSized(rw, err.Error(), http.StatusInternalServerError)
 			// The write LANDED and this process could not load it. Saying "the
 			// import failed" would be false about the file on disk, and would
 			// send an operator to repeat an import that already worked.
 			case result.Wrote:
-				jsonError(rw, "the cookies were imported and written, but this process could not load "+
+				jsonErrorSized(rw, "the cookies were imported and written, but this process could not load "+
 					"them — the auth re-check that follows re-reads the file", http.StatusInternalServerError)
 			default:
-				jsonError(rw, "cookie import failed", http.StatusInternalServerError)
+				jsonErrorSized(rw, "cookie import failed", http.StatusInternalServerError)
 			}
 			return
 		}
@@ -694,11 +829,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		if getActivePlatforms != nil {
 			response["activePlatforms"] = getActivePlatforms()
 		}
-		jsonResponse(rw, response)
+		jsonResponseSized(rw, response)
 	})
 
 	// POST /api/cookies/auto-setup/start
 	heavy.Post("/api/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		var body struct {
 			Platform string `json:"platform"`
 		}
@@ -710,7 +849,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -718,26 +857,38 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			switch {
 			case errors.Is(err, cookies.ErrSetupInProgress),
 				errors.Is(err, cookies.ErrRefreshInProgress):
-				jsonError(rw, err.Error(), http.StatusConflict)
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
-				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
+				jsonErrorSized(rw, "no supported browser installed", http.StatusFailedDependency)
+			// A wrong INPUT, not a server fault and not a condition that
+			// clears: 400 with the sentinel's own sentence, which names the
+			// two accepted values and the one it was given. StartSetup owns
+			// the rule — the TUI's R L chord and the first-run wizard call it
+			// directly — so this arm renders that decision rather than
+			// repeating its list here, where the copy would be free to drift.
+			case errors.Is(err, cookies.ErrUnsupportedPlatform):
+				jsonErrorSized(rw, err.Error(), http.StatusBadRequest)
 			// Shutdown, not a fault: the service latched stopped and will not
 			// launch another browser. 503 rather than the 409 the two
 			// in-progress cases get, because this one never clears.
 			case errors.Is(err, cookies.ErrServiceStopped):
-				jsonError(rw, err.Error(), http.StatusServiceUnavailable)
+				jsonErrorSized(rw, err.Error(), http.StatusServiceUnavailable)
 			default:
-				jsonError(rw, "failed to start setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to start setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{"success": true})
+		jsonResponseSized(rw, map[string]any{"success": true})
 	})
 
 	// POST /api/cookies/auto-setup/finish
 	heavy.Post("/api/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -774,18 +925,19 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// file that has already been replaced, and that is the one error exit
 		// this re-check must not skip.
 		//
-		// The Flush is what makes "the client is not waiting on this" true. The
-		// defer alone does not: jsonResponse and jsonError both write into
-		// net/http's bufio writer and neither flushes, the handler does not
-		// return until this defer completes, and Server.WriteTimeout is 0 — so
-		// without it a browser on the setup dialog's 60 s AbortController waits
-		// for FinishSetupDetailed PLUS up to 45 s of re-check and can abort a
-		// setup that in fact succeeded. Flushing here commits the response
-		// first; the gzip wrapper implements Flusher, and /api/update/apply
-		// already relies on the same thing before it restarts the process.
+		// The Content-Length is what makes "the client is not waiting on this"
+		// true, and the Flush is what makes it PROMPT. Neither alone suffices:
+		// jsonResponseSized sets a length so net/http can send an identity body
+		// it is able to terminate without waiting for the handler, and the
+		// Flush commits it now rather than at return. Before the length was
+		// set, a browser on the setup dialog's 60 s AbortController waited for
+		// FinishSetupDetailed PLUS up to 45 s of re-check and could abort a
+		// setup that in fact succeeded. The gzip wrapper implements Flusher and
+		// keeps the header for sub-threshold identity JSON;
+		// /api/update/apply already relies on the same flush.
 		//
-		// Inside the defer rather than after jsonResponse so it covers the
-		// jar-reload error exit too, which answers through jsonError and is
+		// Inside the defer rather than after jsonResponseSized so it covers the
+		// jar-reload error exit too, which answers through jsonErrorSized and is
 		// precisely the error path that reaches the re-check.
 		defer func() {
 			if refreshSvc == nil || !result.Wrote {
@@ -811,9 +963,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
-				jsonError(rw, err.Error(), http.StatusNotFound)
+				jsonErrorSized(rw, err.Error(), http.StatusNotFound)
 			case errors.Is(err, cookies.ErrSetupCancelled):
-				jsonError(rw, err.Error(), http.StatusConflict)
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			// readFirefoxCookies now reports an unreadable profile loudly
 			// instead of returning an empty jar, so a broken profile reaches
 			// the user as that rather than a bare 500. (An EMPTY profile is
@@ -824,9 +976,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// profile from a failed read.)
 			case errors.Is(err, cookies.ErrCookieDBNotFound),
 				errors.Is(err, cookies.ErrCookieDBUnreadable):
-				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+				jsonErrorSized(rw, err.Error(), http.StatusUnprocessableEntity)
 			case errors.Is(err, cookies.ErrCookieDBLocked):
-				jsonError(rw, err.Error(), http.StatusConflict)
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			// S9's abort: Moombox could not read the existing cookies.txt
 			// before merging in the cookies this setup call just extracted,
 			// and deliberately did not write anything. Passed through
@@ -835,19 +987,23 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// that the fix is a permissions/mount problem rather than
 			// running setup again.
 			case errors.Is(err, cookies.ErrCookieFileUnreadable):
-				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
+				jsonErrorSized(rw, err.Error(), http.StatusUnprocessableEntity)
 			default:
-				jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to finish setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, cookieSetupOutcome(result))
+		jsonResponseSized(rw, cookieSetupOutcome(result))
 	})
 
 	// POST /api/cookies/auto-setup/cancel
 	heavy.Post("/api/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -861,13 +1017,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		if err := autoCookieSvc.CancelSetup(); err != nil {
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
-				jsonError(rw, err.Error(), http.StatusNotFound)
+				jsonErrorSized(rw, err.Error(), http.StatusNotFound)
 			default:
-				jsonError(rw, "failed to cancel setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to cancel setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{"success": true})
+		jsonResponseSized(rw, map[string]any{"success": true})
 	})
 
 	// POST /api/cookies/auto-setup/abandon
@@ -883,9 +1039,31 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	// Answers a missing setup exactly as /cancel and /finish do; the beacon
 	// cannot read any of it, but a 404 must not read as a server fault to
 	// anything that can.
+	//
+	// LOOPBACK-GATED with the other three, and the reasoning is the inverse of
+	// theirs: this one opens nothing, so the owner's sentence did not name it —
+	// but what it CLOSES is the exposure. Where setupBrowserGone cannot answer
+	// (a failed job creation or assign on either OS, a Linux group that could
+	// not be adopted, an unreadable /proc, darwin, the fallback build)
+	// AbandonSetup releases, which means cleanupLocked: SetupInProgress goes
+	// false, the host's own finish then answers ErrNoSetupInProgress, the
+	// sign-in the operator just completed is discarded and the window is left
+	// orphaned. One unauthenticated LAN POST, on a lan install with no auth at
+	// all — the same family as the row the trio's gate closes.
+	//
+	// It costs the beacon nothing. sendBeacon fires only from a tab whose
+	// _cookieSetupActive is set (settings.js, setup.js), and only a SUCCESSFUL
+	// /auto-setup/start sets it — so a page with a setup to abandon is, since
+	// that endpoint was gated, a loopback page by construction, on Linux and in
+	// Docker as much as on Windows. A LAN beacon has nothing of its own to
+	// release; the only slot it can reach is someone else's.
 	heavy.Post("/api/cookies/auto-setup/abandon", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -893,13 +1071,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		if err != nil {
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
-				jsonError(rw, err.Error(), http.StatusNotFound)
+				jsonErrorSized(rw, err.Error(), http.StatusNotFound)
 			default:
-				jsonError(rw, "failed to release setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to release setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{"success": true, "released": released})
+		jsonResponseSized(rw, map[string]any{"success": true, "released": released})
 	})
 
 	// POST /api/auto-cookies/validate-browser-path validates a user-specified

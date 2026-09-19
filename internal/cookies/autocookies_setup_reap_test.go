@@ -42,6 +42,53 @@ func captureKills(t *testing.T) *[]int {
 	return &killed
 }
 
+// withLaunchWindowKillBudget shortens the launch-window poll cap for one test
+// and restores it afterwards.
+//
+// The budget is a PRODUCTION value that seven tests otherwise wait out in full
+// — ~13.5 s of this package's ~41 s, which is the whole suite's wall-time floor
+// (owner decision O-Q, 2026-09-17). It is a package-level var, so tests that
+// set it must not run in parallel with each other; this package has no
+// t.Parallel anywhere and must not gain one while this seam exists.
+func withLaunchWindowKillBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := launchWindowKillBudget
+	t.Cleanup(func() { launchWindowKillBudget = prev })
+	launchWindowKillBudget = d
+}
+
+// testLaunchWindowKillBudget is what the seven tests set. Comfortably above
+// killProcessTreePollDelay's own granularity so a single poll still happens,
+// and small enough that waiting it out costs nothing.
+const testLaunchWindowKillBudget = 20 * time.Millisecond
+
+// TestLaunchWindowKillBudgetIsASeam pins the seam itself: it must be settable
+// and it must be RESTORED, or one test's 20 ms silently disarms the launch-
+// window poll for every test that runs after it — including
+// TestCancelCatchesABrowserPublishedInsideTheLaunchWindow, which depends on the
+// production value and would start failing for a reason no diff explains.
+//
+// Mutants:
+//   - turn the var back into a const -> this does not compile.
+//   - drop t.Cleanup from withLaunchWindowKillBudget -> the post-subtest
+//     assertion fails.
+func TestLaunchWindowKillBudgetIsASeam(t *testing.T) {
+	before := launchWindowKillBudget
+	t.Run("shortened", func(t *testing.T) {
+		withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
+		if launchWindowKillBudget != testLaunchWindowKillBudget {
+			t.Fatalf("launchWindowKillBudget = %s, want %s", launchWindowKillBudget, testLaunchWindowKillBudget)
+		}
+	})
+	if launchWindowKillBudget != before {
+		t.Fatalf("the budget was not restored: %s, want %s — every later test would silently run with a disarmed launch window",
+			launchWindowKillBudget, before)
+	}
+	if before != 2*time.Second {
+		t.Fatalf("the PRODUCTION budget is %s, want 2s — O-Q changes the declaration, not the value", before)
+	}
+}
+
 // jobReports fixes what the setup slot's Job Object says for one test, and
 // restores the real probe afterwards.
 //
@@ -308,6 +355,14 @@ func TestFinishSetupIsRefusedOnceTheSetupHasBeenReaped(t *testing.T) {
 // so this stands where CancelSetup stands: claim held, no process yet, one
 // published a few poll intervals later. Against the unfixed body the kill
 // returns immediately and nothing is killed.
+// DELIBERATELY at the production budget. This test publishes the process
+// 3 * killProcessTreePollDelay (150 ms) after the kill starts, which is the
+// whole point — it proves the kill catches a browser the launcher publishes
+// a few poll intervals late. Under the 20 ms the seven fast tests use,
+// killSetupProcess gives up on its first poll and the assertion below
+// passes over a kill that never had anything to catch. If this test ever
+// needs to be fast, scale its own publish delay with the seam rather than
+// shortening the seam under it.
 func TestCancelCatchesABrowserPublishedInsideTheLaunchWindow(t *testing.T) {
 	killed := captureKills(t)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
@@ -341,6 +396,7 @@ func TestCancelCatchesABrowserPublishedInsideTheLaunchWindow(t *testing.T) {
 // hold shutdown open indefinitely.
 func TestKillSetupProcessCannotBlockOnALauncherThatNeverPublishes(t *testing.T) {
 	killed := captureKills(t)
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 
 	t.Run("nothing claimed returns at once", func(t *testing.T) {
 		s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})

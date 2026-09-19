@@ -523,10 +523,12 @@ The `JobQueue` implements a two-tier concurrency model:
 
 The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Queued`) jobs at most `archive_slots` at a time per channel — spec §10's archive-slots pacing. It is the only path out of `Queued`: `ShouldProcess(Queued)` is false by design, so neither startup recovery nor the worker's heartbeat poller ever touches a `Queued` row.
 
-- Single goroutine, woken by `Wake()` (backlog-job creation, job completion) or the worker's 60s heartbeat; wake signals coalesce through a capacity-1 channel
+- Single goroutine, woken by `Wake()` (backlog-job creation, job completion, a cookie repair that returns parked backlog to `Queued`) or the worker's 60s heartbeat; wake signals coalesce through a capacity-1 channel
 - One admission sweep per wake: for each channel with `Queued` rows, admit `archive_slots − in-flight backlog jobs`, newest `published` first
 - Admission writes `status = Upcoming` durably FIRST (the in-flight count observes the DB), then enqueues in the JobQueue — a crash between the two steps self-heals because startup recovery re-enqueues `Upcoming` rows
 - `resolveSlots` is injected by `cmd/moombox` against the live config store, so per-channel `archive_slots` overrides hot-reload
+- A **disabled** channel resolves to 0 slots, so disabling it PAUSES its queued backlog (owner decision O-J, 2026-09-17). Every discovery path already reads `enabled = false` as a pause — the feed, DECAPI and Twitch monitors skip the channel, and the backfill keeps it in `active` while never scanning it — and the resolver was the one place that did not, so a disabled channel went on starting downloads M at a time. In-flight jobs are untouched: they have already left `Queued`, and this number is an admission budget rather than a kill switch. A channel with **no config entry at all** still gets the global default, so a removed channel's leftover `Queued` rows are not stranded.
+- `Run` performs one admission sweep before entering its wait: the wake sites are all event-driven — backlog creation, job completion, a cookie repair — and a restart has none of them, so leftover `Queued` rows used to wait for the 60 s heartbeat. The sweep is gated to the first pass of `Run`, so a `sweep()` that panics deterministically restarts on the heartbeat cadence rather than every second
 
 ### ProgressTracker
 
@@ -676,6 +678,9 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
   Error          Error          Error              Error
   Cancelled      Cancelled      Cancelled          Cancelled
                                 COOKIES?
+                                   |
+                                   +--(cookie repair, priority 0)--------> Upcoming
+                                   +--(cookie repair, backlog, priority 1)-> Queued
 ```
 
 ### Status Definitions
@@ -703,7 +708,7 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 - Any -> `Error`: Unrecoverable error at any stage
 - Any -> `Cancelled`: User-initiated cancellation
 - `Downloading` -> `COOKIES?`: Auth failure detected (login required, members-only, cookies expired)
-- `COOKIES?` -> `Upcoming`: A credential-recovery sweep resumed the job. Two sweeps exist and they are not interchangeable:
+- `COOKIES?` -> `Upcoming` (priority 0) / `COOKIES?` -> `Queued` (priority 1, backlog, **when its `feed_items` row still exists**): a credential-recovery sweep resumed the job. A backlog row returns to `Queued` rather than `Upcoming` so the archive-slots scheduler re-admits it `archive_slots` at a time instead of releasing a channel's whole parked backlog at once. A parked backlog job of a REMOVED channel returns to `Upcoming` so it can finish at all: `CancelAndPrune` deletes the channel's `feed_items` rows but deliberately leaves a running download alone, and `NextQueuedJobs` INNER-JOINs `feed_items`, so a partnerless `Queued` row would never be admitted and `Queued` has no other exit (`/retry` and `/resume` both refuse it). Two sweeps exist and they are not interchangeable:
   - **Auth recovered** (`RefreshService.OnAuthRecovered`) fires when a platform goes from not-authenticated to authenticated, and offers the sweep no account identity. It resumes every park EXCEPT `park_reason = 'membership'`.
   - **Credential observation** (`RefreshService.OnCredentialsChanged`, both platforms — only YouTube can park a job on an account question) hands the sweep the account identity currently in the cookie file. A membership park then resumes if and only if that identity differs from the `park_identity` it recorded when it was refused.
   A membership park is excluded from the first sweep because it happened while the session was ALREADY authenticated, so that transition cannot be the event that fixes it -- resuming there bought a guaranteed-identical failure once per auth cycle. Only a different account can help.

@@ -357,3 +357,147 @@ func TestReloginBadgeNamesTheChordThatAnswersIt(t *testing.T) {
 		}
 	}
 }
+
+// unreadableBar is a bar whose cookies.txt could not be read, for one platform.
+func unreadableBar(yt, tw CookieStatus) *StatusBarModel {
+	m := NewStatusBarModel()
+	m.SetActivePlatforms(true, true)
+	m.SetCookieStatus(yt, tw)
+	return m
+}
+
+// TestStatusBarNamesAnUnreadableCookieFile is COOKIES-6's TUI half. The bar had
+// no state for it, so an unreadable cookies.txt rendered as CookieStatusNone —
+// the yellow "never configured" badge — for a file sitting on the volume.
+//
+// Red and NOT gated on `healthy`, the same shape CookieStatusRelogin already
+// has: it is a conclusive, operator-actionable failure, so it must survive
+// every tier rather than dropping out at tierEssential like Unknown does.
+//
+// Mutants:
+//   - render it through the `healthy` gate -> the tierEssential row loses the
+//     badge exactly when the bar is narrowest and the operator most confused.
+//   - reuse "YT!" (the Relogin abbreviation) -> the tierTight row becomes
+//     indistinguishable from a re-login prompt, which has a different remedy.
+//   - add the arm to the YouTube ladder only -> the Twitch subtest fails.
+//   - abbreviate to the BARE code at the tight tiers (what this did until the
+//     Arc M close review) -> the stripped tight and essential renders are
+//     byte-identical to a CookiesOnly bar's, and the only thing telling the two
+//     apart is the colour — invisible to a colour-blind operator, to a NO_COLOR
+//     terminal and to every log or screenshot the bytes end up in.
+//   - use "!" as the glyph -> it collides with Relogin's "YT!", and the
+//     re-login comparison below fails.
+func TestStatusBarNamesAnUnreadableCookieFile(t *testing.T) {
+	for _, tc := range []struct {
+		code    string
+		unread  *StatusBarModel
+		relogin *StatusBarModel
+	}{
+		{"YT", unreadableBar(CookieStatusFileUnreadable, CookieStatusOK), unreadableBar(CookieStatusRelogin, CookieStatusOK)},
+		{"TW", unreadableBar(CookieStatusOK, CookieStatusFileUnreadable), unreadableBar(CookieStatusOK, CookieStatusRelogin)},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			m, r := tc.unread, tc.relogin
+
+			full := stripANSI(m.renderCookieStatus(tierFull, m.tallyJobs()))
+			if want := tc.code + ": cookies.txt unreadable"; !strings.Contains(full, want) {
+				t.Errorf("tierFull = %q, want it to contain %q — the operator is sent to the "+
+					"permission, not back through a cookie setup they already did", full, want)
+			}
+
+			// The tight tiers carry the GLYPH, not the bare code: the colour is
+			// the only other thing separating this badge from CookiesOnly's, and
+			// colour alone is not a distinction a colour-blind operator, a
+			// NO_COLOR terminal or a pasted screenshot can carry.
+			glyph := tc.code + "?"
+			rejected := unreadableBar(CookieStatusCookiesOnly, CookieStatusOK)
+			if tc.code == "TW" {
+				rejected = unreadableBar(CookieStatusOK, CookieStatusCookiesOnly)
+			}
+			for _, tier := range []struct {
+				name string
+				t    barTier
+			}{{"tierTight", tierTight}, {"tierEssential", tierEssential}} {
+				got := stripANSI(m.renderCookieStatus(tier.t, m.tallyJobs()))
+				if !strings.Contains(got, glyph) {
+					t.Errorf("%s = %q, want it to carry %q — an unreadable cookies.txt is conclusive "+
+						"and actionable, and at this width the label is all the operator has",
+						tier.name, got, glyph)
+				}
+				if reject := stripANSI(rejected.renderCookieStatus(tier.t, rejected.tallyJobs())); got == reject {
+					t.Errorf("%s renders %q for both an unreadable file and rejected credentials once "+
+						"the SGR bytes are stripped — the remedies are a permission fix and a "+
+						"re-export, and colour cannot be the only thing telling them apart", tier.name, got)
+				}
+				if relogin := stripANSI(r.renderCookieStatus(tier.t, r.tallyJobs())); got == relogin {
+					t.Errorf("%s renders %q for both an unreadable file and a re-login prompt — "+
+						"two alerts with different remedies are one alert", tier.name, got)
+				}
+			}
+		})
+	}
+}
+
+// TestUnreadableBadgeIsDistinctFromRejectedCredentials is fix round 1's
+// Minor 4. cookieFileErrorLabel abbreviates to the bare code at tierTight so
+// it cannot be confused with the re-login prompt's "YT!" — and that left it
+// byte-identical to the CookiesOnly arm, which renders the bare code too. Two
+// alerts that render identically are one alert, which is the helper's own
+// argument used against it by a different neighbour.
+//
+// Fixed by COLOUR rather than by a longer label: the label is the scarce thing
+// at these tiers, and ColorCookies is already this program's "a cookie file is
+// the problem" colour (the COOKIES? job status). Asserted on the RAW render,
+// not the stripped one — the escape sequence is what the operator's terminal
+// actually paints, and stripANSI is a test convenience, not the surface.
+//
+// ONE PLATFORM ACTIVE PER ROW, so the whole render is the badge under test.
+// With both active a mutant that recolours only ONE ladder's CookiesOnly arm
+// leaves the other platform's badge still differing, and the comparison passes
+// over a collision it was written to catch.
+//
+// Mutants:
+//   - render the unreadable arms in statusBarRedStyle -> every tier collapses
+//     onto the CookiesOnly rendering and the two states are one badge again.
+//   - give either ladder's CookiesOnly arm the cookie colour -> the same
+//     collapse from the other side, on that platform's row.
+func TestUnreadableBadgeIsDistinctFromRejectedCredentials(t *testing.T) {
+	// One platform active at a time; the other renders nothing at all.
+	bar := func(ytActive bool, state CookieStatus) *StatusBarModel {
+		m := NewStatusBarModel()
+		m.SetActivePlatforms(ytActive, !ytActive)
+		if ytActive {
+			m.SetCookieStatus(state, CookieStatusOK)
+		} else {
+			m.SetCookieStatus(CookieStatusOK, state)
+		}
+		return m
+	}
+
+	for _, platform := range []struct {
+		code   string
+		ytSide bool
+	}{{"YT", true}, {"TW", false}} {
+		for _, tier := range []barTier{tierFull, tierKeys, tierTight, tierEssential} {
+			unread := bar(platform.ytSide, CookieStatusFileUnreadable)
+			got := unread.renderCookieStatus(tier, unread.tallyJobs())
+			if stripANSI(got) == "" {
+				t.Errorf("%s tier %d: the unreadable badge rendered nothing", platform.code, tier)
+			}
+			for _, other := range []struct {
+				name  string
+				state CookieStatus
+			}{
+				{"rejected credentials", CookieStatusCookiesOnly},
+				{"a re-login prompt", CookieStatusRelogin},
+			} {
+				o := bar(platform.ytSide, other.state)
+				if want := o.renderCookieStatus(tier, o.tallyJobs()); got == want {
+					t.Errorf("%s tier %d: an unreadable cookies.txt renders exactly like %s (%q) — "+
+						"the remedies are a permission fix, a re-export and a browser login, "+
+						"and one badge cannot mean all three", platform.code, tier, other.name, stripANSI(got))
+				}
+			}
+		}
+	}
+}

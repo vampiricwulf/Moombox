@@ -279,3 +279,59 @@ test("dismissing the details dialog clears the selection (JobDetailsController.b
 
   assert.equal(h.app.selectedJobId, null);
 });
+
+// -- 9. The cookie setup buttons refuse off-host ----------------------------
+
+test("the Set up buttons open a browser on the host when the viewer IS the host", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: { "POST /api/cookies/auto-setup/start": () => ({ success: true }) },
+  });
+
+  h.el("btn-auto-cookie-setup-yt").click();
+  await h.flush();
+
+  const posts = h.http.matching("/api/cookies/auto-setup/start", "POST");
+  assert.equal(posts.length, 1, "a viewer at the host must still be able to start the login");
+  assert.deepEqual(posts[0].body, { platform: "youtube" });
+});
+
+// The browser this opens appears ON THE HOST. A remote viewer who clicked saw
+// nothing happen and had no way to learn that a login window was waiting on a
+// screen they cannot see. The server refuses it now too
+// (requireLoopbackForBrowserSetup); this is the explanation, not the
+// enforcement, and it has to arrive somewhere the viewer is looking — the
+// inline #auto-cookie-setup-result lives INSIDE the setup dialog, which this
+// path never opens.
+//
+// Mutants:
+//   - drop the guard -> the request is sent and the viewer waits on a window
+//     that is not on their screen (or, now, on a bare 403).
+//   - write the refusal into #auto-cookie-setup-result -> the toast assertion
+//     fails, and in a browser the sentence would be invisible.
+//   - guard only the YouTube button -> the twitch subtest fails; both buttons
+//     call the one function on purpose.
+for (const [id, platform] of [["btn-auto-cookie-setup-yt", "youtube"], ["btn-auto-cookie-setup-tw", "twitch"]]) {
+  test(`the ${platform} Set up button refuses a viewer who is not at the host`, { skip }, async () => {
+    const h = await harness.makeApp({
+      url: "http://192.168.1.20:774/",
+      routes: { "POST /api/cookies/auto-setup/start": () => ({ success: true }) },
+    });
+
+    h.el(id).click();
+    await h.flush();
+
+    assert.equal(
+      h.http.matching("/api/cookies/auto-setup/start", "POST").length,
+      0,
+      "a LAN viewer asked the host to open a browser window on its own screen",
+    );
+
+    const said = h.toasts().map((t) => t.textContent).join(" ");
+    assert.match(said, /run this on the host/i);
+    assert.match(said, /Import/, "the refusal must name the remedy that works from here");
+
+    // The dialog must not be sitting there waiting for a login that never
+    // started: its "I'm Logged In" button would finish nothing.
+    assert.notEqual(h.el("auto-cookie-setup-dialog")._open, true);
+  });
+}

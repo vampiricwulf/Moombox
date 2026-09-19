@@ -34,6 +34,21 @@ var (
 	dacledDirs   = make(map[string]struct{})
 )
 
+// applyUserOnlyDACL and dirTighteningAllowed are the two functions Save's
+// tightening block goes through, behind seams so a test can observe the
+// decision without shelling out to a real icacls or depending on chmod modes
+// this host cannot show. Mirrors the pair internal/cookies keeps over the same
+// two functions for the cookie file's parent — the twin this block is of.
+//
+// The gate one is a seam for a specific reason: utils.DirTighteningAllowed
+// answers true for EVERY directory on Windows (owner decision O-K leaves icacls
+// unchanged), so on a Windows host nothing but a substituted verdict can drive
+// the refusal arm.
+var (
+	applyUserOnlyDACL    = utils.ApplyUserOnlyDACL
+	dirTighteningAllowed = utils.DirTighteningAllowed
+)
+
 // Defaults returns a new MoomboxConfig with all default values applied.
 // boolPtr returns a pointer to b. Used for *bool config fields whose default is
 // a concrete value (a feature that is on unless explicitly disabled), where a
@@ -718,6 +733,31 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	// cookies.dpapi_profile_dir: the path's SHAPE, and nothing else.
+	//
+	// Existence is NOT checked. A container's config.toml is written before
+	// the volume that holds the profile is mounted, and a Validate that
+	// refused a not-yet-present path would fail the save that configures it —
+	// the same reason browser_profile_dir is not checked here either. Every
+	// structural fact about the directory is a RUNTIME one, re-checked on each
+	// pass by dpapi.ValidateProfileDir and reported once at boot, as a Warn
+	// and never a boot failure, by AutoCookieService.LogDpapiProfileDirVerdict.
+	//
+	// What is checked is the shape: a traversing path is a mistake or an
+	// attempt to walk out of wherever the operator meant, and the DPAPI reader
+	// opens whatever it is handed. Relative paths stay legal (Chromium's own
+	// --user-data-dir accepts them).
+	if cfg.Cookies.DpapiProfileDir != "" {
+		cleaned := filepath.Clean(cfg.Cookies.DpapiProfileDir)
+		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) ||
+			strings.HasPrefix(cleaned, "../") {
+			fail("cookies.dpapi_profile_dir %q must not traverse above its own root", cfg.Cookies.DpapiProfileDir)
+			if !reportOnly {
+				cfg.Cookies.DpapiProfileDir = ""
+			}
+		}
+	}
+
 	// Disk thresholds
 	if cfg.Disk.WarnPercent < 1 || cfg.Disk.WarnPercent > 99 {
 		fail("disk.warn_percent %d out of range 1..99", cfg.Disk.WarnPercent)
@@ -872,7 +912,17 @@ func Save(cfg *MoomboxConfig, path string) error {
 		// anyway, so a startup WARN there is pure noise. A multi-user
 		// operator who genuinely cares about the tightening can raise the
 		// log level to Debug to see the miss.
-		if daclErr := utils.ApplyUserOnlyDACL(dir); daclErr != nil {
+		// Owner decision O-K: on POSIX the 0700 applies only to a DEDICATED
+		// directory. config.toml sits at /data/config.toml in the image, so
+		// this is the same /data the cookie writer used to chmod — and a
+		// settings save is the gesture most likely to be the FIRST one on a new
+		// container. Windows icacls is unchanged. The config file itself is
+		// still written 0600 (the temp file's Chmod below), so what is given up
+		// on a shared data volume is only the untraversable parent.
+		// See utils.DirTighteningAllowed.
+		if !dirTighteningAllowed(dir) {
+			slog.Debug("config dir also holds the output/staging/database/log surfaces — leaving its mode alone", "dir", dir)
+		} else if daclErr := applyUserOnlyDACL(dir); daclErr != nil {
 			slog.Debug("could not restrict config dir to current user", "dir", dir, "err", daclErr)
 		}
 	}

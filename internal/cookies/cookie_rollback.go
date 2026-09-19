@@ -1,9 +1,44 @@
 package cookies
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 )
+
+// boundedCause renders a file-operation failure as "op: errno" instead of
+// "op <path> <path>: errno", WITHOUT breaking the error chain underneath it.
+//
+// It exists for one exit: the import's rollback-incomplete failure, which the
+// Web route answers as an HTTP 500 whose body is this sentence. O-L's
+// Content-Length only helps below internal/web's 1024-byte gzipMinSize —
+// above it startGzip deletes the header and re-chunks, putting the client back
+// behind the blocking re-check — so every exit of that handler has to be
+// bounded by construction. Every other one is bounded by the phrase it
+// carries; this one wrapped an *os.LinkError from writeFileAtomic's rename,
+// which prints BOTH absolute paths, one of them cookies.cookie_file: an
+// operator config value with no length limit at all.
+//
+// The paths are not lost. restorePreviousCookies logs the RAW error beside
+// this, which is where an operator who needs them looks, and Unwrap keeps
+// errors.Is working against the cause for anything matching on it.
+type boundedCause struct{ err error }
+
+func (b boundedCause) Error() string {
+	var le *os.LinkError
+	if errors.As(b.err, &le) && le.Err != nil {
+		return le.Op + ": " + le.Err.Error()
+	}
+	var pe *fs.PathError
+	if errors.As(b.err, &pe) && pe.Err != nil {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	return b.err.Error()
+}
+
+func (b boundedCause) Unwrap() error { return b.err }
 
 // loadCookieJar reloads the jar from path. It is CookieJar.Load behind a
 // package-level seam — the same shape, and for the same reason, as
@@ -96,7 +131,11 @@ func (s *AutoCookieService) restorePreviousCookies(restored string, platforms []
 	fail := func(stage rollbackStage, head, tail, logMsg string, cause error) *rollbackFailure {
 		var failure error
 		if msgs.sentinel != nil {
-			failure = fmt.Errorf("%w: %s (%w)%s", msgs.sentinel, head, cause, tail)
+			// boundedCause, not the raw cause: this branch IS the import path,
+			// and its sentence is an HTTP 500 body that has to stay under the
+			// gzip ceiling whatever cookies.cookie_file is set to. The chain is
+			// unchanged — %w still wraps both the sentinel and the cause.
+			failure = fmt.Errorf("%w: %s (%w)%s", msgs.sentinel, head, boundedCause{cause}, tail)
 		} else {
 			failure = fmt.Errorf("%s (%w)%s", head, cause, tail)
 		}

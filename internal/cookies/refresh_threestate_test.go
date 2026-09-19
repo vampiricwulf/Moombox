@@ -444,7 +444,11 @@ func TestRecheckReportOnlySaysFailedWhenItIs(t *testing.T) {
 // only per-request, off a snapshot each surface asked for; authStatusChanged's
 // doc states the rule those surfaces live under, and this row is what fails if
 // someone widens the gate without also moving that rule. It fails if either
-// error field is added to authStatusChanged.
+// error field is added to authStatusChanged. CookieFileError is NOT one of
+// them and has a positive row below: it is not a reason string whose wording
+// varies between two occurrences of one outcome, it is the badge STATE itself
+// on both surfaces (tui.CookieStatusFileUnreadable, and the Web indicator arm
+// that names the file).
 //
 // There was a second negative row, "only the clock moved", covering LastCheck —
 // a field that moved on every tick and would have made the gate fire
@@ -455,10 +459,16 @@ func TestRecheckReportOnlySaysFailedWhenItIs(t *testing.T) {
 // moves an Authenticated boolean also moves that platform's verdict, so a gate
 // with either boolean comparison DELETED still passes this table — the verdict
 // comparison covers for it. They are synthetic on purpose. The gate is a pure
-// function over six fields and its contract is that each of the six is a
+// function over seven fields and its contract is that each of the seven is a
 // surface input in its own right; whether today's producers can move one
 // without the other is a fact about the producers, and the day one of them can
 // is not the day to discover the comparison was never pinned.
+//
+// Mutant for the cookie-file row:
+//   - drop `next.CookieFileError != prev.CookieFileError` from the gate -> a
+//     cookies.txt becoming unreadable (or readable again) fires no push, so the
+//     TUI bar keeps its previous badge until some unrelated flip happens to
+//     fire the callback.
 func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 	base := AuthStatus{
 		YouTubeAuthenticated: false,
@@ -513,6 +523,16 @@ func TestAuthStatusChangedGateCoversEverySurfaceInput(t *testing.T) {
 		{
 			"twitch authenticated flipped and nothing else did",
 			with(func(s *AuthStatus) { s.TwitchAuthenticated = true }),
+			true,
+		},
+		{
+			// Not a reason string: the badge state. A cookies.txt becoming
+			// unreadable — or readable again — is exactly the kind of
+			// transition this push exists to deliver, and without the
+			// comparison the bar keeps reporting a mounted file as
+			// never-configured until some unrelated flip fires.
+			"the cookie file became unreadable",
+			with(func(s *AuthStatus) { s.CookieFileError = "open /data/cookies.txt: permission denied" }),
 			true,
 		},
 		{

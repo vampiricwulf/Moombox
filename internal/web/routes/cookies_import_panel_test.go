@@ -385,10 +385,11 @@ func TestImportPanelUploadsTheChosenFileAsMultipart(t *testing.T) {
 // wizard is useless and each has its own mutant:
 //
 //   - drop the hostname test: a phone or a LAN laptop is sent to a wizard that
-//     opens a login window on the HOST's screen. The click appears to do
-//     nothing and nothing anywhere says why. The server does NOT refuse that
-//     client — the loopback gate covers /api/setup/complete, not the cookie
-//     setup trio — so this row is the only thing that stops it.
+//     opens a login window on the HOST's screen. The server refuses that client
+//     now (requireLoopbackForBrowserSetup covers every /auto-setup/ endpoint
+//     as well as /api/setup/complete), so the cost is no longer a window on someone
+//     else's screen — it is a viewer sent to the one control they cannot use,
+//     who gets a 403 where this row would have offered the import instead.
 //   - drop the availableBrowsers test: a container operator sitting at the host
 //     (docker exec, a local port-forward) is sent to a wizard that has no
 //     browser to launch.
@@ -424,6 +425,70 @@ func TestReloginPromptTargetsTheImportUnlessTheWizardCanActuallyHelp(t *testing.
 			got := jsCall(t, vm, "reloginPromptTarget", tc.status, tc.hostname)
 			if got != tc.want {
 				t.Errorf("reloginPromptTarget(%v, %q) = %v, want %q", tc.status, tc.hostname, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestViewerIsAtTheHostIsAStrictSubsetOfTheServersLoopbackRule runs the
+// predicate that was lifted out of reloginPromptTarget so the Settings panel's
+// two "Set up" buttons could ask the same question.
+//
+// It is ADVISORY. Since the auto-setup endpoints became loopback-gated
+// (requireLoopbackForBrowserSetup, internal/web/routes/cookies.go) the server
+// refuses a remote click whatever this answers; the predicate exists so the UI
+// can say so BEFORE the click instead of surfacing a 403 afterwards. That is
+// why a miss is safe in one direction only, and the rows record which.
+//
+// Mutants:
+//   - widen it toward "you are at the host" (a prefix/contains test, say) -> the
+//     four evil-suffix rows send a REMOTE viewer to a control the server will
+//     refuse, which is the confusing failure this predicate exists to avoid.
+//   - have reloginPromptTarget keep its own copy of the expression -> the
+//     differential below survives only until the two drift, which is what an
+//     extraction is supposed to make impossible; invert either copy and it
+//     fails now.
+func TestViewerIsAtTheHostIsAStrictSubsetOfTheServersLoopbackRule(t *testing.T) {
+	vm := utilsVM(t)
+	withBrowser := map[string]any{"availableBrowsers": []any{map[string]any{"name": "Firefox"}}}
+
+	for _, tc := range []struct {
+		hostname string
+		want     bool
+	}{
+		{"localhost", true},
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"[::1]", true},
+		// Loopback to the SERVER and a deliberate miss here: a browser does not
+		// put these in location.hostname, and a miss costs that viewer one
+		// extra step in a panel that holds both controls. Widening is allowed
+		// only in this direction.
+		{"127.0.0.2", false},
+		{"127.1", false},
+		// Remote, every one.
+		{"192.168.1.20", false},
+		{"moombox.example.ts.net", false},
+		{"localhost.evil.example", false},
+		{"127.0.0.1.evil.example", false},
+		{"", false},
+	} {
+		t.Run(tc.hostname, func(t *testing.T) {
+			got := jsCall(t, vm, "viewerIsAtTheHost", tc.hostname)
+			if got != tc.want {
+				t.Errorf("viewerIsAtTheHost(%q) = %v, want %v", tc.hostname, got, tc.want)
+			}
+			// The extraction's whole point: one expression, two callers. With a
+			// browser available, reloginPromptTarget answers "wizard" exactly
+			// when this predicate is true.
+			wantTarget := "import"
+			if tc.want {
+				wantTarget = "wizard"
+			}
+			if target := jsCall(t, vm, "reloginPromptTarget", withBrowser, tc.hostname); target != wantTarget {
+				t.Errorf("reloginPromptTarget(withBrowser, %q) = %v, want %q — the two have drifted, "+
+					"so the header warning and the Settings buttons disagree about who is at the host",
+					tc.hostname, target, wantTarget)
 			}
 		})
 	}

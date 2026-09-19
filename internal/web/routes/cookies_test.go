@@ -1,16 +1,27 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -39,7 +50,7 @@ func TestCancelSetupRouteAnswers404WhenThereIsNothingToCancel(t *testing.T) {
 	CookieRoutes(r, nil, svc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/cancel", nil))
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/cancel", nil)))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cancel with nothing in progress: status %d, want %d", rec.Code, http.StatusNotFound)
@@ -76,7 +87,7 @@ func TestCancelSetupRouteReusesTheFinishHandlerShape(t *testing.T) {
 	bodies := map[string]string{}
 	for _, path := range []string{"/api/cookies/auto-setup/cancel", "/api/cookies/auto-setup/finish"} {
 		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, path, nil)))
 		statuses[path] = rec.Code
 		var body map[string]any
 		json.Unmarshal(rec.Body.Bytes(), &body)
@@ -122,7 +133,7 @@ func TestStartSetupRouteMapsServiceStopped(t *testing.T) {
 	CookieRoutes(r, nil, svc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start", nil))
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start", nil)))
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("start on a stopped service: status %d, want %d — a 500 would read as a bug "+
@@ -604,7 +615,10 @@ func TestTheUnloadBeaconPostsToARouteThatExists(t *testing.T) {
 	CookieRoutes(r, nil, svc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+	// From the host: the beacon is loopback-gated with the rest of the quartet
+	// (TestTheAbandonBeaconReachesTheServiceOnlyFromTheHost), and the subject
+	// here is whether the URL the JS sends is a registered route.
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, path, nil)))
 
 	var body map[string]any
 	if jsonErr := json.Unmarshal(rec.Body.Bytes(), &body); jsonErr != nil {
@@ -620,5 +634,1103 @@ func TestTheUnloadBeaconPostsToARouteThatExists(t *testing.T) {
 	}
 	if body["error"] == nil {
 		t.Errorf("%s answered a missing setup without an error field: %v", path, body)
+	}
+}
+
+// TestCookieIndicatorNamesAnUnreadableFile is COOKIES-6's Web half, run out of
+// the shipped utils.js. An unreadable cookies.txt used to fall into the
+// `!found` arm and render as never-configured — the container operator was
+// told "no cookies" about a file sitting on the volume.
+//
+// The arm sits AFTER `authenticated`, deliberately: a later reload failing over
+// a jar that still holds working credentials is not a reason to redden a badge
+// whose requests are succeeding. It is the "no cookies" misreport that is being
+// corrected, not the green state.
+//
+// Mutants:
+//   - drop the fileError arm -> row 1 renders the absent-copy (indicator-warn
+//     or the platform's `absent` title) instead of naming the file.
+//   - put the arm ahead of `authenticated` -> row 3 turns red while
+//     authenticated requests are demonstrably working.
+func TestCookieIndicatorNamesAnUnreadableFile(t *testing.T) {
+	vm := utilsVM(t)
+	for _, tc := range []struct {
+		name         string
+		status       map[string]any
+		wantClass    string
+		wantContains string
+	}{
+		{
+			"unreadable file, nothing loaded",
+			map[string]any{"found": false, "authenticated": false, "verification": "unknown",
+				"fileError": "open /data/cookies.txt: permission denied"},
+			"indicator-error", "could not be read",
+		},
+		{
+			"ordinary never-configured",
+			map[string]any{"found": false, "authenticated": false, "verification": "unknown", "fileError": ""},
+			"", "",
+		},
+		{
+			"unreadable file but the jar still authenticates",
+			map[string]any{"found": true, "authenticated": true, "verification": "ok",
+				"fileError": "open /data/cookies.txt: permission denied"},
+			"indicator-ok", "Authenticated",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := jsCall(t, vm, "cookieIndicatorState", "youtube", tc.status, false, false).(map[string]any)
+			class, _ := got["className"].(string)
+			title, _ := got["title"].(string)
+			if tc.wantClass != "" && class != tc.wantClass {
+				t.Errorf("className = %q, want %q (title %q)", class, tc.wantClass, title)
+			}
+			if tc.wantContains != "" && !strings.Contains(title, tc.wantContains) {
+				t.Errorf("title = %q, want it to contain %q", title, tc.wantContains)
+			}
+			if tc.wantClass == "" && strings.Contains(title, "could not be read") {
+				t.Errorf("title = %q — a file that is merely absent must not claim it could not be read", title)
+			}
+		})
+	}
+}
+
+// TestCookieStatusPayloadsCarryTheFileError pins the wire half of COOKIES-6 on
+// BOTH projections. The sentinel is platform-independent — one cookies.txt
+// holds both platforms' rows — so either badge must be able to name it, and a
+// key added to one payload and not the other is the junction defect
+// CookieStatusPayload's own doc comment exists to prevent.
+//
+// Mutants:
+//   - add `fileError` to CookieStatusPayload only -> the Twitch row fails.
+//   - project it from a per-platform field -> the shared-sentinel row fails.
+func TestCookieStatusPayloadsCarryTheFileError(t *testing.T) {
+	const sentinel = "open /data/cookies.txt: permission denied"
+	status := cookies.AuthStatus{CookieFileError: sentinel}
+
+	for _, tc := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"cookieStatus", CookieStatusPayload(status)},
+		{"twitchAuthStatus", TwitchAuthStatusPayload(status)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.payload["fileError"]
+			if !ok {
+				t.Fatalf("%s carries no fileError key — the badge cannot name the file it "+
+					"could not read, and renders a mounted file as never-configured", tc.name)
+			}
+			if got != sentinel {
+				t.Errorf("fileError = %v, want %q", got, sentinel)
+			}
+		})
+	}
+
+	// Empty stays empty: a jar that loaded is not a jar that failed to.
+	for name, payload := range map[string]map[string]any{
+		"cookieStatus":     CookieStatusPayload(cookies.AuthStatus{}),
+		"twitchAuthStatus": TwitchAuthStatusPayload(cookies.AuthStatus{}),
+	} {
+		if got := payload["fileError"]; got != "" {
+			t.Errorf("%s fileError = %v for a jar that loaded, want empty", name, got)
+		}
+	}
+}
+
+// --- COOKIES-4 / owner decision O-L: Content-Length before the blocking re-check ---
+
+// gzipIdentityCeiling is internal/web's gzipMinSize, repeated here because that
+// const is unexported.
+//
+// It is the width at which CompressionMiddleware stops being harmless to this
+// fix. Below it, a Flush before the threshold sends the buffered bytes through
+// commitPlain, which does NOT touch Content-Length — the header the two
+// handlers set survives and the body is identity and self-terminating. At or
+// above it, startGzip deletes Content-Length, sets Content-Encoding: gzip and
+// re-chunks, and the gzip trailer is written by the middleware's
+// `defer gz.Close()` — which runs after the handler returns, i.e. after the
+// re-check. Both halves are asserted by
+// TestSizedCookieAnswersSurviveTheGzipWrapper.
+const gzipIdentityCeiling = 1024
+
+// unsizedControlBlock is how long the CONTROL arm of
+// TestSizedCookieAnswerLandsBeforeTheBlockingRecheck blocks its handler.
+//
+// Only the control arm is timed, and it is timed in the direction that cannot
+// flake: it asserts the body did NOT arrive before a real sleep elapsed, which
+// is a lower bound on a sleep the handler actually performs. The SIZED arm
+// takes no time measurement at all — it holds its re-check open on a channel
+// and reads the body while the handler provably cannot return (see there).
+//
+// 150 ms rather than the second-and-a-bit this used to be: with the sized arm
+// off the clock, all this has to do is exceed a loopback round trip by an
+// unmistakable margin, and the whole test runs under -race -count=3.
+const unsizedControlBlock = 150 * time.Millisecond
+
+// sizedRecheckBound is a DEADLINE, not an expectation: how long the sized arm
+// waits for a step that should take microseconds before calling the fixture
+// broken. Generous on purpose — a deadline that fires under load is a flake,
+// and nothing here is measuring speed.
+const sizedRecheckBound = 30 * time.Second
+
+// sizedWriterRouter is importRouter's twin for the timing test, and it exists
+// for the one thing importRouter cannot hand back: the RefreshService.
+//
+// The property under test is what the client holds WHILE that service's pass is
+// still running on the handler goroutine, and OnAuthChange is the only seam
+// this package can reach into a pass with — youtubeGuideURL, twitchValidateURL
+// and refreshPassHook are all unexported in internal/cookies.
+//
+// The jar handed to the RefreshService is EMPTY and is not the import service's
+// jar, so the pass costs no network however successful the import was:
+// youtubeGuideExchange returns before it builds a request when
+// HasAnyYouTubeAuthCookie is false, and checkTwitchAuth does the same on an
+// empty auth-token. It still reaches OnAuthChange, because
+// verdictFromCheck(false, nil) is RefreshFailed against a zero AuthStatus's
+// RefreshUnknown and authStatusChanged compares that field — so the hook fires
+// on the first pass of an empty jar, which is exactly the pass this test runs.
+func sizedWriterRouter(t *testing.T, seed string) (chi.Router, *cookies.RefreshService) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	if seed != "" {
+		if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+			t.Fatalf("seed cookies.txt: %v", err)
+		}
+	}
+	jar := cookies.NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatalf("jar.Load: %v", err)
+	}
+	svc := cookies.NewAutoCookieService(dir, path, jar, nopRouteLogger{})
+	svc.VerifyYouTubeAuth = func(context.Context) (bool, error) { return true, nil }
+	svc.VerifyTwitchAuth = func(context.Context) (bool, error) { return true, nil }
+
+	rs := cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, nopRouteLogger{})
+
+	r := chi.NewRouter()
+	CookieRoutes(r, rs, svc, nil, nil)
+	return r, rs
+}
+
+// driveImportSuccess answers 200 through cookieImportOutcome, with
+// getActivePlatforms wired as cmd/moombox wires it.
+//
+// The callback matters here and nowhere else: it adds the THIRD map to the
+// payload (`activePlatforms`, beside the status snapshot and the relogin map),
+// which makes this the widest body either sized handler can produce — and the
+// width is what TestCookieWritersSetContentLength measures against the gzip
+// ceiling. Driven with a nil callback this row measured a two-map payload
+// production never sends, and understated the widest answer by about a fifth.
+func driveImportSuccess(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r, _, _, _ := importRouterWithPlatforms(t, importHeader+importTwitch, nil,
+		func() map[string]bool { return map[string]bool{"youtube": true, "twitch": true} })
+	return postImport(t, r, "text/plain", importPaste())
+}
+
+// driveImportRejected answers 422 through the ErrImportNotNetscape arm. This is
+// the row that matters most after the success one: it is an error exit, and a
+// fix applied to the success write alone would leave every refusal chunked.
+func driveImportRejected(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r, _, _, _ := importRouter(t, importHeader+importTwitch, nil)
+	return postImport(t, r, "text/plain", `[{"name":"SAPISID"}]`)
+}
+
+// driveImportDuringRefresh answers 409 through Task 3's ErrRefreshInProgress
+// arm. The collision is reproduced through the REAL slot — refreshCmd is an
+// unexported field of internal/cookies — by holding the first import inside its
+// pre-write verification until the second has been answered.
+func driveImportDuringRefresh(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r, _, _, svc := importRouter(t, importHeader+importYouTube+importTwitch, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	gate := func(ctx context.Context) (bool, error) {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			return true, nil
+		}
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return true, nil
+	}
+	svc.VerifyYouTubeAuth = gate
+	svc.VerifyTwitchAuth = gate
+
+	held := make(chan struct{})
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("the holding import panicked: %v", p)
+			}
+			close(held)
+		}()
+		postImport(t, r, "text/plain", importPaste())
+	}()
+
+	select {
+	case <-entered:
+	case <-held:
+		t.Fatal("the first import finished before it reached its pre-write verification — the " +
+			"collision this row needs never happened")
+	case <-time.After(60 * time.Second):
+		t.Fatal("the first import never reached its pre-write verification")
+	}
+
+	rec := postImport(t, r, "text/plain", importPaste())
+	close(release)
+	<-held
+	return rec
+}
+
+// driveImportNoService and driveFinishNoService answer 503 through each
+// handler's `autoCookieSvc == nil` guard — the one exit on each that is taken
+// before anything else runs.
+func driveImportNoService(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, nil, nil, nil)
+	return postImport(t, r, "text/plain", importPaste())
+}
+
+func driveFinishNoService(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, nil, nil, nil)
+	return postFinish(t, r)
+}
+
+// driveFinishNoSetup answers 404 through the ErrNoSetupInProgress arm.
+func driveFinishNoSetup(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+	r := chi.NewRouter()
+	CookieRoutes(r, nil, svc, nil, nil)
+	return postFinish(t, r)
+}
+
+func postFinish(t *testing.T, r chi.Router) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/finish", nil)))
+	return rec
+}
+
+// TestCookieWritersSetContentLength is COOKIES-4 / owner decision O-L. Both
+// handlers Flush and then run a <=45 s auth re-check on the handler goroutine.
+// Without Content-Length net/http uses chunked encoding and the terminating
+// chunk is written only when the handler RETURNS, so the Flush released the
+// headers and nothing else: fetch().json() awaited the body for the whole
+// re-check, inside a dialog with a 60 s abort budget that also has to cover
+// FinishSetup.
+//
+// The property is asserted on the RECORDED HEADER here rather than by timing:
+// Content-Length is exactly what makes net/http send an identity body it can
+// terminate without waiting for the handler, and a recorder can cover every
+// exit cheaply. TestSizedCookieAnswerLandsBeforeTheBlockingRecheck pins the
+// same property by execution over a real server and a real blocking re-check.
+//
+// SIX EXITS, chosen so each handler contributes a success (or its nearest
+// reachable equivalent), an error switch arm and its no-service guard. A
+// successful finish is not reachable from this package — FinishSetupDetailed
+// needs a browser this test must never launch — so the import's
+// ErrRefreshInProgress 409 takes that slot, exactly as the brief allows.
+//
+// Mutants:
+//   - revert either handler to jsonResponse/jsonError -> that row's
+//     Content-Length is empty.
+//   - set Content-Length on the success exit only -> the four error rows fail,
+//     and those are the exits the re-check matters most on (the jar-reload
+//     error runs over a cookies.txt that has already been replaced).
+//   - drop the trailing newline the sized writers keep -> nothing here fails,
+//     which is why TestSizedCookieBodiesAreByteIdenticalToTheEncoder exists.
+func TestCookieWritersSetContentLength(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		want  int
+		drive func(*testing.T) *httptest.ResponseRecorder
+	}{
+		{"import/success", http.StatusOK, driveImportSuccess},
+		{"import/rejected-paste", http.StatusUnprocessableEntity, driveImportRejected},
+		{"import/refresh-in-progress", http.StatusConflict, driveImportDuringRefresh},
+		{"import/no-service", http.StatusServiceUnavailable, driveImportNoService},
+		{"finish/no-setup", http.StatusNotFound, driveFinishNoSetup},
+		{"finish/no-service", http.StatusServiceUnavailable, driveFinishNoService},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := tc.drive(t)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d — this row no longer reaches the exit it names: %s",
+					rec.Code, tc.want, rec.Body.String())
+			}
+			got := rec.Header().Get("Content-Length")
+			if got == "" {
+				t.Fatalf("no Content-Length on a %d from %s. net/http falls back to chunked "+
+					"encoding and writes the terminating chunk only when the HANDLER returns, so "+
+					"the deferred Flush releases the headers and fetch().json() — which awaits the "+
+					"body — sits through the whole re-check", tc.want, tc.name)
+			}
+			if want := strconv.Itoa(rec.Body.Len()); got != want {
+				t.Errorf("Content-Length = %q for a %d-byte body. A length that does not match the "+
+					"bytes is worse than none: net/http truncates the body to it, or the client "+
+					"blocks waiting for bytes that never come", got, rec.Body.Len())
+			}
+			if rec.Body.Len() >= gzipIdentityCeiling {
+				t.Errorf("this exit's body is %d bytes, at or over internal/web's %d-byte gzip "+
+					"threshold — CompressionMiddleware's startGzip deletes Content-Length above it "+
+					"and the gzip trailer is written after the handler returns, which puts the "+
+					"client back behind the re-check. See TestSizedCookieAnswersSurviveTheGzipWrapper",
+					rec.Body.Len(), gzipIdentityCeiling)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Errorf("body is not JSON any more: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestSizedCookieBodiesAreByteIdenticalToTheEncoder is the differential O-L
+// does not license: the fix is about a header, so not one byte of any exit's
+// body may move.
+//
+// json.Encoder.Encode appends a newline and json.Marshal does not, so a sized
+// writer built on Marshal alone silently drops the last byte of every body this
+// endpoint has ever sent. Nothing would notice at the JSON layer, which is
+// precisely why it is asserted here rather than left to a parse.
+//
+// BOTH writers have a row. The error row alone left `jsonResponseSized`'s own
+// trailing newline unpinned — delete it there and every SUCCESS body this
+// endpoint has ever sent loses its last byte, invisibly, while the error row
+// below stays green. That was a live surviving mutant until the Arc M close
+// review.
+//
+// The success row compares the two WRITERS over one representative map rather
+// than driving the handler twice: the handler's payload carries a status
+// snapshot whose timestamps move between two calls, so a differential over two
+// requests would compare two different documents. The writers are the subject
+// anyway — the claim is "the sized writer emits what the encoder emitted".
+//
+// Mutant: delete the `'\n'` from either sized writer -> the matching row's
+// bytes differ from the encoder's by one.
+func TestSizedCookieBodiesAreByteIdenticalToTheEncoder(t *testing.T) {
+	// The shape cookieImportOutcome produces: nested maps, a bool, strings.
+	successPayload := map[string]any{
+		"success":             true,
+		"authenticated":       true,
+		"youtubeVerification": "ok",
+		"twitchVerification":  "unchanged",
+		"youtubeImport":       "installed",
+		"cookieStatus":        map[string]any{"hasYouTubeCookies": true, "hasTwitchCookies": false},
+		"activePlatforms":     map[string]bool{"youtube": true, "twitch": true},
+	}
+
+	for _, tc := range []struct {
+		name  string
+		drive func(*testing.T) *httptest.ResponseRecorder
+		want  func() *httptest.ResponseRecorder
+	}{
+		{
+			name: "success body",
+			drive: func(*testing.T) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				jsonResponseSized(rec, successPayload)
+				return rec
+			},
+			want: func() *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				jsonResponse(rec, successPayload)
+				return rec
+			},
+		},
+		{
+			name:  "error body",
+			drive: driveFinishNoService,
+			want: func() *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				jsonError(rec, "auto-cookie service not configured", http.StatusServiceUnavailable)
+				return rec
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.drive(t).Body.String()
+			want := tc.want().Body.String()
+			if got != want {
+				t.Errorf("the sized writer's body is %q where the unsized writer sent %q — the "+
+					"Content-Length fix moved bytes it has no licence to move", got, want)
+			}
+		})
+	}
+}
+
+// TestBothRecheckHandlersAnswerThroughTheSizedWriters is the exit sweep the
+// wire table cannot be: several exits of both handlers have no fixture in this
+// package at all — the jar-reload 500 needs a file that loads once and then
+// does not, ErrCookieFileUnwritable needs an unexported package var stubbed,
+// and every browser-profile arm needs a browser. Structure covers them.
+//
+// Both handlers run a deferred, BLOCKING re-check that holds the connection
+// open, so the rule is per HANDLER and not per exit: every JSON any exit of
+// these two writes must carry a length. A single surviving jsonResponse or
+// jsonError is a single exit whose client waits out the re-check, and it is the
+// likeliest regression — a new arm added by copying an older one.
+//
+// writeBrowserReadError and readCookieImportBody are deliberately not counted:
+// they are CALLS from these handlers, shared with the refresh handler and with
+// the request-shape refusals respectively, and every exit they own leaves
+// result.Wrote false, so the deferred re-check returns without running and no
+// body is held.
+//
+// Mutants:
+//   - leave any one exit on jsonResponse/jsonError -> that handler's list of
+//     unsized calls is non-empty and the failure names the function.
+//   - delete a handler's success write -> the sized-response count is zero.
+func TestBothRecheckHandlersAnswerThroughTheSizedWriters(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "cookies.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse cookies.go: %v", err)
+	}
+
+	for _, route := range []string{"/api/cookies/import", "/api/cookies/auto-setup/finish"} {
+		t.Run(route, func(t *testing.T) {
+			handler := routeHandlerLit(t, file, route)
+			counts := map[string]int{}
+			ast.Inspect(handler, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if fn, ok := call.Fun.(*ast.Ident); ok {
+					counts[fn.Name]++
+				}
+				return true
+			})
+
+			for _, unsized := range []string{"jsonResponse", "jsonError"} {
+				if counts[unsized] > 0 {
+					t.Errorf("%s still answers %d exit(s) through %s. That writer streams through "+
+						"a json.Encoder and sets no length, so net/http chunks the body and writes "+
+						"the terminating chunk when the HANDLER returns — after the <=45 s re-check "+
+						"this handler defers", route, counts[unsized], unsized)
+				}
+			}
+			if counts["jsonResponseSized"] == 0 {
+				t.Errorf("%s has no jsonResponseSized call — its success exit either went back to "+
+					"the unsized writer or stopped answering at all", route)
+			}
+			if counts["jsonErrorSized"] == 0 {
+				t.Errorf("%s has no jsonErrorSized call — its error exits either went back to the "+
+					"unsized writer or stopped answering at all", route)
+			}
+		})
+	}
+}
+
+// TestSizedCookieAnswerLandsBeforeTheBlockingRecheck is O-L pinned BY
+// EXECUTION, over a real net/http server, a real client and a real blocking
+// re-check on the handler goroutine.
+//
+// The re-check STAYS BLOCKING — that is the decision, not an accident: a
+// goroutine would make the client fast and delete the property the AST
+// call-site test protects (a detached pass whose result nothing waits for is a
+// pass nothing can be sure ran). What changes is only that the body is complete
+// on the wire before the re-check starts.
+//
+// The seam is RefreshService.OnAuthChange, which the pass calls synchronously
+// on the handler goroutine. The sized arm HOLDS it open on a channel instead of
+// sleeping in it, so the claim is a happens-before rather than a measurement:
+// once the callback has been entered and the test still owns its release, the
+// handler PROVABLY cannot return — and the whole body is read anyway. Against
+// the unsized writer that read cannot complete at all, because the terminating
+// chunk is written when the handler returns.
+//
+// The unsized arm below is that mutant, run live rather than described: the
+// same handler shape answering through jsonResponse, the writer both handlers
+// used before O-L.
+func TestSizedCookieAnswerLandsBeforeTheBlockingRecheck(t *testing.T) {
+	t.Run("sized", func(t *testing.T) {
+		r, rs := sizedWriterRouter(t, "")
+
+		var once sync.Once
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		recheckDone := make(chan struct{})
+		rs.OnAuthChange = func(cookies.AuthStatus) {
+			once.Do(func() {
+				close(entered)
+				<-release
+				close(recheckDone)
+			})
+		}
+
+		srv := httptest.NewServer(r)
+		defer srv.Close()
+
+		resp, err := http.Post(srv.URL+"/api/cookies/import", "text/plain", strings.NewReader(importPaste()))
+		if err != nil {
+			t.Fatalf("POST /api/cookies/import: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d, want 200", resp.StatusCode)
+		}
+
+		// The handler is inside the re-check and cannot leave it while this
+		// test holds `release`. Everything after this point happens against a
+		// handler that has provably not returned.
+		select {
+		case <-entered:
+		case <-time.After(sizedRecheckBound):
+			close(release)
+			t.Fatal("the deferred re-check never ran, so this test proves nothing: the body below " +
+				"would not be racing anything")
+		}
+
+		type readResult struct {
+			body []byte
+			err  error
+		}
+		read := make(chan readResult, 1)
+		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					read <- readResult{err: fmt.Errorf("body read panicked: %v", p)}
+				}
+			}()
+			b, rerr := io.ReadAll(resp.Body)
+			read <- readResult{body: b, err: rerr}
+		}()
+
+		var body []byte
+		select {
+		case got := <-read:
+			if got.err != nil {
+				close(release)
+				t.Fatalf("read body: %v", got.err)
+			}
+			body = got.body
+		case <-time.After(sizedRecheckBound):
+			close(release)
+			<-read
+			t.Fatal("the body never arrived while the handler sat inside its re-check — with no " +
+				"Content-Length net/http chunks the answer and writes the terminating chunk only " +
+				"when the HANDLER returns, so fetch().json() waits out the whole re-check inside a " +
+				"60 s dialog budget that also has to cover FinishSetup")
+		}
+
+		if resp.ContentLength < 0 {
+			t.Errorf("the transport reports no Content-Length (transfer-encoding %v) — the answer "+
+				"went out chunked, and a chunked body is only terminated when the handler returns",
+				resp.TransferEncoding)
+		}
+		if len(resp.TransferEncoding) != 0 {
+			t.Errorf("Transfer-Encoding = %v, want identity", resp.TransferEncoding)
+		}
+		if got := int64(len(body)); resp.ContentLength >= 0 && got != resp.ContentLength {
+			t.Errorf("read %d body bytes against a Content-Length of %d", got, resp.ContentLength)
+		}
+
+		// The other half of the happens-before, stated rather than assumed: the
+		// re-check had not finished while the body was being read.
+		select {
+		case <-recheckDone:
+			t.Error("the re-check finished before the test released it — the fixture did not hold " +
+				"the handler goroutine, so the read above is not evidence of anything")
+		default:
+		}
+
+		close(release)
+		select {
+		case <-recheckDone:
+		case <-time.After(sizedRecheckBound):
+			t.Fatal("the released re-check never finished")
+		}
+	})
+
+	// THE MUTANT, executed. jsonResponse is the writer both handlers used
+	// before O-L; everything else here is the production defer's shape. This
+	// arm IS timed, in the only direction that cannot flake: the body must not
+	// arrive before a sleep the handler really performs.
+	t.Run("unsized-is-the-bug", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			defer func() {
+				if f, ok := rw.(http.Flusher); ok {
+					f.Flush()
+				}
+				time.Sleep(unsizedControlBlock)
+			}()
+			jsonResponse(rw, map[string]any{"success": true})
+		}))
+		defer srv.Close()
+
+		start := time.Now()
+		resp, err := http.Get(srv.URL)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		headersAt := time.Since(start)
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		bodyAt := time.Since(start)
+
+		if bodyAt < unsizedControlBlock {
+			t.Fatalf("the unsized answer's body arrived at %v, inside the %v block — net/http no "+
+				"longer holds a flushed chunked body until the handler returns, so the mutant this "+
+				"fix exists for is not reproducible and the assertions above guard nothing",
+				bodyAt.Round(time.Millisecond), unsizedControlBlock)
+		}
+		t.Logf("unsized: headers at %v, body at %v (the %v block)",
+			headersAt.Round(time.Millisecond), bodyAt.Round(time.Millisecond), unsizedControlBlock)
+	})
+}
+
+// TestSizedCookieAnswersSurviveTheGzipWrapper is R3: the two handlers sit
+// behind CompressionMiddleware in the real server (internal/web/server.go), and
+// that wrapper is the one thing that can take the header away again.
+//
+// Below internal/web's 1024-byte threshold it cannot: a Flush before the
+// threshold goes through commitPlain, which sends the buffered bytes identity
+// and leaves Content-Length alone. At or above it, startGzip deletes the header
+// by design — the length changes with compression — and the response is chunked
+// again, with the gzip trailer written by the middleware's `defer gz.Close()`
+// after the handler returns. So above the threshold the client is back behind
+// the re-check.
+//
+// That is ACCEPTED rather than exempted, because no exit of either handler can
+// reach it: the widest body they produce is an import success carrying three
+// maps, ~282 bytes, and TestCookieWritersSetContentLength asserts every driven
+// exit stays under the ceiling. The alternative — adding these two paths to
+// shouldSkipCompression — would trade a real invariant for a skip nobody can
+// see from the handler.
+//
+// Mutants:
+//   - add these routes to shouldSkipCompression, or otherwise stop the wrapper
+//     running over them -> the sub-threshold subtest measures a header the
+//     production stack never puts through CompressionMiddleware, and the claim
+//     it is making is no longer about the real server.
+//   - move internal/web's gzipMinSize below the widest cookie body -> the
+//     sub-threshold subtest fails on Content-Encoding, which is the signal that
+//     the accept-and-document ruling for R3 has to be revisited rather than
+//     the test adjusted.
+//   - make startGzip PRESERVE Content-Length -> the over-threshold subtest
+//     fails, and the ceiling documented on gzipIdentityCeiling no longer
+//     exists.
+func TestSizedCookieAnswersSurviveTheGzipWrapper(t *testing.T) {
+	t.Run("sub-threshold keeps the length", func(t *testing.T) {
+		r, _, _, _ := importRouter(t, importHeader+importTwitch, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/cookies/import", strings.NewReader(importPaste()))
+		req.Header.Set("Content-Type", "text/plain")
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		web.CompressionMiddleware(r).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+			t.Fatalf("Content-Encoding = %q — this body is meant to be under the %d-byte threshold "+
+				"and was compressed instead", enc, gzipIdentityCeiling)
+		}
+		got := rec.Header().Get("Content-Length")
+		if want := strconv.Itoa(rec.Body.Len()); got != want {
+			t.Errorf("Content-Length = %q through CompressionMiddleware for a %d-byte body — the "+
+				"wrapper took the header away, and the import answer is chunked again behind the "+
+				"re-check", got, rec.Body.Len())
+		}
+	})
+
+	// The ceiling, stated by execution so the paragraph above is not a claim
+	// nobody checked. Not a handler: no exit of either one can produce a body
+	// this wide.
+	t.Run("over-threshold loses it", func(t *testing.T) {
+		wide := strings.Repeat("x", gzipIdentityCeiling*2)
+		h := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.Header().Set("Content-Length", strconv.Itoa(len(wide)))
+			_, _ = io.WriteString(rw, wide)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		web.CompressionMiddleware(h).ServeHTTP(rec, req)
+
+		if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+			t.Fatalf("Content-Encoding = %q for a %d-byte body, want gzip — internal/web's "+
+				"threshold moved and this test's premise with it", enc, len(wide))
+		}
+		if got := rec.Header().Get("Content-Length"); got != "" {
+			t.Errorf("Content-Length = %q survived startGzip. If that is now true, the ceiling "+
+				"documented on gzipIdentityCeiling no longer exists and the accept-and-document "+
+				"ruling for R3 should be revisited", got)
+		}
+	})
+}
+
+// fromTheHost stamps a synthetic request with a loopback peer.
+//
+// httptest.NewRequest's default RemoteAddr is 192.0.2.1:1234 — TEST-NET-1,
+// which is neither loopback nor private — so every request in this package now
+// arrives at the auto-setup quartet as a REMOTE client and is refused. Each call
+// site below says, by calling this, that its subject is not the gate.
+func fromTheHost(req *http.Request) *http.Request {
+	req.RemoteAddr = "127.0.0.1:5555"
+	return req
+}
+
+// unlaunchableSetupService builds an AutoCookieService that can answer the
+// auto-setup quartet and can never open a browser.
+//
+// Every test that POSTs to /auto-setup/start needs this and it is not
+// decoration: a regression anywhere above the launch lets StartSetup fall
+// through to browser detection, and on any machine with a browser installed —
+// every developer machine, and the owner's, which runs real browser windows on
+// other profiles — the test OPENS ONE instead of failing.
+// ConfiguredBrowserOverride is the exported seam resolvedBrowser consults
+// first; Stop() is the second belt, latching the service so StartSetup returns
+// before it detects anything.
+func unlaunchableSetupService(t *testing.T) *cookies.AutoCookieService {
+	t.Helper()
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), nopRouteLogger{})
+	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser.exe")
+	svc.ConfiguredBrowserOverride = func() (string, string) { return unlaunchable, "chrome" }
+	svc.Stop()
+	return svc
+}
+
+// autoSetupGatedPaths is the set requireLoopbackForBrowserSetup guards, written
+// once so a path added to the handler file and not to this list fails a test
+// rather than passing unexamined. /auto-setup/abandon is the fourth member by
+// the round-1 ruling; see TestAutoSetupQuartetIsLoopbackGated for why a beacon
+// that opens nothing still has to be gated.
+var autoSetupGatedPaths = []string{
+	"/api/cookies/auto-setup/start",
+	"/api/cookies/auto-setup/finish",
+	"/api/cookies/auto-setup/cancel",
+	"/api/cookies/auto-setup/abandon",
+}
+
+// TestAutoSetupQuartetIsLoopbackGated is the owner's "Auto-setup gate" decision,
+// plus the beacon its wording did not name.
+//
+// These endpoints START, FINISH, CANCEL and RELEASE A HEADED BROWSER WINDOW ON
+// THE HOST'S SCREEN. On a network_access=lan install there is no authentication
+// at all, so any LAN device could open one on a screen its user cannot see,
+// bounded only by the API rate limiter — and the only thing standing in the way
+// was reloginPromptTarget, a CLIENT-side predicate in utils.js whose own
+// comment said so.
+//
+// /abandon is the FOURTH path and was added by the round-1 ruling. It opens
+// nothing, which is why the owner's sentence named only the trio — but what it
+// CLOSES is the point: where setupBrowserGone cannot answer (a failed job
+// creation or assign on either OS, an unadopted Linux process group, an
+// unreadable /proc, darwin, the fallback build) AbandonSetup runs
+// cleanupLocked, SetupInProgress goes false, and the host's own finish then
+// answers 404 with the browser left orphaned. One unauthenticated LAN POST.
+// Gating costs nothing: the beacon fires only from a tab whose
+// _cookieSetupActive is set, and only a SUCCESSFUL /start sets it — so since
+// this gate exists, a page with a setup to abandon is by construction a
+// loopback page. A LAN beacon has nothing of its own to release; the only slot
+// it can reach is someone else's.
+//
+// 403, never 401: app.js installs a global window.fetch interceptor that treats
+// any 401 outside /api/auth/ as an expired session and calls
+// window.location.reload(). A 401 here would throw the operator out of the
+// dashboard instead of telling them where to click.
+//
+// THE PEER, NEVER THE HEADER. The rows below are the client shapes that differ,
+// and they encode docs/spec/security.md's rule that a loopback gate reads the
+// DIRECT peer and ignores trusted_proxies entirely: "arrived over this
+// machine's loopback interface" is a physical-access signal no forwarded header
+// may confer. The two X-Forwarded-For rows are what that buys and what it
+// costs — a forged header can never turn a LAN device into the host (the
+// direction that matters), while a reverse proxy running ON the host still
+// presents its own loopback peer and is admitted (the direction that is
+// accepted, here and at /api/setup/complete alike). Changing the second would
+// mean changing web.IsLoopbackRequest for every loopback surface at once, which
+// is a decision above this handler.
+//
+// Mutants:
+//   - drop the gate from any one of the four -> that row answers its ordinary
+//     status from a LAN address instead of 403. For /abandon that ordinary
+//     status is the proof the LAN caller reached AbandonSetup.
+//   - answer 401 -> the status assertion fails, and a remote click would reload
+//     the dashboard instead of explaining itself.
+//   - gate on web.IsLocalOrPrivateRequest instead of web.IsLoopbackRequest ->
+//     the LAN rows pass the gate, which is the exact population this refuses.
+//   - gate on the effective client IP (web.EffectiveClientIP) -> the forged-XFF
+//     row admits a LAN device that claims to be the host.
+//   - refuse AFTER the autoCookieSvc == nil guard -> a deployment with no
+//     service tells a remote caller 503, which reads as "configure me" rather
+//     than "not from there".
+func TestAutoSetupQuartetIsLoopbackGated(t *testing.T) {
+	for _, path := range autoSetupGatedPaths {
+		t.Run(path, func(t *testing.T) {
+			post := func(remoteAddr, xff, host string) *httptest.ResponseRecorder {
+				r := chi.NewRouter()
+				CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.RemoteAddr = remoteAddr
+				if xff != "" {
+					req.Header.Set("X-Forwarded-For", xff)
+				}
+				if host != "" {
+					req.Host = host
+				}
+				rec := httptest.NewRecorder()
+				r.ServeHTTP(rec, req)
+				return rec
+			}
+
+			// The answer this endpoint gives the operator at the machine. Every
+			// admitted row must match it exactly — "not 403" would also be
+			// satisfied by a gate that refused with some other status.
+			atTheHost := post("127.0.0.1:5555", "", "")
+			if atTheHost.Code == http.StatusForbidden {
+				t.Fatalf("the host itself was refused: %d %s", atTheHost.Code, atTheHost.Body.String())
+			}
+
+			for _, tc := range []struct {
+				name       string
+				remoteAddr string
+				xff        string
+				host       string
+				refused    bool
+			}{
+				{"at the host", "127.0.0.1:5555", "", "", false},
+				{"at the host over IPv6 loopback", "[::1]:5555", "", "", false},
+				// isLoopback is net.ParseIP(ip).IsLoopback(), so the whole of
+				// 127.0.0.0/8 is the host. The CLIENT predicate deliberately
+				// answers false for this one, which errs toward "you are
+				// remote" and costs that viewer one extra step.
+				{"at the host on a 127.0.0.0/8 alias", "127.0.0.2:5555", "", "", false},
+				{"a LAN device", "192.168.1.20:5555", "", "", true},
+				{"a LAN device forging the host's address", "192.168.1.20:5555", "127.0.0.1", "", true},
+				{"a reverse proxy on the host forwarding a LAN client", "127.0.0.1:5555", "192.168.1.20", "", false},
+				// The Host header names the authority the client DIALLED, not
+				// the peer it dialled from; a gate that read it would be
+				// spoofable by anyone who can write a request line.
+				{"a LAN device claiming Host: localhost", "192.168.1.20:5555", "", "localhost", true},
+				{"a LAN device claiming Host: localhost:774", "192.168.1.20:5555", "", "localhost:774", true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					rec := post(tc.remoteAddr, tc.xff, tc.host)
+
+					if !tc.refused {
+						if rec.Code != atTheHost.Code {
+							t.Fatalf("status %d, want %d — the same answer the host gets (body %q)",
+								rec.Code, atTheHost.Code, rec.Body.String())
+						}
+						return
+					}
+
+					if rec.Code != http.StatusForbidden {
+						t.Fatalf("status %d, want %d. A LAN device can otherwise open a browser "+
+							"window on a screen it cannot see (body %q)",
+							rec.Code, http.StatusForbidden, rec.Body.String())
+					}
+					got := decodeErrorBody(t, rec)["error"]
+					if !strings.Contains(got, "on the host") {
+						t.Errorf("refusal = %q, want it to say where to run this instead — a bare "+
+							"'Forbidden' leaves the operator with no next move", got)
+					}
+					if !strings.Contains(got, "Import") {
+						t.Errorf("refusal = %q, want it to name the remedy that works from here "+
+							"(POST /api/cookies/import stays ungated for exactly this viewer)", got)
+					}
+				})
+			}
+
+			// BEFORE anything else runs, including the service guard. An
+			// install with no AutoCookieService wired must not tell a LAN
+			// caller 503 — that reads as "configure me", and the caller's
+			// problem is not the configuration.
+			t.Run("a LAN device of an install with no service", func(t *testing.T) {
+				r := chi.NewRouter()
+				CookieRoutes(r, nil, nil, nil, nil)
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.RemoteAddr = "192.168.1.20:5555"
+				rec := httptest.NewRecorder()
+				r.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusForbidden {
+					t.Errorf("status %d, want %d (body %q)", rec.Code, http.StatusForbidden,
+						rec.Body.String())
+				}
+			})
+		})
+	}
+}
+
+// TestTheAbandonBeaconReachesTheServiceOnlyFromTheHost is the round-1 ruling’s
+// own pin, and it asserts something the status table above cannot: WHICH CALL
+// HAPPENED.
+//
+// /abandon is the one member of the quartet that does harm by RELEASING rather
+// than by opening. Where setupBrowserGone cannot answer — no job object, a
+// failed assign, an unadopted Linux group, an unreadable /proc, darwin, the
+// fallback build — AbandonSetup runs cleanupLocked, which clears setupProcess,
+// setupBrowser, cdpPort and targetPlatform. SetupInProgress goes false, the
+// host’s own finish answers ErrNoSetupInProgress, the sign-in the operator just
+// completed is discarded and the browser window is orphaned (nothing is
+// killed). That destructive arm is pinned at the service, where the state can
+// be fabricated without a browser: cookies.TestAbandonReleasesTheSlotWhereTheReapNeverFires.
+//
+// What is pinned HERE is the only thing that stands between a LAN device and
+// that call: the handler. The two rows differ in which answer comes back, and
+// the answer names its source — ErrNoSetupInProgress can only have come FROM
+// AbandonSetup, so the loopback row proves the host’s own beacon still reaches
+// the service and the LAN row proves nothing reached it. A call that never
+// happens cannot move SetupInProgress.
+//
+// Mutants:
+//   - drop the gate -> the LAN row answers 404 carrying the sentinel, i.e. a
+//     LAN device reached AbandonSetup; against a real in-flight setup on an
+//     unanswerable platform that is the host’s setup destroyed.
+//   - gate the beacon and nothing else, or gate it with a different predicate ->
+//     the loopback row stops reaching the service and the host’s own unload
+//     leaks the slot until restart on exactly the platforms the beacon exists
+//     for.
+func TestTheAbandonBeaconReachesTheServiceOnlyFromTheHost(t *testing.T) {
+	const path = "/api/cookies/auto-setup/abandon"
+
+	post := func(remoteAddr string) *httptest.ResponseRecorder {
+		r := chi.NewRouter()
+		CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = remoteAddr
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	host := post("127.0.0.1:5555")
+	if host.Code != http.StatusNotFound {
+		t.Fatalf("the host’s own beacon: status %d, want %d (body %q)",
+			host.Code, http.StatusNotFound, host.Body.String())
+	}
+	if got := decodeErrorBody(t, host)["error"]; !strings.Contains(got, cookies.ErrNoSetupInProgress.Error()) {
+		t.Errorf("the host’s own beacon answered %q — want %q, which only AbandonSetup produces. "+
+			"On darwin, the fallback build and any launch whose job or process group could not "+
+			"be adopted, this beacon is the ONLY thing that ever releases the slot",
+			got, cookies.ErrNoSetupInProgress.Error())
+	}
+
+	lan := post("192.168.1.20:5555")
+	if lan.Code != http.StatusForbidden {
+		t.Fatalf("a LAN beacon: status %d, want %d (body %q)",
+			lan.Code, http.StatusForbidden, lan.Body.String())
+	}
+	if got := decodeErrorBody(t, lan)["error"]; strings.Contains(got, cookies.ErrNoSetupInProgress.Error()) {
+		t.Errorf("a LAN beacon answered %q — that sentence comes from AbandonSetup, so the call "+
+			"was made. With a real setup in flight on a platform whose reap can never fire, that "+
+			"call clears the slot and the host’s finish 404s", got)
+	}
+}
+
+// TestTheLoopbackRefusalCarriesALength keeps the Task 6 rule on the exit this
+// task adds. The finish handler runs a deferred, BLOCKING auth re-check, so
+// every JSON any of its exits writes must carry a Content-Length or the client
+// waits out the re-check for the body — and this refusal is answered by a
+// SHARED HELPER, which is exactly the shape the per-handler source sweep
+// (TestBothRecheckHandlersAnswerThroughTheSizedWriters) cannot see.
+//
+// Mutant: write the refusal through jsonError -> none of the four carries a
+// length.
+func TestTheLoopbackRefusalCarriesALength(t *testing.T) {
+	for _, path := range autoSetupGatedPaths {
+		r := chi.NewRouter()
+		CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "192.168.1.20:5555"
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(rec.Body.Len()) {
+			t.Errorf("%s refusal: Content-Length = %q for a %d-byte body",
+				path, got, rec.Body.Len())
+		}
+	}
+}
+
+// TestAutoSetupStartRejectsAnUnknownPlatform is COOKIES-8 at the wire.
+//
+// The handler forwarded any string and StartSetup proceeded with the YouTube
+// login URL under targetPlatform="anything", so the Chromium finish skipped
+// cdpEnsurePageTarget and the wizard judged both platforms as if youtube had
+// been asked — a wrong input silently accepted.
+//
+// There is ONE rule and it lives in StartSetup, where the callers that are not
+// this route reach it (the TUI's R L chord, the first-run wizard). The route's
+// share is to render the sentinel as a wrong INPUT — 400, not the 500 its
+// default arm gave — so a second hard-coded platform list here would be a copy
+// free to drift from the one that decides.
+//
+// Mutants:
+//   - drop the 400 arm -> "mastodon" answers 500 "failed to start setup", which
+//     reads as a server fault for a value the caller chose.
+//   - drop the StartSetup check -> "mastodon" gets past the rule entirely and
+//     this fails on the status; the service-level twin
+//     (TestStartSetupRejectsAnUnknownPlatform) names the same mutant for every
+//     non-HTTP caller.
+//   - reject "" or an absent field -> the last three rows fail; both the
+//     dashboard and the first-run wizard omit the field, and it has always
+//     meant youtube.
+func TestAutoSetupStartRejectsAnUnknownPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"a platform Moombox does not support", `{"platform":"mastodon"}`, http.StatusBadRequest},
+		{"the right word in the wrong case", `{"platform":"YouTube"}`, http.StatusBadRequest},
+		{"an empty platform means youtube", `{"platform":""}`, http.StatusServiceUnavailable},
+		{"no platform key at all means youtube", `{}`, http.StatusServiceUnavailable},
+		{"an unparseable body means youtube", `not json`, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := chi.NewRouter()
+			// Stopped, so every row that gets PAST the platform rule lands on
+			// ErrServiceStopped's 503 — a status this package can produce
+			// without a browser, and one no platform refusal shares.
+			CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+			req := httptest.NewRequest(http.MethodPost, "/api/cookies/auto-setup/start",
+				strings.NewReader(tc.body))
+			req.RemoteAddr = "127.0.0.1:5555"
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d (body %q)", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want != http.StatusBadRequest {
+				return
+			}
+			got := decodeErrorBody(t, rec)["error"]
+			for _, accepted := range []string{"youtube", "twitch"} {
+				if !strings.Contains(got, accepted) {
+					t.Errorf("400 body = %q, want it to name %q — the caller cannot fix an input "+
+						"whose accepted values are not stated", got, accepted)
+				}
+			}
+		})
 	}
 }

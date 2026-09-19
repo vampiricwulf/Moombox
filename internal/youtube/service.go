@@ -212,10 +212,11 @@ func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoI
 	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
 }
 
-// ProbeVideoDate fetches only a video's publish date via one anonymous
-// WEB-family player call — see PlayerAPI.ProbeVideoDate. The date-completing
-// half of the monitors' two-phase probe (spec §9): the ANDROID_VR/TV status
-// probes carry no microformat and therefore no dates.
+// ProbeVideoDate fetches only a video's publish date via one WEB-family player
+// call, carrying whatever credentials the jar holds — see
+// PlayerAPI.ProbeVideoDate. The date-completing half of the monitors'
+// two-phase probe (spec §9): the ANDROID_VR/TV status probes carry no
+// microformat and therefore no dates.
 func (s *Service) ProbeVideoDate(ctx context.Context, videoID string) (publishedAt, precision string, err error) {
 	s.vdMu.RLock()
 	vd := s.visitorData

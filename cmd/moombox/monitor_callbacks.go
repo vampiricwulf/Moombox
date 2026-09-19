@@ -78,12 +78,46 @@ func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool
 // resumeCookieParkedJobs applies sweepShouldResume to every job and returns
 // how many were resumed. Split out of the callback closures so the decision
 // and the database loop it actually drives can both be tested directly.
+//
+// THE TARGET STATUS DEPENDS ON queue_priority, and getting it wrong breaks the
+// pacing in one direction or strands a job in the other:
+//
+//   - priority 1 (backlog) resumes to Queued and the scheduler is woken. It is
+//     the only path out of Queued, so it re-admits these archive_slots at a
+//     time. Sending them to Upcoming instead — what this did before — handed
+//     the whole of a channel's parked backlog to the worker's heartbeat poller
+//     at once, bypassed archive-slots entirely, and left CountBacklogInFlight
+//     over-counting until they drained.
+//   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
+//     scheduler never admits a priority-0 row, so Queued would strand it.
+//   - priority 1 with NO feed_items partner also resumes to Upcoming — the
+//     pre-MON-4 path — because Queued would strand it just as surely.
+//     CancelAndPrune (channel REMOVAL) deletes the channel's never-started
+//     jobs and then its feed_items rows, but deliberately leaves a RUNNING
+//     download alone; a backlog VOD that was Downloading at that moment
+//     therefore survives with no partner, and it is exactly the row that
+//     parks in COOKIES? later. NextQueuedJobs INNER-JOINs feed_items, so the
+//     scheduler would return it on no sweep ever, /retry and /resume both
+//     refuse Queued, and ShouldProcess(Queued) is false — the row would be
+//     lost permanently and silently. Pacing is not a property worth having
+//     for a channel that no longer exists.
+//
+// The partner check is the EXISTING GetFeedItem read (nil, nil for no row) —
+// no new query, no schema change, no UpdateJobFields change. A read that
+// ERRORS resumes to Upcoming too: the cheap answer is the one that can still
+// finish the download.
+//
+// wake is the scheduler's Wake (production: runState.schedulerWake). Called
+// once, after the loop, and only when something was resumed: Wake coalesces
+// into a capacity-1 channel, so one signal is all a sweep can use. A nil wake
+// is tolerated — a runState built without a worker has no scheduler to poke,
+// and the 60 s heartbeat still covers it.
 func resumeCookieParkedJobs(db *database.Database, log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}, platform, currentIdentity string) int {
+}, wake func(), platform, currentIdentity string) int {
 	jobs, err := db.GetAllJobs()
 	if err != nil {
 		log.Warn("cookie-parked sweep: GetAllJobs failed", "platform", platform, "err", err)
@@ -94,15 +128,46 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 		if !sweepShouldResume(job, platform, currentIdentity) {
 			continue
 		}
+		status := database.StatusUpcoming
+		if job.QueuePriority == 1 && job.ChannelID != nil {
+			it, err := db.GetFeedItem(*job.ChannelID, job.VideoID)
+			switch {
+			case err != nil:
+				log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
+					"job", job.ID, "platform", platform, "err", err)
+			case it != nil:
+				status = database.StatusQueued
+			}
+		}
 		db.UpdateJobFields(job.ID, map[string]any{
-			"status":        database.StatusUpcoming,
+			"status":        status,
 			"error":         "",
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
 		})
 		resumed++
 	}
+	// Outside the loop and outside any lock the caller holds: one signal is
+	// all the capacity-1 channel can carry, and Wake is non-blocking anyway.
+	if resumed > 0 && wake != nil {
+		wake()
+	}
 	return resumed
+}
+
+// schedulerWake returns the backlog scheduler's Wake, or nil when no worker is
+// wired. A runState built by a test harness (monitor_callbacks_twitch_reauth_test.go)
+// has no dlWorker, and a nil-receiver Scheduler() call would panic inside a
+// credential-repair callback — the worst possible moment for one.
+func (s *runState) schedulerWake() func() {
+	if s.dlWorker == nil {
+		return nil
+	}
+	sched := s.dlWorker.Scheduler()
+	if sched == nil {
+		return nil
+	}
+	return sched.Wake
 }
 
 // recheckAfterCookieWrite runs the in-process auth re-check that MUST follow
@@ -222,6 +287,26 @@ func clearYouTubeMembershipMemo(platform string, clear func() int) int {
 	return clear()
 }
 
+// The two resume notifications' bodies, as format strings (count, platform).
+// Named constants rather than literals at the Send sites so that what an
+// operator actually reads can be pinned by a test —
+// notifications.Manager builds its targets from config and accepts Discord
+// webhook URLs only, so there is no fake target to install instead.
+//
+// BOTH CARRY THE PACING CLAUSE, and that is the load-bearing half. Before
+// MON-4 a repair sent every parked row to Upcoming and the heartbeat poller
+// started them all, so "Resumed N job(s)" and "N downloads are starting" were
+// the same sentence. Now a backlog row returns to Queued and the scheduler
+// re-admits it archive_slots at a time, so an operator with 40 parked rows and
+// archive_slots = 3 reads the count and then watches three downloads start.
+// The count is exactly right; only the text can keep it from being misread.
+// The log lines beside these two Sends make no such implication and stand
+// unchanged.
+const (
+	authRecoveredResumedBody       = "Resumed %d job(s) waiting on %s cookies — backlog re-queues and drains at archive_slots per channel"
+	credentialsObservedResumedBody = "Resumed %d job(s) parked on %s credentials after re-checking the saved credentials — backlog re-queues and drains at archive_slots per channel"
+)
+
 // wireCredentialRepairCallbacks installs the two RefreshService callbacks that
 // fire when a platform's credentials become usable again.
 //
@@ -288,14 +373,14 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			s.log.Info("auth recovered — cleared membership non-member memos",
 				"platform", platform, "channels", n)
 		}
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, "")
+		resumed := resumeCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, "")
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// Event "auth" pairs with the worker's "Authentication Required"
 			// emit — an empty Event would bypass every target's allowlist
 			// (unfilterable) since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
-				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				fmt.Sprintf(authRecoveredResumedBody, resumed, platform),
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},
@@ -347,7 +432,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			s.log.Info("account identity observed — cleared membership non-member memos",
 				"platform", platform, "channels", n)
 		}
-		resumed := resumeCookieParkedJobs(s.db, s.log, platform, identity)
+		resumed := resumeCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, identity)
 		if resumed > 0 {
 			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// States no cause, for the same reason the "Cookie Auto-Refresh
@@ -368,7 +453,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			// Same "auth" event as the recovery notification above, for the
 			// same reason: an empty Event bypasses every target's allowlist.
 			s.notifyMgr.Send("Parked Jobs Re-evaluated",
-				fmt.Sprintf("Resumed %d job(s) parked on %s credentials after re-checking the saved credentials", resumed, platform),
+				fmt.Sprintf(credentialsObservedResumedBody, resumed, platform),
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},

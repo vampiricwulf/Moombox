@@ -1,6 +1,7 @@
 package cookies
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,36 +18,67 @@ import (
 // A case that would also pass against the unfixed function is labelled a
 // regression guard so nobody later mistakes it for a proof.
 
-// captureLogger records Info-level messages so a test can assert that an
-// operator-visible event was actually reported. Only names are recorded —
-// never values.
+// captureLogger records Info- and Debug-level messages, with their key/value
+// args appended, so a test can assert that an operator-visible event was
+// actually reported AT THE LEVEL it claims. Only names are recorded — never
+// values: every arg it is handed today is a holder kind, a cookie NAME or a
+// platform, and a test that needs a logger for anything carrying a secret
+// wants a different one.
+//
+// Debug as well as Info because the two levels are the subject of an
+// assertion of their own — a line demoted to Debug is invisible to an operator
+// running at the default level, and "the Info fired" is only half of that
+// claim.
 type captureLogger struct {
-	mu   sync.Mutex
-	info []string
+	mu    sync.Mutex
+	info  []string
+	debug []string
 }
 
-func (c *captureLogger) record(msg string) {
+func (c *captureLogger) format(msg string, args ...any) string {
+	var b strings.Builder
+	b.WriteString(msg)
+	for i := 0; i+1 < len(args); i += 2 {
+		fmt.Fprintf(&b, " %v=%v", args[i], args[i+1])
+	}
+	return b.String()
+}
+
+func (c *captureLogger) Debug(msg string, args ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.info = append(c.info, msg)
+	c.debug = append(c.debug, c.format(msg, args...))
 }
 
-func (c *captureLogger) Debug(msg string, args ...any) {}
-func (c *captureLogger) Info(msg string, args ...any)  { c.record(msg) }
+func (c *captureLogger) Info(msg string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.info = append(c.info, c.format(msg, args...))
+}
+
 func (c *captureLogger) Warn(msg string, args ...any)  {}
 func (c *captureLogger) Error(msg string, args ...any) {}
 
-func (c *captureLogger) infoContaining(sub string) int {
+// atLevel counts under the lock, and picks the slice under it too: reading
+// c.info to pass it in would be the very race this mutex is here to stop.
+func (c *captureLogger) atLevel(infoSide bool, sub string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	lines := c.debug
+	if infoSide {
+		lines = c.info
+	}
 	n := 0
-	for _, m := range c.info {
+	for _, m := range lines {
 		if strings.Contains(m, sub) {
 			n++
 		}
 	}
 	return n
 }
+
+func (c *captureLogger) infoContaining(sub string) int  { return c.atLevel(true, sub) }
+func (c *captureLogger) debugContaining(sub string) int { return c.atLevel(false, sub) }
 
 // netscapeRow is one parsed line of a Netscape cookie file, split the way
 // CookieJar.Load splits it (fields 6.. are one value that may contain tabs).

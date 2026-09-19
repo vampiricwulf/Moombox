@@ -164,6 +164,21 @@ func (tm *TwitchMonitor) CheckNow() {
 // (~0.5s×N channels every cycle, permanently). Zero-value cycleStart
 // (initial Start scheduling) behaves as a plain interval.
 func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
+	// Same rule as runCycle's guard, for the path that arms the timer: a
+	// cancelled context means this chain was retired by Stop(), and a retired
+	// chain must arm nothing and publish nothing. Checked FIRST, above the
+	// channel-count read, because the "no channels" arm below writes
+	// NextCheckAt and publishes OnSchedule too — the two things this guard
+	// exists to prevent — so a guard placed after it covers only half the
+	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
+	// belongs to whichever chain is live now, and a dead chain zeroing it
+	// would blank the UI's next-check time for no reason. A twin of this check
+	// sits inside the locked section below and covers what this one cannot —
+	// a Stop()+Start() landing after it; both are wanted.
+	if ctx.Err() != nil {
+		return
+	}
+
 	channels := tm.getTwitchChannels()
 	if len(channels) == 0 {
 		tm.mu.Lock()
@@ -195,11 +210,23 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time)
 	}
 
 	tm.mu.Lock()
-	// Don't schedule if monitor was stopped (cancel set to nil). Clear the
-	// checking sentinel so a stopped monitor never reports -1 forever (a
-	// late cycle racing Stop set NextCheckAt=-1 before doCheck returned).
+	// Unreachable since the leading ctx.Err() guard — Stop() cancels the ctx
+	// and nils cancel together, and Stop() itself writes NextCheckAt = 0 — so
+	// this no longer clears the -1 sentinel for a late cycle racing Stop().
+	// Kept as defence for a future cancel-without-cancel path: a monitor that
+	// nils cancel without cancelling its context would otherwise arm a timer
+	// and publish a countdown for a chain nothing owns.
 	if tm.cancel == nil {
 		tm.NextCheckAt = 0
+		tm.mu.Unlock()
+		return
+	}
+	// Kept beside the leading guard, not redundant with it: this closes the
+	// window between that check and this lock, in which a Stop()+Start() would
+	// install a NEW non-nil cancel — so `cancel == nil` above passes and this
+	// dead chain would write the LIVE chain's NextCheckAt and publish its
+	// OnSchedule. Re-reading ctx.Err() costs nothing; do not "simplify" it away.
+	if ctx.Err() != nil {
 		tm.mu.Unlock()
 		return
 	}
@@ -246,6 +273,17 @@ func (tm *TwitchMonitor) runCycle(ctx context.Context) {
 			tm.logger.Error("twitch monitor runCycle panic", "panic", r)
 		}
 	}()
+
+	// A cancelled context means this cycle belongs to a STOPPED chain. Stop()
+	// cancels the context but leaves the AfterFunc armed, and a later Start()
+	// installs a new cancel — so the dead chain's cycle used to pass every
+	// guard, run a full doCheck, and then re-arm the SHARED timer field,
+	// cancelling the live chain's pending cycle every interval. Returning here,
+	// before the `checking` latch and before the scheduleNext defer is
+	// installed, is what stops that. Latent today (Stop runs only at shutdown).
+	if ctx.Err() != nil {
+		return
+	}
 
 	cycleStart := time.Now()
 	tm.mu.Lock()

@@ -6,9 +6,27 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// importSlotSentinel is the value ImportCookies parks in AutoCookieService's
+// refreshCmd while it holds the refresh slot (owner decision O-D).
+//
+// It exists so a DECLINING refresh pass can name what is holding the slot in
+// one Info line without a second field to keep in step with the first: the
+// slot is claimed by exactly two kinds of caller, and pointer identity against
+// this one separates them. It is deliberately a bare *exec.Cmd, because the
+// only thing any reader of refreshCmd touches is .Process — nil here, nil in
+// the refresh path's own `&exec.Cmd{}`, so killRefreshProcess behaves
+// identically for both.
+//
+// SHARED, and it must be: a per-call value would be a different pointer and
+// the comparison would never hold. Nothing writes through it, and concurrent
+// imports cannot both hold the slot anyway — the second is refused before it
+// gets here.
+var importSlotSentinel = &exec.Cmd{}
 
 // prepareCookieImport validates an operator-supplied Netscape cookie file and
 // returns the exact text that must be written to cookies.txt.
@@ -317,12 +335,41 @@ type ImportResult struct {
 // goes through writeCookieFile, and no empty-valued row is ever produced (see
 // prepareCookieImport).
 //
-// NOT gated on the `stopped` latch, unlike StartSetup and
-// RefreshCookiesDetailed. Both of those refusals are about launching or
+// GATED ON THE REFRESH SLOT, and on nothing else (owner decision O-D,
+// 2026-09-17). A paste that lands inside a browser-refresh or recovery pass's
+// read -> verify -> write gap is destroyed by that pass's merge of the
+// PRE-paste file, and the import answers "imported" while it happens; on the
+// recovery path the rows that replace it are the dead ones that raised the
+// alarm. Claiming the same refreshCmd sentinel RefreshCookiesDetailed and
+// StartSetup already use makes the two mutually exclusive without introducing
+// a lock over cookies.txt — the no-lock property the Arc 8 ruling protects is
+// kept, and the answer is the one StartSetup already gives: "please try again
+// shortly", HTTP 409, retried within ~2 minutes.
+//
+// Still NOT gated on the `stopped` latch. That refusal is about launching or
 // steering a browser PROCESS; this launches nothing, and refusing an import
-// during a drain would throw away credentials the operator supplied by hand,
+// during a drain would throw away credentials the operator supplied by hand
 // for the sake of a shutdown that is about to read the file back on the next
 // start anyway.
+//
+// Still NOT gated on setupInProgressLocked either, and that is a RESIDUAL
+// rather than an oversight: a wizard finish is a third writer with its own
+// read -> write gap, but it is gated by the setup slot, not this one, and
+// widening the import's gate to cover it would refuse the container operator's
+// only re-authentication route for the 60 s grace a stale setup slot lingers.
+// O-D was scoped to the refresh collision, which is the one that was
+// reproduced.
+//
+// A claim held here makes Stop()'s killRefreshProcess poll for
+// launchWindowKillBudget before giving up, exactly as it already does for a
+// refresh caught inside its launch window — a bounded shutdown delay, not a
+// new one.
+//
+// The sentinel it claims is importSlotSentinel rather than a fresh &exec.Cmd{},
+// and that is the whole of how a declining pass can say WHO holds the slot
+// (autocookies_refresh.go). No new field, and nothing else changes: the only
+// thing any reader of refreshCmd ever touches is .Process, which is nil on a
+// bare *exec.Cmd whichever one it is.
 //
 // The caller runs the auth re-check. Every gesture that can write cookies.txt
 // must end in one (Arc 10 R4) and this one has TWO callers: the Web import
@@ -332,6 +379,25 @@ type ImportResult struct {
 // — run it themselves rather than through the OnPassCompleted seam. Firing
 // that seam here would double every external site; see its doc comment.
 func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) (ImportResult, error) {
+	// The claim is the function's FIRST act, ahead of every guard clause, so no
+	// branch can return without releasing what it took — and the release is a
+	// defer registered in the same breath, which is what makes that true for
+	// the panic exits as well as the returns.
+	s.mu.Lock()
+	if s.refreshCmd != nil {
+		s.mu.Unlock()
+		// The same sentence StartSetup answers with for the same sentinel, so
+		// the two surfaces cannot drift; the Web route maps it to 409.
+		return ImportResult{}, fmt.Errorf("please try again shortly: %w", ErrRefreshInProgress)
+	}
+	s.refreshCmd = importSlotSentinel // claims the slot (see RefreshCookiesDetailed)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.refreshCmd = nil
+		s.mu.Unlock()
+	}()
+
 	if s.cookiePath == "" {
 		// Unreachable in production — cmd/moombox always constructs the service
 		// with cookies.cookie_file, which config defaults to ./cookies.txt —

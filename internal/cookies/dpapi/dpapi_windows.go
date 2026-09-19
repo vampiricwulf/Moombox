@@ -85,12 +85,19 @@ func cryptUnprotectData(in []byte) ([]byte, error) {
 //	                                (base64 of "DPAPI" || dpapi_blob)
 //
 // profilePath should point at the profile dir (e.g. "Default" or
-// "Profile 1") — the Local State file lives one level up at the
-// User Data root.
+// "Profile 1"). WHERE the Local State file lives is ChromeLocalStatePath's
+// question, not this function's: Chromium keeps it one level up at the
+// User Data root, Opera keeps it inside the profile directory itself. That
+// rule lives in the untagged profiles.go so ValidateProfileDir and this reader
+// cannot disagree — while they were two separate hard-coded "one level up"
+// judgements, Opera was refused by the first and would have failed here.
 //
 // Returns the 32-byte AES-GCM master key suitable for decryptV10Cookie.
 func loadChromeMasterKey(profilePath string) ([]byte, error) {
-	localStatePath := filepath.Join(filepath.Dir(profilePath), "Local State")
+	localStatePath, err := ChromeLocalStatePath(profilePath)
+	if err != nil {
+		return nil, fmt.Errorf("locate Local State for %q: %w", profilePath, err)
+	}
 	data, err := os.ReadFile(localStatePath)
 	if err != nil {
 		return nil, fmt.Errorf("read Local State at %q: %w", localStatePath, err)
