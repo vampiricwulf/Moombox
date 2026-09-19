@@ -138,6 +138,7 @@ func waitBeforeAcceptRetry(d time.Duration, cancel <-chan struct{}) bool {
 // goroutine so a slow client can't stall the accept loop.
 func newSchemeMux(real net.Listener, logger interface {
 	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) (tlsLn, plainLn net.Listener) {
 	return newSchemeMuxWithRetryWait(real, logger, waitBeforeAcceptRetry)
@@ -149,6 +150,7 @@ func newSchemeMux(real net.Listener, logger interface {
 // climbing it.
 func newSchemeMuxWithRetryWait(real net.Listener, logger interface {
 	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }, waitRetry func(d time.Duration, cancel <-chan struct{}) bool) (tlsLn, plainLn net.Listener) {
 	done := make(chan struct{})
@@ -192,7 +194,12 @@ func newSchemeMuxWithRetryWait(real net.Listener, logger interface {
 						retryDelay *= 2
 					}
 					retryDelay = min(retryDelay, acceptRetryMaxDelay)
-					logger.Error("scheme mux accept error; retrying", "err", err, "retryIn", retryDelay)
+					// Warn, not Error: the loop recovers from this unaided,
+					// and at the 1 s ceiling a sustained EMFILE storm writes
+					// one line per second (the hub's own lagging-client line
+					// is Warn for the same reason). A permanent failure still
+					// returns below and is reported by the caller.
+					logger.Warn("scheme mux accept error; retrying", "err", err, "retryIn", retryDelay)
 					if !waitRetry(retryDelay, closed) {
 						return // Close landed mid-backoff
 					}

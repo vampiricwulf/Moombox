@@ -73,6 +73,13 @@ func TestMonitorCheckNowKicksOnceThenDebounces(t *testing.T) {
 	}
 }
 
+// TestMonitorCheckNowUnavailableWithoutCallback — the handler's nil-dep guard.
+// The TUI-only and setup-wizard wirings construct MonitorRouteDeps without a
+// CheckNow, and the route is registered either way.
+//
+// MUTANT: drop `if deps.CheckNow == nil { 503 }` — the handler calls a nil func
+// and panics; RecoveryMiddleware turns that into a 500 in production, and this
+// test into a panic.
 func TestMonitorCheckNowUnavailableWithoutCallback(t *testing.T) {
 	r := chi.NewRouter()
 	MonitorRoutes(r, &MonitorRouteDeps{})

@@ -482,17 +482,22 @@ func TestReleaseNotesRejectsANonVersionParam(t *testing.T) {
 
 // TestReleaseNotesValidatesTheDefaultedVersionToo pins the ORDER: the regex runs
 // AFTER the "no ?version= means the running version" default, so a build whose
-// version string is malformed (this fixture's "2.6.0-test") fails loudly here
+// version string is malformed (this fixture's "2.6.0 beta") fails loudly here
 // instead of quietly querying a tag GitHub has never had.
+//
+// The fixture is a version the regex still refuses. It used to be "2.6.0-test",
+// which the pre-release widening (W-CW7) turned into a VALID version — and the
+// request below carries an uncancelled context, so this committed test would
+// have started dialling api.github.com. The fixture moves with the regex.
 //
 // MUTANT: validate before the default — an empty ?version= skips the check
 // entirely and the malformed running version reaches the GitHub path anyway.
 func TestReleaseNotesValidatesTheDefaultedVersionToo(t *testing.T) {
-	upd, err := updater.New("2.6.0-test", silentLogger{})
+	upd, err := updater.New("2.6.0 beta", silentLogger{})
 	if err != nil {
 		t.Fatalf("updater.New: %v", err)
 	}
-	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0-test"})
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0 beta"})
 
 	req := httptest.NewRequest("GET", "/api/update/release-notes", nil)
 	rec := httptest.NewRecorder()
@@ -509,8 +514,13 @@ func TestReleaseNotesValidatesTheDefaultedVersionToo(t *testing.T) {
 // tag. An accepted value must NOT 400; it goes on to fail at the network
 // (502 here, since the request context is cancelled before it dials).
 //
+// The last three rows are the pre-release shapes release.yml preserves into
+// main.version: a build tagged v2.6.0-test.1 sends its own version here, and
+// before W-CW7 it was answered "invalid version" for a tag that exists.
+//
 // MUTANT: tighten the regex to `^\d+\.\d+\.\d+$` — every tag-shaped value the
-// TUI sends starts 400ing.
+// TUI sends starts 400ing. MUTANT: drop the `(?:-[0-9A-Za-z.-]+)?` group — the
+// three pre-release rows 400.
 func TestReleaseNotesAcceptsEveryPublishedTagShape(t *testing.T) {
 	upd, err := updater.New("2.6.0-test", silentLogger{})
 	if err != nil {
@@ -518,7 +528,8 @@ func TestReleaseNotesAcceptsEveryPublishedTagShape(t *testing.T) {
 	}
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Updater: upd, Version: "2.6.0-test"})
 
-	for _, good := range []string{"2.6.4", "v2.6.4", "2.6.30", "v2.6.32", "2.7.0", "v2.8.8", "2.8.8", "10.0.0"} {
+	for _, good := range []string{"2.6.4", "v2.6.4", "2.6.30", "v2.6.32", "2.7.0", "v2.8.8", "2.8.8", "10.0.0",
+		"v2.6.0-test.1", "3.0.0-rc.1", "v3.0.0-rc1"} {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // never dials; a 400 here would be the regex, not the network
 		req := httptest.NewRequest("GET", "/api/update/release-notes?version="+url.QueryEscape(good), nil).WithContext(ctx)

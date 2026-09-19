@@ -94,6 +94,9 @@ for (const file of ["index.html", "login.html"]) {
       "the browser chrome colour must follow the theme");
   });
 
+  // MUTANT: hard-code "dark" instead of consulting matchMedia — a light-themed
+  // desktop with no stored choice boots dark, which is the flash this file exists
+  // to remove.
   test(`${file}: boot-theme.js follows prefers-color-scheme with nothing stored`, { skip }, () => {
     const { window } = boot(file, { light: true });
     assert.equal(window.document.documentElement.className, "sl-theme-light",
@@ -113,6 +116,8 @@ for (const file of ["index.html", "login.html"]) {
     assert.equal(doc.querySelector('meta[name="theme-color"]').content, "#1C1B22");
   });
 
+  // MUTANT: drop the try/catch — a private window (or blocked site data) throws
+  // before the rest of the page's scripts run, so the login form never wires up.
   test(`${file}: boot-theme.js survives a localStorage that throws`, { skip }, () => {
     const dom = page(file);
     Object.defineProperty(dom.window, "localStorage", {

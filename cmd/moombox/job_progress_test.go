@@ -103,8 +103,15 @@ func TestProgressFrameCarriesEveryFieldTheCardAndDialogRead(t *testing.T) {
 		}
 	}
 	if len(got) != len(want) {
-		t.Errorf("job_progress frame has %d keys, want exactly %d (%v) — an extra key is bytes on the "+
-			"60 Hz path: got %v", len(got), len(want), want, got)
+		// Branch the diagnosis: a hard-coded "an extra key" clause printed the
+		// OPPOSITE of the fault whenever the frame was short a key, which is
+		// what the drop-totalVideoSeq mutant above produces.
+		why := "a missing key leaves the client's held row stale"
+		if len(got) > len(want) {
+			why = "an extra key is bytes on the 60 Hz path"
+		}
+		t.Errorf("job_progress frame has %d keys, want exactly %d (%v) — %s: got %v",
+			len(got), len(want), want, why, got)
 	}
 
 	// The keys must match database.Job's own tags, or the merge writes twins.
@@ -253,5 +260,62 @@ func TestEveryProgressTickStillProducesExactlyOneFrame(t *testing.T) {
 		t.Errorf("the OnJobChange dispatch is not the exact block\n%s\n— anything inserted between the "+
 			"classifier and the broadcast can drop or coalesce a tick, and the cadence is protected "+
 			"(cheaper, never rarer)", dispatch)
+	}
+}
+
+// TestProgressFrameMatchesTheClientFixture is the cross-language pin (W-CW2).
+//
+// The wire between newJobProgressFrame and web/public/app.js's merge is a bare
+// object spread: a key renamed on ONE side silently ADDS a property to the held
+// row instead of updating one, and the card freezes on its first value. Neither
+// suite could see that on its own — a Go-only rename leaves every node test
+// green, and a coordinated rename of database.Job's tag, the frame's tag and
+// the Go want-list is green in BOTH.
+//
+// web/tests/fixtures/job-progress-frame.json is the shared third party: this
+// test asserts the Go frame's key set against it, and job-progress.test.mjs
+// builds its frames from the same file. A rename on either side, or an edit to
+// the fixture alone, now turns at least one suite red.
+//
+// Read with a relative path rather than through the node harness on purpose:
+// this test must not depend on web/tests/node_modules, which is gitignored and
+// absent on a fresh clone.
+//
+// THE MUTANTS:
+//   - rename `json:"lastVideoSeq"` in Go only — the missing/extra key is named
+//     here (the node suite stays green).
+//   - rename the key in the fixture only — named here too, and the node merge
+//     test's lastVideoSeq assertion fails.
+func TestProgressFrameMatchesTheClientFixture(t *testing.T) {
+	const fixture = "../../web/tests/fixtures/job-progress-frame.json"
+	raw, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read %s: %v", fixture, err)
+	}
+	var want map[string]any
+	if err := json.Unmarshal(raw, &want); err != nil {
+		t.Fatalf("parse %s: %v", fixture, err)
+	}
+
+	frameRaw, err := json.Marshal(newJobProgressFrame(realisticProgressJob()))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(frameRaw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("the client fixture carries %q and the Go frame does not — the dashboard reads a "+
+				"key the server stopped sending, and the held row keeps its stale value", k)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("the Go frame carries %q and the client fixture does not — update "+
+				"%s in the same commit, or the new field is bytes nothing reads", k, fixture)
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -114,6 +115,25 @@ func TestBroadcastLogClipsAnOverlongLine(t *testing.T) {
 	}
 	if short := clipLogLine("hello"); short != "hello" {
 		t.Errorf("a short line must pass through unchanged, got %q", short)
+	}
+
+	// A rune straddling the cut: 4095 ASCII bytes then a 3-byte CJK rune, so
+	// byte 4096 is that rune's SECOND byte. A byte-index cut leaves invalid
+	// UTF-8 that json.Marshal silently repairs to U+FFFD — visible garbage at
+	// the boundary of a CJK log line rather than a clean truncation.
+	//
+	// MUTANT: cut at the byte index (`line[:maxLineLen]`) — utf8.ValidString
+	// fails here.
+	straddling := strings.Repeat("x", 4095) + "日" + strings.Repeat("y", 100)
+	got = clipLogLine(straddling)
+	if !utf8.ValidString(got) {
+		t.Errorf("clipped line is not valid UTF-8 — the cut landed inside a rune")
+	}
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Errorf("the rune-safe cut must still mark itself truncated; got %q…", got[:40])
+	}
+	if want := strings.Repeat("x", 4095) + "... (truncated)"; got != want {
+		t.Errorf("clipped line = %q…, want the 4095 bytes before the straddling rune", got[:len(got)-15])
 	}
 }
 

@@ -18,7 +18,13 @@ import (
 
 // staticFixture mounts three assets on a real server + middleware chain.
 // RemoteAddr matters: IPGateMiddleware is in the chain and the default
-// network_access is "localhost", so a request must arrive from loopback.
+// network_access is "localhost", so a request must arrive from loopback —
+// which is true only because a route is registered below. chi builds its
+// middleware chain lazily, in handle(): with no route at all, Mux.ServeHTTP
+// short-circuits to the NotFound handler (chi mux.go:63-68) and every
+// middleware the server installs is bypassed, so a fixture without one
+// silently exercises none of them. authStaticFixture carries the same route
+// for the same reason.
 func staticFixture(t *testing.T, commit string) (*Server, fstest.MapFS) {
 	t.Helper()
 	s := NewServer(config.NewStore(config.Defaults(), ""), testWSLogger{})
@@ -32,6 +38,10 @@ func staticFixture(t *testing.T, commit string) (*Server, fstest.MapFS) {
 		"favicon.svg": {Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
 	}
 	s.MountStaticFiles(fsys)
+	s.Router().Get("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("pong"))
+	})
 	return s, fsys
 }
 

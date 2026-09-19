@@ -2080,6 +2080,11 @@
             <div id="status-bar-right">
                 <span id="disk-indicator" style="display:none"></span>
                 <span id="status-warnings"></span>
+                <!-- role/tabindex/aria-label/data-action on this icon are managed at RUNTIME by
+                     updateStatusBar (app.js): while the first warning is actionable it is a button
+                     and a Tab stop, and while the only warning is the action-less sidecar alert the
+                     three are stripped so Tab does not land on a dead stop. The static attributes
+                     below are the no-warnings (hidden) state. -->
                 <span id="status-warnings-icon" role="button" tabindex="0" title="Warnings" aria-label="Warnings"></span>
                 <span id="yt-indicator" title="YouTube" style="display:none">YT</span>
                 <span id="tw-indicator" title="Twitch" style="display:none">TW</span>

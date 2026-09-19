@@ -29,8 +29,15 @@ const updateCheckDebounce = 30 * time.Second
 // ended the path and turned the rest into a query string. The host is fixed
 // and the method is GET, so this is hygiene rather than a hole, and this keeps
 // it that way. It admits every tag Moombox has published, with or without the
-// leading "v" (the Web sends the bare version, the TUI sends the tag).
-var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
+// leading "v" (the Web sends the bare version, the TUI sends the tag) —
+// including the pre-release suffixes release.yml preserves into main.version
+// (`-rc.N`, `-test.N`; the tag v2.6.0-test.1 exists). Without that suffix a
+// pre-release build's own "View Release Notes" 400d its own version, because
+// the Web sends no ?version= and the handler defaults to the running one
+// (W-CW7). The suffix admits only [0-9A-Za-z.-], so no `/ ? # %` or space can
+// reach GitHub's path, and a segment always starts `v?<digits>` so no ".."
+// segment is expressible.
+var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$`)
 
 // updateApplyOriginAllowed gates POST /api/update/apply to loopback callers.
 // Replacing the binary + restarting is a high-impact action; the audit

@@ -18,15 +18,20 @@ const skip = jsdomMissing || false;
 after(() => harness?.teardownAll());
 
 /**
- * Count textContent / className / style.display assignments across the whole
- * document by wrapping the prototype accessors. Restore before asserting, or a
- * failure message's own string work is counted too.
+ * Count textContent / className / style.display / title assignments across the
+ * whole document by wrapping the prototype accessors. Restore before asserting,
+ * or a failure message's own string work is counted too.
+ *
+ * `title` is here because a tooltip re-assigned with the value it already holds
+ * is invisible to a value assertion and still dirties the element — the same
+ * class of waste the other three counters exist to catch.
  */
 function countDomWrites(window) {
   const textDesc = Object.getOwnPropertyDescriptor(window.Node.prototype, "textContent");
   const classDesc = Object.getOwnPropertyDescriptor(window.Element.prototype, "className");
   const displayDesc = Object.getOwnPropertyDescriptor(window.CSSStyleDeclaration.prototype, "display");
-  const counts = { textContent: 0, className: 0, display: 0 };
+  const titleDesc = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "title");
+  const counts = { textContent: 0, className: 0, display: 0, title: 0 };
 
   Object.defineProperty(window.Node.prototype, "textContent", {
     ...textDesc,
@@ -42,6 +47,12 @@ function countDomWrites(window) {
       set(v) { counts.display++; displayDesc.set.call(this, v); },
     });
   }
+  if (titleDesc && titleDesc.set) {
+    Object.defineProperty(window.HTMLElement.prototype, "title", {
+      ...titleDesc,
+      set(v) { counts.title++; titleDesc.set.call(this, v); },
+    });
+  }
 
   return {
     counts,
@@ -50,6 +61,9 @@ function countDomWrites(window) {
       Object.defineProperty(window.Element.prototype, "className", classDesc);
       if (displayDesc && displayDesc.set) {
         Object.defineProperty(window.CSSStyleDeclaration.prototype, "display", displayDesc);
+      }
+      if (titleDesc && titleDesc.set) {
+        Object.defineProperty(window.HTMLElement.prototype, "title", titleDesc);
       }
     },
   };
@@ -211,28 +225,56 @@ test("an incomplete chat capture renders a warning badge in both paths", { skip 
 
 // ── updateJobCard's progress cell, and the single-card insert (WEB-4 / WEB-9) ─
 
-const jobAt = (id, title) => ({ ...downloadingJob(), id, title });
+const jobAt = (id, title, channelName = "Chan") => ({ ...downloadingJob(), id, title, channelName });
+
+/**
+ * Everything _insertJobCard's tail has to leave in the same state a rebuild
+ * would: the filter bar's channel list, the positional focus index and the
+ * status bar's active count. Read after the insert, compared against the
+ * rebuild.
+ */
+const stateAfter = (h) => ({
+  channels: [...h.app.filterBar._tasksChannels],
+  focusedJobIndex: h.app.focusedJobIndex,
+  activeIndicator: h.el("active-indicator").textContent,
+});
+
+/** Focus the LAST rendered card, the way a `j`/`k` walk down the list does. */
+function focusLastCard(h) {
+  const cards = [...h.document.querySelectorAll(".video-item")];
+  cards[cards.length - 1].setAttribute("data-focused", "");
+  h.app.focusedJobIndex = cards.length - 1;
+}
 
 /** The list container's markup after `newcomer` arrives over the socket. */
 async function splicedMarkup(existing, newcomer) {
   const h = await harness.makeApp();
   h.app.jobs = existing.map((j) => ({ ...j }));
   h.app.renderJobs();
+  focusLastCard(h);
 
   let renders = 0;
   const realRender = h.app.renderJobs.bind(h.app);
   h.app.renderJobs = (...a) => { renders++; return realRender(...a); };
 
   h.app.handleMessage({ type: "job_update", payload: { ...newcomer } });
-  return { html: h.el("jobs-container").innerHTML, renders };
+  return { html: h.el("jobs-container").innerHTML, renders, state: stateAfter(h) };
 }
 
-/** The same list container, rendered from scratch with every job present. */
-async function rebuiltMarkup(all) {
+/**
+ * The same list, reached the way the FALLBACK reaches it: render `existing`,
+ * focus the last card, then push the newcomer and run a full renderJobs().
+ * That is precisely what _insertJobCard returning false would have done, so
+ * every difference below is the fast path's.
+ */
+async function rebuiltMarkup(existing, all) {
   const h = await harness.makeApp();
+  h.app.jobs = existing.map((j) => ({ ...j }));
+  h.app.renderJobs();
+  focusLastCard(h);
   h.app.jobs = all.map((j) => ({ ...j }));
   h.app.renderJobs();
-  return h.el("jobs-container").innerHTML;
+  return { html: h.el("jobs-container").innerHTML, state: stateAfter(h) };
 }
 
 // updateJobCard's progress cell is the highest-frequency DOM write in the app:
@@ -304,27 +346,47 @@ test("a newly discovered job is spliced in, not re-rendered over the whole list"
 
 // R1: the fast path is an OPTIMISATION, so its DOM must be what renderJobs()
 // would have produced — byte for byte, at the head, in the middle and at the
-// tail (the two insertion branches).
+// tail (the two insertion branches) — and so must the state renderJobs()
+// refreshes beside it.
+//
+// The byte-identity claim holds on a list no card has ticked yet: `data-progress`
+// is part of the card's markup, so a card that has taken an updateJobCard tick
+// carries an attribute a fresh render does not. That attribute is per-card
+// update state, not rendered content — every visible string is identical either
+// way, and a rebuild re-establishes it on its first tick.
 //
 // MUTANT: insert at the wrong position (`cards[index + 1]`, or always
 // "beforeend") — the markup no longer matches the rebuild.
 // MUTANT: drop the leading-indentation shuffle — the cards are right but the
 // serialized list differs from a rebuild by one indentation run.
+// MUTANT: delete `this.filterBar.refreshChannels(...)` — the newcomer's channel
+// is missing from the filter dropdown until the next full render.
+// MUTANT: delete `if (this.focusedJobIndex >= index) this.focusedJobIndex += 1`
+// — after a splice ABOVE the focused row the index points one row off, so the
+// next j/k move jumps.
+// MUTANT: delete `this.stats.updateActiveIndicator(...)` — the status bar's
+// "▶ N" goes stale on discovery.
 test("the spliced list is byte-identical to a full renderJobs() rebuild", { skip }, async () => {
   const existing = [jobAt("a", "AAA"), jobAt("b", "BBB"), jobAt("c", "CCC")];
+  // A channel of its own, so refreshChannels has something to be wrong about.
   const cases = [
-    ["head", jobAt("aa", "AA0")],
-    ["middle", jobAt("bb", "BBZ")],
-    ["tail", jobAt("dd", "DDD")],
+    ["head", jobAt("aa", "AA0", "Newcomer Ch")],
+    ["middle", jobAt("bb", "BBZ", "Newcomer Ch")],
+    ["tail", jobAt("dd", "DDD", "Newcomer Ch")],
   ];
 
   for (const [where, newcomer] of cases) {
-    const { html, renders } = await splicedMarkup(existing, newcomer);
-    const full = await rebuiltMarkup([...existing, newcomer]);
+    const { html, renders, state } = await splicedMarkup(existing, newcomer);
+    const full = await rebuiltMarkup(existing, [...existing, newcomer]);
     assert.equal(renders, 0, `${where}: the fast path must have handled this, not renderJobs()`);
-    assert.equal(html, full,
+    assert.equal(html, full.html,
       `${where}: the spliced list must be byte-identical to the rebuild — anything else means the ` +
       "optimisation changed what the user sees");
+    assert.deepEqual(state, full.state,
+      `${where}: the splice must leave the filter channels, the focused index and the active count ` +
+      "exactly where a full render would have — they are what renderJobs() refreshes beside the DOM");
+    assert.ok(state.channels.includes("Newcomer Ch"),
+      `${where}: the newcomer's channel must reach the filter dropdown, or this comparison is vacuous`);
   }
 });
 
@@ -431,4 +493,81 @@ test("_insertJobCard declines a job the caller never pushed", { skip }, async ()
     "a job that is not in this.jobs has no sort position — the helper must decline, not throw");
   assert.equal(h.document.querySelectorAll(".video-item").length, 2,
     "and must not insert a card it could not place");
+});
+
+// The existing dedup pin drives identical calls from the PRISTINE state, so it
+// never observes a repeat after a change — which is the steady state of a real
+// download (the same string on ~59 of every 60 ticks).
+//
+// MUTANT: write dataset.progress only when it is unset
+// (`if (!progressText.dataset.progress) progressText.dataset.progress = progressHtml;`)
+// — the cache goes stale after the first change and every later tick writes
+// again, putting WEB-4 straight back at 60 Hz.
+// MUTANT: compare the tooltip against the wrong key
+// (`if (progressText.dataset.progress !== tooltip)`) — the title is re-assigned
+// on essentially every tick; the value assertion above cannot see that, the
+// write count can.
+test("the progress dedup still holds after the string has moved", { skip }, async () => {
+  const h = await harness.makeApp();
+  const job = downloadingJob();
+  h.app.jobs = [job];
+  h.app.renderJobs();
+  h.app.updateJobCard(job);
+
+  const cell = h.document.querySelector('.video-item[data-job-id="job-1"] .job-progress-text');
+  h.app.updateJobCard({ ...job, progress: "V:2 A:2 C:2" }); // the string moves once
+  const node = cell.firstChild;
+
+  const spy = countDomWrites(h.window);
+  for (let i = 0; i < 20; i++) h.app.updateJobCard({ ...job, progress: "V:2 A:2 C:2" });
+  spy.restore();
+
+  assert.equal(cell.firstChild, node,
+    "the repeat of a MOVED string must still be free — a cache that is written once (the mutant) " +
+    "re-creates the text node on every later tick");
+  assert.equal(spy.counts.title, 0,
+    "an unchanged tooltip must not be re-assigned either — the title is diffed against its own " +
+    "value, not against the progress cache");
+});
+
+// MUTANT: one app-wide cache key (`this._lastProgressHtml`) instead of one per
+// element — card A's write masks card B's identical string and card B's cell
+// freezes on whatever it last rendered.
+test("each card keeps its own progress cache", { skip }, async () => {
+  const h = await harness.makeApp();
+  const a = { ...downloadingJob(), id: "a", title: "AAA" };
+  const b = { ...downloadingJob(), id: "b", title: "BBB" };
+  h.app.jobs = [a, b];
+  h.app.renderJobs();
+
+  for (let i = 1; i <= 5; i++) {
+    h.app.updateJobCard({ ...a, progress: `V:${i} A:${i} C:${i}` });
+    h.app.updateJobCard({ ...b, progress: `V:${i} A:${i} C:${i}` });
+  }
+
+  for (const id of ["a", "b"]) {
+    assert.equal(
+      h.document.querySelector(`.video-item[data-job-id="${id}"] .job-progress-text`).textContent,
+      "V:5 A:5 C:5", `card ${id} froze — the cache must be per element`);
+  }
+});
+
+// The count check is not merely an early-out: it is the line that keeps the id
+// walk in bounds. With the DOM holding FEWER cards than this.jobs minus the
+// newcomer, the walk reads past the end of `cards` and throws inside
+// handleMessage — i.e. inside the WebSocket message path.
+//
+// MUTANT: drop `if (cards.length !== sorted.length - 1) return false;` —
+// TypeError: Cannot read properties of undefined (reading 'dataset').
+test("a rendered list SHORTER than this.jobs declines instead of throwing", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [jobAt("a", "AAA"), jobAt("b", "BBB"), jobAt("c", "CCC")];
+  h.app.renderJobs();
+  h.document.querySelector('.video-item[data-job-id="b"]').remove();
+  h.document.querySelector('.video-item[data-job-id="c"]').remove();
+
+  h.app.handleMessage({ type: "job_update", payload: jobAt("d", "DDD") }); // must not throw
+
+  assert.deepEqual([...h.document.querySelectorAll(".video-item")].map((e) => e.dataset.jobId),
+    ["a", "b", "c", "d"], "the fallback render must reconcile the list");
 });

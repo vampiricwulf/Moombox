@@ -118,3 +118,119 @@ func TestFFmpegCheckRouteReAppliesTheVerifiedPath(t *testing.T) {
 			real, notified)
 	}
 }
+
+// TestApplyValidatedFfmpegPathRefusesATraversalPathAndPersistsToDisk closes
+// W-CW1's second half and Task 2's minor in one test.
+//
+// PUT /api/config refuses any path with a ".." segment (pathFieldError), and
+// validateConfigUpdates has no grandfather clause for paths — so a
+// ".."-bearing value that reached paths.ffmpeg_path made EVERY later full-form
+// save 400 on a field the operator never touched, until config.toml was edited
+// by hand. Executing `-version` is not a superset of that string rule:
+// `<dir>\other\..\bin\ffmpeg.exe` answers it perfectly well. The guard lives
+// here as well as in the handler so no future caller can persist one either.
+//
+// The disk re-read is the direct persistence pin: store.Read returns the LIVE
+// in-memory struct, so on its own it cannot tell "written to config.toml" from
+// "mutated in memory".
+//
+// THE MUTANTS:
+//   - drop the pathFieldError guard from applyValidatedFfmpegPath: the
+//     traversal call returns nil (assertion "want an error").
+//   - skip SaveLocked: the happy path's disk re-read still holds the default.
+func TestApplyValidatedFfmpegPathRefusesATraversalPathAndPersistsToDisk(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	store := config.NewStore(config.Defaults(), cfgPath)
+
+	const want = `C:\tools\ffmpeg.exe`
+	if err := applyValidatedFfmpegPath(store, want, func(string) {}); err != nil {
+		t.Fatalf("applyValidatedFfmpegPath (happy path): %v", err)
+	}
+	fromDisk, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load after the happy path: %v", err)
+	}
+	if fromDisk.Paths.FfmpegPath != want {
+		t.Fatalf("config.toml holds %q, want %q — the verified path never reached DISK, so the next "+
+			"restart loses it", fromDisk.Paths.FfmpegPath, want)
+	}
+
+	// Mixed separators on purpose: config.PathHasTraversal treats both as
+	// separators on every platform, and filepath.Join would clean the ".."
+	// away before the guard ever saw it.
+	traversal := dir + "/other/../bin/ffmpeg.exe"
+	notified := false
+	if err := applyValidatedFfmpegPath(store, traversal, func(string) { notified = true }); err == nil {
+		t.Error("a path PUT /api/config refuses must not be persistable here either — want an error")
+	}
+	if notified {
+		t.Error("OnFfmpegPathChange fired for a refused path — the muxers must never be told about one")
+	}
+
+	live := ""
+	store.Read(func(c *config.MoomboxConfig) { live = c.Paths.FfmpegPath })
+	if live != want {
+		t.Errorf("in-memory paths.ffmpeg_path = %q, want the previous %q — the refusal must not have "+
+			"mutated the config", live, want)
+	}
+	fromDisk, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load after the refusal: %v", err)
+	}
+	if fromDisk.Paths.FfmpegPath != want {
+		t.Errorf("config.toml holds %q, want the previous %q — a refused path reached disk and every "+
+			"later PUT /api/config would 400 on it", fromDisk.Paths.FfmpegPath, want)
+	}
+}
+
+// TestFFmpegCheckRouteRefusesATraversalPathBeforeExecutingIt is the route half
+// of W-CW1. No ffmpeg is needed: the refusal happens BEFORE checkFFmpeg
+// spawns anything, which is the point — Moombox must not execute a path it
+// has already decided it will not store.
+//
+// THE MUTANT: drop the pathFieldError call from the POST handler — the path is
+// spawned (valid=false for a file that does not exist) and the answer is 200,
+// not 400.
+func TestFFmpegCheckRouteRefusesATraversalPathBeforeExecutingIt(t *testing.T) {
+	dir := t.TempDir()
+	store := config.NewStore(config.Defaults(), filepath.Join(dir, "config.toml"))
+	before := ""
+	store.Read(func(c *config.MoomboxConfig) { before = c.Paths.FfmpegPath })
+
+	notified := ""
+	r := chi.NewRouter()
+	FFmpegRoutes(r, &FFmpegDeps{
+		Store:              store,
+		Logger:             ffmpegTestLogger{},
+		OnFfmpegPathChange: func(p string) { notified = p },
+	})
+
+	body, _ := json.Marshal(map[string]string{"path": dir + "/other/../bin/ffmpeg.exe"})
+	req := httptest.NewRequest("POST", "/api/ffmpeg/check", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/ffmpeg/check with a .. segment: want 400, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	// The PUT's own string, so the two writers of paths.ffmpeg_path cannot
+	// disagree about what a valid path is.
+	if resp.Error != "Path cannot contain a .. segment" {
+		t.Errorf("error = %q, want PUT /api/config's own message for this field", resp.Error)
+	}
+
+	after := ""
+	store.Read(func(c *config.MoomboxConfig) { after = c.Paths.FfmpegPath })
+	if after != before {
+		t.Errorf("paths.ffmpeg_path moved to %q — a refused path must not be persisted", after)
+	}
+	if notified != "" {
+		t.Errorf("OnFfmpegPathChange fired with %q for a refused path", notified)
+	}
+}

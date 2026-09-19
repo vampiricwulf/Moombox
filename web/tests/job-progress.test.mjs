@@ -5,6 +5,7 @@
 // job_update is now the only frame that restates them.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 let jsdomMissing = null;
 try {
@@ -41,17 +42,26 @@ const heldJob = () => ({
   updatedAt: harness ? harness.agoISO(30) : "",
 });
 
+// The wire itself, shared with the Go side (W-CW2). cmd/moombox's
+// TestProgressFrameMatchesTheClientFixture asserts newJobProgressFrame's key set
+// against this same file, so a key renamed on either half of the wire — or in
+// the fixture alone — turns a suite red instead of silently adding a property to
+// the held row.
+//
+// Every frame below therefore STARTS from the fixture and overrides only the
+// values a case needs; the keys it does not override (the four sequence
+// counters) are the fixture's, and are asserted as such in the merge test.
+const FRAME = JSON.parse(
+  readFileSync(new URL("./fixtures/job-progress-frame.json", import.meta.url), "utf8"));
+
 const progressFrame = () => ({
+  ...FRAME,
   id: "job-1",
   status: "Downloading",
   progress: "V:200 A:200 C:250",
   percent: 20,
   speed: "2.0 MB/s",
   eta: "01:00:00",
-  lastVideoSeq: 200,
-  lastAudioSeq: 200,
-  totalVideoSeq: 1000,
-  totalAudioSeq: 1000,
   totalChatMessages: 250,
   updatedAt: harness ? harness.agoISO(1) : "",
 });
@@ -70,6 +80,11 @@ test("job_progress merges onto the held row instead of replacing it", { skip }, 
   assert.equal(job.progress, "V:200 A:200 C:250", "the frame's progress must win");
   assert.equal(job.percent, 20, "the frame's percent must win");
   assert.equal(job.totalChatMessages, 250, "the frame's chat count must win");
+  // Straight off the shared fixture, not off a literal in this file: a key
+  // renamed in job-progress-frame.json alone leaves the held row's 100 here.
+  assert.equal(job.lastVideoSeq, FRAME.lastVideoSeq,
+    "the fixture's segment counter must reach the row — if this reads the held 100, the wire fixture " +
+    "and the client no longer agree on the key's name");
   assert.equal(job.title, "A stream",
     "the title is not in the frame and must survive — replacing the object (the mutant) loses it");
   assert.equal(job.description, "the 5 KB description the frame no longer carries",
@@ -227,4 +242,37 @@ test("a frame that only blanks speed and eta still reaches the card", { skip }, 
     "(the mutant) leaves a retracted speed on the card");
   assert.equal(h.app.jobs[0].speed, "", "the blanked speed must reach the row");
   assert.equal(h.app.jobs[0].eta, "", "the blanked eta must reach the row");
+});
+
+// The details panel is the one surface that renders `speed` directly
+// (job-details.js's speedRow/speedValue block); the CARD renders nothing
+// derived from it, so the card-level pins above cannot see a dedupe placed
+// there. Driven through handleMessage rather than updateJobDetails directly,
+// so app.js's `selectedJobId === merged.id` gate is on the path too.
+//
+// MUTANT: a stall-tick dedupe inside updateJobDetails's speed-row block keyed
+// on job.progress instead of job.speed —
+//   if (job.progress !== this._speedProgressSig) { this._speedProgressSig = job.progress; …write… }
+// The stall tick freezes `progress` while blanking speed/eta, so the panel
+// keeps showing a throughput the server has already retracted.
+test("a stall tick still blanks the open details panel's speed row", { skip }, async () => {
+  const h = await harness.makeApp();
+  const job = heldJob();
+  h.app.selectedJobId = job.id;
+  h.app.jobs = [job];
+  h.app.renderJobs();
+  h.app.details.renderJobDetails(job);
+
+  h.app.handleMessage({ type: "job_progress", payload: progressFrame() });
+  h.app.handleMessage({
+    type: "job_progress",
+    payload: { ...progressFrame(), speed: "", eta: "" },
+  });
+
+  const content = h.el("job-details-content");
+  assert.equal(content.querySelector('[data-field="speed"]').textContent, "",
+    "the blanked speed must reach the open details panel — a dedupe keyed on the frozen progress " +
+    "string (the mutant) leaves a retracted throughput on screen");
+  assert.equal(content.querySelector("#speed-row").style.display, "none",
+    "and the row must hide itself, the way it renders hidden for a job with no speed");
 });

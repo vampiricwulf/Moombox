@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 )
@@ -702,10 +703,14 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 	}
 }
 
-// BroadcastJobUpdate sends a single-job update to all clients. No per-job
-// throttle: the high-frequency caller (OnJobChange via ProgressTracker.maybeUpdate)
-// is already bounded to ~60Hz/job by progressUpdateInterval (16ms), and the
-// other callers (OnJobAdded, OnTrimsChanged) are event-driven and low rate.
+// BroadcastJobUpdate sends a single-job update to all clients: a whole job row,
+// for a change a progress tick does not make (status transition, error, chat
+// status, mux output, a new job, a trim edit).
+//
+// No per-job throttle, and none is owed: the ~60 Hz caller (OnJobChange via
+// ProgressTracker.maybeUpdate, bounded by progressUpdateInterval = 16ms) now
+// goes to BroadcastJobProgress below, and the callers left here (OnJobAdded,
+// OnTrimsChanged, the transition paths) are event-driven and low rate.
 // An earlier per-job throttle here raced against the unthrottled
 // BroadcastJobDeleted: a trailing-edge job_update could arrive after a delete
 // and resurrect the row via the client's upsert handler.
@@ -748,12 +753,21 @@ func (hub *WebSocketHub) BroadcastConnectivity(online bool) {
 
 // clipLogLine caps a single log line so one multi-megabyte panic dump cannot
 // be pushed whole to every connected tab.
+//
+// The cut walks back to a rune boundary: a byte index can land inside a
+// multi-byte rune (a CJK title in a job line, an em dash in an error), and
+// json.Marshal then repairs the broken tail to U+FFFD — visible garbage at the
+// boundary rather than a clean truncation. At most three bytes are given up.
 func clipLogLine(line string) string {
 	const maxLineLen = 4096
-	if len(line) > maxLineLen {
-		return line[:maxLineLen] + "... (truncated)"
+	if len(line) <= maxLineLen {
+		return line
 	}
-	return line
+	n := maxLineLen
+	for n > 0 && !utf8.RuneStart(line[n]) {
+		n--
+	}
+	return line[:n] + "... (truncated)"
 }
 
 // BroadcastLog sends a log line to all clients.

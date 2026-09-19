@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -175,6 +176,81 @@ func TestLoginPageAssetsRevalidate(t *testing.T) {
 		s.Router().ServeHTTP(rr, req)
 		if rr.Code != http.StatusNotModified {
 			t.Errorf("%s: conditional GET answered %d, want 304", path, rr.Code)
+		}
+	}
+}
+
+// sameOriginAssetRe finds every same-origin subresource URL in a page.
+var sameOriginAssetRe = regexp.MustCompile(`(?i)\s(?:src|href)="(/[^"]*)"`)
+
+// TestLoginPageSubresourcesAreAllowListed: every same-origin asset login.html
+// fetches must reach the static handler unauthenticated, or the login page is
+// dead for the only visitors who need it. TestLoginPageAssetsAreReachable-
+// Unauthenticated above names today's two files; this one follows the PAGE, so
+// a third one added later cannot be forgotten.
+//
+// It also closes the rename case: the allow-list entries are exact strings and
+// the handler behind them ends in the SPA fallback, so an allow-listed path
+// that stops being a file answers an unauthenticated visitor with the
+// dashboard shell. A renamed boot-theme.js makes login.html's own
+// src="/boot-theme.js" answer text/html, which is what this rejects.
+//
+// THE MUTANT: add <script src="/whatever.js"> to login.html and leave
+// AuthMiddleware's allow-list alone — the browser is handed login.html for it.
+func TestLoginPageSubresourcesAreAllowListed(t *testing.T) {
+	s := authStaticFixture(t)
+	login, err := fs.ReadFile(webassets.PublicFS, "public/login.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, m := range sameOriginAssetRe.FindAllStringSubmatch(string(login), -1) {
+		found++
+		if ct := getUnauthenticated(t, s, m[1]).Header().Get("Content-Type"); strings.Contains(ct, "text/html") {
+			t.Errorf("login.html fetches %s but an unauthenticated visitor is answered %q for it — "+
+				"add it to AuthMiddleware's allow-list", m[1], ct)
+		}
+	}
+	if found == 0 {
+		t.Error("no same-origin subresource found in login.html — the scan matched nothing and this " +
+			"test is vacuous")
+	}
+}
+
+// cdnTagRe is one <link>/<script> element, opening tag only.
+var cdnTagRe = regexp.MustCompile(`(?is)<(?:link|script)\b[^>]*>`)
+
+// TestCDNSubresourcesCarryIntegrity — both pages pull Shoelace from
+// cdn.jsdelivr.net, which is the one origin script-src and style-src admit
+// besides 'self'. Subresource Integrity is what keeps that concession narrow:
+// without it a compromised or MITM'd CDN response executes with the page's
+// full authority, and login.html is the page served to UNAUTHENTICATED
+// external visitors.
+//
+// login.html's light-theme stylesheet shipped without the attribute although
+// index.html's identical URL carried it and the file's own comment claimed the
+// hashes matched.
+//
+// THE MUTANT: drop any integrity= attribute from either page — that tag is
+// named here.
+func TestCDNSubresourcesCarryIntegrity(t *testing.T) {
+	for _, page := range []string{"public/index.html", "public/login.html"} {
+		body, err := fs.ReadFile(webassets.PublicFS, page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinned := 0
+		for _, tag := range cdnTagRe.FindAllString(string(body), -1) {
+			if !strings.Contains(tag, "cdn.jsdelivr.net") {
+				continue
+			}
+			pinned++
+			if !strings.Contains(tag, "integrity=\"sha") {
+				t.Errorf("%s: a cdn.jsdelivr.net subresource carries no integrity hash:\n%s", page, tag)
+			}
+		}
+		if pinned == 0 {
+			t.Errorf("%s: no cdn.jsdelivr.net tag matched — the scan is vacuous", page)
 		}
 	}
 }

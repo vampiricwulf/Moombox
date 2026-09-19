@@ -44,6 +44,11 @@ func TestCallDebouncerWindow(t *testing.T) {
 
 // TestCallDebouncerFirstCallIsNeverRefused — a zero stamp must not read as
 // "called at the epoch, so refuse everything until 30s past 1970".
+//
+// MUTANT: drop the zero-stamp check from allow and compare the clock against
+// the stored nanos unconditionally — on a host whose clock is near the epoch
+// (a container before NTP lands) the very first manual check is refused, and
+// the user is told to wait for a call nobody made.
 func TestCallDebouncerFirstCallIsNeverRefused(t *testing.T) {
 	d := newCallDebouncer(30 * time.Second)
 	if ok, _ := d.allow(time.Unix(0, 0)); !ok {

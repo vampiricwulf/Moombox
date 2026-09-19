@@ -294,6 +294,18 @@ test("every control has an accessible name", { skip }, async () => {
   assert.match(version.title, /^Moombox v2\.8\.8/);
   assert.equal(version.getAttribute("aria-label"), version.title,
     "the version indicator's name must say what pressing it does");
+
+  // The idle branch is the other half of keeping the name in step: with nothing
+  // to warn about, the icon stands for nothing and must go back to the markup's
+  // static name. MUTANT: delete the else branch's
+  // `warningsIcon.setAttribute("aria-label", "Warnings")` — the icon keeps
+  // announcing a re-login that is no longer required, for as long as the tab
+  // stays open.
+  h.app.autoCookieReloginRequired = { youtube: false, twitch: false };
+  h.app.updateStatusBar();
+  assert.equal(icon.getAttribute("aria-label"), "Warnings",
+    "with no warnings left the icon's accessible name must be reset, not left naming the warning " +
+    "it used to stand for");
 });
 
 // ── Fix round 1: the key must not do two things at once ────────────────────

@@ -588,7 +588,7 @@ This pattern reduces SQLite write transactions from potentially hundreds per sec
 
 ### WebSocket Broadcast Rate
 
-The WebSocket hub does not throttle `job_update` broadcasts. The highest-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval = 16ms`; the other callers (`OnJobAdded`, `OnTrimsChanged`) are event-driven. A previous per-job throttle in the hub created an ordering race where the trailing edge could arrive after a `BroadcastJobDeleted` and resurrect a deleted row via the client's upsert handler.
+The WebSocket hub throttles nothing. The highest-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`, capped to ~60 Hz per job by `progressUpdateInterval = 16ms`) now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and `OnJobAdded`/`OnTrimsChanged` are event-driven. A previous per-job throttle in the hub created an ordering race where the trailing edge could arrive after a `BroadcastJobDeleted` and resurrect a deleted row via the client's upsert handler.
 
 ### TUI Async Updates
 

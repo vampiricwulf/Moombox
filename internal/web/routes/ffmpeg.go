@@ -118,7 +118,18 @@ type FFmpegDeps struct {
 // onChange runs AFTER the write lock is released — the same rule the config
 // PUT's hot-reload block follows, so a callback that reads the config (or
 // takes another lock that a config reader holds) cannot invert the lock order.
+//
+// A value PUT /api/config would refuse is refused here too, before anything is
+// written: answering `-version` is not a superset of the PUT's string rule
+// (`<dir>\other\..\bin\ffmpeg.exe` does both), and validateConfigUpdates has
+// no grandfather clause for paths — so one stored here made every later
+// full-form save 400 on a field the operator never touched (W-CW1). Defence in
+// depth: the POST handler refuses the same shape before it spawns anything, and
+// this stops a future caller from persisting one by another route.
 func applyValidatedFfmpegPath(store *config.Store, path string, onChange func(string)) error {
+	if msg := pathFieldError(path, false); msg != "" {
+		return errors.New(msg)
+	}
 	mu := store.RWMutex()
 	cfg := store.Config()
 	mu.Lock()
@@ -188,6 +199,16 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		path := strings.TrimSpace(body.Path)
 		if path == "" {
 			jsonError(rw, "path is required", http.StatusBadRequest)
+			return
+		}
+		// PUT /api/config's own rule, applied BEFORE checkFFmpeg spawns
+		// anything: Moombox must not execute a path it has already decided it
+		// will not store, and a `..`-bearing value that got persisted here
+		// made every later PUT /api/config 400 on a field the operator never
+		// touched (W-CW1). The PUT's exact message, so the two writers of
+		// paths.ffmpeg_path cannot disagree about what a valid path is.
+		if msg := pathFieldError(path, false); msg != "" {
+			jsonError(rw, msg, http.StatusBadRequest)
 			return
 		}
 

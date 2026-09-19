@@ -1757,7 +1757,10 @@ export class MoomboxApp {
       // node between them. insertAdjacentHTML cannot split that node, so the
       // chunk's leading run is moved to its tail instead — which is what makes
       // the spliced list byte-identical to a rebuild (pinned by the
-      // differential test) rather than merely equivalent.
+      // differential test) rather than merely equivalent, on a list no card has
+      // ticked yet: `data-progress` below is per-card update state, not
+      // rendered content, so a ticked card carries an attribute a fresh render
+      // does not until its own first tick.
       const lead = html.slice(0, html.length - html.trimStart().length);
       const trail = html.slice(html.trimEnd().length);
       cards[index].insertAdjacentHTML("beforebegin", html.trim() + trail + lead);
