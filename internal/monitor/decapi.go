@@ -287,7 +287,9 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context, cycleStart time.Time)
 	// exists to prevent — so a guard placed after it covers only half the
 	// function. Deliberately WITHOUT touching NextCheckAt: the countdown
 	// belongs to whichever chain is live now, and a dead chain zeroing it
-	// would blank the UI's next-check time for no reason.
+	// would blank the UI's next-check time for no reason. A twin of this check
+	// sits inside the locked section below and covers what this one cannot —
+	// a Stop()+Start() landing after it; both are wanted.
 	if ctx.Err() != nil {
 		return
 	}
@@ -329,6 +331,15 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context, cycleStart time.Time)
 	// a stopped monitor never reports -1 forever.
 	if dm.cancel == nil {
 		dm.NextCheckAt = 0
+		dm.mu.Unlock()
+		return
+	}
+	// Kept beside the leading guard, not redundant with it: this closes the
+	// window between that check and this lock, in which a Stop()+Start() would
+	// install a NEW non-nil cancel — so `cancel == nil` above passes and this
+	// dead chain would write the LIVE chain's NextCheckAt and publish its
+	// OnSchedule. Re-reading ctx.Err() costs nothing; do not "simplify" it away.
+	if ctx.Err() != nil {
 		dm.mu.Unlock()
 		return
 	}
