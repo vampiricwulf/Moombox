@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -1549,12 +1550,10 @@ func (s *runState) wireMonitorCallbacks() {
 	// caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
-		// Stop routing log lines once the job reaches a terminal state; the
-		// buffer stays readable (CORE-12). Ahead of the archive gate below,
-		// which returns early for exactly the rows that most need untracking.
-		if job.IsTerminal() {
-			s.db.UntrackJobForLogs(job.ID)
-		}
+		// Follow the job's status for per-job log routing (CORE-12). Ahead
+		// of the archive gate below, which returns early for exactly the
+		// rows that most need it.
+		s.syncJobLogRoutingOnChange(ev)
 		// Skip broadcasting updates for archived (old finished) jobs — same
 		// classification as the list filter, via the shared
 		// jobfilter.IsArchivedAt predicate so the two can never disagree
@@ -1582,7 +1581,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// to do for ALL jobs on every fan-out.
 	s.unsubWSJobAdded = s.db.OnJobAdded(func(ev *database.JobAdded) {
 		job := ev.Job
-		s.db.TrackJobForLogs(job.ID)
+		s.syncJobLogRouting(job)
 		s.wsHub.BroadcastJobUpdate(job)
 	})
 
@@ -1675,6 +1674,41 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "connectivity_restored"},
 		)
 	})
+}
+
+// syncJobLogRouting starts or stops per-job log routing for one job, by its
+// status: a live job is routed to, a terminal one is not — and its buffer
+// stays readable either way, because the job that just failed is the one
+// whose log an operator opens next (CORE-12).
+//
+// The OnJobAdded seed and the OnJobChange transition both call this, so
+// "which statuses collect log lines" exists once. The add path needs the
+// untrack half too: the ZIP archive import (internal/web/routes/
+// import_routes.go) really does AddJob a Finished job, and tracking it would
+// leave a terminal ID in the routed set that nothing removes.
+func (s *runState) syncJobLogRouting(job *database.Job) {
+	if job.IsTerminal() {
+		s.db.UntrackJobForLogs(job.ID)
+		return
+	}
+	s.db.TrackJobForLogs(job.ID)
+}
+
+// syncJobLogRoutingOnChange is the OnJobChange half. A job that LEAVES a
+// terminal state must be routed to again: /retry (ReinitializeJob), /resume
+// (ResumeJob) and auto-retry each resurrect a job with a plain
+// UpdateJobFields(status=…), which fires only this event — an untrack-only
+// subscriber meant the whole re-run produced no per-job log lines until a
+// restart.
+//
+// Gated on the status column because OnJobChange also fires for every ~60 Hz
+// progress write, and only a status write can change the answer: the progress
+// pipeline never touches jobLogsMu.
+func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
+	if !slices.Contains(ev.Changes, "status") {
+		return
+	}
+	s.syncJobLogRouting(ev.Job)
 }
 
 // onJobDeleted is the OnJobDeleted subscriber's body: drop exactly the deleted

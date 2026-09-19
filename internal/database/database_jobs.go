@@ -969,6 +969,13 @@ func (db *Database) ClearJobLogs(jobID string) {
 // the jobs that are actually producing log lines rather than over every row
 // the database has ever held — years of Finished jobs used to be scanned per
 // line, under this lock (CORE-12). Each log line belongs to at most one job.
+//
+// The cost per line is still a substring scan per tracked ID — proportional
+// to the number of LIVE jobs, not constant: 5 live measures ~99 ns, 5,000
+// live measures ~76 µs, which is the pre-CORE-12 cost. Live jobs are bounded
+// by the archive slots and num_parallel_downloads, so that ceiling is not
+// reachable in practice; keeping a terminal job tracked is what used to make
+// it so.
 func (db *Database) RouteLogToJobs(line string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()

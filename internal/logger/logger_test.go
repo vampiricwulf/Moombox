@@ -554,25 +554,25 @@ func TestRotationBackoffRetriesOncePerWindowAndResetsOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "seam.log")
 
-	l, err := New(logPath, "DEBUG", minLogRotationSize, 1)
+	clock := goldenNow
+	renames := 0
+	renameFails := true
+	// The seams go in through New, before the logger is published to
+	// slog.SetDefault; only this goroutine drives the closures.
+	l, err := New(logPath, "DEBUG", minLogRotationSize, 1,
+		WithClock(func() time.Time { return clock }),
+		WithRename(func(oldpath, newpath string) error {
+			renames++
+			if renameFails {
+				return errors.New("simulated: another process holds the file open")
+			}
+			return os.Rename(oldpath, newpath)
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
 	l.SuppressStdout()
-
-	clock := goldenNow
-	l.now = func() time.Time { return clock }
-
-	renames := 0
-	renameFails := true
-	l.renameFile = func(oldpath, newpath string) error {
-		renames++
-		if renameFails {
-			return errors.New("simulated: another process holds the file open")
-		}
-		return os.Rename(oldpath, newpath)
-	}
 
 	write := func(tag string) {
 		for i := range 30 {
@@ -666,18 +666,16 @@ func TestRotationBackoffRetriesOncePerWindowAndResetsOnSuccess(t *testing.T) {
 func TestFileAndRingLinesShareOneClockSample(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "once.log")
-	l, err := New(logPath, "DEBUG", 1024*1024, 3)
+	ticks := 0
+	l, err := New(logPath, "DEBUG", 1024*1024, 3, WithClock(func() time.Time {
+		ticks++
+		return goldenNow.Add(time.Duration(ticks) * time.Second)
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
 	l.SuppressStdout()
-
-	ticks := 0
-	l.now = func() time.Time {
-		ticks++
-		return goldenNow.Add(time.Duration(ticks) * time.Second)
-	}
 
 	l.Info("single format", "key", "value")
 
@@ -773,13 +771,12 @@ second line	and a tab k=v
 func TestLogWireFormatsAreByteIdentical(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "golden.log")
-	l, err := New(logPath, "DEBUG", 1024*1024, 3)
+	l, err := New(logPath, "DEBUG", 1024*1024, 3, WithClock(func() time.Time { return goldenNow }))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
 	l.SuppressStdout()
-	l.now = func() time.Time { return goldenNow }
 
 	goldenFixture(l)
 
@@ -792,5 +789,101 @@ func TestLogWireFormatsAreByteIdentical(t *testing.T) {
 	}
 	if got := strings.Join(l.GetRecentLines(), "\n---\n"); got != goldenRingLines {
 		t.Errorf("the ring-buffer/subscriber format changed.\n got: %q\nwant: %q", got, goldenRingLines)
+	}
+}
+
+// A rotation failure that persists must keep saying so — once an hour, never
+// once per attempt and never once per write. Measured on the previous commit,
+// a rename failing for 48 h produced exactly ONE diagnostic across 2,879
+// attempts while the live file reached 2,135× the cap; that line goes to
+// stderr (so it is never in moombox.log) or, in TUI mode, into a 200-entry
+// ring a busy instance recycles within minutes, so an operator who misses it
+// sees only a file that will not stop growing (B-2).
+//
+// The payload is written through Write — the io.Writer the handler uses for
+// the file — so the ring buffer holds the rotation diagnostics and nothing
+// else and they can be counted exactly.
+//
+// Mutants: no reminder at all (1 diagnostic in 48 h); a reminder per attempt
+// (2,879); the streak's report clock never advanced (a reminder per attempt
+// again); the reminder emitted after a successful rotation too (the second
+// phase's count rises).
+func TestRotationFailureRemindsHourly(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "remind.log")
+
+	clock := goldenNow
+	renameFails := true
+	l, err := New(logPath, "DEBUG", minLogRotationSize, 1,
+		WithClock(func() time.Time { return clock }),
+		WithRename(func(oldpath, newpath string) error {
+			if renameFails {
+				return errors.New("simulated: another process holds the file open")
+			}
+			return os.Rename(oldpath, newpath)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	l.SuppressStdout() // what the TUI does — diagf then lands in the ring
+
+	payload := []byte(strings.Repeat("p", 300) + "\n")
+	minute := func() {
+		t.Helper()
+		clock = clock.Add(time.Minute)
+		if _, err := l.Write(payload); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	count := func() (details, reminders int, last string) {
+		for _, line := range l.GetRecentLines() {
+			switch {
+			case strings.Contains(line, "logger: rotation still blocked"):
+				reminders++
+				last = line
+			case strings.Contains(line, "logger: rotation"):
+				details++
+			}
+		}
+		return details, reminders, last
+	}
+
+	const hours = 48
+	for range hours * 60 {
+		minute()
+	}
+
+	details, reminders, last := count()
+	if details != 1 {
+		t.Errorf("%d detail diagnostics in %d h, want 1 (one per streak)", details, hours)
+	}
+	if reminders < hours-3 || reminders > hours {
+		t.Errorf("%d reminders in %d h; want roughly one an hour — never one per attempt (2,879) and never zero", reminders, hours)
+	}
+	// The reminder carries what the first line cannot: how long the streak
+	// has run and how far past the cap the live file is.
+	for _, want := range []string{"is now", "bytes (cap"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("the reminder must name the file's size; %q has no %q", last, want)
+		}
+	}
+
+	// Not one line was dropped while backing off — the file holds all of them.
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(len(payload)) * hours * 60; info.Size() != want {
+		t.Errorf("the live file holds %d bytes, want %d — backing off must never drop a write", info.Size(), want)
+	}
+
+	// The holder lets go: rotations succeed again and the reminders stop.
+	renameFails = false
+	for range 3 * 60 {
+		minute()
+	}
+	if _, after, _ := count(); after != reminders {
+		t.Errorf("%d reminders after the rotation started succeeding, want the same %d", after, reminders)
 	}
 }

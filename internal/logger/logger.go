@@ -73,13 +73,13 @@ type Logger struct {
 	currentSize int64
 
 	// now samples the wall clock — once per log line, for BOTH formatted
-	// shapes — and drives the rotation back-off window. A field so tests can
-	// pin the instant and step the window without sleeping; set by New and
-	// replaced only before the first log call.
+	// shapes — and drives the rotation back-off window. WithClock replaces
+	// it; see Option for why only New may write it.
 	now func() time.Time
-	// renameFile is os.Rename. A field so a test can simulate the Windows
-	// failure CORE-3 is about (another process holding the rotation target
-	// open makes both renames fail) without holding a real handle.
+	// renameFile is os.Rename. WithRename replaces it so a test can simulate
+	// the Windows failure CORE-3 is about (another process holding the
+	// rotation target open makes both renames fail) without holding a real
+	// handle.
 	renameFile func(oldpath, newpath string) error
 
 	// rotateFailing / rotateBackoffUntil back off after a rotation whose
@@ -92,6 +92,14 @@ type Logger struct {
 	// rotation field.
 	rotateFailing      bool
 	rotateBackoffUntil time.Time
+	// rotateStreakStart / rotateLastReport bound the reminder a persistent
+	// failure emits. The one detail line the streak's first attempt writes is
+	// easy to miss — diagf reaches stderr (never moombox.log itself) or, in
+	// TUI mode, a 200-entry ring a busy instance recycles in minutes — while
+	// a rename that fails for 48 h leaves the live file at thousands of times
+	// the cap. So the streak says so again once an hour, with the size.
+	rotateStreakStart time.Time
+	rotateLastReport  time.Time
 
 	// Ring buffer for recent log lines
 	ringBuffer []string
@@ -127,8 +135,46 @@ const minLogRotationSize = 4096
 // (CORE-3).
 const rotateBackoff = 60 * time.Second
 
+// rotateReportInterval is how often a rotation failure that persists says so
+// again. The streak's first attempt reports the error itself; every hour
+// after that the reminder carries how long the streak has run and how large
+// the un-rotated file has grown, because the single first line goes to stderr
+// or into a ring buffer that recycles (CORE-3).
+const rotateReportInterval = time.Hour
+
+// Option configures a Logger at construction.
+//
+// Options exist so the seams the tests need are set BEFORE New publishes the
+// logger through slog.SetDefault — after that call the logger is reachable
+// from every goroutine that logs through slog.Default(), and assigning a
+// plain field on it would be an unsynchronised write. The fields are written
+// nowhere else.
+type Option func(*Logger)
+
+// WithClock replaces the wall clock the logger samples: once per log line for
+// both formatted shapes, and for the rotation back-off window. Tests use it
+// to pin a timestamp or to step a multi-hour window without sleeping.
+func WithClock(now func() time.Time) Option {
+	return func(l *Logger) {
+		if now != nil {
+			l.now = now
+		}
+	}
+}
+
+// WithRename replaces os.Rename in the rotation path, so a test can simulate
+// a rotation target another process holds open — the Windows failure the
+// back-off exists for — without holding a real handle.
+func WithRename(rename func(oldpath, newpath string) error) Option {
+	return func(l *Logger) {
+		if rename != nil {
+			l.renameFile = rename
+		}
+	}
+}
+
 // New creates a new Logger with file rotation support.
-func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
+func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Logger, error) {
 	if maxSize < minLogRotationSize {
 		// config.Validate accepts down to 1024, so a 1024-4095 value is
 		// legal config — surface the override instead of silently ignoring
@@ -147,6 +193,11 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 		ringBuffer: make([]string, defaultRingSize),
 		now:        time.Now,
 		renameFile: os.Rename,
+	}
+	for _, opt := range options {
+		if opt != nil {
+			opt(l)
+		}
 	}
 
 	// Set up log level
@@ -371,9 +422,24 @@ func (l *Logger) rotate() {
 	if rotated {
 		l.rotateFailing = false
 		l.rotateBackoffUntil = time.Time{}
+		l.rotateStreakStart = time.Time{}
+		l.rotateLastReport = time.Time{}
 	} else {
+		now := l.now()
+		switch {
+		case firstOfStreak:
+			l.rotateStreakStart = now
+			l.rotateLastReport = now
+		case now.Sub(l.rotateLastReport) >= rotateReportInterval:
+			// Once an hour for as long as the holder keeps the handle, and
+			// never per write: the first line is easy to miss and says
+			// nothing about how far past the cap the file has run.
+			l.diagf("logger: rotation still blocked after %s; %s is now %d bytes (cap %d)",
+				now.Sub(l.rotateStreakStart).Round(time.Minute), l.filePath, l.currentSize, l.maxSize)
+			l.rotateLastReport = now
+		}
 		l.rotateFailing = true
-		l.rotateBackoffUntil = l.now().Add(rotateBackoff)
+		l.rotateBackoffUntil = now.Add(rotateBackoff)
 	}
 
 	// Open fresh file — if this fails, surface it so we don't silently lose
