@@ -101,13 +101,6 @@ const (
 	// that a typical Firefox/Chromium teardown completes within 1-2
 	// iterations while not pinning a CPU core. Audit reports/cookies.md #45.
 	killProcessTreePollDelay = 50 * time.Millisecond
-	// launchWindowKillBudget caps how long a kill will wait for a launcher to
-	// publish the process it is about to start. Both slots have the same
-	// window — the claim is taken (setupClaimed / the refreshCmd sentinel)
-	// before the real process exists — so both killers poll for it, and both
-	// give up rather than let Stop() block on a launcher that errored before
-	// it ever assigned. See killSetupProcess and killRefreshProcess.
-	launchWindowKillBudget = 2 * time.Second
 	// setupAbandonGrace is how long a setup whose browser has already exited
 	// is still held before the next StartSetup / RefreshCookies / GetStatus
 	// reaps it.
@@ -174,6 +167,21 @@ const (
 	// reason on the finish side.
 	setupAbandonGrace = 60 * time.Second
 )
+
+// launchWindowKillBudget caps how long a kill will wait for a launcher to
+// publish the process it is about to start. Both slots have the same
+// window — the claim is taken (setupClaimed / the refreshCmd sentinel)
+// before the real process exists — so both killers poll for it, and both
+// give up rather than let Stop() block on a launcher that errored before
+// it ever assigned. See killSetupProcess and killRefreshProcess.
+//
+// A var rather than a const SOLELY so tests can shorten it (owner decision
+// O-Q, 2026-09-17): seven of them wait this out in full, ~13.5 s of the ~41 s
+// that makes this package the whole suite's wall-time floor. Nothing in
+// production writes it, and the value is unchanged. Because it is package
+// state that tests mutate, this package must stay free of t.Parallel — see
+// withLaunchWindowKillBudget.
+var launchWindowKillBudget = 2 * time.Second
 
 // authVerifyWindow is the value checkPlatformAuth actually spends, and it is a
 // var for exactly one reason: a test cannot wait out a 12 s window to prove the

@@ -178,6 +178,7 @@ func referencesOutsidePackage(t *testing.T, name string) map[string]refKind {
 // So this matches references rather than calls, and asserts the KIND of each,
 // so the method-value shape cannot slip past again.
 func TestRefreshCookiesDetailedCallersAreEnumerated(t *testing.T) {
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 	want := map[string]refKind{
 		"internal/web/routes/cookies.go":   refCall,
 		"cmd/moombox/tui_wiring.go":        refCall,

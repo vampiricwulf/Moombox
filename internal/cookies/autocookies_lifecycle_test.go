@@ -60,6 +60,7 @@ func cancellingDetector(t *testing.T, s *AutoCookieService, cancelErr *error, ca
 // Against the unfixed code this returns a "start browser: …" error from the
 // launch that should never have been attempted.
 func TestCancelDuringStartSetupPreparationIsHonoured(t *testing.T) {
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
 
 	var cancelErr error
@@ -102,6 +103,7 @@ func TestCancelDuringStartSetupPreparationIsHonoured(t *testing.T) {
 // implementer needs a failure that names the flag rather than one that reports
 // a browser opening.
 func TestCleanupDoesNotEraseTheCancelFlag(t *testing.T) {
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
 	s.setupClaimed = true // a StartSetup mid-preparation: something to cancel
 
@@ -136,6 +138,7 @@ func TestCleanupDoesNotEraseTheCancelFlag(t *testing.T) {
 // previous one's cancel and refuse to start, forever. Claim time is where it
 // is consumed, so a fresh StartSetup after a cancelled one must run.
 func TestStartSetupClaimConsumesAPendingCancel(t *testing.T) {
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
 	s.setupClaimed = true
 	if err := s.CancelSetup(); err != nil {
@@ -295,6 +298,7 @@ func TestFailedSetupExitDoesNotPoisonTheNextSetup(t *testing.T) {
 // documented ErrNoSetupInProgress as "returned by FinishSetup or CancelSetup";
 // only the FinishSetup half was ever built.
 func TestCancelSetupReportsNothingToCancel(t *testing.T) {
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 	t.Run("no setup ever started", func(t *testing.T) {
 		s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
 		if err := s.CancelSetup(); !errors.Is(err, ErrNoSetupInProgress) {
@@ -334,6 +338,7 @@ func TestCancelSetupReportsNothingToCancel(t *testing.T) {
 // button on screen in the first place. If the two ever disagree, the UI offers
 // a cancel the service answers 404 to, or hides one that would have worked.
 func TestCancelSetupAgreesWithSetupInProgress(t *testing.T) {
+	withLaunchWindowKillBudget(t, testLaunchWindowKillBudget)
 	cases := []struct {
 		name  string
 		setup func(*AutoCookieService)
