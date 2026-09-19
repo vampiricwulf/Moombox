@@ -74,8 +74,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Finished job can age across hide_finished_age_days while the
 		// dashboard sits idle with no rebuild-triggering event; without
 		// this it lingers in the active rows until the next unrelated one.
+		// The same sweep re-reads hide_finished_age_days: a change made
+		// from the dashboard reaches the TUI through no event at all, so
+		// without this the two UIs disagree about which Finished jobs are
+		// archived until the settings overlay is next opened and closed
+		// (CORE-11). One store read a minute, and a rebuild only when the
+		// threshold actually moved.
 		if now := time.Now(); now.Sub(a.lastArchiveSweep) >= time.Minute {
 			a.lastArchiveSweep = now
+			a.syncHideFinishedAge()
 			a.taskList.ResweepArchive()
 		}
 		// Backstop for the demand-driven marquee and progress loops: if a

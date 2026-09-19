@@ -55,6 +55,38 @@ func cookieBadgeFor(authenticated, hasCookies bool, verdict cookies.RefreshVerdi
 	}
 }
 
+// newTUIResync builds the replay for a dropped TUI job update. The forwarders
+// in runTUI send non-blocking on their 100-slot channels and count the drop;
+// nothing ever replayed it, so a dropped Downloading->Finished left a stale
+// row for the rest of the session while user-interfaces.md claimed a resync
+// existed (CORE-6).
+//
+// The returned func is free when nothing was dropped (one atomic load). When
+// a drop IS pending it takes the flag, fetches a full snapshot and pushes it
+// down the full-list channel the TUI already handles; if either the fetch or
+// the push fails the flag is re-armed so the next caller tries again —
+// clearing it there would turn one dropped update into a permanent
+// divergence. Taking the flag first is what makes this ONE refresh per streak
+// of drops rather than one per dropped message: it is a catch-up, not a poll,
+// and it leaves the ~60 Hz forwarding path exactly as it was.
+func newTUIResync(needed *atomic.Bool, jobsCh chan []*database.Job, getAll func() ([]*database.Job, error)) func() {
+	return func() {
+		if !needed.CompareAndSwap(true, false) {
+			return
+		}
+		jobs, err := getAll()
+		if err != nil {
+			needed.Store(true)
+			return
+		}
+		select {
+		case jobsCh <- jobs:
+		default:
+			needed.Store(true)
+		}
+	}
+}
+
 // runTUI starts the BubbleTea TUI, wires every callback (job actions,
 // trim service, orphan scanner, client-token management, setup wizard,
 // FFmpeg check, cookie controls, update check, etc.), runs the TUI
@@ -287,6 +319,12 @@ func (s *runState) runTUI() {
 		// the validate-browser-path handler in routes/cookies.go for the
 		// other, precisely-targeted invalidation site.
 		cookies.InvalidateBrowserDetection()
+		// A TUI settings save must reach the dashboards too — the Web PUT
+		// has always broadcast this, the TUI never did, so a threshold
+		// changed in the terminal left every open dashboard filtering on
+		// the old one (CORE-11). The same method both sides call, so the
+		// two directions cannot drift.
+		s.broadcastHideFinishedAge()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
 		if updatedCfg.Logs.LogLevel != "" {
 			s.log.SetLevel(updatedCfg.Logs.LogLevel)
@@ -731,6 +769,10 @@ func (s *runState) runTUI() {
 
 	// Dropped-message counters — track silent drops on TUI channels
 	var tuiDroppedJobs, tuiDroppedLogs atomic.Int64
+	// tuiResyncNeeded arms the full-snapshot replay after a dropped job
+	// event (CORE-6). See newTUIResync.
+	var tuiResyncNeeded atomic.Bool
+	resyncTUIJobs := newTUIResync(&tuiResyncNeeded, jobsUpdateCh, s.db.GetAllJobs)
 
 	// Push initial disk status to TUI
 	if ds := routes.SharedDiskStatus.Load(); ds != nil {
@@ -757,11 +799,21 @@ func (s *runState) runTUI() {
 	// gives us the changed-columns list, which the TUI uses to gate
 	// expensive list/detail rebuilds (see hasDisplayChange in
 	// app_update.go). DECISIONS #21 / audit tui.md F20.
+	//
+	// Each forwarder runs resyncTUIJobs() on the way in: a drop recorded by
+	// an earlier event is replayed as a full snapshot by the next one, which
+	// is what makes a dropped terminal transition recoverable instead of a
+	// stale row for the session (CORE-6).
 	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
+		resyncTUIJobs()
 		select {
 		case jobUpdateCh <- ev:
 		default:
 			tuiDroppedJobs.Add(1)
+			if tuiResyncNeeded.CompareAndSwap(false, true) {
+				s.log.Warn("TUI job update dropped — a full refresh is queued",
+					slog.String("job", ev.Job.ID))
+			}
 		}
 	})
 	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
@@ -770,10 +822,15 @@ func (s *runState) runTUI() {
 	// the task list instead of clearing + rebuilding from a fresh
 	// snapshot. DECISIONS #21 consumer migration.
 	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
+		resyncTUIJobs()
 		select {
 		case jobAddedCh <- ev:
 		default:
 			tuiDroppedJobs.Add(1)
+			if tuiResyncNeeded.CompareAndSwap(false, true) {
+				s.log.Warn("TUI job update dropped — a full refresh is queued",
+					slog.String("job", ev.Job.ID))
+			}
 		}
 	})
 	// OnJobDeleted subscriber: DeleteJob no longer fires OnJobsChange
@@ -782,10 +839,15 @@ func (s *runState) runTUI() {
 	// instead of clearing+rebuilding from a full-list snapshot.
 	// DECISIONS #21.
 	unsubTUIJobDeleted := s.db.OnJobDeleted(func(ev *database.JobDeleted) {
+		resyncTUIJobs()
 		select {
 		case jobDeletedCh <- ev:
 		default:
 			tuiDroppedJobs.Add(1)
+			if tuiResyncNeeded.CompareAndSwap(false, true) {
+				s.log.Warn("TUI job update dropped — a full refresh is queued",
+					slog.String("job", ev.JobID))
+			}
 		}
 	})
 	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
@@ -793,6 +855,7 @@ func (s *runState) runTUI() {
 	// affected job here (so its Trims field is current) and forward
 	// the refreshed pointer to the TUI handler. DECISIONS #21.
 	unsubTUITrimsChanged := s.db.OnTrimsChanged(func(ev *database.TrimsChanged) {
+		resyncTUIJobs()
 		job, err := s.db.GetJob(ev.JobID)
 		if err != nil || job == nil {
 			return
@@ -801,14 +864,48 @@ func (s *runState) runTUI() {
 		case jobTrimsChangedCh <- job:
 		default:
 			tuiDroppedJobs.Add(1)
+			if tuiResyncNeeded.CompareAndSwap(false, true) {
+				s.log.Warn("TUI job update dropped — a full refresh is queued",
+					slog.String("job", job.ID))
+			}
 		}
 	})
+	// This one already carries a full list, so its own drop is harmless (a
+	// snapshot is queued when a snapshot cannot be queued) and its default
+	// stays empty. The replay call at the top still matters: the list it is
+	// about to deliver is NEWER than the snapshot a pending resync would
+	// fetch, so a queued replay is satisfied here rather than re-read a
+	// moment later.
 	unsubTUIJobsChange := s.db.OnJobsChange(func(jobs []*database.Job) {
+		resyncTUIJobs()
 		select {
 		case jobsUpdateCh <- jobs:
 		default:
 		}
 	})
+
+	// 1 s backstop for the resync: the forwarders above cover the common
+	// case (drops happen under event pressure, so more events follow), but a
+	// drop whose job then goes quiet would otherwise never be replayed. One
+	// atomic load per second when nothing is pending — this is a discovery
+	// bound on a pending catch-up, not a poll of the database.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("[Main] Panic in TUI resync backstop", "panic", fmt.Sprint(r))
+			}
+		}()
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-t.C:
+				resyncTUIJobs()
+			}
+		}
+	}()
 
 	// Forward log lines to TUI
 	tuiLogSub := s.log.Subscribe()
@@ -984,9 +1081,13 @@ func (s *runState) runTUI() {
 	unsubConnTUI()
 	unsubSidecarTUI()
 
-	// Report dropped messages (helps diagnose missed TUI updates)
+	// Report dropped messages (helps diagnose missed TUI updates). A dropped
+	// job event is no longer a silently stale row — each streak of drops was
+	// replayed by a full refresh (newTUIResync) — so this count is a
+	// pressure signal, not a correctness one.
 	if n := tuiDroppedJobs.Load(); n > 0 {
-		s.log.Warn("TUI dropped job update messages", slog.Int64("count", n))
+		s.log.Warn("TUI dropped job update messages (each streak replayed by a full refresh)",
+			slog.Int64("count", n))
 	}
 	if n := tuiDroppedLogs.Load(); n > 0 {
 		s.log.Warn("TUI dropped log messages", slog.Int64("count", n))

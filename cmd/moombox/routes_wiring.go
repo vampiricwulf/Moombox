@@ -72,27 +72,8 @@ func (s *runState) wireRoutes() func() {
 		OnMaxParallelChange: func(n int) {
 			s.dlWorker.SetParallelDownloads(n)
 		},
-		OnHideFinishedAgeChanged: func() {
-			// Send config_update FIRST so the Web UI's hideFinishedAgeDays is
-			// already up to date by the time the jobs_update payload (filtered
-			// with the new threshold) arrives. Otherwise the per-client FIFO
-			// queue would deliver jobs_update first, and the Web UI's archive
-			// re-eval would run with the stale threshold and undo the server's
-			// widening on a threshold increase.
-			// Capture the threshold ONCE and reuse it for both the
-			// config_update payload and the job filtering below. Re-reading
-			// the store for the filter (via filterJobsByAge) would race a
-			// concurrent config change and could broadcast a hideFinishedAgeDays
-			// that disagrees with the threshold the jobs_update was filtered by.
-			var hideAge float64
-			s.configStore.Read(func(c *config.MoomboxConfig) {
-				hideAge = c.Monitors.HideFinishedAgeDays.Value
-			})
-			s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
-			jobs, _ := s.db.GetAllJobs()
-			s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
-		},
-		OnChannelChange: s.kickMonitors,
+		OnHideFinishedAgeChanged: s.broadcastHideFinishedAge,
+		OnChannelChange:          s.kickMonitors,
 		OnNotificationsChange: func() {
 			// Hot-reload notification targets so edits apply immediately —
 			// previously they silently required a restart nothing asked for.
@@ -202,6 +183,34 @@ func (s *runState) wireRoutes() func() {
 	routes.WatchRoutes(s.r, s.db)
 
 	return importCleanup
+}
+
+// broadcastHideFinishedAge pushes a hide_finished_age_days change to every
+// dashboard: the config_update first, then the re-filtered job list.
+//
+// Send config_update FIRST so the Web UI's hideFinishedAgeDays is already up
+// to date by the time the jobs_update payload (filtered with the new
+// threshold) arrives. Otherwise the per-client FIFO queue would deliver
+// jobs_update first, and the Web UI's archive re-eval would run with the
+// stale threshold and undo the server's widening on a threshold increase.
+// Capture the threshold ONCE and reuse it for both the config_update payload
+// and the job filtering below. Re-reading the store for the filter (via
+// filterJobsByAge) would race a concurrent config change and could broadcast
+// a hideFinishedAgeDays that disagrees with the threshold the jobs_update was
+// filtered by.
+//
+// TWO callers, deliberately one method: the Web PUT's
+// ConfigRoutesCallbacks.OnHideFinishedAgeChanged above and the TUI's
+// OnSaveConfig (tui_wiring.go). Before that pairing a TUI save never reached
+// the dashboard at all (CORE-11).
+func (s *runState) broadcastHideFinishedAge() {
+	var hideAge float64
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		hideAge = c.Monitors.HideFinishedAgeDays.Value
+	})
+	s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
+	jobs, _ := s.db.GetAllJobs()
+	s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
 }
 
 // currentWebPort resolves the port this process is actually serving on.

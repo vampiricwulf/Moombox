@@ -23,10 +23,7 @@ func TestTaskListHonoursAFractionalThreshold(t *testing.T) {
 
 	a := NewApp()
 	a.SetConfig(cfg)
-	// Task 5 adds the exported HideFinishedAgeDays() accessor; until it
-	// lands the field itself is the only reader, and this file is in
-	// package tui.
-	if got := a.taskList.hideFinishedAgeDays; got != 0.5 {
+	if got := a.taskList.HideFinishedAgeDays(); got != 0.5 {
 		t.Fatalf("threshold = %v, want 0.5", got)
 	}
 

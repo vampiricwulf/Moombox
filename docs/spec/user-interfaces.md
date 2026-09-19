@@ -351,7 +351,7 @@ The TUI receives backend state changes via typed messages delivered through Bubb
 
 | Message Type | Interval | Purpose |
 |--------------|----------|---------|
-| `tickMsg` | 1 second | Main tick. Updates clocks, checks chord timeouts, refreshes dynamic content. |
+| `tickMsg` | 1 second | Main tick. Updates clocks, checks chord timeouts, refreshes dynamic content. Once a minute it also runs the archive sweep, which re-reads `hide_finished_age_days` from the config store (`syncHideFinishedAge` in `internal/tui/app.go`) before re-bucketing aged rows — a threshold changed from the dashboard reaches the TUI through no event at all, so this sweep is the whole Web → TUI direction and bounds its latency at 60 s. A change made in the TUI travels the other way immediately, through the shared `broadcastHideFinishedAge`. |
 | `progressTickMsg` | 16ms (active) / 500ms (idle) | Progress bar animation. Runs at ~60fps during active downloads, drops to 2fps when idle to save CPU. |
 | `logFlushMsg` | 250ms | Triggers flushing accumulated log lines from the buffer to the viewport. |
 | `marqueeTickMsg` | 150ms | Advances scrolling marquee text for overflowed labels. |
@@ -415,7 +415,7 @@ default:
 }
 ```
 
-If a send is dropped, a drop counter increments. The next successful send triggers a full state refresh (re-fetching all jobs from the database) so the TUI catches up on missed intermediate updates. This ensures the TUI never blocks a backend goroutine, even if the Bubble Tea event loop is busy processing a complex view update.
+If a send is dropped, a drop counter increments **and a replay flag is armed** (`newTUIResync` in `cmd/moombox/tui_wiring.go`). The next forwarded job event — or a 1 s backstop ticker, for a job that then goes quiet — takes the flag and triggers a full state refresh (re-fetching all jobs from the database and pushing that snapshot down the full-list channel) so the TUI catches up on missed intermediate updates. A streak of drops arms the flag once, so this is one catch-up refresh per streak rather than one per dropped message, and a refresh whose fetch or whose delivery fails re-arms the flag instead of clearing it — a dropped `Downloading → Finished` can therefore never leave a stale row for the rest of the session. This ensures the TUI never blocks a backend goroutine, even if the Bubble Tea event loop is busy processing a complex view update.
 
 ### Backend Communication
 
@@ -526,7 +526,7 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | `job_update` | Single job object | When any field of a single job changes |
 | `jobs_update` | Full job array | When a job is added or deleted (full list, not incremental) |
 | `job_deleted` | `{ id }` | When a job row is removed from the database |
-| `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes |
+| `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes — from the dashboard's own `PUT /api/config` or from a TUI settings save, both through one `broadcastHideFinishedAge` in `cmd/moombox/routes_wiring.go`, which sends this first and then a `jobs_update` re-filtered with the same captured threshold |
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
 | `backfill_status` | `{ channel, tab, pages, state }` | Feed-history backfill scan progress per channel (`state`: scanning / error / done / idle). Active scans are also seeded via `initial_state`. |

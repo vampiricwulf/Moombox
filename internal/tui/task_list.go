@@ -349,6 +349,12 @@ func (m *TaskListModel) SetHideFinishedAgeDays(days float64) {
 	m.rebuildVirtualList()
 }
 
+// HideFinishedAgeDays returns the archive threshold the list is currently
+// bucketing with. Read by the App's periodic config resync so a threshold
+// changed from the dashboard can be applied without an unconditional rebuild
+// (App.syncHideFinishedAge).
+func (m *TaskListModel) HideFinishedAgeDays() float64 { return m.hideFinishedAgeDays }
+
 // SetJobs updates the job list and re-sorts.
 func (m *TaskListModel) SetJobs(jobs []*database.Job) {
 	m.jobs = jobs
