@@ -945,6 +945,8 @@ Both UIs display the same status information in a persistent status bar / footer
 | Re-login required | `YT: Re-login` / `TW: Re-login` in the warnings area, clickable to start setup | Folded into the platform indicator as `YT: Re-login` / `YT!`, and at `tierFull` followed by `(R L)` — the chord that opens the same interactive setup the dashboard's click does |
 | Update indicator | New version badge | New version indicator |
 
+**Keyboard reachability (Web).** The status bar's clickable non-controls — the check countdown, the `YT: Re-login` / `TW: Re-login` warnings, the collapsed warnings icon and the version indicator — plus the log panel's resume-auto-scroll pill are all `role="button" tabindex="0"` and answer `Enter` and `Space` through the same handler their click uses, never a second copy of it; `Space` is `preventDefault()`ed so it activates the control instead of scrolling the page under the user. The glyph-only two — the warnings icon and the version indicator — take their accessible name from the title they already carry, kept in step as the title changes. The action-less `PO tokens: sidecar down` warning is deliberately none of this: it is a statement rather than a button, so it stays a plain span, is not a Tab stop, and leaves `Enter` and `Space` to the browser.
+
 **Cookie parity, and where it stops.** The two indicators agree on the facts that matter and are held to that by shared code and by tests, not by convention:
 
 | Property | Status |

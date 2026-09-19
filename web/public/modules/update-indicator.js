@@ -58,6 +58,16 @@ export class UpdateController {
         }, 3000);
       };
       el.addEventListener("click", this._versionClickHandler);
+      // The keyboard half of the same role="button": the SAME handler, so
+      // the click-twice-to-open arming is shared across both input paths and
+      // a mouse-then-Enter gesture completes. preventDefault() because Space
+      // is the page-scroll key.
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this._versionClickHandler();
+        }
+      });
     }
     if (this.available) {
       el.textContent = `v${this.app._version} ⬆`;
@@ -70,6 +80,10 @@ export class UpdateController {
       el.title = `Moombox v${this.app._version} — click to open the GitHub page`;
       el.style.cursor = "";
     }
+    // Its text is a bare version string ("v2.8.8 ⬆"), which names the control
+    // but not what pressing it does; the title already says that, so it is the
+    // accessible name too.
+    el.setAttribute("aria-label", el.title);
   }
 
   showUpdateDialog() {

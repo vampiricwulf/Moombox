@@ -463,7 +463,7 @@
                     >
                 </div>
                 <div id="logs-container">
-                    <div id="log-autoscroll-pill" style="display: none;">
+                    <div id="log-autoscroll-pill" role="button" tabindex="0" style="display: none;">
                         <sl-icon name="arrow-down"></sl-icon> Resume auto-scroll
                     </div>
                     <div id="logs-viewer"></div>
@@ -2080,13 +2080,13 @@
             <div id="status-bar-right">
                 <span id="disk-indicator" style="display:none"></span>
                 <span id="status-warnings"></span>
-                <span id="status-warnings-icon" title="Warnings"></span>
+                <span id="status-warnings-icon" role="button" tabindex="0" title="Warnings" aria-label="Warnings"></span>
                 <span id="yt-indicator" title="YouTube" style="display:none">YT</span>
                 <span id="tw-indicator" title="Twitch" style="display:none">TW</span>
                 <sl-icon-button id="btn-refresh-cookies" name="arrow-clockwise" label="Refresh cookies" style="display:none"></sl-icon-button>
                 <span class="status-divider" role="separator" aria-orientation="vertical"></span>
                 <sl-tooltip id="version-open-tooltip" content="Click again to open the GitHub page" trigger="manual" placement="top">
-                    <span id="version-indicator" class="version-indicator" style="display:none"></span>
+                    <span id="version-indicator" class="version-indicator" role="button" tabindex="0" style="display:none"></span>
                 </sl-tooltip>
                 <sl-icon-button id="btn-logout" name="box-arrow-right" label="Log out" title="Log out" style="display:none"></sl-icon-button>
                 <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>

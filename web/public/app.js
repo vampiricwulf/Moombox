@@ -353,21 +353,40 @@ export class MoomboxApp {
       reload: () => window.location.reload(),
     });
 
-    // Status warnings — delegated click (text on desktop)
+    // Status warnings — delegated click and keydown (text on desktop).
+    //
+    // One `activate` for both input paths, not two copies: a keyboard user
+    // whose Enter does something other than the click is worse off than one
+    // whose Enter does nothing, and a copy is how that drift starts.
     const warningsEl = document.getElementById("status-warnings");
     if (warningsEl) {
-      warningsEl.addEventListener("click", (e) => {
-        const warning = e.target.closest(".status-warning");
-        if (!warning) return;
+      const activate = (target) => {
+        const warning = target?.closest?.(".status-warning");
+        // Not every warning is a button. The sidecar alert carries no action
+        // (updateStatusBar leaves its data-action unset), so it is neither
+        // focusable nor activatable — and saying so here is what lets the
+        // keydown leave Space to the browser instead of swallowing the page
+        // scroll for a span that does nothing.
+        if (!warning?.dataset.action) return false;
         this.answerReloginPrompt(warning.dataset.action);
+        return true;
+      };
+      warningsEl.addEventListener("click", (e) => { activate(e.target); });
+      // Delegated, like the click: the spans are rebuilt on every status
+      // update, so per-span listeners would have to be re-bound each time.
+      warningsEl.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        if (activate(e.target)) e.preventDefault();
       });
     }
 
-    // Status warnings — collapsed icon click (mobile)
+    // Status warnings — collapsed icon (mobile): click or Enter/Space
     const warningsIconEl = document.getElementById("status-warnings-icon");
     if (warningsIconEl) {
-      warningsIconEl.addEventListener("click", () => {
-        this.answerReloginPrompt(warningsIconEl.dataset.action);
+      const trigger = () => this.answerReloginPrompt(warningsIconEl.dataset.action);
+      warningsIconEl.addEventListener("click", trigger);
+      warningsIconEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); trigger(); }
       });
     }
 
@@ -843,7 +862,16 @@ export class MoomboxApp {
       for (const w of warningItems) {
         const span = document.createElement("span");
         span.className = "status-warning";
-        if (w.action) span.dataset.action = w.action;
+        if (w.action) {
+          span.dataset.action = w.action;
+          // A clickable non-control: without these a keyboard user cannot
+          // reach it and a screen reader announces it as text (#check-countdown
+          // is the pattern this copies). Only the ACTIONABLE warnings get
+          // them — the sidecar alert below is a statement, and a Tab stop
+          // that does nothing is the failure this whole change removes.
+          span.setAttribute("role", "button");
+          span.setAttribute("tabindex", "0");
+        }
         span.title = w.title || "Click to re-login";
         span.textContent = w.label;
         warningsEl.appendChild(span);
@@ -858,6 +886,11 @@ export class MoomboxApp {
         icon.name = "exclamation-triangle";
         warningsIcon.appendChild(icon);
         warningsIcon.title = warningItems.map(w => w.label).join(", ");
+        // The icon is glyph-only, so its accessible name is the title — and
+        // aria-label WINS over title for a screen reader, which is why it is
+        // kept in step here rather than left at the markup's static
+        // "Warnings": a stale label would hide the very warnings it stands for.
+        warningsIcon.setAttribute("aria-label", warningsIcon.title);
         if (warningItems[0].action) {
           warningsIcon.dataset.action = warningItems[0].action;
         } else {
@@ -867,6 +900,7 @@ export class MoomboxApp {
         // Clear stale children, title, and dataset from previous warnings
         warningsIcon.textContent = "";
         warningsIcon.title = "";
+        warningsIcon.setAttribute("aria-label", "Warnings");
         delete warningsIcon.dataset.action;
       }
     }
