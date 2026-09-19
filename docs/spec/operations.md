@@ -10,7 +10,8 @@ This document covers building, testing, releasing, updating, and running Moombox
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI builds on tag push only** (tags matching `v*`). The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
-- **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. All other exit codes propagate and terminate.
+- **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
+- **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. On a fresh launch it fails fast and propagates like any other startup-time code; what makes it its own code is that the post-update window never rolls back on it — the environment failed, not the new binary.
 - **Version is set in `cmd/moombox/main.go`** as `var version = "x.y.z"`. CI overrides this via `-ldflags -X main.version=...` at build time.
 - **Windows resource embedding** uses `go-winres` to generate `.syso` files at build time. These files are not committed to the repository.
 - **CGO_ENABLED=0** — the build uses no C dependencies. This is enforced in CI and expected locally.
@@ -287,13 +288,17 @@ The self-updater lives in `internal/updater/`. It checks GitHub Releases, downlo
 
 7. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary.
 
-8. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, and `.new.sig` files left by previous updates or interrupted downloads.
+8. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, `.new.sig` and `.failed` files left by previous updates, interrupted downloads or an automatic rollback; on Windows it also sweeps an orphaned `~`. `<exe>.sig` is deliberately spared — Moombox never writes it, and it is the published signature asset a manual verifier leaves beside the binary.
 
 ### Automatic Rollback
 
-If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is removed (it is bit-identical to the published GitHub asset, so nothing is lost), the preserved rollback artifact is renamed back to the plain name (`rollbackArtifactPath` in
+If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is KEPT as `<exe>.failed` and named in the `.update-failed` marker — the restored (older) binary may refuse a database the new version already migrated, and its refusal message points the operator at exactly that file — the preserved rollback artifact is renamed back to the plain name (`rollbackArtifactPath` in
 `cmd/moombox/launcher_windows.go` prefers `<exe>.old` when it is still on disk and falls back to
-`<exe>~`; on Linux, `cmd/moombox/launcher_unix.go`, it is always `.old`), an `.update-failed` marker documents the rollback, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. When the artifact is already gone (the boot survived to the milestone sweep before dying) or the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`).
+`<exe>~`; on Linux, `cmd/moombox/launcher_unix.go`, it is always `.old`), the marker documents the rollback and names the kept `.failed` path, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. When the artifact is already gone (the boot survived to the milestone sweep before dying) or the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`).
+
+A deterministic startup failure (exit code 3, `exitCodeStartupError`) is never treated as a broken update: `classifyPostUpdateExit` sends it down the preserve path instead, the rollback is skipped, the artifact is preserved with written instructions, and — because the next boot runs the same version the `.update-pending` breadcrumb names — the release is not marked skipped. The environment failed, not the binary.
+
+The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-successful-boot milestone, so it costs one binary's worth of disk only until a boot succeeds. That is also exactly when it is still needed: if the restored (older) binary cannot open a database the newer version already migrated, it dies inside `initServices` well before the sweep, so the file its refusal message names is still there.
 
 ### Signature Verification of Current Binary
 
@@ -326,19 +331,32 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 - **Parent process** (no `_MOOMBOX_CHILD` in environment): Runs `launchAndSupervise()`. Spawns itself as a child process with `_MOOMBOX_CHILD=1` and waits.
 - **Child process** (`_MOOMBOX_CHILD=1`): Runs the full application service stack.
 
-**Parent behavior on child exit:**
-- Exit code 42: Respawn the child (loop continues). If `<exe>.old` exists (from an update), rename it to
-  `<exe>~` to free the `.old` name for future updates. A rename that fails — the `~` name is still held
-  by this launcher's own mapped image, which happens on the second update of one launcher lifetime — is
-  reported on stderr and leaves `.old` in place as the rollback artifact.
-- Any other exit code: Propagate the exit code and terminate.
+**Parent behavior on child exit** (the `switch` in `launchAndSupervise`, `cmd/moombox/launcher.go`, in this order):
+- Exit code 42 (`exitCodeRestart`): Respawn the child (loop continues). If `<exe>.old` exists (from an
+  update), rename it to `<exe>~` to free the `.old` name for future updates. A rename that fails — the
+  `~` name is still held by this launcher's own mapped image, which happens on the second update of one
+  launcher lifetime — is reported on stderr and leaves `.old` in place as the rollback artifact.
 - Normal exit (code 0): Terminate.
+- A launcher-forwarded stop (SIGTERM): propagate the child's code without respawning, and without
+  writing an update-failed marker — stopping the service right after an update must not leave a scary
+  "update failed" marker behind.
+- A non-zero exit from the FIRST boot after an update, inside `postUpdateFailureWindow` (2 minutes):
+  automatic rollback (above), unless the code is `exitCodeStartupError`, which is preserved-with-
+  instructions instead.
+- Exit code 130 or 143 (128+SIGINT / 128+SIGTERM): propagate — user intent.
+- Any other non-zero exit within `launcherHealthyWindow` (60 s) on a FRESH launch: propagate and
+  terminate — a deterministic startup failure must fail fast and visibly, not crash-loop against the
+  same wall.
+- Any other non-zero exit from a child that had proven it can run, or from a respawned child: crash
+  supervision respawns it with 1/2/4/8/16 s backoff (`crashBackoff`, doubling and capped at one
+  minute), giving up after `maxConsecutiveCrashes` (5) consecutive quick deaths. For a 24/7 unattended
+  archiver a dead-until-noticed daemon is the worst outcome.
 
 **Windows-specific details:**
 - The parent ignores `os.Interrupt` (Ctrl+C) — the child handles signals.
 - The `createNoWindow` flag (`0x08000000`) is used when spawning cleanup processes, not the child itself. The child inherits the parent's console (stdin/stdout/stderr are piped through).
 
-**Old binary cleanup:** After an update, the old binary is at `<exe>.old` but is locked because the launcher (parent) is still running from the old binary. The launcher renames `.old` -> `<exe>~`. On exit, the launcher spawns a detached `cmd /C ping 127.0.0.1 -n 3 >nul & del /f /q <exe>~` process to delete the stale file after the launcher fully exits.
+**Old binary cleanup:** After an update, the old binary is at `<exe>.old` but is locked because the launcher (parent) is still running from the old binary. The launcher renames `.old` -> `<exe>~`. On exit, the launcher spawns a detached `cmd /C ping 127.0.0.1 -n 5 >nul & del /f /q <exe>~` process to delete the stale file after the launcher fully exits — 5 pings at the 1 s default interval is about 4 s of wall-clock delay, enough for the launcher to release the file lock. `ping` is used rather than `timeout` because it has no stdin dependency in a detached process.
 
 When that rename cannot happen, the surviving `.old` is the freshest previous binary and the `~` file is
 one version older still; the rollback path prefers `.old` for exactly that reason, and the `~` file is

@@ -364,9 +364,12 @@ func cookiesLoadedFields(jar *cookies.CookieJar, now int64) []any {
 // closeLimiters) are ready for run() to defer.
 //
 // Returns a wrapped error from the three fatal-exit points (config.Load,
-// logger.New, database.Open). The caller prints the error and calls
-// os.Exit(1) to preserve the pre-refactor behaviour where deferred cleanup
-// is skipped on a fatal startup failure.
+// logger.New, database.Open). The caller prints the error and exits with
+// exitCodeStartupError (3), which both preserves the pre-refactor behaviour
+// where deferred cleanup is skipped on a fatal startup failure AND tells the
+// launcher this is the environment failing deterministically, so a
+// first-post-update boot that lands here is never rolled back as a broken
+// release (CORE-23).
 func (s *runState) initServices(logLevelOverride string) error {
 	if !s.useTUI {
 		fmt.Println("Loading configuration...")

@@ -449,14 +449,21 @@ Configuration is TOML, parsed via `BurntSushi/toml`. The full config type is `Mo
 
 ### File Search Order
 
-When loading configuration (via `Load(customPath)` in `internal/config/config.go`), files are checked in
-order:
+`Load(customPath)` (`internal/config/config.go`) has two modes, and the flag decides which.
 
-1. `--config` flag path (if provided)
-2. `<cwd>/config.toml`
-3. `<cwd>/config/config.toml`
-4. `~/.config/moombox/config.toml`
-5. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
+**An explicit `-config <path>` is AUTHORITATIVE.** That file is the only one considered. If it exists it
+is loaded; if it does not, `Load` returns `Defaults()` and the named path stays the save target, so the
+first write creates the file exactly where it was asked for. There is no fall-through — before O-Y the
+search paths were appended unconditionally, so `-config /not/yet/there` silently adopted
+`~/.config/moombox/config.toml` when one happened to exist, and the operator asked for one file and got
+another (CORE-17).
+
+**Without the flag** the search runs in order, first hit wins:
+
+1. `<cwd>/config.toml`
+2. `<cwd>/config/config.toml`
+3. `~/.config/moombox/config.toml`
+4. If none found: use `Defaults()` with no file loaded (`ConfigLoaded = false`)
 
 **Saves go back to the file that answered.** The location that was read is recorded in `LoadedFrom`
 (`internal/config/types.go`), and `cmd/moombox/services.go` points the run's config path at it before
