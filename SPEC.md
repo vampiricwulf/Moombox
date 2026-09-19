@@ -662,7 +662,7 @@ Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 48-entry 
 
 ### Config
 
-TOML format parsed by `BurntSushi/toml`. Search order: custom path (CLI flag), `./config.toml`, `./config/config.toml`, `~/.config/moombox/config.toml`. Falls back to defaults if no file found.
+TOML format parsed by `BurntSushi/toml`. An explicit `-config` path is authoritative — it is the only file considered, and a path that does not yet exist falls back to defaults rather than to another file. Without the flag the search order is `./config.toml`, `./config/config.toml`, `~/.config/moombox/config.toml`; if none exists, defaults are used.
 
 **Sections:** `[network]` (port, access level, TLS, password, trusted proxies), `[paths]` (database, log, output, staging, ffmpeg), `[logs]` (level, rotation), `[monitors]` (intervals, archive window/slots, hide threshold, probe cooldown, membership discovery), `[downloader]` (template, resolution, parallelism, chat, retry), `[cookies]` (file, auto, browser profile, platforms, refresh interval), `[disk]` (warn/critical percent), `[updates]` (auto-check), `[[channels]]` (array of monitored channels), `[[notifications]]` (array of webhook configs).
 

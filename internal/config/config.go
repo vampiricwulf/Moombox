@@ -109,16 +109,33 @@ func Defaults() *MoomboxConfig {
 	}
 }
 
-// Load reads configuration from a TOML file, searching multiple locations.
-// If customPath is empty, it searches: cwd -> ./config/ -> ~/.config/moombox/.
+// Load reads configuration from a TOML file.
+//
+// An explicit customPath (the -config flag) is AUTHORITATIVE: it is the only
+// file considered, and when it does not exist Load returns defaults rather
+// than silently adopting a config from somewhere else. Before O-Y the search
+// paths were appended unconditionally, so `-config /not/yet/there` adopted
+// ~/.config/moombox/config.toml when one happened to exist — the operator
+// asked for one file and got another (CORE-17).
+//
+// When customPath is empty the search runs: cwd -> ./config/ ->
+// ~/.config/moombox/. SPEC.md documents this order.
+//
 // The file that answers is recorded in cfg.LoadedFrom — callers must save back
 // to it rather than to the path they asked for (see the field's doc). When no
 // file is found, LoadedFrom is "" and the caller's own path stays the target.
 func Load(customPath string) (*MoomboxConfig, error) {
-	paths := []string{}
 	if customPath != "" {
-		paths = append(paths, customPath)
+		if _, err := os.Stat(customPath); err == nil {
+			return loadFromFile(customPath)
+		}
+		// Named but absent — the caller's path stays the save target
+		// (storePathFor in cmd/moombox/helpers.go keeps it when LoadedFrom
+		// is empty), so a fresh install writes exactly where it was told.
+		return Defaults(), nil
 	}
+
+	paths := []string{}
 
 	cwd, err := os.Getwd()
 	if err != nil {

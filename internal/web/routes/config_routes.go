@@ -304,13 +304,16 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		warnPct, warnOK := dk["disk_warn_percent"].(float64)
 		critPct, critOK := dk["disk_critical_percent"].(float64)
 		if warnOK {
-			if warnPct < 1 || warnPct > 100 {
-				errs["disk.disk_warn_percent"] = "disk_warn_percent must be between 1 and 100"
+			// 1..99 mirrors config.validateOrNormalize — a value this
+			// validator called valid was then refused inside config.Save as
+			// an opaque 500 "failed to save config" (CORE-21).
+			if warnPct < 1 || warnPct > 99 {
+				errs["disk.disk_warn_percent"] = "disk_warn_percent must be between 1 and 99"
 			}
 		}
 		if critOK {
-			if critPct < 1 || critPct > 100 {
-				errs["disk.disk_critical_percent"] = "disk_critical_percent must be between 1 and 100"
+			if critPct < 1 || critPct > 99 {
+				errs["disk.disk_critical_percent"] = "disk_critical_percent must be between 1 and 99"
 			}
 		}
 		if warnOK && critOK && critPct <= warnPct {
@@ -391,8 +394,9 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 		// browser_type alone (without browser_path) is allowed but unused — no validation needed
 		if v, ok := ck["refresh_interval"].(float64); ok {
-			if v < 10 {
-				errs["cookies.refresh_interval"] = "refresh_interval must be at least 10"
+			// 10..10080 mirrors config.validateOrNormalize (CORE-21).
+			if v < 10 || v > 10080 {
+				errs["cookies.refresh_interval"] = "refresh_interval must be between 10 and 10080"
 			}
 		}
 		// acquisition: mirrors config.validateOrNormalize's enum exactly, so a

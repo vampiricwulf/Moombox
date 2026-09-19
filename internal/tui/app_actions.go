@@ -723,6 +723,13 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 					return a.HasStagingFiles(j.ID)
 				}
 				return false
+			},
+			// The menu's "no jobs" question is answered from status alone;
+			// the HasStagingFiles probe above runs when A R is chosen and
+			// its job selector is built (CORE-9).
+			StatusFilter: func(j *database.Job) bool {
+				return (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies || (j.Status == database.StatusFinished && j.IncompleteTail)) &&
+					j.Platform == "youtube"
 			}},
 		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no jobs to reinitialize",
@@ -737,6 +744,10 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 					return a.HasSegmentFiles(j.ID)
 				}
 				return false
+			},
+			// Status-only twin of the filter above — see A R (CORE-9).
+			StatusFilter: func(j *database.Job) bool {
+				return j.Status == database.StatusCancelled || j.Status == database.StatusError
 			}},
 		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no active jobs",

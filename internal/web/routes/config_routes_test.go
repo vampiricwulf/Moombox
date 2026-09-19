@@ -943,3 +943,98 @@ func TestConfigUpdatesProbeTargets(t *testing.T) {
 		t.Errorf("apply: %v, want %v (trimmed)", cfg.Connectivity.ProbeTargets, want)
 	}
 }
+
+// Two Web validator ranges were wider than config.Validate, so a value the
+// API's own message called valid was refused inside config.Save as an opaque
+// 500 "failed to save config" (CORE-21).
+//
+// Mutant: restoring 1..100 / no-maximum — the 100 and 20000 rows report no
+// field error.
+func TestWebValidatorRangesMatchConfigValidate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		updates map[string]any
+		field   string
+	}{
+		{"disk warn 100", map[string]any{"disk": map[string]any{"disk_warn_percent": float64(100)}}, "disk.disk_warn_percent"},
+		{"disk critical 100", map[string]any{"disk": map[string]any{"disk_critical_percent": float64(100)}}, "disk.disk_critical_percent"},
+		{"refresh 20000", map[string]any{"cookies": map[string]any{"refresh_interval": float64(20000)}}, "cookies.refresh_interval"},
+	} {
+		errs := validateConfigUpdates(tc.updates)
+		if _, ok := errs[tc.field]; !ok {
+			t.Errorf("%s: want a field error on %s, got %v", tc.name, tc.field, errs)
+		}
+	}
+}
+
+// The differential the row actually asks for: for each of the two fields the
+// Web validator and config.validateOrNormalize must agree at min-1, min, max
+// and max+1. A one-sided fix (tightening the maximum but not the minimum, or
+// only one of the two disk fields) still passes the coarse test above.
+//
+// config.Validate's messages are matched on the field name AND "out of
+// range" so the disk cross-check ("critical_percent N must be >
+// warn_percent M"), which the single-field Web payloads cannot trigger, is
+// not mistaken for a range verdict.
+//
+// Mutant: leaving one range divergent — e.g. disk_critical_percent at 1..100
+// while disk_warn_percent moves to 1..99 — and the 100 probe for that field
+// reports web=false cfg=true.
+func TestWebValidatorRangeBoundariesAgreeWithConfigValidate(t *testing.T) {
+	cases := []struct {
+		field   string                               // the Web validator's field key
+		cfgName string                               // the name config.Validate uses
+		updates func(float64) map[string]any         // single-field PUT body
+		apply   func(*config.MoomboxConfig, float64) // the same value on a config
+		probes  []float64
+	}{
+		{
+			field:   "disk.disk_warn_percent",
+			cfgName: "disk.warn_percent",
+			updates: func(v float64) map[string]any {
+				return map[string]any{"disk": map[string]any{"disk_warn_percent": v}}
+			},
+			apply:  func(c *config.MoomboxConfig, v float64) { c.Disk.WarnPercent = int(v) },
+			probes: []float64{0, 1, 99, 100, 500},
+		},
+		{
+			field:   "disk.disk_critical_percent",
+			cfgName: "disk.critical_percent",
+			updates: func(v float64) map[string]any {
+				return map[string]any{"disk": map[string]any{"disk_critical_percent": v}}
+			},
+			apply:  func(c *config.MoomboxConfig, v float64) { c.Disk.CriticalPercent = int(v) },
+			probes: []float64{0, 1, 99, 100, 500},
+		},
+		{
+			field:   "cookies.refresh_interval",
+			cfgName: "cookies.refresh_interval",
+			updates: func(v float64) map[string]any {
+				return map[string]any{"cookies": map[string]any{"refresh_interval": v}}
+			},
+			apply:  func(c *config.MoomboxConfig, v float64) { c.Cookies.RefreshInterval = config.FlexDuration{Value: v} },
+			probes: []float64{0, 9, 10, 10080, 10081, 20000},
+		},
+	}
+
+	for _, tc := range cases {
+		for _, v := range tc.probes {
+			_, webRejects := validateConfigUpdates(tc.updates(v))[tc.field]
+
+			cfg := config.Defaults()
+			tc.apply(cfg, v)
+			cfgRejects := false
+			for _, err := range config.Validate(cfg) {
+				msg := err.Error()
+				if strings.Contains(msg, tc.cfgName) && strings.Contains(msg, "out of range") {
+					cfgRejects = true
+				}
+			}
+
+			if webRejects != cfgRejects {
+				t.Errorf("%s = %v: web rejects %v, config.Validate rejects %v — the two ranges must be the same range",
+					tc.field, v, webRejects, cfgRejects)
+			}
+		}
+	}
+}

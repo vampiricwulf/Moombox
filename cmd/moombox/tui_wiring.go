@@ -619,10 +619,10 @@ func (s *runState) runTUI() {
 	// the dashboard cannot disagree about which port the plugin should point
 	// at or whether the one on disk matches.
 	app.OnYtdlpPluginStatus = func() (routes.YtdlpPluginInfo, error) {
-		return routes.YtdlpPluginStatus(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+		return routes.YtdlpPluginStatus(s.currentWebPort(), s.httpsEnabled())
 	}
 	app.OnInstallYtdlpPlugin = func() error {
-		return routes.InstallYtdlpPlugin(s.currentWebPort(), s.cfg.Network.HTTPSEnabled)
+		return routes.InstallYtdlpPlugin(s.currentWebPort(), s.httpsEnabled())
 	}
 
 	app.OnHashPassword = func(password string) string {
@@ -717,11 +717,7 @@ func (s *runState) runTUI() {
 
 	// Wire setup wizard FFmpeg status check
 	app.SetupWizFFmpegCheck(func() (bool, string) {
-		path := s.cfg.Paths.FfmpegPath
-		if path == "" {
-			path = "ffmpeg"
-		}
-		valid, ver, _ := routes.CheckFFmpegCached(path)
+		valid, ver, _ := routes.CheckFFmpegCached(s.ffmpegPathOrDefault())
 		return valid, ver
 	})
 
@@ -748,11 +744,11 @@ func (s *runState) runTUI() {
 	}
 
 	// Check FFmpeg on startup (after config is loaded)
+	// ConfigLoaded is written once at load and never mutated, so it stays a
+	// direct read; the path beside it is a live field and goes through the
+	// store (CORE-24).
 	if s.cfg.ConfigLoaded {
-		ffmpegPath := s.cfg.Paths.FfmpegPath
-		if ffmpegPath == "" {
-			ffmpegPath = "ffmpeg"
-		}
+		ffmpegPath := s.ffmpegPathOrDefault()
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer checkCancel()
 		if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
@@ -1103,4 +1099,26 @@ func (s *runState) runTUI() {
 	if n := tuiDroppedLogs.Load(); n > 0 {
 		s.log.Warn("TUI dropped log messages", slog.Int64("count", n))
 	}
+}
+
+// httpsEnabled and ffmpegPathOrDefault read through the config store.
+// Closures that outlive wiring must never touch s.cfg's fields directly:
+// PUT /api/config assigns *cfg = cfgCopy under the store's lock, so an
+// unlocked field read races a whole-struct replacement (CORE-24).
+func (s *runState) httpsEnabled() bool {
+	enabled := false
+	s.configStore.Read(func(c *config.MoomboxConfig) { enabled = c.Network.HTTPSEnabled })
+	return enabled
+}
+
+// ffmpegPathOrDefault returns the configured FFmpeg path, or "ffmpeg" for
+// the PATH lookup when none is set — the fallback every caller applied
+// itself.
+func (s *runState) ffmpegPathOrDefault() string {
+	path := ""
+	s.configStore.Read(func(c *config.MoomboxConfig) { path = c.Paths.FfmpegPath })
+	if path == "" {
+		return "ffmpeg"
+	}
+	return path
 }

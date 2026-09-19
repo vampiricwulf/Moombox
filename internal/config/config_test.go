@@ -1196,9 +1196,9 @@ func isolateHomeConfig(t *testing.T) {
 }
 
 // TestLoadRecordsTheFileItRead pins the fix for a config saved to a different
-// file than it was loaded from. Load searches cwd, ./config/ and
-// ~/.config/moombox/ after the -config flag (see its doc), and the caller has
-// no other way to learn which one answered.
+// file than it was loaded from. With no -config flag Load searches cwd,
+// ./config/ and ~/.config/moombox/ (see its doc), and the caller has no other
+// way to learn which one answered.
 //
 // Mutant: dropping `cfg.LoadedFrom = path` from loadFromFile leaves it empty
 // and fails this.
@@ -1269,5 +1269,66 @@ func TestNormalizeRewritesPortZero(t *testing.T) {
 	Normalize(cfg)
 	if cfg.Network.Port != 774 {
 		t.Errorf("network.port 0 normalised to %d, want the 774 default", cfg.Network.Port)
+	}
+}
+
+// O-Y: an explicit -config path is AUTHORITATIVE. Load's comment claimed the
+// cwd/./config/~ search happened only when customPath was empty, but the code
+// appended the search paths unconditionally — so `-config /not/yet/there`
+// silently adopted ~/.config/moombox/config.toml when one existed (CORE-17).
+//
+// Mutant: appending the search paths after customPath again — the home file
+// is adopted and LoadedFrom names it.
+func TestExplicitConfigPathIsAuthoritative(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	// cwd is isolated too, so the assertion below rests on the -config rule
+	// rather than on whatever the package directory happens to contain.
+	t.Chdir(t.TempDir())
+	fallback := filepath.Join(home, ".config", "moombox")
+	if err := os.MkdirAll(fallback, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	homeCfg := filepath.Join(fallback, "config.toml")
+	if err := os.WriteFile(homeCfg, []byte("[network]\nport = 9999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	asked := filepath.Join(t.TempDir(), "does-not-exist.toml")
+	cfg, err := Load(asked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LoadedFrom != "" {
+		t.Errorf("LoadedFrom = %q, want \"\" — an explicit path that does not exist must not fall through", cfg.LoadedFrom)
+	}
+	if cfg.Network.Port == 9999 {
+		t.Error("Load adopted the home config despite an explicit -config path")
+	}
+
+	// The explicit path IS honoured when it exists.
+	present := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(present, []byte("[network]\nport = 7411\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(present)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Network.Port != 7411 {
+		t.Errorf("explicit config gave port %d, want 7411", cfg2.Network.Port)
+	}
+
+	// The differential half: WITHOUT the flag the search order is unchanged,
+	// so the very home file the explicit path refused to fall through to is
+	// still the one that answers.
+	cfg3, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg3.Network.Port != 9999 || cfg3.LoadedFrom != homeCfg {
+		t.Errorf("Load(\"\") gave port %d from %q, want 9999 from %q — the search order must not change",
+			cfg3.Network.Port, cfg3.LoadedFrom, homeCfg)
 	}
 }
