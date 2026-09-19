@@ -622,3 +622,104 @@ func TestTheUnloadBeaconPostsToARouteThatExists(t *testing.T) {
 		t.Errorf("%s answered a missing setup without an error field: %v", path, body)
 	}
 }
+
+// TestCookieIndicatorNamesAnUnreadableFile is COOKIES-6's Web half, run out of
+// the shipped utils.js. An unreadable cookies.txt used to fall into the
+// `!found` arm and render as never-configured — the container operator was
+// told "no cookies" about a file sitting on the volume.
+//
+// The arm sits AFTER `authenticated`, deliberately: a later reload failing over
+// a jar that still holds working credentials is not a reason to redden a badge
+// whose requests are succeeding. It is the "no cookies" misreport that is being
+// corrected, not the green state.
+//
+// Mutants:
+//   - drop the fileError arm -> row 1 renders the absent-copy (indicator-warn
+//     or the platform's `absent` title) instead of naming the file.
+//   - put the arm ahead of `authenticated` -> row 3 turns red while
+//     authenticated requests are demonstrably working.
+func TestCookieIndicatorNamesAnUnreadableFile(t *testing.T) {
+	vm := utilsVM(t)
+	for _, tc := range []struct {
+		name         string
+		status       map[string]any
+		wantClass    string
+		wantContains string
+	}{
+		{
+			"unreadable file, nothing loaded",
+			map[string]any{"found": false, "authenticated": false, "verification": "unknown",
+				"fileError": "open /data/cookies.txt: permission denied"},
+			"indicator-error", "could not be read",
+		},
+		{
+			"ordinary never-configured",
+			map[string]any{"found": false, "authenticated": false, "verification": "unknown", "fileError": ""},
+			"", "",
+		},
+		{
+			"unreadable file but the jar still authenticates",
+			map[string]any{"found": true, "authenticated": true, "verification": "ok",
+				"fileError": "open /data/cookies.txt: permission denied"},
+			"indicator-ok", "Authenticated",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := jsCall(t, vm, "cookieIndicatorState", "youtube", tc.status, false, false).(map[string]any)
+			class, _ := got["className"].(string)
+			title, _ := got["title"].(string)
+			if tc.wantClass != "" && class != tc.wantClass {
+				t.Errorf("className = %q, want %q (title %q)", class, tc.wantClass, title)
+			}
+			if tc.wantContains != "" && !strings.Contains(title, tc.wantContains) {
+				t.Errorf("title = %q, want it to contain %q", title, tc.wantContains)
+			}
+			if tc.wantClass == "" && strings.Contains(title, "could not be read") {
+				t.Errorf("title = %q — a file that is merely absent must not claim it could not be read", title)
+			}
+		})
+	}
+}
+
+// TestCookieStatusPayloadsCarryTheFileError pins the wire half of COOKIES-6 on
+// BOTH projections. The sentinel is platform-independent — one cookies.txt
+// holds both platforms' rows — so either badge must be able to name it, and a
+// key added to one payload and not the other is the junction defect
+// CookieStatusPayload's own doc comment exists to prevent.
+//
+// Mutants:
+//   - add `fileError` to CookieStatusPayload only -> the Twitch row fails.
+//   - project it from a per-platform field -> the shared-sentinel row fails.
+func TestCookieStatusPayloadsCarryTheFileError(t *testing.T) {
+	const sentinel = "open /data/cookies.txt: permission denied"
+	status := cookies.AuthStatus{CookieFileError: sentinel}
+
+	for _, tc := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"cookieStatus", CookieStatusPayload(status)},
+		{"twitchAuthStatus", TwitchAuthStatusPayload(status)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.payload["fileError"]
+			if !ok {
+				t.Fatalf("%s carries no fileError key — the badge cannot name the file it "+
+					"could not read, and renders a mounted file as never-configured", tc.name)
+			}
+			if got != sentinel {
+				t.Errorf("fileError = %v, want %q", got, sentinel)
+			}
+		})
+	}
+
+	// Empty stays empty: a jar that loaded is not a jar that failed to.
+	for name, payload := range map[string]map[string]any{
+		"cookieStatus":     CookieStatusPayload(cookies.AuthStatus{}),
+		"twitchAuthStatus": TwitchAuthStatusPayload(cookies.AuthStatus{}),
+	} {
+		if got := payload["fileError"]; got != "" {
+			t.Errorf("%s fileError = %v for a jar that loaded, want empty", name, got)
+		}
+	}
+}

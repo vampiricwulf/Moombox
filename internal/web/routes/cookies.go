@@ -153,6 +153,16 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 // can widen it. Anything added to any producer must keep that rule, or this
 // projection puts an intermediary's HTML on the dashboard.
 //
+//   - fileError — cookies.txt is PRESENT and could not be READ. It joins the
+//     keys above on the same additive terms, and on the same
+//     no-response-bodies rule: it is produced over a read that failed before
+//     any byte was parsed and is assembled from the path and the failure class
+//     alone (see AuthStatus.CookieFileError and CookieJar.LastLoadError), so it
+//     names a path and a cause and can carry no cookie value. It is
+//     platform-independent — one file holds both platforms — so both payloads
+//     carry it and either badge can name it. Without it the state rendered as
+//     `found: false`, i.e. as never-configured, about a file on the volume.
+//
 // `verification` (and, for Twitch, `found`) are ADDITIVE, by the precedent
 // `renewed` set and `ran`/`verdict` and the setup's two verification fields
 // followed: an older frontend ignores the extra keys and behaves exactly as it
@@ -169,6 +179,7 @@ func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
 		"authenticated": status.YouTubeAuthenticated,
 		"verification":  status.YouTubeVerification.String(),
 		"youtubeError":  status.YouTubeError,
+		"fileError":     status.CookieFileError,
 	}
 }
 
@@ -182,6 +193,7 @@ func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 		"authenticated": status.TwitchAuthenticated,
 		"verification":  status.TwitchVerification.String(),
 		"twitchError":   status.TwitchError,
+		"fileError":     status.CookieFileError,
 	}
 }
 

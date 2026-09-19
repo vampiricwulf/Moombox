@@ -65,6 +65,17 @@ type AuthStatus struct {
 
 	YouTubeError string `json:"youtubeError,omitempty"`
 	TwitchError  string `json:"twitchError,omitempty"`
+
+	// CookieFileError is the jar's last read failure, bounded and path-only
+	// (CookieJar.LastLoadError). Empty when cookies.txt loaded, and empty when
+	// there is no cookies.txt — an ABSENT file is never-configured, which both
+	// dashboards already say correctly. This exists for the case they used to
+	// get wrong: a file that is present on the volume and unreadable, which
+	// rendered identically to "you have not set cookies up".
+	//
+	// PLATFORM-INDEPENDENT on purpose. One file holds both platforms' rows, so
+	// both status payloads project it and either badge can name it.
+	CookieFileError string `json:"cookieFileError,omitempty"`
 }
 
 // verdictFromCheck projects one platform's (authenticated, err) pair onto the
@@ -243,11 +254,19 @@ type twitchAuthMark struct {
 // to configured-but-rejected leaves TwitchAuthenticated false — both are badge
 // transitions the operator must see, and on the boolean-only gate both were
 // silent until some unrelated flip happened to fire the callback.
+//
+// CookieFileError is compared for exactly that reason and is NOT an exception
+// to the exclusion above. It is not a reason string that varies between two
+// occurrences of one outcome: it is the badge state itself on both surfaces
+// (tui.CookieStatusFileUnreadable, and the Web indicator's own arm), so a file
+// becoming unreadable — or becoming readable again — is a transition that has
+// to be pushed or the bar stays wrong until some unrelated flip fires.
 func authStatusChanged(prev, next AuthStatus) bool {
 	return next.YouTubeAuthenticated != prev.YouTubeAuthenticated ||
 		next.TwitchAuthenticated != prev.TwitchAuthenticated ||
 		next.HasYouTubeCookies != prev.HasYouTubeCookies ||
 		next.HasTwitchCookies != prev.HasTwitchCookies ||
 		next.YouTubeVerification != prev.YouTubeVerification ||
-		next.TwitchVerification != prev.TwitchVerification
+		next.TwitchVerification != prev.TwitchVerification ||
+		next.CookieFileError != prev.CookieFileError
 }

@@ -468,3 +468,38 @@ func TestNeverConfiguredPlatformsStaySilent(t *testing.T) {
 		t.Errorf("OnRecoveryNeeded fired %v on an empty jar, want none", fired)
 	}
 }
+
+// TestRefreshPassCarriesTheJarsLoadFailure is COOKIES-6's server half: the pass
+// has to PROJECT what the jar recorded, or the sentinel exists and nothing ever
+// reads it. Both dashboards render this field and neither can see the jar.
+//
+// The pass samples it inside the same locked block as hasYTCookies, after its
+// own jar.Reload(), so the snapshot the badge is built from describes one read.
+//
+// Mutants:
+//   - drop the CookieFileError line from the rs.status literal -> the failed
+//     row is empty and both badges go back to "never configured".
+//   - sample it BEFORE doRefresh's Reload() -> the repaired row still carries
+//     the previous pass's sentinel, so the badge stays red after the fix.
+func TestRefreshPassCarriesTheJarsLoadFailure(t *testing.T) {
+	pointYouTubeGuideAt(t, statusServer(t, http.StatusServiceUnavailable))
+
+	jar := jarWithAuth(t)
+	restore := makeUnreadable(t, jar.GetFilePath())
+	rs := NewRefreshService(jar, 0, nopLogger{})
+
+	rs.CheckNow(context.Background())
+	if got := rs.GetStatus().CookieFileError; got == "" {
+		t.Error("AuthStatus.CookieFileError is empty after a pass whose reload could not read " +
+			"cookies.txt — the file is on the volume and both dashboards say it was never set up")
+	}
+
+	// And it CLEARS: repairing the permission takes the badge back down
+	// without a restart, which is the whole point of COOKIES-2.
+	restore()
+	rs.CheckNow(context.Background())
+	if got := rs.GetStatus().CookieFileError; got != "" {
+		t.Errorf("AuthStatus.CookieFileError = %q after a pass that read the file — the badge "+
+			"would stay red after the operator fixed the permission", got)
+	}
+}

@@ -570,6 +570,11 @@ export function parkedCookiePlatforms(jobs) {
  * It comes from the caller because it is computed from the job list rather than
  * from the status payload; see parkedCookiePlatforms.
  *
+ * `status.fileError` is the fifth state and ranks immediately under
+ * `authenticated`: cookies.txt is PRESENT and could not be read, which the
+ * `!found` arm below used to render as never-configured. See the arm itself for
+ * why it sits under the green one rather than over it.
+ *
  * The reason line is `youtubeError` / `twitchError` off the same payload, and
  * it is appended to whichever arm has one. Until Arc 10 that was the
  * inconclusive arm alone, on the belief that a conclusive verdict never
@@ -598,6 +603,20 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
   }
   if (status?.authenticated) {
     return { className: "indicator-ok", title: `${meta.name}: Authenticated` };
+  }
+  // AFTER `authenticated` and BEFORE `!found`. A cookies.txt that cannot be
+  // read renders as never-configured on the `!found` arm — the container
+  // operator is told "no cookies" about a file sitting on the volume — but a
+  // jar that still authenticates is doing real work, and reddening that badge
+  // would report a stale-reload problem as a credential problem. `fileError`
+  // is path-and-cause only (see AuthStatus.CookieFileError); an older binary
+  // omits the key entirely and this arm never fires, which is the additive
+  // contract every other key here follows.
+  if (status?.fileError) {
+    return {
+      className: "indicator-error",
+      title: `${meta.name}: cookies.txt could not be read (${status.fileError})`,
+    };
   }
   if (!status?.found) {
     return meta.absent;

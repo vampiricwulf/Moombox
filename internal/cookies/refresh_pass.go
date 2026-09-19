@@ -264,6 +264,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		hasChecked                 bool
 		hasYTCookies, hasTWCookies bool
 		hasTwitchToken             bool
+		cookieFileErr              string
 		ytIdentity, prevYTIdentity string
 		twIdentity, prevTWIdentity string
 		twEffective                bool
@@ -303,6 +304,14 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		// that were silent forever.
 		hasYTCookies = rs.jar.HasAnyYouTubeAuthCookie()
 		hasTWCookies = rs.jar.HasAnyTwitchAuthCookie()
+
+		// Sampled here with the rest of the snapshot, and AFTER doRefresh's
+		// jar.Reload() at the top, so it describes the read that just happened.
+		// It is the state the two predicates above CANNOT express: a cookies.txt
+		// that is present and could not be read loads nothing, so both of them
+		// answer false and every surface reported a mounted file as one that was
+		// never set up.
+		cookieFileErr = rs.jar.LastLoadError()
 
 		// The NARROW predicate, and deliberately not hasTWCookies. The tier-2
 		// Twitch probe sends the bearer token as the credential; without it
@@ -381,6 +390,8 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			TwitchVerification:  twVerification,
 			YouTubeError:        ytErrStr,
 			TwitchError:         twStatusErr,
+			// Platform-independent: one cookies.txt holds both platforms' rows.
+			CookieFileError: cookieFileErr,
 		}
 
 		// Update previous auth state tracking.

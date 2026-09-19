@@ -357,3 +357,61 @@ func TestReloginBadgeNamesTheChordThatAnswersIt(t *testing.T) {
 		}
 	}
 }
+
+// unreadableBar is a bar whose cookies.txt could not be read, for one platform.
+func unreadableBar(yt, tw CookieStatus) *StatusBarModel {
+	m := NewStatusBarModel()
+	m.SetActivePlatforms(true, true)
+	m.SetCookieStatus(yt, tw)
+	return m
+}
+
+// TestStatusBarNamesAnUnreadableCookieFile is COOKIES-6's TUI half. The bar had
+// no state for it, so an unreadable cookies.txt rendered as CookieStatusNone —
+// the yellow "never configured" badge — for a file sitting on the volume.
+//
+// Red and NOT gated on `healthy`, the same shape CookieStatusRelogin already
+// has: it is a conclusive, operator-actionable failure, so it must survive
+// every tier rather than dropping out at tierEssential like Unknown does.
+//
+// Mutants:
+//   - render it through the `healthy` gate -> the tierEssential row loses the
+//     badge exactly when the bar is narrowest and the operator most confused.
+//   - reuse "YT!" (the Relogin abbreviation) -> the tierTight row becomes
+//     indistinguishable from a re-login prompt, which has a different remedy.
+//   - add the arm to the YouTube ladder only -> the Twitch subtest fails.
+func TestStatusBarNamesAnUnreadableCookieFile(t *testing.T) {
+	for _, tc := range []struct {
+		code    string
+		unread  *StatusBarModel
+		relogin *StatusBarModel
+	}{
+		{"YT", unreadableBar(CookieStatusFileUnreadable, CookieStatusOK), unreadableBar(CookieStatusRelogin, CookieStatusOK)},
+		{"TW", unreadableBar(CookieStatusOK, CookieStatusFileUnreadable), unreadableBar(CookieStatusOK, CookieStatusRelogin)},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			m, r := tc.unread, tc.relogin
+
+			full := stripANSI(m.renderCookieStatus(tierFull, m.tallyJobs()))
+			if want := tc.code + ": cookies.txt unreadable"; !strings.Contains(full, want) {
+				t.Errorf("tierFull = %q, want it to contain %q — the operator is sent to the "+
+					"permission, not back through a cookie setup they already did", full, want)
+			}
+
+			tight := stripANSI(m.renderCookieStatus(tierTight, m.tallyJobs()))
+			if !strings.Contains(tight, tc.code) {
+				t.Errorf("tierTight = %q, want it to still carry a %s badge", tight, tc.code)
+			}
+			if reloginTight := stripANSI(r.renderCookieStatus(tierTight, r.tallyJobs())); tight == reloginTight {
+				t.Errorf("tierTight renders %q for both an unreadable file and a re-login prompt — "+
+					"two alerts with different remedies are one alert", tight)
+			}
+
+			essential := stripANSI(m.renderCookieStatus(tierEssential, m.tallyJobs()))
+			if !strings.Contains(essential, tc.code) {
+				t.Errorf("tierEssential = %q, want the %s badge to survive: an unreadable "+
+					"cookies.txt is conclusive and actionable, not reassurance", essential, tc.code)
+			}
+		})
+	}
+}

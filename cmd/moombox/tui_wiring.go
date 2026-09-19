@@ -30,6 +30,12 @@ import (
 //
 //   - authenticated wins outright. It is the only state that lets us do
 //     authenticated work, and it implies RefreshOK.
+//   - an UNREADABLE cookie file reports FILE UNREADABLE, ahead of everything
+//     but `authenticated`. It explains every symptom below it, and the two
+//     states it used to render as — NONE for a jar that loaded nothing, or
+//     UNKNOWN for one holding stale rows — both send the operator to the wrong
+//     remedy. `authenticated` still wins: a jar that is doing authenticated
+//     work is not a credential problem, whatever a later reload failed to do.
 //   - no cookies at all reports NONE, whatever the verdict says. A platform
 //     that was never configured is not a platform whose cookies failed, and
 //     the check returns a conclusive "not authenticated" for it.
@@ -42,10 +48,12 @@ import (
 // `hasCookies` is the LOOSE predicate on both sides (HasAnyYouTubeAuthCookie /
 // HasAnyTwitchAuthCookie), so a half-cleared jar reads as configured rather
 // than as never-set-up — see AuthStatus and twitchAuthCookieNames.
-func cookieBadgeFor(authenticated, hasCookies bool, verdict cookies.RefreshVerdict) tui.CookieStatus {
+func cookieBadgeFor(authenticated, hasCookies, fileUnreadable bool, verdict cookies.RefreshVerdict) tui.CookieStatus {
 	switch {
 	case authenticated:
 		return tui.CookieStatusOK
+	case fileUnreadable:
+		return tui.CookieStatusFileUnreadable
 	case !hasCookies:
 		return tui.CookieStatusNone
 	case verdict == cookies.RefreshFailed:
@@ -873,8 +881,11 @@ func (s *runState) runTUI() {
 	// Wire cookie status to TUI. Parameter `auth` is the incoming status —
 	// named differently from `s` (receiver) to avoid the pre-refactor shadow.
 	authStatusToTUI := func(auth cookies.AuthStatus) {
-		yt := cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, auth.YouTubeVerification)
-		tw := cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, auth.TwitchVerification)
+		// One cookies.txt holds both platforms' rows, so the sentinel is
+		// platform-independent and both badges read the same one.
+		unreadable := auth.CookieFileError != ""
+		yt := cookieBadgeFor(auth.YouTubeAuthenticated, auth.HasYouTubeCookies, unreadable, auth.YouTubeVerification)
+		tw := cookieBadgeFor(auth.TwitchAuthenticated, auth.HasTwitchCookies, unreadable, auth.TwitchVerification)
 		// Check auto-cookie relogin state. As of test.36 the relogin map
 		// is keyed by lowercase platform name (audit cookies.md #44).
 		//
