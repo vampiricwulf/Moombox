@@ -51,12 +51,10 @@ func TestConcurrentWriteAndRotate(t *testing.T) {
 // writes — failing silently here would lose every subsequent log
 // line. Audit reports/small-packages.md logger rotate Rename failure.
 func TestRotateRenameFailureKeepsLoggerUsable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Windows handles open-file rename differently; on POSIX the
-		// rename always succeeds even if a reader holds the file. The
-		// assertion below ("post-rotate writes still land") is the
-		// invariant we care about regardless of which branch fires.
-	}
+	// Windows handles open-file rename differently; on POSIX the rename
+	// always succeeds even if a reader holds the file. The assertion below
+	// ("post-rotate writes still land") is the invariant we care about
+	// regardless of which branch fires.
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "rename-fail.log")
 

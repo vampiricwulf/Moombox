@@ -1530,11 +1530,12 @@ func (s *runState) wireMonitorCallbacks() {
 	s.decapiMon.SetOnChannelUnhealthy(unhealthyNotify("youtube", s.feedMon))
 	s.twitchMon.SetOnChannelUnhealthy(unhealthyNotify("twitch"))
 
-	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
+	// Initialize per-job log tracking with existing jobs (matches TS
+	// knownJobIds). Terminal rows are skipped by SyncJobLogTracking: their
+	// in-memory buffers are empty at boot anyway, and tracking them made
+	// every log line scan them (CORE-12).
 	if existingJobs, err := s.db.GetAllJobs(); err == nil {
-		for _, j := range existingJobs {
-			s.db.TrackJobForLogs(j.ID)
-		}
+		s.db.SyncJobLogTracking(existingJobs)
 	}
 
 	// Database -> WebSocket: broadcast job updates. Uses the
@@ -1548,6 +1549,12 @@ func (s *runState) wireMonitorCallbacks() {
 	// caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
+		// Stop routing log lines once the job reaches a terminal state; the
+		// buffer stays readable (CORE-12). Ahead of the archive gate below,
+		// which returns early for exactly the rows that most need untracking.
+		if job.IsTerminal() {
+			s.db.UntrackJobForLogs(job.ID)
+		}
 		// Skip broadcasting updates for archived (old finished) jobs — same
 		// classification as the list filter, via the shared
 		// jobfilter.IsArchivedAt predicate so the two can never disagree
@@ -1602,12 +1609,13 @@ func (s *runState) wireMonitorCallbacks() {
 	})
 
 	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
-		// Keep per-job log tracking in sync (matches TS knownJobIds update)
+		// Keep per-job log tracking in sync (matches TS knownJobIds update):
+		// live jobs routed, terminal ones dropped from the scan (CORE-12).
 		activeIDs := make(map[string]struct{}, len(jobs))
 		for _, j := range jobs {
 			activeIDs[j.ID] = struct{}{}
-			s.db.TrackJobForLogs(j.ID)
 		}
+		s.db.SyncJobLogTracking(jobs)
 		s.db.PruneJobLogs(activeIDs)
 		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 	})

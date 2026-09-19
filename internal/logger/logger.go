@@ -49,10 +49,13 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 // logger once carried a parallel LogForJob/GetJobLogs buffer API, but
 // nothing in production ever wired it and it was removed 2026-07.
 type Logger struct {
-	slog   *slog.Logger
-	level  *slog.LevelVar
-	file   *os.File
-	fileMu sync.Mutex
+	// handler renders the on-disk / stdout line. Its output shape is the
+	// file format and is PROTECTED — see log() for why the record is built
+	// here instead of through a *slog.Logger.
+	handler slog.Handler
+	level   *slog.LevelVar
+	file    *os.File
+	fileMu  sync.Mutex
 
 	// Toggleable stdout writer (disabled during TUI)
 	stdout *switchableWriter
@@ -68,6 +71,27 @@ type Logger struct {
 	maxSize     int
 	maxFiles    int
 	currentSize int64
+
+	// now samples the wall clock — once per log line, for BOTH formatted
+	// shapes — and drives the rotation back-off window. A field so tests can
+	// pin the instant and step the window without sleeping; set by New and
+	// replaced only before the first log call.
+	now func() time.Time
+	// renameFile is os.Rename. A field so a test can simulate the Windows
+	// failure CORE-3 is about (another process holding the rotation target
+	// open makes both renames fail) without holding a real handle.
+	renameFile func(oldpath, newpath string) error
+
+	// rotateFailing / rotateBackoffUntil back off after a rotation whose
+	// renames failed. On Windows any process holding <log>.1 open (tail,
+	// editor, AV) makes both renames fail, and rotate() was re-attempted
+	// after EVERY write past the cap — so the failure repeated per log line:
+	// a WARN diagnostic into the ring buffer, every WS subscriber and the
+	// TUI log panel, per line, while the live file grew unbounded (CORE-3,
+	// reproduced at 7.4x the cap). Guarded by fileMu like every other
+	// rotation field.
+	rotateFailing      bool
+	rotateBackoffUntil time.Time
 
 	// Ring buffer for recent log lines
 	ringBuffer []string
@@ -96,6 +120,13 @@ const defaultRingSize = 200
 // structured log line.
 const minLogRotationSize = 4096
 
+// rotateBackoff is how long a failed rotation waits before the next attempt.
+// While it runs, the live log file is allowed to grow past
+// log_max_file_size: an oversize file for up to a minute is strictly better
+// than a diagnostic per log line for as long as the holder keeps the handle
+// (CORE-3).
+const rotateBackoff = 60 * time.Second
+
 // New creates a new Logger with file rotation support.
 func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	if maxSize < minLogRotationSize {
@@ -114,6 +145,8 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 		maxFiles:   maxFiles,
 		ringSize:   defaultRingSize,
 		ringBuffer: make([]string, defaultRingSize),
+		now:        time.Now,
+		renameFile: os.Rename,
 	}
 
 	// Set up log level
@@ -147,11 +180,10 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	multi := io.MultiWriter(writers...)
 
 	// Custom handler with timestamp formatting. Use the attribute's own
-	// time value (captured by slog at the log call site) rather than
-	// time.Now() so formatted timestamps reflect the exact call moment
-	// even when slog buffers. This also keeps file/stdout timestamps in
-	// lock-step with the ring-buffer / subscriber timestamps emitted
-	// through formatLogLine.
+	// time value rather than time.Now(): log() stamps the record with the
+	// SINGLE instant it also hands formatLogLine, so file/stdout timestamps
+	// are the same sample as the ring-buffer / subscriber ones rather than
+	// a second reading of the clock (CORE-22).
 	opts := &slog.HandlerOptions{
 		Level: l.level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
@@ -169,10 +201,10 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 			return a
 		},
 	}
-	l.slog = slog.New(slog.NewTextHandler(multi, opts))
+	l.handler = slog.NewTextHandler(multi, opts)
 	// Route the process-global slog default through the FULL pipeline (level
 	// gate, file, ring buffer, subscribers, TUI-safe stderr gating) via the
-	// bridge — not through l.slog directly, which would feed the file but
+	// bridge — not through l.handler directly, which would feed the file but
 	// skip the ring buffer and subscribers, leaving stray warnings (e.g.
 	// config.Save's DACL warning) invisible in the TUI log panel and the web
 	// log endpoints. Std `log` output (http.Server error noise) is rebridged
@@ -192,7 +224,7 @@ type defaultSlogBridge struct {
 }
 
 func (b defaultSlogBridge) Enabled(_ context.Context, level slog.Level) bool {
-	return b.l.slog.Enabled(context.Background(), level)
+	return level >= b.l.level.Level()
 }
 
 func (b defaultSlogBridge) Handle(_ context.Context, r slog.Record) error {
@@ -252,10 +284,20 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 
 	// Check if rotation is needed
 	if l.currentSize >= int64(l.maxSize) {
-		l.rotate()
+		l.rotateIfDue()
 	}
 
 	return n, err
+}
+
+// rotateIfDue rotates unless a previous attempt failed recently. The line
+// itself has already been written either way: backing off lets the live file
+// grow past the cap, it never drops a line (CORE-3).
+func (l *Logger) rotateIfDue() {
+	if l.rotateFailing && l.now().Before(l.rotateBackoffUntil) {
+		return
+	}
+	l.rotate()
 }
 
 func (l *Logger) openFile() error {
@@ -288,18 +330,29 @@ func (l *Logger) rotate() {
 		oldFile.Close()
 	}
 
+	// firstOfStreak: only the FIRST failed attempt of a streak reports. The
+	// rest are the same holder, the same handle, the same message.
+	firstOfStreak := !l.rotateFailing
+	rotated := true
+
 	// Shift existing log files
 	for i := l.maxFiles - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", l.filePath, i)
 		dst := fmt.Sprintf("%s.%d", l.filePath, i+1)
-		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
-			l.diagf("logger: rotation rename %s -> %s failed: %v", src, dst, err)
+		if err := l.renameFile(src, dst); err != nil && !os.IsNotExist(err) {
+			rotated = false
+			if firstOfStreak {
+				l.diagf("logger: rotation rename %s -> %s failed: %v (retrying no sooner than %s)", src, dst, err, rotateBackoff)
+			}
 		}
 	}
 
 	// Rename current to .1
-	if err := os.Rename(l.filePath, l.filePath+".1"); err != nil && !os.IsNotExist(err) {
-		l.diagf("logger: rotation rename current log failed: %v", err)
+	if err := l.renameFile(l.filePath, l.filePath+".1"); err != nil && !os.IsNotExist(err) {
+		rotated = false
+		if firstOfStreak {
+			l.diagf("logger: rotation rename current log failed: %v (retrying no sooner than %s)", err, rotateBackoff)
+		}
 	}
 
 	// Remove excess files. Loop upward until the first gap so a runtime
@@ -308,14 +361,24 @@ func (l *Logger) rotate() {
 	for i := l.maxFiles + 1; ; i++ {
 		excess := fmt.Sprintf("%s.%d", l.filePath, i)
 		if err := os.Remove(excess); err != nil {
-			if !os.IsNotExist(err) {
+			if !os.IsNotExist(err) && firstOfStreak {
 				l.diagf("logger: rotation remove excess file failed: %v", err)
 			}
 			break
 		}
 	}
 
-	// Open fresh file — if this fails, surface it so we don't silently lose all logging
+	if rotated {
+		l.rotateFailing = false
+		l.rotateBackoffUntil = time.Time{}
+	} else {
+		l.rotateFailing = true
+		l.rotateBackoffUntil = l.now().Add(rotateBackoff)
+	}
+
+	// Open fresh file — if this fails, surface it so we don't silently lose
+	// all logging. NOT streak-suppressed: a reopen failure is a different
+	// fault from a rename failure and loses every subsequent line.
 	if err := l.openFile(); err != nil {
 		l.diagf("logger: rotation failed to open new log file: %v", err)
 	}
@@ -326,15 +389,32 @@ func (l *Logger) log(level slog.Level, msg string, args ...any) {
 		return
 	}
 
-	// Check level before doing any work
-	if !l.slog.Enabled(context.Background(), level) {
+	// Check the level before doing any work. Reading the LevelVar directly
+	// is the same answer slog.Logger.Enabled gives, without the handler
+	// round trip.
+	if level < l.level.Level() {
 		return
 	}
 
-	l.slog.Log(context.Background(), level, msg, args...)
+	// ONE clock sample per line, for BOTH wire shapes. slog's TextHandler
+	// used to format its own copy from a record slog.Logger stamped with
+	// time.Now() while formatLogLine sampled the clock again, so the file
+	// line and the UI line could disagree about the second (CORE-22).
+	now := l.now()
 
-	// Format for ring buffer and subscribers
-	line := formatLogLine(level, msg, args...)
+	// The on-disk / stdout line. Building the record here rather than
+	// calling slog.Logger.Log is what carries `now` into the file format —
+	// and it skips the runtime.Callers slog.Logger.log does on every call
+	// for a source location this handler is not configured to print. The
+	// rendered bytes are unchanged: this is the same record Log would have
+	// built, with the same handler.
+	rec := slog.NewRecord(now, level, msg, 0)
+	rec.Add(args...)
+	_ = l.handler.Handle(context.Background(), rec)
+
+	// The ring-buffer / subscriber line — the TUI log panel's and the
+	// dashboard's shape, which is deliberately not the file's.
+	line := formatLogLine(now, level, msg, args...)
 	l.addToRingBuffer(line)
 	l.broadcast(line)
 }
@@ -356,14 +436,14 @@ var logLineBuilderPool = sync.Pool{
 	},
 }
 
-func formatLogLine(level slog.Level, msg string, args ...any) string {
+func formatLogLine(now time.Time, level slog.Level, msg string, args ...any) string {
 	sb := logLineBuilderPool.Get().(*strings.Builder)
 	defer func() {
 		sb.Reset()
 		logLineBuilderPool.Put(sb)
 	}()
 
-	ts := time.Now().Format("2006-01-02 15:04:05")
+	ts := now.Format("2006-01-02 15:04:05")
 	levelStr := level.String()
 
 	sb.WriteString(ts)

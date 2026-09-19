@@ -423,10 +423,12 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 The database maintains in-memory per-job log buffers (`jobLogs map[string][]string`) for real-time log viewing in the Web UI and TUI. These are not persisted to SQLite.
 
 - `AddJobLog(jobID, line)` appends a line. Capped at 200 lines; when exceeded, trimmed to last 100.
-- `RouteLogToJobs(line)` scans all tracked job IDs and routes the line to the first matching buffer (substring match on job ID in log line).
-- `TrackJobForLogs(jobID)` initializes the buffer for a job (nil slice).
-- `PruneJobLogs(activeIDs)` removes buffers for jobs no longer in the database.
-- `ClearJobLogs(jobID)` removes a specific buffer.
+- `RouteLogToJobs(line)` scans the ROUTED SET of job IDs (`logRouted`, a second map beside `jobLogs`) and routes the line to the first matching buffer (substring match on job ID in log line).
+- `TrackJobForLogs(jobID)` starts routing to a job and initializes its buffer (nil slice).
+- `UntrackJobForLogs(jobID)` stops routing to a job and KEEPS its buffer — the job that just failed is the one whose log an operator opens next.
+- `SyncJobLogTracking(jobs)` applies both rules to a whole list: non-terminal jobs tracked, terminal ones untracked. The boot seed and the `OnJobsChange` fan-out both call it (`cmd/moombox/monitor_callbacks.go`), so only live jobs are ever scanned — tracking every row the database had ever held cost 47 µs of substring scanning per log line at 5,000 jobs, under the write lock.
+- `PruneJobLogs(activeIDs)` removes buffers — and routing — for jobs no longer in the database.
+- `ClearJobLogs(jobID)` removes a specific buffer and its routing.
 
 ### Auxiliary Data Operations
 
@@ -1182,6 +1184,8 @@ Log output is sent to both:
 
 Rotation is checked after every write. The `currentSize` counter tracks bytes written since the last rotation.
 
+**A rotation whose renames fail backs off for `rotateBackoff`** (`internal/logger/logger.go`, 60 s) and reports once per failure STREAK rather than once per attempt. On Windows any process holding `<log>.1` open — a tail, an editor, an antivirus scanner — makes both renames fail, and re-attempting after every write past the cap turned that into a WARN diagnostic per log line, into the ring buffer, every WebSocket subscriber and the TUI log panel, while the live file kept growing (reproduced at 7.4× the cap). While the back-off runs the live file is allowed to grow past `log_max_file_size`; no log line is ever dropped for it. A rotation that succeeds clears both the window and the streak, so the next failure reports again.
+
 ### Ring Buffer
 
 A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent log lines in memory. Used to populate the TUI log panel and Web UI log view on initial load (before real-time subscription kicks in).
@@ -1190,7 +1194,7 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 
 ### Per-Job Log Buffers
 
-The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs).
+The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs). Only NON-TERMINAL jobs are scanned for — see § Per-Job Log Buffers above for the routed set.
 
 The Logger type once carried a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` buffer API; nothing in production ever wired it (the buffers stayed permanently empty at runtime), and it was removed in 2026-07. Per-job log consumers use the database pipeline above.
 

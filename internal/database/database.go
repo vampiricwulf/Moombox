@@ -124,6 +124,13 @@ type Database struct {
 	// Per-job in-memory log buffers
 	jobLogsMu sync.RWMutex
 	jobLogs   map[string][]string
+	// logRouted is the SET of job IDs RouteLogToJobs scans. It is deliberately
+	// not the same map as jobLogs: tracking follows only non-terminal jobs
+	// (a years-old Finished row cost 47 µs of substring scanning per log
+	// line at 5,000 jobs, under the write lock — CORE-12), while the BUFFER
+	// must outlive the terminal transition because the operator reads a
+	// failed job's log right after it fails. Guarded by jobLogsMu.
+	logRouted map[string]struct{}
 
 	// GetJobStats cache — the aggregate is a full-table scan, so results are
 	// cached for jobStatsCacheTTL. Not invalidated on writes: stats drive UI
@@ -206,6 +213,7 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 		db:            sqlDB,
 		fieldToColumn: ftc,
 		jobLogs:       make(map[string][]string),
+		logRouted:     make(map[string]struct{}),
 	}
 	if len(logger) > 0 && logger[0] != nil {
 		db.logger = logger[0]
