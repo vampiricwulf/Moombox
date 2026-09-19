@@ -3,14 +3,34 @@ package routes
 import (
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/updater"
 )
+
+// updateCheckDebounce bounds how often POST /api/update/check actually asks
+// GitHub. Each call spends one of the 60/h unauthenticated requests, so a held
+// key or a script could exhaust the quota and suppress the daily auto-check
+// for an hour — on a box whose YouTube/Twitch extractors rot without updates
+// (WEB-12). Same window and same wire answer as /api/monitors/check-now. The
+// SCHEDULED check is untouched: checkAndBroadcastUpdate (cmd/moombox/helpers.go)
+// calls updater.CheckForUpdate directly and never travels this route.
+const updateCheckDebounce = 30 * time.Second
+
+// releaseVersionRe is the only shape /api/update/release-notes accepts.
+// updater.FetchReleaseNotes interpolates the value into api.github.com's path
+// (".../releases/tags/v"+version) with no escaping, so an unvalidated "?"
+// ended the path and turned the rest into a query string. The host is fixed
+// and the method is GET, so this is hygiene rather than a hole, and this keeps
+// it that way. It admits every tag Moombox has published, with or without the
+// leading "v" (the Web sends the bare version, the TUI sends the tag).
+var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 
 // updateApplyOriginAllowed gates POST /api/update/apply to loopback callers.
 // Replacing the binary + restarting is a high-impact action; the audit
@@ -90,6 +110,8 @@ func DismissUpdate(store *config.Store, tag string) error {
 // AutoCheckUpdates field and persists via store.SaveLocked, rolling back
 // the in-memory mutation if the save fails.
 func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
+	updateCheckGate := newCallDebouncer(updateCheckDebounce)
+
 	// GET /api/update/status — current update status
 	r.Get("/api/update/status", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
@@ -111,6 +133,13 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 	r.Post("/api/update/check", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not available", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Stamp on the ATTEMPT, not on the outcome: the quota is spent by the
+		// request, whether or not GitHub answers usefully.
+		if ok, wait := updateCheckGate.allow(time.Now()); !ok {
+			writeDebounced(w, wait)
 			return
 		}
 
@@ -220,6 +249,13 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		version := r.URL.Query().Get("version")
 		if version == "" {
 			version = deps.Updater.CurrentVersion()
+		}
+		// AFTER the default on purpose: a build whose own version string is
+		// malformed must fail loudly here rather than quietly query a tag
+		// GitHub has never had.
+		if !releaseVersionRe.MatchString(version) {
+			jsonError(w, "invalid version", http.StatusBadRequest)
+			return
 		}
 		info, err := deps.Updater.FetchReleaseNotes(r.Context(), version)
 		if err != nil {

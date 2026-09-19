@@ -521,7 +521,7 @@ The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives th
 
 **Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval` (16 ms gate in `internal/worker/progress.go`); the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
 
-**Connection management:** 30-second ping interval, 10-second write timeout, 1MB max message size, 256KB backpressure limit.
+**Connection management:** 30-second ping interval, 10-second write timeout, 4 KiB client read limit (the only client message is `{"type":"ping"}`), 16-frame per-client backpressure queue.
 
 ### API Route Catalog
 

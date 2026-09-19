@@ -18,9 +18,13 @@ const (
 	// broadcast to ride on (see flushResync), so on a completely quiet hub a
 	// ghost row survives up to one tick. That it equals wsLagLogInterval's 30 s
 	// is a coincidence — the two bound unrelated things and may be tuned apart.
-	wsPingInterval   = 30 * time.Second
-	wsMaxMessageSize = 1024 * 1024 // 1MB (match TS maxPayload)
-	maxLogBuffer     = 200         // Trim log ring buffer to this size
+	wsPingInterval = 30 * time.Second
+	// wsMaxMessageSize bounds a CLIENT frame. The only message a client sends
+	// is {"type":"ping"} — 15 bytes (web/public/app.js) — so 4 KiB is ~273×
+	// headroom; the old 1 MiB was an unauthenticated read budget per socket on
+	// a lan install, json.Unmarshal'ed in full (WEB-11). Server frames are
+	// unaffected — this is a read limit.
+	wsMaxMessageSize = 4 << 10 // 4 KiB
 	// wsReadIdleTimeout bounds how long a single Conn.Read may block
 	// waiting for a frame. Longer than 2× wsPingInterval (30s) so that
 	// a normally-responsive client — which keeps the peer alive via
@@ -51,9 +55,9 @@ type InitialStateProvider func() map[string]any
 
 // WebSocketHub manages WebSocket connections and broadcasts.
 //
-// hub.mu protects the clients map and closed flag. RWMutex matches
-// logBufMu's shape for consistency, and lets Broadcast's snapshot and
-// ClientCount use the cheaper RLock path. Audit reports/web.md Q-20.
+// hub.mu protects the clients map and closed flag. RWMutex rather than Mutex
+// so Broadcast's snapshot and ClientCount can use the cheaper RLock path.
+// Audit reports/web.md Q-20.
 type WebSocketHub struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
@@ -89,10 +93,6 @@ type WebSocketHub struct {
 	// wires the real check; only a WebSocketHub built outside it (test
 	// harnesses today) can leave this nil.
 	OriginCheck func(r *http.Request) (allowed bool, comparedHost string)
-
-	// Log buffer for initial state (ring buffer)
-	logBufMu sync.RWMutex
-	logBuf   []string
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -506,13 +506,16 @@ func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
 // path so a re-synced client is handed byte-for-byte what a new connection
 // gets — one payload shape, one client-side handler.
 //
-// Locking: takes only logBufMu, and callers must hold neither hub.mu nor
-// logBufMu. queueOrDrop reaches this from inside Broadcast, i.e. from inside a
-// database subscriber; that is safe because Database dispatches subscribers
-// AFTER releasing db.mu, Broadcast releases hub.mu before its enqueue loop,
-// BroadcastLog releases logBufMu before broadcasting, and the backfill producer
-// releases backfillMu before its Broadcast. Do not move any of those unlocks
-// inside a broadcast.
+// The payload is exactly what InitialState returns: the hub adds no "logs"
+// key of its own any more (WEB-14). ws_wiring.go's provider always carries one
+// from the logger's own ring, which is the only ring there is.
+//
+// Locking: takes no lock of its own, and callers must not hold hub.mu.
+// queueOrDrop reaches this from inside Broadcast, i.e. from inside a database
+// subscriber; that is safe because Database dispatches subscribers AFTER
+// releasing db.mu, Broadcast releases hub.mu before its enqueue loop, and the
+// backfill producer releases backfillMu before its Broadcast. Do not move any
+// of those unlocks inside a broadcast.
 func (hub *WebSocketHub) initialStateBytes() []byte {
 	var data map[string]any
 	if hub.InitialState != nil {
@@ -520,15 +523,6 @@ func (hub *WebSocketHub) initialStateBytes() []byte {
 	}
 	if data == nil {
 		data = make(map[string]any)
-	}
-
-	// Include log buffer (fallback if InitialState didn't provide logs)
-	if data["logs"] == nil {
-		hub.logBufMu.RLock()
-		if hub.logBuf != nil {
-			data["logs"] = hub.logBuf
-		}
-		hub.logBufMu.RUnlock()
 	}
 
 	msgBytes, err := json.Marshal(WSMessage{Type: "initial_state", Payload: data})
@@ -752,32 +746,24 @@ func (hub *WebSocketHub) BroadcastConnectivity(online bool) {
 	hub.Broadcast("connectivity", map[string]any{"online": online})
 }
 
-// BroadcastLog sends a log line to all clients and stores in buffer.
-func (hub *WebSocketHub) BroadcastLog(line string) {
-	// Truncate very long log lines to prevent buffer bloat
+// clipLogLine caps a single log line so one multi-megabyte panic dump cannot
+// be pushed whole to every connected tab.
+func clipLogLine(line string) string {
 	const maxLineLen = 4096
 	if len(line) > maxLineLen {
-		line = line[:maxLineLen] + "... (truncated)"
+		return line[:maxLineLen] + "... (truncated)"
 	}
-
-	// Add to ring buffer
-	hub.logBufMu.Lock()
-	hub.logBuf = append(hub.logBuf, line)
-	if len(hub.logBuf) > maxLogBuffer*2 {
-		hub.logBuf = append([]string{}, hub.logBuf[len(hub.logBuf)-maxLogBuffer:]...)
-	}
-	hub.logBufMu.Unlock()
-
-	hub.Broadcast("log", line)
+	return line
 }
 
-// GetLogBuffer returns the current log buffer.
-func (hub *WebSocketHub) GetLogBuffer() []string {
-	hub.logBufMu.RLock()
-	defer hub.logBufMu.RUnlock()
-	result := make([]string, len(hub.logBuf))
-	copy(result, hub.logBuf)
-	return result
+// BroadcastLog sends a log line to all clients.
+//
+// The hub keeps NO buffer of its own: the logger owns the only ring
+// (logger.GetRecentLines), ws_wiring.go always puts it in the initial-state
+// payload, and the hub's copy was appended on every line and never read
+// (WEB-14).
+func (hub *WebSocketHub) BroadcastLog(line string) {
+	hub.Broadcast("log", clipLogLine(line))
 }
 
 // ClientCount returns the number of connected clients.

@@ -549,9 +549,9 @@ Job update broadcasts are not throttled in the WebSocket hub. The only high-freq
 |-----------|-------|
 | Ping interval | 30 seconds (server-initiated) |
 | Write timeout | 10 seconds per message |
-| Max message size (read limit) | 1 MB |
+| Max message size (read limit) | 4 KiB — a client only ever sends `{"type":"ping"}`, and on a `lan` install the upgrade needs no credential |
 | Backpressure limit | 16 queued frames per client (`wsWriteQueueSize`); on overflow the oldest is dropped and a later frame is replaced by a full `initial_state` snapshot — at most one per second per client (`wsResyncMinInterval`), flushed by the ping tick if no broadcast comes (`flushResync`) |
-| Log ring buffer | 200 lines (oldest evicted when full) |
+| Log ring buffer | None in the hub — the logger owns the only ring (`GetRecentLines`), which `ws_wiring.go` puts in every `initial_state`. A single broadcast line is clipped at 4096 characters (`clipLogLine`, `internal/web/websocket.go`) |
 
 ---
 
@@ -851,8 +851,8 @@ The same two lists carry every other restart-required key — `port`, `network_a
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/update/status` | Get current update status (available version, if any). |
-| `GET` | `/api/update/release-notes` | Fetch release notes for a version. Query param `version=X.Y.Z`; defaults to current version. Returns sanitized HTML rendered from GitHub release body via goldmark + bluemonday (download-link section stripped). Used by the Web UI "View Release Notes" button. |
-| `POST` | `/api/update/check` | Manually check for updates. |
+| `GET` | `/api/update/release-notes` | Fetch release notes for a version. Query param `version=X.Y.Z` (validated against `^v?\d+\.\d+\.\d+$`; anything else is a `400`), defaulting to the current version. Returns sanitized HTML rendered from the GitHub release body via goldmark + bluemonday (download-link section stripped). Used by the Web UI "View Release Notes" button. |
+| `POST` | `/api/update/check` | Manually check for updates. Debounced to one accepted check per 30 s — every call spends one of GitHub's 60/h unauthenticated requests — and a call inside the window returns 200 with `{"success":false,"debounced":true,"retryAfterMs":N}`, the same shape `/api/monitors/check-now` and `/api/backfill/rescan` use (`callDebouncer`, `internal/web/routes/debounce.go`). The scheduled daily auto-check calls the updater directly and is not gated by this debounce. |
 | `POST` | `/api/update/apply` | Download and apply an available update. Triggers restart. |
 | `POST` | `/api/update/verify` | Verify the Ed25519 signature of the current binary. |
 | `POST` | `/api/update/dismiss` | Dismiss the update notification. Body shared with the TUI via `DismissUpdate`. |

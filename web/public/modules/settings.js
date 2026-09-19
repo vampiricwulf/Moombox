@@ -304,7 +304,16 @@ export class SettingsController {
         const resp = await fetch("/api/update/check", { method: "POST" });
         if (!resp.ok) throw new Error(resp.statusText);
         const data = await resp.json();
-        if (data.available) {
+        if (data.debounced) {
+          // The server spends one of GitHub's 60/h unauthenticated requests
+          // per check, so it answers 200 {debounced, retryAfterMs} inside its
+          // 30 s window. Same sentence the Tasks panel's force-check uses for
+          // /api/monitors/check-now (app.js) — one debounce, one wording —
+          // rendered in this button's own result span, where "Up to date" and
+          // "Check failed" already go.
+          result.textContent = `Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`;
+          result.style.color = "var(--sl-color-neutral-500)";
+        } else if (data.available) {
           result.textContent = `v${data.version} available!`;
           result.style.color = "var(--sl-color-success-600)";
           this.app._updateAvailable = data;
