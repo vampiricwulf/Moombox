@@ -165,10 +165,17 @@ jobs:
         # premiere-attestation field gate — and until now no workflow ran it.
         # The `npm ci` guard is required because the sidecar build step above
         # is skipped on an embed-cache HIT, which leaves node_modules absent.
+        # On a cache HIT that build step is skipped too, so vendor/ejs.bundle.js
+        # (esbuild's output, imported by src/cipher.js, which the tests import
+        # transitively via src/server.js) is also absent — it's built here when
+        # missing. Every Go step has already consumed the embed blobs by this
+        # point, and actions/cache only saves on a miss, so this rebuilt
+        # tarball is never re-cached.
         if: runner.os == 'Linux'
         working-directory: bgutil-sidecar
         run: |
           [ -d node_modules ] || npm ci --no-audit --no-fund --ignore-scripts
+          [ -f vendor/ejs.bundle.js ] || node build.mjs
           npm test
 
       - name: Frontend test suite
