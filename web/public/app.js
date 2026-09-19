@@ -1194,6 +1194,12 @@ export class MoomboxApp {
         if (idx === -1) break;
 
         const oldStatus = this.jobs[idx].status;
+        // Trust the wire: every key the frame carries is merged as-is, including
+        // one outside the twelve (an additive wire change reaches the row
+        // without a client release). The key set is pinned on the SERVER, by
+        // newJobProgressFrame and its frame-size test, and job_update already
+        // takes a whole row from the same authenticated socket — a client-side
+        // allow-list would buy nothing and would break additive evolution.
         const merged = { ...this.jobs[idx], ...patch };
         // Replaced, not mutated in place, exactly as job_update does it:
         // nothing holds a reference to an element of this.jobs — every reader

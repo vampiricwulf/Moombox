@@ -178,3 +178,53 @@ test("every job_progress frame reaches the card in the same turn", { skip }, asy
   assert.match(text, /V:230/,
     "the card must show the LAST tick synchronously — a deferred flush leaves an older string here");
 });
+
+// MUTANT: a value dedupe placed after the unknown-id guard —
+// `const _sig = JSON.stringify(patch); if (this._pgSig === _sig) break;`.
+// It survives the test above because that one sends three DISTINCT frames, and
+// it is a live regression rather than an academic one: UpdateJobFields stamps
+// updated_at with RFC3339, i.e. SECOND resolution, so two 16 ms ticks inside
+// the same second are byte-identical frames and the dedupe drops the second.
+// "Cheaper, never rarer" — a repeated frame is still a repaint the server sent.
+test("two identical consecutive frames both reach the card", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [heldJob()];
+  h.app.renderJobs();
+
+  let cards = 0;
+  const realCard = h.app.updateJobCard.bind(h.app);
+  h.app.updateJobCard = (...a) => { cards++; return realCard(...a); };
+
+  const identical = progressFrame();
+  h.app.handleMessage({ type: "job_progress", payload: { ...identical } });
+  h.app.handleMessage({ type: "job_progress", payload: { ...identical } });
+
+  assert.equal(cards, 2,
+    "a repeated frame must still repaint — a payload-signature dedupe (the mutant) swallows every " +
+    "second tick of a stream whose numbers happen to be unchanged within one updated_at second");
+});
+
+// MUTANT: the narrower, more tempting dedupe —
+// `if (patch.progress !== undefined && patch.progress === this.jobs[idx].progress) break;`.
+// It drops exactly the STALL tick, which is the one the operator most needs to
+// see: Task 4's own tick-shape enumeration has {progress, speed, eta}, where
+// the progress string is frozen while speed and eta are blanked. Under the
+// mutant the card keeps showing a throughput the server has already retracted.
+test("a frame that only blanks speed and eta still reaches the card", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.jobs = [heldJob()];
+  h.app.renderJobs();
+  h.app.handleMessage({ type: "job_progress", payload: progressFrame() });
+
+  let cards = 0;
+  const realCard = h.app.updateJobCard.bind(h.app);
+  h.app.updateJobCard = (...a) => { cards++; return realCard(...a); };
+
+  h.app.handleMessage({ type: "job_progress", payload: { ...progressFrame(), speed: "", eta: "" } });
+
+  assert.equal(cards, 1,
+    "a stall tick — same progress string, blanked speed/eta — must repaint; a progress-string dedupe " +
+    "(the mutant) leaves a retracted speed on the card");
+  assert.equal(h.app.jobs[0].speed, "", "the blanked speed must reach the row");
+  assert.equal(h.app.jobs[0].eta, "", "the blanked eta must reach the row");
+});
