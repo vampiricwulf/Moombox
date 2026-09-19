@@ -614,7 +614,10 @@ func TestTheUnloadBeaconPostsToARouteThatExists(t *testing.T) {
 	CookieRoutes(r, nil, svc, nil, nil)
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+	// From the host: the beacon is loopback-gated with the rest of the quartet
+	// (TestTheAbandonBeaconReachesTheServiceOnlyFromTheHost), and the subject
+	// here is whether the URL the JS sends is a registered route.
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodPost, path, nil)))
 
 	var body map[string]any
 	if jsonErr := json.Unmarshal(rec.Body.Bytes(), &body); jsonErr != nil {
@@ -1283,7 +1286,7 @@ func TestSizedCookieAnswersSurviveTheGzipWrapper(t *testing.T) {
 //
 // httptest.NewRequest's default RemoteAddr is 192.0.2.1:1234 — TEST-NET-1,
 // which is neither loopback nor private — so every request in this package now
-// arrives at the auto-setup trio as a REMOTE client and is refused. Each call
+// arrives at the auto-setup quartet as a REMOTE client and is refused. Each call
 // site below says, by calling this, that its subject is not the gate.
 func fromTheHost(req *http.Request) *http.Request {
 	req.RemoteAddr = "127.0.0.1:5555"
@@ -1291,7 +1294,7 @@ func fromTheHost(req *http.Request) *http.Request {
 }
 
 // unlaunchableSetupService builds an AutoCookieService that can answer the
-// auto-setup trio and can never open a browser.
+// auto-setup quartet and can never open a browser.
 //
 // Every test that POSTs to /auto-setup/start needs this and it is not
 // decoration: a regression anywhere above the launch lets StartSetup fall
@@ -1310,14 +1313,40 @@ func unlaunchableSetupService(t *testing.T) *cookies.AutoCookieService {
 	return svc
 }
 
-// TestAutoSetupTrioIsLoopbackGated is the owner's "Auto-setup gate" decision.
+// autoSetupGatedPaths is the set requireLoopbackForBrowserSetup guards, written
+// once so a path added to the handler file and not to this list fails a test
+// rather than passing unexamined. /auto-setup/abandon is the fourth member by
+// the round-1 ruling; see TestAutoSetupQuartetIsLoopbackGated for why a beacon
+// that opens nothing still has to be gated.
+var autoSetupGatedPaths = []string{
+	"/api/cookies/auto-setup/start",
+	"/api/cookies/auto-setup/finish",
+	"/api/cookies/auto-setup/cancel",
+	"/api/cookies/auto-setup/abandon",
+}
+
+// TestAutoSetupQuartetIsLoopbackGated is the owner's "Auto-setup gate" decision,
+// plus the beacon its wording did not name.
 //
-// These three endpoints START, FINISH and CANCEL A HEADED BROWSER WINDOW ON THE
-// HOST'S SCREEN. On a network_access=lan install there is no authentication at
-// all, so any LAN device could open one on a screen its user cannot see,
+// These endpoints START, FINISH, CANCEL and RELEASE A HEADED BROWSER WINDOW ON
+// THE HOST'S SCREEN. On a network_access=lan install there is no authentication
+// at all, so any LAN device could open one on a screen its user cannot see,
 // bounded only by the API rate limiter — and the only thing standing in the way
 // was reloginPromptTarget, a CLIENT-side predicate in utils.js whose own
 // comment said so.
+//
+// /abandon is the FOURTH path and was added by the round-1 ruling. It opens
+// nothing, which is why the owner's sentence named only the trio — but what it
+// CLOSES is the point: where setupBrowserGone cannot answer (a failed job
+// creation or assign on either OS, an unadopted Linux process group, an
+// unreadable /proc, darwin, the fallback build) AbandonSetup runs
+// cleanupLocked, SetupInProgress goes false, and the host's own finish then
+// answers 404 with the browser left orphaned. One unauthenticated LAN POST.
+// Gating costs nothing: the beacon fires only from a tab whose
+// _cookieSetupActive is set, and only a SUCCESSFUL /start sets it — so since
+// this gate exists, a page with a setup to abandon is by construction a
+// loopback page. A LAN beacon has nothing of its own to release; the only slot
+// it can reach is someone else's.
 //
 // 403, never 401: app.js installs a global window.fetch interceptor that treats
 // any 401 outside /api/auth/ as an expired session and calls
@@ -1337,8 +1366,9 @@ func unlaunchableSetupService(t *testing.T) *cookies.AutoCookieService {
 // is a decision above this handler.
 //
 // Mutants:
-//   - drop the gate from any one of the three -> that row answers its ordinary
-//     status from a LAN address instead of 403.
+//   - drop the gate from any one of the four -> that row answers its ordinary
+//     status from a LAN address instead of 403. For /abandon that ordinary
+//     status is the proof the LAN caller reached AbandonSetup.
 //   - answer 401 -> the status assertion fails, and a remote click would reload
 //     the dashboard instead of explaining itself.
 //   - gate on web.IsLocalOrPrivateRequest instead of web.IsLoopbackRequest ->
@@ -1348,20 +1378,19 @@ func unlaunchableSetupService(t *testing.T) *cookies.AutoCookieService {
 //   - refuse AFTER the autoCookieSvc == nil guard -> a deployment with no
 //     service tells a remote caller 503, which reads as "configure me" rather
 //     than "not from there".
-func TestAutoSetupTrioIsLoopbackGated(t *testing.T) {
-	for _, path := range []string{
-		"/api/cookies/auto-setup/start",
-		"/api/cookies/auto-setup/finish",
-		"/api/cookies/auto-setup/cancel",
-	} {
+func TestAutoSetupQuartetIsLoopbackGated(t *testing.T) {
+	for _, path := range autoSetupGatedPaths {
 		t.Run(path, func(t *testing.T) {
-			post := func(remoteAddr, xff string) *httptest.ResponseRecorder {
+			post := func(remoteAddr, xff, host string) *httptest.ResponseRecorder {
 				r := chi.NewRouter()
 				CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
 				req := httptest.NewRequest(http.MethodPost, path, nil)
 				req.RemoteAddr = remoteAddr
 				if xff != "" {
 					req.Header.Set("X-Forwarded-For", xff)
+				}
+				if host != "" {
+					req.Host = host
 				}
 				rec := httptest.NewRecorder()
 				r.ServeHTTP(rec, req)
@@ -1371,7 +1400,7 @@ func TestAutoSetupTrioIsLoopbackGated(t *testing.T) {
 			// The answer this endpoint gives the operator at the machine. Every
 			// admitted row must match it exactly — "not 403" would also be
 			// satisfied by a gate that refused with some other status.
-			atTheHost := post("127.0.0.1:5555", "")
+			atTheHost := post("127.0.0.1:5555", "", "")
 			if atTheHost.Code == http.StatusForbidden {
 				t.Fatalf("the host itself was refused: %d %s", atTheHost.Code, atTheHost.Body.String())
 			}
@@ -1380,16 +1409,27 @@ func TestAutoSetupTrioIsLoopbackGated(t *testing.T) {
 				name       string
 				remoteAddr string
 				xff        string
+				host       string
 				refused    bool
 			}{
-				{"at the host", "127.0.0.1:5555", "", false},
-				{"at the host over IPv6 loopback", "[::1]:5555", "", false},
-				{"a LAN device", "192.168.1.20:5555", "", true},
-				{"a LAN device forging the host's address", "192.168.1.20:5555", "127.0.0.1", true},
-				{"a reverse proxy on the host forwarding a LAN client", "127.0.0.1:5555", "192.168.1.20", false},
+				{"at the host", "127.0.0.1:5555", "", "", false},
+				{"at the host over IPv6 loopback", "[::1]:5555", "", "", false},
+				// isLoopback is net.ParseIP(ip).IsLoopback(), so the whole of
+				// 127.0.0.0/8 is the host. The CLIENT predicate deliberately
+				// answers false for this one, which errs toward "you are
+				// remote" and costs that viewer one extra step.
+				{"at the host on a 127.0.0.0/8 alias", "127.0.0.2:5555", "", "", false},
+				{"a LAN device", "192.168.1.20:5555", "", "", true},
+				{"a LAN device forging the host's address", "192.168.1.20:5555", "127.0.0.1", "", true},
+				{"a reverse proxy on the host forwarding a LAN client", "127.0.0.1:5555", "192.168.1.20", "", false},
+				// The Host header names the authority the client DIALLED, not
+				// the peer it dialled from; a gate that read it would be
+				// spoofable by anyone who can write a request line.
+				{"a LAN device claiming Host: localhost", "192.168.1.20:5555", "", "localhost", true},
+				{"a LAN device claiming Host: localhost:774", "192.168.1.20:5555", "", "localhost:774", true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					rec := post(tc.remoteAddr, tc.xff)
+					rec := post(tc.remoteAddr, tc.xff, tc.host)
 
 					if !tc.refused {
 						if rec.Code != atTheHost.Code {
@@ -1437,6 +1477,72 @@ func TestAutoSetupTrioIsLoopbackGated(t *testing.T) {
 	}
 }
 
+// TestTheAbandonBeaconReachesTheServiceOnlyFromTheHost is the round-1 ruling’s
+// own pin, and it asserts something the status table above cannot: WHICH CALL
+// HAPPENED.
+//
+// /abandon is the one member of the quartet that does harm by RELEASING rather
+// than by opening. Where setupBrowserGone cannot answer — no job object, a
+// failed assign, an unadopted Linux group, an unreadable /proc, darwin, the
+// fallback build — AbandonSetup runs cleanupLocked, which clears setupProcess,
+// setupBrowser, cdpPort and targetPlatform. SetupInProgress goes false, the
+// host’s own finish answers ErrNoSetupInProgress, the sign-in the operator just
+// completed is discarded and the browser window is orphaned (nothing is
+// killed). That destructive arm is pinned at the service, where the state can
+// be fabricated without a browser: cookies.TestAbandonReleasesTheSlotWhereTheReapNeverFires.
+//
+// What is pinned HERE is the only thing that stands between a LAN device and
+// that call: the handler. The two rows differ in which answer comes back, and
+// the answer names its source — ErrNoSetupInProgress can only have come FROM
+// AbandonSetup, so the loopback row proves the host’s own beacon still reaches
+// the service and the LAN row proves nothing reached it. A call that never
+// happens cannot move SetupInProgress.
+//
+// Mutants:
+//   - drop the gate -> the LAN row answers 404 carrying the sentinel, i.e. a
+//     LAN device reached AbandonSetup; against a real in-flight setup on an
+//     unanswerable platform that is the host’s setup destroyed.
+//   - gate the beacon and nothing else, or gate it with a different predicate ->
+//     the loopback row stops reaching the service and the host’s own unload
+//     leaks the slot until restart on exactly the platforms the beacon exists
+//     for.
+func TestTheAbandonBeaconReachesTheServiceOnlyFromTheHost(t *testing.T) {
+	const path = "/api/cookies/auto-setup/abandon"
+
+	post := func(remoteAddr string) *httptest.ResponseRecorder {
+		r := chi.NewRouter()
+		CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = remoteAddr
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	host := post("127.0.0.1:5555")
+	if host.Code != http.StatusNotFound {
+		t.Fatalf("the host’s own beacon: status %d, want %d (body %q)",
+			host.Code, http.StatusNotFound, host.Body.String())
+	}
+	if got := decodeErrorBody(t, host)["error"]; !strings.Contains(got, cookies.ErrNoSetupInProgress.Error()) {
+		t.Errorf("the host’s own beacon answered %q — want %q, which only AbandonSetup produces. "+
+			"On darwin, the fallback build and any launch whose job or process group could not "+
+			"be adopted, this beacon is the ONLY thing that ever releases the slot",
+			got, cookies.ErrNoSetupInProgress.Error())
+	}
+
+	lan := post("192.168.1.20:5555")
+	if lan.Code != http.StatusForbidden {
+		t.Fatalf("a LAN beacon: status %d, want %d (body %q)",
+			lan.Code, http.StatusForbidden, lan.Body.String())
+	}
+	if got := decodeErrorBody(t, lan)["error"]; strings.Contains(got, cookies.ErrNoSetupInProgress.Error()) {
+		t.Errorf("a LAN beacon answered %q — that sentence comes from AbandonSetup, so the call "+
+			"was made. With a real setup in flight on a platform whose reap can never fire, that "+
+			"call clears the slot and the host’s finish 404s", got)
+	}
+}
+
 // TestTheLoopbackRefusalCarriesALength keeps the Task 6 rule on the exit this
 // task adds. The finish handler runs a deferred, BLOCKING auth re-check, so
 // every JSON any of its exits writes must carry a Content-Length or the client
@@ -1444,14 +1550,10 @@ func TestAutoSetupTrioIsLoopbackGated(t *testing.T) {
 // SHARED HELPER, which is exactly the shape the per-handler source sweep
 // (TestBothRecheckHandlersAnswerThroughTheSizedWriters) cannot see.
 //
-// Mutant: write the refusal through jsonError -> none of the three carries a
+// Mutant: write the refusal through jsonError -> none of the four carries a
 // length.
 func TestTheLoopbackRefusalCarriesALength(t *testing.T) {
-	for _, path := range []string{
-		"/api/cookies/auto-setup/start",
-		"/api/cookies/auto-setup/finish",
-		"/api/cookies/auto-setup/cancel",
-	} {
+	for _, path := range autoSetupGatedPaths {
 		r := chi.NewRouter()
 		CookieRoutes(r, nil, unlaunchableSetupService(t), nil, nil)
 		req := httptest.NewRequest(http.MethodPost, path, nil)

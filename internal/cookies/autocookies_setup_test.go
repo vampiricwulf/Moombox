@@ -2,6 +2,8 @@ package cookies
 
 import (
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,15 +30,24 @@ import (
 //   - drop the check -> err is nil (or a browser error) and the service claims
 //     the setup slot for a platform no finish branch handles.
 //   - check AFTER the lock, the stopped gate or the slot claim -> the stopped
-//     subtest at the end fails: a wrong value is wrong whatever state the
+//     assertion at the end fails: a wrong value is wrong whatever state the
 //     service is in, and a claim taken for an input that was never going to
 //     work is a claim the caller with a usable one waits behind.
+//   - check relocated BELOW the browser resolution or the launch -> the
+//     resolution counter is 1 and the profile dir exists. The five value rows
+//     cannot see that relocation on their own (the launcher is made to fail, so
+//     the sentinel still comes back), which is why the three state assertions
+//     exist rather than more values.
 //   - accept case-insensitively or trim -> the "YouTube" and "youtube " rows
 //     fail; both would reach the finish branches, which compare the literal.
 //   - reject "" -> TestStartSetupTreatsAnAbsentPlatformAsYouTube fails; an
 //     absent field is not a wrong one.
 func TestStartSetupRejectsAnUnknownPlatform(t *testing.T) {
-	s := NewAutoCookieService(t.TempDir(), filepath.Join(t.TempDir(), "cookies.txt"),
+	// A profile dir that does NOT exist yet. StartSetup's os.MkdirAll runs
+	// between the slot claim and the launch, so its absence afterwards is a
+	// state-level statement that neither ever happened.
+	profileDir := filepath.Join(t.TempDir(), "profile")
+	s := NewAutoCookieService(profileDir, filepath.Join(t.TempDir(), "cookies.txt"),
 		NewCookieJar(), nopAutoCookieLogger{})
 
 	// Browser guard, not decoration: if the validation regresses, StartSetup
@@ -44,8 +55,19 @@ func TestStartSetupRejectsAnUnknownPlatform(t *testing.T) {
 	// installed OPENS ONE from this test. ConfiguredBrowserOverride is the
 	// exported seam resolvedBrowser consults first, so a path inside a fresh
 	// temp dir substitutes a browser that provably cannot launch.
+	//
+	// It is also the COUNTER. resolvedBrowser is the only way this service can
+	// name a browser and it runs immediately before startChromiumSetup /
+	// startFirefoxSetup, the only two calls that open a window — so one
+	// consultation is what every launch is preceded by, and zero consultations
+	// is the closest this package can come to "the launcher was never called"
+	// without a seam inside the launchers themselves.
 	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser.exe")
-	s.ConfiguredBrowserOverride = func() (string, string) { return unlaunchable, "chrome" }
+	resolutions := 0
+	s.ConfiguredBrowserOverride = func() (string, string) {
+		resolutions++
+		return unlaunchable, "chrome"
+	}
 
 	for _, p := range []string{"mastodon", "YouTube", "youtube ", "../youtube", "kick"} {
 		err := s.StartSetup(p)
@@ -60,12 +82,32 @@ func TestStartSetupRejectsAnUnknownPlatform(t *testing.T) {
 		}
 	}
 
+	// THE ORDER, from state rather than from one carefully chosen service
+	// state. Each of the three names a different waypoint of StartSetup, and
+	// the rows above cannot see any of them: ConfiguredBrowserOverride makes
+	// the launcher fail, so a check relocated BELOW the launch still answers
+	// ErrUnsupportedPlatform and every row stays green.
+	if resolutions != 0 {
+		t.Errorf("a rejected platform resolved a browser %d time(s) — the rule ran below "+
+			"resolvedBrowser, which is immediately before the launch, so on a host with a real "+
+			"browser installed a wrong value opens a window before it is refused", resolutions)
+	}
+	if _, err := os.Stat(profileDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the browser profile dir exists after a rejected platform (stat err = %v) — "+
+			"StartSetup's MkdirAll sits between the slot claim and the launch, so the rule ran "+
+			"below the claim", err)
+	}
 	s.mu.Lock()
 	claimed := s.setupClaimed
+	target := s.targetPlatform
 	s.mu.Unlock()
 	if claimed {
 		t.Error("the setup slot was claimed for a rejected platform — validate before the claim, " +
 			"or a wrong input locks out the right one")
+	}
+	if target != "" {
+		t.Errorf("targetPlatform = %q after a rejected platform — the rule ran after the slot was "+
+			"populated, which is after the browser was prepared", target)
 	}
 
 	// The ORDER, made observable: a stopped service is the one state this

@@ -291,14 +291,19 @@ func jsonErrorSized(w http.ResponseWriter, msg string, code int) {
 // requireLoopbackForBrowserSetup refuses an /auto-setup/* request that did not
 // come from the host, and reports whether it did so.
 //
-// These three endpoints START, FINISH and CANCEL A HEADED BROWSER WINDOW ON THE
-// HOST'S SCREEN. On a network_access=lan install there is no authentication at
-// all, so before this any LAN device could open one on a screen its user cannot
-// see, bounded only by the API rate limiter — and the only thing standing in
-// the way was reloginPromptTarget, a CLIENT-side predicate in utils.js whose
-// own comment said so. The remedy that works from anywhere is the paste import
-// (POST /api/cookies/import), which stays ungated by the Arc 11 ruling for
-// exactly the deployment this one refuses — so the refusal names it.
+// Three of the four endpoints it guards START, FINISH and CANCEL A HEADED
+// BROWSER WINDOW ON THE HOST'S SCREEN. On a network_access=lan install there is
+// no authentication at all, so before this any LAN device could open one on a
+// screen its user cannot see, bounded only by the API rate limiter — and the
+// only thing standing in the way was reloginPromptTarget, a CLIENT-side
+// predicate in utils.js whose own comment said so. The remedy that works from
+// anywhere is the paste import (POST /api/cookies/import), which stays ungated
+// by the Arc 11 ruling for exactly the deployment this one refuses — so the
+// refusal names it.
+//
+// The fourth is /auto-setup/abandon, which opens nothing and is guarded for the
+// opposite reason: it RELEASES the setup slot, so a LAN POST could destroy the
+// host's in-flight sign-in. Its handler comment carries that case in full.
 //
 // The SHAPE is the first-run wizard's gate (an inline web.IsLoopbackRequest
 // answered before anything else runs, including the service guard). The STATUS
@@ -501,7 +506,7 @@ var cookieImportOnlyKeys = map[string]bool{"youtubeImport": true, "twitchImport"
 
 // CookieRoutes registers cookie-related API routes. The optional rate
 // limiter wraps the headless-browser endpoints (/auto-refresh and the
-// auto-setup start/finish/cancel trio) so a buggy or hostile client
+// auto-setup start/finish/cancel/abandon quartet) so a buggy or hostile client
 // can't trigger a flurry of browser process launches — an expensive
 // operation per audit reports/web.md S-7.
 func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter) {
@@ -1032,9 +1037,31 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	// Answers a missing setup exactly as /cancel and /finish do; the beacon
 	// cannot read any of it, but a 404 must not read as a server fault to
 	// anything that can.
+	//
+	// LOOPBACK-GATED with the other three, and the reasoning is the inverse of
+	// theirs: this one opens nothing, so the owner's sentence did not name it —
+	// but what it CLOSES is the exposure. Where setupBrowserGone cannot answer
+	// (a failed job creation or assign on either OS, a Linux group that could
+	// not be adopted, an unreadable /proc, darwin, the fallback build)
+	// AbandonSetup releases, which means cleanupLocked: SetupInProgress goes
+	// false, the host's own finish then answers ErrNoSetupInProgress, the
+	// sign-in the operator just completed is discarded and the window is left
+	// orphaned. One unauthenticated LAN POST, on a lan install with no auth at
+	// all — the same family as the row the trio's gate closes.
+	//
+	// It costs the beacon nothing. sendBeacon fires only from a tab whose
+	// _cookieSetupActive is set (settings.js, setup.js), and only a SUCCESSFUL
+	// /auto-setup/start sets it — so a page with a setup to abandon is, since
+	// that endpoint was gated, a loopback page by construction, on Linux and in
+	// Docker as much as on Windows. A LAN beacon has nothing of its own to
+	// release; the only slot it can reach is someone else's.
 	heavy.Post("/api/cookies/auto-setup/abandon", func(rw http.ResponseWriter, req *http.Request) {
+		if !requireLoopbackForBrowserSetup(rw, req) {
+			return
+		}
+
 		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			jsonErrorSized(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -1042,13 +1069,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		if err != nil {
 			switch {
 			case errors.Is(err, cookies.ErrNoSetupInProgress):
-				jsonError(rw, err.Error(), http.StatusNotFound)
+				jsonErrorSized(rw, err.Error(), http.StatusNotFound)
 			default:
-				jsonError(rw, "failed to release setup", http.StatusInternalServerError)
+				jsonErrorSized(rw, "failed to release setup", http.StatusInternalServerError)
 			}
 			return
 		}
-		jsonResponse(rw, map[string]any{"success": true, "released": released})
+		jsonResponseSized(rw, map[string]any{"success": true, "released": released})
 	})
 
 	// POST /api/auto-cookies/validate-browser-path validates a user-specified

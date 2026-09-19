@@ -386,8 +386,8 @@ func TestImportPanelUploadsTheChosenFileAsMultipart(t *testing.T) {
 //
 //   - drop the hostname test: a phone or a LAN laptop is sent to a wizard that
 //     opens a login window on the HOST's screen. The server refuses that client
-//     now (requireLoopbackForBrowserSetup covers the cookie setup trio as well
-//     as /api/setup/complete), so the cost is no longer a window on someone
+//     now (requireLoopbackForBrowserSetup covers every /auto-setup/ endpoint
+//     as well as /api/setup/complete), so the cost is no longer a window on someone
 //     else's screen — it is a viewer sent to the one control they cannot use,
 //     who gets a 403 where this row would have offered the import instead.
 //   - drop the availableBrowsers test: a container operator sitting at the host
@@ -434,7 +434,7 @@ func TestReloginPromptTargetsTheImportUnlessTheWizardCanActuallyHelp(t *testing.
 // predicate that was lifted out of reloginPromptTarget so the Settings panel's
 // two "Set up" buttons could ask the same question.
 //
-// It is ADVISORY. Since the auto-setup trio became loopback-gated
+// It is ADVISORY. Since the auto-setup endpoints became loopback-gated
 // (requireLoopbackForBrowserSetup, internal/web/routes/cookies.go) the server
 // refuses a remote click whatever this answers; the predicate exists so the UI
 // can say so BEFORE the click instead of surfacing a 403 afterwards. That is
