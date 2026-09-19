@@ -702,10 +702,8 @@ const cookieLoadErrorUnknownCause = "the file could not be read"
 // therefore renders cookieLoadErrorUnknownCause, which still names the file.
 func cookieLoadErrorSentence(filePath string, err error) string {
 	op, cause := "open", cookieLoadErrorUnknownCause
-	var pathErr *fs.PathError
-	if errors.As(err, &pathErr) {
-		var errno syscall.Errno
-		if errors.As(pathErr.Err, &errno) {
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+		if errno, ok := errors.AsType[syscall.Errno](pathErr.Err); ok {
 			if pathErr.Op != "" {
 				op = pathErr.Op
 			}

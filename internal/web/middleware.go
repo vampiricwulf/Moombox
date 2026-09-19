@@ -603,8 +603,8 @@ func EffectiveClientIP(store *config.Store, r *http.Request) string {
 		return direct
 	}
 	parts := strings.Split(xff, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		hop := canonicalizeForwardedIP(parts[i])
+	for _, part := range slices.Backward(parts) {
+		hop := canonicalizeForwardedIP(part)
 		if !proxies.contains(hop) {
 			// First hop the chain didn't vouch for. An unparseable value is
 			// returned as-is on purpose rather than falling back to the

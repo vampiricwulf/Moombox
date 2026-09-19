@@ -1396,10 +1396,7 @@ func chatJSONLooksComplete(f *os.File, size int64) bool {
 	if size <= 0 {
 		return false
 	}
-	n := int64(chatJSONWindow)
-	if size < n {
-		n = size
-	}
+	n := min(int64(chatJSONWindow), size)
 	head := make([]byte, n)
 	if _, err := f.ReadAt(head, 0); err != nil {
 		return false

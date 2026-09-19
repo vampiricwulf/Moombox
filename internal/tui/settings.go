@@ -579,7 +579,7 @@ func (m *SettingsModel) applyValues() {
 	// entry, so without this gate one typo makes the whole save fail while
 	// saveAndClose still reports "Saved" and every other change in that save
 	// is lost. Mirrors validateConfigUpdates' web-side field error.
-	for _, p := range strings.Split(m.values["trusted_proxies"], ",") {
+	for p := range strings.SplitSeq(m.values["trusted_proxies"], ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
@@ -600,7 +600,7 @@ func (m *SettingsModel) applyValues() {
 
 	// Validate probe_targets entries. Same rationale as trusted_proxies above:
 	// config.Validate refuses an unparseable host:port, so gate it here too.
-	for _, p := range strings.Split(m.values["probe_targets"], ",") {
+	for p := range strings.SplitSeq(m.values["probe_targets"], ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
@@ -766,14 +766,14 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Network.TLSKeyPath = m.values["tls_key_path"]
 	m.cfg.Network.TrustForwardedProto = m.values["trust_forwarded_proto"] == "Yes"
 	proxies := []string(nil)
-	for _, p := range strings.Split(m.values["trusted_proxies"], ",") {
+	for p := range strings.SplitSeq(m.values["trusted_proxies"], ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			proxies = append(proxies, p)
 		}
 	}
 	m.cfg.Network.TrustedProxies = proxies
 	targets := []string(nil)
-	for _, p := range strings.Split(m.values["probe_targets"], ",") {
+	for p := range strings.SplitSeq(m.values["probe_targets"], ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			targets = append(targets, p)
 		}

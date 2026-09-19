@@ -174,10 +174,7 @@ func (d *SegmentDownloader) saveResume() {
 	// sidecar in production (sweep-2, Task 4 rounds). LastSeq stays 0 there,
 	// which loadResume accepts alongside a non-zero BytesWritten, and Start's
 	// direct path reads the offset, not the sequence.
-	lastSeq := seq - 1
-	if lastSeq < 0 {
-		lastSeq = 0
-	}
+	lastSeq := max(seq-1, 0)
 	state := ResumeState{
 		LastSeq:      lastSeq,
 		BytesWritten: written,

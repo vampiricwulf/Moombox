@@ -694,8 +694,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		// error, or the watch-page parse, denied VISIONOS and ANDROID_VR their
 		// chance to answer at all; the watch-page fallback below still applies
 		// when nothing else produces anything.
-		var mm *VideoIDMismatchError
-		if errors.As(err, &mm) {
+		if mm, ok := errors.AsType[*VideoIDMismatchError](err); ok {
 			// A substitution has its own line because it names the video
 			// YouTube served instead — upstream's own warning does
 			// (_video.py:3122-3123, :3182-3184), and the generic line below

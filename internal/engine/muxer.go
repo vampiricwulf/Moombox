@@ -94,9 +94,9 @@ func ffmpegPathArg(p string) string {
 	if len(utf16.Encode([]rune(abs))) < 260 {
 		return p
 	}
-	if strings.HasPrefix(abs, `\\`) {
+	if rest, ok := strings.CutPrefix(abs, `\\`); ok {
 		// A UNC path takes the \\?\UNC\ form, not \\?\\\server.
-		return `\\?\UNC\` + strings.TrimPrefix(abs, `\\`)
+		return `\\?\UNC\` + rest
 	}
 	return `\\?\` + abs
 }

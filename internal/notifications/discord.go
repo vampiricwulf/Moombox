@@ -251,8 +251,7 @@ func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet stri
 		// reaches any log line or HTTP response body (the manager's async
 		// failure log, SendTest's route response, retry-loop wrap all flow
 		// through here).
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			return 0, "", "", fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
 		}
 		return 0, "", "", err

@@ -31,7 +31,7 @@ func ScanBalancedJSONObject(s []byte) ([]byte, bool) {
 	depth := 0
 	var quote byte
 	escaped := false
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if quote != 0 {
 			switch {

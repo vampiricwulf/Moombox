@@ -63,10 +63,9 @@ func classifyProbeErr(err error) probeErrClass {
 	}
 
 	// net.Error is an interface; *net.OpError and *net.DNSError both implement
-	// it, so this single errors.As covers dial / timeout / DNS / connection
+	// it, so this single errors.AsType covers dial / timeout / DNS / connection
 	// failures without needing separate concrete-type checks.
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return classNetwork
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {

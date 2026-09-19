@@ -445,8 +445,7 @@ const exitCodeRebootRequired = 3010
 // isRebootRequired returns true if the error is an *exec.ExitError
 // with exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED).
 func isRebootRequired(err error) bool {
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return exitErr.ExitCode() == exitCodeRebootRequired
 	}
 	return false
