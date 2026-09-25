@@ -36,14 +36,23 @@ type jobWithStaging struct {
 	*database.Job
 	HasStaging  bool `json:"hasStaging"`
 	HasSegments bool `json:"hasSegments"`
+	// Asides and KeptChatSidecar describe what a preserved staging directory
+	// is still holding — the recordings the engine set aside rather than
+	// truncated, and the chat capture keepOnlyChatCapture kept. Never null:
+	// the details dialog reads .length off this directly.
+	Asides          []worker.Aside `json:"asides"`
+	KeptChatSidecar bool           `json:"keptChatSidecar"`
 }
 
 // enrichJob adds computed staging fields to a job response.
 func enrichJob(job *database.Job, stagingBase string) jobWithStaging {
+	report := worker.ScanAsides(stagingBase, job.ID)
 	return jobWithStaging{
-		Job:         job,
-		HasStaging:  worker.HasStagingFiles(stagingBase, job.ID),
-		HasSegments: worker.HasSegmentFiles(stagingBase, job.ID),
+		Job:             job,
+		HasStaging:      worker.HasStagingFiles(stagingBase, job.ID),
+		HasSegments:     worker.HasSegmentFiles(stagingBase, job.ID),
+		Asides:          report.Groups,
+		KeptChatSidecar: report.KeptChatSidecar,
 	}
 }
 
@@ -1096,7 +1105,64 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 		if w != nil {
 			if err := w.MuxJob(jobID); err != nil {
-				jsonError(rw, err.Error(), http.StatusInternalServerError)
+				// ErrStagingBusy is a conflict, not a fault: a set-aside
+				// recovery holds this job's staging, and the operator can
+				// simply try again in a moment. Error→status mapping only —
+				// the handler's gates above (Error/Cancelled and
+				// HasSegmentFiles) are unchanged.
+				status := http.StatusInternalServerError
+				if errors.Is(err, worker.ErrStagingBusy) {
+					status = http.StatusConflict
+				}
+				jsonError(rw, err.Error(), status)
+				return
+			}
+		}
+
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/jobs/:id/recover-asides — mux the recordings the engine set
+	// aside into their own files beside the archive.
+	//
+	// Its own verb, registered exactly as /mux is (no loopback gate, no rate
+	// limiter). /mux means "mux the recording" and its HasSegmentFiles gate is
+	// what makes that true; an aside overlaps the recording from sequence 0
+	// and can only ever be a sibling, so widening that gate would change what
+	// the Mux button means (spec §5).
+	r.Post("/api/jobs/{id}/recover-asides", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+		if worker.IsActiveJobStatus(job.Status) {
+			jsonError(rw, "Job is active; set-aside recovery would race the download", http.StatusConflict)
+			return
+		}
+
+		var stagingBase string
+		store.Read(func(c *config.MoomboxConfig) {
+			stagingBase = c.Paths.EffectiveStagingDir()
+		})
+		if len(worker.ScanAsides(stagingBase, jobID).Groups) == 0 {
+			jsonError(rw, "No set-aside recordings in staging", http.StatusConflict)
+			return
+		}
+
+		if w != nil {
+			if err := w.RecoverAsides(jobID); err != nil {
+				// The worker re-checks both preconditions (it is also reached
+				// from the TUI) and adds the in-flight claim this layer cannot
+				// see. All three refusals are 409; anything else is ours.
+				status := http.StatusInternalServerError
+				if errors.Is(err, worker.ErrRecoveryJobActive) ||
+					errors.Is(err, worker.ErrStagingBusy) ||
+					errors.Is(err, worker.ErrNoAsides) {
+					status = http.StatusConflict
+				}
+				jsonError(rw, err.Error(), status)
 				return
 			}
 		}

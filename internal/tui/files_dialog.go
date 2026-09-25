@@ -22,6 +22,11 @@ type OrphanedFileEntry struct {
 	JobID     string
 	JobTitle  string
 	JobStatus string
+	// Asides names the set-aside recordings a staging entry still holds
+	// (worker.OrphanedEntry.Asides). The sweep has sent them since sweep-2;
+	// without this field the terminal offered captured footage as if it were
+	// scratch space.
+	Asides []string
 }
 
 // fileItem wraps OrphanedFileEntry as a list.Item.
@@ -132,6 +137,13 @@ func (d fileDelegate) renderFile(w io.Writer, m list.Model, index int, f Orphane
 	sizeStr := formatFileSize(f.Size)
 	typeTag := fmt.Sprintf("%-9s", typeStr)
 	suffix := " (" + sizeStr + ")"
+	if n := len(f.Asides); n > 0 {
+		word := "asides"
+		if n == 1 {
+			word = "aside"
+		}
+		suffix = fmt.Sprintf(" (%s, %d %s)", sizeStr, n, word)
+	}
 
 	// Truncate the variable-width path to fit (truncate plain text BEFORE
 	// assembling with styled type badge — truncateString uses runewidth

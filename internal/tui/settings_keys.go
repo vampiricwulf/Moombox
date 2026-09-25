@@ -138,6 +138,17 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.toggleField(field)
 		case fieldCycle:
 			m.cycleFieldReverse(field)
+		case fieldNumber:
+			// A number row that declares options is a picker: the arrows step
+			// the presets, typing still enters anything else. The text input
+			// has to follow, or the next keystroke syncs its stale text back
+			// over the value we just set.
+			if len(field.options) > 0 {
+				cycleNumberPreset(m.values, field.key, field.options, -1)
+				m.recheckDirty()
+				m.status = saveIdle
+				m.updateTextInputForField()
+			}
 		}
 		return ""
 	case keyRight:
@@ -146,6 +157,13 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.toggleField(field)
 		case fieldCycle:
 			m.cycleFieldForward(field)
+		case fieldNumber:
+			if len(field.options) > 0 {
+				cycleNumberPreset(m.values, field.key, field.options, 1)
+				m.recheckDirty()
+				m.status = saveIdle
+				m.updateTextInputForField()
+			}
 		}
 		return ""
 	case "shift+left":
@@ -428,9 +446,23 @@ func (m *SettingsModel) ensureFieldVisible() {
 func (m *SettingsModel) settingsContentHeight() int {
 	h := max(m.height-2, 10) // matches View()'s box height
 	buttonLine := 1
+	// renderFields emits a SECOND line under every field that carries a
+	// previewFn, so a window measured in field units overruns the box by the
+	// number of preview rows the section can show. Reserve them here rather
+	// than clipping inside renderFields: a clip would draw fewer fields than
+	// ensureFieldVisible budgeted for, and the focused row at the foot of the
+	// window would simply vanish. The count is the section's previewFn fields,
+	// not the ones currently rendering a non-empty preview, so the window does
+	// not resize under the operator as they type.
+	previewRows := 0
+	for i := range sections[m.sectionIndex].fields {
+		if sections[m.sectionIndex].fields[i].previewFn != nil {
+			previewRows++
+		}
+	}
 	if sections[m.sectionIndex].name == "Network" {
 		// Network reserves 4 extra lines for the compact security block.
-		return max(h-12-buttonLine, 1)
+		return max(h-12-buttonLine-previewRows, 1)
 	}
-	return max(h-8-buttonLine, 1)
+	return max(h-8-buttonLine-previewRows, 1)
 }

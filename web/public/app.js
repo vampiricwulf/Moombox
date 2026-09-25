@@ -2759,6 +2759,35 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * Start set-aside recovery for a job. Returns true when the server accepted
+   * it. Its own verb, not a Mux: /mux means "mux the recording" and refuses a
+   * staging directory that holds nothing but preserved footage.
+   */
+  async recoverAsides(jobId) {
+    const id = jobId || this.selectedJobId;
+    if (!id || this._jobActionsInFlight.has(id)) return false;
+
+    this._jobActionsInFlight.add(id);
+    try {
+      const response = await fetch(`/api/jobs/${id}/recover-asides`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        this.showToast("Recovery started", "success");
+        return true;
+      }
+      const data = await response.json().catch(() => ({ error: response.statusText }));
+      this.showToast(data.error || "Failed to recover set-aside recordings", "danger");
+      return false;
+    } catch (e) {
+      this.showToast("Failed to recover set-aside recordings: " + e.message, "danger");
+      return false;
+    } finally {
+      this._jobActionsInFlight.delete(id);
+    }
+  }
+
   async deleteJob(jobId) {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;

@@ -80,6 +80,40 @@ var restartRequiredKeys = map[string]bool{
 	"use_sidecar":           true,
 }
 
+// resolutionPresets are the max_video_resolution values the arrow keys step
+// through on the Downloader section's Max resolution row, in ascending numeric
+// order with the unbounded sentinel first. The row is still a NUMBER row, so
+// anything off this ladder can be typed and is kept — the presets are a
+// shortcut, not a constraint. Kept in step with RESOLUTION_PRESETS in
+// web/public/modules/settings.js.
+var resolutionPresets = []string{"0", "480", "720", "1080", "1440", "2160", "4320"}
+
+// resolutionPreview names the preset a stored cap corresponds to, on the dim
+// line under the row. An empty or unparseable value previews nothing (the
+// operator is mid-edit); a parseable value off the ladder previews as Custom,
+// so an accidental 12800 is visible as one.
+func resolutionPreview(value string) string {
+	v := strings.TrimSpace(value)
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return ""
+	}
+	switch n {
+	case 0:
+		// Byte-identical to the Web option label in
+		// web/public/modules/settings.js / index.html.
+		return "Unbounded — always the largest"
+	case 480, 720, 1080, 1440:
+		return strconv.Itoa(n) + "p"
+	case 2160:
+		return "4K (2160)"
+	case 4320:
+		return "8K (4320)"
+	default:
+		return "Custom: " + strconv.Itoa(n)
+	}
+}
+
 var sections = []settingsSection{
 	{
 		name: "Network",
@@ -136,7 +170,7 @@ var sections = []settingsSection{
 					return templatePreview(value)
 				},
 			},
-			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels (e.g. 1080, 2160)", nil},
+			{"max_video_resolution", "Max resolution", fieldNumber, resolutionPresets, "shorter edge in pixels; 0 = unbounded (e.g. 1080, 2160); ←/→ step the presets", resolutionPreview},
 			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "2-4 recommended, higher uses more CPU/network", nil},
 			{"segment_workers", "Segment workers", fieldNumber, nil, "segments fetched at once within one download, not the number of concurrent downloads (default: 12, min 1, no max; above 16 raises bot-detection risk)", nil},
 			{"reorder_buffer_mb", "Reorder buffer per job", fieldNumber, nil, "MB of out-of-order segments one download may hold in RAM; 0 = unbounded (default: 1024; 256 on arm64)", nil},
@@ -649,7 +683,7 @@ func (m *SettingsModel) applyValues() {
 		{"log_max_files", "Max log files must be 1-100", 1, 100},
 		{"archive_window_days", "Archive window must be 1-3650 days", 1, 3650},
 		{"archive_slots", "Archive slots must be 1-100", 1, 100},
-		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
+		{"max_video_resolution", "Max resolution must be at least 0 (0 = unbounded)", 0, math.MaxInt},
 		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
 		{"segment_workers", "Segment workers must be at least 1", 1, math.MaxInt},
 		{"reorder_buffer_mb", "Reorder buffer must be >= 0 MB (0 = unbounded)", 0, math.MaxInt},

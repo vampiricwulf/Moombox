@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 var codecRegex = regexp.MustCompile(`codecs="?([^",]+)`)
@@ -55,6 +57,15 @@ func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fp
 	Debug(msg string, args ...any)
 }) SelectedFormats {
 	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, logger)
+}
+
+// isSelectableVideo reports whether a format is a video rendition the selector
+// can actually download. It is the single definition the cap pre-pass and the
+// selection loop below both use: two copies of this test could drift, and the
+// symptom would be a cap resolved over a different set than the one the gate
+// filters — silent, and wrong only for some playlists.
+func isSelectableVideo(f *Format) bool {
+	return strings.Contains(f.MimeType, "video") && f.URL != ""
 }
 
 // audioTrackScore ranks one audio format's TRACK against the others. Ported
@@ -139,19 +150,33 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 		}
 	}
 
+	// Resolve the resolution cap ONCE, over the video formats that are
+	// actually downloadable (ruling R1). The cap compares the SHORT edge, the
+	// largest size at or below it wins, and when nothing is at or below it the
+	// closest size ABOVE it is chosen — the cap is a preference among the
+	// qualities YouTube offered, never a filter that can leave a job with no
+	// video at all. `maxResolution == 0` is unbounded.
+	videoCands := make([]utils.Cand, 0, len(formats))
+	for i := range formats {
+		f := &formats[i]
+		if !isSelectableVideo(f) {
+			continue
+		}
+		w, h := f.dims()
+		videoCands = append(videoCands, utils.Cand{Width: w, Height: h})
+	}
+	capSize, haveCapSize := utils.SelectByCap(maxResolution, videoCands)
+
 	for i := range formats {
 		f := &formats[i]
 		mimeType := f.MimeType
 
 		if strings.Contains(mimeType, "video") {
-			if f.URL == "" {
+			if !isSelectableVideo(f) || !haveCapSize || f.CapDimension() != capSize {
 				continue
 			}
 
 			maxDim := f.MaxDimension()
-			if maxDim > maxResolution {
-				continue
-			}
 
 			if bestVideo == nil {
 				bestVideo = f

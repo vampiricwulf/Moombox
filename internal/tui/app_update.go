@@ -1367,7 +1367,11 @@ func (a *App) handleTrimsChanged(job *database.Job) {
 }
 
 func (a *App) updateSelectedJob() {
-	a.details.SetJob(a.taskList.SelectedJob())
+	job := a.taskList.SelectedJob()
+	a.details.SetJob(job)
+	// After SetJob: it clears the previous job's summary on a switch, and
+	// SetAsides is a no-op when nothing changed.
+	a.details.SetAsides(a.asidesFor(job))
 }
 
 // routeComponentMsg forwards tea.Msg to the active dialog's embedded components
