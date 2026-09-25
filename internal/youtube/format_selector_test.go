@@ -14,8 +14,9 @@ func TestSelectBestFormats(t *testing.T) {
 		{Itag: 251, MimeType: "audio/webm; codecs=\"opus\"", Bitrate: 160000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a2"},
 	}
 
-	// max_video_resolution=1920 allows up to 1080p (max dimension is 1920)
-	result := SelectBestFormats(formats, 1920, true)
+	// max_video_resolution=1080: the cap is the SHORT edge now, so 1080
+	// admits every 1920x1080 rendition here (it used to need 1920).
+	result := SelectBestFormats(formats, 1080, true)
 
 	if result.Video == nil {
 		t.Fatal("expected video format")
@@ -41,8 +42,9 @@ func TestSelectBestFormatsResolutionLimit(t *testing.T) {
 		{Itag: 135, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 1500000, Width: new(854), Height: new(480), Fps: new(30), URL: "https://example.com/v3"},
 	}
 
-	// max dimension 1280 allows up to 720p
-	result := SelectBestFormats(formats, 1280, true)
+	// The cap is the SHORT edge (R1), so 720 admits 1280x720 and rejects
+	// 1920x1080. Before this arc the same intent was written as 1280.
+	result := SelectBestFormats(formats, 720, true)
 	if result.Video == nil {
 		t.Fatal("expected video format")
 	}
@@ -345,5 +347,86 @@ func TestSelectBestAudioPrefersTheOriginalNonDRCTrack(t *testing.T) {
 	if audioTrackScore(&def) <= audioTrackScore(&plain) {
 		t.Errorf("YouTube's default track scored %d, unlabelled scored %d — the default must rank higher",
 			audioTrackScore(&def), audioTrackScore(&plain))
+	}
+}
+
+// TestSelectBestFormatsCapIsTheShortEdge is ruling R1 at the YouTube format
+// selector. Before this arc the gate compared max(width, height), so the
+// shipped default of 2160 REJECTED every 3840x2160 format — the key that names
+// 4K excluded it — and a cap with nothing under it returned Video == nil.
+//
+// Mutants:
+//   - long edge restored: "4K under the default cap" picks itag 137 (1080p)
+//     and "portrait 4K" picks nothing.
+//   - closest-above replaced by largest: "nothing at or below the cap" picks
+//     itag 401 (2160p) instead of itag 271 (1440p).
+//   - closest-above dropped entirely (nil restored): the same row fatals on a
+//     nil Video.
+func TestSelectBestFormatsCapIsTheShortEdge(t *testing.T) {
+	ladder := []Format{
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/1080"},
+		{Itag: 271, MimeType: "video/webm; codecs=\"vp9\"", Bitrate: 9000000, Width: new(2560), Height: new(1440), Fps: new(30), URL: "https://example.com/1440"},
+		{Itag: 401, MimeType: "video/mp4; codecs=\"av01.0.12M.08\"", Bitrate: 18000000, Width: new(3840), Height: new(2160), Fps: new(30), URL: "https://example.com/2160"},
+	}
+
+	t.Run("4K under the default cap", func(t *testing.T) {
+		got := SelectBestFormats(ladder, 2160, true)
+		if got.Video == nil {
+			t.Fatal("no video selected at max_video_resolution=2160 — the 3840x2160 format is 2160 on its SHORT edge and must be admitted")
+		}
+		if got.Video.Itag != 401 {
+			t.Errorf("selected itag %d at cap 2160, want 401 (3840x2160) — the cap compares the short edge", got.Video.Itag)
+		}
+	})
+
+	t.Run("portrait 4K under the default cap", func(t *testing.T) {
+		portrait := []Format{
+			{Itag: 400, MimeType: "video/mp4; codecs=\"av01.0.12M.08\"", Bitrate: 18000000, Width: new(2160), Height: new(3840), Fps: new(30), URL: "https://example.com/portrait"},
+		}
+		got := SelectBestFormats(portrait, 2160, true)
+		if got.Video == nil {
+			t.Fatal("no video selected for a 2160x3840 portrait source at cap 2160 — its short edge is 2160")
+		}
+		if got.Video.Itag != 400 {
+			t.Errorf("selected itag %d, want 400", got.Video.Itag)
+		}
+	})
+
+	t.Run("nothing at or below the cap picks the closest above", func(t *testing.T) {
+		got := SelectBestFormats(ladder[1:], 1080, true)
+		if got.Video == nil {
+			t.Fatal("no video selected at cap 1080 with only 1440p and 2160p on offer — the cap is a preference, never an exclusion that leaves nothing")
+		}
+		if got.Video.Itag != 271 {
+			t.Errorf("selected itag %d at cap 1080, want 271 (2560x1440) — the CLOSEST above, not the largest", got.Video.Itag)
+		}
+	})
+
+	t.Run("cap 0 is unbounded", func(t *testing.T) {
+		got := SelectBestFormats(ladder, 0, true)
+		if got.Video == nil {
+			t.Fatal("no video selected at max_video_resolution=0 — 0 means unbounded")
+		}
+		if got.Video.Itag != 401 {
+			t.Errorf("selected itag %d at cap 0, want 401 (the largest)", got.Video.Itag)
+		}
+	})
+}
+
+// TestFormatCapDimension pins the accessor the gate reads, and that the long
+// edge is still available for the tie-break inside a chosen size.
+//
+// Mutant: CapDimension delegating to MaxDimension — the first row returns 3840.
+func TestFormatCapDimension(t *testing.T) {
+	f := Format{Width: new(3840), Height: new(2160)}
+	if got := f.CapDimension(); got != 2160 {
+		t.Errorf("CapDimension() = %d for 3840x2160, want 2160", got)
+	}
+	if got := f.MaxDimension(); got != 3840 {
+		t.Errorf("MaxDimension() = %d for 3840x2160, want 3840 — the long edge is still the in-size tie-break", got)
+	}
+	heightOnly := Format{Height: new(720)}
+	if got := heightOnly.CapDimension(); got != 720 {
+		t.Errorf("CapDimension() = %d for a height-only format, want 720", got)
 	}
 }

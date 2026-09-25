@@ -292,9 +292,10 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.reorder_budget_mb"] = "reorder_budget_mb must be >= 0 MB (0 = unbounded)"
 			}
 		}
+		// 0 = unbounded (ruling R1); mirrors config.Validate's floor.
 		if v, ok := dl["max_video_resolution"].(float64); ok {
-			if v < 1 {
-				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 1"
+			if v < 0 {
+				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 0 (0 = unbounded)"
 			}
 		}
 		if v, ok := dl["maximum_timeout"].(float64); ok {
