@@ -25,41 +25,40 @@ type ChatFileLogger interface {
 // current batch.
 var ErrChatFilePartialWrite = errors.New("chat file truncated but subsequent write failed")
 
-// WriteChatFileAtomic writes data as JSON to path atomically via a .tmp
-// intermediate plus os.Rename. Calls PadMessageCountJSON on the marshaled
-// bytes so subsequent UpdateChatFileHeaderFields keeps the header byte-size
-// stable. Includes f.Sync() before rename for crash-safety.
+// WriteChatFileAtomic writes data as JSON to path through WriteFileAtomic: a
+// uniquely named temp file in the same directory, fsync, chmod 0644 and
+// ReplaceFile. Calls PadMessageCountJSON on the marshaled bytes so
+// subsequent UpdateChatFileHeaderFields keeps the header byte-size stable.
+//
+// What the shared writer changed: the temp file's NAME. This used to open a
+// fixed path + ".tmp", so two writers aiming at one chat file could interleave
+// into a single temp and rename a torn result into place; os.CreateTemp gives
+// each writer its own. Everything else is carried over unchanged and is now
+// the shared writer's to guarantee — the fsync BEFORE the rename, the Windows
+// sharing-violation retry inside ReplaceFile, and the removal of the temp on
+// every failure path (one deferred cleanup instead of four hand-written ones).
+// The fsync order and both cleanup paths are pinned by writefile_test.go's
+// TestWriteFileAtomicSyncsBeforeReplacingTarget,
+// TestWriteFileAtomicSyncFailureLeavesNoTempAndTargetUntouched and
+// TestWriteFileAtomicRenameFailureLeavesNoTempAndTargetIntact; the retry by
+// replacefile_test.go's TestReplaceFileRetriesATransientRefusalThenSucceeds.
+//
+// The encoded bytes are byte-identical to what the old writer produced —
+// MarshalIndent with a two-space indent, the padded count field, no trailing
+// newline — because AppendChatMessages parses this layout by byte offset;
+// TestWriteChatFileAtomicEncodingIsUnchanged pins it. The one deliberate
+// difference is the POSIX mode: exactly 0644 now (WriteFileAtomic chmods)
+// rather than 0644 masked by the process umask.
+//
+// AppendChatMessages and UpdateChatFileHeaderFields deliberately do NOT use
+// this path: they rewrite a live file in place and own their own durability.
 func WriteChatFileAtomic[T any](path string, data T) error {
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	jsonBytes = PadMessageCountJSON(jsonBytes)
-
-	tmpFile := path + ".tmp"
-	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("open tmp: %w", err)
-	}
-	if _, err := f.Write(jsonBytes); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
-		return fmt.Errorf("write: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
-		return fmt.Errorf("fsync: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("close: %w", err)
-	}
-	if err := ReplaceFile(tmpFile, path); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("rename: %w", err)
-	}
-	return nil
+	return WriteFileAtomic(path, jsonBytes, 0o644)
 }
 
 // AppendChatMessages appends msgs to an existing chat JSON file by locating

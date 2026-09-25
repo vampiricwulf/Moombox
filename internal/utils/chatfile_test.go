@@ -67,10 +67,18 @@ func TestWriteChatFileAtomicRoundTrip(t *testing.T) {
 		t.Errorf("roundtrip lost content: %+v", back)
 	}
 
-	// A .tmp file must not be left behind after a successful rename.
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Errorf("expected .tmp file removed, stat err=%v", err)
-	}
+	// No temp file of ANY name may survive a successful write. The old
+	// fixed-name stat is retired because the name is now unpredictable; the
+	// glob is its honest replacement on this SUCCESS path.
+	//
+	// Mutant this kills: WriteFileAtomic replacing its ReplaceFile rename with
+	// a copy — the temp then outlives a successful write and the glob finds it.
+	// It does NOT carry the deferred-cleanup mutant: deleting WriteFileAtomic's
+	// `defer … os.Remove(tmpPath)` leaves this test green, because a successful
+	// ReplaceFile consumes the temp by renaming it onto the target. That mutant
+	// belongs to TestWriteChatFileAtomicRoutesThroughTheSharedWriter, the
+	// failure-path test, which is where it was verified to fail.
+	assertNoTempSurvives(t, dir)
 }
 
 func TestAppendChatMessagesIncremental(t *testing.T) {
@@ -422,5 +430,148 @@ func TestAppendChatMessagesContentBrackets(t *testing.T) {
 	}
 	if doc.Messages[0].Text != "gg]}]" || doc.Messages[2].Text != "]}" {
 		t.Errorf("content corrupted: %+v", doc.Messages)
+	}
+}
+
+// assertNoTempSurvives fails if any *.tmp entry is left in dir. It replaces the
+// fixed-name `os.Stat(path + ".tmp")` checks the two adopting writers used to
+// carry: once a writer's temp name comes from os.CreateTemp, a stat of one
+// hard-coded name proves nothing, while the glob still proves the real
+// property — a successful write leaves the directory with the target and
+// nothing else.
+func assertNoTempSurvives(t *testing.T, dir string) {
+	t.Helper()
+	leftovers, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		t.Fatalf("glob temps in %s: %v", dir, err)
+	}
+	if len(leftovers) != 0 {
+		t.Errorf("temp files survived: %v", leftovers)
+	}
+}
+
+// TestWriteChatFileAtomicUsesAUniqueTempName pins the adopt: the chat writer
+// now goes through WriteFileAtomic, whose temp name comes from os.CreateTemp,
+// so a second writer already mid-write on the FIXED `path + ".tmp"` name can
+// no longer be clobbered. Rather than racing two writers, the property is
+// checked directly — the directory is pre-seeded with the fixed name the old
+// writer would have used, and it must come back untouched.
+//
+// Mutant this kills: restoring the local `tmpFile := path + ".tmp"` writer
+// (the pre-adopt code) truncates the seeded file and then renames it onto the
+// target, so the ReadFile below fails outright.
+func TestWriteChatFileAtomicUsesAUniqueTempName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+	fixed := path + ".tmp"
+
+	if err := os.WriteFile(fixed, []byte("another-writer-is-mid-write"), 0o644); err != nil {
+		t.Fatalf("seed fixed temp: %v", err)
+	}
+
+	doc := chatfileTestDoc{
+		Platform:     "twitch",
+		MessageCount: 1,
+		Messages:     []chatfileTestMessage{{ID: "m1", Text: "hi"}},
+	}
+	if err := WriteChatFileAtomic(path, &doc); err != nil {
+		t.Fatalf("WriteChatFileAtomic: %v", err)
+	}
+
+	got, err := os.ReadFile(fixed)
+	if err != nil {
+		t.Fatalf("the fixed .tmp name was consumed: %v", err)
+	}
+	if string(got) != "another-writer-is-mid-write" {
+		t.Errorf("fixed .tmp content: want it untouched, got %q", string(got))
+	}
+}
+
+// TestWriteChatFileAtomicRoutesThroughTheSharedWriter drives WriteFileAtomic's
+// syncFile seam from the chat writer's side: with the fsync failing, the call
+// must fail, a pre-existing target must be left exactly as it was, and no temp
+// may survive. This is the assertion that proves the delegation is real rather
+// than a copy of the same steps.
+//
+// Mutants this kills: reverting to the local writer — its own f.Sync() never
+// consults the seam, the write "succeeds", so the error assertion fails and
+// the seeded target is overwritten; dropping WriteFileAtomic's deferred
+// os.Remove(tmpPath) — the leftover *.tmp assertion fails. This failure path,
+// NOT the success-path glob in TestWriteChatFileAtomicRoundTrip, is what
+// carries that second mutant (verified at plan review: with the deferred
+// cleanup deleted this test reports `temp files survived:
+// [...\chat.json.968817497.tmp]` while the round-trip test stays green).
+func TestWriteChatFileAtomicRoutesThroughTheSharedWriter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+
+	injected := errors.New("injected sync failure")
+	orig := syncFile
+	syncFile = func(f *os.File) error { return injected }
+	t.Cleanup(func() { syncFile = orig })
+
+	doc := chatfileTestDoc{MessageCount: 1, Messages: []chatfileTestMessage{{ID: "m1", Text: "hi"}}}
+	err := WriteChatFileAtomic(path, &doc)
+	if err == nil {
+		t.Fatal("WriteChatFileAtomic: want the injected fsync failure, got nil")
+	}
+	if !errors.Is(err, injected) {
+		t.Errorf("error chain: want it to wrap %v, got %v", injected, err)
+	}
+
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read back target: %v", readErr)
+	}
+	if string(got) != "original" {
+		t.Errorf("target after a failed write: want untouched %q, got %q", "original", string(got))
+	}
+	assertNoTempSurvives(t, dir)
+}
+
+// chatGoldenPreAdopt is the EXACT file the pre-adopt WriteChatFileAtomic wrote
+// for the fixture in TestWriteChatFileAtomicEncodingIsUnchanged: MarshalIndent
+// with a two-space indent, PadMessageCountJSON widening the count field to 20
+// characters, and no trailing newline. Captured from the writer at
+// main @ ce304b09 before this task changed it.
+const chatGoldenPreAdopt = "{\n  \"platform\": \"twitch\",\n  \"messageCount\": 2                   ,\n  \"downloadedAt\": \"2026-04-24T00:00:00Z\",\n  \"messages\": [\n    {\n      \"id\": \"m1\",\n      \"text\": \"hello\"\n    },\n    {\n      \"id\": \"m2\",\n      \"text\": \"world\"\n    }\n  ]\n}"
+
+// TestWriteChatFileAtomicEncodingIsUnchanged is a REGRESSION pin, not a
+// red-first test: it is green before AND after the adopt, and that is exactly
+// its job. Every chat.json already on disk was produced by the pre-adopt
+// encoder, and AppendChatMessages / UpdateChatFileHeaderFields both parse the
+// layout by byte offsets (the 256-byte tail scan, the fixed-width count
+// field), so a single byte of drift in the encoding would break appends to
+// files written by an earlier build.
+//
+// Mutants this kills: swapping json.MarshalIndent for json.Marshal; changing
+// the indent; dropping the PadMessageCountJSON call; appending a trailing
+// newline. Verify its teeth by execution — make one of those four edits, watch
+// this test fail, revert.
+func TestWriteChatFileAtomicEncodingIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+
+	doc := chatfileTestDoc{
+		Platform:     "twitch",
+		MessageCount: 2,
+		DownloadedAt: "2026-04-24T00:00:00Z",
+		Messages: []chatfileTestMessage{
+			{ID: "m1", Text: "hello"},
+			{ID: "m2", Text: "world"},
+		},
+	}
+	if err := WriteChatFileAtomic(path, &doc); err != nil {
+		t.Fatalf("WriteChatFileAtomic: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(raw) != chatGoldenPreAdopt {
+		t.Errorf("encoding drifted.\n got: %q\nwant: %q", string(raw), chatGoldenPreAdopt)
 	}
 }
