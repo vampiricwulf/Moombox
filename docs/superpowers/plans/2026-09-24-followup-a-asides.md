@@ -2901,7 +2901,7 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
 
 One entry in `buildMenuItems()` and one `dispatchAction` case; help text, the chord hint and the action menu all derive from that entry, and `TestHelpCoversEveryChord` proves it. The structural probe pin is widened here rather than in Task 5, because that is where the new seam actually gets a menu entry behind it.
 
-**The chord letter is `A S`, by controller ruling.** This is the one place the reason is written down: the spec's §3 and §5 say `A R`, and `A R` is already **Resume Job** in `buildMenuItems` (the A-prefix letters in use at HEAD are A/Z/R/I/M/C/D/W/T/K/O, so `S` — for Set-aside — is free). Everywhere else in this plan just uses `A S`. The spec document itself is **not** edited: it stays the historical record of what was designed, and Task 8 reports the substitution to the owner.
+**The chord letter is `A S`, by controller ruling.** This is the one place the reason is written down: the spec originally said `A R` (corrected to `A S` in 6738fdd3), and `A R` is already **Resume Job** in `buildMenuItems` (the A-prefix letters in use at HEAD are A/Z/R/I/M/C/D/W/T/K/O, so `S` — for Set-aside — is free). Everywhere else in this plan just uses `A S`. The spec document itself is **not** edited: it stays the historical record of what was designed, and Task 8 reports the substitution to the owner.
 
 **Files:**
 - Modify: `internal/tui/app_actions.go`
@@ -3538,7 +3538,7 @@ Expected: six `--- PASS`. A `--- SKIP` means FFmpeg is not on this host's PATH a
 
 1. **Field gate — the first real recovery.** A set-aside recovery on a job that actually restarted mid-stream needs a real interrupted capture and cannot be manufactured here. Everything below it is pinned by fixtures.
 2. **`engine.RestartSiblingStem` does not understand a compound extension.** `RestartSiblingStem("Title.restart-1700000000.chat.json")` returns `("", false)`, because stripping one extension leaves `1700000000.chat` where the digits rule expects a stamp. This arc folds `.json` off inside `scanOutputOrphans` (Task 2) because §4 forbids Arc A touching an engine file, and that fold is safe — it runs only under the existing `isChat` branch, and an ordinary `Title.chat.json` or `Title - part1.chat.json` still returns false. **Teaching the predicate the compound extension in `internal/engine/downloader.go` is the right long-term home**; propose it as a follow-up and delete the worker-side fold when it lands.
-3. **The spec still says `A R`.** `docs/superpowers/specs/2026-09-24-post-sweep2-followups-design.md` §3 and §5 name the chord `A R`, which is Resume Job. The code, `CLAUDE.md`, `user-interfaces.md` and `architecture.md` all say `A S` per the controller's ruling; the spec is deliberately left as the historical record of what was designed.
+3. **The spec was corrected to `A S`** (6738fdd3): its §3 and §5 originally named the chord `A R`, which is Resume Job. The code, `CLAUDE.md`, `user-interfaces.md` and `architecture.md` all say `A S` per the controller's ruling; the spec is deliberately left as the historical record of what was designed.
 4. **Three readers of the active-status list.** `worker.IsActiveJobStatus` is the source; `tui.JobIsActive` is pinned against it by `cmd/moombox/active_status_parity_test.go`; the dashboard's literal in `job-details.js` is pinned only behaviourally by its jsdom test. A fourth reader, or a change to the list, needs all three touched.
 5. **`Asides` returns `(AsideReport, error)`, not the spec's `([]Aside, error)`.** The job-level chat flag rides with the groups instead of needing a second call; noted so the divergence from §3's literal wording is a recorded choice rather than a drift.
 
@@ -3571,7 +3571,7 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- docs
 
 Hand the controller: every gate's result, the five residuals from Step 6, and the decisions this arc made that the spec did not dictate —
 
-- the chord letter `A S` (controller ruling; the spec's `A R` is Resume Job);
+- the chord letter `A S` (controller ruling; `A R` is Resume Job; the spec was corrected in 6738fdd3);
 - the status code `200`, matching `/mux`, rather than `202`;
 - `web/public/index.html` untouched, because the Recover button belongs inside the rendered section that lists what it acts on;
 - `muxStagedAsides` now returning its outputs (finalize ignores them; the chat copy needs the first);
