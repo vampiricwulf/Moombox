@@ -128,6 +128,17 @@
 # backlog pacing is governed by archive_slots; this is the global ceiling.
 # num_parallel_downloads = 10
 
+# Out-of-order segment bytes ONE download may hold in RAM while its
+# head-of-order segment works through its retry ladder. 0 = unbounded.
+# Default 1024; 256 on arm64, where the cap was originally chosen.
+# reorder_buffer_mb = 1024
+
+# The same bytes, summed across EVERY download running at once. Without it,
+# reorder_buffer_mb multiplies by the number of concurrent downloads. 0 =
+# unbounded. Default 4096; 1024 on arm64. A reorder_buffer_mb above this
+# budget is clamped to it (with a warning at startup).
+# reorder_budget_mb = 4096
+
 # Download live chat alongside streams
 # download_chat = true
 

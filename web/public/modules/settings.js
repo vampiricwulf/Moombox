@@ -646,6 +646,8 @@ export class SettingsController {
     this.app.setInputValue("cfg-max-resolution", config.downloader?.max_video_resolution);
     this.app.setInputValue("cfg-parallel-downloads", config.downloader?.num_parallel_downloads);
     this.app.setInputValue("cfg-segment-workers", config.downloader?.segment_workers);
+    this.app.setInputValue("cfg-reorder-buffer-mb", config.downloader?.reorder_buffer_mb);
+    this.app.setInputValue("cfg-reorder-budget-mb", config.downloader?.reorder_budget_mb);
     // Download chat switch
     const downloadChatSwitch = document.getElementById("cfg-download-chat");
     if (downloadChatSwitch) {
@@ -826,6 +828,8 @@ export class SettingsController {
     const maxResolution = this.app.getInputNumber("cfg-max-resolution");
     const parallelDownloads = this.app.getInputNumber("cfg-parallel-downloads");
     const segmentWorkers = this.app.getInputNumber("cfg-segment-workers");
+    const reorderBufferMB = this.app.getInputNumber("cfg-reorder-buffer-mb");
+    const reorderBudgetMB = this.app.getInputNumber("cfg-reorder-budget-mb");
     const maximumTimeout = this.app.getInputNumber("cfg-maximum-timeout");
     const interruptionTimeout = this.app.getInputNumber("cfg-interruption-timeout");
     const incompleteStagingExpiry = this.app.getInputNumber("cfg-incomplete-staging-expiry");
@@ -941,6 +945,8 @@ export class SettingsController {
         max_video_resolution: maxResolution,
         num_parallel_downloads: parallelDownloads,
         segment_workers: segmentWorkers,
+        reorder_buffer_mb: reorderBufferMB,
+        reorder_budget_mb: reorderBudgetMB,
         download_chat: downloadChat,
         prefer_60fps: prefer60fps,
         maximum_timeout: maximumTimeout,
