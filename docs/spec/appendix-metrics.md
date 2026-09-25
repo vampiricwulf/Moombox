@@ -52,7 +52,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | Package | Source Lines | Src Files | Test Files | Description |
 |---------|-------------|-----------|------------|-------------|
 | tui/ | ~22,290 | 43 | 63 | Largest — 2-over-1 panel layout, overlays, chord system |
-| worker/ | ~17,290 | 38 | 53 | Download orchestration, strategies, queue, quality monitor |
+| worker/ | ~17,320 | 38 | 54 | Download orchestration, strategies, queue, quality monitor |
 | cookies/ | ~15,870 | 35 | 80 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
 | engine/ | ~8,040 | 20 | 42 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
 | web/routes/ | ~7,570 | 25 | 51 | REST handlers (jobs, config, stats, output, staging, cookies) |
@@ -62,8 +62,8 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | database/ | ~3,970 | 8 | 11 | SQLite/WAL, migrations, batch updates, pub/sub |
 | web/ | ~3,950 | 9 | 16 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
 | cipher/ | ~3,110 | 13 | 11 | YouTube signature cipher: sidecar-routed + goja fallback |
-| chat/ | ~3,020 | 3 | 16 | YouTube live chat downloader (polling + batching) |
-| utils/ | ~2,580 | 26 | 24 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap |
+| chat/ | ~3,030 | 3 | 16 | YouTube live chat downloader (polling + batching) |
+| utils/ | ~2,590 | 26 | 24 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap |
 | config/ | ~2,250 | 6 | 6 | TOML config, FlexDuration, channel terms, migrations |
 | bgutils/ | ~2,050 | 6 | 5 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja fallback) |
 | bgutils/sidecar/ | ~1,840 | 7 | 5 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
@@ -85,9 +85,9 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~8,200 lines across 22 source files (moombox entry/launcher/adapters + sign tool), plus 46 test files (~7,670 lines)
-- **internal/ packages:** ~118,840 lines across 310 source files in 30 packages
-- **Test code:** ~145,980 lines across 485 test files under `internal/`
-- **Frontend:** ~21,340 lines across 27 files (~936 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
+- **internal/ packages:** ~118,890 lines across 310 source files in 30 packages
+- **Test code:** ~146,310 lines across 486 test files under `internal/`
+- **Frontend:** ~21,340 lines across 27 files (~944 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
 

@@ -58,7 +58,7 @@ Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go
 - `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save
 - `OnGoSoftLimitChange(mb)` → `debug.SetMemoryLimit` (0 restores the boot limit)
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
-- `OnFfmpegPathChange(path)` → rebuilds the services that captured the path at construction (`TrimService`)
+- `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
 - `OnReorderBudgetChange(downloaderCfg)` → `runState.applyReorderBudget`
 
 `applyReorderBudget` (`cmd/moombox/hot_reload.go`) is the model for a process-wide value: ONE method reached from all three entry points — `initServices` at boot, this PUT callback, and the TUI's `OnSaveConfig` hot-reload block — so the number never travels through `engine.DownloaderOptions` or the worker's per-job call sites.
