@@ -72,6 +72,7 @@ func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fp
 // TIE-BREAK inside a track, never across tracks: a loudness-normalised
 // rendition is a processed copy of the same audio, so given both we archive
 // the untouched one.
+
 // isSelectableVideo reports whether a format is a video rendition the selector
 // can actually download. It is the single definition the cap pre-pass and the
 // selection loop below both use: two copies of this test could drift, and the
