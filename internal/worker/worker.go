@@ -79,6 +79,30 @@ var ErrNonActionable = errors.New("non-actionable error")
 // branch without comparing error strings.
 var ErrCancelled = errors.New("cancelled")
 
+// The three ways the off-queue staging verbs refuse. All three are the
+// caller's problem to report, never a job failure: the job's own status is
+// untouched by a refusal, and the REST layer maps each of them to 409.
+var (
+	// ErrRecoveryJobActive: the job is Downloading, Muxing, Live or Upcoming,
+	// so its staging dir is being written and its output directory is about to
+	// be.
+	ErrRecoveryJobActive = errors.New("job is active; set-aside recovery would race the download")
+	// ErrStagingBusy: another off-queue operation already holds this job's
+	// staging directory. Shared by MuxJob and RecoverAsides, because the
+	// collision is symmetric.
+	ErrStagingBusy = errors.New("another operation is already working this job's staging directory")
+	// ErrNoAsides: nothing in staging was ever set aside. Recovery is not a
+	// second Mux button, so this is a refusal rather than a no-op success.
+	ErrNoAsides = errors.New("no set-aside recordings in staging")
+)
+
+// The operations that can hold a job's staging claim. Named so a refusal can
+// say what is in the way.
+const (
+	opMux           = "mux"
+	opRecoverAsides = "set-aside recovery"
+)
+
 // heartbeatInterval is the safety-net poll interval for catching missed jobs.
 // Normal job discovery is signal-driven via NotifyNewJob. The backlog
 // scheduler reuses it as its sweep heartbeat (spec §10) — its normal path is
@@ -187,6 +211,17 @@ type DownloadWorker struct {
 	logger      logger
 	wg          sync.WaitGroup // tracks in-flight processJob goroutines
 	notifyJob   chan struct{}  // signal to re-check for new jobs (non-blocking send)
+
+	// stagingClaimMu guards stagingClaims, the per-job claim BOTH off-queue
+	// verbs take before they start: MuxJob and RecoverAsides. Each writes into
+	// one staging directory and one output directory, and each calls
+	// muxStagedAsides with its OWN asideOutputPath `used` map — so two of them
+	// running together both pick the plain <stem>.restart-<ts>.mp4 and write
+	// over each other. The value is the operation holding it, so the refusal
+	// can say which. Lazily allocated, so a zero-value worker (the tests build
+	// several) needs no constructor change.
+	stagingClaimMu sync.Mutex
+	stagingClaims  map[string]string
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
@@ -1732,11 +1767,22 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		return fmt.Errorf("no segment files found in staging")
 	}
 
+	// The same per-job staging claim RecoverAsides takes. Both verbs mux out
+	// of one directory into one output directory, and both reach
+	// muxStagedAsides with their own asideOutputPath collision map — so two of
+	// them together write the same sibling name over each other. Before the
+	// status write, so a refusal leaves the row exactly as it found it.
+	release, err := w.claimJobOperation(jobID, opMux)
+	if err != nil {
+		return err
+	}
+
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status": database.StatusMuxing,
 	})
 
 	w.wg.Go(func() {
+		defer release()
 		defer func() {
 			if r := recover(); r != nil {
 				w.logger.Error("panic in MuxJob", "jobID", jobID, "panic", fmt.Sprint(r))
@@ -1802,6 +1848,160 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		// off-queue route kept every restart-muxed job's raw recording forever
 		// (sweep-2 Task 2 review, finding 1).
 		w.cleanupStagingAfterMux(jobID, jobCtx.StagingDir)
+	})
+
+	return nil
+}
+
+// claimJobOperation takes one job's staging claim for op and returns the
+// release. It refuses with ErrStagingBusy, naming the operation in the way,
+// when somebody already holds it.
+//
+// Taken SYNCHRONOUSLY by the caller, before it spawns anything, so a refusal
+// is reported to the operator rather than discovered by two FFmpeg processes.
+// The release is always deferred by the goroutine that got it, so a panicking
+// run cannot leave a job stuck for the process's life.
+func (w *DownloadWorker) claimJobOperation(jobID, op string) (func(), error) {
+	w.stagingClaimMu.Lock()
+	defer w.stagingClaimMu.Unlock()
+	if held, busy := w.stagingClaims[jobID]; busy {
+		return nil, fmt.Errorf("%w (%s in progress)", ErrStagingBusy, held)
+	}
+	if w.stagingClaims == nil {
+		w.stagingClaims = map[string]string{}
+	}
+	w.stagingClaims[jobID] = op
+	return func() {
+		w.stagingClaimMu.Lock()
+		defer w.stagingClaimMu.Unlock()
+		delete(w.stagingClaims, jobID)
+	}, nil
+}
+
+// restoreLogRouting puts a job's per-job log routing back where cmd/moombox's
+// syncJobLogRouting would have it: tracked while non-terminal, untracked (with
+// the buffer kept) once terminal.
+//
+// The counterpart to the TrackJobForLogs RecoverAsides does on the way in.
+// That bracket exists because RouteLogToJobs scans only db.logRouted, and
+// SyncJobLogTracking deletes every terminal job from it (CORE-12) — so a
+// recovery, which runs ONLY on a terminal job and deliberately never writes a
+// status, would emit every one of its log lines into nothing. MuxJob has no
+// such problem: it flips the row to Muxing first.
+//
+// Re-reads the row rather than unconditionally untracking, so a job that was
+// resurrected while the recovery ran (a /resume, a retry) is left tracked.
+func (w *DownloadWorker) restoreLogRouting(jobID string) {
+	fresh, err := w.db.GetJob(jobID)
+	if err != nil || fresh == nil || fresh.IsTerminal() {
+		w.db.UntrackJobForLogs(jobID)
+		return
+	}
+	w.db.TrackJobForLogs(jobID)
+}
+
+// RecoverAsides muxes every recording the engine set aside for this job into
+// its own file beside the job's archive, carries the kept chat capture beside
+// the first of them, and then reclaims the staging directory — but only when
+// nothing a mux still owes is left in it (see the guard at the end of the
+// goroutine); the remaining carve-outs are cleanupStagingAfterMux's own.
+//
+// The off-queue twin of MuxJob, and deliberately NOT part of it: MuxJob means
+// "mux the recording" and is gated on HasSegmentFiles, which does not know the
+// .restart-<ts> suffix — an aside-only staging dir has no recording to mux
+// (spec §5, "recovery is its own verb"). The job's STATUS is never written
+// here either: the job finished (or failed, or was cancelled) long ago and
+// this is not its lifecycle. Progress and failures reach the operator the way
+// the aside mux always has, through the job's log lines.
+//
+// Returns one of the three typed refusals synchronously; a nil return means
+// the recovery is running.
+func (w *DownloadWorker) RecoverAsides(jobID string) error {
+	job, err := w.db.GetJob(jobID)
+	if err != nil {
+		return fmt.Errorf("look up job %s: %w", jobID, err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	if IsActiveJobStatus(job.Status) {
+		return fmt.Errorf("%w (status %s)", ErrRecoveryJobActive, job.Status)
+	}
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
+	})
+	if len(ScanAsides(stagingBase, jobID).Groups) == 0 {
+		return ErrNoAsides
+	}
+	release, err := w.claimJobOperation(jobID, opRecoverAsides)
+	if err != nil {
+		return err
+	}
+	// The job is terminal, so nothing is routing its log lines (CORE-12).
+	// Both UIs point the operator at the job's log for this run's progress, so
+	// route to it for the duration and hand it back at the end.
+	w.db.TrackJobForLogs(jobID)
+
+	w.wg.Go(func() {
+		// Declared FIRST so it runs LAST: the recover handler's own line still
+		// has to reach the job's log.
+		defer w.restoreLogRouting(jobID)
+		defer func() {
+			if r := recover(); r != nil {
+				// No status write: a panic in the recovery must not turn a
+				// Finished job into an Error one. The asides are still in
+				// staging, where the shield holds them for another attempt.
+				w.logger.Error("panic in RecoverAsides", "jobID", jobID, "panic", fmt.Sprint(r))
+			}
+		}()
+		defer release()
+
+		jobCtx := w.buildJobContext(job)
+		// The orchestrator's mux root, never context.Background(), for the
+		// reason MuxJob gives: a Stop reaches this FFmpeg instead of leaving
+		// it writing into a staging dir.
+		ctx := w.orchestrator.muxRoot()
+
+		// Same download slot a queued job takes — this starts an FFmpeg, and
+		// num_parallel_downloads exists to bound exactly that.
+		if !w.queue.AcquireDownloadSlot(ctx, jobID) {
+			w.logger.Info("RecoverAsides: shutdown while waiting for a mux slot; the recordings stay in staging", "jobID", jobID)
+			return
+		}
+		defer w.queue.ReleaseDownloadSlot(jobID)
+
+		if err := w.orchestrator.recoverAsides(ctx, jobCtx); err != nil {
+			if ctx.Err() != nil {
+				w.logger.Info("RecoverAsides: cancelled by shutdown; the recordings stay in staging", "jobID", jobID)
+				return
+			}
+			w.logger.Error("set-aside recovery did not finish; the recordings it could not mux stay in staging",
+				"jobID", jobID, "err", err)
+			return
+		}
+
+		// Every aside is out of staging now — but that is NOT enough to hand
+		// the directory to cleanupStagingAfterMux. Its four shields are:
+		// asides present (just consumed), hasUnmuxedParts (FALSE for a
+		// single-file job, because hasUnmuxedSegmentParts returns false with
+		// no seg_N dirs), IncompleteTail, and chat-incomplete. A Cancelled or
+		// Error job whose staging holds both the fresh video.mp4 and an aside
+		// — the commonest shape after a mid-stream restart, and exactly what
+		// /mux and A M exist to rescue — falls through all four to
+		// os.RemoveAll. Recovering the asides would delete the main recording.
+		//
+		// So: reclaim only when the directory holds no recognised media
+		// (discoverStagingMedia, the same discovery muxFromStaging uses) and
+		// no unmuxed part. The remaining jobNeedsStaging terms — the
+		// incomplete tail and the chat capture — are cleanupStagingAfterMux's
+		// own, and it still prunes rather than deletes for the chat one.
+		if discoverStagingMedia(jobCtx.StagingDir) == nil && !w.hasUnmuxedParts(jobID, jobCtx.StagingDir) {
+			w.cleanupStagingAfterMux(jobID, jobCtx.StagingDir)
+			return
+		}
+		w.logger.Warn("set-aside recordings recovered; staging kept: unmuxed recording present",
+			"path", jobCtx.StagingDir, "jobID", jobID)
 	})
 
 	return nil

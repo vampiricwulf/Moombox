@@ -464,12 +464,19 @@ func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool
 // RECOGNISED MEDIA; an aside-only dir is not offered the Mux action at all,
 // because HasSegmentFiles (discoverStagingMedia) does not know the suffix.
 // Either way it never fails the job, whose own recording muxed fine.
-func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase string) {
+//
+// Returns the sibling outputs it wrote, oldest recording first. Finalize
+// ignores them (its own chat, thumbnail and description handling is about the
+// ARCHIVE, not the asides); recoverAsides needs the first one, because the
+// chat capture a preserved staging dir is still holding has to land beside
+// something.
+func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase string) []string {
 	groups := groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir))
 	if len(groups) == 0 {
-		return
+		return nil
 	}
 	used := map[string]bool{}
+	var recovered []string
 	for _, g := range groups {
 		out, ok := asideOutputPath(outputDir, filenameBase, g.stamp, used)
 		if !ok {
@@ -495,6 +502,7 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		}
 		o.logger.Warn("a set-aside recording was muxed to its own file beside the archive; it overlaps the start of the main recording, so it is NOT one of the job's parts",
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
+		recovered = append(recovered, out)
 		for _, p := range g.files {
 			if err := os.Remove(p); err != nil {
 				o.logger.Warn("could not remove a recovered set-aside recording", "aside", p, "err", err, "jobID", jobCtx.Job.ID)
@@ -504,6 +512,103 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 			}
 		}
 	}
+	return recovered
+}
+
+// copyKeptChatSidecar puts the chat capture a preserved staging dir is still
+// holding beside a recovered set-aside recording, and returns where it landed
+// ("" when there was nothing to copy, or a copy of it is already in the output
+// directory).
+//
+// The destination is the recovered file's STEM plus ".chat.json", which is how
+// every other chat archive in the output directory is named
+// (copyAssets writes filenameBase+".chat.json"), so the player and the output
+// sweep recognise it without a special case.
+//
+// Only ever called for the FIRST recovered recording: a stream has one chat
+// archive, and copying it beside every sibling would multiply it by the number
+// of restarts.
+//
+// Two ways it can already be there, and they are different:
+//   - dst itself, which only a PREVIOUS RECOVERY can have written — finalize
+//     never uses the .restart-<ts> stem for an asset.
+//   - jobChatPath, the job's own <filenameBase>.chat.json, which a job that
+//     finalized before its chat was flagged incomplete really does have.
+//     Without this arm a chat-incomplete job that DID finalize ends up with
+//     two copies of the same comments under different names.
+//
+// jobChatPath may be "" for a caller that has no such path to offer.
+func copyKeptChatSidecar(stagingDir, output, jobChatPath string) (string, error) {
+	src := findKeptChatCapture(stagingDir)
+	if src == "" {
+		return "", nil
+	}
+	dst := strings.TrimSuffix(output, filepath.Ext(output)) + ".chat.json"
+	if fileExists(dst) || (jobChatPath != "" && fileExists(jobChatPath)) {
+		return "", nil
+	}
+	if err := copyFile(src, dst); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+// recoverAsides is the standalone form of the muxStagedAsides call finalize
+// makes: same sibling naming, same output directory, same best-effort
+// per-group behaviour — reached on demand for a staging dir that holds nothing
+// BUT asides, which no finalize will ever visit again.
+//
+// It is deliberately NOT a widening of the Mux action. /mux and the TUI's A M
+// mean "mux the recording", and their HasSegmentFiles gate is what makes that
+// true; an aside is footage that overlaps the recording from sequence 0 and
+// can only ever be a sibling. Recovery is its own verb (spec §5).
+//
+// A partial success is REPORTED, not swallowed: muxStagedAsides leaves a group
+// it could not read exactly where it was, the aside shield keeps the dir, and
+// the caller has to know the recovery did not finish.
+func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobContext) error {
+	// Same fresh-metadata re-resolve muxAndFinalize does: a title edited since
+	// the capture must not produce a sibling under the old name.
+	if resolved, freshJob := o.resolveFreshFilename(jobCtx); freshJob != nil {
+		jobCtx.Filename = resolved
+		jobCtx.Job = freshJob
+	}
+	// The same three lines muxAndFinalize uses to split a template that may
+	// carry a subdirectory ("${channel}/...") into a directory and a base.
+	filenameBase := jobCtx.Filename
+	outputDir := filepath.Dir(filepath.Join(jobCtx.OutputDir, filenameBase+".mp4"))
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	filenameBase = filepath.Base(filenameBase)
+
+	before := len(groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir)))
+	if before == 0 {
+		return ErrNoAsides
+	}
+	o.logger.Info("recovering set-aside recordings", "groups", before, "jobID", jobCtx.Job.ID)
+
+	recovered := o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
+	if len(recovered) > 0 {
+		// The job's own chat archive, if its finalize wrote one — the second
+		// thing copyKeptChatSidecar refuses to duplicate.
+		dst, err := copyKeptChatSidecar(jobCtx.StagingDir, recovered[0], filepath.Join(outputDir, filenameBase+".chat.json"))
+		switch {
+		case err != nil:
+			o.logger.Warn("could not copy the kept chat capture beside a recovered recording; it stays in staging",
+				"err", err, "jobID", jobCtx.Job.ID)
+		case dst != "":
+			o.logger.Info("the kept chat capture was copied beside the first recovered recording",
+				"chat", dst, "jobID", jobCtx.Job.ID)
+		}
+	}
+
+	if left := len(groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir))); left > 0 {
+		return fmt.Errorf("recovered %d of %d set-aside recordings; %d could not be muxed and stay in staging",
+			len(recovered), before, left)
+	}
+	o.logger.Info("every set-aside recording was recovered", "recovered", len(recovered), "jobID", jobCtx.Job.ID)
+	return nil
 }
 
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {

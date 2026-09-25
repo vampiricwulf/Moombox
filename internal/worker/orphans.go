@@ -80,6 +80,12 @@ var activeJobStatuses = map[database.JobStatus]bool{
 	database.StatusMuxing:      true,
 }
 
+// IsActiveJobStatus reports whether a status means the job is actively using
+// its staging and output paths. Exported so the REST layer can refuse a
+// recovery on a live job without re-listing the four statuses — the list lives
+// here, beside the deletion refusal that has always used it.
+func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] }
+
 // jobNeedsStaging reports whether a Finished job's staging directory was
 // deliberately preserved rather than cleaned up, and so must NOT be offered
 // (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
@@ -521,7 +527,18 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// archive whose stem it carries: owned while that archive is known,
 		// and otherwise folded into the archive's own entry rather than
 		// offered as a row of its own.
-		if stem, ok := engine.RestartSiblingStem(filepath.Base(absPath)); ok {
+		//
+		// A recovered recording's chat archive is <stem>.restart-<ts>.chat.json.
+		// RestartSiblingStem strips ONE extension, which leaves ".chat" glued to
+		// the timestamp and makes the name fail its digits rule — so without
+		// folding the compound extension first, the chat file recoverAsides
+		// writes beside a sibling is offered as a deletable orphan the moment it
+		// lands, while the sibling itself is correctly owned.
+		sibBase := filepath.Base(absPath)
+		if isChat {
+			sibBase = strings.TrimSuffix(sibBase, ".json")
+		}
+		if stem, ok := engine.RestartSiblingStem(sibBase); ok {
 			stemPath := normalizePath(filepath.Join(filepath.Dir(absPath), stem))
 			if knownStems[stemPath] {
 				return nil // its job still has the archive this belongs to
