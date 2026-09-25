@@ -1696,6 +1696,29 @@ func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
 	w.EnqueueJob(jobID)
 }
 
+// Asides reports the set-aside recordings in a job's staging directory, and
+// whether that directory also still holds the chat capture keepOnlyChatCapture
+// preserves. The read half of the recovery verb: RecoverAsides is what acts on
+// it, and both UIs render it under the job.
+//
+// Errors only when the job row cannot be read — an empty report is a perfectly
+// ordinary answer, and the caller must be able to tell it from "that job is
+// gone".
+func (w *DownloadWorker) Asides(jobID string) (AsideReport, error) {
+	job, err := w.db.GetJob(jobID)
+	if err != nil {
+		return AsideReport{}, fmt.Errorf("look up job %s: %w", jobID, err)
+	}
+	if job == nil {
+		return AsideReport{}, fmt.Errorf("job %s not found", jobID)
+	}
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
+	})
+	return ScanAsides(stagingBase, jobID), nil
+}
+
 // MuxJob force-muxes a cancelled/errored job's staging files.
 // Bypasses the download queue — runs directly in a wg-tracked goroutine.
 func (w *DownloadWorker) MuxJob(jobID string) error {

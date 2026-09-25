@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -283,6 +284,139 @@ func groupStagedAsides(asides []string) []asideGroup {
 		out = append(out, *byKey[k])
 	}
 	return out
+}
+
+// Aside is one restart's worth of set-aside recording, as the UIs see it: the
+// GROUP, never the individual files. A DASH restart sets the video and audio
+// halves aside under the same second and muxStagedAsides recombines them into
+// a single output, so "two asides" must mean two recordings an operator can
+// get back, not four files on disk.
+type Aside struct {
+	// Path is the group's video half (its audio half for an audio-only
+	// capture) — enough to identify the recording in a tooltip or a log line,
+	// and never used to address it: recovery works from the staging dir.
+	Path string `json:"path"`
+	// Size is every byte of the group, both halves included.
+	Size int64 `json:"size"`
+	// Timestamp is the second the engine stamped into the name, rendered as
+	// RFC 3339 UTC — the project's wire format for a time. Empty only if the
+	// stamp is unparseable, which engine.IsStagedRestartPath already excludes.
+	Timestamp string `json:"timestamp"`
+	// HasResumeSidecar reports whether the aside still has its .resume.json
+	// twin. Informational: recovery muxes the bytes either way, and the twin
+	// is deleted with the recording it describes.
+	HasResumeSidecar bool `json:"hasResumeSidecar"`
+}
+
+// AsideReport is one job's staging directory as the recovery surfaces read it.
+type AsideReport struct {
+	// Groups is in stagedAsideRecordings' order: the staging root's asides
+	// first, then each seg_N part dir's, oldest first WITHIN each — a split
+	// job's part-1 restart therefore follows a later root restart. Never nil:
+	// the UIs index into it, and a job that never staged anything must answer
+	// [] rather than null.
+	Groups []Aside `json:"groups"`
+	// KeptChatSidecar reports whether the staging dir still holds the chat
+	// capture keepOnlyChatCapture preserves (worker.go). A recovery carries it
+	// beside the first recovered file, which is the only way it ever reaches
+	// the output directory for a job whose own finalize had no chat to copy.
+	//
+	// Only computed when Groups is non-empty: finding it costs a tree walk,
+	// this report is built on every GET /api/jobs/{id}, and neither UI renders
+	// the flag without a recording to recover beside.
+	KeptChatSidecar bool `json:"keptChatSidecar"`
+}
+
+// ScanAsides reports the set-aside recordings in one job's staging directory.
+//
+// Takes (stagingBase, jobID) rather than a directory for the same reason
+// HasSegmentFiles (staging.go) does: the REST layer already reads the base out
+// of the config store and has no worker instance to ask.
+func ScanAsides(stagingBase, jobID string) AsideReport {
+	return asideReport(filepath.Join(stagingBase, jobID))
+}
+
+// asideReport is ScanAsides over an already-resolved directory — the form the
+// orchestrator uses, where the job context carries the path.
+func asideReport(stagingDir string) AsideReport {
+	groups := groupStagedAsides(stagedAsideRecordings(stagingDir))
+	out := AsideReport{Groups: make([]Aside, 0, len(groups))}
+	if len(groups) == 0 {
+		// Short-circuit the tree walk. This runs on every GET /api/jobs/{id},
+		// and the overwhelmingly common answer is "nothing was ever set
+		// aside" — for which the chat flag is not rendered by either UI
+		// anyway, because both gate the whole section on having a recording
+		// to recover.
+		return out
+	}
+	out.KeptChatSidecar = findKeptChatCapture(stagingDir) != ""
+	for _, g := range groups {
+		// groupStagedAsides classifies every file into video or audio, and a
+		// group only exists because a file landed in one of them, so exactly
+		// one of these is set for a single-stream capture and video wins for a
+		// DASH pair.
+		path := g.video
+		if path == "" {
+			path = g.audio
+		}
+		a := Aside{Path: path, Timestamp: asideTimestamp(g.stamp)}
+		for _, p := range g.files {
+			if info, err := os.Stat(p); err == nil {
+				a.Size += info.Size()
+			}
+			if fileExists(engine.StagedRestartSidecar(p)) {
+				a.HasResumeSidecar = true
+			}
+		}
+		out.Groups = append(out.Groups, a)
+	}
+	return out
+}
+
+// asideTimestamp renders the unix-seconds stamp the engine wrote into an
+// aside's name as RFC 3339 UTC. Empty for anything unparseable — which
+// engine.IsStagedRestartPath has already excluded by the time a name reaches
+// here, so the empty return is a guard, not a case.
+func asideTimestamp(stamp string) string {
+	secs, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return ""
+	}
+	return time.Unix(secs, 0).UTC().Format(time.RFC3339)
+}
+
+// findKeptChatCapture returns the chat capture a preserved staging dir still
+// holds, or "" when there is none.
+//
+// The set of files that COUNT as the chat capture is isChatCaptureFile's
+// (worker.go) — the same rule keepOnlyChatCapture prunes down to, so the two
+// cannot disagree about what survived. The file this returns is the narrow
+// member of that set: chat.json itself is the only one a recovery can copy
+// beside an output, because chat.json.resume.json is a resume offset map and
+// chat.json.lostbatch.json is a spill, and neither is a chat archive.
+//
+// Any depth, because a quality- or gap-split job keeps each part's chat beside
+// that part's media in seg_N/.
+func findKeptChatCapture(stagingDir string) string {
+	if stagingDir == "" {
+		return ""
+	}
+	var found string
+	_ = filepath.WalkDir(stagingDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !isChatCaptureFile(name) {
+			return nil
+		}
+		if name == "chat.json" {
+			found = p
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // asideOutputCollisionLimit bounds asideOutputPath's counter. Reaching it
