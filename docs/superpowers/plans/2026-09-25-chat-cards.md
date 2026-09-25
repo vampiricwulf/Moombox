@@ -20,7 +20,7 @@ Checked by reading `internal/chat/api.go` (`parseAction` at `:474`, `selectRende
 
 **(a) Membership header text is NOT captured.** `parseAction:513` sets `msg.IsMembership = true` and nothing else; `parseMessageRenderer` reads only `renderer["message"]`. A `liveChatMembershipItemRenderer` keeps its human-readable line in `headerPrimaryText` (a milestone: "Member for 6 months") or, when there is no primary text, in `headerSubtext` (a new member: "Welcome to Member!"), and carries `message` only for a milestone the member typed into. So a **new-member event archives as a message with an empty `message` array** and no other content at all, and a milestone loses its "Member for N months" line. Field shape confirmed against `references/bgutil-ytdlp-pot-provider/server/node_modules/.deno/youtubei.js@16.0.1/node_modules/youtubei.js/bundle/browser.js:22885-22910` (`LiveChatMembershipItem`: `header_primary_text` optional, `header_subtext` always, `message` optional). → **Task 1.**
 
-**(b) Neither sponsorship renderer is parsed.** `selectRenderer`'s roster is exactly four keys — `liveChatTextMessageRenderer`, `liveChatPaidMessageRenderer`, `liveChatPaidStickerRenderer`, `liveChatMembershipItemRenderer` — so `liveChatSponsorshipsGiftPurchaseAnnouncementRenderer` and `liveChatSponsorshipsGiftRedemptionAnnouncementRenderer` return `nil` and are **dropped silently**; gifted memberships are absent from every archive Moombox has written. (`internal/chat/helpers_test.go:103-108` already claims the roster has five entries including the gift-purchase one — a comment written against an intention, not the code. Task 2 makes it true and correct, at six.) Shapes confirmed at the same reference, `:23125-23200`: the purchase renderer nests `authorName`/`authorBadges`/`primaryText` one level down in `header.liveChatSponsorshipsHeaderRenderer` and carries no `timestampText`, while the redemption renderer is flat and carries its line in `message`. → **Task 2.**
+**(b) Neither sponsorship renderer is parsed.** `selectRenderer`'s roster is exactly four keys — `liveChatTextMessageRenderer`, `liveChatPaidMessageRenderer`, `liveChatPaidStickerRenderer`, `liveChatMembershipItemRenderer` — so `liveChatSponsorshipsGiftPurchaseAnnouncementRenderer` and `liveChatSponsorshipsGiftRedemptionAnnouncementRenderer` return `nil` and are **dropped silently**; gifted memberships are absent from every archive Moombox has written. (`internal/chat/helpers_test.go:104-109` already claims the roster has five entries including the gift-purchase one — a comment written against an intention, not the code. Task 2 makes it true and correct, at six.) Shapes confirmed at the same reference, `:23125-23200`: the purchase renderer nests `authorName`/`authorBadges`/`primaryText` one level down in `header.liveChatSponsorshipsHeaderRenderer` and carries no `timestampText`, while the redemption renderer is flat and carries its line in `message`. → **Task 2.**
 
 ---
 
@@ -28,8 +28,14 @@ Checked by reading `internal/chat/api.go` (`parseAction` at `:474`, `selectRende
 
 Every task's requirements implicitly include this section.
 
-- **Sidebar only (K4), pinned.** `_buildNicoEl` (`web/public/modules/player.js:1710-1723`) must be **byte-identical** at the end of the arc, and the overlay's rendered output must not move either. `git diff main -- web/public/modules/player.js | grep -c '_buildNicoEl'` is checked in task 8 and the function body is re-read there. This is also why task 1 adds a NEW field rather than folding the membership header line into `message`: the overlay renders `msg.message` and returns `null` when it is empty, so a membership event that renders as nothing today would start scrolling across the video.
-- **The row is still a row.** Every shape produces exactly ONE element, appended as one direct child of `#player-sidebar-messages`, carrying the `chat-msg` class. The sidebar's promotion (`updateSidebarActiveState:1283`), reset (`resetSidebarToTime:1340`), post-end promotion (`_markPostEnd:1247`), divider reconciliation (`_applyDividers:1210`), search filter (`filterChat:554`) and scroll maths (`syncSidebarToTime:1303`) all address rows by `container.children[i]` and never by a selector — but every `.chat-msg.<state>` rule in `web/public/moombox.css` does key on the class, and so does the jsdom harness's `measure()` (`web/tests/helpers/player-dom.mjs:325`), which is what gives a row a non-zero `offsetTop`. **Decision pinned: cards and notices keep `chat-msg` and add a modifier class; no timeline code learns a new class.** Task 3's "a card is still a timeline row" test is the pin.
+- **Sidebar only (K4), pinned.** `_buildNicoEl` (`web/public/modules/player.js:1711-1724`) must be **byte-identical** at the end of the arc, and the overlay's rendered output must not move either. The gate in task 8 counts only **code** lines the diff added or removed —
+
+  ```bash
+  git diff main -- web/public/modules/player.js | grep -cE '^[-+][^*]*(_buildNicoEl\(|"nico-message")'
+  ```
+
+  expected `0` — and the function body is re-read there. A bare `grep -c '_buildNicoEl'` over the diff would be a false-positive machine: a prose mention of the overlay in any comment this arc adds would trip it. **Corollary, and a rule for every task: no comment this arc writes may name `_buildNicoEl` or the string `"nico-message"`** — say "the overlay builder" instead. This constraint is also why task 1 adds a NEW field rather than folding the membership header line into `message`: the overlay renders `msg.message` and returns `null` when it is empty, so a membership event that renders as nothing today would start scrolling across the video.
+- **The row is still a row.** Every shape produces exactly ONE element, appended as one direct child of `#player-sidebar-messages`, carrying the `chat-msg` class. The sidebar's promotion (`updateSidebarActiveState:1284`), reset (`resetSidebarToTime:1337`), post-end promotion (`_markPostEnd:1247`), divider reconciliation (`_applyDividers:1209`), search filter (`filterChat:554`) and scroll maths (`syncSidebarToTime:1302`) all address rows by `container.children[i]` and never by a selector — but every `.chat-msg.<state>` rule in `web/public/moombox.css` does key on the class, and so does the jsdom harness's `measure()` (`web/tests/helpers/player-dom.mjs:325`), which is what gives a row a non-zero `offsetTop`. **Decision pinned: cards and notices keep `chat-msg` and add a modifier class; no timeline code learns a new class.** Task 3's "a card is still a timeline row" test is the pin.
 - No Shoelace bundling; no new CDN dependency; **no new fetches** — every field these shapes read is already in the chat file the player loads from `GET /api/jobs/{id}/chat` (`internal/web/routes/jobs.go:540`, which serves the archive verbatim through `serveChatJSON` — there is no normaliser anywhere between the file and `_buildChatMessageEl`, so the JS sees the Go JSON tags exactly).
 - **The CSP is untouched.** Colours reach the DOM as CSS custom properties written through the CSSOM (`el.style.setProperty("--card-header", …)`). A CSSOM write is not an inline `<style>` element and is not governed by `style-src`; and `internal/web/middleware.go:98` grants `style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net` regardless, a grant `internal/web/middleware_csp_test.go:71` pins for Shoelace's shadow DOM. No task edits `middleware.go`.
 - DB layer untouched; no config key; no API route change; no schema change.
@@ -88,11 +94,11 @@ Tasks 3, 4, 5 and 6 all write **the same three files**. They are ordered, never 
 
 | File | Task 3 | Task 4 | Task 5 | Task 6 |
 |---|---|---|---|---|
-| `player.js` | restructures `_buildChatMessageEl`; adds 3 shared helpers + `_fillSuperchatCard`; adds 1 dispatch line | adds `_fillMemberCard` + **1** dispatch line after task 3's | adds `_fillTwitchNotice` + **1** dispatch line after task 4's | adds `_cheerChip` + **3** lines inside `_fillPlainRow` |
-| `moombox.css` | replaces `.chat-msg.superchat`'s body; edits one selector; appends the card block at the end of the chat section | appends `.chat-card-note` | appends the notice block | appends `.cheer-chip` |
-| `player.test.mjs` | appends the section banner, the shared fixtures and 7 tests | appends 3 tests | appends 3 tests | appends 2 tests |
+| `player.js` | restructures `_buildChatMessageEl`; adds 3 shared helpers + `_fillSuperchatCard`; adds 1 dispatch line | adds `MEMBER_CARD_COLORS` + `_fillMemberCard` + **1** dispatch line after task 3's | adds `TWITCH_NOTICE_TYPES`/`twitchNoticeLine` + `_fillTwitchNotice` + **1** dispatch line after task 4's | adds `CHEER_SCALE`/`cheerColor` + `_cheerChip` + **6** lines inside `_fillPlainRow` |
+| `moombox.css` | deletes `.chat-msg.superchat`; edits one selector; appends the card block at the end of the chat section | appends `.chat-card-note` | appends the notice block | appends `.cheer-chip` |
+| `player.test.mjs` | appends the section banner, the shared fixtures and **9** tests (7 jsdom + 2 pure) | appends **3** tests (3 jsdom) | extends the `player.js` import line, then appends **4** tests (3 jsdom + 1 pure) | extends the `player.js` import line, then appends **3** tests (2 jsdom + 1 pure) |
 
-Only task 3 modifies existing lines; 4, 5 and 6 are append-plus-one-dispatch-line. Tasks 1 and 2 share `internal/chat/api.go` and `internal/chat/api_test.go` and are likewise ordered — task 2 consumes task 1's `renderedText`. Task 7 touches three files no earlier task does. No task may be started before the previous one's commit exists.
+Task 3 is the only one that modifies existing lines in `player.js` or `moombox.css`; tasks 4, 5 and 6 delete nothing in either (verify with `git diff <previous task's commit> -- web/public/modules/player.js web/public/moombox.css | grep -c '^-[^-]'` → `0`). In `player.test.mjs` tasks 5 and 6 each have exactly **one** non-append hunk, the shared `player.js` import line their step 1 tells the implementer to extend. Tasks 1 and 2 share `internal/chat/api.go` and `internal/chat/api_test.go` and are likewise ordered — task 2 consumes task 1's `renderedText` and `MembershipText`, and anchors on the membership branch task 1 writes. Task 5 anchors on task 4's `MEMBER_CARD_COLORS` and `_fillMemberCard`, so it needs task 4 in place, not merely task 3. Task 7 touches three files no earlier task does. No task may be started before the previous one's commit exists.
 
 ---
 
@@ -261,6 +267,7 @@ In `internal/chat/types.go`, inside `ChatMessage` (currently `:14-26`), add the 
 
 ```go
 	IsMembership    bool           `json:"isMembership,omitempty"`
+
 	// MembershipText is a liveChatMembershipItemRenderer's own header line —
 	// "Member for 6 months" (headerPrimaryText) for a milestone, "Welcome to
 	// Member!" (headerSubtext) for a new member — and the gift-purchase
@@ -274,12 +281,14 @@ In `internal/chat/types.go`, inside `ChatMessage` (currently `:14-26`), add the 
 	// would start scrolling membership notices across the video (2026-09-25
 	// ruling K4, "sidebar only"). Empty on every other kind of message and on
 	// every file written before this field existed.
-	MembershipText  string         `json:"membershipText,omitempty"`
+	MembershipText string `json:"membershipText,omitempty"`
 ```
+
+**The field is written unpadded, deliberately.** A full-line comment inside a struct ends gofmt's tabwriter alignment run, so `MembershipText` starts a run of one and must NOT be padded out to the `IsMembership` column. Padding it makes `gofmt -l ./internal/chat` name `types.go` at step 7 — confirmed by execution (2026-09-25), which produced the `gofmt -d` hunk `-\tMembershipText  string         …` / `+\tMembershipText string …`.
 
 - [ ] **Step 4: Add the reader and wire the branch**
 
-In `internal/chat/api.go`, add `renderedText` immediately **after** `parseMessageRuns` (which ends around `:870`; put it before `extractBadges` at `:896`):
+In `internal/chat/api.go`, add `renderedText` immediately **after** `parseMessageRuns`, which ends at `:874` — i.e. directly above `extractNavURL` (`:876-894`):
 
 ```go
 // renderedText flattens one of YouTube's text fields to a plain string.
@@ -647,7 +656,7 @@ func giftPurchaseFields(r map[string]any) (map[string]any, string) {
 
 Note `header["…"]` on a nil map is a legal read in Go and yields the zero value, so the two type assertions need no separate nil check between them.
 
-Then, in `parseAction`, replace the membership branch task 1 wrote with the three-way form. The block now reads (the paid/sticker branch above it is unchanged):
+Then make two separate edits inside `parseAction`. **The first is the hoist**, and it does NOT touch the membership branch: it is inserted between `selectRenderer`'s nil guard (`:499-501`) and `msg := api.parseMessageRenderer(renderer)` (`:503`), so the shared reader receives the flattened map. The `msg := …` lines are shown only to mark the join point — do not duplicate them:
 
 ```go
 	var giftLine string
@@ -663,7 +672,7 @@ Then, in `parseAction`, replace the membership branch task 1 wrote with the thre
 	}
 ```
 
-— i.e. the hoist happens **between** `selectRenderer` (`:498`) and `parseMessageRenderer` (`:503`), so the shared reader receives the flattened map. Then the membership annotation below becomes:
+**The second edit replaces the membership branch task 1 wrote** (further down, after the paid/sticker branch, which is unchanged) with the three-way form:
 
 ```go
 	if memb, ok := item["liveChatMembershipItemRenderer"].(map[string]any); ok {
@@ -689,7 +698,7 @@ Then, in `parseAction`, replace the membership branch task 1 wrote with the thre
 	}
 ```
 
-Finally, correct the stale roster claim in `internal/chat/helpers_test.go:103-108`. Replace
+Finally, correct the stale roster claim in `internal/chat/helpers_test.go:104-109`. Replace
 
 ```go
 // TestSelectRendererSuperChatPaidMessageBranch — selectRenderer's
@@ -814,7 +823,9 @@ This task also does the arc's only restructuring, so tasks 4–6 can be additive
 
 **Ruling — the outer div keeps the `superchat` class, but its CSS rule goes.** The class is what a reader greps for and what a future "paid only" filter would use, so it stays on the element. Its one declaration — the amber `border-left` — has nothing to become: no element carries `.superchat` without `.chat-card` any more, and the card supplies the whole look. The rule is deleted rather than given a placeholder value.
 
-**Measured, recorded here so the implementer does not have to re-derive it:** the WCAG relative luminance of the seven body colours is 0.235 (tier 1), 0.633 (2), 0.619 (3), 0.637 (4), 0.338 (5), 0.192 (6), 0.180 (7). A threshold of 0.5 therefore reproduces YouTube's own choice exactly — dark ink on 2, 3 and 4, white on 1, 5, 6 and 7 — with no second table. Tier 0's gray pair is #606060 / #757575 (luminance 0.117 / 0.178, both light ink).
+**Ruling — one ink per card, derived from the BODY colour, applied to both halves.** Spec §2 item 1 says the implementation "derives it from the body colour's luminance", and YouTube paints a tier's header and body text the same colour. Deriving each half from its own background instead would split four of the eight tiers' cards in two: only tier 4's header is light enough for dark ink, so a tier-3 card would read white-on-header over dark-on-body and a tier-4 card the reverse. **Cost if wrong:** a hypothetical archived pair whose header is much lighter than its body gets one low-contrast half.
+
+**Measured, recorded here so the implementer does not have to re-derive it** (all executed against this task's own `relativeLuminance`, 2026-09-25). Body colours, tiers 0-7: 0.178, 0.235, 0.633, 0.619, 0.637, 0.338, 0.192, 0.180 — so a 0.5 threshold reproduces YouTube's own choice exactly, dark ink on 2, 3 and 4 and white on 0, 1, 5, 6 and 7, with no second table. Header colours, tiers 0-7: 0.117, 0.133, 0.390, 0.400, 0.535, 0.227, 0.129, 0.134 — recorded only to show why they are NOT the input: on seven of eight tiers a header-derived ink would disagree with its own body. Tier 0's gray pair is #606060 / #757575. Sanity anchors: #FFFFFF = 1.0000, #000000 = 0.0000, #808080 = 0.2159.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -907,6 +918,10 @@ test("a Super Chat is a two-part card in the colours the archive recorded", { sk
 
   const header = row.querySelector(".chat-card-header");
   const body = row.querySelector(".chat-card-body");
+  // Tier 3's body green (#1DE9B6, luminance 0.619) takes dark ink, and the
+  // header takes the same one — one ink per card, derived from the body.
+  // MUTANT: derive each half from its own colour and the header flips to
+  // chat-ink-light, because #00BFA5 is only 0.400.
   assert.ok(header.classList.contains("chat-ink-dark"), header.className);
   assert.ok(body.classList.contains("chat-ink-dark"), body.className);
   assert.equal(header.querySelector(".chat-msg-author").textContent, "Payer",
@@ -1022,7 +1037,7 @@ cd /d/Git/Moombox/.worktrees/chat-cards/web/tests
 timeout 300 node --test player.test.mjs 2>&1 | tail -30
 ```
 
-Expected: the file fails to load — `SyntaxError: The requested module '../public/modules/player.js' does not provide an export named 'relativeLuminance'` — which is the honest red for a test naming symbols this task creates. Record the exact message. (If Node reports the whole file as one failure rather than per-test, that is expected for an import-time error.)
+Expected: the file fails to load — `SyntaxError: The requested module '../public/modules/player.js' does not provide an export named 'SUPERCHAT_TIER_COLORS'` — which is the honest red for a test naming symbols this task creates. Node names the **last** unresolved binding in the import list, not the first, so the symbol quoted is whichever this plan's import line ends with. Record the exact message. (If Node reports the whole file as one failure rather than per-test, that is expected for an import-time error.)
 
 - [ ] **Step 3: Add the colour model to `player.js`**
 
@@ -1187,18 +1202,27 @@ Then add, immediately after `_buildChatMessageEl`:
    * The colours ride as CSS custom properties written through the CSSOM. A
    * setProperty write is not an inline <style> element and is not governed by
    * style-src (which internal/web/middleware.go grants 'unsafe-inline' anyway,
-   * for Shoelace's shadow DOM), so nothing about the CSP moves. The ink class
-   * is derived from the colour actually painted, so an archived pair YouTube
-   * has never shipped still reads.
+   * for Shoelace's shadow DOM), so nothing about the CSP moves.
+   *
+   * ONE ink for the whole card, derived from the BODY colour — the half that
+   * carries the message, and the one YouTube picks its text colour from. Both
+   * halves take it, as they do on YouTube: a header strip is always the darker
+   * partner of its body, so deriving each half separately would put dark text
+   * on a tier-4 header (#FFB300, luminance 0.535) above white text on its own
+   * body, and light text on a tier-3 header (#00BFA5, 0.400) above dark text
+   * on its body — a card that changes ink halfway down. Measured header
+   * luminances, tiers 0-7: 0.117, 0.133, 0.390, 0.400, 0.535, 0.227, 0.129,
+   * 0.134 — only tier 4's would disagree with its body.
    */
   _cardParts(div, headerColor, bodyColor) {
     div.classList.add("chat-card");
     div.style.setProperty("--card-header", headerColor);
     div.style.setProperty("--card-body", bodyColor);
+    const ink = `chat-ink-${readableInk(bodyColor)}`;
     const header = document.createElement("div");
-    header.className = `chat-card-header chat-ink-${readableInk(headerColor)}`;
+    header.className = `chat-card-header ${ink}`;
     const body = document.createElement("div");
-    body.className = `chat-card-body chat-ink-${readableInk(bodyColor)}`;
+    body.className = `chat-card-body ${ink}`;
     div.appendChild(header);
     div.appendChild(body);
     return { header, body };
@@ -1338,8 +1362,9 @@ with
     border-radius: 0 0 4px 4px;
 }
 
-/* The ink each half's own colour asks for, chosen by relative luminance in
-   player.js readableInk. Set on the header and body elements themselves, so
+/* The card's ink, chosen from its BODY colour by relative luminance in
+   player.js _cardParts and worn by both halves. Set on the header and body
+   elements themselves rather than inherited from the row, so
    `.chat-msg.post`'s neutral-700 — which reaches a flat row's spans by
    inheritance — cannot repaint a card. */
 .chat-ink-light { color: #ffffff; }
@@ -1384,7 +1409,21 @@ cd /d/Git/Moombox/.worktrees/chat-cards/web/tests
 timeout 300 node --test --test-name-pattern="flip at 0.5" player.test.mjs 2>&1 | tail -20   # expect FAIL
 ```
 
-Expected: `readableInk("#BCBCBC")` comes back `"light"`, want `"dark"`. Restore `>= 0.5` by hand, re-run, expect pass. Then do the second mutant: by hand, delete `div.classList.add("chat-card")`'s sibling `div.className` marker by changing `_cardParts`'s first line to `div.className = "chat-card";` (dropping `chat-msg`), run `--test-name-pattern="still a timeline row"` and confirm the `offsetTop > 0` assertion fails; restore by hand and re-run. Record both observed failures.
+Expected: `AssertionError: 'light' !== 'dark'` on `readableInk("#BCBCBC")`. Restore `>= 0.5` by hand, re-run, expect pass.
+
+Then the second mutant, which must strip the `chat-msg` marker **and nothing else** — replace `_cardParts`'s first line with:
+
+```js
+    div.classList.add("chat-card");
+    div.classList.remove("chat-msg");
+```
+
+```bash
+cd /d/Git/Moombox/.worktrees/chat-cards/web/tests
+timeout 300 node --test --test-name-pattern="still a timeline row" player.test.mjs 2>&1 | tail -20   # expect FAIL
+```
+
+Expected: `AssertionError [ERR_ASSERTION]: a card is measured like any row` — the `offsetTop > 0` claim, and only that one. (`div.className = "chat-card";` would be the wrong mutant: it also wipes `future`, so the run dies three assertions earlier and never reaches the one the mutant exists to prove.) Restore the single `div.classList.add("chat-card");` line by hand, re-run, expect pass. Record both observed failures.
 
 - [ ] **Step 8: Gates**
 
@@ -1526,10 +1565,10 @@ test("both gifted-membership shapes render as member cards", { skip }, async () 
 
 ```bash
 cd /d/Git/Moombox/.worktrees/chat-cards/web/tests
-timeout 300 node --test --test-name-pattern="member card|green card|gifted-membership" player.test.mjs 2>&1 | tail -30
+timeout 300 node --test --test-name-pattern="green card|milestone card|gifted-membership" player.test.mjs 2>&1 | tail -30
 ```
 
-Expected: **3 failing**, each on the first card assertion — `Expected values to be strictly equal: false !== true` for `row.classList.contains("chat-card")`, because a membership message still takes the flat-row branch. Record one failure verbatim.
+Expected: `tests 3 / pass 0 / fail 3`, each on the first card assertion — `AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:` for `assert.ok(row.classList.contains("chat-card"))`, because a membership message still takes the flat-row branch. The pattern must name all three tests: "milestone card" is the middle one's only distinctive phrase, and a pattern of `member card|green card|gifted-membership` silently selects two of three. Record one failure verbatim and the `tests 3` line.
 
 - [ ] **Step 3: Add the member card**
 
@@ -1863,9 +1902,12 @@ And the method after `_fillMemberCard`:
    *
    * Not a card: these carry no colour of their own and no amount, so the
    * two-part shell would be two strips of the same purple. The content span is
-   * appended only when it produced nodes, the same hasChildNodes idiom
-   * _buildNicoEl uses, so a silent notice does not end in an empty span that
-   * the divider-dim rule would then dim as a child.
+   * appended only when it produced nodes, the same hasChildNodes idiom the
+   * overlay builder uses, so a silent notice does not end in an empty span
+   * that the divider-dim rule would then dim as a child.
+   *
+   * ("the overlay builder", not its name: task 8's K4 gate greps the diff for
+   * the overlay symbol, and a prose mention would read as an overlay edit.)
    */
   _fillTwitchNotice(div, msg) {
     div.classList.add("chat-notice", "twitch");
@@ -2233,7 +2275,7 @@ cd /d/Git/Moombox/.worktrees/chat-cards/web/tests
 timeout 300 node --test --test-name-pattern="dims a card's block children" a11y-controls.test.mjs 2>&1 | tail -12
 ```
 
-Expected: **pass**. This is a regression pin, not a red-first test — task 3 already made the change it guards. So prove its teeth by execution: by hand, revert the selector in `web/public/moombox.css` to `.chat-msg.divider-before.future > span {`, re-run the same command and confirm **both** assertions fail with their messages, then restore `> *` by hand and re-run to green. Record both outputs.
+Expected: **pass**. This is a regression pin, not a red-first test — task 3 already made the change it guards. So prove its teeth by execution: by hand, revert the selector in `web/public/moombox.css` to `.chat-msg.divider-before.future > span {`, re-run the same command and confirm the failure — `AssertionError: the divider-dim rule must reach every direct child, not only spans`, the **first** assertion's message and the only one printed, because `node:assert` throws there and the second never runs. Then restore `> *` by hand and re-run to green. Record both outputs.
 
 - [ ] **Step 3: Update `docs/spec/user-interfaces.md`**
 
@@ -2315,7 +2357,9 @@ git commit -F /tmp/k-t7.msg -- web/tests/a11y-controls.test.mjs docs/spec/user-i
 
 ### Task 8: Arc gates, then delete this plan
 
-Spec §3's merge-candidate gates over a branch that has absorbed `main`. The sibling arc (`tui-120fps`) may have merged first, so the merge is expected to do something — run it before anything else.
+The merge-candidate gates over a branch that has absorbed `main`. The sibling arc (`tui-120fps`) may have merged first, so the merge is expected to do something — run it before anything else.
+
+The chain's authoritative gate list is `.superpowers/sdd/2026-09-25-chat-cards/gates.sh`, **which the controller runs** — it adds the libc pin, the TUI import rule, the `-race` set, the `FrameCost` pins and the four `MOOMBOX_LIVE_*` gates on top of what follows. Spec §3 is *Order* and names no gates; step 2 below is the implementer's subset, chosen for what this arc actually touches.
 
 **Files:**
 - Delete: `docs/superpowers/plans/2026-09-25-chat-cards.md`
@@ -2381,11 +2425,14 @@ Expected: the no-jsdom run reports `fail 0` with the skipped count the README st
 
 ```bash
 cd /d/Git/Moombox/.worktrees/chat-cards
-git diff main -- web/public/modules/player.js | grep -n '_buildNicoEl\|nico-message' || echo "NO OVERLAY LINES IN THE DIFF"
+git diff main -- web/public/modules/player.js | grep -nE '^[-+][^*]*(_buildNicoEl\(|"nico-message")' || echo "NO OVERLAY LINES IN THE DIFF"
+git diff main -- web/public/modules/player.js | grep -cE '^[-+][^*]*(_buildNicoEl\(|"nico-message")'
 sed -n '/_buildNicoEl(msg) {/,/^  }$/p' web/public/modules/player.js
 ```
 
-Expected: `NO OVERLAY LINES IN THE DIFF`, and the printed `_buildNicoEl` body identical to the one quoted in this plan's constraints — the `announcement` branch, the `appendChatContent` call, the `hasChildNodes` null return and the eager-loading sweep, unchanged. If the diff shows an overlay line, stop: K4 is the arc's hard scope boundary.
+Expected: `NO OVERLAY LINES IN THE DIFF`, then `0`, then a printed `_buildNicoEl` body identical to the one quoted in this plan's constraints — the `announcement` branch, the `appendChatContent` call, the `hasChildNodes` null return and the eager-loading sweep, unchanged. If the diff shows an overlay line, stop: K4 is the arc's hard scope boundary.
+
+The pattern matches only added or removed lines that **call** the builder or name the overlay's class, and `[^*]*` excludes JSDoc continuation lines (` * …`), so a comment mentioning the overlay in prose cannot trip it. A bare `grep -n '_buildNicoEl'` over the diff would: it was tried, and task 5's own doc comment matched it, halting the arc on a false positive. The comment rule in the Global Constraints (no arc-written comment may name `_buildNicoEl` or `"nico-message"`) is the second half of the same fix.
 
 - [ ] **Step 4: The ONE full suite — controller-run**
 
