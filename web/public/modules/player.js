@@ -25,6 +25,76 @@ function announcementColorClass(color) {
 }
 
 /**
+ * YouTube's Super Chat palette: each tier's header and body colour, 1 (blue,
+ * $1) through 7 (red, $100+), plus a neutral gray pair for tier 0 — the
+ * archive's marker for a colour pair internal/chat's table did not know
+ * (SuperchatInfo.Tier).
+ *
+ * The table lives here rather than in a CSS [data-tier] block because a card's
+ * INK is derived from the colour actually painted: a stylesheet-only fallback
+ * would leave this file unable to compute the ink for an archive written
+ * before headerColor/bodyColor were recorded, and a second per-tier ink table
+ * in CSS would then have to agree with this one forever. `data-tier` is still
+ * stamped on the element as a styling hook.
+ */
+export const SUPERCHAT_TIER_COLORS = {
+  0: { header: "#606060", body: "#757575" },
+  1: { header: "#1565C0", body: "#1E88E5" },
+  2: { header: "#00B8D4", body: "#00E5FF" },
+  3: { header: "#00BFA5", body: "#1DE9B6" },
+  4: { header: "#FFB300", body: "#FFCA28" },
+  5: { header: "#E65100", body: "#F57C00" },
+  6: { header: "#C2185B", body: "#E91E63" },
+  7: { header: "#D00000", body: "#E62117" },
+};
+
+/** internal/chat's argbHex writes exactly #RRGGBB; nothing else is a colour. */
+const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+
+function isHexColor(s) {
+  return typeof s === "string" && HEX_RE.test(s);
+}
+
+/**
+ * WCAG 2.x relative luminance of an #RRGGBB colour, or null when the string is
+ * not one (an old or malformed archive), which every caller reads as "no
+ * colour recorded".
+ * @param {string} hex
+ * @returns {number|null}
+ */
+export function relativeLuminance(hex) {
+  if (!isHexColor(hex)) return null;
+  const chan = (i) => {
+    const c = parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * chan(0) + 0.7152 * chan(1) + 0.0722 * chan(2);
+}
+
+/**
+ * Which ink reads on `hex`: "dark" at or above a relative luminance of 0.5,
+ * "light" below it and for anything unparseable (the safe default on a
+ * saturated card).
+ *
+ * Measured: the seven tier body colours come out at 0.235, 0.633, 0.619,
+ * 0.637, 0.338, 0.192 and 0.180, so this one threshold reproduces YouTube's
+ * own choice — dark text on tiers 2, 3 and 4, white on 1, 5, 6 and 7 — without
+ * a second hard-coded table, and an archived colour YouTube has never shipped
+ * still reads.
+ * @param {string} hex
+ * @returns {"light"|"dark"}
+ */
+export function readableInk(hex) {
+  const l = relativeLuminance(hex);
+  return l !== null && l >= 0.5 ? "dark" : "light";
+}
+
+/** The colour actually painted: the archived one when usable, else the fallback. */
+function resolvedColor(archived, fallback) {
+  return isHexColor(archived) ? archived : fallback;
+}
+
+/**
  * Hand the keyboard to the player surface after a job has been selected: off
  * the picker (where every shortcut is swallowed) and onto the video wrapper,
  * so Space/arrows/F/M/C/S work without the user clicking the video first. Both
@@ -1117,30 +1187,51 @@ export class PlayerController {
       div.dataset.divider = dividerLabel;
     }
 
+    // Shape dispatch. Every branch fills the SAME element: one direct child of
+    // #player-sidebar-messages per message, still carrying `chat-msg`. The
+    // sidebar's promotion, reset, post-end marking, divider reconciliation,
+    // search filter and scroll maths all address rows by container.children[i]
+    // and would not notice the class going — but every `.chat-msg.<state>`
+    // rule in moombox.css would, and so would the jsdom harness's measured box.
     if (msg.superchat) {
-      div.classList.add("superchat");
+      this._fillSuperchatCard(div, msg);
+      return div;
     }
+    this._fillPlainRow(div, msg);
+    return div;
+  }
 
+  /**
+   * The ordinary flat row: time, author, content. Extracted verbatim from
+   * _buildChatMessageEl; the Super Chat class and amount span it used to carry
+   * moved into _fillSuperchatCard, which is now the only shape that reaches
+   * them.
+   */
+  _fillPlainRow(div, msg) {
     if (msg.messageType === "announcement") {
       div.classList.add("announcement");
       div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
     }
+    div.appendChild(this._timeSpan(msg));
+    div.appendChild(this._authorSpan(msg, true));
+    const contentSpan = document.createElement("span");
+    this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
+    div.appendChild(contentSpan);
+  }
 
-    // Timestamp
-    const timeSpan = document.createElement("span");
-    timeSpan.className = "chat-msg-time";
-    timeSpan.textContent = formatMsToTime(msg.offsetMs);
-    div.appendChild(timeSpan);
+  /** The row's offset timestamp. */
+  _timeSpan(msg) {
+    const span = document.createElement("span");
+    span.className = "chat-msg-time";
+    span.textContent = formatMsToTime(msg.offsetMs);
+    return span;
+  }
 
-    // Superchat amount
-    if (msg.superchat) {
-      const scSpan = document.createElement("span");
-      scSpan.className = "chat-msg-superchat";
-      scSpan.textContent = msg.superchat.amount;
-      div.appendChild(scSpan);
-    }
-
-    // Author
+  /**
+   * The author span with its badge class. `withColon` is the flat row's
+   * "Name: " prefix; a card header puts the name on its own line and drops it.
+   */
+  _authorSpan(msg, withColon) {
     const authorSpan = document.createElement("span");
     authorSpan.className = "chat-msg-author";
     if (msg.authorBadges && Array.isArray(msg.authorBadges)) {
@@ -1151,15 +1242,81 @@ export class PlayerController {
       else if (hasBadge("member") || hasBadge("subscriber")) authorSpan.classList.add("member");
       else if (hasBadge("vip")) authorSpan.classList.add("member");
     }
-    authorSpan.textContent = msg.authorName + ": ";
-    div.appendChild(authorSpan);
+    authorSpan.textContent = withColon ? msg.authorName + ": " : msg.authorName;
+    return authorSpan;
+  }
 
-    // Message content — use safe DOM builder instead of innerHTML
-    const contentSpan = document.createElement("span");
-    this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
-    div.appendChild(contentSpan);
+  /**
+   * Turn `div` into a two-part card and hand back its header and body.
+   *
+   * The colours ride as CSS custom properties written through the CSSOM. A
+   * setProperty write is not an inline <style> element and is not governed by
+   * style-src (which internal/web/middleware.go grants 'unsafe-inline' anyway,
+   * for Shoelace's shadow DOM), so nothing about the CSP moves.
+   *
+   * ONE ink for the whole card, derived from the BODY colour — the half that
+   * carries the message, and the one YouTube picks its text colour from. Both
+   * halves take it, as they do on YouTube: a header strip is always the darker
+   * partner of its body, so deriving each half separately would put dark text
+   * on a tier-4 header (#FFB300, luminance 0.535) above white text on its own
+   * body, and light text on a tier-3 header (#00BFA5, 0.400) above dark text
+   * on its body — a card that changes ink halfway down. Measured header
+   * luminances, tiers 0-7: 0.117, 0.133, 0.390, 0.400, 0.535, 0.227, 0.129,
+   * 0.134 — only tier 4's would disagree with its body.
+   */
+  _cardParts(div, headerColor, bodyColor) {
+    div.classList.add("chat-card");
+    div.style.setProperty("--card-header", headerColor);
+    div.style.setProperty("--card-body", bodyColor);
+    const ink = `chat-ink-${readableInk(bodyColor)}`;
+    const header = document.createElement("div");
+    header.className = `chat-card-header ${ink}`;
+    const body = document.createElement("div");
+    body.className = `chat-card-body ${ink}`;
+    div.appendChild(header);
+    div.appendChild(body);
+    return { header, body };
+  }
 
-    return div;
+  /**
+   * K1: a Super Chat or Super Sticker as YouTube draws it — a header strip in
+   * the tier's header colour carrying the author, the amount and the time, and
+   * the message in the body colour beneath it.
+   *
+   * The archived headerColor/bodyColor win; SUPERCHAT_TIER_COLORS is the
+   * fallback for a file written before internal/chat recorded them (or with a
+   * pair its table did not know, which arrives as tier 0). The amount is shown
+   * exactly as archived — SuperchatInfo.Currency is derived from that same
+   * string, so appending it would restate it.
+   */
+  _fillSuperchatCard(div, msg) {
+    const sc = msg.superchat || {};
+    const tier = SUPERCHAT_TIER_COLORS[sc.tier] ? sc.tier : 0;
+    const palette = SUPERCHAT_TIER_COLORS[tier];
+    div.classList.add("superchat");
+    div.dataset.tier = String(tier);
+    const { header, body } = this._cardParts(
+      div,
+      resolvedColor(sc.headerColor, palette.header),
+      resolvedColor(sc.bodyColor, palette.body),
+    );
+
+    header.appendChild(this._authorSpan(msg, false));
+    const amount = document.createElement("span");
+    amount.className = "chat-msg-superchat";
+    amount.textContent = sc.amount || "";
+    header.appendChild(amount);
+    header.appendChild(this._timeSpan(msg));
+
+    // A Super Sticker's image is not archived, so the body says what it was.
+    // `kind` arrived with the tier fix (2026-09-05); an older file has none,
+    // and a paid message with no parts at all is a sticker in all but name.
+    const parts = Array.isArray(msg.message) ? msg.message : [];
+    if (sc.kind === "sticker" || (!sc.kind && parts.length === 0)) {
+      body.textContent = "Super Sticker";
+      return;
+    }
+    this.appendChatContent(body, msg.message || [], msg.emotes);
   }
 
   /**
