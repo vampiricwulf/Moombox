@@ -81,7 +81,17 @@ export class FilesController {
       row.className = "files-row";
 
       const typeBadge = `<span class="files-type-badge ${this.app.escapeHtml(file.type)}">${this.app.escapeHtml(file.type)}</span>`;
-      const pathStr = `<span class="files-path" title="${this.app.escapeHtml(file.path)}">${this.app.escapeHtml(file.relPath)}</span>`;
+      // A staging dir that still holds set-aside recordings is captured
+      // footage, not scratch space — the sweep sends the names for exactly
+      // this reason, and showing them is what lets an operator tell the
+      // difference before clicking Delete.
+      let pathInner = this.app.escapeHtml(file.relPath);
+      if (Array.isArray(file.asides) && file.asides.length > 0) {
+        const n = file.asides.length;
+        pathInner += `<br><span class="files-asides" style="color: var(--sl-color-warning-600); font-size: 0.85em;">`
+          + `${n} set-aside recording${n === 1 ? "" : "s"}: ${this.app.escapeHtml(file.asides.join(", "))}</span>`;
+      }
+      const pathStr = `<span class="files-path" title="${this.app.escapeHtml(file.path)}">${pathInner}</span>`;
       const sizeStr = `<span>${this.app.escapeHtml(formatBytes(file.size))}</span>`;
       const modStr = `<span data-timestamp="${this.app.escapeHtml(file.modified)}" title="${new Date(file.modified).toLocaleString()}">${this.app.escapeHtml(formatRelativeTime(file.modified))}</span>`;
 
