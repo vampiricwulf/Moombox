@@ -132,6 +132,18 @@ const (
 	// 3.7-6.2 MB segments of a 1080p60 live stream, sixteen workers would
 	// hold ~250 MB. Bounding by bytes means a wider pool costs connections,
 	// not memory — workers simply wait for the head segment to land.
+	//
+	// It is no longer read at the call sites. Since owner ruling R3
+	// (2026-09-24) the per-job ceiling is operator-settable
+	// (downloader.reorder_buffer_mb, defaulting to 1024 MB or 256 MB on
+	// arm64) and reaches the engine through ConfigureReorder; this constant
+	// is what sharedReorderBudget starts at, so a downloader driven WITHOUT
+	// that call — every test in this package, and any embedding that does
+	// not boot through cmd/moombox — keeps exactly the bound it had before.
+	// It stays here, as a constant, rather than moving into
+	// config.platformDefaults: internal/engine imports nothing from
+	// internal/config and this is the value that applies when there is no
+	// config at all.
 	catchUpBufferBytes = 256 << 20
 )
 
