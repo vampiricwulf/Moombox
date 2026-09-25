@@ -707,8 +707,9 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 // for a change a progress tick does not make (status transition, error, chat
 // status, mux output, a new job, a trim edit).
 //
-// No per-job throttle, and none is owed: the ~60 Hz caller (OnJobChange via
-// ProgressTracker.maybeUpdate, bounded by progressUpdateInterval = 16ms) now
+// No per-job throttle, and none is owed: the high-frequency caller
+// (OnJobChange via ProgressTracker.maybeUpdate, bounded by the configured
+// progress interval — downloader.progress_interval_ms, 16ms by default) now
 // goes to BroadcastJobProgress below, and the callers left here (OnJobAdded,
 // OnTrimsChanged, the transition paths) are event-driven and low rate.
 // An earlier per-job throttle here raced against the unthrottled
@@ -719,7 +720,8 @@ func (hub *WebSocketHub) BroadcastJobUpdate(data any) {
 }
 
 // BroadcastJobProgress sends the slim per-tick frame: only the fields a
-// download's ~60 Hz progress write actually moves. The CADENCE is identical to
+// download's progress write actually moves — one per configured progress
+// interval, ~60 Hz at the 16ms default. The CADENCE is identical to
 // job_update's — this makes each update cheaper, never rarer (the protected
 // ruling) — and the client merges the frame onto the row it already holds. The
 // payload shape is the caller's (cmd/moombox/job_progress.go); this hub stays

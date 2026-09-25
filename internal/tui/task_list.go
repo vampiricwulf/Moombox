@@ -138,7 +138,7 @@ type TaskListModel struct {
 	// statusSummary is renderHeader's icon-count line ("3▼ 2✓"), computed when
 	// the rows are rebuilt instead of on every frame. buildStatusSummary walks
 	// every job and time.Parses each Finished row's UpdatedAt through
-	// isJobArchived — at 60Hz with a few hundred rows that parse was the whole
+	// isJobArchived — at the fast tick's rate with a few hundred rows that parse was the whole
 	// cost of the header. Every path that changes m.jobs ends in
 	// rebuildVirtualList, and the only other way the counts can move (a
 	// Finished job aging across hide_finished_age_days) is caught by the
@@ -445,7 +445,7 @@ func (m *TaskListModel) RemoveJob(jobID string) {
 //
 // Audit reports/tui.md #22 — the previous post-rebuild relocation walked
 // m.list.Items() linearly to follow the selected job's new sorted
-// position. With 100+ active jobs and 60fps progress ticks that O(N)
+// position. With 100+ active jobs and per-frame progress ticks that O(N)
 // scan was measurable. virtualIndex (built inside rebuildVirtualList)
 // turns the relocation into an O(1) map lookup.
 func (m *TaskListModel) UpdateJob(job *database.Job) bool {

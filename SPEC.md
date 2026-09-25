@@ -53,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's 16ms gate caps progress writes at ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -273,7 +273,7 @@ The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safet
 | Component | Pattern | Parameters |
 |-----------|---------|------------|
 | Worker | Dual semaphore | 100 lifecycle slots (downloading + muxing) + 10 download slots (VODs only, configurable) |
-| WebSocket | No hub throttle | Rate bounded upstream by ProgressTracker (~60 Hz/job) |
+| WebSocket | No hub throttle | Rate bounded upstream by ProgressTracker (one report per configured progress interval per job; ~60 Hz at the 16 ms default) |
 | Database | Signal-driven batch coalesce | 100ms window, zero idle I/O |
 | TUI | Non-blocking sends | Drop counters for diagnostics |
 | TUI logs | Batched flush | 250ms flush interval |
@@ -507,7 +507,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 
 **Server-to-client message types:**
 - `job_update` — A job changed in a way a progress tick does not (status transition, error, chat status, mux output, new job, trim edit)
-- `job_progress` — Progress-only tick of an active download, ~60 Hz per job (payload: `{id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt}`, merged client-side)
+- `job_progress` — Progress-only tick of an active download, one per configured progress interval per job (~60 Hz at the 16 ms default) (payload: `{id, status, progress, percent, speed, eta, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, totalChatMessages, updatedAt}`, merged client-side)
 - `jobs_update` — Full job list refresh (payload: array of all visible jobs)
 - `job_deleted` — A job row was removed (payload: `{id}`)
 - `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
@@ -524,7 +524,7 @@ That list is the whole wire protocol: the hub's own `Broadcast` helpers in `inte
 
 The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives the Web UI's client-side archive re-evaluation: on every `job_update`/`jobs_update` and on a 60-second idle sweep, the Web UI moves Finished jobs that have aged past the threshold from the active panel into the Archived panel. The TUI's `isJobArchived` reclassification (`internal/tui/task_list.go`) does the same, and the active panel stays in sync with wall-clock time without a page refresh. Every Go classifier — that TUI bucket, the REST `/api/jobs` split, the `job_update` broadcast gate and the `cmd/moombox` list filter — runs the one predicate in `internal/jobfilter/archive.go` (`ArchiveCutoff`, `IsArchived`), which scales the fractional day threshold exactly and treats the boundary as exclusive: a Finished job whose `updated_at` sits exactly on the cutoff stays active, as does one whose timestamp is missing or unparseable.
 
-**Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval` (16 ms gate in `internal/worker/progress.go`) and now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
+**Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to one report per job per configured progress interval — `downloader.progress_interval_ms`, whose 16 ms default is `progressUpdateInterval` in `internal/worker/progress.go`, so ~60 Hz unless an operator says otherwise — and now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
 
 **Connection management:** 30-second ping interval, 10-second write timeout, 4 KiB client read limit (the only client message is `{"type":"ping"}`), 16-frame per-client backpressure queue.
 
