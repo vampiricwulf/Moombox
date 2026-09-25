@@ -424,3 +424,26 @@ test("every keyboard-reachable control has the app's focus ring, not the UA's", 
   assert.match(body, /outline:\s*2px solid var\(--sl-color-primary-500\)/,
     "the ring must match the app's convention (2px solid primary-500)");
 });
+
+// Reads the stylesheet as text, so it needs no jsdom and carries no `skip` —
+// the same shape as the focus-ring test above, and for the same reason: the
+// rule has no runtime witness. The player harness builds a document with no
+// stylesheet, so nothing in player.test.mjs can see a computed opacity.
+//
+// MUTANT: narrow the selector back to `> span`. A region-divider row that is
+// still `.future` keeps its label at full contrast by holding the ROW at
+// opacity 1 and dimming its children instead; a flat row's children are all
+// spans, but a Super Chat card's are its header and body divs and a Twitch
+// notice's include its system line — so `> span` would leave a card at full
+// strength in the middle of a dimmed pre-show region, reading as though
+// playback had already reached it.
+test("the divider row dims a card's block children, not only its spans", () => {
+  const css = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public", "moombox.css"),
+    "utf8",
+  );
+  assert.ok(css.includes(".chat-msg.divider-before.future > * {"),
+    "the divider-dim rule must reach every direct child, not only spans");
+  assert.ok(!css.includes(".chat-msg.divider-before.future > span"),
+    "the span-only form must be gone, not merely joined by a wider one");
+});
