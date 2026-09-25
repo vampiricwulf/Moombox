@@ -848,6 +848,18 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	if stagingDir == "" {
 		return
 	}
+	// Every line below is the LAST thing the operator reads about this job,
+	// and by the time we get here the row is already Finished: the finalize
+	// write untracks the job's per-job log routing synchronously, inside
+	// UpdateJobFields (notifyJobUpdate calls OnJobChange subscribers inline,
+	// and cmd/moombox's syncJobLogRoutingOnChange untracks on terminal —
+	// CORE-12). Without this bracket the staging outcome reaches the global
+	// log only, and the per-job log every UI shows ends mid-finalize.
+	//
+	// The same bracket RecoverAsides uses, and restoreLogRouting re-reads the
+	// row, so a job resurrected while this ran is left tracked.
+	w.db.TrackJobForLogs(jobID)
+	defer w.restoreLogRouting(jobID)
 	fresh, _ := w.db.GetJob(jobID)
 	preserveForTail := fresh != nil && fresh.IncompleteTail
 	// A chat capture that ended without completing leaves its resume
