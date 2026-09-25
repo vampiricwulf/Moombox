@@ -459,7 +459,7 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 | `modules/update-indicator.js` | `UpdateController` — the header version indicator and the update-available dialog (apply/skip) |
 | `modules/filter-bar.js` | `FilterBarController` — the unified filter bar shared by the Tasks and Archived tabs: token parsing/rendering, chip removal, channel/platform pickers |
 | `modules/job-details.js` | `JobDetailsController` — the job details dialog: render, live updates, action buttons, per-job logs |
-| `modules/player.js` | Video player with per-job chat replay: niconico-style media-time scrolling overlay, chat sidebar with pre-show/post-end dividers, chat search, per-job chat offset, resume/watched tracking, per-part Twitch chat merge, multi-segment seeking |
+| `modules/player.js` | Video player with per-job chat replay: niconico-style media-time scrolling overlay, chat sidebar with pre-show/post-end dividers, chat search, per-job chat offset, resume/watched tracking, per-part Twitch chat merge, multi-segment seeking. The sidebar also renders Super Chat / Super Sticker tier cards, membership cards, Twitch sub/resub/gift/raid notice blocks and the cheer chip — sidebar only; the overlay keeps plain scrolling text |
 | `modules/segments.js` | `SegmentPlayer` — multi-segment playback helper shared by the player and the trimmer |
 | `modules/chat-timeline.js` | Pure chat/video timeline math: offset normalization, chat-to-video bias, pre-show/post-end partitioning, per-part chat merge |
 | `modules/nico-lanes.js` | `LaneAllocator` — niconico lane-collision math for the overlay's right-to-left scrolling |

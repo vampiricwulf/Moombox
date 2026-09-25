@@ -275,7 +275,7 @@ OnJobUpdate subscribers --> WebSocket broadcast --> Web UI + TUI update
 SegmentDownloader.OnProgress callback
     |
     v
-ProgressTracker (throttles to 1s DB persist, one report per progress_interval_ms — 16ms default)
+ProgressTracker (one job-row write per report, one report per progress_interval_ms — 16ms default; gap rows flushed at most once a second)
     |
     v
 Database.UpdateJobFields (batched via 100ms coalesce window)
@@ -534,7 +534,7 @@ The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Q
 
 The `ProgressTracker` aggregates progress from video, audio, and chat downloaders and persists to the database:
 
-- Update throttling: one report per `downloader.progress_interval_ms` (16ms by default), 1-second database persist interval. The TUI's own progress tick is finer — 8ms, one per frame at its 120 fps renderer — so the engine's gate, not the tick, is what bounds the rate
+- Update throttling: one report per `downloader.progress_interval_ms` (16ms by default), with gap rows flushed to the database at most once a second (the job row is written on every report). The TUI's own progress tick is finer — 8ms, one per frame at its 120 fps renderer — so the engine's gate, not the tick, is what bounds the rate
 - Progress string format: `"V:1234 A:5678 C:900"` (video seq, audio seq, chat messages)
 - Speed calculation: smoothed exponential average (factor 0.7) of bytes/second
 - ETA calculation: based on elapsed time and progress percentage
