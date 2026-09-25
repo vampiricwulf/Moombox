@@ -48,6 +48,14 @@ export const SUPERCHAT_TIER_COLORS = {
   7: { header: "#D00000", body: "#E62117" },
 };
 
+/**
+ * YouTube's member green. The body is that green mixed 25% toward white
+ * (#0F9D58 → #4BB682): a lighter tint of the same hue, computed from the
+ * header rather than picked, and at a relative luminance of 0.366 it takes the
+ * same white ink as the header (0.249), so the card reads as one block.
+ */
+export const MEMBER_CARD_COLORS = { header: "#0F9D58", body: "#4BB682" };
+
 /** internal/chat's argbHex writes exactly #RRGGBB; nothing else is a colour. */
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
@@ -1197,6 +1205,10 @@ export class PlayerController {
       this._fillSuperchatCard(div, msg);
       return div;
     }
+    if (msg.isMembership) {
+      this._fillMemberCard(div, msg);
+      return div;
+    }
     this._fillPlainRow(div, msg);
     return div;
   }
@@ -1317,6 +1329,36 @@ export class PlayerController {
       return;
     }
     this.appendChatContent(body, msg.message || [], msg.emotes);
+  }
+
+  /**
+   * K2: a membership event — a new member, a milestone, a gift purchase or a
+   * gift redemption — as a green card.
+   *
+   * `membershipText` is the renderer's own header line ("Welcome to Member!",
+   * "Member for 6 months", "Gifted 5 memberships"), captured by
+   * internal/chat/api.go; `message` is whatever the member typed, which a new
+   * member and a gift purchase do not have. The two are kept apart — the line
+   * beside the name, the words in the body — which is the reason the archive
+   * carries them as separate fields.
+   *
+   * A card with nothing to put in its body drops the body element rather than
+   * leaving an empty coloured strip; .chat-card-header:last-child rounds the
+   * header on all four corners when that happens.
+   */
+  _fillMemberCard(div, msg) {
+    div.classList.add("member");
+    const { header, body } = this._cardParts(div, MEMBER_CARD_COLORS.header, MEMBER_CARD_COLORS.body);
+    header.appendChild(this._authorSpan(msg, false));
+    if (msg.membershipText) {
+      const note = document.createElement("span");
+      note.className = "chat-card-note";
+      note.textContent = msg.membershipText;
+      header.appendChild(note);
+    }
+    header.appendChild(this._timeSpan(msg));
+    this.appendChatContent(body, msg.message || [], msg.emotes);
+    if (!body.hasChildNodes()) body.remove();
   }
 
   /**

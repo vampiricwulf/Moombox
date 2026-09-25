@@ -1843,6 +1843,13 @@ sl-progress-bar {
     opacity: 0.75;
 }
 
+/* K2: the renderer's own line ("Member for 6 months"), set beside the name
+   rather than under it so a member card stays at most two rows tall. */
+.chat-card-note {
+    font-size: var(--sl-font-size-x-small);
+    opacity: 0.85;
+}
+
 .chat-emoji {
     height: 1.2em;
     vertical-align: middle;

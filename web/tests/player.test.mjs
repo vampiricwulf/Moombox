@@ -1512,3 +1512,58 @@ test("an ordinary message is unchanged by the card dispatch", { skip }, async ()
   assert.ok(ann.classList.contains("announcement"));
   assert.ok(ann.classList.contains("announcement-blue"));
 });
+
+// MUTANT: read `message` and ignore membershipText — a new member renders as a
+// name and a timestamp, which is exactly what the archive used to hold.
+test("a new member gets a green card carrying the renderer's own line", { skip }, async () => {
+  const h = await showChat([ytMsg({
+    authorName: "newfan", isMembership: true,
+    membershipText: "Welcome to Member!", message: [],
+  })]);
+  const row = h.sidebar().children[0];
+  assert.ok(row.classList.contains("chat-msg"));
+  assert.ok(row.classList.contains("chat-card"));
+  assert.ok(row.classList.contains("member"));
+  assert.equal(row.style.getPropertyValue("--card-header"), "#0F9D58");
+  assert.equal(row.style.getPropertyValue("--card-body"), "#4BB682");
+  const header = row.querySelector(".chat-card-header");
+  assert.ok(header.classList.contains("chat-ink-light"),
+    "the member green and its tint both take white ink");
+  assert.equal(header.querySelector(".chat-msg-author").textContent, "newfan");
+  assert.equal(header.querySelector(".chat-card-note").textContent, "Welcome to Member!");
+  assert.equal(row.querySelector(".chat-card-body"), null,
+    "a member who typed nothing gets no empty body strip");
+});
+
+// MUTANT: put the milestone line in the body — the member's own words and the
+// renderer's line become one paragraph and the card stops having two parts.
+test("a milestone card keeps the line and the message apart", { skip }, async () => {
+  const h = await showChat([ytMsg({
+    authorName: "oldfan", isMembership: true,
+    membershipText: "Member for 6 months",
+    message: [{ type: "text", text: "thanks!" }],
+  })]);
+  const row = h.sidebar().children[0];
+  assert.equal(row.querySelector(".chat-card-note").textContent, "Member for 6 months");
+  assert.equal(row.querySelector(".chat-card-body").textContent, "thanks!");
+  assert.equal(row.querySelector(".chat-card-header").lastChild.className, "chat-msg-time");
+});
+
+// The two shapes internal/chat only started archiving in this arc. MUTANT:
+// gate the card on membershipText instead of isMembership — the redemption
+// (which has none, its line is its message) falls back to a flat row.
+test("both gifted-membership shapes render as member cards", { skip }, async () => {
+  const h = await showChat([
+    ytMsg({ authorName: "gifter", isMembership: true,
+            membershipText: "Gifted 5 memberships", message: [] }),
+    ytMsg({ offsetMs: 2000, authorName: "lucky", isMembership: true,
+            message: [{ type: "text", text: "was gifted a membership by gifter" }] }),
+  ]);
+  const [purchase, redemption] = h.sidebar().children;
+  assert.equal(purchase.querySelector(".chat-card-note").textContent, "Gifted 5 memberships");
+  assert.equal(purchase.querySelector(".chat-card-body"), null);
+  assert.ok(redemption.classList.contains("member"));
+  assert.equal(redemption.querySelector(".chat-card-note"), null);
+  assert.equal(redemption.querySelector(".chat-card-body").textContent,
+    "was gifted a membership by gifter");
+});
