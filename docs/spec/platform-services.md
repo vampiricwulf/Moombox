@@ -243,8 +243,8 @@ Logged-in state is detected by checking for `"LOGGED_IN":true` or `"isLoggedIn":
 
 For each video format (identified by `mimeType` containing "video") with a non-empty URL:
 
-1. **Resolution gate**: Skip if `MaxDimension()` (which is `max(width, height)`) exceeds `maxResolution` config setting.
-2. **Resolution comparison**: Higher `MaxDimension` wins.
+1. **Resolution cap**: `max_video_resolution` compares the SHORTER frame dimension (`(*Format).CapDimension`, `internal/youtube/types.go`, over `CapDimension` in `internal/utils/resolution.go`), so `2160` recognises a 3840x2160 source and a 2160x3840 portrait one alike. `SelectByCap` (`internal/utils/resolution.go`) resolves the cap to one size — the largest at or below it, or the CLOSEST size above it when a video offers nothing that small — and `0` means unbounded. Formats at any other size are skipped. The cap is a preference among the qualities YouTube offered, never a filter that can leave a job with no video.
+2. **Resolution comparison**: within the chosen size, the higher `MaxDimension` wins — the rung that separates an anamorphic 2560x1080 from a 1920x1080.
 3. **FPS tiebreaker** (same resolution): If `prefer60fps` is true, higher FPS wins. If false, lower FPS wins.
 4. **Codec score tiebreaker** (same resolution, same FPS): Higher score wins. Scores are assigned by regex pattern matching against the codec string extracted from the `mimeType` field:
 
