@@ -1629,10 +1629,11 @@ func (s *runState) wireMonitorCallbacks() {
 	// chat_offset) bypass OnJobChange entirely at the writer side,
 	// so player-state scrubs don't reach this subscriber.
 	//
-	// No per-job throttle here: progress writes are already capped to
-	// ~60Hz/job upstream by ProgressTracker.maybeUpdate (16ms gate in
-	// internal/worker/progress.go), and every other UpdateJobFields
-	// caller is event-driven (state transitions, not loops).
+	// No per-job throttle here: progress writes are already capped
+	// upstream by ProgressTracker.maybeUpdate to one per configured
+	// progress interval (downloader.progress_interval_ms, 16ms by default
+	// — ~60Hz/job; internal/worker/progress.go), and every other
+	// UpdateJobFields caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
 		// Follow the job's status for per-job log routing (CORE-12). Ahead

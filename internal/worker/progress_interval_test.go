@@ -85,7 +85,8 @@ func reportsInOneBurst(t *testing.T, interval time.Duration) int {
 // MUTANT: leaving maybeUpdate's gate on the progressUpdateInterval constant —
 // the fast tracker reports 10 times, not 20. MUTANT: dropping the gate
 // altogether — both report 160. MUTANT: storing updateInterval but stamping
-// pt.lastUpdate before the comparison instead of after — both report 160.
+// pt.lastUpdate before the comparison instead of after — both report 0 (the
+// comparison then sees a zero gap on every event).
 func TestAnEightMillisecondTrackerReportsTwiceAsOften(t *testing.T) {
 	slow := reportsInOneBurst(t, 16*time.Millisecond)
 	fast := reportsInOneBurst(t, 8*time.Millisecond)
@@ -139,10 +140,11 @@ func TestTrackerDefaultMatchesTheConfigDefault(t *testing.T) {
 // test cares about.
 //
 // MUTANT: reading the value from w.cfg directly instead of through
-// readConfig — the store's write never reaches the snapshot and the second
-// assertion still reads 16 ms. MUTANT: converting with time.Duration(ms)
-// instead of time.Duration(ms) * time.Millisecond — 8 nanoseconds, and every
-// assertion fails.
+// readConfig — testWorkerSetup builds a bare MoomboxConfig, so the FIRST
+// assertion fails: 0s where the 16 ms default was expected. MUTANT:
+// converting with time.Duration(ms) instead of time.Duration(ms) *
+// time.Millisecond — the first assertion fails with 16ns (t.Fatalf stops
+// there).
 func TestTheNextJobsTrackerTakesANewProgressInterval(t *testing.T) {
 	w, db := testWorkerSetup(t)
 
@@ -175,5 +177,30 @@ func TestTheNextJobsTrackerTakesANewProgressInterval(t *testing.T) {
 	t.Cleanup(pt.Close)
 	if pt.updateInterval != 8*time.Millisecond {
 		t.Errorf("the tracker built after the save gates at %v, want 8ms", pt.updateInterval)
+	}
+}
+
+// TestCalculateETAReadsTheTrackerClock pins the seam completion: calculateETA
+// must read elapsed time through pt.now, the same field every other gate in
+// the file reads, not time.Now directly — otherwise a test that drives pt.now
+// off a fake clock (as reportsInOneBurst does above) gets a real-clock ETA
+// with no way to control it.
+//
+// MUTANT: reverting calculateETA to time.Since(pt.startTime) — elapsed comes
+// out near zero (the fake clock never advanced the real one), so the early
+// "too early for meaningful estimate" guard fires and the result is "" where
+// this test wants "15m 0s".
+func TestCalculateETAReadsTheTrackerClock(t *testing.T) {
+	pt := NewProgressTracker(nil, "eta", nopProgressLogger{}, 0)
+	t.Cleanup(pt.Close)
+
+	clk := &fakeClock{t: pt.startTime.Add(100 * time.Second)}
+	pt.mu.Lock()
+	pt.now = clk.now
+	pt.videoReported, pt.videoSeq, pt.videoTotal = true, 100, 1000
+	pt.mu.Unlock()
+
+	if got := pt.calculateETA(); got != "15m 0s" {
+		t.Errorf("calculateETA() = %q, want %q", got, "15m 0s")
 	}
 }

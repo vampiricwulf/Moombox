@@ -989,11 +989,12 @@ const (
 	// progressFastInterval is the progress-tick cadence while a download is
 	// delivering: one tick per frame at tuiTargetFPS (a frame is 8.33ms at
 	// 120 fps), so a progress change reaches the model before the next frame
-	// rather than sitting through one. The extra ticks are free on a
-	// no-change frame — JobDetailsModel.SetProgress skips the rebuild for an
-	// unchanged pointer inside one wall-clock second, and handleJobUpdate's
-	// display/tally gates refuse a no-change write — which is the property
-	// TestFrameCostAtLogCap pins.
+	// rather than sitting through one. A no-change tick costs no rebuild
+	// (JobDetailsModel.SetProgress skips an unchanged pointer inside one
+	// wall-clock second) and no repaint (the renderer's viewEquals) — only
+	// the memoised View() bubbletea calls after every message, the 30-alloc
+	// frame TestFrameCostAtLogCap pins (~0.25-0.6 ms at 20-1,000 jobs), so
+	// doubling the tick count doubles that and nothing else.
 	progressFastInterval = 8 * time.Millisecond   // ~120fps during active downloads
 	progressIdleInterval = 500 * time.Millisecond // Upcoming countdown / chat-count cadence
 )

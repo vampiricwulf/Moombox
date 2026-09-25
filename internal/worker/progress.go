@@ -692,7 +692,7 @@ func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
 
 // calculateETA estimates time remaining based on segment or byte progress (B8).
 func (pt *ProgressTracker) calculateETA() string {
-	elapsed := time.Since(pt.startTime).Seconds()
+	elapsed := pt.now().Sub(pt.startTime).Seconds()
 	if elapsed < 5 {
 		return "" // Too early for meaningful estimate
 	}
