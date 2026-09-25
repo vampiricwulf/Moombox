@@ -49,6 +49,16 @@ import (
 // seq to hand markFailed. Once nothing will ever read from this buffer
 // again, no worker should be left stranded waiting for room.
 //
+// Every wake of this buffer's cond happens with mu held, or by a caller that
+// has just held it (take, setHead, markFailed, release). That is not a style
+// preference — admit() holds mu continuously from a failed admission attempt
+// to cond.Wait(), so a Broadcast issued without mu can land in that window,
+// find no waiter, and be lost, parking a worker against a ceiling that has
+// already freed. The process-wide reorderBudget wakes buffers from OUTSIDE
+// (a flush on one download frees room for another), and it keeps the same
+// convention through wakeWaiters — see reorder_budget.go. Anything that
+// gains the ability to wake this cond must keep it too.
+//
 // claim / beginClaims turn the buffer into the rolling-window work source
 // for catch-up's worker pool: instead of a feeder goroutine pushing one
 // fixed batch, each worker asks claim() for the next sequence to fetch.
@@ -70,6 +80,16 @@ type reorderBuffer struct {
 	limit int
 	head  int
 
+	// budget is the process-wide ceiling this buffer's admissions are also
+	// charged against (see reorderBudget). Every buffer has one; tests point
+	// at a private instance so they neither see nor perturb the shared one.
+	budget *reorderBudget
+	// reserved is what this buffer currently owes `budget`. It tracks
+	// `bytes` exactly — every admit charges both, every take frees both —
+	// and is kept as its own counter so release() can zero it and make the
+	// free idempotent, which `bytes` alone could not express.
+	reserved int
+
 	// failed / minFailedSeq: see the type doc.
 	failed       bool
 	minFailedSeq int
@@ -87,8 +107,19 @@ type reorderBuffer struct {
 }
 
 func newReorderBuffer(limit, head int) *reorderBuffer {
-	rb := &reorderBuffer{seg: make(map[int][]byte), limit: limit, head: head}
+	return newReorderBufferOn(sharedReorderBudget, limit, head)
+}
+
+// newReorderBufferOn is newReorderBuffer against an explicit budget. Only
+// tests pass anything but sharedReorderBudget: a test that shares the process
+// budget would be perturbed by — and would perturb — every other buffer in
+// the package, and the registration below is what makes cross-buffer wakeups
+// work, so pointing `.budget` at a private instance after construction would
+// silently leave the buffer unwakeable.
+func newReorderBufferOn(bg *reorderBudget, limit, head int) *reorderBuffer {
+	rb := &reorderBuffer{seg: make(map[int][]byte), limit: limit, head: head, budget: bg}
 	rb.cond = sync.NewCond(&rb.mu)
+	bg.register(rb)
 	return rb
 }
 
@@ -102,7 +133,14 @@ func newReorderBuffer(limit, head int) *reorderBuffer {
 // buffer has a recorded failure: head can never itself sit above
 // minFailedSeq, since nothing flushes past a gap, so head simply stops
 // advancing there.
+//
+// A non-head waits on TWO ceilings — this buffer's own and the process-wide
+// reorderBudget — and the head is exempt from both, for the same reason in
+// both cases: nothing frees either ceiling without a flush, and nothing
+// flushes without its head. A limit of 0 means this buffer is unbounded
+// (downloader.reorder_buffer_mb = 0); the budget has the same convention.
 func (b *reorderBuffer) admit(seq int, data []byte) bool {
+	n := len(data)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for {
@@ -112,25 +150,46 @@ func (b *reorderBuffer) admit(seq int, data []byte) bool {
 		if b.failed && seq > b.minFailedSeq && seq != b.head {
 			return false
 		}
-		if seq == b.head || b.bytes < b.limit {
+		if seq == b.head {
+			b.budget.admitHead(n)
 			b.seg[seq] = data
-			b.bytes += len(data)
+			b.bytes += n
+			b.reserved += n
 			return true
+		}
+		if (b.limit <= 0 || b.bytes < b.limit) && b.budget.reserve(n) {
+			b.seg[seq] = data
+			b.bytes += n
+			b.reserved += n
+			return true
+		}
+		if f := beforeReorderWait.Load(); f != nil {
+			(*f)()
 		}
 		b.cond.Wait()
 	}
 }
 
 // take removes and returns the segment for seq, if present, freeing its
-// share of the ceiling and waking any admit() callers blocked on room.
+// share of BOTH ceilings and waking any admit() callers blocked on room —
+// this buffer's own, through its cond, and every other live buffer's,
+// through the budget's registry.
 func (b *reorderBuffer) take(seq int) ([]byte, bool) {
 	b.mu.Lock()
 	data, ok := b.seg[seq]
+	freed := 0
 	if ok {
 		delete(b.seg, seq)
 		b.bytes -= len(data)
+		// min() against reserved: after release() zeroed the reservation a
+		// late take must not free a second time.
+		freed = min(len(data), b.reserved)
+		b.reserved -= freed
 	}
 	b.mu.Unlock()
+	if freed > 0 {
+		b.budget.free(freed)
+	}
 	if ok {
 		b.cond.Broadcast()
 	}
@@ -175,10 +234,28 @@ func (b *reorderBuffer) markFailed(seq int) {
 // blocked admit() call regardless of how it relates to any failure.
 // Reserved for teardown unrelated to any specific segment's availability
 // — see the type doc. Idempotent and safe to call more than once.
+//
+// It also hands this buffer's whole outstanding reservation back to the
+// process-wide budget and drops it from the registry: a buffer torn down
+// with segments still resident would otherwise hold that share of the shared
+// ceiling for the life of the process, and one abandoned download per hour
+// would starve every later one. The map goes with the reservation: nothing
+// reads a released buffer (admit refuses, the consumer has returned), and
+// dropping the slices here keeps the bytes the budget just handed back from
+// staying reachable for as long as something — the DASH watcher's closure,
+// or a worker still inside admit() waiting to observe released — holds a
+// reference to this buffer.
 func (b *reorderBuffer) release() {
 	b.mu.Lock()
 	b.released = true
+	freed := b.reserved
+	b.reserved = 0
+	clear(b.seg)
 	b.mu.Unlock()
+	if freed > 0 {
+		b.budget.free(freed)
+	}
+	b.budget.unregister(b)
 	b.cond.Broadcast()
 }
 
@@ -314,10 +391,14 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	results := make(chan int, workers)
 	// rb is the byte-bounded reorder buffer: workers admit fetched segments
 	// into it (blocking there, not on `results`, once resident bytes reach
-	// catchUpBufferBytes) and the consumer below drains it in ascending
-	// order. See reorderBuffer's doc for the head-always-admitted and
-	// markFailed/release deadlock-avoidance guarantees.
-	bufLimit := catchUpBufferBytes
+	// the per-job ceiling below) and the consumer below drains it in
+	// ascending order. See reorderBuffer's doc for the head-always-admitted
+	// and markFailed/release deadlock-avoidance guarantees.
+	// The per-job ceiling is operator-settable (downloader.reorder_buffer_mb,
+	// reaching the engine through ConfigureReorder); 0 means unbounded. Read
+	// at construction, so a config save mid-download changes what the NEXT
+	// catch-up round builds with. The test override still wins when set.
+	bufLimit := sharedReorderBudget.perJobLimit()
 	if d.catchUpBufferBytesOverride > 0 {
 		bufLimit = d.catchUpBufferBytesOverride
 	}

@@ -161,9 +161,22 @@ type DownloaderConfig struct {
 	// limit; past SegmentWorkersWarnThreshold a warning is logged because a
 	// large simultaneous fan-out is the kind of traffic shape that attracts
 	// bot detection.
-	SegmentWorkers int  `toml:"segment_workers" json:"segment_workers"`
-	DownloadChat   bool `toml:"download_chat" json:"download_chat"`
-	Prefer60fps    bool `toml:"prefer_60fps" json:"prefer_60fps"`
+	SegmentWorkers int `toml:"segment_workers" json:"segment_workers"`
+	// ReorderBufferMB caps the out-of-order segment bytes ONE download may
+	// hold in RAM while its head-of-order segment works through its retry
+	// ladder (engine.reorderBuffer, fed by runParallelCatchUp and
+	// runHlsVodParallel). 0 = unbounded. Default 1024, or 256 on arm64 —
+	// see platformDefaults in config.go for why only arm64 differs.
+	ReorderBufferMB int `toml:"reorder_buffer_mb" json:"reorder_buffer_mb"`
+	// ReorderBudgetMB caps what EVERY live reorder buffer may hold between
+	// them, process-wide. Without it, ReorderBufferMB multiplied by the
+	// number of concurrent downloads: ten VOD jobs at the 1 GB per-job
+	// ceiling is 10 GB of admissible residency on a box that has 4. 0 =
+	// unbounded. Default 4096, or 1024 on arm64. A per-job value above this
+	// budget is clamped to it at read time (ReorderLimitBytes).
+	ReorderBudgetMB int  `toml:"reorder_budget_mb" json:"reorder_budget_mb"`
+	DownloadChat    bool `toml:"download_chat" json:"download_chat"`
+	Prefer60fps     bool `toml:"prefer_60fps" json:"prefer_60fps"`
 	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
 	// retrying — checking every 30s whether the stream has ended — before
 	// force-finalizing the recording, even if YouTube still reports the stream
