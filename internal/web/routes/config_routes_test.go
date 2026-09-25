@@ -1038,3 +1038,31 @@ func TestWebValidatorRangeBoundariesAgreeWithConfigValidate(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigPutAcceptsUnboundedResolution: the Web validator's floor drops from
+// 1 to 0 with config.Validate's (ruling R1). A rejected 0 would make the
+// dashboard unable to save what its own picker offers.
+//
+// Mutant: the floor left at 1 — the first case reports the field error.
+func TestConfigPutAcceptsUnboundedResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   float64
+		wantErr bool
+	}{
+		{"zero is unbounded", 0, false},
+		{"negative is still invalid", -1, true},
+		{"a normal cap", 1080, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateConfigUpdates(map[string]any{
+				"downloader": map[string]any{"max_video_resolution": tc.value},
+			})
+			_, got := errs["downloader.max_video_resolution"]
+			if got != tc.wantErr {
+				t.Errorf("max_video_resolution=%v produced error %v, want %v (errs: %v)",
+					tc.value, got, tc.wantErr, errs)
+			}
+		})
+	}
+}

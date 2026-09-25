@@ -3,6 +3,7 @@ package worker
 import (
 	"strings"
 
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -16,9 +17,14 @@ func IsProgressiveFormat(f *youtube.Format) bool {
 //
 // Selection priority:
 //  1. Manual itag override (preferItag > 0) — exact match, bypasses all filters
-//  2. Quality preference (qualityPref) — targets a specific resolution/FPS like "1080p60"
-//  3. maxRes hard cap — filters out streams exceeding the pixel limit
-//  4. Highest bandwidth among remaining candidates
+//  2. Resolution cap (maxRes) — ruling R1: the cap compares the SHORTER frame
+//     dimension and resolves to one size, the largest at or below it, or the
+//     closest above it when nothing is at or below. `0` is unbounded. It never
+//     empties the candidate list.
+//  3. Quality preference (qualityPref) — targets a specific resolution/FPS like
+//     "1080p60" among everything at or below the chosen size, so a per-job
+//     preference lower than the cap is still honoured
+//  4. Highest bandwidth among the streams AT the chosen size (source/best)
 //
 // For audio streams (isVideo=false), qualityPref and maxRes are ignored.
 func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, isVideo bool, qualityPref string) *DashStreamInfo {
@@ -31,35 +37,47 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 		}
 	}
 
-	// Build filtered candidate list
-	candidates := make([]int, 0, len(streams)) // indices into streams
+	// Build the type-filtered candidate list (indices into streams).
+	typed := make([]int, 0, len(streams))
 	for i := range streams {
 		s := &streams[i]
-
-		// Filter by type
 		if isVideo && !strings.Contains(s.MimeType, "video") {
 			continue
 		}
 		if !isVideo && !strings.Contains(s.MimeType, "audio") {
 			continue
 		}
-
-		// Resolution cap for video
-		if isVideo && maxRes > 0 {
-			maxDim := max(s.Height, s.Width)
-			if maxDim > maxRes {
-				continue
-			}
-		}
-
-		candidates = append(candidates, i)
+		typed = append(typed, i)
 	}
 
-	if len(candidates) == 0 {
+	if len(typed) == 0 {
 		return nil
 	}
 
-	// Quality preference targeting for video streams
+	// Resolve the resolution cap to a size, then keep everything at or below
+	// it. Audio streams carry no frame size and are never capped.
+	candidates := typed
+	capSize, haveCapSize := 0, false
+	if isVideo {
+		cands := make([]utils.Cand, len(typed))
+		for i, idx := range typed {
+			cands[i] = utils.Cand{Width: streams[idx].Width, Height: streams[idx].Height}
+		}
+		capSize, haveCapSize = utils.SelectByCap(maxRes, cands)
+		if haveCapSize {
+			capped := make([]int, 0, len(typed))
+			for _, idx := range typed {
+				if utils.CapDimension(streams[idx].Width, streams[idx].Height) <= capSize {
+					capped = append(capped, idx)
+				}
+			}
+			candidates = capped
+		}
+	}
+
+	// Quality preference targeting for video streams, over everything at or
+	// below the chosen size — a job that asked for 720p under a 2160 cap gets
+	// 720p, exactly as it did before this arc.
 	if isVideo && qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
@@ -74,9 +92,24 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 		}
 	}
 
-	// Default: highest bandwidth among candidates (source/best)
-	best := candidates[0]
-	for _, idx := range candidates[1:] {
+	// Default: highest bandwidth AT the chosen size (source/best). Restricting
+	// to the chosen size is what makes "the largest rendition at or below the
+	// cap" true even when a smaller rendition happens to carry more bits.
+	atSize := candidates
+	if isVideo && haveCapSize {
+		atSize = make([]int, 0, len(candidates))
+		for _, idx := range candidates {
+			if utils.CapDimension(streams[idx].Width, streams[idx].Height) == capSize {
+				atSize = append(atSize, idx)
+			}
+		}
+		// Defensive, as above — capSize is always attained by some candidate.
+		if len(atSize) == 0 {
+			atSize = candidates
+		}
+	}
+	best := atSize[0]
+	for _, idx := range atSize[1:] {
 		if streams[idx].Bandwidth > streams[best].Bandwidth {
 			best = idx
 		}

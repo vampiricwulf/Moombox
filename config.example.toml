@@ -118,8 +118,11 @@
 # Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}
 # output_template = "${channel}/${start_date} ${title} [${id}]"
 
-# Maximum video resolution. Based on max(width, height), so portrait videos
-# are handled correctly (e.g., 2160 allows both 3840x2160 and 2160x3840).
+# Maximum video resolution, compared against the SHORTER frame dimension — so
+# 2160 recognises 4K both ways round (3840x2160 and 2160x3840) and a 720x1280
+# portrait stream counts as 720. Moombox takes the largest rendition at or below
+# this; when a stream offers nothing that small it takes the closest one above,
+# so the cap never leaves a recording empty. 0 = unbounded (always the largest).
 # max_video_resolution = 2160
 
 # Peak concurrent VOD downloads across all channels. Live streams always

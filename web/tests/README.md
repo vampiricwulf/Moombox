@@ -7,7 +7,7 @@ suites drive their module inside a jsdom document:
 `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`,
 `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`,
 `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`,
-`settings-reorder-budget.test.mjs`,
+`resolution-picker.test.mjs`, `settings-reorder-budget.test.mjs`,
 `sidecar-warning.test.mjs` and `update-check-debounce.test.mjs`.
 jsdom is the only dev dependency, and it is **optional**.
 
@@ -34,7 +34,7 @@ modules.
 
 ## The DOM suites (jsdom)
 
-The fifteen suites listed above are the ones that need a DOM. Install jsdom
+The sixteen suites listed above are the ones that need a DOM. Install jsdom
 **inside `web/tests/`** — never at the repo root:
 
 ```bash
@@ -51,22 +51,24 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 129
+checkout without `npm ci` reports them as **skipped**, never failed — the 133
 DOM tests (player 37, render-diff 16, app 13, a11y-controls 12, boot-and-login 12,
-job-progress 8, job-asides 6, log-panel 4, open-folder 4,
+job-progress 8, job-asides 6, log-panel 4, open-folder 4, resolution-picker 4,
 settings-reorder-budget 4, update-check-debounce 4, archive-boundary 3,
-sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 123 tests
-that need no DOM — the eight pure suites plus the stylesheet-text test in
-`a11y-controls.test.mjs`, which reads `moombox.css` and asserts on its text:
+sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 125 tests
+that need no DOM — the eight pure suites, the stylesheet-text test in
+`a11y-controls.test.mjs`, which reads `moombox.css` and asserts on its text,
+and the two mapping tests in `resolution-picker.test.mjs`, whose other four
+tests do need one:
 
 ```
-ℹ tests 252
-ℹ pass 123
+ℹ tests 258
+ℹ pass 125
 ℹ fail 0
-ℹ skipped 129
+ℹ skipped 133
 ```
 
-With jsdom installed the same command reports `tests 252` / `pass 252` /
+With jsdom installed the same command reports `tests 258` / `pass 258` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
@@ -77,6 +79,7 @@ than a silent skip.
 |-------|-------------|
 | `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
 | `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
+| `resolution-picker.test.mjs` | partly — 2 pure mapping tests, 4 jsdom picker tests |
 
 ## The player harness
 
@@ -173,11 +176,16 @@ the lane allocator, the overlay scheduler — are covered by the plain suites.
 `player.js` and `app.js` — and the controllers `app.js` composes, reached
 through the app harness — are covered by the jsdom suites above, as are the two
 standalone page scripts `boot-theme.js` and `login.js` (`boot-and-login.test.mjs`,
-which evals them against the real `index.html` and `login.html`). `settings.js`,
-`setup.js` and `trimmer.js` have no harness of their own; `release-notes-toast.test.mjs`
-and `settings-reorder-budget.test.mjs` reach `settings.js` handlers only because
-`MoomboxApp` constructs `SettingsController` and wires its listeners. The two
-helpers are the pattern to extend if a real one is wanted.
+which evals them against the real `index.html` and `login.html`). The other
+UI-heavy modules (`settings.js`, `setup.js`, `trimmer.js`) have no harness of
+their own yet — `release-notes-toast.test.mjs` and
+`settings-reorder-budget.test.mjs` reach `settings.js` handlers only because
+`MoomboxApp` constructs `SettingsController` and wires its listeners, and
+`resolution-picker.test.mjs` reaches both resolution pickers the same way
+through the app harness, driving `populateConfigForm()` and `setupListeners()`
+on the live controllers while importing the two pure mapping helpers directly;
+`helpers/player-dom.mjs` and `helpers/app-dom.mjs` are the pattern to extend if
+a real one is wanted.
 
 ## Adding a test
 

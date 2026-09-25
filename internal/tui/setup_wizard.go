@@ -155,7 +155,7 @@ var advancedSetupSteps = []setupStepDef{
 		title:    "Downloader",
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
-			{"maxRes", "Max resolution", "2160", "Maximum video dimension (width or height)", setupFieldNumber, nil},
+			{"maxRes", "Max resolution", "2160", "Shorter edge in pixels; 0 = unbounded (always the largest)", setupFieldNumber, nil},
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
 			{"numParallel", "Parallel downloads", "2", "2-4 recommended, higher uses more CPU/network", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
@@ -1257,10 +1257,6 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Downloader: Parallel downloads must be at least 1"
 		return ""
 	}
-	if n := vNum("maxRes"); n != 0 && n < 1 {
-		m.errorMsg = "Downloader: Max resolution must be at least 1"
-		return ""
-	}
 	if n := vNum("maximumTimeout"); n != 0 && n < 30 {
 		m.errorMsg = "Downloader: YouTube max timeout must be at least 30 seconds"
 		return ""
@@ -1356,8 +1352,14 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	if n := vNum("numParallel"); n > 0 {
 		cfg.Downloader.NumParallelDownloads = n
 	}
-	if n := vNum("maxRes"); n > 0 {
-		cfg.Downloader.MaxVideoResolution = n
+	// `0` is the UNBOUNDED mode (ruling R1) and vNum cannot tell it from an
+	// empty field — both come back 0 — so the raw text decides. An empty entry
+	// still means "leave the default alone", the wizard's standing promise; an
+	// explicit 0 reaches the config, matching the Web wizard's Unbounded
+	// option. A negative entry is impossible (validateDigitsOnly) and would
+	// be caught by config.Validate anyway.
+	if s := v("maxRes"); s != "" {
+		cfg.Downloader.MaxVideoResolution = vNum("maxRes")
 	}
 	cfg.Downloader.Prefer60fps = vBool("prefer60fps", true)
 	cfg.Downloader.DownloadChat = vBool("downloadChat", true)

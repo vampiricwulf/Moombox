@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -147,6 +148,51 @@ func cycleFieldOption(vals map[string]string, key string, options []string, dire
 	}
 	next := (idx + direction + len(options)) % len(options)
 	vals[key] = options[next]
+}
+
+// cycleNumberPreset steps a NUMBER field's value through its preset options.
+//
+// It is the numeric sibling of cycleFieldOption, and it exists for one
+// difference: a number row's value need not be one of the options at all (the
+// operator can type anything), and cycleFieldOption's unrecognised-value
+// fallback jumps to options[0] or options[len-1] — for the resolution ladder
+// that turns a right-arrow on a typed 1234 into "0", i.e. unbounded. Here an
+// off-ladder value steps to the nearest preset strictly ABOVE it going
+// forward, or strictly BELOW it going back, wrapping at the ends exactly as
+// cycleFieldOption does. For a value that IS a preset the two are identical.
+//
+// options must be ascending numeric strings; a value that does not parse falls
+// back to the ends, which is what a half-typed field wants.
+func cycleNumberPreset(vals map[string]string, key string, options []string, direction int) {
+	if len(options) == 0 {
+		return
+	}
+	cur, err := strconv.Atoi(strings.TrimSpace(vals[key]))
+	if err != nil {
+		if direction >= 0 {
+			vals[key] = options[0]
+		} else {
+			vals[key] = options[len(options)-1]
+		}
+		return
+	}
+	if direction >= 0 {
+		for _, opt := range options {
+			if n, err := strconv.Atoi(opt); err == nil && n > cur {
+				vals[key] = opt
+				return
+			}
+		}
+		vals[key] = options[0]
+		return
+	}
+	for i := len(options) - 1; i >= 0; i-- {
+		if n, err := strconv.Atoi(options[i]); err == nil && n < cur {
+			vals[key] = options[i]
+			return
+		}
+	}
+	vals[key] = options[len(options)-1]
 }
 
 // dialogBox computes standard dialog box and content widths from a maximum

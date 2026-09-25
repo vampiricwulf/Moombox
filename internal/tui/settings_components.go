@@ -113,6 +113,21 @@ func (m *SettingsModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 	}
+	// Suppress the arrow keys on a number row that declares presets —
+	// handleFieldKey has already cycled the value and reseated the input, and
+	// letting the same key through would move the cursor inside the fresh text
+	// for no reason.
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if k := keyMsg.String(); k == keyLeft || k == keyRight {
+			sec := sections[m.sectionIndex]
+			if sec.fields != nil && m.fieldIndex < len(sec.fields) {
+				fd := sec.fields[m.fieldIndex]
+				if fd.ftype == fieldNumber && len(fd.options) > 0 {
+					return nil
+				}
+			}
+		}
+	}
 	prev := m.textInput.Value()
 	var cmd tea.Cmd
 	m.textInput, cmd = m.textInput.Update(msg)
