@@ -1410,3 +1410,28 @@ func TestValidateRejectsATraversingDpapiProfileDir(t *testing.T) {
 		})
 	}
 }
+
+// TestMaxVideoResolutionZeroIsUnbounded: 0 is the UNBOUNDED mode (ruling R1),
+// so validation must keep it rather than resetting it to the default. The
+// floor was 1 before this arc, which made "always take the largest rendition"
+// unexpressible.
+//
+// Mutant: the floor left at 1 — Normalize rewrites 0 to 2160 and the first
+// assertion fails.
+func TestMaxVideoResolutionZeroIsUnbounded(t *testing.T) {
+	cfg := Defaults()
+	cfg.Downloader.MaxVideoResolution = 0
+	Normalize(cfg)
+	if cfg.Downloader.MaxVideoResolution != 0 {
+		t.Errorf("MaxVideoResolution = %d after Normalize, want 0 preserved — 0 means unbounded",
+			cfg.Downloader.MaxVideoResolution)
+	}
+
+	// A negative value is still nonsense and still resets.
+	cfg.Downloader.MaxVideoResolution = -1
+	Normalize(cfg)
+	if cfg.Downloader.MaxVideoResolution != 2160 {
+		t.Errorf("MaxVideoResolution = %d after Normalize of -1, want the 2160 default",
+			cfg.Downloader.MaxVideoResolution)
+	}
+}

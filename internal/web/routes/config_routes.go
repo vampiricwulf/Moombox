@@ -272,9 +272,10 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.segment_workers"] = "must be >= 1"
 			}
 		}
+		// 0 = unbounded (ruling R1); mirrors config.Validate's floor.
 		if v, ok := dl["max_video_resolution"].(float64); ok {
-			if v < 1 {
-				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 1"
+			if v < 0 {
+				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 0 (0 = unbounded)"
 			}
 		}
 		if v, ok := dl["maximum_timeout"].(float64); ok {

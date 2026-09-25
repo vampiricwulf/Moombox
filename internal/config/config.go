@@ -646,8 +646,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			d.SegmentWorkers = defaults.Downloader.SegmentWorkers
 		}
 	}
-	if d.MaxVideoResolution < 1 {
-		fail("downloader.max_video_resolution %d must be >= 1", d.MaxVideoResolution)
+	// 0 is the UNBOUNDED mode (ruling R1): always take the largest rendition
+	// on offer. Only a negative value is nonsense.
+	if d.MaxVideoResolution < 0 {
+		fail("downloader.max_video_resolution %d must be >= 0 (0 = unbounded)", d.MaxVideoResolution)
 		if !reportOnly {
 			d.MaxVideoResolution = defaults.Downloader.MaxVideoResolution
 		}

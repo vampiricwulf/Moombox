@@ -138,6 +138,17 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.toggleField(field)
 		case fieldCycle:
 			m.cycleFieldReverse(field)
+		case fieldNumber:
+			// A number row that declares options is a picker: the arrows step
+			// the presets, typing still enters anything else. The text input
+			// has to follow, or the next keystroke syncs its stale text back
+			// over the value we just set.
+			if len(field.options) > 0 {
+				cycleNumberPreset(m.values, field.key, field.options, -1)
+				m.recheckDirty()
+				m.status = saveIdle
+				m.updateTextInputForField()
+			}
 		}
 		return ""
 	case keyRight:
@@ -146,6 +157,13 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.toggleField(field)
 		case fieldCycle:
 			m.cycleFieldForward(field)
+		case fieldNumber:
+			if len(field.options) > 0 {
+				cycleNumberPreset(m.values, field.key, field.options, 1)
+				m.recheckDirty()
+				m.status = saveIdle
+				m.updateTextInputForField()
+			}
 		}
 		return ""
 	case "shift+left":
