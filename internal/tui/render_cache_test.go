@@ -541,8 +541,14 @@ func TestStatusBarTallyIsStoredNotRecomputed(t *testing.T) {
 		t.Fatalf("fixture: the bar does not show the active tally")
 	}
 
-	job.Status = database.StatusFinished // in place: no production path does this without SetJobs
-	m.renderCache = ""                   // defeat the memo, so this measures the TALLY and nothing else
+	// In place, which the production path does NOT do: handleJobUpdate
+	// replaces the slice ELEMENT in the array statusBar.jobs aliases and then
+	// re-feeds SetJobs explicitly on a status change (app_update.go), so a
+	// real transition re-tallies — TestJobStatusTransitionRetalliesTheStatusBar
+	// is that pin. This mutation is only a stand-in for "View reads the stored
+	// tally", and the memo is blanked so it measures the tally and nothing else.
+	job.Status = database.StatusFinished
+	m.renderCache = ""
 	if got := stripANSI(m.View()); !strings.Contains(got, "Active: 1") {
 		t.Errorf("a fresh render re-tallied from the job list; the tally belongs to SetJobs:\n%s", got)
 	}
