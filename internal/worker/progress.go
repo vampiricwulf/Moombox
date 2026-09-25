@@ -12,7 +12,13 @@ import (
 )
 
 const (
-	progressUpdateInterval  = 16 * time.Millisecond // ~60fps, matches TUI tick rate
+	// progressUpdateInterval is the DEFAULT minimum gap between one job's
+	// progress reports: what NewProgressTracker falls back to when it is
+	// handed a non-positive interval, and what config.Defaults() writes into
+	// downloader.progress_interval_ms. The live value per tracker is
+	// ProgressTracker.updateInterval, snapshotted per job by buildJobContext.
+	// TestTrackerDefaultMatchesTheConfigDefault pins these two 16s together.
+	progressUpdateInterval  = 16 * time.Millisecond
 	progressPersistInterval = 1 * time.Second
 	activityUpdateInterval  = 1 * time.Second // throttle activity progress-line writes
 	activitySegmentGrace    = 2 * time.Second // show a wait only after this gap with no segment
@@ -27,7 +33,7 @@ const (
 	waitingForSegmentGrace = 5 * time.Second
 	// speedAvgWindow is the span of the sliding window the displayed speed
 	// averages over. The previous EMA (alpha 0.7) smoothed instantaneous
-	// deltas sampled at the ~60Hz update cadence — windows of a few
+	// deltas sampled at the report cadence — windows of a few
 	// milliseconds, where one landing segment reads as a huge spike and an
 	// empty tick as 0, so the readout jittered with the arrival pattern
 	// instead of showing the transfer rate.
@@ -42,20 +48,33 @@ const (
 
 // ProgressTracker tracks download progress and updates the database.
 type ProgressTracker struct {
-	mu             sync.Mutex
-	db             *database.Database
-	logger         logger
-	jobID          string
-	videoSeq       int
-	audioSeq       int
-	videoReported  bool // a video downloader DELIVERED a progress event
-	audioReported  bool // an audio downloader DELIVERED a progress event
-	videoTotal     int
-	audioTotal     int
-	chatCount      int
-	bytesTotal     int64
-	lastUpdate     time.Time
-	lastPersist    time.Time
+	mu            sync.Mutex
+	db            *database.Database
+	logger        logger
+	jobID         string
+	videoSeq      int
+	audioSeq      int
+	videoReported bool // a video downloader DELIVERED a progress event
+	audioReported bool // an audio downloader DELIVERED a progress event
+	videoTotal    int
+	audioTotal    int
+	chatCount     int
+	bytesTotal    int64
+	lastUpdate    time.Time
+	lastPersist   time.Time
+	// updateInterval is the minimum gap between this tracker's progress
+	// reports — maybeUpdate's gate, from downloader.progress_interval_ms via
+	// JobConfig.ProgressInterval. Fixed for the tracker's life: a config save
+	// reaches the NEXT job's tracker, never a running one.
+	updateInterval time.Duration
+	// now is the clock every gate in this file is measured against. A field
+	// so a test can drive a synthetic burst without sleeping; production
+	// assigns time.Now in the constructor and never reassigns it. Every
+	// production read is inside pt.mu, so a test that swaps it must hold
+	// pt.mu too — and must re-stamp lastUpdate/lastPersist/startTime, which
+	// the constructor took from the real clock before this field existed.
+	// Mirrors EmoteResolver.now (internal/twitch/emotes.go).
+	now            func() time.Time
 	lastVideoBytes int64 // last p.Bytes for video downloader delta accumulation
 	lastAudioBytes int64 // last p.Bytes for audio downloader delta accumulation
 
@@ -120,15 +139,25 @@ const (
 )
 
 // NewProgressTracker creates a new progress tracker for a job.
-func NewProgressTracker(db *database.Database, jobID string, logger logger) *ProgressTracker {
+//
+// updateInterval is downloader.progress_interval_ms as a duration, carried
+// here by JobConfig.ProgressInterval. Anything non-positive falls back to
+// progressUpdateInterval, so a JobContext literal built directly by a test —
+// or the early-init window before a config store is wired — needs no value.
+func NewProgressTracker(db *database.Database, jobID string, logger logger, updateInterval time.Duration) *ProgressTracker {
+	if updateInterval <= 0 {
+		updateInterval = progressUpdateInterval
+	}
 	now := time.Now()
 	return &ProgressTracker{
-		db:          db,
-		logger:      logger,
-		jobID:       jobID,
-		lastUpdate:  now,
-		lastPersist: now,
-		startTime:   now,
+		db:             db,
+		logger:         logger,
+		jobID:          jobID,
+		updateInterval: updateInterval,
+		now:            time.Now,
+		lastUpdate:     now,
+		lastPersist:    now,
+		startTime:      now,
 	}
 }
 
@@ -138,7 +167,7 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 		pt.mu.Lock()
 		pt.videoActivity = engine.ActivityNone // a real video segment arrived
 		pt.orchActivity = engine.ActivityNone  // any orchestrator-level wait is over
-		pt.lastSegmentAt = time.Now()
+		pt.lastSegmentAt = pt.now()
 		// Reported on DELIVERY, not at attach: between attach and the first
 		// video event (a post-restart 403 hunt can hold this window open for
 		// minutes), a chat tick or audio event must not persist videoSeq=0
@@ -198,7 +227,7 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 		pt.mu.Lock()
 		pt.audioActivity = engine.ActivityNone // a real audio segment arrived
 		pt.orchActivity = engine.ActivityNone  // any orchestrator-level wait is over
-		pt.lastSegmentAt = time.Now()
+		pt.lastSegmentAt = pt.now()
 		// See AttachVideoDownloader — reported on delivery, not attach.
 		pt.audioReported = true
 		pt.audioSeq = p.Seq
@@ -248,7 +277,7 @@ func (pt *ProgressTracker) noteFetch(n int64) {
 		return
 	}
 	pt.fetchedTotal += n
-	pt.lastFetchAt = time.Now()
+	pt.lastFetchAt = pt.now()
 	pt.mu.Unlock()
 	pt.maybeUpdate()
 }
@@ -283,7 +312,7 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 		pt.mu.Unlock()
 		return
 	}
-	now := time.Now()
+	now := pt.now()
 	switch stream {
 	case streamVideo:
 		if a != pt.videoActivity {
@@ -437,7 +466,7 @@ func (pt *ProgressTracker) activityRefreshLoop() {
 			pt.mu.Unlock()
 			return
 		}
-		now := time.Now()
+		now := pt.now()
 		act, start := engine.ActivityNone, time.Time{}
 		if pt.pendingActivityLocked() {
 			act, start = pt.dominantActivity(now)
@@ -479,8 +508,8 @@ func (pt *ProgressTracker) activityRefreshLoop() {
 func (pt *ProgressTracker) maybeUpdate() {
 	pt.mu.Lock()
 
-	now := time.Now()
-	if now.Sub(pt.lastUpdate) < progressUpdateInterval {
+	now := pt.now()
+	if now.Sub(pt.lastUpdate) < pt.updateInterval {
 		pt.mu.Unlock()
 		return
 	}
