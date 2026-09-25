@@ -33,8 +33,21 @@ import (
 //
 // The quote strip is defensive: a Windows path cannot legally contain a '"',
 // but stripping it means no target can ever escape the quoting.
+//
+// The trailing-backslash doubling is NOT defensive — it is reachable. Inside a
+// quoted argument a run of backslashes immediately before the closing quote
+// escapes it, so `D:\` composed to `explorer.exe "D:\"`, which
+// CommandLineToArgvW reads as the single argument `D:"`. filepath.Dir returns
+// exactly `D:\` for a file in the root of a dedicated recordings disk, and
+// both callers hand their filepath.Dir straight to this helper — an input that
+// WORKED before the force-quoting landed, because Go emits it bare. Doubling
+// the run, exactly as syscall.EscapeArg does, is correct under both parser
+// models: CommandLineToArgvW yields `D:\`, and a naive quote-stripping legacy
+// parser yields `D:\\`, which Windows resolves to the same directory.
 func forceQuoteCmdLine(cmd *exec.Cmd, program, target string) {
+	q := strings.ReplaceAll(target, `"`, "")
+	q += strings.Repeat(`\`, len(q)-len(strings.TrimRight(q, `\`)))
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CmdLine: program + ` "` + strings.ReplaceAll(target, `"`, "") + `"`,
+		CmdLine: program + ` "` + q + `"`,
 	}
 }
