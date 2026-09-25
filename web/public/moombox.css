@@ -1705,14 +1705,16 @@ sl-progress-bar {
 
 /* A divider row is `.future` until playback reaches it — and .future's opacity
    fades the pseudo-element with the row, dropping the label to ~1.9:1 in the
-   state it spends most of its life in. Dim the row's CONTENT instead: every
-   direct child built by _buildChatMessageEl is a span (time, superchat,
-   author, content), so the label keeps its full contrast either way. */
+   state it spends most of its life in. Dim the row's CONTENT instead, so the
+   label keeps its full contrast either way. `> *` and not `> span`: a flat
+   row's children are all spans, but a card's are its header and body divs and
+   a notice's include its system line, and a rule that reached only spans would
+   leave a Super Chat card at full strength while every row around it dimmed. */
 .chat-msg.divider-before.future {
     opacity: 1;
 }
 
-.chat-msg.divider-before.future > span {
+.chat-msg.divider-before.future > * {
     opacity: 0.35;
 }
 
@@ -1738,10 +1740,6 @@ sl-progress-bar {
 
 .chat-msg-author.member {
     color: var(--sl-color-success-600);
-}
-
-.chat-msg.superchat {
-    border-left: 3px solid var(--sl-color-warning-500);
 }
 
 .chat-msg.announcement {
@@ -1778,6 +1776,111 @@ sl-progress-bar {
     font-weight: var(--sl-font-weight-bold);
     color: var(--sl-color-warning-600);
     margin-right: var(--sl-spacing-2x-small);
+}
+
+/* ── Sidebar chat cards (2026-09-25 rulings K1/K2) ───────────────────────────
+   A Super Chat, Super Sticker or membership event is a self-contained two-part
+   card rather than a flat row with a border. The ROW keeps `.chat-msg` — the
+   sidebar promotes, dims, hides, divides and measures rows by that class and
+   by their index — and stops striping; the card inside supplies its colour.
+   --card-header / --card-body are written from JS through the CSSOM
+   (player.js _cardParts), which is not an inline style attribute and asks
+   nothing of style-src. */
+.chat-msg.chat-card:nth-child(odd),
+.chat-msg.chat-card:nth-child(even) {
+    background-color: transparent;
+}
+
+.chat-card-header,
+.chat-card-body {
+    padding: 3px var(--sl-spacing-x-small);
+}
+
+.chat-card-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sl-spacing-2x-small);
+    background: var(--card-header);
+    border-radius: 4px 4px 0 0;
+}
+
+/* A card whose body would be empty drops the body element, so the header is
+   the whole card and rounds on all four corners. */
+.chat-card-header:last-child {
+    border-radius: 4px;
+}
+
+.chat-card-body {
+    background: var(--card-body);
+    border-radius: 0 0 4px 4px;
+}
+
+/* The card's ink, chosen from its BODY colour by relative luminance in
+   player.js _cardParts and worn by both halves. Set on the header and body
+   elements themselves rather than inherited from the row, so
+   `.chat-msg.post`'s neutral-700 — which reaches a flat row's spans by
+   inheritance — cannot repaint a card. */
+.chat-ink-light { color: #ffffff; }
+.chat-ink-dark  { color: rgba(0, 0, 0, 0.87); }
+
+/* Inside a header the author, amount and time take the card's ink instead of
+   their own row colours, and the time is pushed to the top-right. The extra
+   .chat-card qualifier outranks `.chat-msg-author.owner` and friends rather
+   than relying on source order. */
+.chat-card .chat-card-header .chat-msg-author,
+.chat-card .chat-card-header .chat-msg-superchat,
+.chat-card .chat-card-header .chat-msg-time {
+    color: inherit;
+    margin-right: 0;
+}
+
+.chat-card .chat-card-header .chat-msg-author {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.chat-card .chat-card-header .chat-msg-time {
+    opacity: 0.75;
+}
+
+/* K2: the renderer's own line ("Member for 6 months"), set beside the name
+   rather than under it so a member card stays at most two rows tall. Scoped
+   like its header siblings above. Full opacity, unlike the time: this is the
+   event itself, not metadata — a fade would put it at exactly 4.50:1. */
+.chat-card .chat-card-header .chat-card-note {
+    font-size: var(--sl-font-size-x-small);
+}
+
+/* ── Twitch notices (2026-09-25 ruling K3) ───────────────────────────────────
+   A sub, resub, gift or raid is a highlighted block rather than a flat line:
+   Twitch's purple down the left edge and the same purple at 10% behind it. The
+   striping override matches .chat-msg.announcement's — nth-child would
+   otherwise repaint every second notice. The accent is written twice rather
+   than hoisted into a custom property: unlike --announcement-accent, which
+   five colour classes set, there is one value and one setter. */
+.chat-msg.chat-notice.twitch {
+    border-left: 4px solid #9147ff;
+}
+
+.chat-msg.chat-notice.twitch:nth-child(odd),
+.chat-msg.chat-notice.twitch:nth-child(even) {
+    background-color: color-mix(in srgb, #9147ff 10%, transparent);
+}
+
+.chat-notice-line {
+    font-weight: var(--sl-font-weight-semibold);
+}
+
+/* The cheer chip: a pill of the amount's scale colour, inline before the
+   message it paid for. --cheer-bg is set from JS through the CSSOM. */
+.cheer-chip {
+    display: inline-block;
+    padding: 0 6px;
+    margin-right: var(--sl-spacing-2x-small);
+    border-radius: 999px;
+    background: var(--cheer-bg);
+    font-size: var(--sl-font-size-x-small);
+    font-weight: var(--sl-font-weight-bold);
 }
 
 .chat-emoji {

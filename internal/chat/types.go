@@ -23,6 +23,21 @@ type ChatMessage struct {
 	Message         []MessagePart  `json:"message"`
 	Superchat       *SuperchatInfo `json:"superchat,omitempty"`
 	IsMembership    bool           `json:"isMembership,omitempty"`
+
+	// MembershipText is a liveChatMembershipItemRenderer's own header line —
+	// "Member for 6 months" (headerPrimaryText) for a milestone, "Welcome to
+	// Member!" (headerSubtext) for a new member — and the gift-purchase
+	// announcement's primaryText ("Gifted 5 memberships"). It is the EVENT;
+	// Message is only what the member typed, which a new member or a gift
+	// purchase does not have.
+	//
+	// A separate field rather than a run prepended to Message: the sidebar's
+	// member card shows the line beside the author and the message in its
+	// body, and the video overlay renders Message alone, so folding it in
+	// would start scrolling membership notices across the video (2026-09-25
+	// ruling K4, "sidebar only"). Empty on every other kind of message and on
+	// every file written before this field existed.
+	MembershipText string `json:"membershipText,omitempty"`
 }
 
 // MessagePart represents a text or emoji segment in a chat message.

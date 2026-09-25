@@ -101,12 +101,18 @@ func TestFormatTimestampUTCStable(t *testing.T) {
 	}
 }
 
-// TestSelectRendererSuperChatPaidMessageBranch — selectRenderer's
-// switch handles 5 distinct renderer types (chatTextMessageRenderer,
-// chatPaidMessageRenderer, chatPaidStickerRenderer,
-// chatMembershipItemRenderer, chatSponsorshipsGiftPurchaseAnnouncement
-// Renderer). Existing tests cover the happy path; this test locks the
-// paid-message branch which feeds parseSuperChatInfo.
+// TestSelectRendererSuperChatPaidMessageBranch — selectRenderer's roster is
+// six renderer types: liveChatTextMessageRenderer, liveChatPaidMessageRenderer,
+// liveChatPaidStickerRenderer, liveChatMembershipItemRenderer,
+// liveChatSponsorshipsGiftPurchaseAnnouncementRenderer and
+// liveChatSponsorshipsGiftRedemptionAnnouncementRenderer.
+// TestSelectRendererPicksFirstMatch walks all six; this test locks the
+// paid-message branch specifically, which is the one that feeds
+// parseSuperChatInfo.
+//
+// (Until 2026-09-25 this comment claimed five types including the gift
+// purchase, which selectRenderer did not know — the roster had four and every
+// gifted membership was dropped.)
 func TestSelectRendererSuperChatPaidMessageBranch(t *testing.T) {
 	item := map[string]any{
 		"liveChatPaidMessageRenderer": map[string]any{

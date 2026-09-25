@@ -283,6 +283,8 @@ func TestSelectRendererPicksFirstMatch(t *testing.T) {
 		{"paid", "liveChatPaidMessageRenderer"},
 		{"sticker", "liveChatPaidStickerRenderer"},
 		{"membership", "liveChatMembershipItemRenderer"},
+		{"gift purchase", "liveChatSponsorshipsGiftPurchaseAnnouncementRenderer"},
+		{"gift redemption", "liveChatSponsorshipsGiftRedemptionAnnouncementRenderer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -452,5 +454,253 @@ func TestParseActionReplayPositiveOffsetIgnoresTimestampText(t *testing.T) {
 	msg := api.parseAction(replayAction("12345", "-2:30"))
 	if msg == nil || msg.OffsetMs != 12345 {
 		t.Fatalf("a non-zero replay offset is authoritative; got %+v", msg)
+	}
+}
+
+// membershipItem builds a liveChatMembershipItemRenderer action in the shape
+// YouTube ships. A NEW member carries headerSubtext and no message at all; a
+// MILESTONE carries headerPrimaryText ("Member for 6 months"), a headerSubtext
+// that is only the tier name, and the member's own message. Confirmed against
+// youtubei.js' LiveChatMembershipItem (header_primary_text optional,
+// header_subtext always, message optional).
+func membershipItem(primary, subtext, message string) map[string]any {
+	r := map[string]any{
+		"id":            "memb-1",
+		"timestampUsec": "1700000000000000",
+		"authorName":    map[string]any{"simpleText": "newfan"},
+	}
+	if primary != "" {
+		r["headerPrimaryText"] = map[string]any{"runs": []any{
+			map[string]any{"text": primary},
+		}}
+	}
+	if subtext != "" {
+		r["headerSubtext"] = map[string]any{"simpleText": subtext}
+	}
+	if message != "" {
+		r["message"] = map[string]any{"runs": []any{map[string]any{"text": message}}}
+	}
+	return map[string]any{"addChatItemAction": map[string]any{
+		"item": map[string]any{"liveChatMembershipItemRenderer": r},
+	}}
+}
+
+// TestMembershipHeaderTextIsArchived: until this change parseAction tested for
+// the membership renderer's PRESENCE and threw it away, so a new-member event
+// archived as a message with an empty message array and no text anywhere — the
+// sidebar had a timestamp and a name to render and nothing else. The header
+// line is the event.
+//
+// Mutants this kills: dropping the MembershipText assignment (every want below
+// comes back ""); reading headerSubtext first (the milestone row reports
+// "Member" instead of "Member for 6 months"); folding the line into Message
+// instead (the message assertions fail, and with them the overlay-silence
+// guarantee K4 rests on).
+func TestMembershipHeaderTextIsArchived(t *testing.T) {
+	api := NewChatAPI("k", "", nil)
+	cases := []struct {
+		name        string
+		primary     string
+		subtext     string
+		message     string
+		wantText    string
+		wantMessage string
+	}{
+		{"new member", "", "Welcome to Member!", "", "Welcome to Member!", ""},
+		{"milestone", "Member for 6 months", "Member", "thanks!", "Member for 6 months", "thanks!"},
+		{"milestone with no message", "Member for 2 months", "Member", "", "Member for 2 months", ""},
+		{"neither header", "", "", "just talking", "", "just talking"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg := api.parseAction(membershipItem(c.primary, c.subtext, c.message))
+			if msg == nil {
+				t.Fatal("parseAction returned nil for a membership item")
+			}
+			if !msg.IsMembership {
+				t.Error("IsMembership must stay set")
+			}
+			if msg.MembershipText != c.wantText {
+				t.Errorf("MembershipText = %q, want %q", msg.MembershipText, c.wantText)
+			}
+			var gotMessage string
+			for _, p := range msg.Message {
+				gotMessage += p.Text
+			}
+			if gotMessage != c.wantMessage {
+				t.Errorf("Message = %q, want %q — the header line must NOT be folded into it", gotMessage, c.wantMessage)
+			}
+		})
+	}
+}
+
+// TestRenderedTextReadsBothTextShapes: YouTube writes a text field either as
+// {"simpleText": …} or as {"runs": [{"text": …}, …]} and uses both within one
+// membership renderer, so the reader has to take either. Emoji runs (which
+// carry no "text") contribute nothing rather than an "undefined".
+//
+// Mutants this kills: handling only simpleText (the runs rows come back "");
+// handling only runs (the simpleText row comes back ""); concatenating a run's
+// whole map rather than its text.
+func TestRenderedTextReadsBothTextShapes(t *testing.T) {
+	cases := []struct {
+		name  string
+		field any
+		want  string
+	}{
+		{"simple", map[string]any{"simpleText": "Welcome!"}, "Welcome!"},
+		{"runs", map[string]any{"runs": []any{
+			map[string]any{"text": "Member for "},
+			map[string]any{"text": "6"},
+			map[string]any{"text": " months"},
+		}}, "Member for 6 months"},
+		{"simple wins over empty runs", map[string]any{
+			"simpleText": "Welcome!", "runs": []any{},
+		}, "Welcome!"},
+		{"a run with no text contributes nothing", map[string]any{"runs": []any{
+			map[string]any{"text": "a"},
+			map[string]any{"emoji": map[string]any{"emojiId": "x"}},
+			map[string]any{"text": "b"},
+		}}, "ab"},
+		{"absent", nil, ""},
+		{"wrong type", "Welcome!", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := renderedText(c.field); got != c.want {
+				t.Errorf("renderedText = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// giftPurchaseItem builds a liveChatSponsorshipsGiftPurchaseAnnouncementRenderer
+// in the shape YouTube ships: the id, timestampUsec and
+// authorExternalChannelId at the top, and the author, badges and primaryText
+// ("Gifted 5 memberships") one level down in
+// header.liveChatSponsorshipsHeaderRenderer. There is no timestampText.
+func giftPurchaseItem() map[string]any {
+	return map[string]any{"addChatItemAction": map[string]any{
+		"item": map[string]any{
+			"liveChatSponsorshipsGiftPurchaseAnnouncementRenderer": map[string]any{
+				"id":                      "gift-1",
+				"timestampUsec":           "1700000000000000",
+				"authorExternalChannelId": "UCgifter",
+				"header": map[string]any{
+					"liveChatSponsorshipsHeaderRenderer": map[string]any{
+						"authorName": map[string]any{"simpleText": "gifter"},
+						"authorBadges": []any{map[string]any{
+							"liveChatAuthorBadgeRenderer": map[string]any{
+								"tooltip": "Moderator",
+								"icon":    map[string]any{"iconType": "MODERATOR"},
+							},
+						}},
+						"primaryText": map[string]any{"runs": []any{
+							map[string]any{"text": "Gifted "},
+							map[string]any{"text": "5"},
+							map[string]any{"text": " memberships"},
+						}},
+					},
+				},
+			},
+		},
+	}}
+}
+
+// giftRedemptionItem builds the recipient's side: flat, with the line in
+// `message` and the author where parseMessageRenderer already looks.
+func giftRedemptionItem() map[string]any {
+	return map[string]any{"addChatItemAction": map[string]any{
+		"item": map[string]any{
+			"liveChatSponsorshipsGiftRedemptionAnnouncementRenderer": map[string]any{
+				"id":            "redeem-1",
+				"timestampUsec": "1700000000000000",
+				"timestampText": map[string]any{"simpleText": "1:02:03"},
+				"authorName":    map[string]any{"simpleText": "lucky"},
+				"message": map[string]any{"runs": []any{
+					map[string]any{"text": "was gifted a membership by gifter"},
+				}},
+			},
+		},
+	}}
+}
+
+// TestGiftPurchaseIsArchivedWithItsHeaderFields: the purchase renderer was not
+// in selectRenderer's roster at all, so every gifted membership Moombox has
+// ever archived is missing. Adding the key alone is not enough — the author,
+// the badges and the line all live one level down, so a raw read yields
+// author "Unknown" and no text.
+//
+// Mutants this kills: adding the roster key without the hoist (AuthorName
+// comes back "Unknown" and MembershipText ""); hoisting authorName but not
+// authorBadges (the moderator badge is gone); losing id or timestampUsec in
+// the hoist (the ID falls back to a random one and the offset arithmetic loses
+// its clock).
+func TestGiftPurchaseIsArchivedWithItsHeaderFields(t *testing.T) {
+	api := NewChatAPI("k", "", nil)
+	msg := api.parseAction(giftPurchaseItem())
+	if msg == nil {
+		t.Fatal("a gift purchase announcement was dropped")
+	}
+	if !msg.IsMembership {
+		t.Error("a gift purchase is a membership event")
+	}
+	if msg.MembershipText != "Gifted 5 memberships" {
+		t.Errorf("MembershipText = %q, want %q", msg.MembershipText, "Gifted 5 memberships")
+	}
+	if msg.AuthorName != "gifter" {
+		t.Errorf("AuthorName = %q, want %q — the name is in the nested header", msg.AuthorName, "gifter")
+	}
+	if msg.ID != "gift-1" {
+		t.Errorf("ID = %q, want gift-1 — the hoist must keep the outer id", msg.ID)
+	}
+	if msg.TimestampUsec != "1700000000000000" {
+		t.Errorf("TimestampUsec = %q, want the outer one", msg.TimestampUsec)
+	}
+	if msg.AuthorChannelID != "UCgifter" {
+		t.Errorf("AuthorChannelID = %q, want UCgifter", msg.AuthorChannelID)
+	}
+	var hasMod bool
+	for _, b := range msg.AuthorBadges {
+		if b == "moderator" {
+			hasMod = true
+		}
+	}
+	if !hasMod {
+		t.Errorf("AuthorBadges = %v, want the nested header's moderator badge", msg.AuthorBadges)
+	}
+	if len(msg.Message) != 0 {
+		t.Errorf("Message = %v, want empty — a purchase has no typed message", msg.Message)
+	}
+}
+
+// TestGiftRedemptionIsArchived: the recipient's side is flat, so the roster
+// entry is the whole fix — its line is in `message`, which parseMessageRenderer
+// already reads, and it has no header text of its own.
+//
+// Mutant this kills: dropping the roster key (parseAction returns nil and the
+// event is invisible); routing it through the purchase hoist (author and
+// message both come back empty).
+func TestGiftRedemptionIsArchived(t *testing.T) {
+	api := NewChatAPI("k", "", nil)
+	msg := api.parseAction(giftRedemptionItem())
+	if msg == nil {
+		t.Fatal("a gift redemption announcement was dropped")
+	}
+	if !msg.IsMembership {
+		t.Error("a gift redemption is a membership event")
+	}
+	if msg.AuthorName != "lucky" {
+		t.Errorf("AuthorName = %q, want lucky", msg.AuthorName)
+	}
+	if msg.MembershipText != "" {
+		t.Errorf("MembershipText = %q, want empty — the redemption's line is its message", msg.MembershipText)
+	}
+	var got string
+	for _, p := range msg.Message {
+		got += p.Text
+	}
+	if got != "was gifted a membership by gifter" {
+		t.Errorf("Message = %q, want the redemption line", got)
 	}
 }

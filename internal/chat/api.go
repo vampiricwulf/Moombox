@@ -500,6 +500,13 @@ func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
 		return nil
 	}
 
+	var giftLine string
+	if gift, ok := item["liveChatSponsorshipsGiftPurchaseAnnouncementRenderer"].(map[string]any); ok {
+		if flat, line := giftPurchaseFields(gift); flat != nil {
+			renderer, giftLine = flat, line
+		}
+	}
+
 	msg := api.parseMessageRenderer(renderer)
 	if msg == nil {
 		return nil
@@ -510,7 +517,25 @@ func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
 	} else if sticker, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
 		msg.Superchat = api.parseSuperStickerInfo(sticker)
 	}
-	if _, ok := item["liveChatMembershipItemRenderer"]; ok {
+	if memb, ok := item["liveChatMembershipItemRenderer"].(map[string]any); ok {
+		msg.IsMembership = true
+		// The event itself: "Member for 6 months" when YouTube sends a primary
+		// text, else the subtext ("Welcome to Member!"), which is all a
+		// new-member renderer has. Never both — a milestone's subtext is just
+		// the tier name the primary text already names.
+		msg.MembershipText = renderedText(memb["headerPrimaryText"])
+		if msg.MembershipText == "" {
+			msg.MembershipText = renderedText(memb["headerSubtext"])
+		}
+	}
+	// A gifted membership is a membership event too: the purchase carries its
+	// line in the nested header (hoisted above), and the redemption carries it
+	// in `message`, which parseMessageRenderer has already read.
+	if _, ok := item["liveChatSponsorshipsGiftPurchaseAnnouncementRenderer"]; ok {
+		msg.IsMembership = true
+		msg.MembershipText = giftLine
+	}
+	if _, ok := item["liveChatSponsorshipsGiftRedemptionAnnouncementRenderer"]; ok {
 		msg.IsMembership = true
 	}
 	if hasReplayOffset {
@@ -586,12 +611,45 @@ func selectRenderer(item map[string]any) map[string]any {
 		"liveChatPaidMessageRenderer",
 		"liveChatPaidStickerRenderer",
 		"liveChatMembershipItemRenderer",
+		"liveChatSponsorshipsGiftPurchaseAnnouncementRenderer",
+		"liveChatSponsorshipsGiftRedemptionAnnouncementRenderer",
 	} {
 		if r, ok := item[key].(map[string]any); ok {
 			return r
 		}
 	}
 	return nil
+}
+
+// giftPurchaseFields hoists a liveChatSponsorshipsGiftPurchaseAnnouncementRenderer
+// into the field layout parseMessageRenderer reads, and returns its header
+// line alongside.
+//
+// The purchase renderer is the one membership shape that is not flat: the id,
+// timestampUsec and authorExternalChannelId are at the top, but authorName,
+// authorBadges and the primaryText ("Gifted 5 memberships") are one level down
+// in header.liveChatSponsorshipsHeaderRenderer, and there is no timestampText
+// at all (parseMessageRenderer's formatTimestamp fallback covers that). Read
+// raw it produces author "Unknown" and no text.
+//
+// Flattening here rather than teaching parseMessageRenderer a second layout:
+// that reader is shared by every renderer kind, and a nested-author fallback
+// inside it would make five callers pay for one. Returns (nil, "") when the
+// header is missing, which the caller treats as "leave the renderer alone".
+func giftPurchaseFields(r map[string]any) (map[string]any, string) {
+	header, _ := r["header"].(map[string]any)
+	sponsor, _ := header["liveChatSponsorshipsHeaderRenderer"].(map[string]any)
+	if sponsor == nil {
+		return nil, ""
+	}
+	flat := map[string]any{
+		"id":                      r["id"],
+		"timestampUsec":           r["timestampUsec"],
+		"authorExternalChannelId": r["authorExternalChannelId"],
+		"authorName":              sponsor["authorName"],
+		"authorBadges":            sponsor["authorBadges"],
+	}
+	return flat, renderedText(sponsor["primaryText"])
 }
 
 // extractAllChatContinuation pulls the unfiltered "Live Chat" continuation
@@ -871,6 +929,38 @@ func parseMessageRuns(message map[string]any) []MessagePart {
 	}
 
 	return parts
+}
+
+// renderedText flattens one of YouTube's text fields to a plain string.
+// YouTube writes them two ways — {"simpleText": "…"} and {"runs": [{"text":
+// "…"}, …]} — and uses both inside a single liveChatMembershipItemRenderer
+// (headerSubtext is usually simple, headerPrimaryText is always runs), so a
+// reader has to take either. Runs that carry no "text" (an emoji run)
+// contribute nothing. Returns "" for an absent or wrongly-typed field.
+//
+// parseMessageRuns is the richer sibling and stays the reader for message
+// bodies: it keeps emoji, links and bold/italic as MessagePart values. This
+// one exists for the fields that are displayed as one flat line.
+func renderedText(field any) string {
+	m, ok := field.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if s, ok := m["simpleText"].(string); ok && s != "" {
+		return s
+	}
+	runs, _ := m["runs"].([]any)
+	var b strings.Builder
+	for _, run := range runs {
+		runMap, _ := run.(map[string]any)
+		if runMap == nil {
+			continue
+		}
+		if t, ok := runMap["text"].(string); ok {
+			b.WriteString(t)
+		}
+	}
+	return b.String()
 }
 
 // extractNavURL pulls a hyperlink target out of a YouTube navigationEndpoint.

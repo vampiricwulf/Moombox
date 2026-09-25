@@ -1,7 +1,7 @@
 # Frontend JS tests
 
 Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. Fifteen
+dependencies, no DOM — and just import from `../public/modules/`. Sixteen
 suites drive their module inside a jsdom document:
 `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`,
 `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`,
@@ -51,24 +51,25 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 133
-DOM tests (player 37, render-diff 16, app 13, a11y-controls 12, boot-and-login 12,
+checkout without `npm ci` reports them as **skipped**, never failed — the 149
+DOM tests (player 53, render-diff 16, app 13, a11y-controls 12, boot-and-login 12,
 job-progress 8, job-asides 6, log-panel 4, open-folder 4, resolution-picker 4,
 settings-reorder-budget 4, update-check-debounce 4, archive-boundary 3,
-sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 125 tests
-that need no DOM — the eight pure suites, the stylesheet-text test in
-`a11y-controls.test.mjs`, which reads `moombox.css` and asserts on its text,
-and the two mapping tests in `resolution-picker.test.mjs`, whose other four
-tests do need one:
+sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 130 tests
+that need no DOM — the eight pure suites, the two stylesheet-text tests in
+`a11y-controls.test.mjs`, which read `moombox.css` and assert on its text, the
+colour-helper tests in `player.test.mjs` (task 3's two, task 5's one and task
+6's one), and the two mapping tests in `resolution-picker.test.mjs`, whose
+other four tests do need one:
 
 ```
-ℹ tests 258
-ℹ pass 125
+ℹ tests 279
+ℹ pass 130
 ℹ fail 0
-ℹ skipped 133
+ℹ skipped 149
 ```
 
-With jsdom installed the same command reports `tests 258` / `pass 258` /
+With jsdom installed the same command reports `tests 279` / `pass 279` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only

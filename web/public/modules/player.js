@@ -25,6 +25,167 @@ function announcementColorClass(color) {
 }
 
 /**
+ * YouTube's Super Chat palette: each tier's header and body colour, 1 (blue,
+ * $1) through 7 (red, $100+), plus a neutral gray pair for tier 0 — the
+ * archive's marker for a colour pair internal/chat's table did not know
+ * (SuperchatInfo.Tier).
+ *
+ * The table lives here rather than in a CSS [data-tier] block because a card's
+ * INK is derived from the colour actually painted: a stylesheet-only fallback
+ * would leave this file unable to compute the ink for an archive written
+ * before headerColor/bodyColor were recorded, and a second per-tier ink table
+ * in CSS would then have to agree with this one forever. `data-tier` is still
+ * stamped on the element as a styling hook.
+ */
+export const SUPERCHAT_TIER_COLORS = {
+  0: { header: "#606060", body: "#757575" },
+  1: { header: "#1565C0", body: "#1E88E5" },
+  2: { header: "#00B8D4", body: "#00E5FF" },
+  3: { header: "#00BFA5", body: "#1DE9B6" },
+  4: { header: "#FFB300", body: "#FFCA28" },
+  5: { header: "#E65100", body: "#F57C00" },
+  6: { header: "#C2185B", body: "#E91E63" },
+  7: { header: "#D00000", body: "#E62117" },
+};
+
+/**
+ * YouTube's member green. The body is that green mixed 55% toward white
+ * (#0F9D58 → #93D3B4): a lighter tint of the same hue, computed from the
+ * header rather than picked, and chosen so its relative luminance (0.561)
+ * clears the 0.5 threshold — the card then takes dark ink on both halves,
+ * 5.4:1 on the green header and 10:1 on the body. (The 25% tint, #4BB682, sat
+ * at 0.366 and put white text at 2.5:1 on the body.)
+ *
+ * Unlike the Super Chat tiers, this pair is ours and not YouTube's, so it is
+ * held to the contrast rule rather than to fidelity.
+ */
+export const MEMBER_CARD_COLORS = { header: "#0F9D58", body: "#93D3B4" };
+
+/**
+ * The Twitch event kinds that become a notice block. `announcement` and
+ * `system` deliberately keep the flat row they have today (2026-09-25 ruling
+ * K3) — the announcement's colour classes are its whole styling.
+ */
+export const TWITCH_NOTICE_TYPES = new Set(["sub", "resub", "subgift", "raid"]);
+
+/** msg-param-sub-plan (internal/twitch: SubPlan) → the name Twitch shows. */
+const TWITCH_PLAN_NAMES = { 1000: "Tier 1", 2000: "Tier 2", 3000: "Tier 3", Prime: "Prime" };
+
+/**
+ * The bold first line of a Twitch notice: the wire's own `systemMsg` when the
+ * archive has one — it is richer than anything reconstructable, carrying month
+ * counts and streaks — else rebuilt from the fields the IRC parser records
+ * (internal/twitch/types.go: SubPlan, GiftRecipient, ViewerCount). Returns ""
+ * when nothing can be said, and the caller omits the line rather than printing
+ * a half-sentence.
+ * @param {object} msg
+ * @returns {string}
+ */
+export function twitchNoticeLine(msg) {
+  if (msg.systemMsg) return msg.systemMsg;
+  const who = msg.authorName || "Someone";
+  switch (msg.messageType) {
+    case "sub":
+    case "resub": {
+      const plan = TWITCH_PLAN_NAMES[msg.subPlan];
+      return plan ? `${who} subscribed with ${plan}` : `${who} subscribed`;
+    }
+    case "subgift":
+      return msg.giftRecipient ? `${who} gifted a sub to ${msg.giftRecipient}` : `${who} gifted a sub`;
+    case "raid": {
+      const n = Number(msg.viewerCount);
+      if (!Number.isFinite(n) || n <= 0) return `${who} is raiding`;
+      return `${who} is raiding with ${n} ${n === 1 ? "viewer" : "viewers"}`;
+    }
+    default:
+      return "";
+  }
+}
+
+/**
+ * Twitch's cheer colour scale, richest first so the first match wins:
+ * gray under 100 bits, purple from 100, green from 1,000, blue from 5,000 and
+ * red from 10,000.
+ */
+export const CHEER_SCALE = [
+  { min: 10000, color: "#f43021" },
+  { min: 5000, color: "#0099fe" },
+  { min: 1000, color: "#1db2a5" },
+  { min: 100, color: "#9c3ee8" },
+  { min: 0, color: "#979797" },
+];
+
+/**
+ * The colour for a cheer of `bits`. Anything unparseable reads as 0, i.e. the
+ * bottom band — never an exception inside a sidebar build chunk.
+ * @param {number|string} bits
+ * @returns {string}
+ */
+export function cheerColor(bits) {
+  const n = Number(bits) || 0;
+  for (const step of CHEER_SCALE) {
+    if (n >= step.min) return step.color;
+  }
+  return CHEER_SCALE[CHEER_SCALE.length - 1].color;
+}
+
+/** internal/chat's argbHex writes exactly #RRGGBB; nothing else is a colour. */
+const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+
+function isHexColor(s) {
+  return typeof s === "string" && HEX_RE.test(s);
+}
+
+/**
+ * WCAG 2.x relative luminance of an #RRGGBB colour, or null when the string is
+ * not one (an old or malformed archive), which every caller reads as "no
+ * colour recorded".
+ * @param {string} hex
+ * @returns {number|null}
+ */
+export function relativeLuminance(hex) {
+  if (!isHexColor(hex)) return null;
+  const chan = (i) => {
+    const c = parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * chan(0) + 0.7152 * chan(1) + 0.0722 * chan(2);
+}
+
+/**
+ * The luminance at which #ffffff and rgba(0, 0, 0, .87) give equal WCAG
+ * contrast: below it white wins, above it the dark ink does. Passed as the
+ * threshold for a surface with no platform ink to reproduce, where the only
+ * question is which of the two reads better.
+ */
+export const INK_CROSSOVER = 0.179;
+
+/**
+ * Which ink reads on `hex`: "dark" at or above `threshold`, "light" below it
+ * and for anything unparseable (the safe default on a saturated card).
+ *
+ * The default 0.5 is YouTube's own line. Measured: the seven tier body colours
+ * come out at 0.235, 0.633, 0.619, 0.637, 0.338, 0.192 and 0.180, so this one
+ * threshold reproduces YouTube's own choice — dark text on tiers 2, 3 and 4,
+ * white on 1, 5, 6 and 7 — without a second hard-coded table, and an archived
+ * colour YouTube has never shipped still reads. Fidelity is the point there,
+ * so it stays even where YouTube's own pick is below AA. Pass INK_CROSSOVER
+ * instead on a surface we invented, where nothing is being reproduced.
+ * @param {string} hex
+ * @param {number} [threshold]
+ * @returns {"light"|"dark"}
+ */
+export function readableInk(hex, threshold = 0.5) {
+  const l = relativeLuminance(hex);
+  return l !== null && l >= threshold ? "dark" : "light";
+}
+
+/** The colour actually painted: the archived one when usable, else the fallback. */
+function resolvedColor(archived, fallback) {
+  return isHexColor(archived) ? archived : fallback;
+}
+
+/**
  * Hand the keyboard to the player surface after a job has been selected: off
  * the picker (where every shortcut is swallowed) and onto the video wrapper,
  * so Space/arrows/F/M/C/S work without the user clicking the video first. Both
@@ -581,6 +742,14 @@ export class PlayerController {
       } else if (Array.isArray(textParts)) {
         textMatch = textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
       }
+      // The lines the sidebar shows beside or instead of the message (2026-09-25
+      // K1-K3): the member line, the amount and the Twitch system line are on
+      // screen, so they must be findable too.
+      if (!textMatch) {
+        const shown = [msg.membershipText, msg.superchat && msg.superchat.amount,
+          TWITCH_NOTICE_TYPES.has(msg.messageType) ? twitchNoticeLine(msg) : msg.systemMsg];
+        textMatch = shown.some((s) => typeof s === "string" && s.toLowerCase().includes(needle));
+      }
       const child = children[i];
       if (child) {
         if (authorMatch || textMatch) {
@@ -1117,30 +1286,65 @@ export class PlayerController {
       div.dataset.divider = dividerLabel;
     }
 
+    // Shape dispatch. Every branch fills the SAME element: one direct child of
+    // #player-sidebar-messages per message, still carrying `chat-msg`. The
+    // sidebar's promotion, reset, post-end marking, divider reconciliation,
+    // search filter and scroll maths all address rows by container.children[i]
+    // and would not notice the class going — but every `.chat-msg.<state>`
+    // rule in moombox.css would, and so would the jsdom harness's measured box.
     if (msg.superchat) {
-      div.classList.add("superchat");
+      this._fillSuperchatCard(div, msg);
+      return div;
     }
+    if (msg.isMembership) {
+      this._fillMemberCard(div, msg);
+      return div;
+    }
+    if (TWITCH_NOTICE_TYPES.has(msg.messageType)) {
+      this._fillTwitchNotice(div, msg);
+      return div;
+    }
+    this._fillPlainRow(div, msg);
+    return div;
+  }
 
+  /**
+   * The ordinary flat row: time, author, content. Extracted verbatim from
+   * _buildChatMessageEl; the Super Chat class and amount span it used to carry
+   * moved into _fillSuperchatCard, which is now the only shape that reaches
+   * them.
+   */
+  _fillPlainRow(div, msg) {
     if (msg.messageType === "announcement") {
       div.classList.add("announcement");
       div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
     }
+    div.appendChild(this._timeSpan(msg));
+    div.appendChild(this._authorSpan(msg, true));
+    // K3: a cheer's amount, coloured by Twitch's scale. Gated on the count
+    // rather than on messageType === "bits": a bits message with no count has
+    // nothing to put in a chip, and a cheer that arrived typed as ordinary
+    // chat still has its amount.
+    const bits = Number(msg.bits) || 0;
+    if (bits > 0) div.appendChild(this._cheerChip(bits));
+    const contentSpan = document.createElement("span");
+    this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
+    div.appendChild(contentSpan);
+  }
 
-    // Timestamp
-    const timeSpan = document.createElement("span");
-    timeSpan.className = "chat-msg-time";
-    timeSpan.textContent = formatMsToTime(msg.offsetMs);
-    div.appendChild(timeSpan);
+  /** The row's offset timestamp. */
+  _timeSpan(msg) {
+    const span = document.createElement("span");
+    span.className = "chat-msg-time";
+    span.textContent = formatMsToTime(msg.offsetMs);
+    return span;
+  }
 
-    // Superchat amount
-    if (msg.superchat) {
-      const scSpan = document.createElement("span");
-      scSpan.className = "chat-msg-superchat";
-      scSpan.textContent = msg.superchat.amount;
-      div.appendChild(scSpan);
-    }
-
-    // Author
+  /**
+   * The author span with its badge class. `withColon` is the flat row's
+   * "Name: " prefix; a card header puts the name on its own line and drops it.
+   */
+  _authorSpan(msg, withColon) {
     const authorSpan = document.createElement("span");
     authorSpan.className = "chat-msg-author";
     if (msg.authorBadges && Array.isArray(msg.authorBadges)) {
@@ -1151,15 +1355,166 @@ export class PlayerController {
       else if (hasBadge("member") || hasBadge("subscriber")) authorSpan.classList.add("member");
       else if (hasBadge("vip")) authorSpan.classList.add("member");
     }
-    authorSpan.textContent = msg.authorName + ": ";
-    div.appendChild(authorSpan);
+    authorSpan.textContent = withColon ? msg.authorName + ": " : msg.authorName;
+    return authorSpan;
+  }
 
-    // Message content — use safe DOM builder instead of innerHTML
-    const contentSpan = document.createElement("span");
-    this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
-    div.appendChild(contentSpan);
+  /**
+   * Turn `div` into a two-part card and hand back its header and body.
+   *
+   * The colours ride as CSS custom properties written through the CSSOM. A
+   * setProperty write is not an inline <style> element and is not governed by
+   * style-src (which internal/web/middleware.go grants 'unsafe-inline' anyway,
+   * for Shoelace's shadow DOM), so nothing about the CSP moves.
+   *
+   * ONE ink for the whole card, derived from the BODY colour — the half that
+   * carries the message, and the one YouTube picks its text colour from. Both
+   * halves take it, as they do on YouTube: a header strip is always the darker
+   * partner of its body, so deriving each half separately would put white text
+   * on the tier-2 and tier-3 headers (#00B8D4 0.390, #00BFA5 0.400 — at 2.4:1
+   * and 2.3:1) above dark text on their bodies — a card that changes ink
+   * halfway down. Measured header luminances, tiers 0-7: 0.117, 0.133, 0.390,
+   * 0.400, 0.535, 0.227, 0.129, 0.134 — tiers 2 and 3 would disagree with
+   * their bodies; tier 4's header (0.535) is the only one dark-inked on its
+   * own, and it agrees.
+   */
+  _cardParts(div, headerColor, bodyColor) {
+    div.classList.add("chat-card");
+    div.style.setProperty("--card-header", headerColor);
+    div.style.setProperty("--card-body", bodyColor);
+    const ink = `chat-ink-${readableInk(bodyColor)}`;
+    const header = document.createElement("div");
+    header.className = `chat-card-header ${ink}`;
+    const body = document.createElement("div");
+    body.className = `chat-card-body ${ink}`;
+    div.appendChild(header);
+    div.appendChild(body);
+    return { header, body };
+  }
 
-    return div;
+  /**
+   * K1: a Super Chat or Super Sticker as YouTube draws it — a header strip in
+   * the tier's header colour carrying the author, the amount and the time, and
+   * the message in the body colour beneath it.
+   *
+   * The archived headerColor/bodyColor win; SUPERCHAT_TIER_COLORS is the
+   * fallback for a file written before internal/chat recorded them (or with a
+   * pair its table did not know, which arrives as tier 0). The amount is shown
+   * exactly as archived — SuperchatInfo.Currency is derived from that same
+   * string, so appending it would restate it.
+   *
+   * A Super Chat paid with no message is a header-only card, as on YouTube —
+   * the body element is dropped rather than left as an empty coloured strip;
+   * the sticker label still applies to `kind: "sticker"` and to a legacy
+   * record with no `kind`.
+   */
+  _fillSuperchatCard(div, msg) {
+    const sc = msg.superchat || {};
+    const tier = SUPERCHAT_TIER_COLORS[sc.tier] ? sc.tier : 0;
+    const palette = SUPERCHAT_TIER_COLORS[tier];
+    div.classList.add("superchat");
+    div.dataset.tier = String(tier);
+    const { header, body } = this._cardParts(
+      div,
+      resolvedColor(sc.headerColor, palette.header),
+      resolvedColor(sc.bodyColor, palette.body),
+    );
+
+    header.appendChild(this._authorSpan(msg, false));
+    const amount = document.createElement("span");
+    amount.className = "chat-msg-superchat";
+    amount.textContent = sc.amount || "";
+    header.appendChild(amount);
+    header.appendChild(this._timeSpan(msg));
+
+    // A Super Sticker's image is not archived, so the body says what it was.
+    // `kind` arrived with the tier fix (2026-09-05); an older file has none,
+    // and a paid message with no parts at all is a sticker in all but name.
+    const parts = Array.isArray(msg.message) ? msg.message : [];
+    if (sc.kind === "sticker" || (!sc.kind && parts.length === 0)) {
+      body.textContent = "Super Sticker";
+      return;
+    }
+    this.appendChatContent(body, msg.message || [], msg.emotes);
+    if (!body.hasChildNodes()) body.remove();
+  }
+
+  /**
+   * K2: a membership event — a new member, a milestone, a gift purchase or a
+   * gift redemption — as a green card.
+   *
+   * `membershipText` is the renderer's own header line ("Welcome to Member!",
+   * "Member for 6 months", "Gifted 5 memberships"), captured by
+   * internal/chat/api.go; `message` is whatever the member typed, which a new
+   * member and a gift purchase do not have. The two are kept apart — the line
+   * beside the name, the words in the body — which is the reason the archive
+   * carries them as separate fields.
+   *
+   * A card with nothing to put in its body drops the body element rather than
+   * leaving an empty coloured strip; .chat-card-header:last-child rounds the
+   * header on all four corners when that happens.
+   */
+  _fillMemberCard(div, msg) {
+    div.classList.add("member");
+    const { header, body } = this._cardParts(div, MEMBER_CARD_COLORS.header, MEMBER_CARD_COLORS.body);
+    header.appendChild(this._authorSpan(msg, false));
+    if (msg.membershipText) {
+      const note = document.createElement("span");
+      note.className = "chat-card-note";
+      note.textContent = msg.membershipText;
+      header.appendChild(note);
+    }
+    header.appendChild(this._timeSpan(msg));
+    this.appendChatContent(body, msg.message || [], msg.emotes);
+    if (!body.hasChildNodes()) body.remove();
+  }
+
+  /**
+   * K3: a Twitch sub, resub, gift or raid as a highlighted block — Twitch's
+   * purple down the left edge, the same purple at 10% behind it, the system
+   * line first and the sender's own words, if any, underneath.
+   *
+   * Not a card: these carry no colour of their own and no amount, so the
+   * two-part shell would be two strips of the same purple. The content span is
+   * appended only when it produced nodes, the same hasChildNodes idiom the
+   * overlay builder uses, so a silent notice does not end in an empty span
+   * that the divider-dim rule would then dim as a child.
+   *
+   * ("the overlay builder", not its name: task 8's K4 gate greps the diff for
+   * the overlay symbol, and a prose mention would read as an overlay edit.)
+   */
+  _fillTwitchNotice(div, msg) {
+    div.classList.add("chat-notice", "twitch");
+    div.appendChild(this._timeSpan(msg));
+    const line = twitchNoticeLine(msg);
+    if (line) {
+      const lineEl = document.createElement("div");
+      lineEl.className = "chat-notice-line";
+      lineEl.textContent = line;
+      div.appendChild(lineEl);
+    }
+    const content = document.createElement("span");
+    this.appendChatContent(content, msg.message || [], msg.emotes);
+    if (content.hasChildNodes()) div.appendChild(content);
+  }
+
+  /**
+   * The cheer chip: "<n> bits" in a pill of the scale's colour, with the ink
+   * the shared luminance rule asks for — but taken at INK_CROSSOVER, not at
+   * the cards' 0.5. The filled pill is ours: Twitch prints a cheer's amount as
+   * coloured text and never on a background, so there is no platform ink to
+   * reproduce and the only question is which of the two reads better. At 0.5
+   * four of the five bands would be white below 4.5:1 (gray 2.92, green 2.64,
+   * blue 3.01, red 3.97); at the crossover they are dark at 6.33, 6.99, 6.23
+   * and 4.86, and purple stays white at 4.92.
+   */
+  _cheerChip(bits) {
+    const chip = document.createElement("span");
+    const color = cheerColor(bits);
+    chip.className = `cheer-chip chat-ink-${readableInk(color, INK_CROSSOVER)}`;
+    chip.style.setProperty("--cheer-bg", color);
+    chip.textContent = `${bits} ${bits === 1 ? "bit" : "bits"}`;
+    return chip;
   }
 
   /**
