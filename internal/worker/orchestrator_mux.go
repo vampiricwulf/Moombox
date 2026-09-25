@@ -591,8 +591,19 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 	recovered := o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
 	if len(recovered) > 0 {
 		// The job's own chat archive, if its finalize wrote one — the second
-		// thing copyKeptChatSidecar refuses to duplicate.
-		dst, err := copyKeptChatSidecar(jobCtx.StagingDir, recovered[0], filepath.Join(outputDir, filenameBase+".chat.json"))
+		// thing copyKeptChatSidecar refuses to duplicate. Read from the ROW,
+		// not rebuilt from the template: chat_file is the absolute path
+		// copyAssets recorded, whereas filenameBase was re-resolved from fresh
+		// metadata twenty lines up — so a title edited since the finalize would
+		// have this look for <new name>.chat.json while the archive on disk
+		// still wears the old one, the guard would miss, and the same comments
+		// would land twice under two names. The rebuilt path stays as the
+		// fallback for a row that never recorded one.
+		jobChat := jobCtx.Job.ChatFile
+		if jobChat == "" {
+			jobChat = filepath.Join(outputDir, filenameBase+".chat.json")
+		}
+		dst, err := copyKeptChatSidecar(jobCtx.StagingDir, recovered[0], jobChat)
 		switch {
 		case err != nil:
 			o.logger.Warn("could not copy the kept chat capture beside a recovered recording; it stays in staging",

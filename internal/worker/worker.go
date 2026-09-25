@@ -1940,7 +1940,11 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	}
 	// The job is terminal, so nothing is routing its log lines (CORE-12).
 	// Both UIs point the operator at the job's log for this run's progress, so
-	// route to it for the duration and hand it back at the end.
+	// route to it for the duration and hand it back at the end. Best-effort,
+	// not a guarantee: SyncJobLogTracking drops every terminal ID from the
+	// routed set and re-runs on each OnJobsChange fan-out, i.e. on every AddJob
+	// and DeleteJob — so a stream discovered while a long aside is muxing
+	// silently ends the routing and the rest of this run's lines go nowhere.
 	w.db.TrackJobForLogs(jobID)
 
 	w.wg.Go(func() {
@@ -1996,6 +2000,29 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 		// no unmuxed part. The remaining jobNeedsStaging terms — the
 		// incomplete tail and the chat capture — are cleanupStagingAfterMux's
 		// own, and it still prunes rather than deletes for the chat one.
+		//
+		// …and the ROW has to be re-read first, because the decision above is
+		// about a directory somebody else may now own. This verb writes no
+		// status, so for its whole run the row still reads
+		// Error/Cancelled/Finished — exactly what /retry, /resume and
+		// /reinitialize accept — and a row parked at COOKIES? is promoted to
+		// Upcoming by the credential sweep with no operator action at all. A
+		// revival hands the SAME staging directory to a fresh download whose
+		// first files are not yet a name discoverStagingMedia knows, so the
+		// media guard would wave it through and the cleanup would os.RemoveAll
+		// a live capture. MuxJob is immune only because it flips the row to
+		// Muxing before it spawns; the claim covers the two off-queue verbs,
+		// not the queue.
+		fresh, _ := w.db.GetJob(jobID)
+		if fresh == nil || IsActiveJobStatus(fresh.Status) {
+			status := "row deleted"
+			if fresh != nil {
+				status = string(fresh.Status)
+			}
+			w.logger.Warn("set-aside recordings recovered; staging kept: the job is no longer the terminal row this recovery started from",
+				"status", status, "path", jobCtx.StagingDir, "jobID", jobID)
+			return
+		}
 		if discoverStagingMedia(jobCtx.StagingDir) == nil && !w.hasUnmuxedParts(jobID, jobCtx.StagingDir) {
 			w.cleanupStagingAfterMux(jobID, jobCtx.StagingDir)
 			return

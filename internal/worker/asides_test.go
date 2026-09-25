@@ -777,3 +777,142 @@ func mp4Named(t *testing.T, dir, suffix string) string {
 	}
 	return ""
 }
+
+// TestRecoverAsidesLeavesStagingToAJobRevivedMidRun is the second data-loss
+// pin, on the door the first one does not watch.
+//
+// RecoverAsides deliberately writes no status, so for its whole run the row
+// still reads Cancelled/Error/Finished — exactly the statuses /retry, /resume
+// and /reinitialize accept — and a row parked at COOKIES? is promoted to
+// Upcoming by the credential sweep with no operator action at all. The revived
+// download takes over the SAME staging directory, and its first files are not
+// yet anything discoverStagingMedia recognises (it knows only video_stream,
+// audio_stream, video.ts, video.mp4 and audio.m4a) — so the media guard waves
+// the directory through and an unguarded cleanup os.RemoveAll's a live
+// capture. MuxJob is immune because it flips the row to Muxing before it
+// spawns; the shared claim covers the two off-queue verbs, not the queue.
+//
+// The download slot is the seam, so this is ordered rather than timed: with
+// the only slot held elsewhere the recovery goroutine is parked inside
+// AcquireDownloadSlot, which puts the revival strictly before the cleanup
+// decision without a single sleep.
+//
+// Mutants this kills:
+//   - the status re-read dropped (the shape as first committed): the revived
+//     download's staging file and its whole directory are deleted.
+//   - the re-read done but not acted on (logged and fall through): the same.
+//   - the re-read done against the goroutine's captured job rather than the
+//     database: the snapshot still says Cancelled, so the guard never fires.
+func TestRecoverAsidesLeavesStagingToAJobRevivedMidRun(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	w.SetParallelDownloads(1)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-revived")
+	db.UpdateJobFields("j-revived", map[string]any{"status": database.StatusCancelled})
+	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000"), 5)
+
+	// Hold the only download slot. The recovery parks in AcquireDownloadSlot
+	// until this is released, so everything between here and the release is
+	// guaranteed to happen before the recovery reaches its cleanup decision.
+	if !w.queue.AcquireDownloadSlot(context.Background(), "holder") {
+		t.Fatal("could not take the only download slot")
+	}
+	if err := w.RecoverAsides("j-revived"); err != nil {
+		t.Fatalf("RecoverAsides: %v", err)
+	}
+
+	// The revival: /retry's ReinitializeJob writes a live status and
+	// re-enqueues, and the restarted download begins filling the same staging
+	// directory. Its first bytes wear a name no staging discovery knows.
+	db.UpdateJobFields("j-revived", map[string]any{"status": database.StatusDownloading})
+	live := filepath.Join(staging, "video_stream.part")
+	if err := os.WriteFile(live, []byte("the revived download's first bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w.queue.ReleaseDownloadSlot("holder")
+	waitForStagingClaim(t, w, "j-revived")
+	w.Stop()
+
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("DATA LOSS: the revived download's staging file was deleted by the recovery (stat err = %v)", err)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("DATA LOSS: the revived download's staging directory was removed by the recovery (stat err = %v)", err)
+	}
+	// The recovery still did the job it was asked to do — the guard is about
+	// the directory, not about the mux.
+	if mp4Named(t, outputDir, engine.StagedRestartSuffix+"1700000000.mp4") == "" {
+		t.Errorf("the set-aside recording was not recovered: %v", mp4sIn(t, outputDir))
+	}
+	if left := stagedAsideRecordings(staging); len(left) != 0 {
+		t.Errorf("%d set-aside recording(s) still in staging: %v", len(left), left)
+	}
+}
+
+// TestRecoverAsidesFindsTheFinalizedChatUnderItsOldName pins the duplicate
+// guard on the one shape that defeats a path rebuilt from the template.
+//
+// recoverAsides re-resolves the filename from fresh metadata by design, so a
+// title edited since the finalize gives a base that is NOT the one the archive
+// on disk wears. A jobChatPath built from the re-resolved base therefore points
+// at a file nothing ever wrote, copyKeptChatSidecar's second arm never fires,
+// and the output directory ends up holding the same comments twice under two
+// names. chat_file is the absolute path copyAssets actually recorded.
+//
+// Driven through the orchestrator method so the re-resolve runs for real.
+//
+// Mutant: jobChatPath built as filepath.Join(outputDir, filenameBase+".chat.json")
+// (the shape as first committed) — a second archive appears beside the
+// recovered sibling under the NEW title.
+func TestRecoverAsidesFindsTheFinalizedChatUnderItsOldName(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-title")
+	// What the finalize left behind: the archive's chat under the title the
+	// job had THEN, and the row pointing at it.
+	finalized := filepath.Join(outputDir, "Original [j-title].chat.json")
+	if err := os.WriteFile(finalized, []byte(`{"messages":[{"id":"m1"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db.UpdateJobFields("j-title", map[string]any{
+		"status":    database.StatusCancelled,
+		"title":     "Renamed",
+		"chat_file": finalized,
+	})
+	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000"), 5)
+	if err := os.WriteFile(filepath.Join(staging, "chat.json"), []byte(`{"messages":[{"id":"m1"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := db.GetJob("j-title")
+	if err != nil || job == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	jobCtx := w.buildJobContext(job)
+	if err := w.orchestrator.recoverAsides(context.Background(), jobCtx); err != nil {
+		t.Fatalf("recoverAsides: %v", err)
+	}
+	// The re-resolve really did change the base — without that this test
+	// would pass for the wrong reason.
+	if jobCtx.Filename == "Original [j-title]" {
+		t.Fatalf("the filename did not re-resolve to the edited title (still %q) — the fixture no longer reproduces the shape", jobCtx.Filename)
+	}
+
+	var chats []string
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".chat.json") {
+			chats = append(chats, e.Name())
+		}
+	}
+	if len(chats) != 1 || chats[0] != filepath.Base(finalized) {
+		t.Errorf("chat archives in the output dir = %v, want only %q — one stream has one chat archive, and a title edit must not buy it a second", chats, filepath.Base(finalized))
+	}
+}
