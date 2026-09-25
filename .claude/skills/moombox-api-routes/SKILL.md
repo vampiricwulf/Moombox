@@ -52,7 +52,7 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 ### 1. Choose Broadcast Method
 `internal/web/websocket.go`:
 - `Broadcast(type, payload)` — immediate, generic broadcast
-- `BroadcastJobUpdate(data)` — per-job update; no hub-level throttle (upstream rate is bounded by `ProgressTracker.maybeUpdate`'s 16ms gate for the high-frequency path)
+- `BroadcastJobUpdate(data)` — per-job update; no hub-level throttle (upstream rate is bounded by the `ProgressTracker`'s progress-interval gate — `downloader.progress_interval_ms`, 16 ms by default — for the high-frequency path)
 - `BroadcastJobsUpdate(data)` — full job list (add/delete, threshold changes)
 - `BroadcastJobDeleted(jobID)` — targeted row removal; clients drop the row immediately
 - `BroadcastCheckTimers(data)` — next monitor check times
