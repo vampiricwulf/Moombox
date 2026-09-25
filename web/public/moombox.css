@@ -1844,10 +1844,11 @@ sl-progress-bar {
 }
 
 /* K2: the renderer's own line ("Member for 6 months"), set beside the name
-   rather than under it so a member card stays at most two rows tall. */
-.chat-card-note {
+   rather than under it so a member card stays at most two rows tall. Scoped
+   like its header siblings above. Full opacity, unlike the time: this is the
+   event itself, not metadata — a fade would put it at exactly 4.50:1. */
+.chat-card .chat-card-header .chat-card-note {
     font-size: var(--sl-font-size-x-small);
-    opacity: 0.85;
 }
 
 /* ── Twitch notices (2026-09-25 ruling K3) ───────────────────────────────────

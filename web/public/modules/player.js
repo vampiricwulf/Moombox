@@ -49,12 +49,17 @@ export const SUPERCHAT_TIER_COLORS = {
 };
 
 /**
- * YouTube's member green. The body is that green mixed 25% toward white
- * (#0F9D58 → #4BB682): a lighter tint of the same hue, computed from the
- * header rather than picked, and at a relative luminance of 0.366 it takes the
- * same white ink as the header (0.249), so the card reads as one block.
+ * YouTube's member green. The body is that green mixed 55% toward white
+ * (#0F9D58 → #93D3B4): a lighter tint of the same hue, computed from the
+ * header rather than picked, and chosen so its relative luminance (0.561)
+ * clears the 0.5 threshold — the card then takes dark ink on both halves,
+ * 5.4:1 on the green header and 10:1 on the body. (The 25% tint, #4BB682, sat
+ * at 0.366 and put white text at 2.5:1 on the body.)
+ *
+ * Unlike the Super Chat tiers, this pair is ours and not YouTube's, so it is
+ * held to the contrast rule rather than to fidelity.
  */
-export const MEMBER_CARD_COLORS = { header: "#0F9D58", body: "#4BB682" };
+export const MEMBER_CARD_COLORS = { header: "#0F9D58", body: "#93D3B4" };
 
 /**
  * The Twitch event kinds that become a notice block. `announcement` and
@@ -148,21 +153,31 @@ export function relativeLuminance(hex) {
 }
 
 /**
- * Which ink reads on `hex`: "dark" at or above a relative luminance of 0.5,
- * "light" below it and for anything unparseable (the safe default on a
- * saturated card).
+ * The luminance at which #ffffff and rgba(0, 0, 0, .87) give equal WCAG
+ * contrast: below it white wins, above it the dark ink does. Passed as the
+ * threshold for a surface with no platform ink to reproduce, where the only
+ * question is which of the two reads better.
+ */
+export const INK_CROSSOVER = 0.179;
+
+/**
+ * Which ink reads on `hex`: "dark" at or above `threshold`, "light" below it
+ * and for anything unparseable (the safe default on a saturated card).
  *
- * Measured: the seven tier body colours come out at 0.235, 0.633, 0.619,
- * 0.637, 0.338, 0.192 and 0.180, so this one threshold reproduces YouTube's
- * own choice — dark text on tiers 2, 3 and 4, white on 1, 5, 6 and 7 — without
- * a second hard-coded table, and an archived colour YouTube has never shipped
- * still reads.
+ * The default 0.5 is YouTube's own line. Measured: the seven tier body colours
+ * come out at 0.235, 0.633, 0.619, 0.637, 0.338, 0.192 and 0.180, so this one
+ * threshold reproduces YouTube's own choice — dark text on tiers 2, 3 and 4,
+ * white on 1, 5, 6 and 7 — without a second hard-coded table, and an archived
+ * colour YouTube has never shipped still reads. Fidelity is the point there,
+ * so it stays even where YouTube's own pick is below AA. Pass INK_CROSSOVER
+ * instead on a surface we invented, where nothing is being reproduced.
  * @param {string} hex
+ * @param {number} [threshold]
  * @returns {"light"|"dark"}
  */
-export function readableInk(hex) {
+export function readableInk(hex, threshold = 0.5) {
   const l = relativeLuminance(hex);
-  return l !== null && l >= 0.5 ? "dark" : "light";
+  return l !== null && l >= threshold ? "dark" : "light";
 }
 
 /** The colour actually painted: the archived one when usable, else the fallback. */
@@ -726,6 +741,14 @@ export class PlayerController {
         textMatch = textParts.toLowerCase().includes(needle);
       } else if (Array.isArray(textParts)) {
         textMatch = textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
+      }
+      // The lines the sidebar shows beside or instead of the message (2026-09-25
+      // K1-K3): the member line, the amount and the Twitch system line are on
+      // screen, so they must be findable too.
+      if (!textMatch) {
+        const shown = [msg.membershipText, msg.superchat && msg.superchat.amount,
+          TWITCH_NOTICE_TYPES.has(msg.messageType) ? twitchNoticeLine(msg) : msg.systemMsg];
+        textMatch = shown.some((s) => typeof s === "string" && s.toLowerCase().includes(needle));
       }
       const child = children[i];
       if (child) {
@@ -1347,12 +1370,13 @@ export class PlayerController {
    * ONE ink for the whole card, derived from the BODY colour — the half that
    * carries the message, and the one YouTube picks its text colour from. Both
    * halves take it, as they do on YouTube: a header strip is always the darker
-   * partner of its body, so deriving each half separately would put dark text
-   * on a tier-4 header (#FFB300, luminance 0.535) above white text on its own
-   * body, and light text on a tier-3 header (#00BFA5, 0.400) above dark text
-   * on its body — a card that changes ink halfway down. Measured header
-   * luminances, tiers 0-7: 0.117, 0.133, 0.390, 0.400, 0.535, 0.227, 0.129,
-   * 0.134 — only tier 4's would disagree with its body.
+   * partner of its body, so deriving each half separately would put white text
+   * on the tier-2 and tier-3 headers (#00B8D4 0.390, #00BFA5 0.400 — at 2.4:1
+   * and 2.3:1) above dark text on their bodies — a card that changes ink
+   * halfway down. Measured header luminances, tiers 0-7: 0.117, 0.133, 0.390,
+   * 0.400, 0.535, 0.227, 0.129, 0.134 — tiers 2 and 3 would disagree with
+   * their bodies; tier 4's header (0.535) is the only one dark-inked on its
+   * own, and it agrees.
    */
   _cardParts(div, headerColor, bodyColor) {
     div.classList.add("chat-card");
@@ -1378,6 +1402,11 @@ export class PlayerController {
    * pair its table did not know, which arrives as tier 0). The amount is shown
    * exactly as archived — SuperchatInfo.Currency is derived from that same
    * string, so appending it would restate it.
+   *
+   * A Super Chat paid with no message is a header-only card, as on YouTube —
+   * the body element is dropped rather than left as an empty coloured strip;
+   * the sticker label still applies to `kind: "sticker"` and to a legacy
+   * record with no `kind`.
    */
   _fillSuperchatCard(div, msg) {
     const sc = msg.superchat || {};
@@ -1407,6 +1436,7 @@ export class PlayerController {
       return;
     }
     this.appendChatContent(body, msg.message || [], msg.emotes);
+    if (!body.hasChildNodes()) body.remove();
   }
 
   /**
@@ -1470,16 +1500,20 @@ export class PlayerController {
 
   /**
    * The cheer chip: "<n> bits" in a pill of the scale's colour, with the ink
-   * the shared luminance rule asks for. Every colour on today's scale happens
-   * to be dark enough for white ink, so the rule is invisible here — it is
-   * used anyway so a future pale band reads without a second thought.
+   * the shared luminance rule asks for — but taken at INK_CROSSOVER, not at
+   * the cards' 0.5. The filled pill is ours: Twitch prints a cheer's amount as
+   * coloured text and never on a background, so there is no platform ink to
+   * reproduce and the only question is which of the two reads better. At 0.5
+   * four of the five bands would be white below 4.5:1 (gray 2.92, green 2.64,
+   * blue 3.01, red 3.97); at the crossover they are dark at 6.33, 6.99, 6.23
+   * and 4.86, and purple stays white at 4.92.
    */
   _cheerChip(bits) {
     const chip = document.createElement("span");
     const color = cheerColor(bits);
-    chip.className = `cheer-chip chat-ink-${readableInk(color)}`;
+    chip.className = `cheer-chip chat-ink-${readableInk(color, INK_CROSSOVER)}`;
     chip.style.setProperty("--cheer-bg", color);
-    chip.textContent = `${bits} bits`;
+    chip.textContent = `${bits} ${bits === 1 ? "bit" : "bits"}`;
     return chip;
   }
 

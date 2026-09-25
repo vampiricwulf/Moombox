@@ -5,7 +5,7 @@
 // skipped (not failed) when jsdom is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { relativeLuminance, readableInk, SUPERCHAT_TIER_COLORS, twitchNoticeLine, cheerColor } from "../public/modules/player.js";
+import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor } from "../public/modules/player.js";
 
 let jsdomMissing = null;
 try {
@@ -1384,28 +1384,42 @@ test("every Super Chat tier's palette lands on YouTube's own ink", () => {
     ["light", "light", "dark", "dark", "dark", "light", "light", "light"]);
   assert.equal(SUPERCHAT_TIER_COLORS[3].header, "#00BFA5");
   assert.equal(SUPERCHAT_TIER_COLORS[7].body, "#E62117");
+  // The member card's tint is the arc's own colour, not YouTube's, so it is
+  // held to the rule rather than to fidelity: it must clear the threshold, so
+  // the whole card takes dark ink (5.4:1 on the green header, 10:1 on the
+  // tint). MUTANT: put the 25% tint (#4BB682, 0.366) back and white ink
+  // returns at 2.53:1 on the body.
+  assert.ok(relativeLuminance(MEMBER_CARD_COLORS.body) >= 0.5,
+    `member body luminance ${relativeLuminance(MEMBER_CARD_COLORS.body)} is below 0.5`);
+  assert.equal(readableInk(MEMBER_CARD_COLORS.body), "dark");
 });
 
+// The archived pair is deliberately UNLIKE the tier's own: tier 7 is YouTube's
+// red (#D00000/#E62117, white ink), and this file records a near-white body.
+// Everything the card shows therefore has to come from the archive — both
+// custom properties AND the ink. MUTANT: `resolvedColor` returning the
+// fallback (the palette) survives a same-colour fixture; here the properties
+// come back red and the ink flips to light.
 test("a Super Chat is a two-part card in the colours the archive recorded", { skip }, async () => {
   const h = await showChat([superchatMsg(
-    { amount: "$5.00", currency: "USD", color: "green", tier: 3, kind: "message",
-      headerColor: "#00BFA5", bodyColor: "#1DE9B6" },
+    { amount: "$5.00", currency: "USD", tier: 7, kind: "message",
+      headerColor: "#123456", bodyColor: "#EEEEEE" },
     { authorName: "Payer", message: [{ type: "text", text: "thank you" }] },
   )]);
   const row = h.sidebar().children[0];
   assert.ok(row.classList.contains("chat-msg"), "a card is still a timeline row");
   assert.ok(row.classList.contains("chat-card"));
   assert.ok(row.classList.contains("superchat"));
-  assert.equal(row.dataset.tier, "3");
-  assert.equal(row.style.getPropertyValue("--card-header"), "#00BFA5");
-  assert.equal(row.style.getPropertyValue("--card-body"), "#1DE9B6");
+  assert.equal(row.dataset.tier, "7");
+  assert.equal(row.style.getPropertyValue("--card-header"), "#123456");
+  assert.equal(row.style.getPropertyValue("--card-body"), "#EEEEEE");
 
   const header = row.querySelector(".chat-card-header");
   const body = row.querySelector(".chat-card-body");
-  // Tier 3's body green (#1DE9B6, luminance 0.619) takes dark ink, and the
-  // header takes the same one — one ink per card, derived from the body.
-  // MUTANT: derive each half from its own colour and the header flips to
-  // chat-ink-light, because #00BFA5 is only 0.400.
+  // The ink is read off the PAINTED body (#EEEEEE, luminance 0.838), not off
+  // tier 7's red (0.180), and the header wears the same one — one ink per
+  // card, derived from the body. MUTANT: derive each half from its own colour
+  // and the header flips to chat-ink-light, because #123456 is only 0.045.
   assert.ok(header.classList.contains("chat-ink-dark"), header.className);
   assert.ok(body.classList.contains("chat-ink-dark"), body.className);
   assert.equal(header.querySelector(".chat-msg-author").textContent, "Payer",
@@ -1441,22 +1455,34 @@ test("an unparseable archived colour is treated as absent", { skip }, async () =
 });
 
 // MUTANT: render the (unarchived) sticker image, or leave the body empty — a
-// sticker becomes an unexplained blank card.
-test("a Super Sticker says so in place of the image it does not archive", { skip }, async () => {
+// sticker becomes an unexplained blank card. MUTANT: keep the body element on
+// the third row and a Super Chat paid with no message — a common real shape
+// YouTube draws header-only — grows an empty strip of tier colour.
+test("a Super Sticker says so in place of the image it does not archive, and a message-less Super Chat is header-only", { skip }, async () => {
   const h = await showChat([
     superchatMsg({ amount: "$2.00", tier: 2, kind: "sticker",
                    headerColor: "#00B8D4", bodyColor: "#00E5FF" }, { message: [] }),
     // An archive written before `kind` existed (it arrived 2026-09-05): a paid
     // message with no parts at all is a sticker in everything but the label.
     superchatMsg({ amount: "$2.00", tier: 2 }, { offsetMs: 2000, message: [] }),
+    // `kind: "message"` and nothing typed: not a sticker, so no label — and
+    // no body either.
+    superchatMsg({ amount: "$5.00", tier: 3, kind: "message",
+                   headerColor: "#00BFA5", bodyColor: "#1DE9B6" },
+                 { offsetMs: 3000, message: [] }),
   ]);
   assert.equal(h.sidebar().children[0].querySelector(".chat-card-body").textContent, "Super Sticker");
   assert.equal(h.sidebar().children[1].querySelector(".chat-card-body").textContent, "Super Sticker");
+  assert.equal(h.sidebar().children[2].querySelector(".chat-card-body"), null,
+    "a Super Chat paid with no message keeps no empty body");
+  assert.equal(h.sidebar().children[2].children.length, 1,
+    "the header is the whole card");
 });
 
-// MUTANT: drop the tier clamp — an archive with tier 9 (or a string) indexes
-// SUPERCHAT_TIER_COLORS to undefined and the builder throws mid-chunk, taking
-// the whole sidebar build with it.
+// MUTANT: drop the tier clamp — an archive with tier 9 (or a non-numeric
+// string; a numeric one such as "3" resolves, object keys being strings)
+// indexes SUPERCHAT_TIER_COLORS to undefined and the builder throws mid-chunk,
+// taking the whole sidebar build with it.
 test("an unresolved tier gets the neutral gray card", { skip }, async () => {
   const h = await showChat([
     superchatMsg({ amount: "¥500", color: "gray", tier: 0, kind: "message" }),
@@ -1525,10 +1551,10 @@ test("a new member gets a green card carrying the renderer's own line", { skip }
   assert.ok(row.classList.contains("chat-card"));
   assert.ok(row.classList.contains("member"));
   assert.equal(row.style.getPropertyValue("--card-header"), "#0F9D58");
-  assert.equal(row.style.getPropertyValue("--card-body"), "#4BB682");
+  assert.equal(row.style.getPropertyValue("--card-body"), "#93D3B4");
   const header = row.querySelector(".chat-card-header");
-  assert.ok(header.classList.contains("chat-ink-light"),
-    "the member green and its tint both take white ink");
+  assert.ok(header.classList.contains("chat-ink-dark"),
+    "the tint clears the 0.5 threshold, so the whole card takes dark ink (5.4:1 on the green, 10:1 on the tint)");
   assert.equal(header.querySelector(".chat-msg-author").textContent, "newfan");
   assert.equal(header.querySelector(".chat-card-note").textContent, "Welcome to Member!");
   assert.equal(row.querySelector(".chat-card-body"), null,
@@ -1678,20 +1704,29 @@ test("cheerColor follows Twitch's amount scale at every boundary", () => {
   ]);
   assert.equal(cheerColor("1500"), "#1db2a5", "the archive writes a number, but a string still lands");
   assert.equal(cheerColor(undefined), "#979797");
+  // The chip is the arc's own surface — Twitch prints cheer amounts as
+  // coloured text, never on a filled pill, so there is no platform ink to be
+  // faithful to and the ink is picked for contrast at the crossover rather
+  // than at the cards' 0.5. MUTANT: use the default threshold and all five
+  // come back "light" — gray 2.92:1, green 2.64:1, blue 3.01:1, red 3.97:1.
+  assert.deepEqual(CHEER_SCALE.map((s) => readableInk(s.color, INK_CROSSOVER)),
+    ["dark", "dark", "dark", "light", "dark"]);
 });
 
 // MUTANT: place the chip after the content and the cheer reads as a trailing
 // afterthought instead of a prefix. MUTANT: build it for every Twitch message
-// and every ordinary line grows a "0 bits" pill.
+// and every ordinary line grows a "0 bits" pill. MUTANT: drop the plural guard
+// and a single-bit cheer reads "1 bits".
 test("a cheer gets a scaled chip before its content; a plain line does not", { skip }, async () => {
   const h = await showTwitchChat([
     twNotice({ messageType: "bits", bits: 5000, authorName: "cheerer", message: "take my bits" }),
     twNotice({ offsetMs: 2000, messageType: "chat", message: "no bits here" }),
     twNotice({ offsetMs: 3000, messageType: "bits", bits: 0, message: "nothing to show" }),
+    twNotice({ offsetMs: 4000, messageType: "bits", bits: 1, message: "one" }),
   ]);
-  const [cheer, plain, empty] = h.sidebar().children;
+  const [cheer, plain, empty, single] = h.sidebar().children;
   assert.deepEqual([...cheer.children].map((c) => c.className),
-    ["chat-msg-time", "chat-msg-author", "cheer-chip chat-ink-light", ""]);
+    ["chat-msg-time", "chat-msg-author", "cheer-chip chat-ink-dark", ""]);
   const chip = cheer.querySelector(".cheer-chip");
   assert.equal(chip.textContent, "5000 bits");
   assert.equal(chip.style.getPropertyValue("--cheer-bg"), "#0099fe");
@@ -1699,6 +1734,8 @@ test("a cheer gets a scaled chip before its content; a plain line does not", { s
   assert.equal(plain.querySelector(".cheer-chip"), null);
   assert.equal(empty.querySelector(".cheer-chip"), null,
     "a bits message with no count has nothing to put in a chip");
+  assert.equal(single.querySelector(".cheer-chip").textContent, "1 bit",
+    "the raid line pluralises its viewers; the chip pluralises its bits");
 });
 
 // The chip lives on the FLAT row, so it must survive beside everything else
@@ -1715,4 +1752,44 @@ test("a cheer chip coexists with a badge and an announcement", { skip }, async (
   assert.deepEqual([...row.children].map((c) => c.className),
     ["chat-msg-time", "chat-msg-author member", "cheer-chip chat-ink-light", ""]);
   assert.equal(row.querySelector(".cheer-chip").style.getPropertyValue("--cheer-bg"), "#9c3ee8");
+});
+
+// ── Search over the new shapes (close wave) ─────────────────────────────────
+
+// The cards and notices put text on screen that is in neither `message` nor
+// `authorName`: the membership line, the Super Chat amount and the Twitch
+// system line (which, with no wire `systemMsg`, only exists as a rebuild).
+// MUTANT: read only the message array and every one of those lines is visible
+// and unfindable.
+//
+// Two harnesses, in order: makePlayer republishes the globals filterChat reads
+// through `document`, so the YouTube assertions all run before the Twitch
+// document exists.
+test("search finds the lines the cards show beside the message", { skip }, async () => {
+  const shown = (h) => [...h.sidebar().children].map((c) => !c.classList.contains("search-hidden"));
+
+  const yt = await showChat([
+    ytMsg({ authorName: "newfan", isMembership: true,
+            membershipText: "Welcome to Member!", message: [] }),
+    superchatMsg({ amount: "$5.00", tier: 3, kind: "message" },
+                 { offsetMs: 2000, authorName: "Payer",
+                   message: [{ type: "text", text: "thank you" }] }),
+    ytMsg({ offsetMs: 3000, authorName: "Plain", message: [{ type: "text", text: "hi" }] }),
+  ]);
+  yt.player.filterChat("welcome");
+  assert.deepEqual(shown(yt), [true, false, false], "the member card's own line is findable");
+  yt.player.filterChat("5.00");
+  assert.deepEqual(shown(yt), [false, true, false], "the amount in the card header is findable");
+  yt.player.filterChat("thank");
+  assert.deepEqual(shown(yt), [false, true, false], "the card body still matches as text");
+  yt.player.filterChat("plain");
+  assert.deepEqual(shown(yt), [false, false, true], "the author match is untouched");
+
+  const tw = await showTwitchChat([
+    twNotice({ messageType: "raid", authorName: "other", viewerCount: 120 }),
+    twNotice({ offsetMs: 2000, messageType: "chat", authorName: "fan", message: "hello" }),
+  ]);
+  tw.player.filterChat("raiding");
+  assert.deepEqual(shown(tw), [true, false],
+    "a raid with no wire systemMsg is findable by the line the sidebar rebuilt");
 });
