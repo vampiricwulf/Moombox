@@ -708,6 +708,52 @@ func isDeletableStatus(s database.JobStatus) bool {
 		s == database.StatusCancelled || s == database.StatusCookies
 }
 
+// JobIsActive reports whether a job is actively writing its staging and output
+// paths.
+//
+// The SOURCE OF TRUTH for this list is worker.IsActiveJobStatus
+// (internal/worker/orphans.go), which is what the worker and the REST route
+// both refuse a set-aside recovery on; internal/tui cannot import that package
+// (the import fence), so this is a deliberate twin and cmd/moombox pins the
+// two against each other for every status. The third reader, the dashboard's
+// literal in web/public/modules/job-details.js, cites the same source and is
+// pinned behaviourally by its own jsdom test.
+//
+// Four statuses, spelled out rather than derived from IsTerminal(): a Queued
+// or COOKIES? job is not terminal but its staging dir is not being written
+// either, and recovery is perfectly safe there.
+//
+// Exported only so that parity test can exist.
+func JobIsActive(s database.JobStatus) bool {
+	return s == database.StatusDownloading || s == database.StatusMuxing ||
+		s == database.StatusLive || s == database.StatusUpcoming
+}
+
+// asidesFor returns the selected job's set-aside summary, probing the disk at
+// most once per job ID. An active job answers empty without a probe: its
+// staging dir is mid-write, and nothing in it is recoverable yet.
+func (a *App) asidesFor(job *database.Job) AsideSummary {
+	if job == nil || a.JobAsides == nil || JobIsActive(job.Status) {
+		return AsideSummary{}
+	}
+	if a.asidesJobID == job.ID {
+		return a.asidesCache
+	}
+	a.asidesJobID = job.ID
+	a.asidesCache = a.JobAsides(job.ID)
+	return a.asidesCache
+}
+
+// invalidateAsides drops the memo for one job, so the next selection re-reads
+// the disk. Called when a recovery is dispatched: the recordings it consumes
+// are gone within seconds, and a stale panel would keep offering them.
+func (a *App) invalidateAsides(jobID string) {
+	if a.asidesJobID == jobID {
+		a.asidesJobID = ""
+		a.asidesCache = AsideSummary{}
+	}
+}
+
 // buildMenuItems builds context-sensitive action menu items.
 // This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {

@@ -558,6 +558,14 @@ type App struct {
 	// the newcomer hint in the status bar (session-only, not persisted).
 	seenChordHint bool
 
+	// asidesJobID / asidesCache memoise ONE job's JobAsides answer — the
+	// selected one. updateSelectedJob runs on every cursor move and on every
+	// JobsUpdateMsg, so an unmemoised probe would read the disk once per
+	// database write. Invalidated by invalidateAsides when a recovery is
+	// dispatched for that job.
+	asidesJobID string
+	asidesCache AsideSummary
+
 	// Callbacks for actions
 	OnAddVideo  func(url string)
 	OnCancelJob func(jobID string)
@@ -570,9 +578,14 @@ type App struct {
 	OnMuxJob          func(jobID string) error
 	HasStagingFiles   func(jobID string) bool // checks if staging dir has files
 	HasSegmentFiles   func(jobID string) bool // checks if staging dir has segment files
-	OnCreateTrim      func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim      func(jobID, trimID string) error
-	OnOpenFolder      func(jobID string)
+	// JobAsides reports a job's set-aside recordings and whether its staging
+	// dir still holds a chat capture. A DISK probe like HasStagingFiles and
+	// HasSegmentFiles beside it, so the same rule applies: it runs on
+	// SELECTION, never when the action menu opens (CORE-9).
+	JobAsides    func(jobID string) AsideSummary
+	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
+	OnDeleteTrim func(jobID, trimID string) error
+	OnOpenFolder func(jobID string)
 	// OnSaveConfig persists the settings model's config. It returns the save
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).

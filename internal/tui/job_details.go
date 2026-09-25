@@ -31,6 +31,12 @@ type JobDetailsModel struct {
 	rows            []detailRow
 	hideDescription bool
 
+	// asides is the selected job's set-aside summary, pushed in by the App
+	// rather than probed here: buildRows runs on every job update and every
+	// resize, and the answer comes off the disk. Cleared by SetJob on a job
+	// switch so a stale summary is never rendered under a new job.
+	asides AsideSummary
+
 	// Marquee for scrolling the title value when it overflows.
 	marquee Marquee
 
@@ -119,6 +125,13 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 	if job != nil {
 		newID = job.ID
 	}
+	if newID != prevID {
+		// The summary belongs to the job the cursor just left. The App pushes
+		// the new one straight after this call; until then the panel says
+		// nothing rather than something false.
+		m.asides = AsideSummary{}
+	}
+
 	// Transient view state (progress overlay, scroll position, marquee
 	// phase) resets only on a genuine job switch. SetJob is also called as
 	// a same-job re-sync whenever ANY job's display column changes — with
@@ -288,6 +301,51 @@ func (m *JobDetailsModel) updateViewportContent() {
 		lines = append(lines, m.renderRow(r, contentW))
 	}
 	m.viewport.SetContentLines(lines)
+}
+
+// AsideEntry is one restart's worth of set-aside recording as the TUI shows
+// it. A deliberate re-declaration of internal/worker's Aside rather than an
+// import: internal/tui imports no worker, web, routes or bgutils package, and
+// cmd/moombox/tui_wiring.go is where the two shapes meet.
+type AsideEntry struct {
+	// Timestamp is RFC 3339, as the worker renders it.
+	Timestamp string
+	// Size is every byte of the restart, both halves of a DASH pair included.
+	Size int64
+	// HasResumeSidecar reports whether the recording's .resume.json survived.
+	HasResumeSidecar bool
+}
+
+// AsideSummary is one job's staging directory as the details panel reads it.
+type AsideSummary struct {
+	Asides          []AsideEntry
+	KeptChatSidecar bool
+}
+
+// sameAs reports whether two summaries would render identically, so SetAsides
+// can skip a rebuild. The App calls SetAsides from updateSelectedJob, which
+// also runs on every JobsUpdateMsg.
+func (s AsideSummary) sameAs(other AsideSummary) bool {
+	if s.KeptChatSidecar != other.KeptChatSidecar || len(s.Asides) != len(other.Asides) {
+		return false
+	}
+	for i := range s.Asides {
+		if s.Asides[i] != other.Asides[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// SetAsides gives the panel the selected job's set-aside summary. A no-op when
+// nothing changed.
+func (m *JobDetailsModel) SetAsides(s AsideSummary) {
+	if s.sameAs(m.asides) {
+		return
+	}
+	m.asides = s
+	m.buildRows()
+	m.updateViewportContent()
 }
 
 func (m *JobDetailsModel) buildRows() {
@@ -627,6 +685,36 @@ func (m *JobDetailsModel) buildRows() {
 			fileLink = (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(fullPath)}).String()
 		}
 		m.addFieldLink("File", j.Filename, fileLink)
+	}
+
+	// === Set-aside Recordings ===
+	// Footage the engine preserved when it could not resume a recording
+	// mid-stream (engine.StagedRestartSuffix). It overlaps the archive from
+	// sequence 0, so it is never merged in — recovery muxes each restart into
+	// its own file beside the archive (the A S chord, POST
+	// /api/jobs/{id}/recover-asides). Only rendered when there is something to
+	// recover: a kept chat capture on its own is not.
+	if n := len(m.asides.Asides); n > 0 {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Set-aside Recordings (%d)", n)})
+		now := time.Now()
+		for i, a := range m.asides.Asides {
+			when := "unknown time"
+			if a.Timestamp != "" {
+				when = formatDateStrRelative(a.Timestamp, now)
+			}
+			sidecar := "no resume sidecar"
+			if a.HasResumeSidecar {
+				sidecar = "resume sidecar"
+			}
+			m.addField(fmt.Sprintf("Recording %d", i+1),
+				fmt.Sprintf("%s - %s - %s", when, formatFileSize(a.Size), sidecar))
+		}
+		chat := "none"
+		if m.asides.KeptChatSidecar {
+			chat = "kept in staging"
+		}
+		m.addField("Chat Capture", chat)
 	}
 
 	// === Description ===
