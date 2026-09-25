@@ -4,6 +4,8 @@ package youtube
 import (
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // StreamStatus indicates the current state of a YouTube video.
@@ -287,8 +289,8 @@ func (f *Format) IsAudio() bool {
 	return strings.Contains(f.MimeType, "audio") && f.Width == nil
 }
 
-// MaxDimension returns max(width, height) for resolution comparison.
-func (f *Format) MaxDimension() int {
+// dims returns the format's frame dimensions with an absent one as 0.
+func (f *Format) dims() (int, int) {
 	w, h := 0, 0
 	if f.Width != nil {
 		w = *f.Width
@@ -296,10 +298,24 @@ func (f *Format) MaxDimension() int {
 	if f.Height != nil {
 		h = *f.Height
 	}
-	if w > h {
-		return w
-	}
-	return h
+	return w, h
+}
+
+// MaxDimension returns max(width, height). It is no longer the resolution CAP
+// comparison (see CapDimension and ruling R1) — it is the tie-break the format
+// selector applies BETWEEN two renditions that already share a short edge, so
+// an anamorphic 2560x1080 still outranks a 1920x1080.
+func (f *Format) MaxDimension() int {
+	w, h := f.dims()
+	return max(w, h)
+}
+
+// CapDimension returns the dimension downloader.max_video_resolution is
+// compared against — the shorter positive one. See utils.CapDimension for the
+// rule and why it is not the long edge.
+func (f *Format) CapDimension() int {
+	w, h := f.dims()
+	return utils.CapDimension(w, h)
 }
 
 // YtcfgData holds configuration extracted from YouTube watch page.

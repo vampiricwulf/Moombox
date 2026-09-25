@@ -253,23 +253,46 @@ func findMenuItem(t *testing.T, a *App, chord string) (int, menuActionItem) {
 // Mutant: giving any NeedsJob entry a JobFilter that calls one of those
 // callbacks without a StatusFilter beside it (executed on A I) — the count
 // is non-zero.
+//
+// Mutant (Arc A): giving A S a JobFilter that calls JobAsides with no
+// StatusFilter beside it — the count is non-zero.
 func TestActionMenuOpenCallsNoProbeSeamAtAll(t *testing.T) {
 	a := NewApp()
 	probes := 0
-	probeType := reflect.TypeOf(func(string) bool { return false })
-	counter := reflect.ValueOf(func(string) bool { probes++; return true })
-
 	v := reflect.ValueOf(a).Elem()
-	seams := 0
+	seams, sawJobAsides := 0, false
 	for i := range v.NumField() {
 		f := v.Field(i)
-		if f.Kind() == reflect.Func && f.Type() == probeType && f.CanSet() {
-			f.Set(counter)
-			seams++
+		if f.Kind() != reflect.Func || !f.CanSet() {
+			continue
+		}
+		ft := f.Type()
+		// The shape of a per-job probe: one string in (the job ID), something
+		// out. Widened from func(string) bool when JobAsides — which answers
+		// with a struct, not a bool — became the third such seam, so the guard
+		// covers a new one by SHAPE rather than by the plan remembering to add
+		// it (Arc A).
+		if ft.IsVariadic() || ft.NumIn() != 1 || ft.In(0).Kind() != reflect.String || ft.NumOut() == 0 {
+			continue
+		}
+		f.Set(reflect.MakeFunc(ft, func([]reflect.Value) []reflect.Value {
+			probes++
+			out := make([]reflect.Value, ft.NumOut())
+			for j := range out {
+				out[j] = reflect.Zero(ft.Out(j))
+			}
+			return out
+		}))
+		seams++
+		if v.Type().Field(i).Name == "JobAsides" {
+			sawJobAsides = true
 		}
 	}
 	if seams == 0 {
-		t.Fatal("no func(string) bool callbacks found on App — re-anchor this guard rather than letting it pass vacuously")
+		t.Fatal("no single-string-argument func callbacks found on App — re-anchor this guard rather than letting it pass vacuously")
+	}
+	if !sawJobAsides {
+		t.Error("JobAsides was not replaced — the shape filter no longer matches it, so A S's probe is unguarded")
 	}
 
 	jobs := make([]*database.Job, 0, 200)

@@ -32,6 +32,54 @@ func CurrentSchemaVersion() int {
 	return schemaVersion
 }
 
+// The launcher's rollback artifact suffixes, MIRRORED here so the schema
+// downgrade refusal below can name real files.
+//
+// They cannot be shared: failedBinarySuffix is a constant in cmd/moombox's
+// package main, which no package can import, the ".update-failed" suffix is
+// an inline literal in writeAutoRollbackMarker there, and internal/database
+// imports nothing internal by design. The drift guard is
+// TestDowngradeRefusalNamesTheLauncherArtifacts in cmd/moombox — the one
+// package that can see both sides — reached from here through
+// RollbackArtifactSuffixes.
+const (
+	failedBinarySuffix       = ".failed"
+	updateFailedMarkerSuffix = ".update-failed"
+)
+
+// defaultBinaryName stands in when os.Executable() cannot answer. It is the
+// project's own name, which is what a default install is called on every
+// platform; a wrong-but-plausible name is better advice than no name.
+const defaultBinaryName = "moombox"
+
+// RollbackArtifactSuffixes returns the two launcher artifact suffixes the
+// downgrade refusal names.
+//
+// Exported for ONE reader: the parity test in cmd/moombox. Nothing in the
+// program calls it, and that is the point — it exists so the duplication
+// above can be checked rather than trusted.
+func RollbackArtifactSuffixes() (failed, marker string) {
+	return failedBinarySuffix, updateFailedMarkerSuffix
+}
+
+// rollbackArtifactBase names the running executable the way the launcher's
+// rollback artifacts are named: attemptAutoRollback and writeAutoRollbackMarker
+// both build their paths from exePath, so on Linux the artifacts are
+// `moombox.failed` and `moombox.update-failed`, and on a renamed install they
+// carry that name. The refusal used to hard-code the Windows spelling of a
+// default install (C L17).
+func rollbackArtifactBase() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return defaultBinaryName
+	}
+	base := filepath.Base(exe)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return defaultBinaryName
+	}
+	return base
+}
+
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
 // existing databases from older schema versions. Tables like "segments" and
@@ -247,9 +295,10 @@ func (db *Database) migrate() error {
 	// the `moombox add` side process already has this guard (addvideo.go
 	// via FileSchemaVersion); this closes the same hole for the daemon.
 	if version > schemaVersion {
+		exe := rollbackArtifactBase()
 		return fmt.Errorf(
-			"database schema v%d is newer than this binary supports (v%d) — you appear to have downgraded after an update migrated the database; restore the newer binary (an automatic rollback keeps it beside this executable as moombox.exe.failed and names the exact path in the moombox.exe.update-failed marker; a manual downgrade leaves moombox.exe.old from the update swap) or upgrade again",
-			version, schemaVersion)
+			"database schema v%d is newer than this binary supports (v%d) — you appear to have downgraded after an update migrated the database; restore the newer binary (an automatic rollback keeps it beside this executable as %s%s and names the exact path in the %s%s marker) or download it again",
+			version, schemaVersion, exe, failedBinarySuffix, exe, updateFailedMarkerSuffix)
 	}
 
 	// Run incremental migrations if needed

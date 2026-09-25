@@ -456,6 +456,43 @@ func TestOpenBrowserURLUsesTheSharedCommand(t *testing.T) {
 	}
 }
 
+// TestOpenPathWindowsArmForceQuotes is the half of W R-3 a Linux runner can
+// see. The CmdLine itself is unassertable off Windows (syscall.SysProcAttr
+// has no such field there), so the shape is pinned structurally instead:
+// without this, CI's ubuntu job has ZERO coverage of the quoting, and the
+// fix could be deleted on a Linux-only change with every gate still green.
+//
+// MUTANTS:
+//   - delete the call from openPathCommandFor -> the first assertion fails;
+//   - replace the CmdLine assignment with a plain exec.Command inside
+//     openpath_windows.go -> the second fails;
+//   - drop the embedded-quote strip -> the third fails.
+func TestOpenPathWindowsArmForceQuotes(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	if text := strings.ReplaceAll(string(src), "\r\n", "\n"); !strings.Contains(text,
+		"\tif goos == \"windows\" {\n\t\tforceQuoteCmdLine(cmd, program, target)\n\t}") {
+		t.Error("openPathCommandFor does not force-quote its Windows arm — a directory whose path " +
+			"contains '=' opens nothing, which is W R-3")
+	}
+
+	win, err := os.ReadFile("openpath_windows.go")
+	if err != nil {
+		t.Fatalf("read openpath_windows.go: %v", err)
+	}
+	wtext := strings.ReplaceAll(string(win), "\r\n", "\n")
+	if !strings.Contains(wtext, "syscall.SysProcAttr{") || !strings.Contains(wtext, "CmdLine:") {
+		t.Error("openpath_windows.go no longer sets SysProcAttr.CmdLine; Go's own quoting is what " +
+			"leaves the '=' bare")
+	}
+	if !strings.Contains(wtext, "ReplaceAll(target,") {
+		t.Error("openpath_windows.go no longer strips embedded quotes, so a crafted target could " +
+			"escape the quoting")
+	}
+}
+
 // fakeChild stands in for a started child process. The two arms of
 // detachStarted are Release and Wait, and a real child here would be a file
 // manager window on the developer's desktop (R3), so the arms are recorded

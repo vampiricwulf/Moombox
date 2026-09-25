@@ -529,18 +529,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	if err != nil {
 		if ctx.Err() != nil {
-			// Shutdown: stop chat but preserve staging dir for resume
-			if chatDl != nil {
-				chatDl.Stop()
-				if chatDone != nil {
-					chatTimer := time.NewTimer(2 * time.Second)
-					select {
-					case <-chatDone:
-						chatTimer.Stop()
-					case <-chatTimer.C:
-					}
-				}
-			}
+			// Shutdown: stop chat but preserve staging dir for resume.
+			// cleanup IS this arm's old inline body — Stop, then the bounded
+			// chatShutdownGrace wait — so the grace lives in one place
+			// instead of a third literal 2*time.Second.
+			o.cleanup(chatDl, chatDone)
 			return ctx.Err()
 		}
 		o.cleanup(chatDl, chatDone)

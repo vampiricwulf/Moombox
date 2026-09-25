@@ -11,6 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -88,59 +89,13 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	// Step 3: Select best variant respecting max_video_resolution and quality preference
-	maxRes := job.Config.MaxVideoResolution
-	if maxRes <= 0 {
-		maxRes = 9999
-	}
-
-	// Filter by maxRes cap
-	var filtered []*engine.HlsVariant
-	for i := range parsed.Variants {
-		v := &parsed.Variants[i]
-		varMaxDim := max(v.Height, v.Width)
-		if varMaxDim <= maxRes {
-			filtered = append(filtered, v)
-		}
-	}
-
-	if len(filtered) == 0 {
-		return nil, fmt.Errorf("no HLS variants found within resolution limit (%d)", maxRes)
-	}
-
-	// Apply quality preference targeting
-	var bestVariant *engine.HlsVariant
 	qualityPref := job.Job.QualityPreference
 	if qualityPref == "audio_only" {
-		// YouTube HLS doesn't have audio-only variants — select lowest bandwidth
-		// to minimize wasted video data (audio quality is the same across variants)
 		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
-		bestVariant = filtered[0]
-		for _, v := range filtered[1:] {
-			if v.Bandwidth < bestVariant.Bandwidth {
-				bestVariant = v
-			}
-		}
-	} else if qualityPref != "" && qualityPref != "best" {
-		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
-		if targetHeight > 0 {
-			// Try exact height match
-			bestVariant = selectHlsByHeight(filtered, targetHeight, targetFPS)
-			// Descend through lower heights
-			if bestVariant == nil {
-				bestVariant = selectNextLowerHls(filtered, targetHeight)
-			}
-			// No lower heights — fall through to source/best
-		}
 	}
-
-	// Fallback: highest bandwidth among all filtered candidates (source/best)
+	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution)
 	if bestVariant == nil {
-		bestVariant = filtered[0]
-		for _, v := range filtered[1:] {
-			if v.Bandwidth > bestVariant.Bandwidth {
-				bestVariant = v
-			}
-		}
+		return nil, fmt.Errorf("invalid HLS master playlist (no variants found)")
 	}
 
 	job.Logger.Info("selected HLS variant",
@@ -217,6 +172,88 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	return result, nil
+}
+
+// selectHlsVariant picks the variant to record from a YouTube live master
+// playlist, given the job's quality preference and downloader.max_video_resolution.
+//
+// Ruling R1: the cap compares the SHORTER frame dimension and resolves to one
+// size — the largest at or below it, or the closest above it when nothing is at
+// or below. `0` is unbounded. Before this arc the site compared max(width,
+// height) and returned a HARD ERROR ("no HLS variants found within resolution
+// limit") when the filter emptied the list, which failed the whole download
+// over a preference; and it substituted 9999 for a non-positive cap.
+//
+// The quality preference is matched against everything at or below the chosen
+// size (so a per-job 720p under a 2160 cap still resolves to 720p); the
+// no-preference path ranks only the variants AT the chosen size.
+//
+// Returns nil only for an empty variant list — DownloadHls rejects a master
+// playlist with no variants before calling this.
+func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int) *engine.HlsVariant {
+	if len(variants) == 0 {
+		return nil
+	}
+
+	cands := make([]utils.Cand, len(variants))
+	for i := range variants {
+		cands[i] = utils.Cand{Width: variants[i].Width, Height: variants[i].Height}
+	}
+	capSize, haveCapSize := utils.SelectByCap(maxRes, cands)
+
+	var capped []*engine.HlsVariant
+	for i := range variants {
+		if haveCapSize && utils.CapDimension(variants[i].Width, variants[i].Height) > capSize {
+			continue
+		}
+		capped = append(capped, &variants[i])
+	}
+
+	if qualityPref == "audio_only" {
+		// YouTube HLS has no audio-only variants — take the lowest bandwidth
+		// to minimise wasted video data (audio quality is the same across
+		// variants). DownloadHls logs the warning.
+		best := capped[0]
+		for _, v := range capped[1:] {
+			if v.Bandwidth < best.Bandwidth {
+				best = v
+			}
+		}
+		return best
+	}
+
+	if qualityPref != "" && qualityPref != "best" {
+		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
+		if targetHeight > 0 {
+			if v := selectHlsByHeight(capped, targetHeight, targetFPS); v != nil {
+				return v
+			}
+			if v := selectNextLowerHls(capped, targetHeight); v != nil {
+				return v
+			}
+			// No lower heights — fall through to source/best
+		}
+	}
+
+	atSize := capped
+	if haveCapSize {
+		var exact []*engine.HlsVariant
+		for _, v := range capped {
+			if utils.CapDimension(v.Width, v.Height) == capSize {
+				exact = append(exact, v)
+			}
+		}
+		if len(exact) > 0 {
+			atSize = exact
+		}
+	}
+	best := atSize[0]
+	for _, v := range atSize[1:] {
+		if v.Bandwidth > best.Bandwidth {
+			best = v
+		}
+	}
+	return best
 }
 
 // selectHlsByHeight finds an HLS variant matching the target height, optionally with FPS.
