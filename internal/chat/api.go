@@ -510,8 +510,16 @@ func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
 	} else if sticker, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
 		msg.Superchat = api.parseSuperStickerInfo(sticker)
 	}
-	if _, ok := item["liveChatMembershipItemRenderer"]; ok {
+	if memb, ok := item["liveChatMembershipItemRenderer"].(map[string]any); ok {
 		msg.IsMembership = true
+		// The event itself: "Member for 6 months" when YouTube sends a primary
+		// text, else the subtext ("Welcome to Member!"), which is all a
+		// new-member renderer has. Never both — a milestone's subtext is just
+		// the tier name the primary text already names.
+		msg.MembershipText = renderedText(memb["headerPrimaryText"])
+		if msg.MembershipText == "" {
+			msg.MembershipText = renderedText(memb["headerSubtext"])
+		}
 	}
 	if hasReplayOffset {
 		if replayOffsetMs == 0 {
@@ -871,6 +879,38 @@ func parseMessageRuns(message map[string]any) []MessagePart {
 	}
 
 	return parts
+}
+
+// renderedText flattens one of YouTube's text fields to a plain string.
+// YouTube writes them two ways — {"simpleText": "…"} and {"runs": [{"text":
+// "…"}, …]} — and uses both inside a single liveChatMembershipItemRenderer
+// (headerSubtext is usually simple, headerPrimaryText is always runs), so a
+// reader has to take either. Runs that carry no "text" (an emoji run)
+// contribute nothing. Returns "" for an absent or wrongly-typed field.
+//
+// parseMessageRuns is the richer sibling and stays the reader for message
+// bodies: it keeps emoji, links and bold/italic as MessagePart values. This
+// one exists for the fields that are displayed as one flat line.
+func renderedText(field any) string {
+	m, ok := field.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if s, ok := m["simpleText"].(string); ok && s != "" {
+		return s
+	}
+	runs, _ := m["runs"].([]any)
+	var b strings.Builder
+	for _, run := range runs {
+		runMap, _ := run.(map[string]any)
+		if runMap == nil {
+			continue
+		}
+		if t, ok := runMap["text"].(string); ok {
+			b.WriteString(t)
+		}
+	}
+	return b.String()
 }
 
 // extractNavURL pulls a hyperlink target out of a YouTube navigationEndpoint.
