@@ -243,14 +243,45 @@ func runSteps[M any](t *testing.T, m M, steps []renderStep[M], view func() strin
 		defeat()
 		want := view() // the same frame with the cache defeated
 		if got != want {
-			t.Errorf("%s: the memoised frame differs from a fresh render\ncached:\n%s\nfresh:\n%s",
-				step.name, stripANSI(got), stripANSI(want))
+			t.Errorf("%s: the memoised frame differs from a fresh render at byte %d (cached %d bytes, fresh %d)\n"+
+				"cached bytes: %q\nfresh bytes:  %q\ncached:\n%s\nfresh:\n%s",
+				step.name, firstDiff(got, want), len(got), len(want),
+				diffWindow(got, want), diffWindow(want, got),
+				stripANSI(got), stripANSI(want))
 		}
 		if step.covers != "" && want == before {
 			t.Errorf("%s: the step renders identically, so it cannot cover %s — the claim is vacuous",
 				step.name, step.covers)
 		}
 	}
+}
+
+// firstDiff returns the index of the first byte at which a and b differ, or
+// min(len(a), len(b)) when one is a prefix of the other.
+func firstDiff(a, b string) int {
+	n := min(len(a), len(b))
+	for i := range n {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
+}
+
+// diffWindow quotes up to 40 bytes of a around its first difference from b.
+// The stripped dumps runSteps prints are unreadable when the difference is an
+// ANSI escape rather than text — which is the one shape a pair of frames that
+// both LOOK blank can take, and the shape the single observed failure of this
+// family most plausibly had: only the tail of its dump was captured (the
+// post-sweep-2 Arc C close review, 2026-09-24), so an ANSI-only difference is
+// the inference, not the record — which is why the message quotes raw bytes
+// for BOTH shapes. Quoting the raw bytes is what turns a second occurrence
+// into a diagnosis.
+func diffWindow(a, b string) string {
+	i := firstDiff(a, b)
+	lo := max(i-20, 0)
+	hi := min(i+20, len(a))
+	return a[lo:hi]
 }
 
 // The cache may change what a frame COSTS, never what it says.

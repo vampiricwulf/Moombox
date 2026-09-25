@@ -1206,6 +1206,42 @@ func hasDisplayChange(changes []string) bool {
 	return false
 }
 
+// tallyColumns is the set of database column names the STATUS BAR's stored
+// tally derives from: tallyJobs reads Job.Status for the active counter, and
+// parkedCookieJobs reads Job.Status and Job.Platform for the B1 parked badge.
+//
+// NOT a subset of displayColumns, and not meant to be — platform is not a
+// display column. The gate below stays nested inside the hasDisplayChange
+// branch, which is what makes that safe: UpdateJobFields never writes platform
+// today, and if it ever did it would arrive alongside a display column.
+//
+// Why a named set rather than the two keys spelled out at the call site, which
+// is what this replaces: the gate is coupled to what tallyJobs and
+// parkedCookieJobs actually read, and nothing checked that coupling. A new
+// field in barJobCounts would have left the bar frozen for whatever column
+// feeds it, silently. TestTallyColumnsMatchWhatTheTallyReads now pins the set
+// in both directions against the derivation itself.
+//
+// platform earns its place even though nothing emits it: parkedCookieJobs
+// reads it, so it is a real input, and dropping it because no writer exists
+// today is the exact mutant that test names.
+var tallyColumns = map[string]struct{}{
+	"status":   {},
+	"platform": {},
+}
+
+// hasTallyChange reports whether any column in changes is one the status
+// bar's stored tally derives from. The twin of hasDisplayChange, and the gate
+// on the one SetJobs call in handleJobUpdate.
+func hasTallyChange(changes []string) bool {
+	for _, col := range changes {
+		if _, ok := tallyColumns[col]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // isProgressTerminal reports the statuses that must NOT hold a progress-store
 // entry: the download is over (or parked), so there is no live progress to
 // render and the 16ms tick has nothing to rebuild for the job. One predicate,
@@ -1256,17 +1292,18 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 		// snapshot / add / delete left behind, indefinitely on a quiet
 		// install.
 		//
-		// Gated on exactly the columns tallyJobs derives from, so a real
-		// transition costs one walk and a progress tick costs none: progress
-		// is not a display column, so it never reaches this branch at all,
-		// and the gate keeps the other eleven that do (title, filename, …)
-		// off the tally too. platform is here because parkedCookieJobs reads
-		// it; it is not itself a display column, so it only ever arrives
-		// alongside one, and status is the key that fires in practice.
+		// Gated on tallyColumns — exactly the columns tallyJobs and
+		// parkedCookieJobs derive from — so a real transition costs one walk
+		// and a progress tick costs none: progress is not a display column,
+		// so it never reaches this branch at all, and the gate keeps the
+		// other eleven that do (title, filename, …) off the tally too. The
+		// set is a named home rather than two keys typed out here so the
+		// coupling to the derivation is checkable; status is the key that
+		// fires in practice.
 		//
 		// handleTrimsChanged is the other UpdateJob caller and deliberately
 		// has no such call: a trim write touches neither column.
-		if slices.Contains(ev.Changes, "status") || slices.Contains(ev.Changes, "platform") {
+		if hasTallyChange(ev.Changes) {
 			a.statusBar.SetJobs(a.taskList.Jobs())
 		}
 		// Refresh details from whatever is selected now — the update may

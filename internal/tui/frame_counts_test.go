@@ -232,3 +232,128 @@ func TestNonTallyUpdatesLeaveTheStatusBarTallyAlone(t *testing.T) {
 			"so they pin nothing")
 	}
 }
+
+// tallyProbe is one column's claim: mutate writes the field that column
+// carries, and moves says whether the status bar's stored tally is allowed to
+// follow it. The fixture is per-row because platform only moves the tally for
+// a job that is already parked — parkedCookieJobs filters on Status first, so
+// a platform flip on a Downloading job is correctly invisible, and a probe
+// that used one shared fixture would report platform as a non-input.
+type tallyProbe struct {
+	column string
+	job    func() *database.Job
+	mutate func(*database.Job)
+	moves  bool
+}
+
+// TestTallyColumnsMatchWhatTheTallyReads is the coupling pin tallyColumns
+// exists for. Arc C's fix gated handleJobUpdate's SetJobs call on two keys
+// typed out beside the call; nothing tied those keys to tallyJobs or
+// parkedCookieJobs, so a new field in barJobCounts could quietly freeze the
+// bar for whatever column feeds it and every test would stay green.
+//
+// Both directions are checked, per column. The DERIVATION: does tallyJobs'
+// answer actually move when this field moves? The SET: is the column in
+// tallyColumns? They must agree, so a column can neither sit in the set
+// without being an input nor be an input without sitting in the set. The
+// count check at the end closes the third hole — a column added to the set
+// with no probe beside it.
+//
+// Mutants this kill: deleting "platform" from tallyColumns (the platform
+// row's set half fires); adding any of the eleven other display columns to it
+// (that row's set half fires, and TestNonTallyUpdatesLeaveTheStatusBarTally
+// Alone/title_rewrite fires too for "title"); adding a column to the set with
+// no probe (the count check fires).
+func TestTallyColumnsMatchWhatTheTallyReads(t *testing.T) {
+	downloading := func() *database.Job {
+		return &database.Job{ID: "a", Status: database.StatusDownloading, Platform: "youtube"}
+	}
+	probes := []tallyProbe{
+		// The two inputs.
+		{"status", downloading, func(j *database.Job) { j.Status = database.StatusFinished }, true},
+		{"platform", func() *database.Job {
+			return &database.Job{ID: "a", Status: database.StatusCookies, Platform: ""}
+		}, func(j *database.Job) { j.Platform = "twitch" }, true},
+
+		// The eleven other display columns, each moved on a job the tally
+		// does count, so a false positive would show.
+		{"title", downloading, func(j *database.Job) { j.Title = "retitled" }, false},
+		{"channel_name", downloading, func(j *database.Job) { j.ChannelName = "other" }, false},
+		{"thumbnail_url", downloading, func(j *database.Job) { j.ThumbnailURL = "https://example.test/t.jpg" }, false},
+		{"description", downloading, func(j *database.Job) { j.Description = "some text" }, false},
+		{"stream_start_time", downloading, func(j *database.Job) { j.StreamStartTime = "2026-09-24T00:00:00Z" }, false},
+		{"stream_end_time", downloading, func(j *database.Job) { j.StreamEndTime = "2026-09-24T01:00:00Z" }, false},
+		{"error", downloading, func(j *database.Job) { j.Error = "boom" }, false},
+		{"output_file", downloading, func(j *database.Job) { j.OutputFile = "D:/out/show.mp4" }, false},
+		{"filename", downloading, func(j *database.Job) { j.Filename = "show.mp4" }, false},
+		{"is_vod", downloading, func(j *database.Job) { j.IsVod = true }, false},
+		{"chat_status", downloading, func(j *database.Job) { j.ChatStatus = "incomplete" }, false},
+
+		// Not a display column at all, and the ~10/sec one: it must not move
+		// the tally either, or the 60 Hz rule is broken at the source.
+		{"progress", downloading, func(j *database.Job) { j.Progress, j.Percent = "V:9 A:9", 42 }, false},
+	}
+
+	inputs := 0
+	for _, p := range probes {
+		if p.moves {
+			inputs++
+		}
+		t.Run(p.column, func(t *testing.T) {
+			m := NewStatusBarModel()
+			job := p.job()
+			m.SetJobs([]*database.Job{job})
+
+			before := m.tallyJobs()
+			p.mutate(job)
+			after := m.tallyJobs()
+			if moved := after != before; moved != p.moves {
+				t.Errorf("mutating the field %s carries moved the tally = %v, want %v (before %+v, after %+v)",
+					p.column, moved, p.moves, before, after)
+			}
+
+			_, inSet := tallyColumns[p.column]
+			if inSet != p.moves {
+				t.Errorf("tallyColumns[%q] = %v but the derivation says the tally does%s follow it — "+
+					"the gate and tallyJobs/parkedCookieJobs disagree",
+					p.column, inSet, map[bool]string{true: "", false: " not"}[p.moves])
+			}
+		})
+	}
+
+	if len(tallyColumns) != inputs {
+		t.Errorf("tallyColumns has %d entries but only %d probed columns move the tally — a column was "+
+			"added to the set with no probe beside it, so nothing checks that it is really an input",
+			len(tallyColumns), inputs)
+	}
+}
+
+// TestHasTallyChange is the gate's own table, the twin of TestHasDisplayChange,
+// and the reason handleJobUpdate can read a named set instead of spelling two
+// keys out at the call site.
+//
+// Mutant this kills: hasTallyChange returning true on the first key it sees
+// rather than on a key in the set — "title only" and "unknown column" fire.
+func TestHasTallyChange(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changes []string
+		want    bool
+	}{
+		{"nil", nil, false},
+		{"empty slice", []string{}, false},
+		{"progress tick", []string{"progress", "percent", "speed", "eta"}, false},
+		{"title only", []string{"title"}, false},
+		{"status transition", []string{"status"}, true},
+		{"platform", []string{"platform"}, true},
+		{"mixed: progress + status", []string{"progress", "status", "eta"}, true},
+		{"mixed: title + platform", []string{"title", "platform"}, true},
+		{"unknown column", []string{"some_unknown_column"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasTallyChange(tc.changes); got != tc.want {
+				t.Errorf("hasTallyChange(%v) = %v, want %v", tc.changes, got, tc.want)
+			}
+		})
+	}
+}

@@ -24,19 +24,43 @@ import (
 // FIRST recorded part's base name — see the pinning comment there.
 var partBaseRe = regexp.MustCompile(`^(.+) - part\d+\.mp4$`)
 
-// writeDescriptionAtomic writes the description via tmp+rename so a crash
-// mid-write can't leave a partially-written .description file that the DB
-// row still points at. The tmp file is cleaned up on rename failure.
+// writeDescriptionAtomic writes the description through utils.WriteFileAtomic:
+// a uniquely named temp file in the same directory, fsync, chmod 0644 and
+// utils.ReplaceFile.
+//
+// It used to do this by hand — os.WriteFile to a FIXED finalPath + ".tmp",
+// then a bare os.Rename — and the old comment's promise, that "a crash
+// mid-write can't leave a partially-written .description file that the DB row
+// still points at", was only half kept. Three gaps, all closed by the shared
+// writer:
+//
+//   - No fsync at all. os.WriteFile does not sync, so a crash could journal
+//     the rename while the data pages never reached disk, leaving exactly the
+//     torn file the comment said was impossible.
+//   - A fixed temp name. Two jobs whose resolved filename base collides in one
+//     output directory shared that single temp; os.CreateTemp gives each
+//     writer its own.
+//   - A bare os.Rename. Every other output write in this package goes through
+//     utils.ReplaceFile, which retries the Windows AV/indexer sharing window
+//     instead of reporting it as a hard failure. This one did not.
+//
+// Plus one deferred temp cleanup in place of the hand-written one. Those
+// properties are pinned by writefile_test.go's
+// TestWriteFileAtomicSyncsBeforeReplacingTarget,
+// TestWriteFileAtomicSyncFailureLeavesNoTempAndTargetUntouched,
+// TestWriteFileAtomicRenameFailureLeavesNoTempAndTargetIntact and
+// TestWriteFileAtomicUsesAUniqueTempName — cited here rather than re-tested
+// from this side.
+//
+// The bytes on disk are unchanged: the body is written verbatim, there is no
+// encoder, and TestWriteDescriptionAtomicWritesTheBodyVerbatim pins it. The
+// one deliberate difference is the POSIX mode — exactly 0644 now
+// (WriteFileAtomic chmods) rather than 0644 masked by the process umask. A
+// no-op on Windows and on a default-umask Linux host; on a umask 077 host the
+// .description widens from 0600 to 0644, matching every other file the shared
+// writer produces.
 func writeDescriptionAtomic(finalPath, body string) error {
-	tmpPath := finalPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(body), 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return utils.WriteFileAtomic(finalPath, []byte(body), 0o644)
 }
 
 // resolveFreshFilename resolves the filename template against fresh job
