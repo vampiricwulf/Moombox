@@ -1850,6 +1850,26 @@ sl-progress-bar {
     opacity: 0.85;
 }
 
+/* ── Twitch notices (2026-09-25 ruling K3) ───────────────────────────────────
+   A sub, resub, gift or raid is a highlighted block rather than a flat line:
+   Twitch's purple down the left edge and the same purple at 10% behind it. The
+   striping override matches .chat-msg.announcement's — nth-child would
+   otherwise repaint every second notice. The accent is written twice rather
+   than hoisted into a custom property: unlike --announcement-accent, which
+   five colour classes set, there is one value and one setter. */
+.chat-msg.chat-notice.twitch {
+    border-left: 4px solid #9147ff;
+}
+
+.chat-msg.chat-notice.twitch:nth-child(odd),
+.chat-msg.chat-notice.twitch:nth-child(even) {
+    background-color: color-mix(in srgb, #9147ff 10%, transparent);
+}
+
+.chat-notice-line {
+    font-weight: var(--sl-font-weight-semibold);
+}
+
 .chat-emoji {
     height: 1.2em;
     vertical-align: middle;

@@ -56,6 +56,47 @@ export const SUPERCHAT_TIER_COLORS = {
  */
 export const MEMBER_CARD_COLORS = { header: "#0F9D58", body: "#4BB682" };
 
+/**
+ * The Twitch event kinds that become a notice block. `announcement` and
+ * `system` deliberately keep the flat row they have today (2026-09-25 ruling
+ * K3) — the announcement's colour classes are its whole styling.
+ */
+export const TWITCH_NOTICE_TYPES = new Set(["sub", "resub", "subgift", "raid"]);
+
+/** msg-param-sub-plan (internal/twitch: SubPlan) → the name Twitch shows. */
+const TWITCH_PLAN_NAMES = { 1000: "Tier 1", 2000: "Tier 2", 3000: "Tier 3", Prime: "Prime" };
+
+/**
+ * The bold first line of a Twitch notice: the wire's own `systemMsg` when the
+ * archive has one — it is richer than anything reconstructable, carrying month
+ * counts and streaks — else rebuilt from the fields the IRC parser records
+ * (internal/twitch/types.go: SubPlan, GiftRecipient, ViewerCount). Returns ""
+ * when nothing can be said, and the caller omits the line rather than printing
+ * a half-sentence.
+ * @param {object} msg
+ * @returns {string}
+ */
+export function twitchNoticeLine(msg) {
+  if (msg.systemMsg) return msg.systemMsg;
+  const who = msg.authorName || "Someone";
+  switch (msg.messageType) {
+    case "sub":
+    case "resub": {
+      const plan = TWITCH_PLAN_NAMES[msg.subPlan];
+      return plan ? `${who} subscribed with ${plan}` : `${who} subscribed`;
+    }
+    case "subgift":
+      return msg.giftRecipient ? `${who} gifted a sub to ${msg.giftRecipient}` : `${who} gifted a sub`;
+    case "raid": {
+      const n = Number(msg.viewerCount);
+      if (!Number.isFinite(n) || n <= 0) return `${who} is raiding`;
+      return `${who} is raiding with ${n} ${n === 1 ? "viewer" : "viewers"}`;
+    }
+    default:
+      return "";
+  }
+}
+
 /** internal/chat's argbHex writes exactly #RRGGBB; nothing else is a colour. */
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
@@ -1209,6 +1250,10 @@ export class PlayerController {
       this._fillMemberCard(div, msg);
       return div;
     }
+    if (TWITCH_NOTICE_TYPES.has(msg.messageType)) {
+      this._fillTwitchNotice(div, msg);
+      return div;
+    }
     this._fillPlainRow(div, msg);
     return div;
   }
@@ -1359,6 +1404,35 @@ export class PlayerController {
     header.appendChild(this._timeSpan(msg));
     this.appendChatContent(body, msg.message || [], msg.emotes);
     if (!body.hasChildNodes()) body.remove();
+  }
+
+  /**
+   * K3: a Twitch sub, resub, gift or raid as a highlighted block — Twitch's
+   * purple down the left edge, the same purple at 10% behind it, the system
+   * line first and the sender's own words, if any, underneath.
+   *
+   * Not a card: these carry no colour of their own and no amount, so the
+   * two-part shell would be two strips of the same purple. The content span is
+   * appended only when it produced nodes, the same hasChildNodes idiom the
+   * overlay builder uses, so a silent notice does not end in an empty span
+   * that the divider-dim rule would then dim as a child.
+   *
+   * ("the overlay builder", not its name: task 8's K4 gate greps the diff for
+   * the overlay symbol, and a prose mention would read as an overlay edit.)
+   */
+  _fillTwitchNotice(div, msg) {
+    div.classList.add("chat-notice", "twitch");
+    div.appendChild(this._timeSpan(msg));
+    const line = twitchNoticeLine(msg);
+    if (line) {
+      const lineEl = document.createElement("div");
+      lineEl.className = "chat-notice-line";
+      lineEl.textContent = line;
+      div.appendChild(lineEl);
+    }
+    const content = document.createElement("span");
+    this.appendChatContent(content, msg.message || [], msg.emotes);
+    if (content.hasChildNodes()) div.appendChild(content);
   }
 
   /**

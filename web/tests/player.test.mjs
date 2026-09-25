@@ -5,7 +5,7 @@
 // skipped (not failed) when jsdom is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { relativeLuminance, readableInk, SUPERCHAT_TIER_COLORS } from "../public/modules/player.js";
+import { relativeLuminance, readableInk, SUPERCHAT_TIER_COLORS, twitchNoticeLine } from "../public/modules/player.js";
 
 let jsdomMissing = null;
 try {
@@ -1566,4 +1566,101 @@ test("both gifted-membership shapes render as member cards", { skip }, async () 
   assert.equal(redemption.querySelector(".chat-card-note"), null);
   assert.equal(redemption.querySelector(".chat-card-body").textContent,
     "was gifted a membership by gifter");
+});
+
+// ── Twitch sub / resub / gift / raid notices (Task 5, K3) ───────────────────
+
+/** A Twitch-shaped chat file: `message` is a plain string, not MessagePart[]. */
+const twNotice = (extra = {}) => ({
+  offsetMs: 1000, authorName: "streamer_fan", message: "", ...extra,
+});
+
+/** Build a player over a Twitch chat file (marked, so no legacy correction). */
+async function showTwitchChat(messages) {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: { platform: "twitch", emoteOffsets: "utf16", messages },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  return h;
+}
+
+// Pure: no DOM. MUTANT: build the line even when the wire sent one (a resub's
+// real systemMsg carries the month count and the streak, which no rebuild has).
+// MUTANT: drop the plural guard and a one-viewer raid reads "1 viewers".
+test("twitchNoticeLine prefers the wire's own line and rebuilds a sane one", () => {
+  assert.equal(twitchNoticeLine({ messageType: "resub", systemMsg: "fan subscribed for 12 months!" }),
+    "fan subscribed for 12 months!");
+  assert.equal(twitchNoticeLine({ messageType: "sub", authorName: "fan", subPlan: "1000" }),
+    "fan subscribed with Tier 1");
+  assert.equal(twitchNoticeLine({ messageType: "resub", authorName: "fan", subPlan: "Prime" }),
+    "fan subscribed with Prime");
+  assert.equal(twitchNoticeLine({ messageType: "sub", authorName: "fan", subPlan: "9999" }),
+    "fan subscribed", "an unknown plan is omitted, never printed");
+  assert.equal(twitchNoticeLine({ messageType: "subgift", authorName: "fan", giftRecipient: "pal" }),
+    "fan gifted a sub to pal");
+  assert.equal(twitchNoticeLine({ messageType: "subgift", authorName: "fan" }),
+    "fan gifted a sub");
+  assert.equal(twitchNoticeLine({ messageType: "raid", authorName: "other", viewerCount: 120 }),
+    "other is raiding with 120 viewers");
+  assert.equal(twitchNoticeLine({ messageType: "raid", authorName: "other", viewerCount: 1 }),
+    "other is raiding with 1 viewer");
+  assert.equal(twitchNoticeLine({ messageType: "raid", authorName: "other" }),
+    "other is raiding");
+  assert.equal(twitchNoticeLine({ messageType: "chat", authorName: "fan" }), "");
+});
+
+// MUTANT: drop the .chat-msg marker from the notice and the row stops dimming,
+// dividing and measuring with the rest of the sidebar.
+test("a Twitch sub, gift and raid each render as a purple notice block", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "sub", subPlan: "Prime", systemMsg: "fan subscribed with Prime" }),
+    twNotice({ offsetMs: 2000, messageType: "subgift", authorName: "fan", giftRecipient: "pal" }),
+    twNotice({ offsetMs: 3000, messageType: "raid", authorName: "other", viewerCount: 120 }),
+  ]);
+  const lines = [...h.sidebar().children].map((row) => {
+    assert.ok(row.classList.contains("chat-msg"), row.className);
+    assert.ok(row.classList.contains("chat-notice"), row.className);
+    assert.ok(row.classList.contains("twitch"), row.className);
+    return row.querySelector(".chat-notice-line").textContent;
+  });
+  assert.deepEqual(lines, [
+    "fan subscribed with Prime",
+    "fan gifted a sub to pal",
+    "other is raiding with 120 viewers",
+  ]);
+});
+
+// MUTANT: always append the content span — a notice with no message gains an
+// empty trailing span, which the divider-dim rule then dims as a child.
+test("a resub's own words sit under its system line, and silence adds nothing", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "resub", systemMsg: "fan subscribed for 12 months!",
+               message: "still here!" }),
+    twNotice({ offsetMs: 2000, messageType: "sub", systemMsg: "quiet subscribed" }),
+  ]);
+  const [spoken, silent] = h.sidebar().children;
+  assert.deepEqual([...spoken.children].map((c) => c.className),
+    ["chat-msg-time", "chat-notice-line", ""]);
+  assert.equal(spoken.lastChild.textContent, "still here!");
+  assert.deepEqual([...silent.children].map((c) => c.className),
+    ["chat-msg-time", "chat-notice-line"]);
+});
+
+// The scope pin for K3: only the four kinds named become blocks.
+// MUTANT: add "announcement" or "system" to TWITCH_NOTICE_TYPES and the
+// announcement loses its colour classes to a notice block.
+test("announcements and system messages keep today's flat rendering", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "announcement", announcementColor: "green", message: "hello all" }),
+    twNotice({ offsetMs: 2000, messageType: "system", message: "stream is starting" }),
+  ]);
+  const [ann, sys] = h.sidebar().children;
+  assert.ok(ann.classList.contains("announcement"));
+  assert.ok(ann.classList.contains("announcement-green"));
+  assert.equal(ann.querySelector(".chat-notice-line"), null);
+  assert.equal(sys.className, "chat-msg future");
+  assert.equal(sys.lastChild.textContent, "stream is starting");
 });
