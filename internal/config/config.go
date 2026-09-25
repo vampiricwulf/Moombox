@@ -153,6 +153,7 @@ func Defaults() *MoomboxConfig {
 			SegmentWorkers:              12,
 			ReorderBufferMB:             reorderPerJobMB,
 			ReorderBudgetMB:             reorderBudgetMB,
+			ProgressIntervalMS:          16, // ms; ~60 progress reports/second per job
 			DownloadChat:                true,
 			Prefer60fps:                 true,
 			MaximumTimeout:              600,
@@ -731,6 +732,20 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("downloader.reorder_budget_mb %d must be >= 0 MB (0 = unbounded)", d.ReorderBudgetMB)
 		if !reportOnly {
 			d.ReorderBudgetMB = defaults.Downloader.ReorderBudgetMB
+		}
+	}
+	// progress_interval_ms is the one downloader key where 0 is NOT a
+	// documented "disabled" value. An ungated ProgressTracker would write
+	// the database once per arriving segment callback on every download at
+	// once, so anything below 1 ms resets to the default rather than being
+	// honoured. No maximum: 1000 is a once-a-second progress line, which is
+	// slow but legal, and the rule this project keeps is that updates get
+	// cheaper or more frequent, never rarer — a coarse value an operator
+	// asked for in writing is not the same thing.
+	if d.ProgressIntervalMS < 1 {
+		fail("downloader.progress_interval_ms %d must be >= 1 ms", d.ProgressIntervalMS)
+		if !reportOnly {
+			d.ProgressIntervalMS = defaults.Downloader.ProgressIntervalMS
 		}
 	}
 	// 0 is the UNBOUNDED mode (ruling R1): always take the largest rendition

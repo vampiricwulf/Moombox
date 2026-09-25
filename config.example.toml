@@ -155,6 +155,17 @@
 # time, which can risk negative consequences on your account.
 # maximum_timeout = 600
 
+# Advanced: minimum gap (milliseconds) between one job's progress reports.
+# This is what caps the per-job update rate everywhere downstream — the
+# progress bar, the WebSocket frames and the TUI's rows all move at most this
+# often. 16 ms is about 60 reports a second; 8 ms is about 120, matching the
+# TUI's 120 fps renderer; 100 ms is ten. Each report costs one database write
+# and one fan-out to every connected client, so lower values buy smoothness
+# with CPU and disk. Minimum 1; there is no maximum. Read when a job STARTS,
+# so a change applies to the next download rather than one already running.
+# Default: 16.
+# progress_interval_ms = 16
+
 # Advanced: manual PO token override (bypasses built-in BotGuard generation)
 # po_token = ""
 

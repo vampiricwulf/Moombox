@@ -60,7 +60,7 @@ What this means in practice:
 - **Goja VMs auto-evict when idle.** Cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. Cipher VMs use a 10-VM LRU cache, so at most ten player.js runtimes exist simultaneously. The fallback BotGuard goja-VM (when the sidecar is unavailable) evicts itself via `time.AfterFunc` when its TTL expires.
 - **BotGuard sidecar is one long-running subprocess, not per-request.** The Node + JSDOM sidecar starts once at Moombox launch and serves every PO-token request from the same V8 instance. Per-request subprocess spawning would cost 200-500ms cold-start per token; the long-running model amortises that to a one-time startup cost. The subprocess is pinned to a Windows Job Object so it dies with Moombox even on hard parent crashes.
 - **Database batch coalescing.** Updates within a 100ms window are flushed in a single transaction rather than individually. This reduces disk IO by orders of magnitude during active downloads (when many progress updates fire per second) while adding negligible latency.
-- **WebSocket broadcasts rely on upstream rate-limiting.** Job update broadcasts are not throttled in the hub — the only high-frequency caller (`OnJobChange` via `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by a 16 ms gate in `internal/worker/progress.go`, and the other callers are event-driven. An earlier per-job throttle in the hub raced against `BroadcastJobDeleted` (which is not throttled) and could resurrect deleted rows.
+- **WebSocket broadcasts rely on upstream rate-limiting.** Job update broadcasts are not throttled in the hub — the only high-frequency caller (`OnJobChange` via `ProgressTracker.maybeUpdate`) is already capped to one report per job per configured progress interval — 16 ms by default, so ~60 Hz — by the gate in `internal/worker/progress.go`, and the other callers are event-driven. An earlier per-job throttle in the hub raced against `BroadcastJobDeleted` (which is not throttled) and could resurrect deleted rows.
 - **TUI non-blocking sends.** Channel sends to the TUI use non-blocking operations with drop counters. If the TUI's event loop is busy, updates are dropped rather than blocking the sender. The drop counter tracks how many were missed so the next successful send can trigger a full refresh.
 - **Log ring buffer.** The in-memory log buffer is bounded at 200 lines. Old entries are evicted as new ones arrive. This prevents unbounded memory growth in long-running sessions.
 - **WAL mode SQLite.** Write-ahead logging allows concurrent reads during writes without blocking, and the single-connection configuration eliminates lock contention entirely.
@@ -120,7 +120,7 @@ What this means in practice:
 - Catch-up downloading uses a configurable pool of parallel segment fetches (`segment_workers`, 12 by default) when falling behind, but only when needed.
 - Cipher solving caches compiled VMs to avoid recompilation, but caps the cache at 3 entries to limit memory.
 - Database queries use prepared statements and indexes, but the single-connection model is retained for simplicity and correctness.
-- The TUI reduces its progress tick interval from 16ms (active) to 500ms (idle) to avoid unnecessary rendering work.
+- The TUI reduces its progress tick interval from 8ms (active — one tick per frame at its 120 fps renderer) to 500ms (idle) to avoid unnecessary rendering work.
 
 ---
 
@@ -221,7 +221,7 @@ Because Moombox runs continuously on the user's personal machine, resource effic
 Polling loops are a last resort. Where possible, subsystems sleep until explicitly signaled:
 
 - The **database batch update system** uses a signal channel. When an update is queued, a signal is sent. The flush goroutine wakes, waits 100ms for more updates to accumulate, then flushes everything in a single transaction. If no updates are queued, the goroutine sleeps indefinitely — zero CPU, zero IO.
-- The **WebSocket broadcast system** is also signal-driven: a broadcast only happens when `OnJobChange` fires. The hub does no throttling of its own — `ProgressTracker.maybeUpdate` already caps progress writes at ~60 Hz/job upstream, and every other UpdateJobFields caller is event-driven. During idle periods both layers do nothing.
+- The **WebSocket broadcast system** is also signal-driven: a broadcast only happens when `OnJobChange` fires. The hub does no throttling of its own — `ProgressTracker.maybeUpdate` already caps progress writes at one per configured progress interval per job upstream (~60 Hz at the 16 ms default), and every other UpdateJobFields caller is event-driven. During idle periods both layers do nothing.
 
 Some subsystems necessarily poll because the external API provides no push mechanism:
 - RSS feed monitors poll on a configurable interval (default varies by platform).

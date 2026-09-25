@@ -381,7 +381,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// that never reach Finalize (download error, ctx cancel) — without it a
 	// pending wait activity would keep the refresh loop rewriting the
 	// terminal job's progress line every second for the process lifetime.
-	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
+	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger, jobCtx.Config.ProgressInterval)
 	defer tracker.Close()
 
 	o.attachTrackerAndProgress(tracker, result)

@@ -82,7 +82,7 @@ type (
 	channelClosedMsg struct{ Name string }
 	tickMsg          struct{}
 	// progressTickMsg carries the generation of the schedule that produced
-	// it: a cadence upshift (500ms→16ms) supersedes the in-flight schedule
+	// it: a cadence upshift (500ms→8ms) supersedes the in-flight schedule
 	// with a fresh one, and the stale tick is dropped on arrival by its
 	// old generation instead of waiting out its interval.
 	progressTickMsg struct{ gen int }
@@ -485,7 +485,7 @@ type App struct {
 	progressTicking   bool
 	// progressGen invalidates a superseded progress schedule on cadence
 	// upshift; progressInterval records the class the running loop was last
-	// scheduled at (so the upshift can detect 500ms→16ms transitions).
+	// scheduled at (so the upshift can detect 500ms→8ms transitions).
 	progressGen      int
 	progressInterval time.Duration
 	// lastArchiveSweep throttles the 60s archive-boundary resweep run from
@@ -977,12 +977,31 @@ func (a *App) tick() tea.Cmd {
 }
 
 const (
-	progressFastInterval = 16 * time.Millisecond  // ~60fps during active downloads
+	// tuiTargetFPS is the renderer's frame-rate ceiling, handed to
+	// tea.WithFPS at the package's one tea.NewProgram site (Run, in
+	// app_commands.go). Bubbletea defaults to 60 and caps at 120
+	// (defaultFPS / maxFPS, charm.land/bubbletea/v2), so 120 is the most
+	// there is to ask for; the owner asked for it (ruling F1, 2026-09-25).
+	// It costs nothing while nothing moves — a frame is drawn only when the
+	// view actually changed, which is what the FrameCost pins measure.
+	tuiTargetFPS = 120
+
+	// progressFastInterval is the progress-tick cadence while a download is
+	// delivering: one tick per frame at tuiTargetFPS (a frame is 8.33ms at
+	// 120 fps), so a progress change reaches the model before the next frame
+	// rather than sitting through one. A no-change tick costs no rebuild
+	// (JobDetailsModel.SetProgress skips an unchanged pointer inside one
+	// wall-clock second) and no repaint (the renderer's viewEquals) — only
+	// the memoised View() bubbletea calls after every message, the 30-alloc
+	// frame TestFrameCostAtLogCap pins (~0.25-0.6 ms at 20-1,000 jobs), so
+	// doubling the tick count doubles that and nothing else.
+	progressFastInterval = 8 * time.Millisecond   // ~120fps during active downloads
 	progressIdleInterval = 500 * time.Millisecond // Upcoming countdown / chat-count cadence
 )
 
-// wantsFastProgress reports whether the progress loop should run at the
-// 60fps class: an actively-delivering download, or a visible in-progress trim.
+// wantsFastProgress reports whether the progress loop should run at the fast
+// class — one tick per frame at tuiTargetFPS: an actively-delivering
+// download, or a visible in-progress trim.
 func (a *App) wantsFastProgress() bool {
 	return a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible())
 }
@@ -1198,9 +1217,9 @@ func (a *App) ensureProgressTicking() tea.Cmd {
 	if a.progressTicking {
 		// Cadence upshift without waiting out the pending tick: the loop is
 		// running at the idle 500ms class and a download/trim just went
-		// live. Supersede the in-flight schedule with a fresh 16ms one NOW —
+		// live. Supersede the in-flight schedule with a fresh 8ms one NOW —
 		// the old tick is dropped on arrival by its stale generation —
-		// instead of letting up to one 500ms beat delay 60fps progress
+		// instead of letting up to one 500ms beat delay fast-class progress
 		// (real-time principle; the lag predated the demand-driven loops).
 		if a.progressInterval != progressFastInterval && a.wantsFastProgress() {
 			a.progressGen++

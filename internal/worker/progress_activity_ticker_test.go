@@ -23,7 +23,7 @@ func newDBProgressTracker(t *testing.T) (*ProgressTracker, *database.Database) {
 	if _, err := db.AddJob(&database.Job{ID: "act-test", Status: database.StatusDownloading}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	return NewProgressTracker(db, "act-test", nopProgressLogger{}), db
+	return NewProgressTracker(db, "act-test", nopProgressLogger{}, 0), db
 }
 
 func jobProgress(t *testing.T, db *database.Database) (progress, speed, eta string) {
@@ -45,7 +45,7 @@ func TestSpeedUsesArrivalCounter(t *testing.T) {
 	defer pt.Close()
 
 	pt.mu.Lock()
-	pt.lastUpdate = time.Now().Add(-100 * time.Millisecond) // pass the 16ms throttle
+	pt.lastUpdate = time.Now().Add(-100 * time.Millisecond) // pass the report gate
 	pt.fetchedTotal = 10 << 20                              // ~10 MB arrived off the network
 	pt.bytesTotal = 0                                       // nothing flushed yet — the flush source read 0 B/s
 	// Seed the window with a fetched-source baseline ~2s back so this tick's
@@ -104,7 +104,7 @@ func TestChatTickKeepsActivityMessage(t *testing.T) {
 	defer pt.Close()
 
 	pt.SetWaitActivity(engine.ActivityVerifyingEnd)
-	time.Sleep(20 * time.Millisecond) // clear maybeUpdate's 16ms gate
+	time.Sleep(20 * time.Millisecond) // clear maybeUpdate's report gate
 	pt.SetChatCount(7)
 
 	progress, speed, _ := jobProgress(t, db)

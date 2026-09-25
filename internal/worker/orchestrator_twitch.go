@@ -311,7 +311,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	// Deferred Close mirrors ExecuteWithChat: any exit that skips the
 	// post-loop Finalize must still stop the activity refresh loop.
-	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
+	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger, jobCtx.Config.ProgressInterval)
 	defer tracker.Close()
 	tracker.AttachVideoDownloader(videoDl)
 
