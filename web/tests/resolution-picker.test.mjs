@@ -108,4 +108,21 @@ test("the setup wizard picker writes the same integer", { skip }, async () => {
   select.value = "custom";
   select.dispatchEvent(new h.window.CustomEvent("sl-change"));
   assert.notEqual(h.el("setup-max-resolution").style.display, "none");
+
+  // MUTANT: the wizard's apply() keeping `&& preset.value !== ""` (the shape the
+  // settings twin needs and this one must not have) — CLEARING the clearable
+  // select would leave the last pick in the hidden input, so the wizard would
+  // write a cap the operator retracted while showing "Default (2160)".
+  // Also kills: `custom.value = preset.value || "0"`, which turns "no choice"
+  // into Unbounded — the one thing the empty-vs-0 rule forbids.
+  select.value = "";
+  select.dispatchEvent(new h.window.CustomEvent("sl-change"));
+  assert.equal(h.el("setup-max-resolution").value, "", "clearing the select retracts the cap it had set");
+  assert.equal(h.app.getInputNumber("setup-max-resolution"), undefined, "a cleared select sends no key at all");
+  assert.equal(h.el("setup-max-resolution").style.display, "none", "and hides the custom box again");
+
+  // ...while an explicitly picked 0 is still the integer 0, not "no choice".
+  select.value = "0";
+  select.dispatchEvent(new h.window.CustomEvent("sl-change"));
+  assert.equal(h.app.getInputNumber("setup-max-resolution"), 0, "Unbounded is the integer 0, not a cleared field");
 });
