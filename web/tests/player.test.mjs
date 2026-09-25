@@ -5,7 +5,7 @@
 // skipped (not failed) when jsdom is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { relativeLuminance, readableInk, SUPERCHAT_TIER_COLORS, twitchNoticeLine } from "../public/modules/player.js";
+import { relativeLuminance, readableInk, SUPERCHAT_TIER_COLORS, twitchNoticeLine, cheerColor } from "../public/modules/player.js";
 
 let jsdomMissing = null;
 try {
@@ -1663,4 +1663,56 @@ test("announcements and system messages keep today's flat rendering", { skip }, 
   assert.equal(ann.querySelector(".chat-notice-line"), null);
   assert.equal(sys.className, "chat-msg future");
   assert.equal(sys.lastChild.textContent, "stream is starting");
+});
+
+// ── Twitch cheer chip (Task 6, K3 second half) ──────────────────────────────
+
+// Pure: no DOM. The eight boundaries the ruling names, each side of each step.
+// MUTANT: write `>` instead of `>=` anywhere in the ladder and 100, 1000, 5000
+// or 10000 drops a band. MUTANT: order the ladder ascending and every cheer
+// comes back gray.
+test("cheerColor follows Twitch's amount scale at every boundary", () => {
+  assert.deepEqual([0, 99, 100, 999, 1000, 4999, 5000, 9999, 10000, 250000].map(cheerColor), [
+    "#979797", "#979797", "#9c3ee8", "#9c3ee8", "#1db2a5",
+    "#1db2a5", "#0099fe", "#0099fe", "#f43021", "#f43021",
+  ]);
+  assert.equal(cheerColor("1500"), "#1db2a5", "the archive writes a number, but a string still lands");
+  assert.equal(cheerColor(undefined), "#979797");
+});
+
+// MUTANT: place the chip after the content and the cheer reads as a trailing
+// afterthought instead of a prefix. MUTANT: build it for every Twitch message
+// and every ordinary line grows a "0 bits" pill.
+test("a cheer gets a scaled chip before its content; a plain line does not", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "bits", bits: 5000, authorName: "cheerer", message: "take my bits" }),
+    twNotice({ offsetMs: 2000, messageType: "chat", message: "no bits here" }),
+    twNotice({ offsetMs: 3000, messageType: "bits", bits: 0, message: "nothing to show" }),
+  ]);
+  const [cheer, plain, empty] = h.sidebar().children;
+  assert.deepEqual([...cheer.children].map((c) => c.className),
+    ["chat-msg-time", "chat-msg-author", "cheer-chip chat-ink-light", ""]);
+  const chip = cheer.querySelector(".cheer-chip");
+  assert.equal(chip.textContent, "5000 bits");
+  assert.equal(chip.style.getPropertyValue("--cheer-bg"), "#0099fe");
+  assert.equal(cheer.lastChild.textContent, "take my bits");
+  assert.equal(plain.querySelector(".cheer-chip"), null);
+  assert.equal(empty.querySelector(".cheer-chip"), null,
+    "a bits message with no count has nothing to put in a chip");
+});
+
+// The chip lives on the FLAT row, so it must survive beside everything else
+// that row can carry. MUTANT: insert it before the time span, or build it in a
+// branch that an announcement takes first — a cheered announcement is a real
+// Twitch shape and would lose either its colour or its amount.
+test("a cheer chip coexists with a badge and an announcement", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "announcement", announcementColor: "blue", bits: 100,
+               authorBadges: ["subscriber/12"], message: "cheers" }),
+  ]);
+  const row = h.sidebar().children[0];
+  assert.ok(row.classList.contains("announcement-blue"), row.className);
+  assert.deepEqual([...row.children].map((c) => c.className),
+    ["chat-msg-time", "chat-msg-author member", "cheer-chip chat-ink-light", ""]);
+  assert.equal(row.querySelector(".cheer-chip").style.getPropertyValue("--cheer-bg"), "#9c3ee8");
 });

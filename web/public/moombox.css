@@ -1870,6 +1870,18 @@ sl-progress-bar {
     font-weight: var(--sl-font-weight-semibold);
 }
 
+/* The cheer chip: a pill of the amount's scale colour, inline before the
+   message it paid for. --cheer-bg is set from JS through the CSSOM. */
+.cheer-chip {
+    display: inline-block;
+    padding: 0 6px;
+    margin-right: var(--sl-spacing-2x-small);
+    border-radius: 999px;
+    background: var(--cheer-bg);
+    font-size: var(--sl-font-size-x-small);
+    font-weight: var(--sl-font-weight-bold);
+}
+
 .chat-emoji {
     height: 1.2em;
     vertical-align: middle;

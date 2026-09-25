@@ -97,6 +97,33 @@ export function twitchNoticeLine(msg) {
   }
 }
 
+/**
+ * Twitch's cheer colour scale, richest first so the first match wins:
+ * gray under 100 bits, purple from 100, green from 1,000, blue from 5,000 and
+ * red from 10,000.
+ */
+export const CHEER_SCALE = [
+  { min: 10000, color: "#f43021" },
+  { min: 5000, color: "#0099fe" },
+  { min: 1000, color: "#1db2a5" },
+  { min: 100, color: "#9c3ee8" },
+  { min: 0, color: "#979797" },
+];
+
+/**
+ * The colour for a cheer of `bits`. Anything unparseable reads as 0, i.e. the
+ * bottom band — never an exception inside a sidebar build chunk.
+ * @param {number|string} bits
+ * @returns {string}
+ */
+export function cheerColor(bits) {
+  const n = Number(bits) || 0;
+  for (const step of CHEER_SCALE) {
+    if (n >= step.min) return step.color;
+  }
+  return CHEER_SCALE[CHEER_SCALE.length - 1].color;
+}
+
 /** internal/chat's argbHex writes exactly #RRGGBB; nothing else is a colour. */
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
@@ -1271,6 +1298,12 @@ export class PlayerController {
     }
     div.appendChild(this._timeSpan(msg));
     div.appendChild(this._authorSpan(msg, true));
+    // K3: a cheer's amount, coloured by Twitch's scale. Gated on the count
+    // rather than on messageType === "bits": a bits message with no count has
+    // nothing to put in a chip, and a cheer that arrived typed as ordinary
+    // chat still has its amount.
+    const bits = Number(msg.bits) || 0;
+    if (bits > 0) div.appendChild(this._cheerChip(bits));
     const contentSpan = document.createElement("span");
     this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
     div.appendChild(contentSpan);
@@ -1433,6 +1466,21 @@ export class PlayerController {
     const content = document.createElement("span");
     this.appendChatContent(content, msg.message || [], msg.emotes);
     if (content.hasChildNodes()) div.appendChild(content);
+  }
+
+  /**
+   * The cheer chip: "<n> bits" in a pill of the scale's colour, with the ink
+   * the shared luminance rule asks for. Every colour on today's scale happens
+   * to be dark enough for white ink, so the rule is invisible here — it is
+   * used anyway so a future pale band reads without a second thought.
+   */
+  _cheerChip(bits) {
+    const chip = document.createElement("span");
+    const color = cheerColor(bits);
+    chip.className = `cheer-chip chat-ink-${readableInk(color)}`;
+    chip.style.setProperty("--cheer-bg", color);
+    chip.textContent = `${bits} bits`;
+    return chip;
   }
 
   /**
