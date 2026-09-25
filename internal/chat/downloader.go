@@ -1485,10 +1485,13 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 }
 
 // readExistingChatData attempts to read the previously-flushed chat file on
-// disk in full (header included) — adoptExistingChatFile needs the header's
-// streamStartTime as well as the messages. The error is returned (rather
-// than folded into a nil result) so callers can tell "no file" from "a file
-// that does not parse" — those two need opposite handling.
+// disk in full (header included). The only caller left is
+// prependExistingMessages, writeChatFile's append-failure fallback; adoption
+// reads the header through readChatFileAdoptionSummary (a stream, not a whole
+// slurp) since T4-35, so this full read never runs on the adoption path. The
+// error is returned (rather than folded into a nil result) so callers can tell
+// "no file" from "a file that does not parse" — those two need opposite
+// handling.
 func (cd *ChatDownloader) readExistingChatData(path string) (*ChatData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

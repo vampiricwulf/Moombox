@@ -358,11 +358,11 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `network_access` | `"localhost"` | `"localhost"`, `"lan"`, `"external"`, or `"public"` — `"public"` behaves like `"external"` and is only settable in `config.toml` ([Remote Access](#remote-access)) |
 | `trusted_proxies` | `[]` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
 | `log_level` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
-| `downloader.max_video_resolution` | `1080` | Max resolution (based on max of width/height, handles portrait) |
-| `downloader.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
+| `downloader.max_video_resolution` | `2160` | Cap on the SHORTER frame edge (so `2160` is 4K in either orientation); picks the largest rendition at or below it, else the closest above; `0` = unbounded |
+| `cookies.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
 | `downloader.download_chat` | `true` | Download live chat alongside streams |
 | `downloader.prefer_60fps` | `true` | Prefer 60fps when same resolution available |
-| `downloader.num_parallel_downloads` | `2` | Simultaneous download jobs |
+| `downloader.num_parallel_downloads` | `10` | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
 | `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
 | `twitch_check_interval` | `15` | Seconds between Twitch GQL live-status checks (with jitter) |
@@ -413,6 +413,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | A R | Resume job |
 | A I | Reinitialize job |
 | A M M | Mux job from existing segments (confirm) |
+| A S S | Recover set-aside recordings into their own files beside the archive (confirm) |
 | A C C | Cancel active job (confirm) |
 | A D D | Delete job (confirm) |
 | A W | Toggle watched (Finished jobs) |
@@ -463,7 +464,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | ? | Toggle help overlay |
 | c | Clear log view (log panel focused) |
 
-**Navigation**: Up/Down to select/scroll, PgUp/PgDn for log pages, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
+**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs), Ctrl+U/Ctrl+D for a half page (Details, Logs), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
 
 ### Add Video Dialog
 

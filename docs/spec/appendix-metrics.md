@@ -1,6 +1,8 @@
 # Appendix: Project Metrics
 
-> **Last verified:** 2026-09-19
+> **Last verified:** 2026-09-25
+>
+> No package was added or removed since the 2026-09-19 pass — the counts moved inside packages that already existed. The four new production files are `internal/engine/reorder_budget.go` (the process-wide reorder budget), `internal/utils/resolution.go` (`CapDimension`/`SelectByCap`, ruling R1), and the `internal/web/openpath_{windows,other}.go` pair (the shared folder-open composer both UIs call).
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -49,20 +51,20 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 | Package | Source Lines | Src Files | Test Files | Description |
 |---------|-------------|-----------|------------|-------------|
-| tui/ | ~21,760 | 43 | 58 | Largest — 2-over-1 panel layout, overlays, chord system |
-| worker/ | ~16,600 | 38 | 49 | Download orchestration, strategies, queue, quality monitor |
+| tui/ | ~22,290 | 43 | 63 | Largest — 2-over-1 panel layout, overlays, chord system |
+| worker/ | ~17,290 | 38 | 53 | Download orchestration, strategies, queue, quality monitor |
 | cookies/ | ~15,870 | 35 | 80 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
-| engine/ | ~7,690 | 19 | 41 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe |
-| web/routes/ | ~7,470 | 25 | 48 | REST handlers (jobs, config, stats, output, staging, cookies) |
-| youtube/ | ~6,430 | 13 | 17 | YouTube service, player API, format selector, membership tab |
-| twitch/ | ~6,400 | 14 | 34 | Twitch GQL API, auth, HLS, IRC chat, VOD chat, emotes |
+| engine/ | ~8,040 | 20 | 42 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |
+| web/routes/ | ~7,570 | 25 | 51 | REST handlers (jobs, config, stats, output, staging, cookies) |
+| youtube/ | ~6,470 | 13 | 17 | YouTube service, player API, format selector, membership tab |
+| twitch/ | ~6,410 | 14 | 34 | Twitch GQL API, auth, HLS, IRC chat, VOD chat, emotes |
 | monitor/ | ~5,030 | 9 | 11 | Feed (RSS), DECAPI, Twitch monitors, archive scheduling |
-| database/ | ~3,920 | 8 | 11 | SQLite/WAL, migrations, batch updates, pub/sub |
-| web/ | ~3,870 | 7 | 14 | chi router, WebSocket, auth, middleware, embed |
+| database/ | ~3,970 | 8 | 11 | SQLite/WAL, migrations, batch updates, pub/sub |
+| web/ | ~3,950 | 9 | 16 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
 | cipher/ | ~3,110 | 13 | 11 | YouTube signature cipher: sidecar-routed + goja fallback |
-| chat/ | ~2,910 | 3 | 15 | YouTube live chat downloader (polling + batching) |
-| utils/ | ~2,510 | 25 | 23 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL |
-| config/ | ~2,110 | 6 | 4 | TOML config, FlexDuration, channel terms, migrations |
+| chat/ | ~3,020 | 3 | 16 | YouTube live chat downloader (polling + batching) |
+| utils/ | ~2,580 | 26 | 24 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap |
+| config/ | ~2,250 | 6 | 6 | TOML config, FlexDuration, channel terms, migrations |
 | bgutils/ | ~2,050 | 6 | 5 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja fallback) |
 | bgutils/sidecar/ | ~1,840 | 7 | 5 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
 | goja/ | ~1,470 | 5 | 11 | JS runtime shims (minimal DOM, timers, encoding) |
@@ -82,10 +84,10 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 ### Totals
 
-- **cmd/:** ~8,130 lines across 22 source files (moombox entry/launcher/adapters + sign tool), plus 42 test files
-- **internal/ packages:** ~116,660 lines across 306 source files in 30 packages
-- **Test code:** ~140,210 lines across 466 test files under `internal/`
-- **Frontend:** ~20,650 lines across 27 files (~904 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
+- **cmd/:** ~8,200 lines across 22 source files (moombox entry/launcher/adapters + sign tool), plus 46 test files (~7,670 lines)
+- **internal/ packages:** ~118,840 lines across 310 source files in 30 packages
+- **Test code:** ~145,980 lines across 485 test files under `internal/`
+- **Frontend:** ~21,340 lines across 27 files (~936 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
 
