@@ -139,6 +139,8 @@ var sections = []settingsSection{
 			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels (e.g. 1080, 2160)", nil},
 			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "2-4 recommended, higher uses more CPU/network", nil},
 			{"segment_workers", "Segment workers", fieldNumber, nil, "segments fetched at once within one download, not the number of concurrent downloads (default: 12, min 1, no max; above 16 raises bot-detection risk)", nil},
+			{"reorder_buffer_mb", "Reorder buffer per job", fieldNumber, nil, "MB of out-of-order segments one download may hold in RAM; 0 = unbounded (default: 1024; 256 on arm64)", nil},
+			{"reorder_budget_mb", "Reorder budget total", fieldNumber, nil, "MB every download's reorder buffer may hold between them; 0 = unbounded (default: 4096; 1024 on arm64)", nil},
 			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video", nil},
 			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available", nil},
 			{"maximum_timeout", "YouTube max timeout", fieldNumber, nil, "seconds to keep retrying a stalled YouTube livestream (30s live-checks) before finalizing even if YouTube still reports it live (default: 600, min 30, no max; very large values risk account consequences)", nil},
@@ -515,6 +517,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["max_video_resolution"] = strconv.Itoa(cfg.Downloader.MaxVideoResolution)
 	m.values["num_parallel_downloads"] = strconv.Itoa(cfg.Downloader.NumParallelDownloads)
 	m.values["segment_workers"] = strconv.Itoa(cfg.Downloader.SegmentWorkers)
+	m.values["reorder_buffer_mb"] = strconv.Itoa(cfg.Downloader.ReorderBufferMB)
+	m.values["reorder_budget_mb"] = strconv.Itoa(cfg.Downloader.ReorderBudgetMB)
 	m.values["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	m.values["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
 	m.values["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
@@ -648,6 +652,8 @@ func (m *SettingsModel) applyValues() {
 		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
 		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
 		{"segment_workers", "Segment workers must be at least 1", 1, math.MaxInt},
+		{"reorder_buffer_mb", "Reorder buffer must be >= 0 MB (0 = unbounded)", 0, math.MaxInt},
+		{"reorder_budget_mb", "Reorder budget must be >= 0 MB (0 = unbounded)", 0, math.MaxInt},
 		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
 		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
 		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
@@ -821,6 +827,8 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Downloader.MaxVideoResolution, _ = strconv.Atoi(m.values["max_video_resolution"])
 	m.cfg.Downloader.NumParallelDownloads, _ = strconv.Atoi(m.values["num_parallel_downloads"])
 	m.cfg.Downloader.SegmentWorkers, _ = strconv.Atoi(m.values["segment_workers"])
+	m.cfg.Downloader.ReorderBufferMB, _ = strconv.Atoi(m.values["reorder_buffer_mb"])
+	m.cfg.Downloader.ReorderBudgetMB, _ = strconv.Atoi(m.values["reorder_budget_mb"])
 	m.cfg.Downloader.DownloadChat = m.values["download_chat"] == "Yes"
 	m.cfg.Downloader.Prefer60fps = m.values["prefer_60fps"] == "Yes"
 	m.cfg.Downloader.MaximumTimeout, _ = strconv.Atoi(m.values["maximum_timeout"])
