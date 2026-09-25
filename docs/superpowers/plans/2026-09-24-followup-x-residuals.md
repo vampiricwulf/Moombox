@@ -39,7 +39,7 @@ Added for this arc:
 
 ## Branch and worktree
 
-Already created and prepared (verified 2026-09-24): `D:/Git/Moombox/.worktrees/followup-x-residuals` on branch `followup-x-residuals` at `ad1a8bdf`, with the four embed blobs, `internal/cipher/testdata/*.js` and `web/tests/node_modules` all present, and a clean `git status`. The recipe is recorded here only so it can be rebuilt if the worktree is lost:
+Already created and prepared (verified 2026-09-24): `D:/Git/Moombox/.worktrees/followup-x-residuals` on branch `followup-x-residuals` at `392e5667` (the plan commit; `ad1a8bdf` + this plan, so every code line number below still resolves), with the four embed blobs, `internal/cipher/testdata/*.js` and `web/tests/node_modules` all present, and a clean `git status`. The recipe is recorded here only so it can be rebuilt if the worktree is lost:
 
 ```bash
 cd /d/Git/Moombox
@@ -111,7 +111,7 @@ Its doc comment promises that "a crash mid-write can't leave a partially-written
 
 **Ruling — the glob helper is a worker-side twin, not a new `utils` export.** `internal/utils/chatfile_test.go:442` already defines `assertNoTempSurvives`, but a `_test.go` symbol is invisible outside its package. The alternatives are (i) exporting a `testing`-dependent helper from `internal/utils`, which drags `testing` into a production package that ships in the binary, or (ii) standing up an `internal/utils/utilstest` package for nine lines of `filepath.Glob`. Both cost more than the duplication they remove, and spec §0 item 1 explicitly allows "`assertNoTempSurvives` **or its twin in the owning package**". So: a nine-line unexported twin, carrying the **same name** on both sides so they read as one idea, with a comment citing the original.
 
-**Ruling — the tests live in a new `internal/worker/orchestrator_mux_test.go`.** The package's convention is one `_test.go` per declaring file (`orchestrator_utils_test.go`, `orchestrator_eviction_test.go`, `orchestrator_strategy_test.go`, `orchestrator_vod_refresh_test.go`), and `orchestrator_mux.go` is the one orchestrator file with no twin. The two existing files that could absorb these tests are `mux_finalize_test.go` (18 lines, about `httpError`) and `chat_status_outcome_test.go` (chat verdicts, which happens to drive `copyAssets`); burying a writer's tests in either would make them unfindable from the declaring file.
+**Ruling — the tests live in a new `internal/worker/orchestrator_mux_test.go`.** The package leans toward one `_test.go` per declaring file (`orchestrator_utils_test.go`, `orchestrator_eviction_test.go`), and `orchestrator_mux.go` — the largest orchestrator file and the one this arc touches — has no twin. The two existing files that could absorb these tests are `mux_finalize_test.go` (18 lines, about `httpError`) and `chat_status_outcome_test.go` (chat verdicts, which happens to drive `copyAssets`); burying a writer's tests in either would make them unfindable from the declaring file.
 
 **Behaviour delta to record (the only one):** the written file's POSIX mode becomes exactly `0644` (`WriteFileAtomic` chmods after an `os.CreateTemp` that creates at `0600`) instead of `0644 &^ umask` (what `os.WriteFile`'s create mode gave). A no-op on Windows and on a default-umask Linux host; on a `umask 077` host the `.description` widens from `0600` to `0644`. Intended — it matches every other file `WriteFileAtomic` writes, and the mode is already pinned by `internal/utils/writefile_test.go`'s `TestWriteFileAtomicWritesContentAndPerm`. State it in the doc comment; do not add a duplicate perm test.
 
@@ -582,11 +582,11 @@ go test -count=1 -timeout 300s -run 'TestTallyColumnsMatchWhatTheTallyReads|Test
 Expected: **FAIL to build** —
 
 ```
-internal/tui/frame_counts_test.go:NNN:11: undefined: tallyColumns
-internal/tui/frame_counts_test.go:NNN:15: undefined: hasTallyChange
+internal/tui/frame_counts_test.go: undefined: tallyColumns    (×3)
+internal/tui/frame_counts_test.go: undefined: hasTallyChange  (×1)
 ```
 
-That build failure is this task's red: both symbols are introduced by Step 3. The *behavioural* red — that the gate really reads the set — is carried by the mutants in Step 5, two of which are verified by execution. If anything OTHER than those two `undefined:` lines appears (a field name that does not exist on `database.Job`, say), fix the test before going on; the struct is `internal/database/types.go:58` and the spelling is `IsVod`, not `IsVOD`.
+That build failure is this task's red: both symbols are introduced by Step 3. The *behavioural* red — that the gate really reads the set — is carried by the mutants in Step 5, two of which are verified by execution. If a name OTHER than `tallyColumns` or `hasTallyChange` is reported undefined (a field that does not exist on `database.Job`, say), fix the test before going on; the struct is `internal/database/types.go:58` and the spelling is `IsVod`, not `IsVOD`.
 
 - [ ] **Step 3: Name the set, point the gate at it**
 
@@ -860,7 +860,7 @@ go test -count=1 -timeout 300s -run 'TestTakeAndRelease|TestAnUnbounded|resident
 go test -count=1 -timeout 600s ./internal/engine/
 ```
 
-Expected: `ok github.com/vampiricwulf/Moombox/internal/engine` for both. `TestAnUnboundedPerJobCeilingAdmitsEveryNonHead` and `TestAnUnboundedBudgetAdmitsEveryNonHead` are included in the first run because they are the other `residentBytes()` readers and neither calls `release()` before asserting — they must be unaffected. The whole-package run (~25 s) is the one that catches the `downloader_parallel_test.go` readers at lines 83, 124, 165 and 445.
+Expected: `ok github.com/vampiricwulf/Moombox/internal/engine` for both. `TestAnUnboundedPerJobCeilingAdmitsEveryNonHead` is the other `residentBytes()` reader in this file (`reorder_budget_test.go:292`) and does not call `release()` before asserting; `TestAnUnboundedBudgetAdmitsEveryNonHead` runs beside it as its pair. Both must be unaffected. The whole-package run (~25 s) is the one that catches the `downloader_parallel_test.go` readers at lines 83, 124, 165 and 445.
 
 - [ ] **Step 5: Verify the pin's teeth by execution**
 
@@ -923,6 +923,10 @@ Spec §0 item 4. **Diagnose before fixing.** This task may end with a production
 **What the shape tells us before any command is run.** Only one helper in `internal/tui/render_cache_test.go` emits a TWO-frame `cached:` / `fresh:` dump — `runSteps` (line 237), used by exactly two tests, `TestTaskListCachedFramesMatchFreshFrames` (272) and `TestJobDetailsCachedFramesMatchFreshFrames` (383). A "blank rounded-border panel" is the shape of the details panel with no job (`{"no job"}`, the last step of the details test) or the empty task list (`{"empty"}` / `{"setup flag"}`, the last two steps of the task-list test). If both halves of the dump looked blank, the difference was in ANSI bytes that `stripANSI` removed — which is a fact the current failure message cannot express, and which Step 5's branch (c) fixes.
 
 **The standing hypothesis, and the one thing that would make it true.** Both panels' cache keys carry `time.Now().Unix()` (`taskListKey` at `task_list.go:1018`, `jobDetailsKey` at `job_details.go:931`), and `runSteps` is the ONE cached-vs-fresh observation in that file **not** wrapped in `observeInOneSecond` — every other one is (lines 48, 129, 155, 181, 456, plus `archive_threshold_test.go:104` and `frame_cost_test.go:209`). Under `-race` a render is an order of magnitude slower, so a `got`/`want` pair straddling a second boundary goes from vanishingly unlikely to merely rare. That only produces a MISMATCH, though, if something in the rendered bytes is second-dependent, and a static read says it may not be for these two fixtures: the task list's only live clock read is `renderHeader`'s `renderTimer` (`task_list.go:1120-1133`, `time.Until` → `formatCountdown`), and the fixture leaves the three countdowns either zero (not rendered) or at `MonitorCheckingTime()` (a static "…"); the details panel bakes its "5m ago" suffixes into the viewport rows at `buildRows` time, which is why `jobDetailsKey`'s own comment calls `sec` "insurance, not a live dependency". **Step 3 settles this by experiment rather than by reading.**
+
+**The expected outcome is already known: branch (c).** The plan evaluation (opus, 2026-09-24, `.superpowers/sdd/2026-09-24-followup-x-residuals/plan-review.md`) ran this task's diagnosis in a disposable export and selected branch (c) by execution: 10/10 cold `-race` rounds of `render_cache_test.go` green after `go clean -testcache`, `-count=50` warm green, two cold whole-package unfiltered `-race` rounds green, no `WARNING: DATA RACE` anywhere, and the forced 1100 ms boundary of Step 3 passing all 36 step pairs (`TestTaskListCachedFramesMatchFreshFrames` 27.5 s PASS, `TestJobDetailsCachedFramesMatchFreshFrames` 12.1 s PASS). **Run Steps 1–3 anyway and record your own numbers** — the point of the diagnosis is the evidence, and a machine that behaves differently is itself the finding — but expect the (c) row and treat a branch-(a) or branch-(b) result as something to re-verify before acting on.
+
+**Ruling (controller, 2026-09-24): branch (c) may sharpen the failure message — test-only, pin-neutral — because a diagnosable next failure is the evidence the spec asks to record.**
 
 **Files:**
 - Modify (branch a or c): `internal/tui/render_cache_test.go`
@@ -1015,11 +1019,11 @@ Pick exactly one branch from the evidence in Steps 1–3 and record the reasonin
 
 | Evidence | Branch | Action |
 |---|---|---|
-| Step 3's forced boundary makes a step fail (or Step 1 found a render-time, fixture-active clock read) | **(a) timing-sensitive assertion** | Apply the `runSteps` wrap in Step 5a. Test-only, no production file. Re-run Step 3's forced-boundary probe: it must now PASS with the sleep still in. Then remove the sleep and run Step 6. |
+| Step 3's forced boundary makes a step fail (or Step 1 found a render-time, fixture-active clock read) | **(a) timing-sensitive assertion** | Apply the `runSteps` wrap in Step 5a. Test-only, no production file. Then apply Step 5a's own GREEN check: the sleep moves INSIDE the `observeInOneSecond` closure and the helper must give up with `20 attempts all straddled a second boundary` — the guard refusing to compare, which is the fix working. Remove the sleep, confirm green, then run Step 6. |
 | Any run in Step 2 printed `WARNING: DATA RACE` | **(b) a real race** | STOP. Do not edit anything. Follow `superpowers:systematic-debugging`, capture both stacks from the report, and hand the finding to the controller before touching a production file — a race here is outside the four residuals' scope and the owner decides whether this arc carries the fix. If the controller says go: fix the PRODUCTION side, never the assertion; if the race is a goroutine leaked by an earlier test in the package, the leak is the bug. |
 | Step 3 passes, Step 2's 200 warm iterations and 30 cold unfiltered rounds are all green, and Step 1 found no render-time fixture-active clock read | **(c) not reproducible** | No production change and no assertion change. Apply the failure-message sharpening in Step 5c so the next occurrence is diagnosable, and record the full evidence. |
 
-**Ruling (recorded here so the implementer does not have to decide it):** branch (c) is not "do nothing". The spec says "record the evidence and leave it", and the message change leaves every assertion, every pin and every behaviour exactly as it is — it changes only what a failure PRINTS. Without it the next occurrence produces the same undiagnosable artefact the first one did (two stripped dumps that look identical, because the difference was in bytes `stripANSI` removed). Cost if this ruling is wrong: six lines of test-only formatting code that never runs on a green suite.
+**Ruling (recorded here so the implementer does not have to decide it, and CONFIRMED by the controller on 2026-09-24 — see the sentence in this task's intro):** branch (c) is not "do nothing". The spec says "record the evidence and leave it", and the message change leaves every assertion, every pin and every behaviour exactly as it is — it changes only what a failure PRINTS (verified in the evaluation: FrameCost 30/0 unchanged, all pins green, staticcheck clean). Without it the next occurrence produces the same undiagnosable artefact the first one did (two stripped dumps that look identical, because the difference was in bytes `stripANSI` removed). Cost if this ruling is wrong: six lines of test-only formatting code that never runs on a green suite.
 
 - [ ] **Step 5a: BRANCH (a) — observe each pair inside one wall-clock second**
 
@@ -1247,7 +1251,7 @@ Expected: `0` beside every path. (`grep -c $'\r'` and `awk '/\r/'` both lie abou
 
 - [ ] **Step 3: The ONE full suite — controller-run**
 
-Spec §1: implementers never run the full suite; the controller's gate runner does, one at a time across the chain. Hand off; do not start it if another run is in flight.
+Spec §1: implementers never run the full suite; the controller's gate runner does, one at a time across the chain. Hand off to the controller. Do not run this yourself under any circumstances (spec §1) — the command block below is the controller's.
 
 ```bash
 cd /d/Git/Moombox/.worktrees/followup-x-residuals
