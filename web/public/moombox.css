@@ -1871,6 +1871,34 @@ sl-progress-bar {
     font-weight: var(--sl-font-weight-semibold);
 }
 
+/* A `system` USERNOTICE (prime upgrade, viewer milestone, ritual, pay-forward)
+   at reduced emphasis: the same block, quieter (owner ruling 2026-09-25). Half
+   the tint, the accent kept at full width but half opacity, and the line at
+   normal weight — the four kinds above stay the loud ones. The width is kept
+   rather than thinned so a dim notice's text starts on the same column as its
+   neighbours'. The tinted rule repeats the nth-child pair for the same reason
+   the full-strength one does: striping would otherwise repaint every second
+   dim notice at the full alpha.
+
+   neutral-700, not the 500 the timestamp wears: this line is the event itself,
+   the only text most of these rows have, and .chat-msg.post above documents
+   why anything lighter than 700 fails 4.5:1 in the dark theme. Both themes
+   come for free — Shoelace's neutral scale flips with the theme and the accent
+   is mixed against `transparent`, so neither value is written twice. */
+.chat-msg.chat-notice.twitch.dim {
+    border-left-color: color-mix(in srgb, #9147ff 50%, transparent);
+    color: var(--sl-color-neutral-700);
+}
+
+.chat-msg.chat-notice.twitch.dim:nth-child(odd),
+.chat-msg.chat-notice.twitch.dim:nth-child(even) {
+    background-color: color-mix(in srgb, #9147ff 5%, transparent);
+}
+
+.chat-msg.chat-notice.twitch.dim .chat-notice-line {
+    font-weight: var(--sl-font-weight-normal);
+}
+
 /* The cheer chip: a pill of the amount's scale colour, inline before the
    message it paid for. --cheer-bg is set from JS through the CSSOM. */
 .cheer-chip {
