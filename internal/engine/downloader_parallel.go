@@ -388,7 +388,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// catchUpBufferBytes) and the consumer below drains it in ascending
 	// order. See reorderBuffer's doc for the head-always-admitted and
 	// markFailed/release deadlock-avoidance guarantees.
-	bufLimit := catchUpBufferBytes
+	// The per-job ceiling is operator-settable (downloader.reorder_buffer_mb,
+	// reaching the engine through ConfigureReorder); 0 means unbounded. Read
+	// at construction, so a config save mid-download changes what the NEXT
+	// catch-up round builds with. The test override still wins when set.
+	bufLimit := sharedReorderBudget.perJobLimit()
 	if d.catchUpBufferBytesOverride > 0 {
 		bufLimit = d.catchUpBufferBytesOverride
 	}

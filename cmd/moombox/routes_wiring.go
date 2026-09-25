@@ -86,6 +86,7 @@ func (s *runState) wireRoutes() func() {
 		OnGoSoftLimitChange:         s.applyGoSoftLimit,
 		OnTrustForwardedProtoChange: s.applyTrustForwardedProto,
 		OnFfmpegPathChange:          s.applyFfmpegPath,
+		OnReorderBudgetChange:       s.applyReorderBudget,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
 	routes.MonitorRoutes(s.r, &routes.MonitorRouteDeps{CheckNow: func() {

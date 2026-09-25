@@ -398,6 +398,7 @@ func (s *runState) runTUI() {
 		s.applyGoSoftLimit(snap.Memory.GoSoftLimitMB)
 		s.applyTrustForwardedProto(snap.Network.TrustForwardedProto)
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
+		s.applyReorderBudget(snap.Downloader)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
 		return nil

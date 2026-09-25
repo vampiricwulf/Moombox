@@ -514,18 +514,20 @@ type SegmentDownloader struct {
 	lastCatchUpFailure atomicTime
 
 	// catchUpBufferBytesOverride lets tests shrink the reorder buffer's byte
-	// ceiling below production's 256 MB catchUpBufferBytes, so a test can
-	// saturate it with a handful of small fake segments instead of waiting
-	// on real production-scale transfers. Zero (the default) means "use
-	// catchUpBufferBytes" — production code never sets this.
+	// ceiling below the configured per-job ceiling (1024 MB by default, 256
+	// MB on arm64), so a test can saturate it with a handful of small fake
+	// segments instead of waiting on real production-scale transfers. Zero
+	// (the default) means "use the configured per-job ceiling" —
+	// downloader.reorder_buffer_mb, read through
+	// sharedReorderBudget.perJobLimit. Production code never sets this.
 	catchUpBufferBytesOverride int
 
 	// hlsVodBufferBytesOverride is the same seam for the HLS VOD reorder
 	// buffer (runHlsVodParallel) — deliberately the same shape as
 	// catchUpBufferBytesOverride above rather than a package var, so the two
 	// twins read alike and tests that shrink either one stay parallelisable.
-	// Zero (the default) means "use catchUpBufferBytes"; production code
-	// never sets this.
+	// Zero (the default) means "use the configured per-job ceiling";
+	// production code never sets this.
 	//
 	// The ceiling it shrinks is sweep-2 ENGINE-2: that reorder buffer was a
 	// plain map with no bound at all, so while fetchSegmentWithRetry worked
