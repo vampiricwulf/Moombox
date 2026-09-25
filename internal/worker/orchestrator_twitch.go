@@ -952,6 +952,18 @@ sessionLoop:
 			// outage wait): preserve staging dir for resume
 			if twitchChatDl != nil {
 				twitchChatDl.Stop()
+				// This exit never reaches resolveChatOutcome, the only other
+				// place that waits on chatDone — and the chat goroutine's
+				// deferred teardown (flush, then the resume-sidecar write) is
+				// still running. Returning here left ResumeStore.Save mid-
+				// rename inside the staging directory the caller is about to
+				// hand to a resume, a /retry (which DELETES staging) or a
+				// t.TempDir cleanup. Bounded, like every other wait on this
+				// channel: a wedged downloader must not hold a shutdown open.
+				if !waitForChatShutdown(chatDone, chatShutdownGrace) {
+					o.logger.Warn("Twitch chat downloader still running after the shutdown grace; "+
+						"its resume sidecar may be incomplete", "jobID", jobCtx.Job.ID)
+				}
 			}
 			return ctx.Err()
 		}
@@ -1017,7 +1029,7 @@ sessionLoop:
 		if isVod {
 			outcome = o.resolveVodChatOutcome(ctx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
 		} else {
-			outcome = o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+			outcome = o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, chatShutdownGrace)
 		}
 		o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
 	}

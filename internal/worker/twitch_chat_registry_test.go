@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -323,5 +325,150 @@ func TestExecuteTwitchRegistersTheLiveChatDownloaderForItsWholeRun(t *testing.T)
 	}
 	if got := registryLen(o.twitchChats); got != 0 {
 		t.Errorf("the registry still holds %d entries after ExecuteTwitch returned, want 0", got)
+	}
+}
+
+// TestExecuteTwitchDoesNotOutliveItsChatGoroutineOnCancel pins the shutdown
+// ordering. ExecuteTwitch's shutdown/user-cancel arm used to Stop() the chat
+// downloader and return immediately, without ever reaching resolveChatOutcome
+// — the only place that waits on chatDone. The chat goroutine's deferred
+// teardown (flush -> saveResumeState -> ResumeStore.Save) was therefore still
+// writing chat.json.resume.json.tmp into staging AFTER the orchestrator had
+// returned and declared the job finished. In production that is a write into
+// a directory a /retry may already be deleting; in tests it is the observed
+// t.TempDir "The directory is not empty" flake.
+//
+// The assertion is deliberately "removable IMMEDIATELY", with no retry: the
+// whole claim is that nothing of ours is still writing by the time
+// ExecuteTwitch returns.
+//
+// MUTANT: delete the waitForChatShutdown call from the cancel arm in
+// orchestrator_twitch.go — RemoveAll fails (Windows) or the leftover check
+// finds chat.json.resume.json.tmp, and this test fails on the run, not one
+// run in fifty.
+func TestExecuteTwitchDoesNotOutliveItsChatGoroutineOnCancel(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	o := w.orchestrator
+
+	job := &database.Job{
+		ID: "tw_cancel_wait", VideoID: "reg", URL: "https://twitch.tv/x",
+		Platform: "twitch", Status: database.StatusDownloading,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not t.TempDir: this test REMOVES the directory itself, as its assertion.
+	chatDir, err := os.MkdirTemp("", "moombox-chat-cancel-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(chatDir) })
+
+	cd := twitch.NewChatDownloader(twitch.ChatDownloaderOptions{
+		ChannelLogin: "somechannel",
+		OutputPath:   filepath.Join(chatDir, "chat.json"),
+	}, &discardLogger{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: t.TempDir(), Logger: &discardLogger{}}
+	_ = o.ExecuteTwitch(ctx, jobCtx, &TwitchVariantInfo{URL: "http://127.0.0.1:1/x.m3u8", Name: "720p"}, false, cd)
+
+	// No sidecar temp may survive the return, on any platform.
+	entries, err := os.ReadDir(chatDir)
+	if err != nil {
+		t.Fatalf("read chat dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("%s is still being written after ExecuteTwitch returned — the orchestrator "+
+				"outlived its own chat goroutine", e.Name())
+		}
+	}
+
+	// And the directory is removable with no retry at all, which is the
+	// property the caller (a worker, or t.TempDir) actually depends on.
+	if err := os.RemoveAll(chatDir); err != nil {
+		t.Errorf("the chat directory is still held the instant ExecuteTwitch returned: %v (entries: %v)",
+			err, entries)
+	}
+}
+
+// TestWaitForChatShutdownIsBoundedAndFreeWhenThereIsNothingToWaitFor is the
+// negative half of the pin above: the wait the cancel arm gained must cost
+// nothing where there is no chat goroutine, and must never be able to hold a
+// shutdown open.
+//
+// The uncancelled paths are unchanged BY CONSTRUCTION, not by this test:
+// ExecuteTwitch's new waitForChatShutdown call sits inside
+// `if ctx.Err() != nil { if !outageFinalize || parentCtx.Err() != nil ||
+// userCancelled.Load() { … } }`, so a job whose context is live never reaches
+// it; cleanup() keeps the same two-second bound it always had, now spelled
+// through this helper; and the live finalize path's grace changed from
+// 2*time.Second to chatShutdownGrace, which is that same value.
+//
+// Three mutations, one per block. Dropping the nil guard: a select on a nil
+// channel simply never fires that arm, so every Stop() with no chat goroutine
+// behind it would burn the full grace — the "no new wait" claim, broken
+// silently. Replacing the select with a bare `<-done`: block 3 hangs until the
+// test binary's timeout instead of returning false, which is the wedged-
+// downloader-holds-shutdown-open failure the comment forbids. Returning true
+// on expiry: block 3's verdict flips and the caller's Warn never fires.
+func TestWaitForChatShutdownIsBoundedAndFreeWhenThereIsNothingToWaitFor(t *testing.T) {
+	// No goroutine was started. Trivially finished, and instantly.
+	start := time.Now()
+	if !waitForChatShutdown(nil, 5*time.Second) {
+		t.Error("a nil done channel reported an unfinished chat goroutine")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("a nil done channel cost %s — a Stop() with no chat behind it must not wait", elapsed)
+	}
+
+	// Already finished. Same.
+	closed := make(chan struct{})
+	close(closed)
+	start = time.Now()
+	if !waitForChatShutdown(closed, 5*time.Second) {
+		t.Error("an already-closed done channel reported an unfinished chat goroutine")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("an already-closed done channel cost %s, want ~0", elapsed)
+	}
+
+	// Wedged. BOUNDED: it gives up and says so, rather than holding the
+	// shutdown open for as long as the downloader stays stuck.
+	stuck := make(chan struct{})
+	start = time.Now()
+	if waitForChatShutdown(stuck, 50*time.Millisecond) {
+		t.Error("a chat goroutine that never signalled was reported as finished")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("the wait returned after %s, short of its own 50ms grace", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("the wait ran %s on a 50ms grace — it is not bounded by the grace", elapsed)
+	}
+
+	// Signalled mid-wait: the ordinary shutdown, where the teardown finishes
+	// inside the grace and the caller proceeds without the Warn.
+	late := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("panic in the late-signal goroutine: %v", r)
+			}
+		}()
+		time.Sleep(30 * time.Millisecond)
+		close(late)
+	}()
+	start = time.Now()
+	if !waitForChatShutdown(late, 5*time.Second) {
+		t.Error("a chat goroutine that finished inside the grace was reported as still running")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("a signal at 30ms was noticed only after %s", elapsed)
 	}
 }

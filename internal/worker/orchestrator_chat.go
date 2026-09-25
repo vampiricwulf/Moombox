@@ -218,18 +218,53 @@ func (o *DownloadOrchestrator) resolveChatOutcome(dl ChatSource, rec *chatOutcom
 	}
 }
 
+// chatShutdownGrace is how long a cancel/shutdown path gives a chat goroutine
+// to finish after it has been Stop()'d. It is the same grace
+// resolveChatOutcome already applies after its own Stop(), named here so the
+// two cancel/shutdown sites that wait on it — this file's cleanup and
+// ExecuteTwitch's shutdown/user-cancel arm — cannot drift to two different
+// numbers; ExecuteTwitch's live finalize path hands it to resolveChatOutcome
+// as the grace that call applies after its own Stop(), which is the same
+// value with the same meaning.
+//
+// NOT every grace in the tree. ExecuteTwitch's unknown-verdict exit keeps its
+// own literals, argued for at that call site: that job is on its way to Error
+// with staging intact and a Retry re-runs the whole capture, so a shared
+// shutdown grace is not what governs it.
+const chatShutdownGrace = 2 * time.Second
+
+// waitForChatShutdown waits up to grace for a chat goroutine's done channel to
+// close, and reports whether it did. A nil channel means no goroutine was
+// started, which is trivially "finished".
+//
+// BOUNDED, never a bare receive: a downloader wedged in a socket read must not
+// hold a shutdown open. The caller Stop()s first — this waits for the teardown
+// that Stop triggers (flush, then the resume-sidecar write), not for the
+// session itself.
+//
+// The wait exists because that teardown writes into the job's STAGING
+// directory. An exit that returns without it leaves ResumeStore.Save mid-
+// rename in a directory the caller may already be deleting — /retry's
+// ReinitializeJob does exactly that.
+func waitForChatShutdown(done chan struct{}, grace time.Duration) bool {
+	if done == nil {
+		return true
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 // cleanup handles cancellation cleanup.
 func (o *DownloadOrchestrator) cleanup(chatDl *chat.ChatDownloader, chatDone chan struct{}) {
 	if chatDl != nil {
 		chatDl.Stop()
-		if chatDone != nil {
-			cleanupTimer := time.NewTimer(2 * time.Second)
-			select {
-			case <-chatDone:
-				cleanupTimer.Stop()
-			case <-cleanupTimer.C:
-			}
-		}
+		waitForChatShutdown(chatDone, chatShutdownGrace)
 	}
 }
 
