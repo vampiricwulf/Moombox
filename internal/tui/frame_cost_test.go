@@ -61,10 +61,13 @@ func frameBenchApp(tb testing.TB) *App {
 	// an early return and the numbers below would describe one line of text.
 	// Assert the fixture really renders all four panels before anything is
 	// measured against it.
-	// "Active: " is the status bar's marker, and the status bar is 70 of the
-	// 100 allocations a cached frame costs — the one panel with no cache.
-	// Without it here, blanking the status bar (a.statusBar.width = 0 after
-	// recalcLayout) passed every assertion below at 31 allocations.
+	// "Active: " is the status bar's marker. Without it here, blanking the
+	// status bar (a.statusBar.width = 0 after recalcLayout) passed every
+	// assertion below at 31 allocations — and a blanked bar is CHEAPER than a
+	// cached one, so a budget alone can never catch it. The marker stays
+	// load-bearing now that the bar is cached: it is the only thing asserting
+	// the bar renders at all, and maxCachedStatusBarAllocs below is what
+	// asserts it renders only once.
 	plain := stripANSI(a.View().Content)
 	for _, want := range []string{"Tasks (", "Details", fmt.Sprintf("Logs (%d)", maxLogLines), "Active: "} {
 		if !strings.Contains(plain, want) {
@@ -130,23 +133,25 @@ func BenchmarkProgressFrameAtLogCap(b *testing.B) {
 }
 
 // maxCachedFrameAllocs bounds a WHOLE bubbletea frame that carries no change,
-// which is what the 60 Hz tick delivers most of the time. On main this frame
-// cost 20,623 allocations because all four panels re-rendered unconditionally;
-// with the CORE-2 caches it is three key comparisons, the status bar and two
-// lipgloss joins — 100, of which the status bar (the one panel with no cache,
-// because it tallies every job on every frame) is 70.
+// which is what the 60 Hz tick delivers most of the time. On main before
+// CORE-2 this frame cost 20,623 allocations because all four panels
+// re-rendered unconditionally; with the CORE-2 caches it was 100, of which
+// the status bar — then the one panel with no cache, because it tallied every
+// job on every frame — was 70. Arc C gave the status bar the same
+// key-comparison cache, and the frame is now 30 (≈146,600 B): four key
+// comparisons and two lipgloss joins.
 //
-// The budget is 2x the measured number. The measurement is exactly 100 with
-// no variance at all — across repeated runs and across terminal/colour
+// The budget is 2x the measured number. The measurement is exactly 30 with no
+// variance at all — across repeated runs and across terminal/colour
 // environments — so the headroom is for a Go or lipgloss release that
 // allocates differently, not for drift in this code. 4x was too loose to be
-// a pin: a partial regression (one panel re-rendering a cheap part of itself,
-// say 250) would have passed silently, and the cheapest un-cached panel here
-// costs thousands, so nothing legitimate lives between 200 and 400.
+// a pin: a partial regression (one panel re-rendering a cheap part of itself)
+// would have passed silently, and the cheapest un-cached panel here costs
+// thousands, so nothing legitimate lives between 60 and 120.
 //
 // Asserted on allocations, not nanoseconds: allocation counts are
 // deterministic across machines and CI runners, wall time is not.
-const maxCachedFrameAllocs = 200
+const maxCachedFrameAllocs = 60
 
 // maxCachedLogPanelAllocs bounds the log panel ALONE on an unchanged frame.
 // Returning the memo allocates nothing at all (measured 0); the headroom is
@@ -157,6 +162,17 @@ const maxCachedFrameAllocs = 200
 // failure says which panel stopped being cached. It is NOT a pin on the
 // pre-wrap: see BenchmarkLogPanelAtLogCap.
 const maxCachedLogPanelAllocs = 8
+
+// maxCachedStatusBarAllocs bounds the status bar ALONE on an unchanged frame.
+// Returning the memo allocates nothing at all (measured 0, like the log
+// panel): the key is a comparable struct that never escapes, so building it
+// and comparing it are free. The headroom is for a future Go that heap-
+// allocates the key, not for a re-render, which is 70.
+//
+// This is the status bar's half of the whole-frame budget above, localised so
+// a failure says WHICH panel stopped being cached — the whole-frame number
+// alone would drop 70 into a 200-wide budget and say nothing.
+const maxCachedStatusBarAllocs = 2
 
 // maxUncachedLogPanelAllocs bounds the log panel when the memo is NOT
 // available — the frame after every insertion, ~10 times a second, and every
@@ -232,6 +248,21 @@ func TestFrameCostAtLogCap(t *testing.T) {
 	if logAllocs > maxCachedLogPanelAllocs {
 		t.Errorf("an unchanged log panel allocates %d times, budget %d — LogViewerModel.View() is rendering instead of returning its memo",
 			logAllocs, maxCachedLogPanelAllocs)
+	}
+
+	// The status bar, localised. Same fixture and same reason as the log
+	// panel's probe above: a.View() has already rendered and memoised it.
+	//
+	// Mutant: delete the key comparison at the top of StatusBarModel.View() —
+	// this budget fails at 70 and NAMES the panel, where the whole-frame
+	// budget only says a frame got dearer (it fails too, at 30+70, but a
+	// future panel added to the frame could absorb that margin; this one
+	// cannot be absorbed).
+	barAllocs, barBytes := steadyStateAllocs(t, func() { a.statusBar.View() })
+	t.Logf("cached status bar: %d allocs/op, %d B/op", barAllocs, barBytes)
+	if barAllocs > maxCachedStatusBarAllocs {
+		t.Errorf("an unchanged status bar allocates %d times, budget %d — StatusBarModel.View() is "+
+			"rendering instead of returning its memo", barAllocs, maxCachedStatusBarAllocs)
 	}
 
 	// The other half of the panel's life: every insertion invalidates the

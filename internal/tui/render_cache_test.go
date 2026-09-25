@@ -485,3 +485,145 @@ func TestTaskListSearchBoxBypassesTheCache(t *testing.T) {
 		t.Errorf("the search box must render live, got:\n%s", got)
 	}
 }
+
+// TestStatusBarViewIsCachedBetweenIdenticalFrames is the status bar's half of
+// CORE-2. bubbletea calls View() after EVERY message; before this the bar
+// re-rendered all six tiers of both halves and tallied the whole job list on
+// every one of them — 70 of a no-change frame's 100 allocations.
+//
+// THE MEMO IS POISONED, NOT THE INPUT. An in-place job mutation would prove
+// nothing here: once SetJobs owns the tally, a job whose Status changes behind
+// the model's back is invisible to a FRESH render too, so the second View()
+// returns the identical string with or without a cache and the test passes on
+// the mutant. Writing a sentinel into renderCache while leaving the key alone
+// asks the one question that matters — was the memo consulted? — and can only
+// be answered "yes" by the lookup this test exists to pin.
+//
+// MUTANT: delete the `if m.renderCache != "" && key == m.cacheKey { return
+// m.renderCache }` block at the top of StatusBarModel.View() — the sentinel is
+// re-rendered away and the assertion fails.
+func TestStatusBarViewIsCachedBetweenIdenticalFrames(t *testing.T) {
+	m := NewStatusBarModel()
+	m.SetWidth(200)
+	m.SetJobs([]*database.Job{{Status: database.StatusDownloading}})
+
+	first := m.View()
+	if !strings.Contains(stripANSI(first), "Active: 1") {
+		t.Fatalf("fixture: the bar does not show the active tally:\n%s", stripANSI(first))
+	}
+
+	const sentinel = "CACHED-SENTINEL"
+	m.renderCache = sentinel // the key is untouched, so this frame is "unchanged"
+	if got := m.View(); got != sentinel {
+		t.Errorf("an unchanged status bar re-rendered instead of returning its memo:\n%s", stripANSI(got))
+	}
+
+	// And the memo is dropped the moment any input moves — width is the
+	// cheapest one to move, and it is in the key.
+	m.SetWidth(140)
+	if got := m.View(); got == sentinel {
+		t.Error("a width change served the stale memo — width is missing from statusBarKey")
+	}
+}
+
+// TestStatusBarTallyIsStoredNotRecomputed pins the other half of the change:
+// SetJobs owns the tally, and View never walks the job list again.
+//
+// MUTANT: leave `counts := m.tallyJobs()` in metricTiers instead of reading
+// m.counts — the in-place mutation below becomes visible and the first
+// assertion fails.
+func TestStatusBarTallyIsStoredNotRecomputed(t *testing.T) {
+	job := &database.Job{Status: database.StatusDownloading}
+	m := NewStatusBarModel()
+	m.SetWidth(200)
+	m.SetJobs([]*database.Job{job})
+	if !strings.Contains(stripANSI(m.View()), "Active: 1") {
+		t.Fatalf("fixture: the bar does not show the active tally")
+	}
+
+	job.Status = database.StatusFinished // in place: no production path does this without SetJobs
+	m.renderCache = ""                   // defeat the memo, so this measures the TALLY and nothing else
+	if got := stripANSI(m.View()); !strings.Contains(got, "Active: 1") {
+		t.Errorf("a fresh render re-tallied from the job list; the tally belongs to SetJobs:\n%s", got)
+	}
+
+	// SetJobs is what re-tallies, and the new tally moves the key.
+	m.SetJobs([]*database.Job{job})
+	if got := stripANSI(m.View()); strings.Contains(got, "Active: ") {
+		t.Errorf("SetJobs must re-tally and re-render; the bar still claims an active download:\n%s", got)
+	}
+}
+
+// TestStatusBarCacheKeyCoversEveryInput is the completeness pin: a cache is
+// only as correct as its key, and the status bar has ten inputs — six setters
+// plus four fields written directly, because ShowChordHint and SelectedCount
+// are public and offline/sidecarDown are package-internal, with no setter
+// between any of them and the field. Each row requires the rendered bar to
+// move when that input does.
+//
+// ONE ROW PER KEY FIELD, not per input, and the difference is the whole
+// resolution of the pin. Four of the ten inputs carry several fields —
+// SetCookieStatus two, SetActivePlatforms two, SetDiskStatus three,
+// SetBackfillStatus four — and a row that moved all of an input's fields at
+// once would still pass with any ONE of them missing from statusBarKey, which
+// is exactly the regression this test exists to refuse. Measured: with the
+// per-input table, dropping twCookie, ytActive, twActive, diskFree,
+// diskUsedPct, diskWarn, backfillName, backfillTab or backfillPages from the
+// key left every subtest green. So each row below reads the model's current
+// values and moves exactly one of them.
+//
+// backfillChannel is the one field that cannot be isolated, and it is not an
+// omission: View reads it only as a visibility GATE (`m.backfillChannel != ""`)
+// and never renders the id itself, so no change to its value alone can move
+// the bar. Its row therefore exercises the gate, which clears all four
+// backfill fields together — the only rendered behaviour the field has.
+//
+// MUTANT: drop ANY ONE field from statusBarKey — that row's subtest fails,
+// and it names the field by its subtest name.
+func TestStatusBarCacheKeyCoversEveryInput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(m *StatusBarModel)
+	}{
+		{"width", func(m *StatusBarModel) { m.SetWidth(120) }},
+		{"yt cookie", func(m *StatusBarModel) { m.SetCookieStatus(CookieStatusRelogin, m.twCookie) }},
+		{"tw cookie", func(m *StatusBarModel) { m.SetCookieStatus(m.ytCookie, CookieStatusRelogin) }},
+		{"yt active", func(m *StatusBarModel) { m.SetActivePlatforms(false, m.twActive) }},
+		{"tw active", func(m *StatusBarModel) { m.SetActivePlatforms(m.ytActive, false) }},
+		{"job tally", func(m *StatusBarModel) {
+			m.SetJobs([]*database.Job{{Status: database.StatusCookies, Platform: "twitch"}})
+		}},
+		{"disk free", func(m *StatusBarModel) { m.SetDiskStatus(m.diskFree/2, m.diskUsedPct, m.diskWarn) }},
+		{"disk used pct", func(m *StatusBarModel) { m.SetDiskStatus(m.diskFree, 99, m.diskWarn) }},
+		{"disk warn", func(m *StatusBarModel) { m.SetDiskStatus(m.diskFree, m.diskUsedPct, "critical") }},
+		{"backfill channel", func(m *StatusBarModel) {
+			// The gate, not the id: "done" clears the slot this channel owns.
+			m.SetBackfillStatus(m.backfillChannel, m.backfillName, m.backfillTab, m.backfillPages, "done")
+		}},
+		{"backfill name", func(m *StatusBarModel) {
+			m.SetBackfillStatus(m.backfillChannel, "Another Channel", m.backfillTab, m.backfillPages, "scanning")
+		}},
+		{"backfill tab", func(m *StatusBarModel) {
+			m.SetBackfillStatus(m.backfillChannel, m.backfillName, "streams", m.backfillPages, "scanning")
+		}},
+		{"backfill pages", func(m *StatusBarModel) {
+			m.SetBackfillStatus(m.backfillChannel, m.backfillName, m.backfillTab, m.backfillPages+4, "scanning")
+		}},
+		{"chord hint", func(m *StatusBarModel) { m.ShowChordHint = true }},
+		{"selected count", func(m *StatusBarModel) { m.SelectedCount = 3 }},
+		{"offline", func(m *StatusBarModel) { m.offline = true }},
+		{"sidecar down", func(m *StatusBarModel) { m.sidecarDown = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := busyStatusBar()
+			m.SetWidth(200)
+			before := m.View()
+			tc.mutate(m)
+			if after := m.View(); after == before {
+				t.Errorf("changing %s left the bar byte-identical — that field is missing from "+
+					"statusBarKey, so the cache will serve a stale bar for it:\n%s",
+					tc.name, stripANSI(before))
+			}
+		})
+	}
+}
