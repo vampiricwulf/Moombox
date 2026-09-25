@@ -473,11 +473,10 @@ func TestYouTubeVodChatWaitRoutesThroughResolveVodChatOutcome(t *testing.T) {
 				"minutes", file)
 		}
 		// The live cut O-A leaves alone is chatWaitTimeout (two minutes); the
-		// GRACE beside it is not this pin's subject and is spelled
-		// differently in the two files — 2*time.Second in orchestrator.go,
-		// chatShutdownGrace in orchestrator_twitch.go, where the same two
-		// seconds are shared with that file's shutdown/user-cancel arm. So
-		// the match stops at the bound.
+		// GRACE beside it is not this pin's subject — it is chatShutdownGrace
+		// in both files now, pinned by
+		// TestEveryChatOutcomeGraceIsTheConstant. So the match stops at the
+		// bound.
 		if !strings.Contains(text, "chatDone, chatWaitTimeout, ") {
 			t.Errorf("%s no longer has the live two-minute chat cut — O-A changes the VOD path "+
 				"only", file)

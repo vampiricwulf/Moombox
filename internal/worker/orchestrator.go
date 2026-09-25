@@ -583,7 +583,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if isVod {
 			outcome = o.resolveVodChatOutcome(ctx, chatDl, &chatRec, chatDone, jobCtx.Job)
 		} else {
-			outcome = o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, 2*time.Second)
+			outcome = o.resolveChatOutcome(chatDl, &chatRec, chatDone, chatWaitTimeout, chatShutdownGrace)
 		}
 		o.recordChatOutcome(jobCtx, chatDl.MessageCount(), outcome)
 	}
