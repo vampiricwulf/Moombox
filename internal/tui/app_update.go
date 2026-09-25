@@ -1375,6 +1375,12 @@ func (a *App) handleTrimsChanged(job *database.Job) {
 	if job == nil {
 		return
 	}
+	// This is the SECOND UpdateJob bypass of statusBar.SetJobs, and unlike
+	// handleJobUpdate's it needs no gate: UpdateJob replaces the element in
+	// the slice the status bar's jobs alias, but a trim write touches neither
+	// Status nor Platform — the only two columns tallyJobs derives from — so
+	// the stored tally is still correct. See handleJobUpdate's gate for the
+	// case that is not.
 	a.taskList.UpdateJob(job)
 	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
 		a.details.SetJob(job)

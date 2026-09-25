@@ -19,11 +19,15 @@ import (
 // launch has carried this same quoting since the behaviour was verified
 // empirically on YouTube watch?v= URLs; the folder-open path never got it.
 //
-// THE DUPLICATION WITH openBrowserCmd (internal/tui/openbrowser_windows.go)
-// IS FORCED, NOT ACCIDENTAL. internal/tui may not import internal/web (the
-// import fence), and SysProcAttr.CmdLine exists only in the Windows syscall
-// package, so neither copy can be hoisted into a shared untagged file.
-// Change one and change the other.
+// THE DUPLICATION WITH internal/tui/openbrowser_windows.go IS FORCED, NOT
+// ACCIDENTAL. internal/tui may not import internal/web (the import fence),
+// and SysProcAttr.CmdLine exists only in the Windows syscall package, so
+// neither copy can be hoisted into a shared untagged file. The TUI therefore
+// carries a byte-for-byte copy of this function (openBrowserCmd calls it),
+// and TestWindowsCmdLineComposersAreByteIdentical (openpath_parity_test.go —
+// UNTAGGED, so ubuntu runs it where neither _windows_test.go table compiles)
+// reads both files and fails the moment the two bodies drift. Change one and
+// change the other.
 //
 // cmd.Args is deliberately left alone. Windows ignores argv entirely once
 // CmdLine is set (syscall.StartProcess prefers sys.CmdLine over

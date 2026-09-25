@@ -133,7 +133,7 @@ func TestWindowsOpenPathCmdLineRoundTripsThroughTheWin32Parser(t *testing.T) {
 		{"the = path W R-3 is about", `C:\Moombox\output\Stream=Archive`, `C:\Moombox\output\Stream=Archive`},
 		{"a drive root's = child", `D:\x=y`, `D:\x=y`},
 		{"a space, an = and a trailing separator", `E:\x y=z\`, `E:\x y=z\`},
-		{"a UNC share root", `\server\share\`, `\server\share\`},
+		{"a UNC share root", `\\server\share\`, `\\server\share\`},
 		{"a plain path with no = at all", `C:\Users\Wulf\Videos`, `C:\Users\Wulf\Videos`},
 		{"an embedded quote is stripped, never escaped", `C:\out\a"b`, `C:\out\ab`},
 		// The row above cannot see a MISSING strip: `"C:\out\a"b"` happens to

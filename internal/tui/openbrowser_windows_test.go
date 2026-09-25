@@ -73,7 +73,7 @@ func TestOpenBrowserCmdRoundTripsThroughTheWin32Parser(t *testing.T) {
 		{"the watch?v= URL the force-quoting exists for", "https://www.youtube.com/watch?v=abc123", "https://www.youtube.com/watch?v=abc123"},
 		{"a drive root — unreachable for a URL, pinned for parity", `D:\`, `D:\`},
 		{"a space, an = and a trailing separator", `E:\x y=z\`, `E:\x y=z\`},
-		{"a UNC share root", `\server\share\`, `\server\share\`},
+		{"a UNC share root", `\\server\share\`, `\\server\share\`},
 		{"a plain URL with no = at all", "https://github.com/vampiricwulf/Moombox", "https://github.com/vampiricwulf/Moombox"},
 		{"an embedded quote is stripped, never escaped", `https://x/a"b`, "https://x/ab"},
 		// The row above cannot see a MISSING strip: `"https://x/a"b"` happens
