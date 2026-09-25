@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -222,6 +223,73 @@ func TestUnboundedResolutionSaves(t *testing.T) {
 	}
 	if got := cfg.Downloader.MaxVideoResolution; got != 0 {
 		t.Errorf("MaxVideoResolution = %d after saving 0, want 0", got)
+	}
+}
+
+// TestSettingsOverlayFitsTheMinimumTerminal: the Downloader section carries
+// TWO preview rows now (output_template's template sample and this arc's
+// resolution preset line), and renderFields emits a second line under each.
+// settingsContentHeight budgets the window in FIELD units, so with nothing
+// reserved for those extra lines the overlay renders 21 lines into the 20-row
+// box at minTermHeight — and bubbletea v2's renderer keeps the LAST height
+// lines of a frame, so what disappears is the header, not the overflow.
+//
+// 20x100 is the smallest terminal app_layout still draws a frame into.
+//
+// Mutant: the previewRows subtraction dropped from settingsContentHeight — 21
+// lines with the first field focused.
+func TestSettingsOverlayFitsTheMinimumTerminal(t *testing.T) {
+	sectionIdx := -1
+	for i := range sections {
+		if sections[i].name == "Downloader" {
+			sectionIdx = i
+			break
+		}
+	}
+	if sectionIdx < 0 {
+		t.Fatal("no Downloader section — the preview rows this pins live there")
+	}
+	previews := 0
+	for i := range sections[sectionIdx].fields {
+		if sections[sectionIdx].fields[i].previewFn != nil {
+			previews++
+		}
+	}
+	if previews < 2 {
+		t.Fatalf("Downloader has %d preview rows, want at least 2 — this case only bites once a section has more than one", previews)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		field int
+	}{
+		{"first field focused", 0},
+		{"last field focused", len(sections[sectionIdx].fields) - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			m := NewSettingsModel()
+			m.configStore = config.NewStore(cfg, "")
+			m.cfg = cfg
+			m.Open(cfg)
+			m.SetSize(100, minTermHeight)
+			m.sectionIndex = sectionIdx
+			m.fieldIndex = tc.field
+			m.updateTextInputForField()
+			m.ensureFieldVisible()
+
+			view := m.View()
+			if got := strings.Count(view, "\n") + 1; got > minTermHeight {
+				t.Errorf("the settings overlay renders %d lines into a %d-row terminal — "+
+					"the renderer keeps the last %d, so the header is clipped",
+					got, minTermHeight, minTermHeight)
+			}
+			// The window must still SHOW the focused row: a reservation that
+			// merely shrinks the window would scroll the focus off-screen.
+			if label := sections[sectionIdx].fields[tc.field].label; !strings.Contains(view, label) {
+				t.Errorf("the focused field %q is not on screen at %d rows", label, minTermHeight)
+			}
+		})
 	}
 }
 

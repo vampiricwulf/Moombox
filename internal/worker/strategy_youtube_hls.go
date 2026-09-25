@@ -208,14 +208,6 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 		}
 		capped = append(capped, &variants[i])
 	}
-	// Defensive, and unreachable while SelectByCap answers from this same
-	// list: whatever size it names, at least one variant has it and so passes
-	// the <= test above.
-	if len(capped) == 0 {
-		for i := range variants {
-			capped = append(capped, &variants[i])
-		}
-	}
 
 	if qualityPref == "audio_only" {
 		// YouTube HLS has no audio-only variants — take the lowest bandwidth

@@ -59,6 +59,15 @@ func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fp
 	return selectBestFormatsImpl(formats, maxResolution, prefer60fps, logger)
 }
 
+// isSelectableVideo reports whether a format is a video rendition the selector
+// can actually download. It is the single definition the cap pre-pass and the
+// selection loop below both use: two copies of this test could drift, and the
+// symptom would be a cap resolved over a different set than the one the gate
+// filters — silent, and wrong only for some playlists.
+func isSelectableVideo(f *Format) bool {
+	return strings.Contains(f.MimeType, "video") && f.URL != ""
+}
+
 // audioTrackScore ranks one audio format's TRACK against the others. Ported
 // from yt-dlp's get_language_code_and_preference (_video.py:3277-3291), whose
 // constants are ORIGINAL_LANG_VALUE = 10 and DEFAULT_LANG_VALUE = 5, with
@@ -72,16 +81,6 @@ func SelectBestFormatsWithLogger(formats []Format, maxResolution int, prefer60fp
 // TIE-BREAK inside a track, never across tracks: a loudness-normalised
 // rendition is a processed copy of the same audio, so given both we archive
 // the untouched one.
-
-// isSelectableVideo reports whether a format is a video rendition the selector
-// can actually download. It is the single definition the cap pre-pass and the
-// selection loop below both use: two copies of this test could drift, and the
-// symptom would be a cap resolved over a different set than the one the gate
-// filters — silent, and wrong only for some playlists.
-func isSelectableVideo(f *Format) bool {
-	return strings.Contains(f.MimeType, "video") && f.URL != ""
-}
-
 func audioTrackScore(f *Format) int {
 	name := strings.ToLower(f.AudioTrackName)
 	score := -1

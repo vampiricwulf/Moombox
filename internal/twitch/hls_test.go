@@ -421,14 +421,19 @@ func TestVideoCodecFamily(t *testing.T) {
 }
 
 // TestSelectBestVariantPrefersTheEnhancedSource is the owner's "codec-aware
-// variant selection preferring the enhanced source". Both source renditions
-// are VIDEO="chunked"; the old rule took the FIRST one in playlist order, which
-// is fine today (there is only ever one) but would be a coin flip once Twitch
-// offers two.
+// variant selection preferring the enhanced source", pinned one rung at a time
+// because the two rungs can mask each other.
 //
-// Mutants: keeping the first-IsSource loop (the 1080p H.264 source is
-// returned); ranking by bandwidth instead of codec (also the H.264 source on a
-// playlist where the transcode outbids the AV1 source).
+// Block 1 pins the SIZE rung: at cap 0 (unbounded) the enhanced HEVC source is
+// the only 1440-short-edge rendition, so R1 resolves the chosen size to 1440
+// and the H.264 source at 1080 is out before any codec question is asked.
+// Mutant: SelectByCap's at-or-below rung inverted (the SMALLEST size chosen) —
+// the 720p30 transcode comes back.
+//
+// Block 2 pins the CODEC rung, and only the codec rung: both sources sit at
+// 1920x1080, so the size rung cannot separate them, the enhanced one is listed
+// LAST so playlist order cannot either, and it is OUTBID so bandwidth cannot.
+// Mutant: the codec order reversed in rankAtChosenSize — the H.264 source wins.
 func TestSelectBestVariantPrefersTheEnhancedSource(t *testing.T) {
 	variants := ParseHLSMasterPlaylist(enhancedMasterPlaylist)
 	got := SelectBestVariant(variants, "best", 0)
@@ -440,15 +445,15 @@ func TestSelectBestVariantPrefersTheEnhancedSource(t *testing.T) {
 			got.Name, got.Width, got.Height, got.VideoCodec)
 	}
 
-	// The same choice with the enhanced source listed LAST and OUTBID. The
-	// fixture above cannot see either named mutant on its own: its HEVC
-	// source is already first in playlist order AND the highest bandwidth, so
-	// both the pre-task first-IsSource loop and a bandwidth ranking pick it by
-	// accident. Here only the codec rank reaches it.
+	// The same choice at the SAME SIZE, with the enhanced source listed LAST
+	// and OUTBID. The fixture above cannot reach the codec rung at all: its
+	// HEVC source is alone at the chosen size, so R1 picks it whatever the
+	// codec order says. Here the two sources share 1920x1080 and only the
+	// codec rank can separate them.
 	const enhancedSourceListedLast = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",FRAME-RATE=60.000,VIDEO="chunked"
 https://example.com/chunked-h264.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=7000000,RESOLUTION=2560x1440,CODECS="hvc1.2.4.L150.90,mp4a.40.2",FRAME-RATE=60.000,VIDEO="chunked"
+#EXT-X-STREAM-INF:BANDWIDTH=7000000,RESOLUTION=1920x1080,CODECS="hvc1.2.4.L150.90,mp4a.40.2",FRAME-RATE=60.000,VIDEO="chunked"
 https://example.com/chunked-hevc.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,CODECS="avc1.4D401F,mp4a.40.2",FRAME-RATE=30.000,VIDEO="720p30"
 https://example.com/720p30.m3u8`
@@ -616,8 +621,8 @@ func TestSelectBestVariantCodecRankAtTheChosenSize(t *testing.T) {
 
 // TestSelectBestVariantHonoursAnExplicitHeightOverTheEnhancedSource: an
 // operator who asked for 1080p60 gets 1080p60, enhanced source or not. The
-// codec preference is the SOURCE step's tie-break, not an override of the
-// quality preference.
+// codec rung ranks only the chosen size (R2 put it ahead of the source flag)
+// and never overrides the quality preference.
 //
 // Mutant: applying the codec rank inside selectVariantByHeight — the 1440p
 // HEVC source is returned for a 1080p60 request.

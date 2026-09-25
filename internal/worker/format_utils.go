@@ -71,11 +71,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 					capped = append(capped, idx)
 				}
 			}
-			// The len check is defensive: SelectByCap answered from this same
-			// list, so at least one stream always has that size.
-			if len(capped) > 0 {
-				candidates = capped
-			}
+			candidates = capped
 		}
 	}
 

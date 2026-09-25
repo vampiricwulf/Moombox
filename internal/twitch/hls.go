@@ -114,14 +114,14 @@ func videoCodecFamily(codecs string) string {
 	return ""
 }
 
-// codecRank orders the video families an enhanced broadcast can offer.
+// codecRank orders the video families an enhanced broadcast can offer. It is
+// the first rung rankAtChosenSize applies once R1 has fixed the size: AV1 3 >
+// HEVC 2 > H.264 1, with an ABSENT family at 0.
 //
-// This is what makes the whole feature byte-compatible: a pre-enhanced playlist
-// lists only H.264 renditions, so every source ties at "avc1" and
-// selectSourceVariant's `> codecRank("avc1")` guard keeps playlist order — the
-// incumbent, the first source in playlist order, wins exactly as before. An
-// ABSENT family ranks 0, below avc1's 1, so a CODECS-less playlist (an older
-// capture, a fixture) ties the same way one rank lower.
+// A pre-enhanced playlist lists only H.264 renditions, so every rendition ties
+// at 1 and the SOURCE flag then the bandwidth decide — playlist order is the
+// last rung now, not the first. A CODECS-less playlist (an older capture, a
+// fixture) ties the same way one rank lower.
 func codecRank(family string) int {
 	switch family {
 	case "av01":
@@ -249,9 +249,7 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 				withinCap = append(withinCap, v)
 			}
 		}
-		if len(withinCap) > 0 {
-			filtered = withinCap
-		}
+		filtered = withinCap
 	}
 
 	// Specific quality preference — match by height and optionally FPS

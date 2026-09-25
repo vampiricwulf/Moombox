@@ -1257,10 +1257,6 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Downloader: Parallel downloads must be at least 1"
 		return ""
 	}
-	if n := vNum("maxRes"); n != 0 && n < 1 {
-		m.errorMsg = "Downloader: Max resolution must be at least 1"
-		return ""
-	}
 	if n := vNum("maximumTimeout"); n != 0 && n < 30 {
 		m.errorMsg = "Downloader: YouTube max timeout must be at least 30 seconds"
 		return ""
