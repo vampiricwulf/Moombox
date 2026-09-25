@@ -172,9 +172,10 @@ func (m *JobDetailsModel) HasProgress() bool {
 // are recomputed from live data every tick (matches TS re-render behavior).
 //
 // Identical pointer in the same second = identical rows, so the rebuild is
-// skipped. This does not slow anything down: the tick still runs at 16ms and
-// every store write still rebuilds on arrival (a new pointer) — the ~50 of 60
-// ticks that carry no new data simply cost nothing now.
+// skipped. This does not slow anything down: the tick still runs at 8ms and
+// every store write still rebuilds on arrival (a new pointer) — the ticks that
+// carry no new data, most of them now that the tick is finer than the engine's
+// report gate, simply cost nothing.
 func (m *JobDetailsModel) SetProgress(p *ProgressData) {
 	sec := time.Now().Unix()
 	if p == m.lastProgress && sec == m.lastProgressSec {

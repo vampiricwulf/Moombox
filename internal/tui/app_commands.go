@@ -671,8 +671,12 @@ func newImportRequest(baseURL string, body io.Reader, title, channel string) (*h
 }
 
 // Run starts the TUI program.
+//
+// tea.WithFPS raises the renderer from bubbletea's default 60 to tuiTargetFPS
+// (120, its maximum). This is the package's ONLY tea.NewProgram site, and
+// TestTheOneProgramIsBuiltWithTheTargetFPS is what keeps it that way.
 func Run(app *App) error {
-	p := tea.NewProgram(app)
+	p := tea.NewProgram(app, tea.WithFPS(tuiTargetFPS))
 	app.program.Store(p)
 	_, err := p.Run()
 	return err

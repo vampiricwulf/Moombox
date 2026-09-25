@@ -190,6 +190,14 @@ type JobConfig struct {
 	// VOD-only strategy simply never calls it, so an unset zero value there
 	// is inert either way.
 	InterruptionTimeout time.Duration
+	// ProgressInterval (config.Downloader.ProgressIntervalMS, milliseconds,
+	// converted once in buildJobContext) is the minimum gap between this
+	// job's progress reports. Handed to NewProgressTracker at both
+	// construction sites; a non-positive value there falls back to
+	// progressUpdateInterval, so a JobContext literal built directly by a
+	// test needs no value. Snapshotted at job start like MaximumTimeout
+	// above, so a config save applies to the next job, not a running one.
+	ProgressInterval time.Duration
 }
 
 // DownloadWorker manages the job processing loop.
@@ -1086,6 +1094,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	var (
 		cfgOutputDir, cfgStagingDir, cfgTemplate string
 		cfgMaxRes, cfgMaxTimeout, cfgSegWorkers  int
+		cfgProgressMS                            int
 		cfgPrefer60, cfgChat                     bool
 		cfgInterruptionTimeout                   config.FlexDuration
 	)
@@ -1098,6 +1107,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgChat = c.Downloader.DownloadChat
 		cfgMaxTimeout = c.Downloader.MaximumTimeout
 		cfgSegWorkers = c.Downloader.SegmentWorkers
+		cfgProgressMS = c.Downloader.ProgressIntervalMS
 		cfgInterruptionTimeout = c.Downloader.InterruptionTimeout
 	})
 
@@ -1152,6 +1162,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 			MaximumTimeout:      cfgMaxTimeout,
 			SegmentWorkers:      cfgSegWorkers,
 			InterruptionTimeout: cfgInterruptionTimeout.AsDuration(time.Minute),
+			ProgressInterval:    time.Duration(cfgProgressMS) * time.Millisecond,
 		},
 		YT:           w.yt,
 		StagingDir:   stagingDir,

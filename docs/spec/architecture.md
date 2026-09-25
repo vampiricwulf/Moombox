@@ -275,7 +275,7 @@ OnJobUpdate subscribers --> WebSocket broadcast --> Web UI + TUI update
 SegmentDownloader.OnProgress callback
     |
     v
-ProgressTracker (throttles to 1s DB persist, 16ms callback rate)
+ProgressTracker (throttles to 1s DB persist, one report per progress_interval_ms — 16ms default)
     |
     v
 Database.UpdateJobFields (batched via 100ms coalesce window)
@@ -284,7 +284,7 @@ Database.UpdateJobFields (batched via 100ms coalesce window)
 OnJobUpdate subscribers
     |
     v
-WebSocket hub (no per-job throttle — ProgressTracker's 16ms gate caps the rate upstream)
+WebSocket hub (no per-job throttle — ProgressTracker's per-job gate caps the rate upstream)
     |
     v
 Web UI / TUI (render updated progress)
@@ -534,7 +534,7 @@ The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Q
 
 The `ProgressTracker` aggregates progress from video, audio, and chat downloaders and persists to the database:
 
-- Update throttling: 16ms callback rate (matching TUI's ~60fps tick), 1-second database persist interval
+- Update throttling: one report per `downloader.progress_interval_ms` (16ms by default), 1-second database persist interval. The TUI's own progress tick is finer — 8ms, one per frame at its 120 fps renderer — so the engine's gate, not the tick, is what bounds the rate
 - Progress string format: `"V:1234 A:5678 C:900"` (video seq, audio seq, chat messages)
 - Speed calculation: smoothed exponential average (factor 0.7) of bytes/second
 - ETA calculation: based on elapsed time and progress percentage
@@ -590,7 +590,7 @@ This pattern reduces SQLite write transactions from potentially hundreds per sec
 
 ### WebSocket Broadcast Rate
 
-The WebSocket hub throttles nothing. The highest-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`, capped to ~60 Hz per job by `progressUpdateInterval = 16ms`) now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and `OnJobAdded`/`OnTrimsChanged` are event-driven. A previous per-job throttle in the hub created an ordering race where the trailing edge could arrive after a `BroadcastJobDeleted` and resurrect a deleted row via the client's upsert handler.
+The WebSocket hub throttles nothing. The highest-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`, capped to one report per job per configured progress interval — `progressUpdateInterval` is its 16ms default, and `downloader.progress_interval_ms` overrides it per install) now broadcasts the slim `job_progress` frame; `job_update` carries the state transitions, and `OnJobAdded`/`OnTrimsChanged` are event-driven. A previous per-job throttle in the hub created an ordering race where the trailing edge could arrive after a `BroadcastJobDeleted` and resurrect a deleted row via the client's upsert handler.
 
 ### TUI Async Updates
 
@@ -601,7 +601,7 @@ The TUI uses non-blocking channel sends to prevent the event loop from blocking:
 - Drop counters are logged periodically but are non-fatal
 - Key timing intervals:
   - Main tick: 1 second
-  - Progress tick (active download): 16ms (~60fps)
+  - Progress tick (active download): 8ms (one per frame at the 120 fps renderer)
   - Progress tick (idle): 500ms
   - Marquee animation: 150ms
   - Log flush window: 250ms, ring buffer max 200 lines

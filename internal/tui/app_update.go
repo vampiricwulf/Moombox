@@ -70,7 +70,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (b) the loop runs for other jobs but the selected one transitioned
 		// terminal (store entry deleted → the progress tick's gate skips
 		// it). Jobs the running loop covers are excluded to avoid double
-		// rebuilds — SetProgress already recomputes these rows at 2-60Hz.
+		// rebuilds — SetProgress already recomputes these rows at 2-120Hz.
 		if sel := a.taskList.SelectedJob(); sel != nil {
 			if !a.progressTicking ||
 				(a.progressStore.Get(sel.ID) == nil && !a.details.HasProgress()) {
@@ -104,7 +104,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		// Refresh progress overlay for the selected job. Active downloads get
-		// 16ms ticks; all other jobs still get 500ms ticks which is enough for
+		// 8ms ticks; all other jobs still get 500ms ticks which is enough for
 		// chat count updates on Upcoming jobs with early chat running.
 		if sel := a.taskList.SelectedJob(); sel != nil {
 			p := a.progressStore.Get(sel.ID)
@@ -235,7 +235,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.statusMap[j.ID] = j.Status
 			// Terminal rows get no entry: handleJobUpdate would delete one on
 			// the next write anyway, and a selected Finished job with a live
-			// entry pins the details panel to the 16ms rebuild path.
+			// entry pins the details panel to the fast-tick rebuild path.
 			if isProgressTerminal(j.Status) {
 				continue
 			}
@@ -1244,7 +1244,7 @@ func hasTallyChange(changes []string) bool {
 
 // isProgressTerminal reports the statuses that must NOT hold a progress-store
 // entry: the download is over (or parked), so there is no live progress to
-// render and the 16ms tick has nothing to rebuild for the job. One predicate,
+// render and the fast tick has nothing to rebuild for the job. One predicate,
 // three readers — the full-list snapshot, the JobAdded path, and the update
 // path — because the entry leaked whenever any one of them disagreed.
 //

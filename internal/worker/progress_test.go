@@ -24,6 +24,7 @@ func newTestProgressTracker() *ProgressTracker {
 	return &ProgressTracker{
 		jobID:     "test-job",
 		logger:    nopProgressLogger{},
+		now:       time.Now,
 		startTime: time.Now().Add(-30 * time.Second),
 	}
 }

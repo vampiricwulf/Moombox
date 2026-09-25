@@ -33,7 +33,7 @@ func TestIsProgressTerminal(t *testing.T) {
 // A full-list snapshot must not seed progress entries for jobs whose
 // progress is over. Mutant: the seeding loop calling Set unconditionally
 // (what it did) — a startup snapshot then leaves every Finished job with a
-// live entry, and the 16ms tick rebuilds the details panel for whichever one
+// live entry, and the fast tick rebuilds the details panel for whichever one
 // is selected, forever.
 func TestSnapshotSkipsProgressForTerminalJobs(t *testing.T) {
 	app := NewApp()
@@ -88,7 +88,7 @@ func TestUpdateOfAnAlreadyTerminalJobLeavesTheStoreEmpty(t *testing.T) {
 }
 
 // The live path is unchanged: every update to a running job refreshes its
-// entry, which is what the 16ms tick renders. Mutant: gating the Set on
+// entry, which is what the fast tick renders. Mutant: gating the Set on
 // something coarser (e.g. Job.IsTerminal) and starving live progress.
 func TestUpdateOfALiveJobStillRefreshesTheStore(t *testing.T) {
 	app := NewApp()

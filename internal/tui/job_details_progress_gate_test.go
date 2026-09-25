@@ -31,7 +31,7 @@ func downloadingJob(id string) *database.Job {
 // mutates a stored ProgressData (every write allocates a new one), so a row
 // carrying the mutated text can only mean the rows were rebuilt.
 //
-// Mutant: dropping the gate (the 60Hz rebuild returns), or gating on the
+// Mutant: dropping the gate (the every-tick rebuild returns), or gating on the
 // pointer alone (the wall-clock rows would then freeze).
 func TestSetProgressSkipsTheRebuildWhenNothingChanged(t *testing.T) {
 	m := NewJobDetailsModel()

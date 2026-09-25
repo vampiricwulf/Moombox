@@ -83,9 +83,9 @@ type LogViewerModel struct {
 	level      LogLevel
 
 	// renderCache / cacheKey memoise View(). bubbletea calls View() after
-	// EVERY message (~120/s with one active download: 60 progress updates
-	// plus the 60 Hz tick), and the vast majority of those carry no log
-	// change at all. The key is every input View() reads; the cache is
+	// EVERY message (~180/s with one active download at the defaults: 60
+	// progress updates plus the 120 Hz tick), and the vast majority of those
+	// carry no log change at all. The key is every input View() reads; the cache is
 	// dropped outright while the search box is open, because the textinput
 	// renders a blinking cursor whose state is not in the key.
 	renderCache string
