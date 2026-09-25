@@ -26,7 +26,7 @@ type ResumeStore[T any] struct {
 
 // Save marshals state to JSON and writes it to s.Path through WriteFileAtomic:
 // a uniquely named temp file in the same directory, fsync, chmod 0644 and
-// utils.ReplaceFile. Returns nil when Path is empty (no-op) — that guard runs
+// ReplaceFile. Returns nil when Path is empty (no-op) — that guard runs
 // FIRST, before the marshal and before the shared writer, because
 // filepath.Dir("") is "." and an unguarded call would drop a stray temp in the
 // process working directory.
@@ -36,12 +36,13 @@ type ResumeStore[T any] struct {
 // interleave into it and rename a torn result into place; os.CreateTemp gives
 // each writer its own. The fsync BEFORE the rename, the Windows
 // sharing-violation retry inside ReplaceFile and the removal of the temp on
-// every failure path are all carried over unchanged and now come from the
-// shared writer — pinned by writefile_test.go's
+// every failure path are all carried over unchanged. The fsync order and both
+// cleanup paths now come from the shared writer — pinned by writefile_test.go's
 // TestWriteFileAtomicSyncsBeforeReplacingTarget,
 // TestWriteFileAtomicSyncFailureLeavesNoTempAndTargetUntouched and
-// TestWriteFileAtomicRenameFailureLeavesNoTempAndTargetIntact. The encoded
-// bytes are unchanged (compact json.Marshal, no trailing newline), pinned by
+// TestWriteFileAtomicRenameFailureLeavesNoTempAndTargetIntact; the retry by
+// replacefile_test.go's TestReplaceFileRetriesATransientRefusalThenSucceeds.
+// The encoded bytes are unchanged (compact json.Marshal, no trailing newline), pinned by
 // TestResumeStoreSaveEncodingIsUnchanged; the POSIX mode is now exactly 0644
 // rather than 0644 masked by the umask.
 //

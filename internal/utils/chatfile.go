@@ -27,7 +27,7 @@ var ErrChatFilePartialWrite = errors.New("chat file truncated but subsequent wri
 
 // WriteChatFileAtomic writes data as JSON to path through WriteFileAtomic: a
 // uniquely named temp file in the same directory, fsync, chmod 0644 and
-// utils.ReplaceFile. Calls PadMessageCountJSON on the marshaled bytes so
+// ReplaceFile. Calls PadMessageCountJSON on the marshaled bytes so
 // subsequent UpdateChatFileHeaderFields keeps the header byte-size stable.
 //
 // What the shared writer changed: the temp file's NAME. This used to open a
@@ -37,10 +37,11 @@ var ErrChatFilePartialWrite = errors.New("chat file truncated but subsequent wri
 // the shared writer's to guarantee — the fsync BEFORE the rename, the Windows
 // sharing-violation retry inside ReplaceFile, and the removal of the temp on
 // every failure path (one deferred cleanup instead of four hand-written ones).
-// Those three are pinned by writefile_test.go's
+// The fsync order and both cleanup paths are pinned by writefile_test.go's
 // TestWriteFileAtomicSyncsBeforeReplacingTarget,
 // TestWriteFileAtomicSyncFailureLeavesNoTempAndTargetUntouched and
-// TestWriteFileAtomicRenameFailureLeavesNoTempAndTargetIntact.
+// TestWriteFileAtomicRenameFailureLeavesNoTempAndTargetIntact; the retry by
+// replacefile_test.go's TestReplaceFileRetriesATransientRefusalThenSucceeds.
 //
 // The encoded bytes are byte-identical to what the old writer produced —
 // MarshalIndent with a two-space indent, the padded count field, no trailing
