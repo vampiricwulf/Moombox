@@ -272,8 +272,11 @@ func firstDiff(a, b string) int {
 // The stripped dumps runSteps prints are unreadable when the difference is an
 // ANSI escape rather than text — which is the one shape a pair of frames that
 // both LOOK blank can take, and the shape the single observed failure of this
-// family had (the post-sweep-2 Arc C close review, 2026-09-24). Quoting the
-// raw bytes is what turns a second occurrence into a diagnosis.
+// family most plausibly had: only the tail of its dump was captured (the
+// post-sweep-2 Arc C close review, 2026-09-24), so an ANSI-only difference is
+// the inference, not the record — which is why the message quotes raw bytes
+// for BOTH shapes. Quoting the raw bytes is what turns a second occurrence
+// into a diagnosis.
 func diffWindow(a, b string) string {
 	i := firstDiff(a, b)
 	lo := max(i-20, 0)

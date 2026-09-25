@@ -146,3 +146,62 @@ func TestWriteDescriptionAtomicRenameFailureLeavesNoTemp(t *testing.T) {
 	}
 	assertNoTempSurvives(t, dir)
 }
+
+// statByHandle returns a FileInfo whose identity is resolved NOW. os.Stat on
+// Windows defers the file-ID lookup to os.SameFile and resolves it by PATH,
+// so a pre-write os.Stat compared after the write would describe the
+// post-write file and the assertion below could never fail. (*os.File).Stat
+// fills the identity from the open handle.
+func statByHandle(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return fi
+}
+
+// TestWriteDescriptionAtomicReplacesTheTargetRatherThanRewritingIt pins the
+// property the three tests above take for granted: the description lands as
+// a NEW file renamed over the old one, never as an in-place rewrite of the
+// old one. A rewrite truncates first, so a crash between the truncate and the
+// write leaves the torn file the doc comment promises is impossible — and a
+// direct os.WriteFile(finalPath, …) passes every other test in this file (no
+// fixed temp to clobber, nothing to leak, the body verbatim). The file
+// identity is what tells the two apart: the NTFS file index / the inode
+// changes across a rename and survives a rewrite.
+//
+// Green before AND after the adopt (the old tmp+rename writer replaced too),
+// so a regression pin. Mutant this kills: `return os.WriteFile(finalPath,
+// []byte(body), 0o644)`.
+func TestWriteDescriptionAtomicReplacesTheTargetRatherThanRewritingIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "show.description")
+	if err := os.WriteFile(path, []byte("the previous description"), 0o644); err != nil {
+		t.Fatalf("seed the previous target: %v", err)
+	}
+	before := statByHandle(t, path)
+
+	if err := writeDescriptionAtomic(path, "the new description"); err != nil {
+		t.Fatalf("writeDescriptionAtomic: %v", err)
+	}
+
+	after := statByHandle(t, path)
+	if os.SameFile(before, after) {
+		t.Error("the target was rewritten in place: the same file identity survived the write, " +
+			"so the body went through a truncate-then-write rather than a temp renamed over the target")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "the new description" {
+		t.Errorf("content after the write = %q, want the new body", got)
+	}
+	assertNoTempSurvives(t, dir)
+}
