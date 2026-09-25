@@ -126,12 +126,18 @@ func TestSelectingAnotherJobDropsTheOldSummary(t *testing.T) {
 //     dir is read while it is being written.
 //   - dropping invalidateAsides: a completed recovery keeps rendering the
 //     recordings it just consumed.
+//   - keying the memo on "something has been probed" rather than on the job
+//     (`a.asidesJobID != ""`): the second inactive job the cursor lands on
+//     renders the FIRST job's recordings, which is the same lie
+//     TestSelectingAnotherJobDropsTheOldSummary pins one level up. The probe
+//     stub answers with the ID it was handed so the payload, not just the
+//     counter, names the job it came from.
 func TestAsidesForProbesOncePerSelectedJob(t *testing.T) {
 	a := NewApp()
 	probes := 0
-	a.JobAsides = func(string) AsideSummary {
+	a.JobAsides = func(id string) AsideSummary {
 		probes++
-		return AsideSummary{Asides: []AsideEntry{{Timestamp: "2023-11-14T22:13:20Z", Size: 1}}}
+		return AsideSummary{Asides: []AsideEntry{{Timestamp: id, Size: 1}}}
 	}
 
 	done := &database.Job{ID: "j1", Title: "t", Status: database.StatusFinished, Platform: "youtube"}
@@ -156,6 +162,20 @@ func TestAsidesForProbesOncePerSelectedJob(t *testing.T) {
 	a.asidesFor(done)
 	if probes != 2 {
 		t.Errorf("asidesFor did not re-probe after invalidateAsides (%d probes)", probes)
+	}
+
+	// A second INACTIVE job: the memo holds one job's answer, so landing on
+	// another one has to probe again AND answer with that job's recordings.
+	other := &database.Job{ID: "j3", Title: "t3", Status: database.StatusCancelled, Platform: "youtube"}
+	if got := a.asidesFor(other); len(got.Asides) != 1 || got.Asides[0].Timestamp != "j3" {
+		t.Errorf("selecting a second inactive job returned %+v — the memo served the previous job's recordings", got)
+	}
+	if probes != 3 {
+		t.Errorf("asidesFor probed %d times over two inactive jobs and one invalidation, want 3", probes)
+	}
+	// ...and the new job's answer is memoised in its turn.
+	if got := a.asidesFor(other); probes != 3 || got.Asides[0].Timestamp != "j3" {
+		t.Errorf("the second job's answer was not memoised: %d probes, %+v", probes, got)
 	}
 }
 
