@@ -1178,13 +1178,13 @@ export class MoomboxApp {
           const oldJob = this.jobs[jobIndex];
           const oldStatus = oldJob.status;
           // Preserve computed staging fields from prior enriched state — WS
-          // delivers raw DB objects without these fields.
-          if (updatedJob.hasStaging === undefined && oldJob.hasStaging !== undefined) {
-            updatedJob.hasStaging = oldJob.hasStaging;
-          }
-          if (updatedJob.hasSegments === undefined && oldJob.hasSegments !== undefined) {
-            updatedJob.hasSegments = oldJob.hasSegments;
-          }
+          // delivers raw DB objects without them. Through the SAME helper the
+          // jobs_update case uses, so the set of carried-forward fields is one
+          // list in one place: this case once kept its own two-field copy, and
+          // when Arc A added `asides`/`keptChatSidecar` to the helper the
+          // details dialog's Set-aside Recordings section vanished here on the
+          // status change that first makes Recover offerable.
+          this.details._preserveStagingFields([oldJob], [updatedJob]);
           this.jobs[jobIndex] = updatedJob;
           // Status change affects sort order — do full re-render
           if (oldStatus !== updatedJob.status) {

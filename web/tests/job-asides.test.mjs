@@ -152,6 +152,46 @@ test("clicking Recover fires the request and disables the button", { skip }, asy
   assert.equal(btn.disabled, true, "the button must stay disabled once a recovery has started");
 });
 
+// The WebSocket delivers RAW DB rows: no asides, no keptChatSidecar, no
+// hasStaging. `jobs_update` carries all four forward through
+// _preserveStagingFields; `job_update` used to carry only the first two by
+// hand — and a status change is exactly what makes updateJobDetails REBUILD
+// the body, so the section disappeared on the one transition that first makes
+// Recover offerable. Reopening the dialog refetched it, which is why this hid.
+//
+// MUTANT: carry hasStaging/hasSegments only (the two-field inline block
+// app.js used to hold) — the section and its new Recover button vanish.
+test("a job_update that omits the asides keeps them on the open details dialog", { skip }, async () => {
+  const h = await harness.makeApp({ routes: { "GET /api/jobs/:id/logs": () => [] } });
+  const job = withAsides({ status: "Downloading", hasStaging: true, hasSegments: true });
+  h.app.selectedJobId = job.id;
+  h.app.jobs = [job];
+  h.app.renderJobs();
+  h.app.details.renderJobDetails(job);
+  assert.ok(h.el("details-asides-section"), "precondition: the section renders while the job is active");
+  assert.equal(h.el("details-recover-asides-btn"), null, "precondition: Recover is withheld while active");
+
+  // The raw row the hub broadcasts — none of the four enriched fields.
+  const raw = { ...inputs.JOBS.Finished, id: "job-1", status: "Cancelled" };
+  for (const k of ["asides", "keptChatSidecar", "hasStaging", "hasSegments"]) delete raw[k];
+  h.app.handleMessage({ type: "job_update", payload: raw });
+  await h.flush();
+
+  assert.ok(
+    h.el("details-asides-section"),
+    "the Set-aside Recordings section vanished on the status-change rebuild",
+  );
+  assert.ok(
+    h.el("details-recover-asides-btn"),
+    "Recover must be offered the moment the job stops being active",
+  );
+  assert.match(h.el("details-asides-section").textContent, /kept in staging/,
+    "keptChatSidecar must be carried forward too, not just the asides array");
+  const held = h.app.jobs.find((j) => j.id === "job-1");
+  assert.equal(held.hasStaging, true, "hasStaging must still be carried forward");
+  assert.equal(held.hasSegments, true, "hasSegments must still be carried forward");
+});
+
 // MUTANT: drop the asides cell from the orphan row — the Files tab offers a
 // staging dir full of captured footage as if it were scratch space, which is
 // exactly the distinction OrphanedEntry.Asides was added to make.
