@@ -26,8 +26,8 @@ const withAsides = (over = {}) => ({
   ...inputs.JOBS.Finished,
   id: "job-1",
   asides: [
-    { path: "D:\staging\job-1\video.mp4.restart-1700000000", size: 1024 * 1024 * 512, timestamp: "2023-11-14T22:13:20Z", hasResumeSidecar: true },
-    { path: "D:\staging\job-1\video.mp4.restart-1700000100", size: 1024 * 1024, timestamp: "2023-11-14T22:15:00Z", hasResumeSidecar: false },
+    { path: "D:\\staging\\job-1\\video.mp4.restart-1700000000", size: 1024 * 1024 * 512, timestamp: "2023-11-14T22:13:20Z", hasResumeSidecar: true },
+    { path: "D:\\staging\\job-1\\video.mp4.restart-1700000100", size: 1024 * 1024, timestamp: "2023-11-14T22:15:00Z", hasResumeSidecar: false },
   ],
   keptChatSidecar: true,
   ...over,
@@ -55,6 +55,18 @@ test("the details dialog lists every set-aside recording with its size and sidec
     section.querySelectorAll(".details-row").length,
     5,
     "want the explanation, one row per recording, one for the chat capture and one for the button",
+  );
+  // MUTANT: drop the path from the row (or write the fixture's Windows path with
+  // single backslashes) — the only place the operator can read WHICH file a row
+  // stands for is this tooltip, and a lone "\v" in a literal silently becomes a
+  // vertical tab, so the fixture would stop describing a real path at all.
+  assert.deepEqual(
+    [...section.querySelectorAll(".details-value[title]")].map((v) => v.getAttribute("title")),
+    [
+      "D:\\staging\\job-1\\video.mp4.restart-1700000000",
+      "D:\\staging\\job-1\\video.mp4.restart-1700000100",
+    ],
+    "each recording's row must carry its real on-disk path as the tooltip",
   );
 });
 
@@ -147,7 +159,7 @@ test("an orphaned staging entry names the set-aside recordings it holds", { skip
   const h = await harness.makeApp();
   h.app.renderOrphanedFiles([
     {
-      type: "staging", path: "D:\staging\job-9", relPath: "job-9", size: 4096,
+      type: "staging", path: "D:\\staging\\job-9", relPath: "job-9", size: 4096,
       modified: new Date().toISOString(), jobId: "", jobTitle: "", jobStatus: "",
       asides: ["video.mp4.restart-1700000000", "audio_stream.restart-1700000000"],
     },
@@ -157,4 +169,11 @@ test("an orphaned staging entry names the set-aside recordings it holds", { skip
   assert.ok(row, "no orphan row was rendered");
   assert.match(row.textContent, /2 set-aside recordings/, "the count is not shown");
   assert.match(row.textContent, /video\.mp4\.restart-1700000000/, "the names are not shown");
+  // Same pin one level up: the row's tooltip is the full staging path, so a
+  // single-backslash fixture literal shows up here rather than nowhere.
+  assert.equal(
+    row.querySelector(".files-path").getAttribute("title"),
+    "D:\\staging\\job-9",
+    "the orphan row must carry the real on-disk path as its tooltip",
+  );
 });
