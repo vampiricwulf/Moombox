@@ -926,7 +926,14 @@ func openPathCommandFor(goos, target string) *exec.Cmd {
 	case "darwin":
 		program = "open"
 	}
-	return exec.Command(program, target)
+	cmd := exec.Command(program, target)
+	// Windows only: Go leaves an unquoted '=' for explorer's legacy parser to
+	// split, so a directory path containing one opens nothing (W R-3). The
+	// argv above is unchanged — Windows ignores it once CmdLine is set.
+	if goos == "windows" {
+		forceQuoteCmdLine(cmd, program, target)
+	}
+	return cmd
 }
 
 // StartDetached starts cmd and hands the child back to the OS. The caller never

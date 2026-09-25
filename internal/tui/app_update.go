@@ -1248,6 +1248,27 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 	// downloads) flow through progressStore and don't need list rebuilds.
 	if hasDisplayChange(ev.Changes) {
 		a.taskList.UpdateJob(job)
+		// Re-tally the status bar. UpdateJob replaces the element in the
+		// slice the bar's jobs ALIAS (TaskListModel.Jobs returns the live
+		// storage), and StatusBarModel no longer walks that slice per frame —
+		// it reads a tally SetJobs stores. Without this the Active: counter
+		// and the B1 parked-COOKIES? badge freeze at whatever the last
+		// snapshot / add / delete left behind, indefinitely on a quiet
+		// install.
+		//
+		// Gated on exactly the columns tallyJobs derives from, so a real
+		// transition costs one walk and a progress tick costs none: progress
+		// is not a display column, so it never reaches this branch at all,
+		// and the gate keeps the other eleven that do (title, filename, …)
+		// off the tally too. platform is here because parkedCookieJobs reads
+		// it; it is not itself a display column, so it only ever arrives
+		// alongside one, and status is the key that fires in practice.
+		//
+		// handleTrimsChanged is the other UpdateJob caller and deliberately
+		// has no such call: a trim write touches neither column.
+		if slices.Contains(ev.Changes, "status") || slices.Contains(ev.Changes, "platform") {
+			a.statusBar.SetJobs(a.taskList.Jobs())
+		}
 		// Refresh details from whatever is selected now — the update may
 		// have moved the job out of the visible (filtered) set, landing
 		// the selection on a different row.
@@ -1354,6 +1375,12 @@ func (a *App) handleTrimsChanged(job *database.Job) {
 	if job == nil {
 		return
 	}
+	// This is the SECOND UpdateJob bypass of statusBar.SetJobs, and unlike
+	// handleJobUpdate's it needs no gate: UpdateJob replaces the element in
+	// the slice the status bar's jobs alias, but a trim write touches neither
+	// Status nor Platform — the only two columns tallyJobs derives from — so
+	// the stored tally is still correct. See handleJobUpdate's gate for the
+	// case that is not.
 	a.taskList.UpdateJob(job)
 	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
 		a.details.SetJob(job)

@@ -113,6 +113,17 @@ type StatusBarModel struct {
 	// cannot be resolved at all (sig has no goja fallback) and PO tokens
 	// fall to a path that errors.
 	sidecarDown bool
+	// counts is the job tally, recomputed once per SetJobs instead of once
+	// per frame. metricTiers used to call tallyJobs() on every render — one
+	// tally, two passes over the whole job list, at up to 60 frames a second
+	// — for a value that only changes when the job list does.
+	counts barJobCounts
+	// renderCache / cacheKey memoise View(), exactly as TaskListModel,
+	// JobDetailsModel and LogViewerModel already do (CORE-2). The status bar
+	// was the one panel left out, at 70 of a no-change frame's 100
+	// allocations.
+	renderCache string
+	cacheKey    statusBarKey
 }
 
 // NewStatusBarModel creates a new status bar model.
@@ -164,6 +175,7 @@ func (m *StatusBarModel) ReloginPlatform() string {
 // SetJobs updates the jobs reference for COOKIES? detection (B1).
 func (m *StatusBarModel) SetJobs(jobs []*database.Job) {
 	m.jobs = jobs
+	m.counts = m.tallyJobs()
 }
 
 // SetDiskStatus updates the disk space display.
@@ -193,10 +205,78 @@ func (m *StatusBarModel) SetBackfillStatus(chID, name, tab string, pages int, st
 	}
 }
 
+// statusBarKey is every input StatusBarModel.View reads, in a comparable
+// struct, so an unchanged frame is one == away from the memoised string.
+//
+// NO CLOCK, deliberately (spec §5). taskListKey and jobDetailsKey carry
+// time.Now().Unix() because their headers show countdowns and timestamps; the
+// status bar shows neither, so nothing here can go stale on its own and a
+// second field would throw away 59 of every 60 cache hits.
+//
+// The PUBLIC fields are in the key rather than behind an invalidate() call,
+// and so are the two package-internal ones: ShowChordHint and SelectedCount
+// are assigned directly by app_layout.go on every frame, and offline and
+// sidecarDown by app_update.go and app.go. There is no setter to invalidate
+// from, and an input that is IN the key re-renders naturally — no writer
+// anywhere can forget to call anything. TestStatusBarCacheKeyCoversEveryInput
+// is the pin that says the list below is complete.
+//
+// diskUsedPct is compared with ==, like every other field. A NaN would never
+// compare equal to itself and would cost one full render per frame — the safe
+// direction, and unreachable anyway: the value comes from an integer ratio.
+type statusBarKey struct {
+	width           int
+	ytCookie        CookieStatus
+	twCookie        CookieStatus
+	ytActive        bool
+	twActive        bool
+	counts          barJobCounts
+	diskFree        uint64
+	diskUsedPct     float64
+	diskWarn        string
+	backfillChannel string
+	backfillName    string
+	backfillTab     string
+	backfillPages   int
+	showChordHint   bool
+	selectedCount   int
+	offline         bool
+	sidecarDown     bool
+}
+
+func (m *StatusBarModel) statusBarKey() statusBarKey {
+	return statusBarKey{
+		width:           m.width,
+		ytCookie:        m.ytCookie,
+		twCookie:        m.twCookie,
+		ytActive:        m.ytActive,
+		twActive:        m.twActive,
+		counts:          m.counts,
+		diskFree:        m.diskFree,
+		diskUsedPct:     m.diskUsedPct,
+		diskWarn:        m.diskWarn,
+		backfillChannel: m.backfillChannel,
+		backfillName:    m.backfillName,
+		backfillTab:     m.backfillTab,
+		backfillPages:   m.backfillPages,
+		showChordHint:   m.ShowChordHint,
+		selectedCount:   m.SelectedCount,
+		offline:         m.offline,
+		sidecarDown:     m.sidecarDown,
+	}
+}
+
 // View renders the status bar.
 func (m *StatusBarModel) View() string {
 	if m.width <= 0 {
 		return ""
+	}
+
+	// Memoised like the other three panels (CORE-2). The zero-width guard
+	// stays ahead of this: an unsized bar renders nothing and caches nothing.
+	key := m.statusBarKey()
+	if m.renderCache != "" && key == m.cacheKey {
+		return m.renderCache
 	}
 
 	left, right := m.fitTiers()
@@ -220,7 +300,10 @@ func (m *StatusBarModel) View() string {
 	// second line into the terminal and corrupting the frame below it.
 	// Clamping (ANSI-aware, so styled runs are cut without severing escape
 	// sequences) degrades to a clipped bar instead of a broken layout.
-	return statusBarBgStyle.MaxWidth(m.width).Render(bar)
+	out := statusBarBgStyle.MaxWidth(m.width).Render(bar)
+	m.renderCache = out
+	m.cacheKey = key
+	return out
 }
 
 // statusBarDescent is the fixed order in which the two halves give up
@@ -335,10 +418,14 @@ type barJobCounts struct {
 	twParked bool // a job parked in COOKIES? on Twitch
 }
 
-// tallyJobs walks the job list once per frame. Two passes rather than one:
+// tallyJobs walks the job list once per SetJobs. Two passes rather than one:
 // parkedCookieJobs stays the named home of the attribution rule (the spec doc
 // cites it by symbol and declaring file), so this calls it instead of
 // inlining it.
+//
+// Still a method, and still called directly by 30+ status-bar tests: it is
+// the named home of the derivation, and SetJobs is merely the one production
+// caller.
 func (m *StatusBarModel) tallyJobs() barJobCounts {
 	c := barJobCounts{}
 	c.ytParked, c.twParked = m.parkedCookieJobs()
@@ -361,7 +448,7 @@ func (m *StatusBarModel) tallyJobs() barJobCounts {
 // (non-warning) disk and cookie readouts, leaving a bar that is silent
 // when everything is healthy and still shouts when it isn't.
 func (m *StatusBarModel) metricTiers() []string {
-	counts := m.tallyJobs()
+	counts := m.counts
 	tiers := make([]string, tierNone+1)
 	for t := tierFull; t <= tierNone; t++ {
 		tiers[t] = m.renderMetrics(t, counts) + m.renderCookieStatus(t, counts)
@@ -637,7 +724,7 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	var parts []string
 
 	// Jobs parked in COOKIES?, attributed to the platform they belong to (B1).
-	// Tallied once per frame by tallyJobs; see parkedCookieJobs for the rule.
+	// Tallied once per SetJobs by tallyJobs; see parkedCookieJobs for the rule.
 	ytRejected, twRejected := counts.ytParked, counts.twParked
 
 	// healthy reports whether a platform's indicator is pure reassurance —
