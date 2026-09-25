@@ -841,6 +841,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
 
+	// The engine's process-wide reorder ceilings (downloader.reorder_buffer_mb
+	// / reorder_budget_mb). Read ONCE here and re-applied from the same
+	// applier on every config save from either UI (hot_reload.go), which is
+	// why nothing downstream — not DownloaderOptions, not the strategies —
+	// carries the value. Warns here if the saved pair is incoherent.
+	s.applyReorderBudget(cfg.Downloader)
+
 	// =========================================================================
 	// 11. Trim service
 	// =========================================================================

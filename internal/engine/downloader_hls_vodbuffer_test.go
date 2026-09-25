@@ -237,3 +237,109 @@ func waitForVodFetchFixedPoint(t *testing.T, fetched *atomic.Int32) int32 {
 	}
 	return held
 }
+
+// TestHlsVodParallelHonoursTheConfiguredPerJobCeiling is the behavioural
+// proof that the CALL SITE reads the configured ceiling rather than the
+// engine constant. Same stall as TestHlsVodParallelBufferIsBounded, but with
+// no test override: the only thing that can bound this download to two
+// resident segments is ConfigureReorder.
+//
+// MUTANT: restore `bufLimit := catchUpBufferBytes` in runHlsVodParallel — the
+// 256 MB constant swallows all 40 segments while segment 0 is blocked and the
+// held assertion fails. MUTANT: have ConfigureReorder write only the total —
+// same failure.
+func TestHlsVodParallelHonoursTheConfiguredPerJobCeiling(t *testing.T) {
+	const (
+		totalSegs = 40
+		segSize   = 64 << 10
+		workers   = 8
+	)
+
+	// A pristine process budget, restored afterwards — the helper lives in
+	// reorder_budget_test.go (same package). This test must NOT call
+	// t.Parallel: it mutates a package var.
+	withFreshSharedBudget(t)
+	ConfigureReorder(2*segSize, 0) // room for two non-head segments, no shared cap
+
+	release := make(chan struct{})
+	var fetched atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/playlist.m3u8") {
+			var b strings.Builder
+			b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
+			for i := range totalSegs {
+				fmt.Fprintf(&b, "#EXTINF:2.0,\n/seg%d.ts\n", i)
+			}
+			b.WriteString("#EXT-X-ENDLIST\n")
+			w.Write([]byte(b.String()))
+			return
+		}
+		if r.URL.Path == "/seg0.ts" {
+			<-release
+		}
+		fetched.Add(1)
+		w.Write(make([]byte, segSize))
+	}))
+	t.Cleanup(srv.Close)
+
+	out := filepath.Join(t.TempDir(), "video.ts")
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:        srv.URL + "/playlist.m3u8",
+		OutputFile:     out,
+		IsHls:          true,
+		SegmentWorkers: workers,
+	})
+	d.delays = fastDelays()
+	// hlsVodBufferBytesOverride deliberately UNSET: the configured ceiling is
+	// the thing under test.
+
+	done := make(chan error, 1)
+	go func() { done <- d.Start(context.Background()) }()
+
+	held := waitForVodFetchFixedPoint(t, &fetched)
+	close(release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Start did not return after the head segment was released — the configured ceiling deadlocked")
+	}
+
+	if maxHeld := int32(2 + workers + 1); held > maxHeld {
+		t.Fatalf("%d segments fetched while segment 0 was blocked, want at most %d — "+
+			"the call site is not reading the configured per-job ceiling", held, maxHeld)
+	}
+	info, err := os.Stat(out)
+	if err != nil || info.Size() != int64(totalSegs*segSize) {
+		t.Fatalf("output = %v/%v, want %d bytes — every segment must still land", info, err, totalSegs*segSize)
+	}
+}
+
+// TestBothReorderCallSitesReadTheConfiguredCeiling pins the DASH catch-up
+// twin, which has no cheap behavioural harness: driving runParallelCatchUp
+// needs a fake GVS and a stalled head, and the ceiling it builds with is a
+// single expression. A source pin is honest about being structural and costs
+// nothing.
+//
+// MUTANT: restore `bufLimit := catchUpBufferBytes` at either site — that
+// file's assertion fires and names the download path that silently keeps the
+// 256 MB constant while the operator's setting is ignored.
+func TestBothReorderCallSitesReadTheConfiguredCeiling(t *testing.T) {
+	for _, name := range []string{"downloader_parallel.go", "downloader_hls.go"} {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		text := string(src)
+		if !strings.Contains(text, "bufLimit := sharedReorderBudget.perJobLimit()") {
+			t.Errorf("%s does not build its reorder buffer from sharedReorderBudget.perJobLimit() — "+
+				"downloader.reorder_buffer_mb is ignored on that download path", name)
+		}
+		if strings.Contains(text, "bufLimit := catchUpBufferBytes") {
+			t.Errorf("%s still seeds bufLimit from the catchUpBufferBytes constant", name)
+		}
+	}
+}

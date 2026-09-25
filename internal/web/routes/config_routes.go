@@ -70,6 +70,12 @@ type ConfigRoutesCallbacks struct {
 	// OnFfmpegPathChange is called when paths.ffmpeg_path changes so services
 	// that captured the path at construction (TrimService) rebuild.
 	OnFfmpegPathChange func(path string)
+	// OnReorderBudgetChange is called when either downloader reorder ceiling
+	// (reorder_buffer_mb / reorder_budget_mb) changes, so the engine's
+	// process-wide budget follows the save without a restart. It takes the
+	// whole saved DownloaderConfig because the two keys are reconciled
+	// against each other (see config.DownloaderConfig.ReorderLimitBytes).
+	OnReorderBudgetChange func(d config.DownloaderConfig)
 }
 
 // pathFieldError returns the per-field error for a user-supplied path value,
@@ -270,6 +276,20 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		if v, ok := dl["segment_workers"].(float64); ok {
 			if v < 1 {
 				errs["downloader.segment_workers"] = "must be >= 1"
+			}
+		}
+		// The two reorder ceilings: 0 is the documented "unbounded" value on
+		// either, so only a negative is rejected and there is no maximum.
+		// Matches config.Validate — a hand-edited TOML and a PUT must be
+		// judged the same way.
+		if v, ok := dl["reorder_buffer_mb"].(float64); ok {
+			if v < 0 {
+				errs["downloader.reorder_buffer_mb"] = "reorder_buffer_mb must be >= 0 MB (0 = unbounded)"
+			}
+		}
+		if v, ok := dl["reorder_budget_mb"].(float64); ok {
+			if v < 0 {
+				errs["downloader.reorder_budget_mb"] = "reorder_budget_mb must be >= 0 MB (0 = unbounded)"
 			}
 		}
 		// 0 = unbounded (ruling R1); mirrors config.Validate's floor.
@@ -579,6 +599,12 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := dl["segment_workers"].(float64); ok {
 			cfg.Downloader.SegmentWorkers = int(v)
 		}
+		if v, ok := dl["reorder_buffer_mb"].(float64); ok {
+			cfg.Downloader.ReorderBufferMB = int(v)
+		}
+		if v, ok := dl["reorder_budget_mb"].(float64); ok {
+			cfg.Downloader.ReorderBudgetMB = int(v)
+		}
 		if v, ok := dl["download_chat"].(bool); ok {
 			cfg.Downloader.DownloadChat = v
 		}
@@ -871,6 +897,8 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldGoSoft := cfg.Memory.GoSoftLimitMB
 		oldTrust := cfg.Network.TrustForwardedProto
 		oldFfmpeg := cfg.Paths.FfmpegPath
+		oldReorderPerJob := cfg.Downloader.ReorderBufferMB
+		oldReorderBudget := cfg.Downloader.ReorderBudgetMB
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -895,6 +923,12 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newGoSoft := cfg.Memory.GoSoftLimitMB
 		newTrust := cfg.Network.TrustForwardedProto
 		newFfmpeg := cfg.Paths.FfmpegPath
+		newReorderPerJob := cfg.Downloader.ReorderBufferMB
+		newReorderBudget := cfg.Downloader.ReorderBudgetMB
+		// A copy, taken under the lock: DownloaderConfig holds only value
+		// types, so the callback below can read it after mu.Unlock without
+		// racing the next PUT.
+		newDownloader := cfg.Downloader
 
 		mu.Unlock()
 
@@ -923,6 +957,10 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if newFfmpeg != oldFfmpeg && callbacks.OnFfmpegPathChange != nil {
 				callbacks.OnFfmpegPathChange(newFfmpeg)
+			}
+			if (newReorderPerJob != oldReorderPerJob || newReorderBudget != oldReorderBudget) &&
+				callbacks.OnReorderBudgetChange != nil {
+				callbacks.OnReorderBudgetChange(newDownloader)
 			}
 		}
 

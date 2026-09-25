@@ -4,10 +4,12 @@ import (
 	"log/slog"
 	"runtime/debug"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
-// The three settings that are read once at startup and re-applied here on
+// The four settings that are read once at startup and re-applied here on
 // every config save from either UI (the web PUT via ConfigRoutesCallbacks,
 // the TUI via OnSaveConfig) — and, for the ffmpeg path, from a third writer:
 // POST /api/ffmpeg/check via FFmpegDeps.OnFfmpegPathChange, which persists a
@@ -57,4 +59,33 @@ func (s *runState) applyFfmpegPath(path string) {
 	if s.log != nil {
 		s.log.Debug("ffmpeg path re-applied", slog.String("path", path))
 	}
+}
+
+// applyReorderBudget re-applies the two downloader reorder ceilings
+// (reorder_buffer_mb / reorder_budget_mb) to the engine's process-wide
+// budget. Reached from three places: initServices at boot, the config PUT's
+// OnReorderBudgetChange callback, and the TUI's OnSaveConfig hot-reload
+// block — so the value never travels through engine.DownloaderOptions or the
+// worker's strategies, which would have meant threading one process-wide
+// number through seven per-job call sites.
+//
+// The clamp warning is emitted whenever the pair is incoherent as saved (a
+// per-job ceiling above the process budget), so boot warns exactly once and a
+// save that leaves the pair incoherent says so again rather than going quiet
+// about a setting that is not doing what it reads like.
+func (s *runState) applyReorderBudget(d config.DownloaderConfig) {
+	perJobBytes, totalBytes, clamped := d.ReorderLimitBytes()
+	engine.ConfigureReorder(perJobBytes, totalBytes)
+	if s.log == nil {
+		return
+	}
+	if clamped {
+		s.log.Warn("downloader.reorder_buffer_mb is above downloader.reorder_budget_mb — clamped to the process-wide budget",
+			slog.Int("reorder_buffer_mb", d.ReorderBufferMB),
+			slog.Int("reorder_budget_mb", d.ReorderBudgetMB))
+		return
+	}
+	s.log.Debug("reorder ceilings applied",
+		slog.Int("per_job_bytes", perJobBytes),
+		slog.Int("total_bytes", totalBytes))
 }

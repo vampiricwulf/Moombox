@@ -132,6 +132,18 @@ const (
 	// 3.7-6.2 MB segments of a 1080p60 live stream, sixteen workers would
 	// hold ~250 MB. Bounding by bytes means a wider pool costs connections,
 	// not memory — workers simply wait for the head segment to land.
+	//
+	// It is no longer read at the call sites. Since owner ruling R3
+	// (2026-09-24) the per-job ceiling is operator-settable
+	// (downloader.reorder_buffer_mb, defaulting to 1024 MB or 256 MB on
+	// arm64) and reaches the engine through ConfigureReorder; this constant
+	// is what sharedReorderBudget starts at, so a downloader driven WITHOUT
+	// that call — every test in this package, and any embedding that does
+	// not boot through cmd/moombox — keeps exactly the bound it had before.
+	// It stays here, as a constant, rather than moving into
+	// config.platformDefaults: internal/engine imports nothing from
+	// internal/config and this is the value that applies when there is no
+	// config at all.
 	catchUpBufferBytes = 256 << 20
 )
 
@@ -502,18 +514,20 @@ type SegmentDownloader struct {
 	lastCatchUpFailure atomicTime
 
 	// catchUpBufferBytesOverride lets tests shrink the reorder buffer's byte
-	// ceiling below production's 256 MB catchUpBufferBytes, so a test can
-	// saturate it with a handful of small fake segments instead of waiting
-	// on real production-scale transfers. Zero (the default) means "use
-	// catchUpBufferBytes" — production code never sets this.
+	// ceiling below the configured per-job ceiling (1024 MB by default, 256
+	// MB on arm64), so a test can saturate it with a handful of small fake
+	// segments instead of waiting on real production-scale transfers. Zero
+	// (the default) means "use the configured per-job ceiling" —
+	// downloader.reorder_buffer_mb, read through
+	// sharedReorderBudget.perJobLimit. Production code never sets this.
 	catchUpBufferBytesOverride int
 
 	// hlsVodBufferBytesOverride is the same seam for the HLS VOD reorder
 	// buffer (runHlsVodParallel) — deliberately the same shape as
 	// catchUpBufferBytesOverride above rather than a package var, so the two
 	// twins read alike and tests that shrink either one stay parallelisable.
-	// Zero (the default) means "use catchUpBufferBytes"; production code
-	// never sets this.
+	// Zero (the default) means "use the configured per-job ceiling";
+	// production code never sets this.
 	//
 	// The ceiling it shrinks is sweep-2 ENGINE-2: that reorder buffer was a
 	// plain map with no bound at all, so while fetchSegmentWithRetry worked

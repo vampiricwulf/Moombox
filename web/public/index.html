@@ -914,6 +914,22 @@
                                 placeholder="12"
                                 help-text="Segments fetched at once within one download (not the number of concurrent downloads). Higher is faster on catch-up; very high values raise bot-detection risk. Default 12, no maximum; values above 16 are flagged as risky."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-reorder-buffer-mb"
+                                type="number"
+                                min="0"
+                                label="Reorder Buffer Per Job (MB)"
+                                placeholder="1024"
+                                help-text="MB of out-of-order segments one download may hold in RAM; 0 = unbounded (default: 1024; 256 on arm64)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-reorder-budget-mb"
+                                type="number"
+                                min="0"
+                                label="Reorder Budget Total (MB)"
+                                placeholder="4096"
+                                help-text="MB every download's reorder buffer may hold between them; 0 = unbounded (default: 4096; 1024 on arm64)"
+                            ></sl-input>
                             <sl-switch id="cfg-download-chat" checked>
                                 Download Live Chat
                                 <span slot="help-text"
