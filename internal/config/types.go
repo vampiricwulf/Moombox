@@ -174,9 +174,30 @@ type DownloaderConfig struct {
 	// ceiling is 10 GB of admissible residency on a box that has 4. 0 =
 	// unbounded. Default 4096, or 1024 on arm64. A per-job value above this
 	// budget is clamped to it at read time (ReorderLimitBytes).
-	ReorderBudgetMB int  `toml:"reorder_budget_mb" json:"reorder_budget_mb"`
-	DownloadChat    bool `toml:"download_chat" json:"download_chat"`
-	Prefer60fps     bool `toml:"prefer_60fps" json:"prefer_60fps"`
+	ReorderBudgetMB int `toml:"reorder_budget_mb" json:"reorder_budget_mb"`
+	// ProgressIntervalMS is the minimum gap, in MILLISECONDS, between one
+	// job's progress reports — ProgressTracker.maybeUpdate's gate, and so
+	// the upstream rate limit on both the WebSocket hub (which throttles
+	// nothing of its own) and the TUI's job rows.
+	//
+	// Min 1; there is deliberately no maximum. Unlike the two reorder
+	// ceilings above, 0 is NOT a documented "disabled" value here: an
+	// ungated tracker would write the database once per arriving segment
+	// callback, on every download at once, which is precisely what the gate
+	// exists to prevent. Validate resets anything below 1 to the default.
+	//
+	// The knob exists so 8 ms — about 120 reports a second, matching the
+	// 120 fps renderer — can be tried on a fast machine without a rebuild,
+	// and so a slow one can go the other way (owner ruling F1, 2026-09-25).
+	// Snapshotted per job start into JobConfig.ProgressInterval by
+	// buildJobContext, like MaximumTimeout and SegmentWorkers, so a change
+	// applies to the NEXT job's tracker and a running tracker keeps the
+	// interval it started with. Not restart-required, and absent from both
+	// restart-required lists because it has no Settings row in either UI:
+	// a config-file-only key by owner ruling, like DpapiProfileDir below.
+	ProgressIntervalMS int  `toml:"progress_interval_ms" json:"progress_interval_ms"`
+	DownloadChat       bool `toml:"download_chat" json:"download_chat"`
+	Prefer60fps        bool `toml:"prefer_60fps" json:"prefer_60fps"`
 	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
 	// retrying — checking every 30s whether the stream has ended — before
 	// force-finalizing the recording, even if YouTube still reports the stream
