@@ -86,6 +86,19 @@ export class JobDetailsController {
           if (!res.ok) this.app.showToast("Failed to mark unwatched", "danger");
           return;
         }
+        const recoverBtn = e.target.closest("#details-recover-asides-btn");
+        if (recoverBtn) {
+          // Disable before the await: the server's in-flight claim refuses a
+          // second recovery with a 409, but the button must not invite one.
+          recoverBtn.loading = true;
+          recoverBtn.disabled = true;
+          const started = await this.app.recoverAsides(this.app.selectedJobId);
+          recoverBtn.loading = false;
+          // Only a refusal gives the button back — a running recovery ends
+          // with the asides gone, and the next render drops the section.
+          if (!started) recoverBtn.disabled = false;
+          return;
+        }
       });
     }
   }
@@ -118,9 +131,19 @@ export class JobDetailsController {
       if (!job) return;
       job.hasStaging = enriched.hasStaging;
       job.hasSegments = enriched.hasSegments;
+      job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
+      job.keptChatSidecar = !!enriched.keptChatSidecar;
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
-        this.updateDetailsButtons(job);
+        if (job.asides.length > 0) {
+          // The section is part of the rendered body, not a static element, so
+          // it can only appear on a rebuild. Rare by construction: only a job
+          // that restarted mid-stream has asides at all.
+          this.renderJobDetails(job);
+          this.loadJobLogs(jobId);
+        } else {
+          this.updateDetailsButtons(job);
+        }
       }
     } catch { /* network blip — buttons stay hidden, same as before the fetch */ }
   }
@@ -589,6 +612,44 @@ export class JobDetailsController {
       </sl-details>
       ` : ""}
 
+      ${(() => {
+        const asides = Array.isArray(job.asides) ? job.asides : [];
+        if (asides.length === 0) return "";
+        // The four statuses worker.IsActiveJobStatus (internal/worker/orphans.go)
+        // names — the single source of truth for "this job's staging is being
+        // written". internal/tui/app_actions.go's JobIsActive is the other
+        // reader, and cmd/moombox pins the two Go sides against each other;
+        // this list is pinned behaviourally by the jsdom test that walks all
+        // four statuses and the Finished complement.
+        const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(job.status);
+        let rows = "";
+        asides.forEach((aside, i) => {
+          const when = aside.timestamp ? this.app.formatRelativeTime(aside.timestamp) : "unknown time";
+          const size = aside.size ? this.app.formatBytes(aside.size) : "—";
+          const sidecar = aside.hasResumeSidecar ? "resume sidecar" : "no resume sidecar";
+          const ts = aside.timestamp ? ` data-timestamp="${this.app.escapeHtml(aside.timestamp)}"` : "";
+          rows += `<div class="details-row">
+            <span class="details-label">Recording ${i + 1}:</span>
+            <span class="details-value" title="${this.app.escapeHtml(aside.path || "")}"><span${ts}>${this.app.escapeHtml(when)}</span> — ${this.app.escapeHtml(size)} — ${this.app.escapeHtml(sidecar)}</span>
+          </div>`;
+        });
+        rows += `<div class="details-row">
+          <span class="details-label">Chat capture:</span>
+          <span class="details-value">${job.keptChatSidecar ? "kept in staging" : "none"}</span>
+        </div>`;
+        if (!isActive) {
+          rows += `<div class="details-row">
+            <span class="details-label"></span>
+            <span class="details-value"><sl-button id="details-recover-asides-btn" variant="primary" size="small" outline><sl-icon slot="prefix" name="film"></sl-icon> Recover</sl-button></span>
+          </div>`;
+        }
+        return `<div class="details-section" id="details-asides-section">
+          <strong>Set-aside Recordings (${asides.length}):</strong>
+          <div class="details-row"><span class="details-label"></span><span class="details-value" style="color: var(--sl-color-neutral-600); font-size: 0.9em;">Footage the engine preserved when it could not resume a recording mid-stream. Recover muxes each one into its own file beside the archive; they overlap the archive's opening, so they are never merged into it.</span></div>
+          ${rows}
+        </div>`;
+      })()}
+
       ${
         job.error
           ? `
@@ -755,7 +816,8 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments fields from oldJobs onto newJobs.
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar fields from
+   * oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
    * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
    */
@@ -770,6 +832,12 @@ export class JobDetailsController {
       }
       if (job.hasSegments === undefined && old.hasSegments !== undefined) {
         job.hasSegments = old.hasSegments;
+      }
+      if (job.asides === undefined && old.asides !== undefined) {
+        job.asides = old.asides;
+      }
+      if (job.keptChatSidecar === undefined && old.keptChatSidecar !== undefined) {
+        job.keptChatSidecar = old.keptChatSidecar;
       }
     }
   }

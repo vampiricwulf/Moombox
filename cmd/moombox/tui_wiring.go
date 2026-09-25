@@ -226,6 +226,29 @@ func (s *runState) runTUI() {
 		})
 		return worker.HasSegmentFiles(base, jobID)
 	}
+	app.JobAsides = func(jobID string) tui.AsideSummary {
+		report, err := s.dlWorker.Asides(jobID)
+		if err != nil {
+			// The row is gone or unreadable; the panel says nothing rather
+			// than something false.
+			return tui.AsideSummary{}
+		}
+		out := tui.AsideSummary{KeptChatSidecar: report.KeptChatSidecar}
+		for _, a := range report.Groups {
+			out.Asides = append(out.Asides, tui.AsideEntry{
+				Timestamp:        a.Timestamp,
+				Size:             a.Size,
+				HasResumeSidecar: a.HasResumeSidecar,
+			})
+		}
+		return out
+	}
+	app.OnRecoverAsides = func(jobID string) error {
+		// Returns one of worker's typed refusals synchronously, or nil once
+		// the recovery is running; the TUI renders whichever it gets on its
+		// feedback line, exactly as it does for MuxJob.
+		return s.dlWorker.RecoverAsides(jobID)
+	}
 	app.OnOpenFolder = func(jobID string) {
 		job, err := s.db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -295,6 +318,7 @@ func (s *runState) runTUI() {
 				JobID:     e.JobID,
 				JobTitle:  e.JobTitle,
 				JobStatus: e.JobStatus,
+				Asides:    e.Asides,
 			}
 		}
 		return result, nil
