@@ -228,6 +228,34 @@ export class SetupController {
 
     // FFmpeg overlay listeners (also called from showFFmpegOverlay for non-first-run)
     this.setupFFmpegListeners();
+
+    this._wireResolutionPreset();
+  }
+
+  /**
+   * The wizard's Max Resolution picker — the same contract as the settings
+   * one: the numeric input holds the integer the wizard sends, the select
+   * writes into it. See SettingsController._wireResolutionPreset.
+   *
+   * The select starts BLANK (no value attribute, a "Default (2160)"
+   * placeholder), so an operator who skips the page still sends no
+   * max_video_resolution key at all and the server default applies — the
+   * wizard's "Leave fields empty to use defaults" promise is unchanged.
+   */
+  _wireResolutionPreset() {
+    const preset = document.getElementById("setup-max-resolution-preset");
+    const custom = document.getElementById("setup-max-resolution");
+    if (!preset || !custom) return;
+    const apply = () => {
+      const isCustom = preset.value === "custom";
+      custom.style.display = isCustom ? "" : "none";
+      if (!isCustom && preset.value !== "") custom.value = preset.value;
+    };
+    if (!this._resolutionPresetWired) {
+      this._resolutionPresetWired = true;
+      preset.addEventListener("sl-change", apply);
+    }
+    apply();
   }
 
   /** Wire up FFmpeg overlay button listeners. Idempotent — safe to call multiple times. */

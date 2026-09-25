@@ -126,6 +126,26 @@ export function renderTemplatePreview(template) {
   return result ? "Example: " + result + ".mkv" : "";
 }
 
+/**
+ * The max_video_resolution values the picker offers, as the strings the
+ * <sl-option value="…"> attributes carry. Kept in step with resolutionPresets
+ * in internal/tui/settings.go — the two UIs must offer the same ladder.
+ */
+export const RESOLUTION_PRESETS = ["0", "480", "720", "1080", "1440", "2160", "4320"];
+
+/**
+ * Map a stored max_video_resolution onto the picker's select value: the
+ * matching preset, "custom" for any other non-negative number, or "" when
+ * there is no value to show (the select stays blank and saveConfig omits the
+ * key, exactly as it did before the picker existed).
+ */
+export function resolutionPresetFor(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return "";
+  return RESOLUTION_PRESETS.includes(String(n)) ? String(n) : "custom";
+}
+
 export class SettingsController {
   constructor(app) {
     this.app = app;
@@ -644,6 +664,9 @@ export class SettingsController {
     this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
     this._wireTemplatePreview();
     this.app.setInputValue("cfg-max-resolution", config.downloader?.max_video_resolution);
+    const resPreset = document.getElementById("cfg-max-resolution-preset");
+    if (resPreset) resPreset.value = resolutionPresetFor(config.downloader?.max_video_resolution);
+    this._wireResolutionPreset();
     this.app.setInputValue("cfg-parallel-downloads", config.downloader?.num_parallel_downloads);
     this.app.setInputValue("cfg-segment-workers", config.downloader?.segment_workers);
     // Download chat switch
@@ -781,6 +804,31 @@ export class SettingsController {
       }
       updatePreview();
     }
+  }
+
+  /**
+   * The Max Resolution picker. The numeric input stays the single source of
+   * the wire value — picking a preset writes the number into it — so
+   * saveConfig's getInputNumber("cfg-max-resolution") is untouched and the
+   * config key is still a plain integer (owner ruling "R1 format").
+   */
+  _wireResolutionPreset() {
+    const preset = document.getElementById("cfg-max-resolution-preset");
+    const custom = document.getElementById("cfg-max-resolution");
+    if (!preset || !custom) return;
+    const apply = () => {
+      const isCustom = preset.value === "custom";
+      custom.style.display = isCustom ? "" : "none";
+      if (!isCustom && preset.value !== "") custom.value = preset.value;
+    };
+    if (!this._resolutionPresetWired) {
+      this._resolutionPresetWired = true;
+      preset.addEventListener("sl-change", () => {
+        apply();
+        this._markDirty();
+      });
+    }
+    apply();
   }
 
   async saveConfig() {

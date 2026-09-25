@@ -875,13 +875,28 @@
                                 help-text="Filename template (max 500 chars). Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
                             ></sl-input>
                             <div id="cfg-template-preview" class="template-preview"></div>
+                            <sl-select
+                                id="cfg-max-resolution-preset"
+                                label="Max Video Resolution"
+                                help-text="Caps the SHORTER edge, so 2160 means 4K in either orientation. Moombox takes the largest rendition at or below the cap; when a stream offers nothing that small it takes the closest one above, never nothing."
+                            >
+                                <sl-option value="0">Unbounded — always the largest</sl-option>
+                                <sl-option value="480">480p</sl-option>
+                                <sl-option value="720">720p</sl-option>
+                                <sl-option value="1080">1080p</sl-option>
+                                <sl-option value="1440">1440p</sl-option>
+                                <sl-option value="2160">4K (2160)</sl-option>
+                                <sl-option value="4320">8K (4320)</sl-option>
+                                <sl-option value="custom">Custom…</sl-option>
+                            </sl-select>
                             <sl-input
                                 id="cfg-max-resolution"
                                 type="number"
-                                min="1"
-                                label="Max Video Resolution"
+                                min="0"
+                                label="Custom Max Resolution"
                                 placeholder="2160"
-                                help-text="Maximum video resolution in pixels (e.g., 2160, 1080, 720, 480)"
+                                help-text="Shorter edge in pixels; 0 = unbounded."
+                                style="display: none"
                             ></sl-input>
                             <sl-input
                                 id="cfg-parallel-downloads"
@@ -1814,7 +1829,17 @@
                 <div class="setup-page" id="setup-adv-step-5" style="display: none">
                     <h2>Download Preferences</h2>
                     <p class="setup-help">Leave fields empty to use defaults.</p>
-                    <sl-input id="setup-max-resolution" type="number" label="Max Resolution" placeholder="2160" min="1"></sl-input>
+                    <sl-select id="setup-max-resolution-preset" label="Max Resolution" placeholder="Default (2160)" clearable help-text="Caps the SHORTER edge, so 2160 means 4K in either orientation.">
+                        <sl-option value="0">Unbounded — always the largest</sl-option>
+                        <sl-option value="480">480p</sl-option>
+                        <sl-option value="720">720p</sl-option>
+                        <sl-option value="1080">1080p</sl-option>
+                        <sl-option value="1440">1440p</sl-option>
+                        <sl-option value="2160">4K (2160)</sl-option>
+                        <sl-option value="4320">8K (4320)</sl-option>
+                        <sl-option value="custom">Custom…</sl-option>
+                    </sl-select>
+                    <sl-input id="setup-max-resolution" type="number" label="Custom Max Resolution" placeholder="2160" min="0" help-text="Shorter edge in pixels; 0 = unbounded." style="display: none"></sl-input>
                     <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
                     <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1" help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
