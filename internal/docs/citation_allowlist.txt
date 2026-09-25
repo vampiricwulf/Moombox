@@ -12,4 +12,15 @@
 # and parseAllowlist REJECTS one that does not: an unexplained suppression is
 # indistinguishable from the rot it hides.
 #
-# Empty today: every citation in docs/spec resolves.
+# bgutil-sidecar/vendor/ejs/VERSION is a TRACKED file with no extension, so
+# fileExtRe does not recognise it and the (a') arm asks whether it is a
+# directory. It is not; it is the one-line commit SHA the ejs vendoring is
+# pinned to, and `git ls-files` has it. The doc is right and so is the file.
+.claude/skills/moombox-upstream-porting/SKILL.md|bgutil-sidecar/vendor/ejs/VERSION
+
+# bgutil-sidecar/node_modules/bgutils-js is npm install output: gitignored
+# (bgutil-sidecar/.gitignore), absent from a fresh clone, and created by the
+# `npm ci` that CI and BUILDING.md both run before anything is built. Same
+# class as the embed blobs in buildArtifacts — a build PREREQUISITE, not doc
+# rot — but a directory, which that map (keyed on file citations) cannot hold.
+.claude/skills/moombox-upstream-porting/SKILL.md|bgutil-sidecar/node_modules/bgutils-js
