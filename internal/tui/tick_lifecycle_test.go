@@ -173,14 +173,14 @@ func TestProgressCadenceUpshiftIsImmediate(t *testing.T) {
 	prevGen := app.progressGen
 
 	// The job goes live: the ensure hook must supersede the pending 500ms
-	// tick with a fresh 16ms schedule NOW instead of waiting it out
-	// (real-time principle — 60fps progress from the first frame).
+	// tick with a fresh 8ms schedule NOW instead of waiting it out
+	// (real-time principle — fast-class progress from the first frame).
 	app.statusMap["u"] = database.StatusDownloading
 	if cmd := app.ensureProgressTicking(); cmd == nil {
 		t.Fatal("expected an upshift cmd when a download starts mid-loop")
 	}
 	if app.progressInterval != progressFastInterval {
-		t.Fatalf("expected the fast 16ms class after upshift, got %v", app.progressInterval)
+		t.Fatalf("expected the fast 8ms class after upshift, got %v", app.progressInterval)
 	}
 	if app.progressGen == prevGen {
 		t.Fatal("upshift must bump the generation to invalidate the pending 500ms tick")
