@@ -245,12 +245,19 @@ func (b *reorderBuffer) markFailed(seq int) {
 // staying reachable for as long as something — the DASH watcher's closure,
 // or a worker still inside admit() waiting to observe released — holds a
 // reference to this buffer.
+//
+// bytes goes with the map, in the same critical section: it is the resident
+// total, and a cleared map holds nothing, so leaving it behind only meant
+// residentBytes() reporting bytes for an empty buffer. Zeroing it cannot
+// drive the counter negative either — take() subtracts only for a segment it
+// found, and after release there are none.
 func (b *reorderBuffer) release() {
 	b.mu.Lock()
 	b.released = true
 	freed := b.reserved
 	b.reserved = 0
 	clear(b.seg)
+	b.bytes = 0
 	b.mu.Unlock()
 	if freed > 0 {
 		b.budget.free(freed)

@@ -233,6 +233,10 @@ func TestAZeroByteGapSentinelIsAdmittedWithTheBudgetExhausted(t *testing.T) {
 // reservation as 0 while a sibling buffer over-admits. MUTANT: drop
 // release()'s clear(b.seg) — the reservation is returned but the segments
 // stay reachable through the map, so has(2) is still true.
+//
+// MUTANT: release() clears b.seg and the reservation but leaves b.bytes —
+// residentBytes() then reports 4 KiB resident for a buffer holding an empty
+// map, and every later reader of it is lied to.
 func TestTakeAndReleaseFreeExactlyWhatThisBufferReserved(t *testing.T) {
 	const seg = 1 << 10
 	bg := newReorderBudget(8*seg, 100*seg)
@@ -254,6 +258,10 @@ func TestTakeAndReleaseFreeExactlyWhatThisBufferReserved(t *testing.T) {
 	if got := budgetReserved(bg); got != 0 {
 		t.Errorf("budget reserved after release = %d, want 0 — release must free the whole outstanding reservation", got)
 	}
+	if got := a.residentBytes(); got != 0 {
+		t.Errorf("residentBytes after release = %d, want 0 — release hands the whole reservation back "+
+			"and clears b.seg, so the per-buffer byte counter must go with them", got)
+	}
 	if a.has(2) {
 		t.Error("seq 2 is still stored after release — a released buffer holds nothing: the bytes handed back to the budget must not stay reachable through b.seg")
 	}
@@ -261,11 +269,18 @@ func TestTakeAndReleaseFreeExactlyWhatThisBufferReserved(t *testing.T) {
 	if got := budgetReserved(bg); got != 0 {
 		t.Errorf("budget reserved after a second release = %d, want 0 — release must not double-free", got)
 	}
+	if got := a.residentBytes(); got != 0 {
+		t.Errorf("residentBytes after a second release = %d, want 0", got)
+	}
 
 	// A take AFTER release must not free anything a second time either.
 	a.take(2)
 	if got := budgetReserved(bg); got != 0 {
 		t.Errorf("budget reserved after a post-release take = %d, want 0", got)
+	}
+	if got := a.residentBytes(); got != 0 {
+		t.Errorf("residentBytes after a post-release take = %d, want 0 — the cleared map means take "+
+			"finds nothing to subtract, so the counter must not drift in either direction", got)
 	}
 }
 
