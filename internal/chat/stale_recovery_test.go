@@ -343,3 +343,105 @@ func (h *timedHandler) timestamps() []time.Time {
 	defer h.mu.Unlock()
 	return append([]time.Time(nil), h.at...)
 }
+
+// replayWatchPage renders a watch page in the shape a broadcast serves the
+// moment it ends: liveChatRenderer.isReplay true, and the token arriving as
+// liveChatReplayContinuationData rather than reloadContinuationData.
+func replayWatchPage(token string) string {
+	return `<html><body><script>var ytInitialData = ` +
+		`{"contents":{"twoColumnWatchNextResults":{"conversationBar":{"liveChatRenderer":` +
+		`{"isReplay":true,"continuations":[{"liveChatReplayContinuationData":{"continuation":"` +
+		token + `"}}]}}}}};` +
+		`</script></body></html>`
+}
+
+// TestRecoverStaleContinuationAdoptsTheReplayFlip executes
+// recoverStaleContinuation itself — the one function on the stale-recovery
+// path that every other test in this file replaces with testRecoveryOverride,
+// and therefore the one whose body nothing ran.
+//
+// Both of its adoption sites were rewired from `cd.continuation = fresh` to
+// `cd.adoptFreshContinuation(fresh, freshIsReplay)`, which is what stops a
+// just-ended broadcast from posting its REPLAY token to the LIVE endpoint (that
+// endpoint answers 200 with no continuation, so the loop recovers again,
+// immediately, forever — the storm TestRunChatLoopFloorsRepeatedStaleRecoveries
+// bounds). adoptFreshContinuation is pinned alone by
+// TestAdoptFreshContinuationHonoursTheReplayFlip, but nothing executed the two
+// CALLS, so a mutant passing a hardcoded false at either site survived.
+//
+// The two subtests are the two sites: the first fetch, and the retry after a
+// failed one.
+//
+// Mutants this kills:
+//   - adoptFreshContinuation(fresh, false) at the first-attempt site
+//   - adoptFreshContinuation(retry, false) at the retry site
+//   - either site reverting to a bare cd.continuation = …
+func TestRecoverStaleContinuationAdoptsTheReplayFlip(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// HTTP status per request, in order; 0 means "serve the replay page".
+		script []int
+	}{
+		{"the first fetch answers", []int{0}},
+		{"the first fetch fails and the retry answers", []int{http.StatusInternalServerError, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The retry site sleeps staleFirstRetryDelay (10s) before its
+			// second fetch. Scale it rather than sleep for real.
+			origRetry := staleFirstRetryDelayForTesting
+			staleFirstRetryDelayForTesting = time.Millisecond
+			t.Cleanup(func() { staleFirstRetryDelayForTesting = origRetry })
+
+			var mu sync.Mutex
+			served := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				mu.Lock()
+				i := served
+				served++
+				mu.Unlock()
+				if i < len(tc.script) && tc.script[i] != 0 {
+					w.WriteHeader(tc.script[i])
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				w.Write([]byte(replayWatchPage("tok-replay")))
+			}))
+			t.Cleanup(srv.Close)
+
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse test server URL: %v", err)
+			}
+
+			cd := NewChatDownloader(ChatDownloaderOptions{
+				VideoID:             "vidFlip",
+				OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+				IsLiveOrUpcoming:    true,
+				InitialContinuation: "stale",
+			})
+			// The retry loop is gated on !shouldStop(), which is false for a
+			// downloader that was never started.
+			cd.running = true
+			// FetchFreshContinuation hardcodes youtube.com; this is how the
+			// real use site is reached without a network request.
+			cd.api.client = &http.Client{Transport: redirectTransport{target: target, base: http.DefaultTransport}}
+
+			if cd.isReplay() {
+				t.Fatal("a live downloader started in replay mode")
+			}
+			if !cd.recoverStaleContinuation(context.Background()) {
+				t.Fatalf("recoverStaleContinuation reported failure after %d served requests", served)
+			}
+			if cd.continuation != "tok-replay" {
+				t.Errorf("continuation = %q, want the recovered token", cd.continuation)
+			}
+			if !cd.isReplay() {
+				t.Error("the watch page's isReplay flip was dropped on the way through " +
+					"recoverStaleContinuation — the next poll posts a replay token to the live endpoint")
+			}
+			if want := len(tc.script); served != want {
+				t.Errorf("served %d watch-page requests, want %d", served, want)
+			}
+		})
+	}
+}

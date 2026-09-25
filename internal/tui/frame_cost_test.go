@@ -133,13 +133,13 @@ func BenchmarkProgressFrameAtLogCap(b *testing.B) {
 }
 
 // maxCachedFrameAllocs bounds a WHOLE bubbletea frame that carries no change,
-// which is what the 60 Hz tick delivers most of the time. On main before
-// CORE-2 this frame cost 20,623 allocations because all four panels
-// re-rendered unconditionally; with the CORE-2 caches it was 100, of which
-// the status bar — then the one panel with no cache, because it tallied every
-// job on every frame — was 70. Arc C gave the status bar the same
-// key-comparison cache, and the frame is now 30 (≈146,600 B): four key
-// comparisons and two lipgloss joins.
+// which is what the 8 ms progress tick delivers most of the time (one per
+// frame at the 120 fps renderer). On main before CORE-2 this frame cost
+// 20,623 allocations because all four panels re-rendered unconditionally;
+// with the CORE-2 caches it was 100, of which the status bar — then the one
+// panel with no cache, because it tallied every job on every frame — was 70.
+// Arc C gave the status bar the same key-comparison cache, and the frame is
+// now 30 (≈146,600 B): four key comparisons and two lipgloss joins.
 //
 // The budget is 2x the measured number. The measurement is exactly 30 with no
 // variance at all — across repeated runs and across terminal/colour

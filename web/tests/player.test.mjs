@@ -1659,6 +1659,47 @@ test("a Twitch sub, gift and raid each render as a purple notice block", { skip 
   ]);
 });
 
+// The per-kind matrix K3 names, through the DOM builder rather than the pure
+// helper: the wire's own line wins for EVERY kind, and every kind rebuilds one
+// when the wire sent none. Both wire strings are deliberately unlike their
+// rebuilds ("fan gifted a sub to pal", "other is raiding with 120 viewers"),
+// so the assertion cannot pass on a fallback.
+// MUTANT: move the `msg.systemMsg` short-circuit inside the sub/resub arm of
+// twitchNoticeLine and the gift and raid rows print the rebuild.
+// MUTANT: rebuild from `messageType` alone and the last two rows lose "with
+// Tier 1" / "with Tier 2".
+test("every Twitch notice kind takes the wire line when sent and a rebuild when not", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "subgift", authorName: "fan", giftRecipient: "pal",
+               systemMsg: "fan gifted 5 subs to the community!" }),
+    twNotice({ offsetMs: 2000, messageType: "raid", authorName: "other", viewerCount: 120,
+               systemMsg: "12 raiders from other have joined!" }),
+    twNotice({ offsetMs: 3000, messageType: "sub", authorName: "quiet", subPlan: "1000" }),
+    twNotice({ offsetMs: 4000, messageType: "resub", authorName: "quiet", subPlan: "2000",
+               message: "year two!" }),
+  ]);
+  const rows = [...h.sidebar().children];
+  for (const row of rows) {
+    assert.ok(row.classList.contains("chat-msg"), row.className);
+    assert.ok(row.classList.contains("chat-notice"), row.className);
+    assert.ok(row.classList.contains("twitch"), row.className);
+  }
+  assert.deepEqual(rows.map((r) => r.querySelector(".chat-notice-line").textContent), [
+    "fan gifted 5 subs to the community!",
+    "12 raiders from other have joined!",
+    "quiet subscribed with Tier 1",
+    "quiet subscribed with Tier 2",
+  ]);
+  // The line is the bold first element after the time; only the resub spoke.
+  assert.deepEqual(rows.map((r) => [...r.children].map((c) => c.className)), [
+    ["chat-msg-time", "chat-notice-line"],
+    ["chat-msg-time", "chat-notice-line"],
+    ["chat-msg-time", "chat-notice-line"],
+    ["chat-msg-time", "chat-notice-line", ""],
+  ]);
+  assert.equal(rows[3].lastChild.textContent, "year two!");
+});
+
 // MUTANT: always append the content span — a notice with no message gains an
 // empty trailing span, which the divider-dim rule then dims as a child.
 test("a resub's own words sit under its system line, and silence adds nothing", { skip }, async () => {

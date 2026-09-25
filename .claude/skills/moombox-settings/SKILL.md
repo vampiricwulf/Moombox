@@ -22,9 +22,10 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 
 ### 2. Default Value
 `internal/config/config.go` → `Defaults()` — Set the default value. For FlexDuration: `FlexDuration{Value: 10}`.
+- A default that differs by CPU architecture goes through `platformDefaults(goarch)` in the same file — arm64-motivated caps only (ruling R3: "any future cap whose value was picked for arm's memory belongs here"). `goarch` is a parameter, not `runtime.GOARCH` read inline, so both branches are testable on one host.
 
 ### 3. Config Validation
-`internal/config/config.go` → `validate()` — Add bounds checking, enum validation, or path sanitization. Replace invalid values with defaults. Called on both load and save.
+`internal/config/config.go` → `validateOrNormalize(cfg, reportOnly)` — Add bounds checking, enum validation, or path sanitization. It is the one implementation behind two entry points (DECISIONS #9): `Validate(cfg)` (`reportOnly=true`) reports issues without mutating, and `Normalize(cfg)` (`reportOnly=false`) replaces the offending field with its default. Load normalises; Save validates first and refuses to write a failing config.
 
 ### 4. API Validation
 `internal/web/routes/config_routes.go` → `validateConfigUpdates()` — Validate the field from API input. Returns `map[string]string` of field→error mappings (e.g., `"network.port": "must be 1-65535"`). Must match constraints from step 3.
@@ -49,20 +50,32 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 - Add applying logic in `applyValues()` — for FlexDuration wrap back: `FlexDuration{Value: float64(v)}`, for booleans check `== "Yes"`
 
 ### 8. Hot-Reload (if runtime-changeable)
-Only 4 settings currently support hot-reload (most require restart):
-- `OnLogLevelChange` → `log.SetLevel()`
-- `OnMaxParallelChange` → `dlWorker.SetParallelDownloads()`
-- `OnHideFinishedAgeChanged` → re-broadcasts job list
-- `OnChannelChange` → `kickMonitors` to re-evaluate channels
+Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
+- `OnLogLevelChange(level)` → `log.SetLevel()`
+- `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
+- `OnHideFinishedAgeChanged()` → re-broadcasts the job list
+- `OnChannelChange()` → `kickMonitors` to re-evaluate channels
+- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save
+- `OnGoSoftLimitChange(mb)` → `debug.SetMemoryLimit` (0 restores the boot limit)
+- `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
+- `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
+- `OnReorderBudgetChange(downloaderCfg)` → `runState.applyReorderBudget`
 
-To add: wire callback in `ConfigRoutesCallbacks` struct (`internal/web/routes/config_routes.go`) and connect in `cmd/moombox/main.go`.
+`applyReorderBudget` (`cmd/moombox/hot_reload.go`) is the model for a process-wide value: ONE method reached from all three entry points — `initServices` at boot, this PUT callback, and the TUI's `OnSaveConfig` hot-reload block — so the number never travels through `engine.DownloaderOptions` or the worker's per-job call sites.
+
+To add: wire the callback in `ConfigRoutesCallbacks` and connect it in `cmd/moombox`.
+
+### 8b. Config-file-only keys
+Some keys are deliberately `config.toml`-only: no Settings row in either UI, absent from both restart lists, documented in `config.example.toml` and the `data-and-storage.md` table, and no `applyConfigUpdates` arm (so a Settings save from either UI leaves them as loaded — `PUT /api/config` merges per key, and a hand-crafted PUT cannot set them either). Each one is a recorded owner ruling, never a shortcut:
+- `downloader.progress_interval_ms` (default 16, min 1 — snapshotted per job start)
+- `cookies.dpapi_profile_dir` (re-read on every DPAPI pass)
 
 ### 9. Config Migration (if renaming/moving)
 `internal/config/config.go` → `migrateOldFormat()` — Non-destructive: only applies when new section doesn't exist. Converts legacy field to current location.
 
 ## Restart-Required Fields
 
-Both UIs check if changed fields require restart. Current list: port, network_access, https_enabled, tls_cert_path, tls_key_path, database_path, log_file_path, log_max_file_size, log_max_files.
+Both UIs check if changed fields require restart. The two lists are `RESTART_REQUIRED_FIELDS` (`web/public/modules/settings.js`) and `restartRequiredKeys` (`internal/tui/settings.go`), pinned equal by `TestRestartRequiredListsAgree`. Current list (16): `network.{port,network_access,https_enabled,tls_cert_path,tls_key_path}`, `paths.{database_path,log_file_path}`, `logs.{log_max_file_size,log_max_files}`, `cookies.{cookie_file,refresh_interval,auto_enabled,browser_profile_dir}`, `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar`.
 
 ## Common Mistakes
 

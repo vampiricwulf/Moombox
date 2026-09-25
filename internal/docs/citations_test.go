@@ -14,11 +14,21 @@ import (
 )
 
 // specDocs are the docs whose code citations are checked: the six deep-dive
-// docs under docs/spec/, plus the two hand-edited root docs added by owner
-// decision O-Z (2026-09-17) after a sweep found four passages in SPEC.md
-// naming symbols and wire values that do not exist, and a path in CLAUDE.md
-// that does not. appendix-metrics.md (volatile numbers), design-philosophy.md
-// and vision-and-purpose.md (prose) are out on purpose.
+// docs under docs/spec/, the two hand-edited root docs added by owner decision
+// O-Z (2026-09-17) after a sweep found four passages in SPEC.md naming symbols
+// and wire values that do not exist and a path in CLAUDE.md that does not,
+// and — added by the 2026-09-25 audit — README.md and the seven skills.
+//
+// The skills earned their place the way SPEC.md did: they cite symbols and
+// paths densely, they are read as instructions rather than as prose, and the
+// audit found three of them stale (a hub ring buffer that no longer exists, a
+// message-type roster five short, a `validate()` that has not been called that
+// since before v2.8.8) in a range that EDITED one of them. README.md is the
+// first thing a human reads and was carrying a resolution rule two arcs old.
+//
+// appendix-metrics.md (volatile numbers), design-philosophy.md and
+// vision-and-purpose.md (prose) are still out on purpose. A name containing a
+// slash is repo-relative; everything else resolves through docPath.
 var specDocs = []string{
 	"architecture.md",
 	"data-and-storage.md",
@@ -28,6 +38,14 @@ var specDocs = []string{
 	"user-interfaces.md",
 	"SPEC.md",
 	"CLAUDE.md",
+	"README.md",
+	".claude/skills/moombox-api-routes/SKILL.md",
+	".claude/skills/moombox-charm-suite/SKILL.md",
+	".claude/skills/moombox-database-migrations/SKILL.md",
+	".claude/skills/moombox-settings/SKILL.md",
+	".claude/skills/moombox-setup-wizard/SKILL.md",
+	".claude/skills/moombox-upstream-porting/SKILL.md",
+	".claude/skills/moombox-web-ui/SKILL.md",
 }
 
 // citationPrefixes are the repo-relative roots a path citation may start
@@ -131,7 +149,10 @@ func backtickSpans(line string) []span {
 // docPath resolves a specDocs entry to its file: the deep-dive docs live in
 // docs/spec/, SPEC.md and CLAUDE.md at the repo root.
 func docPath(root, name string) string {
-	if name == "SPEC.md" || name == "CLAUDE.md" {
+	if strings.Contains(name, "/") {
+		return filepath.Join(root, filepath.FromSlash(name))
+	}
+	if name == "SPEC.md" || name == "CLAUDE.md" || name == "README.md" {
 		return filepath.Join(root, name)
 	}
 	return filepath.Join(root, "docs", "spec", name)
@@ -256,6 +277,51 @@ func TestRootDocsAreChecked(t *testing.T) {
 		}
 		if n := len(docLines(t, root, name)); n < 50 {
 			t.Errorf("%s resolved to %d lines -- docPath is not finding the repo-root doc", name, n)
+		}
+	}
+}
+
+// TestReadmeAndEverySkillAreChecked is the 2026-09-25 audit's half of the same
+// rule. The skills drift silently — the audit found three stale in a range
+// that edited one of them — and a skill is read as an instruction, so a stale
+// path or symbol in one is acted on rather than merely believed.
+//
+// The skills are enumerated from DISK rather than compared against a literal:
+// a skill added later is in the checks by existing, which is the only way this
+// pin stays true without somebody remembering it.
+//
+// Mutants this kills: dropping README.md or any skill from specDocs, and
+// docPath losing its slash arm (docLines then t.Fatalf's on the missing file).
+func TestReadmeAndEverySkillAreChecked(t *testing.T) {
+	root := repoRoot(t)
+	inSpecDocs := func(name string) bool {
+		for _, d := range specDocs {
+			if d == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !inSpecDocs("README.md") {
+		t.Error("README.md is not in specDocs -- it is the first doc a human reads and it rotted for two arcs")
+	}
+
+	skills, err := filepath.Glob(filepath.Join(root, ".claude", "skills", "*", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("glob the skills: %v", err)
+	}
+	if len(skills) < 7 {
+		t.Fatalf("found %d SKILL.md files, want at least 7 -- the glob is not finding .claude/skills/", len(skills))
+	}
+	for _, abs := range skills {
+		rel := filepath.ToSlash(strings.TrimPrefix(abs, root+string(filepath.Separator)))
+		if !inSpecDocs(rel) {
+			t.Errorf("%s is not in specDocs -- every skill is inside the citation checks", rel)
+			continue
+		}
+		if n := len(docLines(t, root, rel)); n < 20 {
+			t.Errorf("%s resolved to %d lines -- docPath is not finding it", rel, n)
 		}
 	}
 }
@@ -631,19 +697,20 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 	}
 
 	// The floors sit just under the counts measured when they were written --
-	// 317 file citations, 59 directories, 160 symbol pairs -- with room for
-	// ordinary doc editing above them. They are a vacuity guard, not a target:
-	// a drop of this size means the scan stopped recognising a whole SHAPE of
-	// citation, not that a paragraph was deleted. Raise them if the docs grow;
-	// never lower one to make a run go green.
-	if files < 250 {
-		t.Errorf("only %d file citations were checked -- the scan is broken (there were 317 when this floor was written)", files)
+	// 662 file citations, 132 directories, 371 symbol pairs, roughly double
+	// the 317/59/160 of the docs/spec-only scan -- with room for ordinary doc
+	// editing above them. They are a vacuity guard, not a target: a drop of
+	// this size means the scan stopped recognising a whole SHAPE of citation,
+	// not that a paragraph was deleted. Raise them if the docs grow; never
+	// lower one to make a run go green.
+	if files < 550 {
+		t.Errorf("only %d file citations were checked -- the scan is broken (there were 662 when this floor was written)", files)
 	}
-	if dirs < 40 {
-		t.Errorf("only %d directory citations were checked -- the scan is broken (there were 59 when this floor was written)", dirs)
+	if dirs < 105 {
+		t.Errorf("only %d directory citations were checked -- the scan is broken (there were 132 when this floor was written)", dirs)
 	}
-	if pairs < 120 {
-		t.Errorf("only %d symbol/path pairs were checked -- the scan is broken (there were 160 when this floor was written)", pairs)
+	if pairs < 300 {
+		t.Errorf("only %d symbol/path pairs were checked -- the scan is broken (there were 371 when this floor was written)", pairs)
 	}
 }
 

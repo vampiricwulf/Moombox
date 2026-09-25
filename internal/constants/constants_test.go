@@ -71,10 +71,13 @@ func TestRandomizedWebUAStaysInWindow(t *testing.T) {
 	}
 }
 
-// nativeAppMajorFloor guards the native YouTube app clients (IOS / ANDROID)
-// against rotting back to an old app version the way the iOS client was
-// frozen at 19.29.1. Track yt-dlp's INNERTUBE_CLIENTS (ios/android were
-// 21.x as of 2026-05). Bump alongside the client versions.
+// nativeAppMajorFloor guards the native YouTube app UAs Moombox actually
+// sends against rotting back to an old app version the way the iOS client was
+// frozen at 19.29.1. Only ANDROID is left (AndroidVRClient sends it); the IOS
+// UA went with IOSClient, since a pinned-but-unsent version is worse than
+// absent — a reader takes it for a maintained one. Track yt-dlp's
+// INNERTUBE_CLIENTS (android was 21.x as of 2026-05). Bump alongside the
+// client versions.
 const nativeAppMajorFloor = 20
 
 var appVersionPattern = regexp.MustCompile(`youtube/(\d+)\.`)
@@ -93,7 +96,7 @@ func appMajor(t *testing.T, ua string) int {
 }
 
 func TestNativeAppUserAgentsNotStale(t *testing.T) {
-	for name, ua := range map[string]string{"IOS": UserAgents.IOS, "Android": UserAgents.Android} {
+	for name, ua := range map[string]string{"Android": UserAgents.Android} {
 		if major := appMajor(t, ua); major < nativeAppMajorFloor {
 			t.Errorf("%s app UA major %d is stale (floor %d): %q", name, major, nativeAppMajorFloor, ua)
 		}

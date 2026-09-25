@@ -824,12 +824,19 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)
 
 	o.keepIncompleteTailProgress(jobCtx.Job.ID, updates)
+
+	// Logged BEFORE the Finished write, not after it. The write untracks this
+	// job's per-job log routing synchronously — notifyJobUpdate calls the
+	// OnJobChange subscribers inline and cmd/moombox untracks on terminal
+	// (CORE-12) — so a completion line emitted afterwards reaches the global
+	// log only and the job's own log ends mid-finalize. Everything the line
+	// reports is known here; UpdateJobFields returns no error to wait for.
+	o.logger.Info("download complete", "jobID", jobCtx.Job.ID, "output", outputFile)
+
 	finishedJob := o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send "Download Finished" notification
 	o.sendFinishedNotification(jobCtx, finishedJob, outputFile, probeData, info)
-
-	o.logger.Info("download complete", "jobID", jobCtx.Job.ID, "output", outputFile)
 	return nil
 }
 
@@ -977,6 +984,14 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, anyPartChat)
 
 	o.keepIncompleteTailProgress(jobCtx.Job.ID, updates)
+
+	// Ahead of the Finished write for the same reason the single-part path
+	// logs its completion line early: the write untracks this job's per-job
+	// log routing synchronously (CORE-12), so anything logged after it is in
+	// the global log only.
+	o.logger.Info("multi-segment download complete",
+		"jobID", jobCtx.Job.ID, "segments", len(segments))
+
 	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send notification
@@ -1031,8 +1046,6 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		)
 	}
 
-	o.logger.Info("multi-segment download complete",
-		"jobID", jobCtx.Job.ID, "segments", len(segments))
 	return nil
 }
 

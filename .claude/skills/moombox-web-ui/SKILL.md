@@ -91,7 +91,7 @@ export class FooController {
 
 `app.js` manages the WebSocket connection and routes messages by type:
 
-**All message types:** `initial_state`, `jobs_update`, `job_update`, `log`, `check_timers`, `disk_status`, `update_available`, `pong`
+**All message types** (the thirteen `case` labels in the handler, in order): `initial_state`, `jobs_update`, `job_update`, `job_progress`, `config_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `backfill_status`, `update_available`, `connectivity`, `pong`
 
 ## Toast Notifications
 

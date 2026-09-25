@@ -44,6 +44,11 @@ const (
 	liveChatPollDefault = 5 * time.Second
 	// maxStaleRecoveryDelay caps that floor's doubling.
 	maxStaleRecoveryDelay = 5 * time.Minute
+	// staleFirstRetryDelay is the first pause INSIDE one stale-continuation
+	// recovery — recoverStaleContinuation's ladder is 10s, 20s, 40s, 80s,
+	// capped at maxStaleRecoveryDelay. Distinct from liveChatPollDefault,
+	// which is the floor BETWEEN consecutive recoveries.
+	staleFirstRetryDelay = 10 * time.Second
 	// replayMarkFutureSlack bounds how far ahead of the wallclock a
 	// timestampUsec may be and still move the replay high-water mark. Chat
 	// timestamps are server-issued, so this is a corruption/clock-skew bound
@@ -55,13 +60,15 @@ const (
 )
 
 // liveChatPollDefaultForTesting / maxStaleRecoveryDelayForTesting are the
-// values staleRecoveryDelay actually reads. Vars rather than consts purely so
-// tests can scale the ladder down instead of sleeping for real minutes — the
-// playerRetryBackoffBase seam in internal/youtube exists for the same reason.
-// Production never writes them.
+// values staleRecoveryDelay actually reads, and staleFirstRetryDelayForTesting
+// is the one recoverStaleContinuation's own ladder starts from. Vars rather
+// than consts purely so tests can scale the ladder down instead of sleeping
+// for real minutes — the playerRetryBackoffBase seam in internal/youtube
+// exists for the same reason. Production never writes them.
 var (
 	liveChatPollDefaultForTesting   = liveChatPollDefault
 	maxStaleRecoveryDelayForTesting = maxStaleRecoveryDelay
+	staleFirstRetryDelayForTesting  = staleFirstRetryDelay
 )
 
 // errStaleRecoveryExhausted is the terminal error Start reports when
@@ -1180,7 +1187,7 @@ func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
 		return true
 	}
 
-	contRetryDelay := 10 * time.Second
+	contRetryDelay := staleFirstRetryDelayForTesting
 	contRetries := 1 // the initial failed call above counts as attempt #1
 	for !cd.shouldStop() && contRetries < maxStaleContinuationAttempts {
 		cd.sleep(ctx, contRetryDelay)
@@ -1485,10 +1492,13 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 }
 
 // readExistingChatData attempts to read the previously-flushed chat file on
-// disk in full (header included) — adoptExistingChatFile needs the header's
-// streamStartTime as well as the messages. The error is returned (rather
-// than folded into a nil result) so callers can tell "no file" from "a file
-// that does not parse" — those two need opposite handling.
+// disk in full (header included). The only caller left is
+// prependExistingMessages, writeChatFile's append-failure fallback; adoption
+// reads the header through readChatFileAdoptionSummary (a stream, not a whole
+// slurp) since T4-35, so this full read never runs on the adoption path. The
+// error is returned (rather than folded into a nil result) so callers can tell
+// "no file" from "a file that does not parse" — those two need opposite
+// handling.
 func (cd *ChatDownloader) readExistingChatData(path string) (*ChatData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

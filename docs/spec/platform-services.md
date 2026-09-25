@@ -1176,7 +1176,11 @@ The chat API response contains `actions` array items. Replay responses wrap acti
 | `liveChatTextMessageRenderer` | Regular chat messages. |
 | `liveChatPaidMessageRenderer` | Super Chat (monetary donation with message). |
 | `liveChatPaidStickerRenderer` | Super Sticker (monetary donation with sticker). |
-| `liveChatMembershipItemRenderer` | Membership milestone messages. |
+| `liveChatMembershipItemRenderer` | New-member and milestone messages. |
+| `liveChatSponsorshipsGiftPurchaseAnnouncementRenderer` | A gifted-membership purchase. Its author, badges and "Gifted N memberships" line sit one level down in `header.liveChatSponsorshipsHeaderRenderer` and are hoisted into the flat layout by `giftPurchaseFields`. |
+| `liveChatSponsorshipsGiftRedemptionAnnouncementRenderer` | The recipient's side of a gifted membership. Flat, and its line is its `message`. |
+
+Every membership shape is archived with `isMembership` set, and the renderer's own header line is archived beside the typed message parts as `ChatMessage.MembershipText` (`membershipText,omitempty` — absent from every file written before the field existed): `headerPrimaryText` ("Member for 6 months") when present, else `headerSubtext` ("Welcome to Member!"), and the gift purchase's hoisted `primaryText` ("Gifted 5 memberships"). It is deliberately NOT folded into `message` — the video overlay renders `message` alone and must stay silent, while the sidebar's member card shows the line beside the author (2026-09-25 ruling K4). A gift redemption carries no `membershipText` because its line IS its `message`.
 
 Super Chat tiers (1-7; blue, cyan, green, yellow, orange, magenta, red) are resolved from YouTube's ARGB renderer colors:
 

@@ -52,11 +52,13 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 ### 1. Choose Broadcast Method
 `internal/web/websocket.go`:
 - `Broadcast(type, payload)` — immediate, generic broadcast
-- `BroadcastJobUpdate(data)` — per-job update; no hub-level throttle (upstream rate is bounded by the `ProgressTracker`'s progress-interval gate — `downloader.progress_interval_ms`, 16 ms by default — for the high-frequency path)
+- `BroadcastJobUpdate(data)` — a whole job row, for a change a progress tick does not make (status transition, error, chat status, mux output, a new job, a trim edit); no hub-level throttle, and the callers left on it are event-driven
+- `BroadcastJobProgress(data)` — the slim per-tick `job_progress` frame (the payload shape is the caller's: `cmd/moombox/job_progress.go`), sent at the same cadence `job_update` used to carry — one per `downloader.progress_interval_ms`, ~60 Hz at the 16 ms default — and merged client-side onto the row the client already holds. Cheaper, never rarer.
 - `BroadcastJobsUpdate(data)` — full job list (add/delete, threshold changes)
 - `BroadcastJobDeleted(jobID)` — targeted row removal; clients drop the row immediately
 - `BroadcastCheckTimers(data)` — next monitor check times
-- `BroadcastLog(line)` — log line + ring buffer storage (200 lines)
+- `BroadcastConnectivity(online)` — `{online}` when reachability flips
+- `BroadcastLog(line)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`). The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `ws_wiring.go` puts `logger.GetRecentLines` into every `initial_state`.
 
 ### 2. Wire the Source
 Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`. Common patterns:
@@ -65,7 +67,7 @@ Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`.
 - **Log subscriber**: `log.Subscribe()` channel → `BroadcastLog()`
 
 ### 3. Frontend Handler
-`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types: `initial_state`, `jobs_update`, `job_update`, `job_deleted`, `config_update`, `log`, `check_timers`, `disk_status`, `update_available`, `connectivity`, `pong`.
+`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types, in the switch's own order: `initial_state`, `jobs_update`, `job_update`, `job_progress`, `config_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `backfill_status`, `update_available`, `connectivity`, `pong`.
 
 ### 4. TUI Handler
 TUI does **not** receive WebSocket messages. Instead, it gets data via:

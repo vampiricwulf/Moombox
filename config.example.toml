@@ -237,6 +237,14 @@
 # needed, unlike auto_enabled above.
 # acquisition = "auto"
 
+# dpapi_fallback turns on the Windows-only DPAPI read: when the CDP refresh
+# launch fails (Chrome already open, a resource the managed-profile launch
+# cannot acquire), Moombox reads the cookies out of a real Chromium-family
+# profile through CryptUnprotectData. Those are the user's actual signed-in
+# cookies, so it is an opt-in privacy surface and it is OFF by default. It
+# must be true for dpapi_profile_dir below to be read at all.
+# dpapi_fallback = false
+
 # dpapi_profile_dir names a Chromium-family PROFILE directory for the
 # Windows DPAPI fallback to read, taking precedence over the automatic
 # discovery walk. Set it when your profile is somewhere the walk cannot

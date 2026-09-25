@@ -221,12 +221,17 @@ func (o *DownloadOrchestrator) resolveChatOutcome(dl ChatSource, rec *chatOutcom
 // chatShutdownGrace is how long a cancel/shutdown path gives a chat goroutine
 // to finish after it has been Stop()'d. It is the same grace
 // resolveChatOutcome already applies after its own Stop(), named here so the
-// two cancel/shutdown sites that wait on it — this file's cleanup, which the
-// YouTube orchestrator now reaches from BOTH its error arm and its shutdown
-// arm, and ExecuteTwitch's shutdown/user-cancel arm — cannot drift to two
-// different numbers; ExecuteTwitch's live finalize path hands it to
-// resolveChatOutcome as the grace that call applies after its own Stop(),
-// which is the same value with the same meaning.
+// sites that wait on it cannot drift to different numbers:
+//
+//   - this file's cleanup, which the YouTube orchestrator reaches from BOTH
+//     its error arm and its shutdown arm;
+//   - ExecuteTwitch's shutdown/user-cancel arm;
+//   - and every finalize path that hands it to resolveChatOutcome as the
+//     grace that call applies after its own Stop() — the YouTube live
+//     (orchestrator.go) and VOD (resolveVodChatOutcome, above) paths and the
+//     Twitch live path (orchestrator_twitch.go). Same value, same meaning.
+//
+// TestEveryChatOutcomeGraceIsTheConstant pins the roster.
 //
 // NOT every grace in the tree. ExecuteTwitch's unknown-verdict exit keeps its
 // own literals, argued for at that call site: that job is on its way to Error
@@ -398,7 +403,7 @@ func (o *DownloadOrchestrator) resolveVodChatOutcome(ctx context.Context, dl Cha
 			}
 		}
 	}
-	return o.resolveChatOutcome(dl, rec, done, wait, 2*time.Second)
+	return o.resolveChatOutcome(dl, rec, done, wait, chatShutdownGrace)
 }
 
 // chatOutcome carries a chat downloader's terminal error from the goroutine it

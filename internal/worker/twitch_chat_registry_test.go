@@ -472,3 +472,63 @@ func TestWaitForChatShutdownIsBoundedAndFreeWhenThereIsNothingToWaitFor(t *testi
 		t.Errorf("a signal at 30ms was noticed only after %s", elapsed)
 	}
 }
+
+// TestEveryChatOutcomeGraceIsTheConstant closes the drift the constant was
+// introduced to close. chatShutdownGrace exists so the two seconds a Stop()'d
+// chat goroutine is given cannot become two different numbers — but the
+// YouTube live finalize and the VOD finalize kept their own `2*time.Second`
+// literals through the arc that introduced it, fifty lines under a comment
+// claiming the grace now "lives in one place instead of a third literal".
+// Nothing noticed, because the values agreed.
+//
+// One call site keeps its literals by ruling: ExecuteTwitch's unknown-verdict
+// exit, argued for at that call site and in chatShutdownGrace's own comment —
+// that job is on its way to Error with staging intact and a Retry re-runs the
+// whole capture, so a shared shutdown grace is not what governs it. It is
+// spelled out here rather than pattern-matched, so reinstating a literal
+// somewhere else cannot hide behind the exemption.
+//
+// Mutant this kills: any resolveChatOutcome call site going back to a literal
+// grace (or a new one arriving with one).
+func TestEveryChatOutcomeGraceIsTheConstant(t *testing.T) {
+	// The ruled exception, in full.
+	const ruledException = "outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, 2*time.Second, 2*time.Second)"
+
+	files, err := filepath.Glob("orchestrator*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	calls, sawException := 0, false
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.Contains(trimmed, "resolveChatOutcome(") ||
+				strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "func ") {
+				continue
+			}
+			calls++
+			if trimmed == ruledException {
+				sawException = true
+				continue
+			}
+			if !strings.HasSuffix(trimmed, "chatShutdownGrace)") {
+				t.Errorf("%s:%d passes a grace that is not chatShutdownGrace — the constant exists so "+
+					"these cannot drift apart:\n  %s", file, i+1, trimmed)
+			}
+		}
+	}
+	if calls != 4 {
+		t.Errorf("found %d resolveChatOutcome call sites, want 4 — update this pin with the roster", calls)
+	}
+	if !sawException {
+		t.Error("the ruled unknown-verdict exit was not found verbatim; if it was reworded, reword this " +
+			"pin with it rather than loosening the match")
+	}
+}

@@ -18,8 +18,9 @@ import (
 // generous to accommodate slow connections on multi-GB VOD pulls.
 var workerHTTPClient = httpx.Client(10 * time.Minute)
 
-// DownloadFile downloads a file from a URL to the output path.
-// Used for VOD direct downloads and thumbnail/asset fetching.
+// DownloadFile downloads a file from a URL to the output path. Its one caller
+// is DownloadThumbnail below; VOD direct downloads live in
+// internal/engine/downloader_direct.go and have never come through here.
 func DownloadFile(ctx context.Context, url, outputPath string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

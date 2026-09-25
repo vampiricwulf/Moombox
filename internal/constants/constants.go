@@ -45,7 +45,6 @@ var UserAgents = struct {
 	Android   string
 	AndroidVR string
 	TV        string
-	IOS       string
 	VisionOS  string
 }{
 	// Randomized per process start (see randomizedWebUA). This is the single
@@ -59,7 +58,6 @@ var UserAgents = struct {
 	Android:   "com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
-	IOS:       "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
 	VisionOS:  "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
 }
 
