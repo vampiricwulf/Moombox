@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -55,7 +57,70 @@ var (
 // plain bool couldn't distinguish "absent" from "explicitly false".
 func boolPtr(b bool) *bool { return &b }
 
+// platformDefaults returns the two memory-derived downloader defaults for a
+// GOARCH: the per-job reorder ceiling and the process-wide reorder budget, in
+// megabytes.
+//
+// This is the FIRST platform-conditional default in the config package, and
+// the rule it establishes is owner ruling R3 (2026-09-24): arm-motivated caps
+// apply only on arm64. The keys exist on every platform and mean the same
+// thing everywhere; only the default differs, because the 256 MB per-job
+// ceiling the engine has carried since Arc 3 was chosen for a Raspberry-Pi-
+// class box and is a needless throttle on a desktop with 32 GB. Any future
+// cap whose value was picked for arm's memory belongs here, keyed the same
+// way — and any cap that was NOT picked for arm's memory does not.
+//
+// The arch is a PARAMETER rather than a read of runtime.GOARCH so both
+// branches are testable on one host; Defaults() is the only caller that
+// passes the real value. Exactly "arm64" gets the small numbers: 32-bit
+// "arm" is not an arm64 host and takes the general defaults like everything
+// else.
+func platformDefaults(goarch string) (perJobMB, budgetMB int) {
+	if goarch == "arm64" {
+		return 256, 1024
+	}
+	return 1024, 4096
+}
+
+// ReorderLimitBytes resolves downloader.reorder_buffer_mb and
+// downloader.reorder_budget_mb into the byte pair engine.ConfigureReorder
+// takes. 0 on either means unbounded and is passed through as 0.
+//
+// When BOTH are bounded, a per-job ceiling above the process-wide budget is
+// clamped to the budget and clamped=true is returned so the caller can warn:
+// the pair is incoherent as written, since the shared budget would refuse the
+// bytes the per-job ceiling promised. An unbounded per-job value is never
+// clamped — it is an explicit instruction, not an accident.
+//
+// mbToBytes saturates rather than overflowing. Validate has already rejected
+// negatives, and int is 64-bit on all three supported targets, so this only
+// bites on a hand-edited value above ~8.8e12 MB — where wrapping to a
+// negative byte count would read back as "unbounded", the opposite of what
+// was asked for.
+func (d DownloaderConfig) ReorderLimitBytes() (perJobBytes, totalBytes int, clamped bool) {
+	perJobBytes = mbToBytes(d.ReorderBufferMB)
+	totalBytes = mbToBytes(d.ReorderBudgetMB)
+	if perJobBytes > 0 && totalBytes > 0 && perJobBytes > totalBytes {
+		perJobBytes = totalBytes
+		clamped = true
+	}
+	return perJobBytes, totalBytes, clamped
+}
+
+// mbToBytes converts megabytes to bytes, saturating at math.MaxInt.
+func mbToBytes(mb int) int {
+	if mb <= 0 {
+		return 0
+	}
+	if mb > math.MaxInt>>20 {
+		return math.MaxInt
+	}
+	return mb << 20
+}
+
 func Defaults() *MoomboxConfig {
+	// The two arm64-conditional downloader defaults; see platformDefaults.
+	reorderPerJobMB, reorderBudgetMB := platformDefaults(runtime.GOARCH)
 	return &MoomboxConfig{
 		Network: NetworkConfig{
 			Port:               774,
@@ -86,6 +151,8 @@ func Defaults() *MoomboxConfig {
 			MaxVideoResolution:          2160,
 			NumParallelDownloads:        10,
 			SegmentWorkers:              12,
+			ReorderBufferMB:             reorderPerJobMB,
+			ReorderBudgetMB:             reorderBudgetMB,
 			DownloadChat:                true,
 			Prefer60fps:                 true,
 			MaximumTimeout:              600,
@@ -644,6 +711,26 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("downloader.segment_workers %d must be >= 1", d.SegmentWorkers)
 		if !reportOnly {
 			d.SegmentWorkers = defaults.Downloader.SegmentWorkers
+		}
+	}
+	// The two reorder ceilings (downloader.reorder_buffer_mb /
+	// reorder_budget_mb): 0 is the documented "unbounded" value on either,
+	// so only a negative is an error, and there is deliberately no maximum —
+	// an operator with 128 GB may say so. The cross-check (a per-job value
+	// above the process budget) is NOT made here: it is resolved at read
+	// time by DownloaderConfig.ReorderLimitBytes, which clamps and reports,
+	// because the pair is legal config that the engine reconciles rather
+	// than a value to rewrite on disk behind the operator's back.
+	if d.ReorderBufferMB < 0 {
+		fail("downloader.reorder_buffer_mb %d must be >= 0 MB (0 = unbounded)", d.ReorderBufferMB)
+		if !reportOnly {
+			d.ReorderBufferMB = defaults.Downloader.ReorderBufferMB
+		}
+	}
+	if d.ReorderBudgetMB < 0 {
+		fail("downloader.reorder_budget_mb %d must be >= 0 MB (0 = unbounded)", d.ReorderBudgetMB)
+		if !reportOnly {
+			d.ReorderBudgetMB = defaults.Downloader.ReorderBudgetMB
 		}
 	}
 	if d.MaxVideoResolution < 1 {
