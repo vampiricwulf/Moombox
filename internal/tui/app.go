@@ -576,8 +576,13 @@ type App struct {
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
 	OnMuxJob          func(jobID string) error
-	HasStagingFiles   func(jobID string) bool // checks if staging dir has files
-	HasSegmentFiles   func(jobID string) bool // checks if staging dir has segment files
+	// OnRecoverAsides muxes the recordings the engine set aside for a job into
+	// their own files beside the archive (the A S chord). Deliberately NOT
+	// OnMuxJob: /mux and A M mean "mux the recording", and an aside overlaps
+	// the recording from sequence 0 — it can only ever be a sibling.
+	OnRecoverAsides func(jobID string) error
+	HasStagingFiles func(jobID string) bool // checks if staging dir has files
+	HasSegmentFiles func(jobID string) bool // checks if staging dir has segment files
 	// JobAsides reports a job's set-aside recordings and whether its staging
 	// dir still holds a chat capture. A DISK probe like HasStagingFiles and
 	// HasSegmentFiles beside it, so the same rule applies: it runs on

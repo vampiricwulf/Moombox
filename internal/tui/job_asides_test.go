@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,3 +158,126 @@ func TestAsidesForProbesOncePerSelectedJob(t *testing.T) {
 		t.Errorf("asidesFor did not re-probe after invalidateAsides (%d probes)", probes)
 	}
 }
+
+// TestRecoverAsidesChordIsOneMenuEntry pins the chord table's single-source
+// rule for the new verb, and the gate it carries.
+//
+// Mutants this kills:
+//   - a JobFilter that does not consult JobAsides: a job with nothing set
+//     aside is offered, and the operator picks a row that can only fail.
+//   - a JobFilter that ignores status: an active job is offered.
+//   - NeedsConfirm dropped: a single keystroke starts an FFmpeg.
+func TestRecoverAsidesChordIsOneMenuEntry(t *testing.T) {
+	a := NewApp()
+	a.JobAsides = func(id string) AsideSummary {
+		if id == "has" {
+			return AsideSummary{Asides: []AsideEntry{{Timestamp: "2023-11-14T22:13:20Z", Size: 1}}}
+		}
+		return AsideSummary{}
+	}
+
+	items := a.buildMenuItems()
+	var item *ActionMenuItem
+	seen := 0
+	for i := range items {
+		if items[i].Chord == "A S" {
+			item = &items[i]
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("buildMenuItems has %d entries for A S, want exactly 1", seen)
+	}
+	if !item.NeedsJob || !item.NeedsConfirm || item.SupportsBatch {
+		t.Errorf("A S = {NeedsJob:%v NeedsConfirm:%v SupportsBatch:%v}, want {true true false}",
+			item.NeedsJob, item.NeedsConfirm, item.SupportsBatch)
+	}
+	if item.JobFilter == nil || item.StatusFilter == nil {
+		t.Fatal("A S must carry BOTH filters: the cheap status-only twin for open, the probing one for selection")
+	}
+
+	has := &database.Job{ID: "has", Title: "t", Status: database.StatusFinished, Platform: "youtube"}
+	none := &database.Job{ID: "none", Title: "t", Status: database.StatusFinished, Platform: "youtube"}
+	live := &database.Job{ID: "has", Title: "t", Status: database.StatusDownloading, Platform: "youtube"}
+
+	if !item.JobFilter(has) {
+		t.Error("A S refuses a terminal job that HAS set-aside recordings")
+	}
+	if item.JobFilter(none) {
+		t.Error("A S offers a job with nothing set aside")
+	}
+	if item.JobFilter(live) {
+		t.Error("A S offers an active job")
+	}
+	if !item.StatusFilter(has) || item.StatusFilter(live) {
+		t.Error("A S's StatusFilter must pass a terminal job and refuse an active one, on status alone")
+	}
+}
+
+// TestRecoverAsidesChordDispatchesAndInvalidates: the chord calls the callback
+// and drops the memo, so the panel stops offering recordings the recovery is
+// consuming.
+//
+// Mutants this kills:
+//   - no dispatch case: the callback is never called and the chord is inert.
+//   - the error swallowed: a refusal (an active job, a second run) reports
+//     "Recovering…" at an operator whose recovery never started.
+//   - invalidateAsides dropped: the stale summary keeps rendering.
+func TestRecoverAsidesChordDispatchesAndInvalidates(t *testing.T) {
+	job := &database.Job{ID: "j1", Title: "Some Stream", Status: database.StatusFinished, Platform: "youtube"}
+
+	t.Run("accepted", func(t *testing.T) {
+		a := NewApp()
+		a.JobAsides = func(string) AsideSummary {
+			return AsideSummary{Asides: []AsideEntry{{Timestamp: "2023-11-14T22:13:20Z", Size: 1}}}
+		}
+		called := ""
+		a.OnRecoverAsides = func(id string) error { called = id; return nil }
+		a.asidesFor(job) // seed the memo
+
+		a.dispatchAction("A S", job)
+		if called != "j1" {
+			t.Errorf("OnRecoverAsides called with %q, want %q", called, "j1")
+		}
+		if a.asidesJobID != "" {
+			t.Error("the aside memo survived a dispatched recovery")
+		}
+		if !strings.Contains(a.feedback.msg, "Some Stream") {
+			t.Errorf("feedback = %q, want it to name the job", a.feedback.msg)
+		}
+	})
+
+	t.Run("refused", func(t *testing.T) {
+		a := NewApp()
+		a.OnRecoverAsides = func(string) error { return errTestRefused }
+		a.dispatchAction("A S", job)
+		if !strings.Contains(a.feedback.msg, "refused by the worker") {
+			t.Errorf("feedback = %q, want the refusal surfaced", a.feedback.msg)
+		}
+	})
+}
+
+// TestOrphanOverlayCountsAsides: the sweep has named a staging dir's set-aside
+// recordings since sweep-2 and the TUI's entry type had nowhere to put them,
+// so the terminal offered captured footage as if it were scratch space.
+//
+// Mutant: dropping the count from the row suffix — the row is
+// indistinguishable from an ordinary staging orphan.
+func TestOrphanOverlayCountsAsides(t *testing.T) {
+	m := NewFilesDialogModel()
+	m.SetSize(100, 30)
+	m.Open()
+	m.SetFiles([]OrphanedFileEntry{
+		{Path: "D:\\staging\\job-9", RelPath: "job-9", Type: "staging", Size: 4096, Modified: "2023-11-14T22:13:20Z",
+			Asides: []string{"video.mp4.restart-1700000000", "audio_stream.restart-1700000000"}},
+	})
+	m.SetHistory(nil)
+
+	if view := m.View(); !strings.Contains(view, "2 asides") {
+		t.Errorf("the orphan overlay does not count the set-aside recordings; view:\n%s", view)
+	}
+}
+
+// errTestRefused stands in for any of the worker's typed refusals; the TUI
+// only ever renders the message.
+var errTestRefused = errors.New("refused by the worker")

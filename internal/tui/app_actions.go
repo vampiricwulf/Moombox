@@ -207,6 +207,17 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedback(fmt.Sprintf("Muxing: %s", job.Title))
 			}
 		}
+	case "A S":
+		if job != nil && a.OnRecoverAsides != nil {
+			if err := a.OnRecoverAsides(job.ID); err != nil {
+				a.setFeedback(fmt.Sprintf("Recovery failed: %s", err))
+			} else {
+				// The recordings are consumed within seconds; drop the memo so
+				// the details panel stops offering them.
+				a.invalidateAsides(job.ID)
+				a.setFeedback(fmt.Sprintf("Recovering set-aside recordings: %s", job.Title))
+			}
+		}
 	case "A C":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
 			count := 0
@@ -794,6 +805,20 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			// Status-only twin of the filter above — see A R (CORE-9).
 			StatusFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusCancelled || j.Status == database.StatusError
+			}},
+		{Chord: "A S", Label: "Recover Set-aside Recordings", HintLabel: "Recover", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no jobs with set-aside recordings",
+			JobFilter: func(j *database.Job) bool {
+				if JobIsActive(j.Status) {
+					return false
+				}
+				return a.JobAsides != nil && len(a.JobAsides(j.ID).Asides) > 0
+			},
+			// Status-only twin of the filter above — see A R (CORE-9). The
+			// JobAsides probe reads the disk, so it runs when A S is chosen
+			// and its job selector is built, never when the menu opens.
+			StatusFilter: func(j *database.Job) bool {
+				return !JobIsActive(j.Status)
 			}},
 		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no active jobs",
