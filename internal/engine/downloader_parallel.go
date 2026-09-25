@@ -163,8 +163,8 @@ func (b *reorderBuffer) admit(seq int, data []byte) bool {
 			b.reserved += n
 			return true
 		}
-		if beforeReorderWait != nil {
-			beforeReorderWait()
+		if f := beforeReorderWait.Load(); f != nil {
+			(*f)()
 		}
 		b.cond.Wait()
 	}
@@ -239,12 +239,18 @@ func (b *reorderBuffer) markFailed(seq int) {
 // process-wide budget and drops it from the registry: a buffer torn down
 // with segments still resident would otherwise hold that share of the shared
 // ceiling for the life of the process, and one abandoned download per hour
-// would starve every later one.
+// would starve every later one. The map goes with the reservation: nothing
+// reads a released buffer (admit refuses, the consumer has returned), and
+// dropping the slices here keeps the bytes the budget just handed back from
+// staying reachable for as long as something — the DASH watcher's closure,
+// or a worker still inside admit() waiting to observe released — holds a
+// reference to this buffer.
 func (b *reorderBuffer) release() {
 	b.mu.Lock()
 	b.released = true
 	freed := b.reserved
 	b.reserved = 0
+	clear(b.seg)
 	b.mu.Unlock()
 	if freed > 0 {
 		b.budget.free(freed)
@@ -385,9 +391,9 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	results := make(chan int, workers)
 	// rb is the byte-bounded reorder buffer: workers admit fetched segments
 	// into it (blocking there, not on `results`, once resident bytes reach
-	// catchUpBufferBytes) and the consumer below drains it in ascending
-	// order. See reorderBuffer's doc for the head-always-admitted and
-	// markFailed/release deadlock-avoidance guarantees.
+	// the per-job ceiling below) and the consumer below drains it in
+	// ascending order. See reorderBuffer's doc for the head-always-admitted
+	// and markFailed/release deadlock-avoidance guarantees.
 	// The per-job ceiling is operator-settable (downloader.reorder_buffer_mb,
 	// reaching the engine through ConfigureReorder); 0 means unbounded. Read
 	// at construction, so a config save mid-download changes what the NEXT

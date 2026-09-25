@@ -865,7 +865,9 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// worker's drain branch below. Miss one and the consumer waits forever
 	// for an index that never arrives, with the workers parked above it
 	// beyond the reach of ctx (sweep-2 Task 6 review, finding 1).
-	// Same operator-settable ceiling as the DASH catch-up twin; see there.
+	// Same operator-settable ceiling as the DASH catch-up twin; see there —
+	// but this buffer lives for the whole VOD, so a save lands on the next
+	// download.
 	bufLimit := sharedReorderBudget.perJobLimit()
 	if d.hlsVodBufferBytesOverride > 0 {
 		bufLimit = d.hlsVodBufferBytesOverride

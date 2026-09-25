@@ -1,6 +1,9 @@
 package engine
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // reorderBudget is the PROCESS-WIDE ceiling on out-of-order segment bytes.
 //
@@ -234,11 +237,15 @@ func wakeWaiters(waiters []*reorderBuffer) {
 
 // beforeReorderWait is a test seam: admit() calls it after an admission
 // attempt has failed and BEFORE cond.Wait(), with the buffer's mu still held.
-// Nil in production, so the cost is one nil check inside a lock already held,
-// off the fetch path.
+// Nil in production, so the cost is one atomic load inside a lock already
+// held, off the fetch path.
 //
 // It exists because the lost-wakeup window wakeWaiters closes is a few
 // instructions wide and cannot be hit by timing: pinning the protocol needs a
 // test that can run a free() INSIDE that window. Nothing in production
 // assigns it.
-var beforeReorderWait func()
+//
+// atomic.Pointer, not a bare func(): admit() reads this from every blocked
+// worker goroutine, so a plain package global would be a data race the moment
+// a test assigned it while another test's buffers were still admitting.
+var beforeReorderWait atomic.Pointer[func()]

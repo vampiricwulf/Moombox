@@ -392,7 +392,7 @@ func (s *runState) runTUI() {
 		// PUT /api/config whole-struct store.
 		snap := s.configStore.Snapshot()
 		s.notifyMgr.Reload(snap)
-		// The three read-once settings the web PUT re-applies via
+		// The four read-once settings the web PUT re-applies via
 		// ConfigRoutesCallbacks; applied unconditionally here for the same
 		// reason the cache invalidation above is (no pre-mutation snapshot).
 		s.applyGoSoftLimit(snap.Memory.GoSoftLimitMB)

@@ -165,10 +165,10 @@ func TestAFreeInsideTheWaitWindowIsNotLost(t *testing.T) {
 	}
 	waiter := newReorderBufferOn(bg, 8*seg, 500)
 
-	t.Cleanup(func() { beforeReorderWait = nil })
+	t.Cleanup(func() { beforeReorderWait.Store(nil) })
 	var once sync.Once
 	freed := make(chan struct{})
-	beforeReorderWait = func() {
+	hook := func() {
 		once.Do(func() {
 			// Issued from another goroutine because this hook runs with the
 			// waiter's mu HELD: a correct wakeWaiters blocks on that mu
@@ -181,6 +181,7 @@ func TestAFreeInsideTheWaitWindowIsNotLost(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		})
 	}
+	beforeReorderWait.Store(&hook)
 
 	admitted := make(chan struct{})
 	go func() {
@@ -229,7 +230,9 @@ func TestAZeroByteGapSentinelIsAdmittedWithTheBudgetExhausted(t *testing.T) {
 // per download and the process quietly stops admitting anything. MUTANT:
 // release() frees b.bytes without clearing the per-buffer counter — the
 // second release double-frees and the final assertion reads a negative
-// reservation as 0 while a sibling buffer over-admits.
+// reservation as 0 while a sibling buffer over-admits. MUTANT: drop
+// release()'s clear(b.seg) — the reservation is returned but the segments
+// stay reachable through the map, so has(2) is still true.
 func TestTakeAndReleaseFreeExactlyWhatThisBufferReserved(t *testing.T) {
 	const seg = 1 << 10
 	bg := newReorderBudget(8*seg, 100*seg)
@@ -250,6 +253,9 @@ func TestTakeAndReleaseFreeExactlyWhatThisBufferReserved(t *testing.T) {
 	a.release()
 	if got := budgetReserved(bg); got != 0 {
 		t.Errorf("budget reserved after release = %d, want 0 — release must free the whole outstanding reservation", got)
+	}
+	if a.has(2) {
+		t.Error("seq 2 is still stored after release — a released buffer holds nothing: the bytes handed back to the budget must not stay reachable through b.seg")
 	}
 	a.release() // idempotent
 	if got := budgetReserved(bg); got != 0 {

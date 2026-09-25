@@ -9,7 +9,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
-// The three settings that are read once at startup and re-applied here on
+// The four settings that are read once at startup and re-applied here on
 // every config save from either UI (the web PUT via ConfigRoutesCallbacks,
 // the TUI via OnSaveConfig) — and, for the ffmpeg path, from a third writer:
 // POST /api/ffmpeg/check via FFmpegDeps.OnFfmpegPathChange, which persists a
