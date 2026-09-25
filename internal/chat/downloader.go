@@ -44,6 +44,11 @@ const (
 	liveChatPollDefault = 5 * time.Second
 	// maxStaleRecoveryDelay caps that floor's doubling.
 	maxStaleRecoveryDelay = 5 * time.Minute
+	// staleFirstRetryDelay is the first pause INSIDE one stale-continuation
+	// recovery — recoverStaleContinuation's ladder is 10s, 20s, 40s, 80s,
+	// capped at maxStaleRecoveryDelay. Distinct from liveChatPollDefault,
+	// which is the floor BETWEEN consecutive recoveries.
+	staleFirstRetryDelay = 10 * time.Second
 	// replayMarkFutureSlack bounds how far ahead of the wallclock a
 	// timestampUsec may be and still move the replay high-water mark. Chat
 	// timestamps are server-issued, so this is a corruption/clock-skew bound
@@ -55,13 +60,15 @@ const (
 )
 
 // liveChatPollDefaultForTesting / maxStaleRecoveryDelayForTesting are the
-// values staleRecoveryDelay actually reads. Vars rather than consts purely so
-// tests can scale the ladder down instead of sleeping for real minutes — the
-// playerRetryBackoffBase seam in internal/youtube exists for the same reason.
-// Production never writes them.
+// values staleRecoveryDelay actually reads, and staleFirstRetryDelayForTesting
+// is the one recoverStaleContinuation's own ladder starts from. Vars rather
+// than consts purely so tests can scale the ladder down instead of sleeping
+// for real minutes — the playerRetryBackoffBase seam in internal/youtube
+// exists for the same reason. Production never writes them.
 var (
 	liveChatPollDefaultForTesting   = liveChatPollDefault
 	maxStaleRecoveryDelayForTesting = maxStaleRecoveryDelay
+	staleFirstRetryDelayForTesting  = staleFirstRetryDelay
 )
 
 // errStaleRecoveryExhausted is the terminal error Start reports when
@@ -1180,7 +1187,7 @@ func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
 		return true
 	}
 
-	contRetryDelay := 10 * time.Second
+	contRetryDelay := staleFirstRetryDelayForTesting
 	contRetries := 1 // the initial failed call above counts as attempt #1
 	for !cd.shouldStop() && contRetries < maxStaleContinuationAttempts {
 		cd.sleep(ctx, contRetryDelay)
