@@ -483,7 +483,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 - **Archived tab** — Browse finished jobs older than `hide_finished_age_days`
 - **Player tab** — Replay archived videos with synchronized chat:
   - Niconico-style flying chat overlay (togglable)
-  - Sidebar chat panel with auto-scroll and search (togglable)
+  - Sidebar chat panel with auto-scroll and search (togglable); click a timestamp to jump the video to 3 s before that message
   - Super Chat and membership cards, Twitch sub/raid notices (other Twitch events as dimmer ones) and cheer chips in the sidebar; emoji support
   - Multi-segment playback with cross-segment seeking for quality-split recordings
 - **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback in the Player tab
