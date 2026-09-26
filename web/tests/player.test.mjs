@@ -5,7 +5,7 @@
 // skipped (not failed) when jsdom is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor } from "../public/modules/player.js";
+import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor, CHAT_SEEK_LEAD_MS, chatSeekTargetSeconds } from "../public/modules/player.js";
 
 let jsdomMissing = null;
 try {
@@ -1898,4 +1898,159 @@ test("search finds the lines the cards show beside the message", { skip }, async
   tw.player.filterChat("raiding");
   assert.deepEqual(shown(tw), [true, false],
     "a raid with no wire systemMsg is findable by the line the sidebar rebuilt");
+});
+
+// ── Click a timestamp to jump the video (2026-09-25) ────────────────────────
+
+/** The time element of a sidebar row, whatever shape the row took. */
+const timeEl = (row) => row.querySelector(".chat-msg-time");
+
+// Pure: the arithmetic on its own, with no DOM and no player. MUTANT: drop the
+// Math.max and the 1 s message seeks to -2; add the offset instead of
+// subtracting it and the 5 s case lands at 122; drop the lead and every row
+// jumps to the instant the message is already gone from the overlay.
+test("chatSeekTargetSeconds backs off the lead, honours the offset and clamps at 0", () => {
+  assert.equal(CHAT_SEEK_LEAD_MS, 3000, "the owner's lead-in is 3 s");
+  assert.equal(chatSeekTargetSeconds(120000, 0), 117);
+  assert.equal(chatSeekTargetSeconds(120000, 5000), 112);
+  assert.equal(chatSeekTargetSeconds(1000, 0), 0);
+  assert.equal(chatSeekTargetSeconds(NaN, 0), null);
+  // A row whose dataset.offset never parsed, and a corrupt stored offset: both
+  // reach the handler as Number(...) of something unparseable, and neither may
+  // be allowed to seek the video to NaN.
+  assert.equal(chatSeekTargetSeconds(undefined, 0), null);
+  assert.equal(chatSeekTargetSeconds(120000, NaN), null);
+  assert.equal(chatSeekTargetSeconds(Infinity, 0), null);
+  // A negative effective time (a message from before the recording started,
+  // or a large positive chat offset) clamps to the start too.
+  assert.equal(chatSeekTargetSeconds(0, 60000), 0);
+  // The lead is a parameter for the tests' sake, not a setting.
+  assert.equal(chatSeekTargetSeconds(120000, 0, 0), 120);
+});
+
+// MUTANT: leave any one shape's time a <span> — that row's timestamp is no
+// longer focusable, Enter/Space do nothing there, and the delegated handler
+// (which matches on the class, not the tag) still fires on a mouse click, so
+// only the keyboard half breaks. Only an assertion on the TAG catches it.
+// Two harnesses, in order — makePlayer closes the previous window, so the
+// YouTube rows are checked before the Twitch document exists.
+test("every sidebar shape's timestamp is a labelled button", { skip }, async () => {
+  const check = (h, expectedText) => {
+    const rows = [...h.sidebar().children];
+    assert.deepEqual(rows.map((r) => timeEl(r).textContent), expectedText,
+      "the text is exactly what the span showed");
+    for (const row of rows) {
+      const btn = timeEl(row);
+      assert.equal(btn.tagName, "BUTTON", `${row.className}: the time must be a real button`);
+      assert.equal(btn.getAttribute("type"), "button",
+        "…of type=button, so it never submits anything");
+      assert.equal(btn.className, "chat-msg-time", "…wearing the class every CSS rule addresses");
+      assert.equal(btn.title, `Jump to ${btn.textContent}`);
+    }
+  };
+
+  // Flat row, Super Chat card, member card.
+  check(await showChat([
+    ytMsg({ offsetMs: 61000 }),
+    superchatMsg({ amount: "$5.00", tier: 3, kind: "message" },
+                 { offsetMs: 62000, message: [{ type: "text", text: "thanks" }] }),
+    ytMsg({ offsetMs: 63000, isMembership: true, membershipText: "Welcome to Member!", message: [] }),
+  ]), ["1:01", "1:02", "1:03"]);
+
+  // Twitch notice block.
+  check(await showTwitchChat([
+    twNotice({ offsetMs: 64000, messageType: "raid", authorName: "other", viewerCount: 12 }),
+  ]), ["1:04"]);
+});
+
+/**
+ * Record what the click handler asks the player to seek to. The stub replaces
+ * the instance method the delegated handler calls, so the assertion is on the
+ * ARGUMENT — the arithmetic — and not on where SegmentPlayer puts it.
+ */
+function recordSeeks(h) {
+  const seeks = [];
+  h.player.seekToGlobalTime = (s) => seeks.push(s);
+  return seeks;
+}
+
+// MUTANT: read the offset off the button instead of the row and every card's
+// click seeks nothing (the dataset lives on the row); MUTANT: seek to the
+// message's own time and the jump lands 3 s late, past the line that was being
+// looked for.
+test("clicking a timestamp seeks 3 s before the message, once", { skip }, async () => {
+  const h = await showChat([ytMsg({ offsetMs: 120000 }), ytMsg({ offsetMs: 180000 })]);
+  const seeks = recordSeeks(h);
+
+  timeEl(h.sidebar().children[0]).click();
+  assert.deepEqual(seeks, [117], "120 s − 0 s offset − 3 s lead");
+
+  timeEl(h.sidebar().children[1]).click();
+  assert.deepEqual(seeks, [117, 177], "one seek per click, never a replay of the first");
+});
+
+// MUTANT: ignore playerCustomOffsetMs and a job whose chat is 5 s out jumps to
+// the wrong place — exactly the job whose owner reached for the offset box.
+test("the per-job chat offset shifts the jump by the same amount", { skip }, async () => {
+  const h = await showChat([ytMsg({ offsetMs: 120000 })]);
+  h.player.playerCustomOffsetMs = 5000;
+  const seeks = recordSeeks(h);
+
+  timeEl(h.sidebar().children[0]).click();
+  assert.deepEqual(seeks, [112], "the message becomes active 5 s earlier, so the jump does too");
+});
+
+// MUTANT: drop the clamp and the first minute of every recording seeks
+// negative; a real <video> silently clamps, but SegmentPlayer's own clamp is
+// skipped entirely when the durations are unknown.
+test("a message inside the lead-in jumps to the start, not past it", { skip }, async () => {
+  const h = await showChat([ytMsg({ offsetMs: 1000 })]);
+  const seeks = recordSeeks(h);
+
+  timeEl(h.sidebar().children[0]).click();
+  assert.deepEqual(seeks, [0]);
+});
+
+// MUTANT: bind the handler to the row instead of the time button and the whole
+// row becomes a seek target — a click meant to select the text of a message
+// would throw playback somewhere else.
+test("clicking anything but the timestamp seeks nothing", { skip }, async () => {
+  const h = await showChat([ytMsg({ offsetMs: 120000, authorName: "Viewer" })]);
+  const seeks = recordSeeks(h);
+  const row = h.sidebar().children[0];
+
+  row.querySelector(".chat-msg-author").click();
+  row.children[2].click();   // the content span
+  row.click();
+  assert.deepEqual(seeks, [], "only the timestamp is a control");
+});
+
+// The timestamp is the sidebar's FIRST focusable control, so it is the first
+// thing to meet the player's Space shortcut. MUTANT: drop BUTTON from the
+// shortcut handler's own tag guard and a keyboard user pressing Space on a
+// timestamp both jumps and toggles playback on the one keypress.
+test("Space on a focused timestamp is the button's, not the player's", { skip }, async () => {
+  const h = await showChat([ytMsg({ offsetMs: 120000 })]);
+  const btn = timeEl(h.sidebar().children[0]);
+  const before = h.mediaCalls.length;
+
+  h.key(" ", { target: btn });
+
+  assert.deepEqual(h.mediaCalls.slice(before), [], "the player must not toggle playback under it");
+});
+
+// The real seek, not the stub: the click must move the video and leave the
+// transport alone. MUTANT: call safePlay (or video.pause()) after the seek and
+// a paused reader who clicked a line to re-read it is put back into playback.
+test("the jump moves the video and never touches the play state", { skip }, async () => {
+  const h = await showChat([ytMsg({ offsetMs: 120000 })]);
+  h.video.currentTime = 10;
+  h.video.paused = true;
+  const before = h.mediaCalls.length;
+
+  timeEl(h.sidebar().children[0]).click();
+
+  assert.equal(h.video.currentTime, 117, "a single-file job seeks the element directly");
+  assert.equal(h.video.paused, true, "still paused");
+  assert.deepEqual(h.mediaCalls.slice(before), [], "no play()/pause()/load() from a timestamp click");
 });

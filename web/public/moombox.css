@@ -999,16 +999,20 @@ body.batch-bar-active {
 }
 
 /* Keyboard focus ring for the status bar's and log panel's role="button"
-   controls. They are spans and divs, so without this the ring is whatever the
-   UA picks; this matches the app's existing :focus-visible convention
-   (#player-chat-offset, .setup-mode-card, .segment-indicator-block). The
-   offset is positive rather than the blocks' -2px — these are small inline
-   glyphs and an inset ring would sit on the text. */
+   controls, and for the chat sidebar's timestamp buttons. The first five are
+   spans and divs, so without this the ring is whatever the UA picks;
+   .chat-msg-time is a real button, but its own rule strips the UA chrome, so
+   without this it would have no visible focus at all. Either way this matches
+   the app's existing :focus-visible convention (#player-chat-offset,
+   .setup-mode-card, .segment-indicator-block). The offset is positive rather
+   than the blocks' -2px — these are small inline glyphs and an inset ring
+   would sit on the text. */
 #check-countdown:focus-visible,
 #status-warnings-icon:focus-visible,
 #version-indicator:focus-visible,
 #log-autoscroll-pill:focus-visible,
-.status-warning:focus-visible {
+.status-warning:focus-visible,
+.chat-msg-time:focus-visible {
     outline: 2px solid var(--sl-color-primary-500);
     outline-offset: 2px;
 }
@@ -1718,11 +1722,35 @@ sl-progress-bar {
     opacity: 0.35;
 }
 
+/* The timestamp is a <button>: clicking it jumps the video to 3 s before the
+   message (player.js CHAT_SEEK_LEAD_MS). It has to read as the plain grey time
+   it has always been, so the UA's button chrome comes off and the row's
+   typography is inherited before the mono face and muted colour are re-applied
+   — `font: inherit` first, so the two declarations after it win. The colour
+   stays explicit rather than `inherit`: a card header repaints it through
+   `.chat-card .chat-card-header .chat-msg-time`, exactly as it did the span,
+   and `.chat-msg.post`'s neutral-700 must keep NOT reaching it. `vertical-align`
+   because an inline-block would otherwise sit on the row's baseline
+   differently from the span it replaced. The affordance is the underline
+   below; the focus ring is the app's, up with the other :focus-visible
+   controls. */
 .chat-msg-time {
-    color: var(--sl-color-neutral-500);
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0 var(--sl-spacing-2x-small) 0 0;
+    font: inherit;
     font-family: var(--sl-font-mono);
     font-size: var(--sl-font-size-x-small);
-    margin-right: var(--sl-spacing-2x-small);
+    vertical-align: baseline;
+    cursor: pointer;
+    color: var(--sl-color-neutral-500);
+}
+
+.chat-msg-time:hover,
+.chat-msg-time:focus-visible {
+    text-decoration: underline;
 }
 
 .chat-msg-author {

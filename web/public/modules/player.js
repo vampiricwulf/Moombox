@@ -225,6 +225,39 @@ export function focusPlayerSurface() {
   document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
 }
 
+/**
+ * How far BEFORE a message the video lands when its timestamp is clicked
+ * (owner ruling 2026-09-25). A constant and not a setting: the point of the
+ * lead-in is that the line being looked for is still ahead of the playhead
+ * when playback resumes, which is a property of reading, not of the recording.
+ */
+export const CHAT_SEEK_LEAD_MS = 3000;
+
+/**
+ * Where a click on a message's timestamp should put the playhead, in seconds.
+ *
+ * `offsetMs − customOffsetMs` is the message's EFFECTIVE time: the video
+ * instant at which the sidebar promotes it (updateSidebarActiveState compares
+ * `offsetMs <= currentMs + playerCustomOffsetMs`), so a job whose chat is
+ * shifted by the offset box jumps by exactly the same shift. The lead backs
+ * off from there, and the result is clamped at 0 — the first three seconds of
+ * a recording, and any message from before it started, jump to the start.
+ *
+ * Returns null for anything non-finite: `dataset.offset` that never parsed, or
+ * a corrupt stored offset. A NaN would otherwise reach `video.currentTime`,
+ * where SegmentPlayer's own clamp is skipped whenever the part durations are
+ * unknown.
+ *
+ * @param {number} offsetMs        the message's own offset
+ * @param {number} customOffsetMs  the per-job chat offset in ms
+ * @param {number} [leadMs]        how far before the message to land
+ * @returns {number|null} seconds, or null when the inputs are not numbers
+ */
+export function chatSeekTargetSeconds(offsetMs, customOffsetMs, leadMs = CHAT_SEEK_LEAD_MS) {
+  if (!Number.isFinite(offsetMs) || !Number.isFinite(customOffsetMs) || !Number.isFinite(leadMs)) return null;
+  return Math.max(0, (offsetMs - customOffsetMs) / 1000 - leadMs / 1000);
+}
+
 export class PlayerController {
   constructor(app) {
     this.app = app;
@@ -516,6 +549,25 @@ export class PlayerController {
       if (!this._programmaticScroll) {
         this.playerAutoScroll = false;
       }
+    });
+
+    // Click a message's timestamp to jump the video to just before it. ONE
+    // delegated listener rather than one per row: a long VOD's sidebar holds
+    // tens of thousands of rows, and they are built in chunks and rebuilt on
+    // every job switch. Delegation also survives that rebuild — the container
+    // is the only element initPlayer ever sees.
+    //
+    // Nothing else in the row is a target: `closest(".chat-msg-time")` matches
+    // the button alone, so selecting the text of a message still selects it.
+    // The play state is deliberately left where it was, and the seek's own
+    // `seeked` event re-syncs the sidebar and re-anchors the overlay.
+    sidebarMessages.addEventListener("click", (e) => {
+      const btn = e.target.closest(".chat-msg-time");
+      if (!btn) return;
+      const row = btn.closest(".chat-msg");
+      const target = chatSeekTargetSeconds(Number(row?.dataset.offset), this.playerCustomOffsetMs);
+      if (target === null) return;
+      this.seekToGlobalTime(target);
     });
 
     // Sync button
@@ -875,10 +927,21 @@ export class PlayerController {
 
   /**
    * Seek to a global time (seconds) across segments.
+   *
+   * A single-file job has no segments at all, and SegmentPlayer returns
+   * without doing anything when `segOffsets` is null — so the element is
+   * seeked directly, which for a one-part recording IS the global timeline.
+   * The same `_seg.active` branch the arrow keys and the resume dialog already
+   * write, hoisted here so a caller with no reason to care (the chat-seek
+   * handler) does not have to repeat it. Nothing changes for the three
+   * existing callers: every one of them already tested `_seg.active` first, so
+   * none of them could ever reach this arm.
    */
   seekToGlobalTime(globalSeconds) {
     const video = document.getElementById("player-video");
-    this._seg.seekToGlobalTime(globalSeconds, video);
+    if (!video) return;
+    if (this._seg.active) this._seg.seekToGlobalTime(globalSeconds, video);
+    else video.currentTime = Math.max(0, globalSeconds);
   }
 
   /**
@@ -1357,12 +1420,25 @@ export class PlayerController {
     div.appendChild(contentSpan);
   }
 
-  /** The row's offset timestamp. */
+  /**
+   * The row's offset timestamp — a real button, so clicking it (or reaching it
+   * with Tab and pressing Enter/Space) jumps the video to CHAT_SEEK_LEAD_MS
+   * before the message. The class is unchanged: moombox.css strips the UA's
+   * button chrome so it still LOOKS like the span it replaced, and every rule
+   * that addressed it — the card headers' `color: inherit`, the divider dim —
+   * still reaches it.
+   *
+   * The element carries no offset of its own: the seek reads `dataset.offset`
+   * off the row (_buildChatMessageEl stamps it on every shape's root), so the
+   * two can never disagree.
+   */
   _timeSpan(msg) {
-    const span = document.createElement("span");
-    span.className = "chat-msg-time";
-    span.textContent = formatMsToTime(msg.offsetMs);
-    return span;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chat-msg-time";
+    btn.textContent = formatMsToTime(msg.offsetMs);
+    btn.title = `Jump to ${btn.textContent}`;
+    return btn;
   }
 
   /**

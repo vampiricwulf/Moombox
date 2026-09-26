@@ -407,6 +407,11 @@ test("the collapsed warnings icon is a button only while it stands for something
 // falls back to whatever ring the UA picks for a span or a div, which is the
 // very thing the app's existing :focus-visible convention (#player-chat-offset,
 // .setup-mode-card, .segment-indicator-block) exists to replace.
+// `.chat-msg-time` — a sidebar row's timestamp, a real <button> since the chat
+// seek — is here for the same reason from the other direction: its rule strips
+// the UA chrome (appearance/border/background), so dropping it from the ring
+// would leave the one focusable control in the sidebar with no visible focus
+// at all rather than merely a foreign one.
 test("every keyboard-reachable control has the app's focus ring, not the UA's", () => {
   const css = fs.readFileSync(
     path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public", "moombox.css"),
@@ -417,7 +422,7 @@ test("every keyboard-reachable control has the app's focus ring, not the UA's", 
   const [selectors, body] = block.split("{");
   for (const sel of [
     "#check-countdown", "#status-warnings-icon", "#version-indicator",
-    "#log-autoscroll-pill", ".status-warning",
+    "#log-autoscroll-pill", ".status-warning", ".chat-msg-time",
   ]) {
     assert.ok(selectors.includes(`${sel}:focus-visible`), `${sel} has no focus ring of its own`);
   }
