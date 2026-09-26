@@ -81,9 +81,11 @@ export const TWITCH_NOTICE_TYPES = new Set(["sub", "resub", "subgift", "raid"]);
  * put in a block and keeps its flat row.
  *
  * Deliberately a predicate rather than a fifth member of TWITCH_NOTICE_TYPES:
- * that set also answers "can twitchNoticeLine build a line for this?" for
- * filterChat, and `system` would then take the rebuild branch, whose default
- * arm returns "" — the one line a dim notice shows would become unsearchable.
+ * membership is unconditional, and a `system` message with an EMPTY system
+ * line must keep its flat row — a set cannot express that condition. (Search
+ * is unaffected either way: twitchNoticeLine returns `systemMsg` before it
+ * reaches the kind switch, so both arms of filterChat's ternary produce the
+ * same string for a `system` message.)
  * @param {object} msg
  * @returns {boolean}
  */
