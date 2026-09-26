@@ -62,11 +62,36 @@ export const SUPERCHAT_TIER_COLORS = {
 export const MEMBER_CARD_COLORS = { header: "#0F9D58", body: "#93D3B4" };
 
 /**
- * The Twitch event kinds that become a notice block. `announcement` and
- * `system` deliberately keep the flat row they have today (2026-09-25 ruling
- * K3) — the announcement's colour classes are its whole styling.
+ * The Twitch event kinds that become a full-strength notice block.
+ * `announcement` deliberately keeps the flat row it has today (2026-09-25
+ * ruling K3) — its colour classes are its whole styling. `system` is not a
+ * member either, but reaches the same block dimmed through
+ * `isDimTwitchNotice`; the set stays the four kinds `twitchNoticeLine` can
+ * rebuild a line for.
  */
 export const TWITCH_NOTICE_TYPES = new Set(["sub", "resub", "subgift", "raid"]);
+
+/**
+ * A `system`-typed USERNOTICE worth a notice block (owner ruling 2026-09-25,
+ * after the whole-range audit). `internal/twitch/chat_irc.go` types everything
+ * it cannot normalize to one of the four kinds as `system` — prime and gift
+ * upgrades, viewer milestones, rituals, pay-forwards — and the wire's
+ * `system-msg` is the only sentence such an event has: there is no kind to
+ * rebuild from, so a `system` message with an EMPTY system line has nothing to
+ * put in a block and keeps its flat row.
+ *
+ * Deliberately a predicate rather than a fifth member of TWITCH_NOTICE_TYPES:
+ * membership is unconditional, and a `system` message with an EMPTY system
+ * line must keep its flat row — a set cannot express that condition. (Search
+ * is unaffected either way: twitchNoticeLine returns `systemMsg` before it
+ * reaches the kind switch, so both arms of filterChat's ternary produce the
+ * same string for a `system` message.)
+ * @param {object} msg
+ * @returns {boolean}
+ */
+export function isDimTwitchNotice(msg) {
+  return msg.messageType === "system" && !!msg.systemMsg;
+}
 
 /** msg-param-sub-plan (internal/twitch: SubPlan) → the name Twitch shows. */
 const TWITCH_PLAN_NAMES = { 1000: "Tier 1", 2000: "Tier 2", 3000: "Tier 3", Prime: "Prime" };
@@ -1300,7 +1325,7 @@ export class PlayerController {
       this._fillMemberCard(div, msg);
       return div;
     }
-    if (TWITCH_NOTICE_TYPES.has(msg.messageType)) {
+    if (TWITCH_NOTICE_TYPES.has(msg.messageType) || isDimTwitchNotice(msg)) {
       this._fillTwitchNotice(div, msg);
       return div;
     }
@@ -1472,7 +1497,11 @@ export class PlayerController {
   /**
    * K3: a Twitch sub, resub, gift or raid as a highlighted block — Twitch's
    * purple down the left edge, the same purple at 10% behind it, the system
-   * line first and the sender's own words, if any, underneath.
+   * line first and the sender's own words, if any, underneath. A `system`
+   * USERNOTICE with a system line (isDimTwitchNotice) takes the same block
+   * with `.dim` added: the same shape at reduced emphasis, per the 2026-09-25
+   * follow-up ruling. The class, not a second builder — the two differ only in
+   * how loudly they are painted.
    *
    * Not a card: these carry no colour of their own and no amount, so the
    * two-part shell would be two strips of the same purple. The content span is
@@ -1485,6 +1514,7 @@ export class PlayerController {
    */
   _fillTwitchNotice(div, msg) {
     div.classList.add("chat-notice", "twitch");
+    if (isDimTwitchNotice(msg)) div.classList.add("dim");
     div.appendChild(this._timeSpan(msg));
     const line = twitchNoticeLine(msg);
     if (line) {
@@ -1493,9 +1523,17 @@ export class PlayerController {
       lineEl.textContent = line;
       div.appendChild(lineEl);
     }
-    const content = document.createElement("span");
-    this.appendChatContent(content, msg.message || [], msg.emotes);
-    if (content.hasChildNodes()) div.appendChild(content);
+    // `internal/twitch` parseUsernotice copies `system-msg` into the message
+    // when the sender typed nothing, so a silent notice reaches the archive
+    // with `message === systemMsg`. That echo is not the sender's own words,
+    // and printing it would put the same sentence in the block twice. Compared
+    // as the raw string rather than the built nodes: a third-party emote map
+    // can turn a word of it into an image, and the echo is still an echo.
+    if (typeof msg.message !== "string" || msg.message !== line) {
+      const content = document.createElement("span");
+      this.appendChatContent(content, msg.message || [], msg.emotes);
+      if (content.hasChildNodes()) div.appendChild(content);
+    }
   }
 
   /**

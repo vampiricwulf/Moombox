@@ -1716,10 +1716,14 @@ test("a resub's own words sit under its system line, and silence adds nothing", 
     ["chat-msg-time", "chat-notice-line"]);
 });
 
-// The scope pin for K3: only the four kinds named become blocks.
-// MUTANT: add "announcement" or "system" to TWITCH_NOTICE_TYPES and the
-// announcement loses its colour classes to a notice block.
-test("announcements and system messages keep today's flat rendering", { skip }, async () => {
+// The scope pin for K3, as the 2026-09-25 follow-up left it: an announcement
+// still keeps its flat coloured row, and so does a `system` message with
+// NOTHING to say — an empty system line has no notice to be.
+// MUTANT: add "announcement" to TWITCH_NOTICE_TYPES and the announcement loses
+// its colour classes to a notice block.
+// MUTANT: dispatch on messageType === "system" alone and the second row
+// becomes an empty purple block with a time and no line.
+test("announcements and a system message with no system line keep today's flat rendering", { skip }, async () => {
   const h = await showTwitchChat([
     twNotice({ messageType: "announcement", announcementColor: "green", message: "hello all" }),
     twNotice({ offsetMs: 2000, messageType: "system", message: "stream is starting" }),
@@ -1730,6 +1734,67 @@ test("announcements and system messages keep today's flat rendering", { skip }, 
   assert.equal(ann.querySelector(".chat-notice-line"), null);
   assert.equal(sys.className, "chat-msg future");
   assert.equal(sys.lastChild.textContent, "stream is starting");
+});
+
+// The 2026-09-25 follow-up ruling: every USERNOTICE that
+// internal/twitch/chat_irc.go does NOT normalize to one of the four kinds —
+// prime and gift upgrades, viewer milestones, rituals, pay-forwards — arrives
+// typed `system` with the wire's `system-msg` and no fields to rebuild from.
+// It gets the same block at reduced emphasis, that line first.
+// MUTANT: leave it on _fillPlainRow and the only sentence the event has ("fan
+// continued their Prime subscription") is never on screen.
+// MUTANT: mark it `.dim` but rebuild the line instead of taking the wire's and
+// twitchNoticeLine's default arm returns "" — the block loses its whole text.
+test("a system USERNOTICE with a system line renders as a dim notice", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "system", authorName: "fan",
+               systemMsg: "fan continued their Prime subscription" }),
+    // parseUsernotice copies `system-msg` into the message when the sender
+    // typed nothing, so the archive's echo must not print the line twice.
+    twNotice({ offsetMs: 2000, messageType: "system", authorName: "quiet",
+               systemMsg: "quiet continued their Prime subscription",
+               message: "quiet continued their Prime subscription" }),
+    twNotice({ offsetMs: 3000, messageType: "system", authorName: "chatty",
+               systemMsg: "chatty continued their Prime subscription",
+               message: "year three!" }),
+  ]);
+  const [silent, echoed, spoken] = h.sidebar().children;
+  for (const row of [silent, echoed, spoken]) {
+    assert.ok(row.classList.contains("chat-msg"), row.className);
+    assert.ok(row.classList.contains("chat-notice"), row.className);
+    assert.ok(row.classList.contains("twitch"), row.className);
+    assert.ok(row.classList.contains("dim"), row.className);
+  }
+  assert.deepEqual([...silent.children].map((c) => c.className),
+    ["chat-msg-time", "chat-notice-line"]);
+  assert.equal(silent.querySelector(".chat-notice-line").textContent,
+    "fan continued their Prime subscription");
+  assert.deepEqual([...echoed.children].map((c) => c.className),
+    ["chat-msg-time", "chat-notice-line"],
+    "the archive's echo of the system line is not a typed message");
+  assert.deepEqual([...spoken.children].map((c) => c.className),
+    ["chat-msg-time", "chat-notice-line", ""]);
+  assert.equal(spoken.querySelector(".chat-notice-line").textContent,
+    "chatty continued their Prime subscription");
+  assert.equal(spoken.lastChild.textContent, "year three!");
+});
+
+// The dim notice's line is on screen, so search must reach it — filterChat
+// reads `systemMsg` for everything outside TWITCH_NOTICE_TYPES, which is the
+// branch the dim notice now shows verbatim.
+// MUTANT: drop the `: msg.systemMsg` arm of filterChat's `shown` list and the
+// milestone sentence is visible and unfindable.
+test("search finds a dim system notice by a word from its system line", { skip }, async () => {
+  const h = await showTwitchChat([
+    twNotice({ messageType: "system", authorName: "fan",
+               systemMsg: "fan watched 10 consecutive streams this month" }),
+    twNotice({ offsetMs: 2000, messageType: "chat", authorName: "other", message: "hello" }),
+  ]);
+  const shown = () => [...h.sidebar().children].map((c) => !c.classList.contains("search-hidden"));
+  h.player.filterChat("consecutive");
+  assert.deepEqual(shown(), [true, false]);
+  h.player.filterChat("hello");
+  assert.deepEqual(shown(), [false, true]);
 });
 
 // ── Twitch cheer chip (Task 6, K3 second half) ──────────────────────────────
