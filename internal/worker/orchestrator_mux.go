@@ -1279,16 +1279,14 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		}
 		fb.AddInline("Trimmed Range", fmt.Sprintf("%s - %s", startStr, endStr))
 	}
-	// Description excerpt — Discord embeds cap field values around 1024
-	// chars, but we keep the notification short. 297 + "..." == 300 total
-	// (audit reports/worker.md F40).
+	// Description excerpt. Cut on a RUNE boundary through the notifications
+	// clamp: the old desc[:descMaxLen-3] was a byte slice, and a Japanese
+	// description (the norm here) splits mid-rune, after which encoding/json
+	// emits U+FFFD and the operator reads mojibake. Escaped too — a
+	// description is job-supplied text and renders Discord markdown.
 	const descMaxLen = 300
 	if finishedJob.Description != "" {
-		desc := finishedJob.Description
-		if len(desc) > descMaxLen {
-			desc = desc[:descMaxLen-3] + "..."
-		}
-		fb.Add("Description", desc)
+		fb.Add("Description", notifications.ClampRunes(notifications.EscapeMarkdown(finishedJob.Description), descMaxLen))
 	}
 	o.notifier.Send("Download Finished",
 		fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),

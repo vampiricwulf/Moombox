@@ -16,6 +16,16 @@ func (l testLogger) Info(msg string, args ...any)  {}
 func (l testLogger) Warn(msg string, args ...any)  {}
 func (l testLogger) Error(msg string, args ...any) {}
 
+// notifConfigWithURLs builds a config whose only content is unfiltered
+// notification targets, in order.
+func notifConfigWithURLs(urls ...string) *config.MoomboxConfig {
+	cfg := &config.MoomboxConfig{}
+	for _, u := range urls {
+		cfg.Notifications = append(cfg.Notifications, config.NotificationConfig{URL: u})
+	}
+	return cfg
+}
+
 // recordingSender captures delivered titles so filter tests can assert
 // which notifications actually reached a target.
 type recordingSender struct {

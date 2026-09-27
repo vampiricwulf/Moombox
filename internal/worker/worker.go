@@ -1329,7 +1329,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			fields := notifications.NewFieldBuilder().
 				AddInline("Channel", job.ChannelName).
 				AddInline(notifications.IDLabel(job.Platform), job.VideoID).
-				Add("Error", errMsg).
+				Add("Error", notifications.EscapeMarkdown(errMsg)).
 				// Terminal-after-retries: say the automation gave up so the
 				// operator knows this needs a manual look.
 				AddIf(job.AutoRetryCount > 0, "Automatic Retries",

@@ -3,9 +3,12 @@ package worker
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
 // assertNoTempSurvives fails if any *.tmp entry is left in dir. The twin of
@@ -233,5 +236,31 @@ func TestFinishedImageIsDroppedForTwitch(t *testing.T) {
 	}
 	if got := finishedImage(nil); got != "" {
 		t.Errorf("finishedImage(nil) = %q, want \"\"", got)
+	}
+}
+
+// TestDescriptionExcerptCutsOnARuneBoundary is the fix for the byte slice at
+// the Description excerpt. A Japanese description — the norm for this project's
+// archives — was cut mid-rune, and encoding/json then replaced the broken tail
+// with U+FFFD.
+//
+// WHAT THIS PINS: the helper COMPOSITION and its 300-rune budget, not the call
+// site — it calls the helpers directly and never reaches
+// sendFinishedNotification, so reverting that line to desc[:descMaxLen-3] would
+// not fail here. The call site is pinned separately, by the "Description" field
+// a notificationtest.Recorder reads off a finished send in Task 6's fixture;
+// ClampRunes' own boundary behaviour is pinned exhaustively in
+// internal/notifications/limits_test.go.
+func TestDescriptionExcerptCutsOnARuneBoundary(t *testing.T) {
+	long := strings.Repeat("あ", 500)
+	got := notifications.ClampRunes(notifications.EscapeMarkdown(long), 300)
+	if !utf8.ValidString(got) {
+		t.Fatalf("the excerpt is not valid UTF-8: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != 300 {
+		t.Errorf("excerpt = %d runes, want 300", n)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-12:])
 	}
 }

@@ -185,6 +185,11 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 		embed.Fields = append([]discordField(nil), fields...)
 	}
 
+	// One clamp for all ~36 send sites. Over ANY Discord limit is a 400, and
+	// the ladder below treats a non-429 4xx as permanent, so an unclamped
+	// embed is a silently dropped alert.
+	clampEmbed(&embed)
+
 	payload := discordPayload{Embeds: []discordEmbed{embed}}
 
 	// A mention rides the message content, never the embed. A nil

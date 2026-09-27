@@ -13,7 +13,10 @@ import (
 )
 
 // discordWebhookRe validates standard Discord webhook URLs (HTTPS only).
-var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord\.com/api/webhooks/\d+/[\w-]+`)
+// discordapp.com is Discord's legacy domain and still serves webhooks; a URL
+// pasted from an old bookmark was rejected outright before it was accepted here
+// (audit R6). parseTarget canonicalises it to discord.com.
+var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+`)
 
 // redactURLForLog reduces an arbitrary notification URL to scheme://host for
 // log lines. Webhook URLs routinely embed secrets in their path or query
@@ -312,9 +315,14 @@ func parseTarget(url string) (sender, error) {
 		return &DiscordWebhook{URL: "https://discord.com/api/webhooks/" + parts}, nil
 
 	case discordWebhookRe.MatchString(url):
-		return &DiscordWebhook{URL: url}, nil
+		// Canonicalise the legacy host. Two reasons, both load-bearing:
+		// buildTargets dedupes on the RESOLVED URL, so the two spellings of
+		// one webhook would otherwise build two targets and post every embed
+		// twice; and Go's http.Client turns a 301/302 on a POST into a GET,
+		// so following discordapp.com's redirect would drop the body.
+		return &DiscordWebhook{URL: strings.Replace(url, "discordapp.com", "discord.com", 1)}, nil
 
-	case strings.Contains(url, "discord.com/api/webhooks"):
+	case strings.Contains(url, "discord.com/api/webhooks"), strings.Contains(url, "discordapp.com/api/webhooks"):
 		return nil, fmt.Errorf("invalid Discord webhook URL: must be HTTPS with a numeric ID and token")
 
 	default:

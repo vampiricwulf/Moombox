@@ -1603,7 +1603,7 @@ func (s *runState) wireMonitorCallbacks() {
 				[]notifications.Field{
 					{Name: "Channel", Value: channelID, Inline: true},
 					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Last Error", Value: lastErr},
+					{Name: "Last Error", Value: notifications.EscapeMarkdown(lastErr)},
 				},
 				notifications.SendOptions{Event: "channel_unhealthy"},
 			)
