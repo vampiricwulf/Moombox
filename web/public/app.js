@@ -1512,8 +1512,18 @@ export class MoomboxApp {
     // Not in memory — the commonest deep link (a Finished job past the
     // archive boundary) lands here, since archivedJobs is fetched lazily and
     // is empty on a cold load. Mirrors _verifyJobExists's response handling.
+    //
+    // The generation token is that method's `_verifyingJobId` guard in the
+    // form this path needs: hashchange can fire again (a second embed's link,
+    // or Back) while this fetch is in flight, and without it a slow answer
+    // for the EARLIER id would open its dialog over the newer selection. The
+    // token is the id, so a re-entrant call for the same id is harmless.
+    this._consumingJobId = jobId;
+    let status = 0;
     try {
       const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+      if (this._consumingJobId !== jobId) return; // a newer deep link took over
+      status = resp.status;
       if (resp.ok) {
         const fetched = await resp.json();
         const existingIdx = this.archivedJobs.findIndex((j) => j.id === fetched.id);
@@ -1523,9 +1533,15 @@ export class MoomboxApp {
         return;
       }
     } catch {
-      // Network error — fall through to the toast below.
+      // Network error — status stays 0 and the toast says so below.
+    } finally {
+      if (this._consumingJobId === jobId) this._consumingJobId = null;
     }
-    this.showToast("Job not found", "danger");
+    // 404 is the only status that means the job is gone. A 500 or a dead
+    // socket means we could not find out, and telling an operator their
+    // archive is missing when Moombox merely could not answer sends them
+    // looking for a file that is still there.
+    this.showToast(status === 404 ? "Job not found" : "Could not load job", "danger");
   }
 
   formatCountdown(epochMs) {

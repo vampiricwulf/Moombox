@@ -43,9 +43,9 @@ const JOB = { id: "j1", title: "A Stream", status: "Finished", platform: "youtub
 // `url.PathEscape` in internal/notifications/mentions.go:21: it leaves "&",
 // "=" and "+" unescaped too, which is why the parser splits the hash on the
 // first "=" by hand instead of feeding it to URLSearchParams). Kept
-// platform: "youtube" — the twitch embed branch of renderJobDetails reads a
-// bare `location.hostname` (job-details.js:404/406) that is not part of this
-// task and is not worth exercising here.
+// platform: "youtube" simply because the YouTube branch of renderJobDetails
+// is the shorter one; the twitch branch's `window.location.hostname` works
+// under jsdom too.
 const ARCHIVED_JOB = {
   id: "aB3-xY_9zqw", videoId: "aB3-xY_9zqw", title: "An Old Stream",
   status: "Finished", platform: "youtube", channel: "c", channelName: "c",
@@ -166,6 +166,71 @@ test("an unknown id toasts instead of opening", { skip }, async () => {
   assert.ok(
     toasts.some((t) => t.includes("Job not found")),
     `expected a "Job not found" toast; got ${JSON.stringify(toasts)}`,
+  );
+});
+
+// A 404 is the only answer that means the job is GONE. A 500 or a dead socket
+// means the dashboard could not find out — telling an operator their archive
+// is missing when the server merely failed to answer sends them hunting for a
+// file that is still on disk.
+//
+// MUTANT: keeping one toast for every failure. Both rows below then read
+// "Job not found" and the 500 row is a lie.
+test("a server error says so instead of claiming the job is gone", { skip }, async () => {
+  for (const [name, route] of [
+    ["500", () => harness.response({ status: 500 })],
+    ["a dead socket", () => { throw new Error("network down"); }],
+  ]) {
+    const h = await harness.makeApp({
+      url: "http://localhost/#job=j500",
+      routes: { "GET /api/jobs/j500": route },
+    });
+    h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+    await h.flush();
+
+    const toasts = h.toasts().map((t) => t.textContent);
+    assert.ok(
+      toasts.some((t) => t.includes("Could not load job")),
+      `${name}: expected a "Could not load job" toast; got ${JSON.stringify(toasts)}`,
+    );
+    assert.ok(
+      !toasts.some((t) => t.includes("Job not found")),
+      `${name}: "Job not found" claims the archive is gone when the server only failed to answer`,
+    );
+  }
+});
+
+// MUTANT: drop the generation token. A second deep link arriving while the
+// first fallback fetch is still in flight (a second embed's link, or Back)
+// lets the SLOWER, EARLIER answer open its dialog over the newer selection —
+// the operator clicks link B and lands on job A.
+test("a slow fetch for an earlier id cannot clobber a newer selection", { skip }, async () => {
+  let releaseFirst;
+  const firstPending = new Promise((resolve) => { releaseFirst = resolve; });
+  const OLD = { ...ARCHIVED_JOB, id: "jOld", videoId: "jOld", title: "The earlier link" };
+  const NEW = { ...ARCHIVED_JOB, id: "jNew", videoId: "jNew", title: "The newer link" };
+
+  const h = await harness.makeApp({
+    url: "http://localhost/#job=jOld",
+    routes: {
+      "GET /api/jobs/jOld": () => firstPending.then(() => OLD),
+      "GET /api/jobs/jNew": () => NEW,
+    },
+  });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  // jOld's fallback fetch is now pending. The operator follows a second link.
+  h.window.location.hash = "#job=jNew";
+  h.window.dispatchEvent(new h.window.Event("hashchange"));
+  await h.flush();
+  assert.equal(h.app.selectedJobId, "jNew", "precondition: the newer link resolved first");
+
+  // Now the earlier one finally answers.
+  releaseFirst();
+  await h.flush();
+
+  assert.equal(
+    h.app.selectedJobId, "jNew",
+    "the stale fetch for jOld reopened its own details over the newer selection",
   );
 });
 

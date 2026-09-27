@@ -401,9 +401,9 @@ export class JobDetailsController {
     // Build embed HTML
     let embedHtml;
     if (isTwitch && twitchVodId) {
-      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.app.escapeHtml(twitchVodId)}&parent=${this.app.escapeHtml(location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
+      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.app.escapeHtml(twitchVodId)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
     } else if (isTwitch && twitchLogin) {
-      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.app.escapeHtml(twitchLogin)}&parent=${this.app.escapeHtml(location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
+      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.app.escapeHtml(twitchLogin)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
     } else {
       embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.app.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
     }

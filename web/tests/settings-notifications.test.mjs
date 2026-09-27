@@ -242,6 +242,60 @@ test("toggling the enabled switch does not raise the unsaved-settings banner", {
   assert.equal(h.app.settings._dirty, false);
 });
 
+// The mention field is the first auto-saving control on this page the server
+// can REJECT: PUT /api/config 400s a token config.ParseMention cannot resolve
+// and answers `details` keyed by field. saveConfig unpacks that map into the
+// toast; _saveNotificationsOnly used to drop it, so a malformed mention read
+// as a bare "Validation failed" with no hint of which target or why.
+//
+// MUTANT: toast only `data.error`. The first assertion below passes and the
+// second — the one naming the field — does not.
+test("a rejected mention names the field and keeps what the operator typed", { skip }, async () => {
+  const h = await openSettings({}, () => harness.response({
+    status: 400,
+    body: {
+      error: "Validation failed",
+      details: { "notifications[0].mention": "mention must be <@&ROLE_ID>, <@USER_ID>, @here or @everyone" },
+    },
+  }));
+
+  const input = control(h, 0, "mention-input");
+  input.value = "<@&123";
+  fire(h, input, "sl-change");
+  await h.flush();
+  await h.flush();
+
+  const toasts = h.toasts().map((t) => t.textContent);
+  assert.ok(
+    toasts.some((t) => t.includes("notifications[0].mention")),
+    `the toast must name the field the server rejected; got ${JSON.stringify(toasts)}`,
+  );
+  assert.ok(
+    toasts.some((t) => t.includes("@here or @everyone")),
+    `the toast must carry the server's reason; got ${JSON.stringify(toasts)}`,
+  );
+
+  // The config reverts — the value was never stored — but the input keeps the
+  // typed text, so a near-miss is one character away from fixed rather than a
+  // retype.
+  assert.ok(
+    !("mention" in h.app.config.notifications[0]),
+    "a refused mention must not be left in the local config",
+  );
+  assert.equal(
+    control(h, 0, "mention-input").value, "<@&123",
+    "the re-render wiped the operator's text; they have to retype it to see the same error again",
+  );
+});
+
+// MUTANT: drop the aria-label. The switch is the only control in the card
+// header with no visible text of its own — a screen reader announces the row
+// as an unnamed switch.
+test("the enabled switch has an accessible name", { skip }, async () => {
+  const h = await openSettings();
+  assert.equal(control(h, 0, "toggle-enabled").getAttribute("aria-label"), "Enabled");
+});
+
 // Regression pin: spec §3.5 ends "Test-send unchanged", and the card rewrite
 // is the one thing that could drop these two buttons.
 test("the card keeps its Test and Delete buttons", { skip }, async () => {

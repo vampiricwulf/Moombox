@@ -77,10 +77,9 @@ const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 // and is pinned against it by TestDefaultMentionEventsMirroredInSettingsJS,
 // which parses this literal: keep it a single-line array of quoted ids.
 //
-// `sidecar_down` is in the ruling but not yet in NOTIFICATION_EVENT_GROUPS —
-// Arc N2a adds the event — so it has no chip of its own to light up today. It
-// still travels in the resolved list, so the first chip the operator unticks
-// writes it out with the rest instead of silently dropping it.
+// Every id here has a chip in NOTIFICATION_EVENT_GROUPS above. One that did
+// not would still travel in the resolved list, so the first chip the operator
+// unticks would write it out with the rest instead of silently dropping it.
 const DEFAULT_MENTION_EVENTS = ["error", "auth", "disk_critical", "update_failed", "crash_recovered", "sidecar_down"];
 
 // Settings that require a process restart to take effect
@@ -1868,7 +1867,7 @@ export class SettingsController {
         <div class="notification-card-header">
           <div class="notification-card-url" title="${this.app.escapeHtml(notif.url || "")}">${this.app.escapeHtml(notif.url || "")}</div>
           ${enabled ? "" : '<sl-badge variant="neutral">Muted</sl-badge>'}
-          <sl-switch size="small" ${enabled ? "checked" : ""} title="${enabled ? "Delivering" : "Muted — kept, but delivers nothing"}" data-notif-action="toggle-enabled" data-notif-index="${idx}"></sl-switch>
+          <sl-switch size="small" ${enabled ? "checked" : ""} aria-label="Enabled" title="${enabled ? "Delivering" : "Muted — kept, but delivers nothing"}" data-notif-action="toggle-enabled" data-notif-index="${idx}"></sl-switch>
           <sl-icon-button name="send" label="Send test notification" data-notif-action="test" data-notif-index="${idx}"></sl-icon-button>
           <sl-icon-button name="trash" label="Delete" data-notif-action="delete" data-notif-index="${idx}"></sl-icon-button>
         </div>
@@ -2061,6 +2060,11 @@ export class SettingsController {
    * the server treats the list as inert while there is nobody to ping, so an
    * operator who retypes a mention gets their own filter back rather than
    * the defaults.
+   *
+   * A rejected save reverts the CONFIG (the value the server refused was
+   * never stored) but puts the typed text back in the field, so the operator
+   * can correct a near-miss like "<@&123" instead of retyping it from scratch
+   * to see the same error again.
    */
   async setNotificationMention(index, value) {
     const notif = this.app.config.notifications?.[index];
@@ -2073,13 +2077,23 @@ export class SettingsController {
     if (next) notif.mention = next;
     else delete notif.mention;
 
+    let rejected = null;
     try {
       await this._saveNotificationsOnly();
     } catch {
       if (previousMention === undefined) delete notif.mention;
       else notif.mention = previousMention;
+      rejected = next;
     }
     this.renderNotificationsList();
+    if (rejected !== null) {
+      // After the re-render, because renderNotificationsList redraws the
+      // input from the reverted config value.
+      const input = document.querySelector(
+        `#notifications-list .notification-card[data-index="${index}"] [data-notif-action="mention-input"]`,
+      );
+      if (input) input.value = rejected;
+    }
   }
 
   /**
@@ -2172,6 +2186,12 @@ export class SettingsController {
   /**
    * Save only the notifications section to avoid side-effects on other unsaved
    * settings. The server-side PUT /api/config merges — omitted sections are untouched.
+   *
+   * A 400 carries `details` keyed by field ("notifications[0].mention"), and
+   * this unpacks it the way saveConfig does. The mention input is the first
+   * auto-saving control in this card that the server can reject, so without it
+   * a malformed token toasts a bare "Validation failed" and the operator is
+   * left guessing which of their targets it meant.
    */
   async _saveNotificationsOnly() {
     let response;
@@ -2189,8 +2209,13 @@ export class SettingsController {
       this.app.showToast("Notifications updated", "success");
     } else {
       const data = await response.json().catch(() => ({ error: response.statusText }));
-      this.app.showToast(data.error || "Failed to save notifications", "danger");
-      throw new Error(data.error || "Failed to save notifications");
+      let msg = data.error || "Failed to save notifications";
+      if (data.details) {
+        const fields = Object.entries(data.details).map(([k, v]) => `${k}: ${v}`).join(", ");
+        msg += ` (${fields})`;
+      }
+      this.app.showToast(msg, "danger");
+      throw new Error(msg);
     }
   }
 
