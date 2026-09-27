@@ -22,20 +22,20 @@ type gateSender struct {
 
 func newGateSender() *gateSender { return &gateSender{gate: make(chan struct{})} }
 
-func (g *gateSender) Send(title, _ string, _ int, _ []Field, _ SendOptions) error {
+func (g *gateSender) Send(msg Message) error {
 	<-g.gate
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.titles = append(g.titles, title)
+	g.titles = append(g.titles, msg.logTitle())
 	return nil
 }
 
-func (g *gateSender) SendOnce(title, _ string, _ int, _ []Field, _ SendOptions) error {
+func (g *gateSender) SendOnce(msg Message) error {
 	<-g.gate
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.titles = append(g.titles, title)
-	g.once = append(g.once, title)
+	g.titles = append(g.titles, msg.logTitle())
+	g.once = append(g.once, msg.logTitle())
 	return nil
 }
 
@@ -223,16 +223,16 @@ type fieldSender struct {
 	fields []Field
 }
 
-func (f *fieldSender) Send(_, _ string, _ int, fields []Field, _ SendOptions) error {
+func (f *fieldSender) Send(msg Message) error {
 	<-f.gate
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.fields = fields
+	f.fields = msg.Embeds[0].Fields
 	return nil
 }
 
-func (f *fieldSender) SendOnce(t, d string, c int, fields []Field, o SendOptions) error {
-	return f.Send(t, d, c, fields, o)
+func (f *fieldSender) SendOnce(msg Message) error {
+	return f.Send(msg)
 }
 
 func (f *fieldSender) got() []Field {
@@ -302,7 +302,7 @@ func TestPopLogsOutsideTheQueueLock(t *testing.T) {
 	q := newTargetQueue(notificationTarget{sender: newGateSender(), key: "k1"}, lg, nil)
 	lg.q = q
 
-	q.enqueue(queued{title: "doomed", tier: TierLow})
+	q.enqueue(queued{msg: One("doomed", "", 0, nil, SendOptions{}), tier: TierLow})
 	q.mu.Lock()
 	q.discard = true
 	q.mu.Unlock()

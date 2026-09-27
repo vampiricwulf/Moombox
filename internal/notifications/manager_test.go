@@ -64,15 +64,15 @@ type recordingSender struct {
 	sent []string
 }
 
-func (r *recordingSender) Send(title, _ string, _ int, _ []Field, _ SendOptions) error {
+func (r *recordingSender) Send(msg Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sent = append(r.sent, title)
+	r.sent = append(r.sent, msg.logTitle())
 	return nil
 }
 
-func (r *recordingSender) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
-	return r.Send(title, description, color, fields, opts)
+func (r *recordingSender) SendOnce(msg Message) error {
+	return r.Send(msg)
 }
 
 func (r *recordingSender) titles() []string {

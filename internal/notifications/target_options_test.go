@@ -153,15 +153,21 @@ func TestMentionAllowedPerForm(t *testing.T) {
 }
 
 // recordOpts is the shared recorder for the three Send tests below: a
-// senderFunc that appends every delivered SendOptions under a mutex (the
-// queue delivers from its own goroutine) and the slice it fills.
-func recordOpts() (*[]SendOptions, *sync.Mutex, senderFunc) {
+// senderFunc that appends every delivered Message under a mutex (the queue
+// delivers from its own goroutine) and the slice it fills.
+//
+// The whole Message, not just its embed's SendOptions: the mention travels at
+// the MESSAGE level now (Discord applies content and allowed_mentions per
+// message), so recording only the opts would drop the very field
+// TestSendAttachesMention asserts on. The per-embed options are one hop away,
+// at .Embeds[0].Opts.
+func recordOpts() (*[]Message, *sync.Mutex, senderFunc) {
 	var mu sync.Mutex
-	got := &[]SendOptions{}
-	return got, &mu, senderFunc(func(_, _ string, _ int, _ []Field, opts SendOptions) error {
+	got := &[]Message{}
+	return got, &mu, senderFunc(func(msg Message) error {
 		mu.Lock()
 		defer mu.Unlock()
-		*got = append(*got, opts)
+		*got = append(*got, msg)
 		return nil
 	})
 }
@@ -261,7 +267,8 @@ func TestSendRewritesJobURL(t *testing.T) {
 	if len(*got) != 2 {
 		t.Fatalf("recorded %d sends, want 2", len(*got))
 	}
-	for i, o := range *got {
+	for i, sent := range *got {
+		o := sent.Embeds[0].Opts
 		if o.URL != "https://moombox.example.com/#job=job-1" {
 			t.Errorf("send %d: title URL = %q, want the dashboard deep link", i, o.URL)
 		}
@@ -304,8 +311,8 @@ func TestSendLeavesURLAloneWithoutAuthorOrJobID(t *testing.T) {
 			if len(*got) != 1 {
 				t.Fatalf("recorded %d sends, want 1", len(*got))
 			}
-			if (*got)[0].URL != tc.opts.URL {
-				t.Errorf("URL = %q, want %q left alone", (*got)[0].URL, tc.opts.URL)
+			if got0 := (*got)[0].Embeds[0].Opts; got0.URL != tc.opts.URL {
+				t.Errorf("URL = %q, want %q left alone", got0.URL, tc.opts.URL)
 			}
 		})
 	}

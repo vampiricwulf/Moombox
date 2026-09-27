@@ -33,9 +33,9 @@ func TestDiscordWebhookSendsValidPayload(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	err := d.Send("My Title", "Some body", 0x123456,
+	err := d.Send(One("My Title", "Some body", 0x123456,
 		[]Field{{Name: "k", Value: "v", Inline: true}},
-		SendOptions{URL: "https://example.com", Event: "test_event"})
+		SendOptions{URL: "https://example.com", Event: "test_event"}))
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestDiscordWebhookHTTPErrorReturnsErr(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	err := d.Send("t", "d", 0, nil, SendOptions{})
+	err := d.Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("400 response: want error, got nil")
 	}
@@ -103,7 +103,7 @@ func TestDiscordWebhookRateLimitRetriesOnce(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	if err := d.Send("t", "d", 0, nil, SendOptions{}); err != nil {
+	if err := d.Send(One("t", "d", 0, nil, SendOptions{})); err != nil {
 		t.Fatalf("Send (with one retry): %v", err)
 	}
 	if got := hits.Load(); got != 2 {
@@ -135,7 +135,7 @@ func TestDiscordWebhook5xxRetriesThenSucceeds(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	if err := d.Send("t", "d", 0, nil, SendOptions{}); err != nil {
+	if err := d.Send(One("t", "d", 0, nil, SendOptions{})); err != nil {
 		t.Fatalf("Send (5xx twice then success): %v", err)
 	}
 	if got := hits.Load(); got != 3 {
@@ -155,7 +155,7 @@ func TestDiscordWebhook5xxGivesUpAfterMaxAttempts(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	err := d.Send("t", "d", 0, nil, SendOptions{})
+	err := d.Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("persistent 502: want error, got nil")
 	}
@@ -179,7 +179,7 @@ func TestDiscordWebhookTransportErrorRetries(t *testing.T) {
 	srv.Close() // all connections now refused
 
 	d := &DiscordWebhook{URL: url}
-	err := d.Send("t", "d", 0, nil, SendOptions{})
+	err := d.Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("dead server: want error, got nil")
 	}
@@ -200,7 +200,7 @@ func TestDiscordWebhook4xxIsPermanent(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	if err := d.Send("t", "d", 0, nil, SendOptions{}); err == nil {
+	if err := d.Send(One("t", "d", 0, nil, SendOptions{})); err == nil {
 		t.Fatal("404: want error, got nil")
 	}
 	if got := hits.Load(); got != 1 {
@@ -227,7 +227,7 @@ func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
 
 			d := &DiscordWebhook{URL: srv.URL}
 			start := time.Now()
-			err := d.Send("t", "d", 0, nil, SendOptions{})
+			err := d.Send(One("t", "d", 0, nil, SendOptions{}))
 			elapsed := time.Since(start)
 			if err == nil {
 				t.Fatal("bogus Retry-After: want error, got nil")
@@ -259,7 +259,7 @@ func TestDiscordWebhook4xxErrorQuotesTheBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	err := (&DiscordWebhook{URL: srv.URL}).Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("400: want error, got nil")
 	}
@@ -284,7 +284,7 @@ func TestDiscordWebhookErrorBodyIsBounded(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	err := (&DiscordWebhook{URL: srv.URL}).Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("403: want error, got nil")
 	}
@@ -380,7 +380,7 @@ func TestDiscordWebhookErrorBodyAtCapIsNotTruncated(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	err := (&DiscordWebhook{URL: srv.URL}).Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("403: want error, got nil")
 	}
@@ -404,7 +404,7 @@ func TestDiscordWebhookErrorBodyCapSplitsAMultiByteRune(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := (&DiscordWebhook{URL: srv.URL}).Send("t", "d", 0, nil, SendOptions{})
+	err := (&DiscordWebhook{URL: srv.URL}).Send(One("t", "d", 0, nil, SendOptions{}))
 	if err == nil {
 		t.Fatal("403: want error, got nil")
 	}

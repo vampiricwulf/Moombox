@@ -308,9 +308,11 @@ type notificationTarget struct {
 // Send runs the full retry ladder; SendOnce makes exactly one attempt — used
 // during shutdown (the 10s force-exit cannot accommodate a 2s+5s ladder) and by
 // SendTest, where an interactive caller wants the immediate outcome.
+// Both take a whole Message — one POST, one to ten embeds — because Discord's
+// content, allowed_mentions and 6000-character total are all per MESSAGE.
 type sender interface {
-	Send(title, description string, color int, fields []Field, opts SendOptions) error
-	SendOnce(title, description string, color int, fields []Field, opts SendOptions) error
+	Send(msg Message) error
+	SendOnce(msg Message) error
 }
 
 // parseTarget resolves a configured notification URL into a sender.
@@ -370,11 +372,11 @@ func SendTest(url string) error {
 	if err != nil {
 		return err
 	}
-	return s.SendOnce("Test Notification",
+	return s.SendOnce(One("Test Notification",
 		"Moombox notifications are configured correctly",
 		TypeSuccess.Color(),
 		[]Field{{Name: "Status", Value: "Working", Inline: true}},
-		SendOptions{})
+		SendOptions{}))
 }
 
 // buildTargets converts the configured notification list into live targets,
@@ -701,25 +703,24 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// FieldBuilder's buffer it is free to reuse for its next send. One
 	// allocation per send buys the guarantee that what is delivered is what
 	// was asked for.
-	it := queued{
-		title:       title,
-		description: description,
-		color:       ntype.Color(),
-		fields:      append([]Field(nil), fields...),
-		opts:        opts,
-		tier:        effectiveTier(opts),
-	}
+	msg := One(title, description, ntype.Color(), append([]Field(nil), fields...), opts)
+	it := queued{msg: msg, tier: effectiveTier(opts)}
 	for _, q := range targets {
 		if !q.allows(opts.Event) {
 			continue
 		}
-		// queued is a value, so this is the per-target copy. fields is shared
-		// across the copies, which is safe because it was already copied once
-		// above and nothing downstream mutates it; the *AllowedMentions is
-		// built once in buildTargets and never written after, so sharing that
-		// pointer across targets and sends is safe too.
+		// queued is a value and so is Message, so this is the per-target copy.
+		// The Embeds slice is shared across the copies, which is safe because
+		// nothing mutates an Embed after One builds it (its fields were already
+		// copied once above); the *AllowedMentions is built once in
+		// buildTargets and never written after, so sharing that pointer across
+		// targets and sends is safe too.
+		//
+		// The ping lands on the MESSAGE, not on the embed's opts: Discord
+		// applies content and allowed_mentions per message, so a batch of ten
+		// embeds pings once.
 		perItem := it
-		perItem.opts.Mention, perItem.opts.MentionAllowed = q.mentionFor(opts.Event)
+		perItem.msg.Mention, perItem.msg.MentionAllowed = q.mentionFor(opts.Event)
 		q.enqueue(perItem)
 	}
 }

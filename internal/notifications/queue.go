@@ -27,16 +27,11 @@ const notificationQueueCap = 256
 // and each one carries the total since the last.
 const dropWarnInterval = 5 * time.Second
 
-// queued is one embed waiting for one target. The fields mirror Send's
-// parameters; the tier is resolved once at enqueue so the overflow policy
-// never has to re-derive it.
+// queued is one MESSAGE waiting for one target. The tier is resolved once at
+// enqueue so the overflow policy never has to re-derive it.
 type queued struct {
-	title       string
-	description string
-	color       int
-	fields      []Field
-	opts        SendOptions
-	tier        Tier
+	msg  Message
+	tier Tier
 }
 
 // targetQueue is one destination, its FIFO, and the single goroutine that
@@ -214,7 +209,7 @@ func (q *targetQueue) enqueue(it queued) {
 	if q.closing || q.discard {
 		q.mu.Unlock()
 		q.logger.Warn("dropping notification — the target is shutting down",
-			"event", it.opts.Event, "title", it.title)
+			"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
 	}
 	if len(q.items) < notificationQueueCap {
@@ -237,7 +232,7 @@ func (q *targetQueue) enqueue(it queued) {
 			q.logger.Warn("notification queue full — shedding notifications",
 				"cap", notificationQueueCap, "dropped_newest", nNewest,
 				"dropped_oldest_low_priority", nOldest,
-				"event", it.opts.Event, "title", it.title)
+				"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		}
 		return
 	}
@@ -250,7 +245,7 @@ func (q *targetQueue) enqueue(it queued) {
 		q.logger.Warn("notification queue full — shedding notifications",
 			"cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
 			"dropped_newest", nNewest,
-			"event", dropped.opts.Event, "title", dropped.title)
+			"event", dropped.msg.logEvent(), "title", dropped.msg.logTitle())
 	}
 	q.signal()
 }
@@ -387,9 +382,9 @@ func (q *targetQueue) deliver(it queued) {
 		// Owner ruling: shutdown sends are single-attempt and the 10s
 		// force-exit stays. A 2s+5s retry ladder cannot finish inside a window
 		// the worker stop may already have spent.
-		err = q.sender.SendOnce(it.title, it.description, it.color, it.fields, it.opts)
+		err = q.sender.SendOnce(it.msg)
 	} else {
-		err = q.sender.Send(it.title, it.description, it.color, it.fields, it.opts)
+		err = q.sender.Send(it.msg)
 	}
 	if err != nil {
 		q.logger.Error("notification send failed", "err", err)

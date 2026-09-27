@@ -52,10 +52,10 @@ func TestSleepsBeforeAnEmptyBucket(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	if err := d.Send("first", "", 0, nil, SendOptions{}); err != nil {
+	if err := d.Send(One("first", "", 0, nil, SendOptions{})); err != nil {
 		t.Fatalf("first Send: %v", err)
 	}
-	if err := d.Send("second", "", 0, nil, SendOptions{}); err != nil {
+	if err := d.Send(One("second", "", 0, nil, SendOptions{})); err != nil {
 		t.Fatalf("second Send: %v", err)
 	}
 	if got := rec.gap(); got < 140*time.Millisecond {
@@ -89,7 +89,7 @@ func TestTheBucketWaitOutlastsTheRoundingSkew(t *testing.T) {
 
 	d := &DiscordWebhook{URL: srv.URL}
 	for range 2 {
-		if err := d.Send("t", "", 0, nil, SendOptions{}); err != nil {
+		if err := d.Send(One("t", "", 0, nil, SendOptions{})); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
@@ -115,7 +115,7 @@ func TestDoesNotSleepWhenTheBucketHasRoom(t *testing.T) {
 
 	d := &DiscordWebhook{URL: srv.URL}
 	for range 2 {
-		if err := d.Send("t", "", 0, nil, SendOptions{}); err != nil {
+		if err := d.Send(One("t", "", 0, nil, SendOptions{})); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
@@ -149,7 +149,7 @@ func TestBucketClearsWhenTheWindowRefills(t *testing.T) {
 
 	d := &DiscordWebhook{URL: srv.URL}
 	for range 3 {
-		if err := d.Send("t", "", 0, nil, SendOptions{}); err != nil {
+		if err := d.Send(One("t", "", 0, nil, SendOptions{})); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
@@ -184,7 +184,7 @@ func TestA429DoesNotAlsoArmTheBucketSleep(t *testing.T) {
 
 	d := &DiscordWebhook{URL: srv.URL}
 	start := time.Now()
-	if err := d.Send("t", "", 0, nil, SendOptions{}); err != nil {
+	if err := d.Send(One("t", "", 0, nil, SendOptions{})); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
@@ -232,7 +232,7 @@ func TestSendOnceHonoursTheBucketOnlyWithinTheShutdownCap(t *testing.T) {
 		d.noteBucket(discordResponse{status: http.StatusOK, rateRemain: "0", rateReset: "0.15"})
 
 		start := time.Now()
-		if err := d.SendOnce("t", "", 0, nil, SendOptions{}); err != nil {
+		if err := d.SendOnce(One("t", "", 0, nil, SendOptions{})); err != nil {
 			t.Fatalf("SendOnce: %v", err)
 		}
 		if elapsed := time.Since(start); elapsed < 140*time.Millisecond {
@@ -254,7 +254,7 @@ func TestSendOnceHonoursTheBucketOnlyWithinTheShutdownCap(t *testing.T) {
 		d.noteBucket(discordResponse{status: http.StatusOK, rateRemain: "0", rateReset: "3"})
 
 		start := time.Now()
-		err := d.SendOnce("t", "", 0, nil, SendOptions{})
+		err := d.SendOnce(One("t", "", 0, nil, SendOptions{}))
 		elapsed := time.Since(start)
 		if err == nil {
 			t.Fatal("SendOnce against a 429: want an error, got nil")
@@ -281,7 +281,7 @@ func TestSendOnceMakesExactlyOneAttempt(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	if err := d.SendOnce("t", "", 0, nil, SendOptions{}); err == nil {
+	if err := d.SendOnce(One("t", "", 0, nil, SendOptions{})); err == nil {
 		t.Fatal("SendOnce against a 500: want an error, got nil")
 	}
 	mu.Lock()

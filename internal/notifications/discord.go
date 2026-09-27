@@ -184,12 +184,18 @@ func MentionParse(mention string) *AllowedMentions {
 	return nil
 }
 
-// buildPayload assembles the embed JSON shared by Send and SendOnce.
-func buildPayload(title, description string, color int, fields []Field, opts SendOptions) ([]byte, error) {
+// toDiscordEmbed renders ONE Embed as the wire struct, clamped.
+//
+// Package-visible rather than inlined into buildPayload so the batcher can
+// size an embed with the SAME clamp the payload will apply: one definition of
+// "how big is this embed", and no drift between what a batch measured and what
+// it later sends.
+func toDiscordEmbed(e Embed) discordEmbed {
+	opts := e.Opts
 	embed := discordEmbed{
-		Title:       title,
-		Description: description,
-		Color:       color,
+		Title:       e.Title,
+		Description: e.Description,
+		Color:       e.Color,
 		Footer:      &discordFooter{Text: footerText(opts)},
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
@@ -216,29 +222,42 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 		embed.Image = &discordImage{URL: opts.Image}
 	}
 
-	if len(fields) > 0 {
+	if len(e.Fields) > 0 {
 		// discordField is a type alias for Field, so this is a direct copy
 		// rather than an element-by-element conversion. It stays a copy
 		// because the clamp below rewrites values in place; the caller's own
 		// buffer is already protected a layer up, where Manager.Send copies
 		// into the queued item.
-		embed.Fields = append([]discordField(nil), fields...)
+		embed.Fields = append([]discordField(nil), e.Fields...)
 	}
 
 	// One clamp for all ~36 send sites. Over ANY Discord limit is a 400, and
-	// the ladder below treats a non-429 4xx as permanent, so an unclamped
+	// the retry ladder treats a non-429 4xx as permanent, so an unclamped
 	// embed is a silently dropped alert.
+	//
+	// PER EMBED. Discord's 6000-character total is per MESSAGE, which for the
+	// single-embed message every producer sends is the same budget; keeping a
+	// MULTI-embed message inside it is the batcher's job, because only the
+	// batcher can decide which embed not to add.
 	clampEmbed(&embed)
+	return embed
+}
 
-	payload := discordPayload{Embeds: []discordEmbed{embed}}
+// buildPayload assembles the message JSON shared by Send and SendOnce.
+func buildPayload(msg Message) ([]byte, error) {
+	payload := discordPayload{Embeds: make([]discordEmbed, 0, len(msg.Embeds))}
+	for _, e := range msg.Embeds {
+		payload.Embeds = append(payload.Embeds, toDiscordEmbed(e))
+	}
 
-	// A mention rides the message content, never the embed. A nil
-	// MentionAllowed is the per-event gate N2b fills from mention_events:
-	// no object, no ping. MentionParse is where an unrecognised form becomes
-	// that nil.
-	if opts.MentionAllowed != nil && opts.Mention != "" {
-		payload.Content = opts.Mention
-		payload.AllowedMentions = opts.MentionAllowed
+	// A mention rides the message content, never the embed — which is also why
+	// it is read from the MESSAGE and not from an embed's opts: a batch of ten
+	// pings once. A nil MentionAllowed is the per-event gate N2b fills from
+	// mention_events: no object, no ping. MentionParse is where an unrecognised
+	// form becomes that nil.
+	if msg.MentionAllowed != nil && msg.Mention != "" {
+		payload.Content = msg.Mention
+		payload.AllowedMentions = msg.MentionAllowed
 	}
 
 	body, err := json.Marshal(payload)
@@ -261,8 +280,8 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 // just as the wait would have, without spending the force-exit's remaining
 // seconds or starving the items queued behind this one. So the bound stays
 // shutdownBucketWaitCap plus the single-attempt request timeout (~15s).
-func (d *DiscordWebhook) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
-	body, err := buildPayload(title, description, color, fields, opts)
+func (d *DiscordWebhook) SendOnce(msg Message) error {
+	body, err := buildPayload(msg)
 	if err != nil {
 		return err
 	}
@@ -281,9 +300,9 @@ func (d *DiscordWebhook) SendOnce(title, description string, color int, fields [
 	}
 }
 
-// Send sends a Discord webhook embed.
-func (d *DiscordWebhook) Send(title, description string, color int, fields []Field, opts SendOptions) error {
-	body, err := buildPayload(title, description, color, fields, opts)
+// Send sends a Discord webhook message.
+func (d *DiscordWebhook) Send(msg Message) error {
+	body, err := buildPayload(msg)
 	if err != nil {
 		return err
 	}

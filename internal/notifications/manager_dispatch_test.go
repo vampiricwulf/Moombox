@@ -22,7 +22,7 @@ func TestManagerWaitTimesOut(t *testing.T) {
 		close(hangForever)
 	})
 
-	hanging := senderFunc(func(string, string, int, []Field, SendOptions) error {
+	hanging := senderFunc(func(Message) error {
 		<-hangForever
 		return nil
 	})
@@ -74,15 +74,11 @@ func TestManagerWaitTimeoutDefaults(t *testing.T) {
 }
 
 // senderFunc adapts a function to the sender interface for tests.
-type senderFunc func(title, description string, color int, fields []Field, opts SendOptions) error
+type senderFunc func(msg Message) error
 
-func (f senderFunc) Send(title, description string, color int, fields []Field, opts SendOptions) error {
-	return f(title, description, color, fields, opts)
-}
+func (f senderFunc) Send(msg Message) error { return f(msg) }
 
-func (f senderFunc) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
-	return f(title, description, color, fields, opts)
-}
+func (f senderFunc) SendOnce(msg Message) error { return f(msg) }
 
 // TestNewManagerRejectsDiscordSchemeEdgeCases covers the discord://
 // URL forms the audit flagged as untested: extra path segments
