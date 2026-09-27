@@ -38,10 +38,6 @@ const CONFIG = {
 // point — DEFAULT_MENTION_EVENTS changing under the UI should fail here as
 // well as in Go's TestDefaultMentionEventsMirroredInSettingsJS.
 const DEFAULTS = ["error", "auth", "disk_critical", "update_failed", "crash_recovered", "sidecar_down"];
-// `sidecar_down` is in the ruling but not yet in NOTIFICATION_EVENT_GROUPS —
-// Arc N2a adds the event — so it has no chip to light up today. It still
-// travels in the resolved list, which is what tests 7 and 8 assert on.
-const DEFAULTS_WITH_CHIPS = DEFAULTS.filter((e) => e !== "sidecar_down");
 
 /** An app with the Settings form populated and PUT /api/config answered. */
 async function openSettings(overrides = {}, putHandler = () => ({ success: true })) {
@@ -175,7 +171,7 @@ test("typing a mention preselects the ruling's defaults without writing them", {
     !("mention_events" in body.notifications[0]),
     `the default list must stay implicit until the operator disagrees with it — writing it out would freeze today's defaults into their config; got ${JSON.stringify(body.notifications[0])}`,
   );
-  assert.deepEqual(litChips(h, 0).sort(), [...DEFAULTS_WITH_CHIPS].sort());
+  assert.deepEqual(litChips(h, 0).sort(), [...DEFAULTS].sort());
 });
 
 // MUTANT: toggle against notif.mention_events (undefined) instead of the
