@@ -525,18 +525,29 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 		}
 
 		urlDisplay := truncateString(n.URL, 50)
-		eventCount := len(allNotifEvents)
-		if len(n.Events) > 0 {
-			eventCount = len(n.Events)
-		}
 
 		nameStyle := lipgloss.NewStyle()
 		if selected {
 			nameStyle = lipgloss.NewStyle().Foreground(ColorCyan)
 		}
 
-		line := prefix + nameStyle.Render(urlDisplay) +
-			DimStyle.Render(fmt.Sprintf(" (%d/%d events)", eventCount, len(allNotifEvents)))
+		// An empty filter is "all events" everywhere else — the manager, the
+		// web card's success tag, operations.md — so it says so here too
+		// rather than rendering as "25/25 events".
+		filter := " (All events)"
+		if len(n.Events) > 0 {
+			filter = fmt.Sprintf(" (%d/%d events)", len(n.Events), len(allNotifEvents))
+		}
+
+		line := prefix + nameStyle.Render(urlDisplay) + DimStyle.Render(filter)
+		// The mute is invisible in a URL list otherwise, and a muted target
+		// looks identical to a broken one.
+		if !n.IsEnabled() {
+			line += YellowStyle.Render(" Muted")
+		}
+		if n.Mention != "" {
+			line += DimStyle.Render(" " + n.Mention)
+		}
 
 		lines = append(lines, line)
 	}
@@ -546,7 +557,10 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 
 func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 	var lines []string
-	focusLine := 1 // URL row by default; updated when an event row has focus
+	// Rows 0..notifEditEventBase-1 sit on lines 1..notifEditEventBase (the
+	// title is pinned at line 0), so a non-event focus maps straight through.
+	// An event row overwrites this below.
+	focusLine := min(m.notifEditFocus, notifEditEventBase-1) + 1
 
 	title := "Edit Notification"
 	if m.notifIndex >= len(m.notifications) {
@@ -555,34 +569,67 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(title)+
 		DimStyle.Render(" (Enter: save, Esc: cancel)"))
 
-	// URL field
-	urlFocused := m.notifEditFocus == 0
-	urlPrefix := "  "
-	if urlFocused {
-		urlPrefix = "> "
+	// The two text rows and the toggle between them share one label column.
+	const labelW = 16
+	textRow := func(focus int, label, value string) string {
+		focused := m.notifEditFocus == focus
+		prefix := "  "
+		prefixColor := ColorWhite
+		labelStyle := DimStyle
+		if focused {
+			prefix = "> "
+			prefixColor = ColorCyan
+			labelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
+		}
+		maxW := max(w-runewidth.StringWidth(prefix)-labelW-2, 10)
+		var rendered string
+		if focused {
+			m.textInput.SetWidth(maxW)
+			rendered = m.textInput.View()
+		} else {
+			rendered = renderInactiveInput(value, maxW, ColorWhite)
+		}
+		return lipgloss.NewStyle().Foreground(prefixColor).Render(prefix) +
+			labelStyle.Render(padRight(label, labelW)) + rendered
 	}
-	urlLabel := "Webhook URL"
-	urlLabelStyle := DimStyle
-	if urlFocused {
-		urlLabelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
+
+	// Webhook URL
+	lines = append(lines, textRow(notifEditURLRow, "Webhook URL", m.notifEditURL))
+
+	// Enabled — the mute. The target and its whole filter stay configured;
+	// only delivery stops, which is what an operator who wants silence needs
+	// now that an empty event filter means "all events".
+	enabledFocused := m.notifEditFocus == notifEditEnabledRow
+	enabledPrefix := "  "
+	enabledPrefixColor := ColorWhite
+	enabledLabelStyle := DimStyle
+	if enabledFocused {
+		enabledPrefix = "> "
+		enabledPrefixColor = ColorCyan
+		enabledLabelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 	}
-	urlMaxW := max(w-runewidth.StringWidth(urlPrefix)-16-2, 10)
-	var urlVal string
-	if urlFocused {
-		m.textInput.SetWidth(urlMaxW)
-		urlVal = m.textInput.View()
-	} else {
-		urlVal = renderInactiveInput(m.notifEditURL, urlMaxW, ColorWhite)
+	enabledMark, enabledWord, enabledColor := " ", "Muted — kept, but delivers nothing", ColorGray
+	if m.notifEditEnabled {
+		enabledMark, enabledWord, enabledColor = "x", "Delivering", ColorGreen
 	}
-	prefixColor := ColorWhite
-	if urlFocused {
-		prefixColor = ColorCyan
+	enabledLine := lipgloss.NewStyle().Foreground(enabledPrefixColor).Render(enabledPrefix) +
+		enabledLabelStyle.Render(padRight("Enabled", labelW)) +
+		lipgloss.NewStyle().Foreground(enabledColor).Render("["+enabledMark+"] "+enabledWord)
+	if enabledFocused {
+		enabledLine += DimStyle.Render("  (Space to toggle)")
 	}
-	lines = append(lines, lipgloss.NewStyle().Foreground(prefixColor).Render(urlPrefix)+urlLabelStyle.Render(padRight(urlLabel, 16))+urlVal)
+	lines = append(lines, enabledLine)
+
+	// Mention
+	mentionLine := textRow(notifEditMentionRow, "Mention", m.notifEditMention)
+	if m.notifEditFocus == notifEditMentionRow {
+		mentionLine += DimStyle.Render(" (<@&ROLE_ID>, <@USER_ID>, @here, @everyone)")
+	}
+	lines = append(lines, mentionLine)
 
 	// Events header
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("  Events (Space to toggle):"))
+	lines = append(lines, DimStyle.Render("  Events (Space to toggle, m: mention @ column):"))
 
 	// Event checkboxes grouped by category
 	flatIdx := 0
@@ -590,7 +637,7 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 		lines = append(lines, "")
 		lines = append(lines, DimStyle.Render("  "+group.name))
 		for _, event := range group.events {
-			isFocused := m.notifEditFocus == flatIdx+1
+			isFocused := m.notifEditFocus == flatIdx+notifEditEventBase
 			if isFocused {
 				focusLine = len(lines)
 			}
@@ -613,6 +660,15 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 				eventStyle = lipgloss.NewStyle().Foreground(ColorCyan)
 			}
 
+			// The mention column, on the same row as the event it belongs to
+			// rather than in a second 25-row block: an event's two flags are
+			// read together, and one navigation list stays one list. Dim while
+			// there is nobody to ping — the flag is kept, it just does nothing.
+			mentionColor := ColorGray
+			if m.notifEditMentionEvents[event] && strings.TrimSpace(m.notifEditMention) != "" {
+				mentionColor = ColorYellow
+			}
+
 			lines = append(lines, lipgloss.NewStyle().Foreground(func() color.Color {
 				if isFocused {
 					return ColorCyan
@@ -620,7 +676,8 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 				return ColorWhite
 			}()).Render(prefix)+
 				lipgloss.NewStyle().Foreground(checkColor).Render("["+checkStr+"]")+
-				eventStyle.Render(" "+event))
+				eventStyle.Render(" "+padRight(event, notifEventNameWidth))+
+				"  "+lipgloss.NewStyle().Foreground(mentionColor).Render("@"))
 			flatIdx++
 		}
 	}

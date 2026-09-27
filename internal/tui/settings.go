@@ -125,6 +125,7 @@ var sections = []settingsSection{
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
+			{"public_url", "Public dashboard URL", fieldText, nil, "external address of this dashboard, used only in webhook embeds (e.g. https://moombox.example.com); blank = link to YouTube/Twitch", nil},
 			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = defaults (requires restart)", nil},
 		},
 	},
@@ -284,6 +285,29 @@ var allNotifEvents = func() []string {
 	return out
 }()
 
+// The notification editor's focus map. Row 0 is the Webhook URL, and
+// notifEditEventBase is the first index that names an event row. Every offset
+// in the editor's renderer and mouse map goes through these, because three of
+// them were hard-coded +1 before the Enabled and Mention rows existed.
+const (
+	notifEditURLRow     = 0
+	notifEditEnabledRow = 1
+	notifEditMentionRow = 2
+	notifEditEventBase  = 3
+)
+
+// notifEventNameWidth is the column the per-event @ mention marker starts at,
+// so the markers line up under each other across groups of differing name
+// lengths. Derived rather than guessed — a longer event id widens the column
+// instead of pushing one row's marker out of line.
+var notifEventNameWidth = func() int {
+	w := 0
+	for _, e := range allNotifEvents {
+		w = max(w, len(e)) // event ids are ASCII
+	}
+	return w
+}()
+
 // channelFieldDef defines a channel editor field.
 type channelFieldDef struct {
 	key            string
@@ -383,7 +407,22 @@ type SettingsModel struct {
 	notifMode       string // "list" or "edit"
 	notifEditURL    string
 	notifEditEvents map[string]bool
-	notifEditFocus  int // 0=URL, 1+=event index
+	// notifEditFocus indexes the edit form's rows: 0 = Webhook URL,
+	// 1 = Enabled, 2 = Mention, notifEditEventBase+n = the nth event row.
+	notifEditFocus int
+	// notifEditEnabled is the per-target mute. Absent in config means
+	// delivering, so an existing target opens on IsEnabled().
+	notifEditEnabled bool
+	notifEditMention string
+	// notifEditMentionEvents lights the per-event @ column. Seeded from the
+	// target's RESOLVED mention filter, so an absent mention_events shows the
+	// shipped defaults without ever having written them down.
+	notifEditMentionEvents map[string]bool
+	// notifEditMentionTouched records whether the operator changed any mention
+	// toggle in this editing session. False keeps mention_events ABSENT on
+	// save, so the target keeps following the shipped default list instead of
+	// freezing today's defaults into their config file.
+	notifEditMentionTouched bool
 	// notifEditScrollStart is the body scroll offset renderNotifEdit applied on
 	// the last render (0 = not scrolled). Mouse click mapping reads it to map an
 	// on-screen row back to the original (unscrolled) line.
@@ -506,6 +545,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
 	m.values["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
 	m.values["trusted_proxies"] = strings.Join(cfg.Network.TrustedProxies, ", ")
+	m.values["public_url"] = cfg.Network.PublicURL
 	m.values["probe_targets"] = strings.Join(cfg.Connectivity.ProbeTargets, ", ")
 
 	// Paths
@@ -648,6 +688,19 @@ func (m *SettingsModel) applyValues() {
 			m.status = saveError
 			return
 		}
+	}
+
+	// Validate network.public_url. Same rationale as the two gates above:
+	// config.Validate refuses a config carrying an unusable value, so without
+	// this one typo makes the whole save fail while saveAndClose still reports
+	// "Saved". The canonical form (lowercased scheme, trailing slash trimmed)
+	// is what gets written below, so the TUI stores exactly what the web path's
+	// validateConfigUpdates would.
+	publicURL, err := config.ValidatePublicURL(m.values["public_url"])
+	if err != nil {
+		m.errorMsg = fmt.Sprintf("Public dashboard URL: %v", err)
+		m.status = saveError
+		return
 	}
 
 	// Validate browser_path if set.
@@ -812,6 +865,7 @@ func (m *SettingsModel) applyValues() {
 		}
 	}
 	m.cfg.Network.TrustedProxies = proxies
+	m.cfg.Network.PublicURL = publicURL
 	targets := []string(nil)
 	for p := range strings.SplitSeq(m.values["probe_targets"], ",") {
 		if p = strings.TrimSpace(p); p != "" {

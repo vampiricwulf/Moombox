@@ -58,6 +58,23 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 					m.notifEditEvents[e] = true
 				}
 			}
+			// Absent enabled means delivering, exactly as the card reads it.
+			m.notifEditEnabled = n.IsEnabled()
+			m.notifEditMention = n.Mention
+			// An ABSENT mention_events shows the shipped defaults; an explicit
+			// (possibly empty) list shows itself. The distinction is the whole
+			// three-way rule, so it is read off the pointer rather than through
+			// ResolveMentionEvents, which folds the no-mention case to nil and
+			// would blank a stored list the moment a mention was cleared.
+			m.notifEditMentionTouched = false
+			if n.MentionEvents == nil {
+				m.seedMentionDefaults()
+			} else {
+				m.notifEditMentionEvents = make(map[string]bool, len(*n.MentionEvents))
+				for _, e := range *n.MentionEvents {
+					m.notifEditMentionEvents[e] = true
+				}
+			}
 			m.notifEditFocus = 0
 			m.notifMode = "edit"
 			m.updateTextInputForField()
@@ -68,6 +85,10 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		for _, e := range allNotifEvents {
 			m.notifEditEvents[e] = true
 		}
+		m.notifEditEnabled = true
+		m.notifEditMention = ""
+		m.notifEditMentionTouched = false
+		m.seedMentionDefaults()
 		m.notifEditFocus = 0
 		m.notifIndex = len(m.notifications)
 		m.notifMode = "edit"
@@ -125,8 +146,22 @@ func (m *SettingsModel) SetNotifTestResult(errMsg string) {
 	m.status = saveError
 }
 
+// seedMentionDefaults lights the @ column with the shipped default mention
+// filter (config.DefaultMentionEvents). Called when the editor opens a target
+// whose mention_events is absent, so the column shows what WOULD be pinged
+// without the operator ever having written the list down. It deliberately does
+// not set notifEditMentionTouched: only the operator's own `m` keypress makes
+// the list explicit.
+func (m *SettingsModel) seedMentionDefaults() {
+	defaults := config.DefaultMentionEvents()
+	m.notifEditMentionEvents = make(map[string]bool, len(defaults))
+	for _, e := range defaults {
+		m.notifEditMentionEvents[e] = true
+	}
+}
+
 func (m *SettingsModel) handleNotifEditKey(key string) string {
-	totalItems := 1 + len(allNotifEvents)
+	totalItems := notifEditEventBase + len(allNotifEvents)
 
 	switch key {
 	case keyEsc:
@@ -152,24 +187,58 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 			m.status = saveError
 			return ""
 		}
-		var events []string
-		enabledCount := 0
-		for _, e := range allNotifEvents {
-			if m.notifEditEvents[e] {
-				enabledCount++
-				events = append(events, e)
-			}
-		}
-		// Zero selected events would store Events = nil, which the
-		// notifications manager treats as "all events" — reject instead.
-		if enabledCount == 0 {
-			m.errorMsg = "Select at least one event (Space to toggle)"
+		// Save-time mention validation, for the same reason the URL gets one:
+		// config.validateOrNormalize CLEARS an unparseable mention instead of
+		// refusing the save, so a typo would round-trip to a target that pings
+		// nobody with nothing said about it.
+		mention, _, _, err := config.ParseMention(m.notifEditMention)
+		if err != nil {
+			m.errorMsg = err.Error()
 			m.status = saveError
 			return ""
 		}
-		n := config.NotificationConfig{URL: strings.TrimSpace(m.notifEditURL)}
-		if enabledCount < len(allNotifEvents) {
+		var events []string
+		selected := 0
+		for _, e := range allNotifEvents {
+			if m.notifEditEvents[e] {
+				selected++
+				events = append(events, e)
+			}
+		}
+		// Copy the stored target rather than building a fresh one: this editor
+		// owns five fields, and a from-scratch literal silently dropped every
+		// other per-target key the moment anyone fixed a typo in a URL.
+		var n config.NotificationConfig
+		if m.notifIndex < len(m.notifications) {
+			n = m.notifications[m.notifIndex]
+		}
+		n.URL = strings.TrimSpace(m.notifEditURL)
+		// An empty selection stores Events = nil, which the manager, the web
+		// card and operations.md all read as "all events". Silence is the
+		// Enabled toggle, not an empty filter.
+		n.Events = nil
+		if selected > 0 && selected < len(allNotifEvents) {
 			n.Events = events
+		}
+		// Written explicitly either way, never deleted back to absent, so the
+		// state an operator chose reads the same in config.toml as it does
+		// here — the same rule the web switch commits under.
+		enabled := m.notifEditEnabled
+		n.Enabled = &enabled
+		n.Mention = mention
+		// The three-way rule: an untouched column leaves mention_events exactly
+		// as it was stored (absent stays absent, so the target keeps following
+		// the shipped list), and the first toggle makes the whole list
+		// explicit — including the all-off case, which is an empty list
+		// ("never"), not an absent key ("the default six").
+		if m.notifEditMentionTouched {
+			mentionEvents := []string{}
+			for _, e := range allNotifEvents {
+				if m.notifEditMentionEvents[e] {
+					mentionEvents = append(mentionEvents, e)
+				}
+			}
+			n.MentionEvents = &mentionEvents
 		}
 		if m.notifIndex < len(m.notifications) {
 			m.notifications[m.notifIndex] = n
@@ -195,12 +264,28 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		}
 		return ""
 	case " ":
-		if m.notifEditFocus > 0 {
-			eventIdx := m.notifEditFocus - 1
-			if eventIdx < len(allNotifEvents) {
-				event := allNotifEvents[eventIdx]
-				m.notifEditEvents[event] = !m.notifEditEvents[event]
+		// Both arms are guarded on their own row, because the two text rows
+		// (URL and Mention) own their own spaces: UpdateComponents routes the
+		// key into the focused input, and this arm must not also act on it.
+		if m.notifEditFocus == notifEditEnabledRow {
+			m.notifEditEnabled = !m.notifEditEnabled
+			return ""
+		}
+		if eventIdx := m.notifEditFocus - notifEditEventBase; eventIdx >= 0 && eventIdx < len(allNotifEvents) {
+			event := allNotifEvents[eventIdx]
+			m.notifEditEvents[event] = !m.notifEditEvents[event]
+		}
+		return ""
+	case "m", "M":
+		// The @ column's key. Guarded on an event row so an `m` typed into the
+		// URL or Mention field only reaches the text input.
+		if eventIdx := m.notifEditFocus - notifEditEventBase; eventIdx >= 0 && eventIdx < len(allNotifEvents) {
+			event := allNotifEvents[eventIdx]
+			if m.notifEditMentionEvents == nil {
+				m.notifEditMentionEvents = make(map[string]bool, len(allNotifEvents))
 			}
+			m.notifEditMentionEvents[event] = !m.notifEditMentionEvents[event]
+			m.notifEditMentionTouched = true
 		}
 		return ""
 	}
