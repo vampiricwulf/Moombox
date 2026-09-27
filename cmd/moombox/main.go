@@ -670,15 +670,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
 		var prevHeapMB float64
-		var lastDiskNotify time.Time
-		var lastDiskLevel string
 		diskCheckCounter := 0
-		diskReadFailing := false
-		// Consecutive read failures. The low-disk safety net silently dying
-		// (volume offline, I/O error) is itself alert-worthy — notified on
-		// the 2nd consecutive failure (~12 min) so a transient SMB blip or
-		// flapping network volume doesn't page the operator.
-		diskReadFailCount := 0
+		diskAlerter := newDiskAlerts(notifyMgr, log)
 		for {
 			select {
 			case <-ctx.Done():
@@ -764,8 +757,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						diskOutputDir = c.Paths.OutputDirectory
 					})
 					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
-						diskReadFailing = false
-						diskReadFailCount = 0
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{
 							"free":      ds.Free,
@@ -782,72 +773,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						default:
 						}
 
-						// Notification with 30-minute cooldown
-						if ds.WarnLevel != "ok" {
-							canNotify := lastDiskLevel != ds.WarnLevel ||
-								time.Since(lastDiskNotify) >= 30*time.Minute
-							if canNotify && notifyMgr.HasTargets() {
-								freeGB := float64(ds.Free) / (1024 * 1024 * 1024)
-								level := "Warning"
-								ntype := notifications.TypeWarning
-								// Critical gets its own event so targets can route
-								// it separately (e.g. a high-priority channel);
-								// eventAliases keeps plain "disk_warning" filters
-								// receiving it too.
-								event := "disk_warning"
-								if ds.WarnLevel == "critical" {
-									level = "Critical"
-									ntype = notifications.TypeError
-									event = "disk_critical"
-								}
-								// Name the directory: an operator with several
-								// machines (or several volumes) can't act on
-								// "output drive" alone. Absolute path — the
-								// config default is the relative "./output".
-								dirShown := diskOutputDir
-								if abs, absErr := filepath.Abs(diskOutputDir); absErr == nil {
-									dirShown = abs
-								}
-								notifyMgr.Send(
-									fmt.Sprintf("Disk Space %s", level),
-									fmt.Sprintf("%.1f%% used — %.1f GB free on output drive", ds.UsedPct, freeGB),
-									ntype,
-									[]notifications.Field{
-										{Name: "Output Directory", Value: dirShown},
-									},
-									notifications.SendOptions{Event: event},
-								)
-								lastDiskNotify = time.Now()
-								lastDiskLevel = ds.WarnLevel
-							}
-						} else {
-							lastDiskLevel = "" // Reset cooldown when back to ok
-						}
+						// The whole notification decision — the 30-minute
+						// cooldown, the level escalation, and the all-clear
+						// that closes them — lives in diskAlerts, where it
+						// can be tested.
+						diskAlerter.onReading(ds, diskOutputDir, time.Now())
 					} else {
-						// GetDiskSpace failed (volume offline, I/O error). Warn
-						// once per failure streak — until this recovers, the
+						// GetDiskSpace failed (volume offline, I/O error): the
 						// dashboard disk gauge and low-disk notifications are
-						// frozen at the last good reading.
-						diskReadFailCount++
-						if !diskReadFailing {
-							log.Warn("[Disk] disk space check failed; gauge and low-disk alerts frozen until it recovers",
-								slog.String("outputDir", diskOutputDir))
-							diskReadFailing = true
-						}
-						// The safety net dying is itself alert-worthy: with
-						// monitoring frozen, the drive can fill unnoticed.
-						// Fires once per streak, on the 2nd consecutive
-						// failure (~12 min) to ride out transient blips.
-						if diskReadFailCount == 2 {
-							notifyMgr.Send("Disk Monitoring Failed",
-								"Disk space checks are failing (volume offline or I/O error) — low-disk alerts are suspended until monitoring recovers",
-								notifications.TypeError,
-								[]notifications.Field{
-									{Name: "Output Directory", Value: diskOutputDir},
-								},
-								notifications.SendOptions{Event: "disk_warning"},
-							)
-						}
+						// frozen at the last good reading until it recovers.
+						diskAlerter.onReadFailure(diskOutputDir)
 					}
 				}
 			}
