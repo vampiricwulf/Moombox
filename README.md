@@ -691,14 +691,14 @@ checkboxes in the TUI — so you rarely need to write one by hand.
 
 ### Mentions and dashboard links
 
-`mention` pings alongside a target's alerts — embeds can't mention on their
+`mention` pings alongside the events a target is configured for — embeds can't mention on their
 own, so the ping rides in the message text instead. `mention_events` narrows
 which events carry it; leave it unset for the default six (`error`, `auth`,
 `disk_critical`, `update_failed`, `crash_recovered`, `sidecar_down`), or set it
 to `[]` for a mention that never fires. Set `network.public_url` to your
 dashboard's externally reachable address and a job embed's title links
 straight to that job (`{public_url}/#job=<id>`) instead of the platform page,
-which moves to the channel/author line instead. See
+which moves to the channel/author line. See
 [docs/spec/operations.md](docs/spec/operations.md#target-options) for the
 full rules.
 

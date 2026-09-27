@@ -315,13 +315,13 @@
 # shorthand, nothing else.
 # You can add multiple [[notifications]] blocks for different endpoints.
 #
-# The full event vocabulary (25 events) is documented in docs/spec/operations.md
-# under "Event Types". A target with no "events" filter receives all of them.
+# The full event vocabulary is documented in docs/spec/operations.md under
+# "Event Types". A target with no "events" filter receives all of them.
 #
 # [[notifications]]
 # url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
 # enabled = true                           # Optional: false mutes this target without deleting it (default: true)
-# events = ["live", "finished", "error"]   # Optional: only send these events (default: all)
+# events = ["found", "finished", "error"]  # Optional: only send these events (default: all)
 # mention = "<@&123456789012345678>"       # Optional: content line to ping a role (<@&ID>), a user (<@ID>), @everyone, or @here
 # mention_events = ["error", "auth"]       # Optional: which events the mention rides along with.
 #                                             Omit entirely to use the default six (error, auth, disk_critical,
