@@ -646,7 +646,10 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 	return nil
 }
 
-// sendMuxingStarting announces the mux for BOTH finalize shapes.
+// sendMuxingStarting announces the mux for all THREE mux shapes: both
+// finalize paths inside muxAndFinalize (single-file and multi-segment) and
+// muxFromStaging's direct-finalize arm, which reaches FFmpeg without passing
+// through muxAndFinalize at all.
 //
 // It used to sit inline in muxAndFinalize, 28 lines BELOW the
 // `len(segments) > 0` branch that returns into finalizeMultiSegmentJob — so
@@ -666,6 +669,13 @@ func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 	job := jobCtx.Job
 	if fresh, err := o.db.GetJob(jobCtx.Job.ID); err == nil && fresh != nil {
 		job = fresh
+	} else if err != nil {
+		// Not fatal — the in-memory job carries the same fields, only
+		// staler — but a database read failing here is worth a line, because
+		// nothing else in this function would show it and the counts in the
+		// embed would simply look behind.
+		o.logger.Debug("muxing notification: job re-read failed, using the in-memory job",
+			"jobID", jobCtx.Job.ID, "err", err)
 	}
 
 	fb := notifications.NewFieldBuilder()
@@ -1305,9 +1315,16 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 	// description (the norm here) splits mid-rune, after which encoding/json
 	// emits U+FFFD and the operator reads mojibake. Escaped too — a
 	// description is job-supplied text and renders Discord markdown.
+	//
+	// CLAMP FIRST, then escape. The other order cuts 300 runes out of the
+	// ESCAPED text, so a cut landing between a backslash and the character it
+	// escapes leaves the excerpt ending in a stray "\…". Escaping afterwards
+	// can at most double the length — 600 runes, still well inside the 1024
+	// the field clamp enforces — and the 300 runes shown are 300 runes of the
+	// operator's description rather than 300 of Moombox's punctuation.
 	const descMaxLen = 300
 	if finishedJob.Description != "" {
-		fb.Add("Description", notifications.ClampRunes(notifications.EscapeMarkdown(finishedJob.Description), descMaxLen))
+		fb.Add("Description", notifications.EscapeMarkdown(notifications.ClampRunes(finishedJob.Description, descMaxLen)))
 	}
 	o.notifier.Send("Download Finished",
 		fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),

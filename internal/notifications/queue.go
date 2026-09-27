@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // notificationQueueCap bounds one target's pending FIFO.
@@ -15,6 +16,16 @@ import (
 // minutes of backlog — long enough that reaching the cap means Discord is
 // down, not that Moombox is busy.
 const notificationQueueCap = 256
+
+// dropWarnInterval is how often ONE target may say it is shedding.
+//
+// A backfill re-scan (R B) against a dead Discord overflows the queue on
+// nearly every send: 2,000 sends into a 256-slot queue was measured at 1,743
+// Warn lines in 35ms. The producer barely notices (17µs a send) — the log
+// pays, and 1,743 near-identical lines bury the incident they are reporting.
+// The count is the diagnostic, not the line per victim, so the lines coalesce
+// and each one carries the total since the last.
+const dropWarnInterval = 5 * time.Second
 
 // queued is one embed waiting for one target. The fields mirror Send's
 // parameters; the tier is resolved once at enqueue so the overflow policy
@@ -60,6 +71,15 @@ type targetQueue struct {
 	items   []queued
 	closing bool // drain what is queued, then exit (Wait)
 	discard bool // drop what is queued, then exit (a removed target)
+
+	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
+	// of shed are counted separately because they mean different things: the
+	// oldest-low-priority kind is the policy working (chatter making room for
+	// alerts), the newest kind is 256 queued ALERTS and a webhook that has
+	// been down long enough to start losing them.
+	droppedOldest int
+	droppedNewest int
+	lastDropWarn  time.Time
 
 	// wake carries one buffered token, so a signal sent while the goroutine is
 	// between pop and receive is remembered rather than lost.
@@ -159,41 +179,105 @@ func (q *targetQueue) enqueue(it queued) {
 		}
 	}
 	if victim < 0 {
+		nOldest, nNewest, warn := q.noteDrop(false)
 		q.mu.Unlock()
-		q.logger.Warn("notification queue full — dropping the newest",
-			"cap", notificationQueueCap, "event", it.opts.Event, "title", it.title)
+		if warn {
+			q.logger.Warn("notification queue full — shedding notifications",
+				"cap", notificationQueueCap, "dropped_newest", nNewest,
+				"dropped_oldest_low_priority", nOldest,
+				"event", it.opts.Event, "title", it.title)
+		}
 		return
 	}
 	dropped := q.items[victim]
 	q.items = append(q.items[:victim], q.items[victim+1:]...)
 	q.items = append(q.items, it)
+	nOldest, nNewest, warn := q.noteDrop(true)
 	q.mu.Unlock()
-	q.logger.Warn("notification queue full — dropped the oldest low-priority notification",
-		"cap", notificationQueueCap, "event", dropped.opts.Event, "title", dropped.title)
+	if warn {
+		q.logger.Warn("notification queue full — shedding notifications",
+			"cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
+			"dropped_newest", nNewest,
+			"event", dropped.opts.Event, "title", dropped.title)
+	}
 	q.signal()
+}
+
+// noteDrop counts one shed notification and reports whether this is the moment
+// to say so — at most once per dropWarnInterval, carrying everything shed
+// since the last line. Called with q.mu HELD; the Warn itself belongs outside
+// it, like every other log line in this file.
+//
+// The first drop of a burst always speaks (the zero lastDropWarn is far in the
+// past), so an operator learns about a shedding queue immediately and then
+// hears a running total rather than a line per victim.
+func (q *targetQueue) noteDrop(oldest bool) (nOldest, nNewest int, warn bool) {
+	if oldest {
+		q.droppedOldest++
+	} else {
+		q.droppedNewest++
+	}
+	if time.Since(q.lastDropWarn) < dropWarnInterval {
+		return 0, 0, false
+	}
+	q.lastDropWarn = time.Now()
+	nOldest, nNewest = q.droppedOldest, q.droppedNewest
+	q.droppedOldest, q.droppedNewest = 0, 0
+	return nOldest, nNewest, true
+}
+
+// flushDrops hands back whatever the coalescing window is still holding,
+// ignoring the interval, and reports false when there is nothing to say.
+// Called with q.mu HELD.
+func (q *targetQueue) flushDrops() (nOldest, nNewest int, report bool) {
+	if q.droppedOldest == 0 && q.droppedNewest == 0 {
+		return 0, 0, false
+	}
+	nOldest, nNewest = q.droppedOldest, q.droppedNewest
+	q.droppedOldest, q.droppedNewest = 0, 0
+	return nOldest, nNewest, true
 }
 
 // pop takes the head. ok=false means nothing is queued; exit=true means the
 // goroutine should return.
+// The lock is released before every log line. This is the one Warn in the
+// package that used to be issued UNDER q.mu, and a logger that re-entered the
+// manager (a hypothetical notify-on-warn sink) deadlocked on it — enqueue
+// wants the same mutex. Proven with a re-entrant logger and a 2s watchdog; no
+// logger on the branch does that, which is what keeps this a tidy-up.
 func (q *targetQueue) pop() (it queued, ok, exit bool) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.discard {
 		// A removed target reports the count and nothing else. The queued
 		// items belong to a webhook the operator has just deleted from their
 		// config; delivering them after the fact would be the opposite of what
 		// the edit asked for.
-		if n := len(q.items); n > 0 {
+		n := len(q.items)
+		q.items = nil
+		q.mu.Unlock()
+		if n > 0 {
 			q.logger.Warn("notification target removed — discarding its queued notifications", "dropped", n)
-			q.items = nil
 		}
 		return queued{}, false, true
 	}
 	if len(q.items) == 0 {
-		return queued{}, false, q.closing
+		// The queue has emptied, so whatever the coalescing window was still
+		// holding has no later drop to ride out on. Reporting it here is what
+		// keeps the total honest for the case that motivated the coalescing:
+		// a burst that sheds 1,743 items in 35ms is ONE window, and without
+		// this the log would claim it shed one.
+		closing := q.closing
+		nOldest, nNewest, report := q.flushDrops()
+		q.mu.Unlock()
+		if report {
+			q.logger.Warn("notification queue drained — totals for what it shed while full",
+				"dropped_oldest_low_priority", nOldest, "dropped_newest", nNewest)
+		}
+		return queued{}, false, closing
 	}
 	it = q.items[0]
 	q.items = q.items[1:]
+	q.mu.Unlock()
 	return it, true, false
 }
 

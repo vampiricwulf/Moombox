@@ -142,6 +142,9 @@ func TestTwitchResumeEmbedCarriesThePause(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("recorded %d resume notifications, want 1", len(got))
 	}
+	if got[0].Title != "Twitch Download Resumed" {
+		t.Errorf("title = %q, want \"Twitch Download Resumed\" — the event key alone does not prove which embed went out", got[0].Title)
+	}
 	paused, ok := got[0].Field("Paused")
 	if !ok {
 		t.Fatalf("the resume embed carries no Paused field: %+v", got[0].Fields)

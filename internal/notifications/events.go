@@ -68,6 +68,13 @@ var KnownEvents = func() map[string]bool {
 // split (e.g. a "disk_warning" filter still receives "disk_critical"
 // alerts — silently losing the MORE urgent alert after an upgrade would be
 // the worst possible migration behavior).
+//
+// The same table serves a second idiom: RETIREMENT. When an event is folded
+// into another and its key disappears from EventGroups, the retired key goes
+// in as the alias VALUE and the survivor as the KEY, so a filter still naming
+// the retired one receives the folded embed instead of going silent. A
+// retirement entry is a migration with an expiry — it names the release it
+// should be deleted in — where a split entry is permanent.
 var eventAliases = map[string]string{
 	"disk_critical": "disk_warning",
 	// C8: the pause embed was undeliverable by construction (it was sent

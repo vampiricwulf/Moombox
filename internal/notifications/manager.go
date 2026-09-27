@@ -480,6 +480,16 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 // that touches an unrelated section must not cost every webhook its bucket
 // state and its backlog. A target that is gone is told to discard after its
 // in-flight item; a new one gets a goroutine.
+//
+// A target with an EMPTY key is outside the diff on both sides: it is never
+// matched as a survivor (so a Reload rebuilds it) and it never lands in byKey
+// (so a later Reload cannot find it to retire). The next Reload drops it from
+// m.targets without ever telling it to stop, and Wait only closes what is IN
+// m.targets, so its goroutine would outlive both. Unreachable today:
+// parseTarget is Discord-only and every target it
+// returns carries the resolved webhook URL as its key. A second target kind
+// that cannot name itself must either be given a synthetic key or retired
+// here explicitly.
 func (m *Manager) applyTargets(built []notificationTarget) {
 	m.targetsMu.Lock()
 	previous := m.byKey
@@ -574,11 +584,17 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		return
 	}
 
+	// fields is COPIED here, once for every send rather than once per target.
+	// A queued item can now sit for seconds — the old goroutine-per-send held
+	// the caller's slice for microseconds — and the usual caller hands over a
+	// FieldBuilder's buffer it is free to reuse for its next send. One
+	// allocation per send buys the guarantee that what is delivered is what
+	// was asked for.
 	it := queued{
 		title:       title,
 		description: description,
 		color:       ntype.Color(),
-		fields:      fields,
+		fields:      append([]Field(nil), fields...),
 		opts:        opts,
 		tier:        effectiveTier(opts),
 	}
@@ -616,6 +632,13 @@ func (m *Manager) effectiveWaitTimeout() time.Duration {
 // Wait stops accepting new notifications for every target, drains what is
 // already queued, and returns when the last goroutine has exited or the wait
 // timeout (defaultWaitTimeout, 30 s, unless injected) expires.
+//
+// The timeout is ONE deadline shared by every target, not a budget per
+// target: it starts before the first queue is waited on, and the first queue
+// to reach it aborts the whole wait, logging once. So a single wedged webhook
+// can spend the entire window and leave the others undrained — which is the
+// intent, because the thing being bounded is how long the PROCESS delays its
+// exit, not how patient it is with any one webhook.
 //
 // **Single-call**: after Wait returns, every queue is closed and later Sends
 // are dropped with a Warn. The graceful-shutdown sequence in cmd/moombox stops

@@ -254,18 +254,45 @@ func TestFinishedImageIsDroppedForTwitch(t *testing.T) {
 // a notificationtest.Recorder reads off a finished send in Task 6's fixture;
 // ClampRunes' own boundary behaviour is pinned exhaustively in
 // internal/notifications/limits_test.go.
+//
+// The ORDER is part of the composition: clamp the raw description, THEN
+// escape. Escaping first spends the 300-rune budget on backslashes Moombox
+// added, and a cut landing between a backslash and its character ends the
+// excerpt in a stray "\…".
 func TestDescriptionExcerptCutsOnARuneBoundary(t *testing.T) {
-	long := strings.Repeat("あ", 500)
-	got := notifications.ClampRunes(notifications.EscapeMarkdown(long), 300)
-	if !utf8.ValidString(got) {
-		t.Fatalf("the excerpt is not valid UTF-8: %q", got)
+	excerpt := func(s string) string {
+		return notifications.EscapeMarkdown(notifications.ClampRunes(s, 300))
 	}
-	if n := utf8.RuneCountInString(got); n != 300 {
-		t.Errorf("excerpt = %d runes, want 300", n)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-12:])
-	}
+
+	t.Run("a Japanese description keeps whole runes", func(t *testing.T) {
+		got := excerpt(strings.Repeat("あ", 500))
+		if !utf8.ValidString(got) {
+			t.Fatalf("the excerpt is not valid UTF-8: %q", got)
+		}
+		if n := utf8.RuneCountInString(got); n != 300 {
+			t.Errorf("excerpt = %d runes, want 300", n)
+		}
+		if !strings.HasSuffix(got, "…") {
+			t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-12:])
+		}
+	})
+
+	t.Run("the cut never lands inside an escape pair", func(t *testing.T) {
+		// Every rune escapable: clamping the ESCAPED form would cut halfway
+		// through one of the pairs it added.
+		got := excerpt(strings.Repeat("*", 500))
+		if strings.HasSuffix(got, `\…`) {
+			t.Errorf("the excerpt ends in an orphaned backslash — it was clamped after escaping: %q", got[len(got)-8:])
+		}
+		if !strings.HasSuffix(got, "…") {
+			t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-8:])
+		}
+		// Escaping after the clamp can at most double the length, which is
+		// still comfortably inside the 1024-rune field value limit.
+		if n := utf8.RuneCountInString(got); n > 600 {
+			t.Errorf("excerpt = %d runes, want <= 600 (300 clamped runes, each at most doubled by the escape)", n)
+		}
+	})
 }
 
 // muxTestOrchestrator builds an orchestrator over a real temp database with a
@@ -405,7 +432,11 @@ func TestMuxFromStagingAnnouncesTheMux(t *testing.T) {
 
 	_ = o.muxFromStaging(context.Background(), jobCtx)
 
-	if got := len(rec.ByEvent("muxing")); got != 1 {
-		t.Errorf("the off-queue mux recorded %d muxing notifications, want 1: %+v", got, rec.Calls())
+	got := rec.ByEvent("muxing")
+	if len(got) != 1 {
+		t.Fatalf("the off-queue mux recorded %d muxing notifications, want 1: %+v", len(got), rec.Calls())
+	}
+	if got[0].Title != "Muxing Starting" {
+		t.Errorf("title = %q, want \"Muxing Starting\" — the event key alone does not prove which embed went out", got[0].Title)
 	}
 }

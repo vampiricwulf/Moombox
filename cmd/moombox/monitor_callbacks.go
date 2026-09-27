@@ -385,9 +385,10 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 		}
 		// A4: the close fires whenever a failure was ANNOUNCED for this
-		// platform, not only when a job happened to be parked. A platform
-		// whose cookies died between recordings produced "Cookie Auto-Refresh
-		// Failed" and then, after the operator fixed it, nothing.
+		// platform, not only when a job happened to be parked, and only once
+		// per announced failure. A platform whose cookies died between
+		// recordings produced "Cookie Auto-Refresh Failed" and then, after the
+		// operator fixed it, nothing.
 		//
 		// Still gated, not unconditional: OnAuthRecovered also fires on the
 		// first successful validate of a perfectly healthy process, and a
@@ -635,12 +636,20 @@ func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, fun
 		send(platform, title, desc, ntype)
 	}
 	// A non-zero stamp means a failure was ANNOUNCED for this platform in this
-	// process. It is deliberately never cleared: the close is the answer to
-	// that announcement whenever it arrives, hours later included.
+	// process. The close CONSUMES it: one close per failure episode, and the
+	// next failure after a close is a new episode that announces at once
+	// rather than sitting inside the old one's cooldown. Clearing the stamp
+	// (rather than keeping a separate "already closed" bool) is what makes
+	// those two halves one decision: the 30-minute cooldown exists to suppress
+	// repeats INSIDE an episode, and a recovery ends the episode.
 	wasNotified := func(platform string) bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return !last[platform].IsZero()
+		if last[platform].IsZero() {
+			return false
+		}
+		delete(last, platform)
+		return true
 	}
 	return notify, wasNotified
 }

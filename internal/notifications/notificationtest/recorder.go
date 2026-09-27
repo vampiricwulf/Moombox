@@ -3,11 +3,13 @@
 // internal/notifications.
 //
 // It is an ordinary package rather than a _test.go helper because the
-// consumers live in four packages — internal/worker, internal/web/routes,
-// cmd/moombox and internal/notifications' own tests — and a test-only file
-// cannot be imported across package boundaries. Nothing in production imports
-// it, so the linker drops it from the binary. internal/webtest is the
-// precedent.
+// consumer packages — internal/worker, internal/web/routes and cmd/moombox,
+// plus any external notifications_test — cannot import a test-only file across
+// a package boundary. internal/notifications' OWN internal tests are the one
+// caller it cannot serve: this package imports notifications, so importing it
+// back would be a cycle. They use the package-local fakes in queue_test.go
+// instead. Nothing in production imports this, so the linker drops it from the
+// binary. internal/webtest is the precedent.
 package notificationtest
 
 import (
@@ -72,11 +74,25 @@ func (r *Recorder) Send(title, description string, ntype notifications.Notificat
 	})
 }
 
+// clone deep-copies the one reference a Call holds. Copying the outer slice is
+// not enough: a Call handed out by value still points at the recorded Fields
+// array, so a test that sorts or rewrites `got[0].Fields` would be editing the
+// recorder's own record — and the next Calls() would hand the edit to the next
+// assertion.
+func clone(c Call) Call {
+	c.Fields = append([]notifications.Field(nil), c.Fields...)
+	return c
+}
+
 // Calls returns a copy of everything recorded so far, in send order.
 func (r *Recorder) Calls() []Call {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]Call(nil), r.calls...)
+	var out []Call
+	for _, c := range r.calls {
+		out = append(out, clone(c))
+	}
+	return out
 }
 
 // ByEvent returns the recorded calls whose SendOptions.Event equals event, in
@@ -89,7 +105,7 @@ func (r *Recorder) ByEvent(event string) []Call {
 	var out []Call
 	for _, c := range r.calls {
 		if c.Opts.Event == event {
-			out = append(out, c)
+			out = append(out, clone(c))
 		}
 	}
 	return out

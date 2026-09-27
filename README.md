@@ -683,8 +683,8 @@ events = ["found", "finished", "error"]  # Optional filter (default: all events)
 Discord webhooks only — the shorthand `discord://ID/TOKEN` works too. The full
 list of event keys, and what each one fires on, is the event table in
 [docs/spec/operations.md](docs/spec/operations.md#notifications-discord-webhooks);
-both settings UIs offer the same list as checkboxes, so you rarely need to
-write one by hand.
+both settings UIs offer the same list as toggles — chips in the web dashboard,
+checkboxes in the TUI — so you rarely need to write one by hand.
 
 ## Job Status Flow
 

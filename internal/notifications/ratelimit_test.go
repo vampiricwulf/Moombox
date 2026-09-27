@@ -63,6 +63,44 @@ func TestSleepsBeforeAnEmptyBucket(t *testing.T) {
 	}
 }
 
+// TestTheBucketWaitOutlastsTheRoundingSkew is the pad.
+//
+// X-RateLimit-Reset-After is millisecond precision. A server that rounds it to
+// NEAREST reports a window that closes up to half a millisecond LATER than the
+// number says, so a sender waking exactly on the number arrives inside the
+// window and is 429'd — by its own punctuality. Measured against a fake
+// Discord doing exactly that: 1-3 such 429s per 400 requests. The ladder
+// absorbs them (one wasted attempt plus the 429's >=1s Retry-After), which is
+// why this is a pad and not an Important, but paying 50ms to not spend a
+// second is the trade.
+//
+// THE MUTANT: dropping bucketSkewPad from noteBucket. The gap falls back to
+// ~150ms and this fails while TestSleepsBeforeAnEmptyBucket above still
+// passes — which is the whole point of measuring it separately.
+func TestTheBucketWaitOutlastsTheRoundingSkew(t *testing.T) {
+	rec := &arrivalRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rec.mark()
+		rw.Header().Set("X-RateLimit-Remaining", "0")
+		rw.Header().Set("X-RateLimit-Reset-After", "0.15")
+		rw.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &DiscordWebhook{URL: srv.URL}
+	for range 2 {
+		if err := d.Send("t", "", 0, nil, SendOptions{}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	// The deadline is armed AFTER the first response is read, so a correct
+	// sender's gap strictly exceeds the window plus the pad.
+	if want, got := 150*time.Millisecond+bucketSkewPad, rec.gap(); got < want {
+		t.Errorf("the second request arrived %v after the first, want >= %v — a window reported as 0.150 may really close at 0.1505, "+
+			"and a sender that wakes on the nose earns a 429 for it", got, want)
+	}
+}
+
 // TestDoesNotSleepWhenTheBucketHasRoom is the premise: a sleep on every send
 // would throttle a healthy webhook to one embed per window for nothing.
 func TestDoesNotSleepWhenTheBucketHasRoom(t *testing.T) {

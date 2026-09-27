@@ -29,8 +29,15 @@ const (
 	discordRetryAfterCap = 30 * time.Second
 	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding one
 	// notification's worst-case hold on its target's queue at ~3x15s requests
-	// + 30s sleep. Two large Retry-After waits would exceed it — a webhook
-	// still rate-limited after one honored wait gives up instead.
+	// + 30s sleep = ~75s. Two large Retry-After waits would exceed it — a
+	// webhook still rate-limited after one honored wait gives up instead.
+	//
+	// The PRE-EMPTIVE empty-bucket wait (waitForBucket, ≤ discordRetryAfterCap
+	// per attempt) is deliberately outside this budget, so the true worst-case
+	// hold is ~75s plus those waits. Counting them here would let one
+	// legitimate 30s bucket wait forfeit the retries a following 5xx needs —
+	// the budget exists to stop a wedged webhook from parking a queue, and a
+	// bucket wait is the opposite: the sender doing what Discord asked.
 	discordMaxSleepTotal = 30 * time.Second
 	// shutdownBucketWaitCap bounds how long a SINGLE-attempt send (SendOnce —
 	// in practice the shutdown path) will wait out a known-empty rate bucket.
@@ -40,6 +47,16 @@ const (
 	// posts immediately and lets the 429 drop the item: the same outcome as
 	// not waiting, minus the seconds spent.
 	shutdownBucketWaitCap = 2 * time.Second
+	// bucketSkewPad is added to every empty-bucket deadline learned from
+	// X-RateLimit-Reset-After. The header is millisecond precision, so a value
+	// rounded to NEAREST lets a sender that wakes exactly on it arrive up to
+	// half a millisecond before the server's window actually closes — and that
+	// request 429s. Measured on a fake Discord that rounds to nearest: 1-3
+	// such 429s per 400 requests without the pad, zero with it. Discord's own
+	// client libraries apply the same small offset for the same reason. The
+	// cost is 50ms of extra latency on a send that was already waiting out a
+	// window.
+	bucketSkewPad = 50 * time.Millisecond
 	// discordErrBodyBytes bounds how much of a rejected webhook's response
 	// body is quoted back in the error. Discord's 4xx bodies are small JSON
 	// objects naming what it refused ({"message": "Unknown Webhook", "code":
@@ -201,9 +218,10 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 
 	if len(fields) > 0 {
 		// discordField is a type alias for Field, so this is a direct copy
-		// rather than an element-by-element conversion. It MUST stay a copy:
-		// the clamp below rewrites values in place, and the caller's slice is
-		// often a FieldBuilder's buffer reused for a later send.
+		// rather than an element-by-element conversion. It stays a copy
+		// because the clamp below rewrites values in place; the caller's own
+		// buffer is already protected a layer up, where Manager.Send copies
+		// into the queued item.
 		embed.Fields = append([]discordField(nil), fields...)
 	}
 
@@ -434,8 +452,9 @@ func (d *DiscordWebhook) noteBucket(r discordResponse) {
 	if secs > discordRetryAfterCap.Seconds() {
 		secs = discordRetryAfterCap.Seconds()
 	}
+	// bucketSkewPad covers the header's millisecond rounding — see its comment.
 	d.bucketMu.Lock()
-	d.bucketRefillsAt = time.Now().Add(time.Duration(secs * float64(time.Second)))
+	d.bucketRefillsAt = time.Now().Add(time.Duration(secs*float64(time.Second)) + bucketSkewPad)
 	d.bucketMu.Unlock()
 }
 

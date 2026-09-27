@@ -163,6 +163,163 @@ func TestQueueOverflowDropsTheNewestWhenNothingIsLowTier(t *testing.T) {
 	}
 }
 
+// TestOverflowWarnsAreCoalescedWithoutLosingTheCount is T4-m3.
+//
+// The scenario is a backfill re-scan (R B) while Discord is unreachable: every
+// catalogue row produces a `found`, the queue is full within a second, and
+// each subsequent send sheds one. Measured at a line per shed, that is 1,743
+// Warn lines in 35 milliseconds — the log then costs more than the sends do
+// and buries the incident inside its own symptom.
+//
+// Coalescing alone is not enough, which is the second half of this pin: a
+// burst that fits inside ONE window would report "1" and swallow the rest, so
+// the queue reports its running total again when it finally empties.
+//
+// THE MUTANT: warning per drop (the first assertion sees ~1,000 lines), or
+// coalescing without the drain-time flush (the total reads 1).
+func TestOverflowWarnsAreCoalescedWithoutLosingTheCount(t *testing.T) {
+	g := newGateSender()
+	lg := &countingLogger{}
+	m := newTestManagerWithLogger(t, lg, 5*time.Second, notificationTarget{sender: g, key: "k1"})
+
+	// One in flight against the gate, then exactly cap queued behind it.
+	m.Send("found-0", "", TypeInfo, nil, SendOptions{Event: "found"})
+	waitFor(t, "the head to be in flight", func() bool { return m.targets[0].pending() == 0 })
+	for i := 1; i <= notificationQueueCap; i++ {
+		m.Send("found-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+	}
+
+	const overflow = 1000
+	for i := range overflow {
+		m.Send("spill-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+	}
+
+	// The burst runs in milliseconds, so it is one coalescing window: one line.
+	if got := lg.warnsContaining("shedding notifications"); got > 2 {
+		t.Errorf("%d shed-Warn lines for %d drops, want at most 2 — the log is the thing this burst costs", got, overflow)
+	}
+
+	g.release()
+	waitFor(t, "the queue to drain", func() bool { return len(g.delivered()) == notificationQueueCap+1 })
+	waitFor(t, "the drained total to be reported", func() bool {
+		return lg.sawWarnContaining("notification queue drained")
+	})
+
+	if got := lg.sumWarnArg("dropped_oldest_low_priority"); got != overflow {
+		t.Errorf("the Warn lines account for %d shed notifications, want %d — a coalesced count that under-reports "+
+			"by three orders of magnitude is worse than the flood it replaced", got, overflow)
+	}
+	if got := lg.sumWarnArg("dropped_newest"); got != 0 {
+		t.Errorf("%d notifications were shed as the-newest, want 0 — the queue was full of low-tier `found`s", got)
+	}
+}
+
+// fieldSender blocks on a gate before recording, so a test can mutate what it
+// passed to Send while the item is queued but not yet read.
+type fieldSender struct {
+	gate chan struct{}
+
+	mu     sync.Mutex
+	fields []Field
+}
+
+func (f *fieldSender) Send(_, _ string, _ int, fields []Field, _ SendOptions) error {
+	<-f.gate
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fields = fields
+	return nil
+}
+
+func (f *fieldSender) SendOnce(t, d string, c int, fields []Field, o SendOptions) error {
+	return f.Send(t, d, c, fields, o)
+}
+
+func (f *fieldSender) got() []Field {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Field(nil), f.fields...)
+}
+
+// TestSendCopiesTheCallersFields is the cost of the queue.
+//
+// Under the old goroutine-per-send the caller's slice was read within
+// microseconds; a queued item can now hold it for seconds, and the usual
+// caller hands over a FieldBuilder's buffer it is entitled to reuse the moment
+// Send returns. No producer on the branch does reuse one — this makes it safe
+// for the one that eventually will, since the symptom would be an embed
+// quietly carrying another job's error.
+//
+// THE MUTANT: `fields: fields` in Manager.Send. The delivered value is then
+// the caller's later edit.
+func TestSendCopiesTheCallersFields(t *testing.T) {
+	fs := &fieldSender{gate: make(chan struct{})}
+	m := newTestManager(t, 5*time.Second, notificationTarget{sender: fs, key: "k1"})
+
+	fields := []Field{{Name: "Error", Value: "the original failure"}}
+	m.Send("Job Failed", "", TypeError, fields, SendOptions{Event: "error"})
+	waitFor(t, "the item to be in flight", func() bool { return m.targets[0].pending() == 0 })
+
+	// The producer reuses its buffer for the next send, as it may.
+	fields[0].Value = "a later job's failure"
+	close(fs.gate)
+
+	waitFor(t, "the delivery", func() bool { return len(fs.got()) == 1 })
+	if got := fs.got()[0].Value; got != "the original failure" {
+		t.Errorf("delivered Error = %q, want %q — the queue handed Discord the caller's buffer, not its content", got, "the original failure")
+	}
+}
+
+// reentrantLogger re-enters the queue from inside Warn, the way a
+// notify-on-warn sink would. It is the only way to observe a log line issued
+// under q.mu, because sync.Mutex has no reentrancy and nothing else in the
+// package takes that lock from a logger.
+type reentrantLogger struct {
+	q *targetQueue
+}
+
+func (l *reentrantLogger) Debug(string, ...any) {}
+func (l *reentrantLogger) Info(string, ...any)  {}
+func (l *reentrantLogger) Error(string, ...any) {}
+func (l *reentrantLogger) Warn(string, ...any) {
+	if l.q != nil {
+		l.q.pending() // takes q.mu
+	}
+}
+
+// TestPopLogsOutsideTheQueueLock keeps the package's one lock-order rule.
+//
+// Every other Warn here is issued after the unlock; pop's discard report was
+// not, so it held q.mu across a logger call. No logger on the branch re-enters
+// the manager, which is what keeps this a tidy-up rather than a live bug — but
+// the rule is cheap to keep and expensive to rediscover, because the failure
+// mode is a wedged sender goroutine, not an error.
+//
+// THE MUTANT: restoring `defer q.mu.Unlock()` at the top of pop. This test
+// then times out on its watchdog instead of returning.
+func TestPopLogsOutsideTheQueueLock(t *testing.T) {
+	lg := &reentrantLogger{}
+	q := newTargetQueue(notificationTarget{sender: newGateSender(), key: "k1"}, lg, nil)
+	lg.q = q
+
+	q.enqueue(queued{title: "doomed", tier: TierLow})
+	q.mu.Lock()
+	q.discard = true
+	q.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		q.pop()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pop did not return within 2s — it is holding q.mu across the discard Warn, so any logger that " +
+			"touches the manager wedges the sender goroutine for good")
+	}
+}
+
 // TestReloadKeepsSurvivorsAndDiscardsRemovedTargets pins the hot-reload diff.
 // A target that survives keeps its goroutine, its pending items and the rate
 // bucket its sender learned — restarting it would re-learn the bucket from

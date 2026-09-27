@@ -335,10 +335,11 @@ func TestHasTargetsWithTarget(t *testing.T) {
 // one-per-config-load summary can be asserted — including that it never
 // carries a URL (the webhook path IS the secret).
 type countingLogger struct {
-	mu    sync.Mutex
-	infos []string
-	args  [][]any
-	warns []string
+	mu       sync.Mutex
+	infos    []string
+	args     [][]any
+	warns    []string
+	warnArgs [][]any
 }
 
 func (l *countingLogger) Debug(string, ...any) {}
@@ -354,6 +355,7 @@ func (l *countingLogger) Warn(msg string, args ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.warns = append(l.warns, msg+" "+fmt.Sprint(args...))
+	l.warnArgs = append(l.warnArgs, args)
 }
 
 func (l *countingLogger) Error(string, ...any) {}
@@ -368,6 +370,37 @@ func (l *countingLogger) sawWarnContaining(s string) bool {
 		}
 	}
 	return false
+}
+
+// warnsContaining counts the Warn lines whose message or args carry s.
+func (l *countingLogger) warnsContaining(s string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, w := range l.warns {
+		if strings.Contains(w, s) {
+			n++
+		}
+	}
+	return n
+}
+
+// sumWarnArg adds up the int value logged under `key` across every Warn line,
+// so a test can assert that coalesced counts still total what was shed.
+func (l *countingLogger) sumWarnArg(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	total := 0
+	for _, args := range l.warnArgs {
+		for i := 0; i+1 < len(args); i += 2 {
+			if k, ok := args[i].(string); ok && k == key {
+				if v, ok := args[i+1].(int); ok {
+					total += v
+				}
+			}
+		}
+	}
+	return total
 }
 
 // TestBuildTargetsDedupesByResolvedURL is MON-6. parseTarget already
