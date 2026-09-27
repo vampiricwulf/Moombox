@@ -1189,6 +1189,12 @@ sl-progress-bar {
     margin-bottom: var(--sl-spacing-small);
 }
 
+/* Muted target: kept, and still editable, but delivering nothing. Same
+   affordance (and the same opacity) as a disabled channel card. */
+.notification-card--disabled {
+    opacity: 0.5;
+}
+
 .notification-card-header {
     display: flex;
     justify-content: space-between;

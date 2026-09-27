@@ -67,6 +67,18 @@ const NOTIFICATION_EVENT_GROUPS = [
 const ALL_NOTIFICATION_EVENTS = NOTIFICATION_EVENT_GROUPS.flatMap((g) => g.events);
 const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 
+// Which events a target's mention rides along with when it sets `mention` but
+// has never written `mention_events` — the owner's 2026-09-27 ruling Q5. This
+// is a MIRROR of config.DefaultMentionEvents() (internal/config/notifications.go)
+// and is pinned against it by TestDefaultMentionEventsMirroredInSettingsJS,
+// which parses this literal: keep it a single-line array of quoted ids.
+//
+// `sidecar_down` is in the ruling but not yet in NOTIFICATION_EVENT_GROUPS —
+// Arc N2a adds the event — so it has no chip of its own to light up today. It
+// still travels in the resolved list, so the first chip the operator unticks
+// writes it out with the rest instead of silently dropping it.
+const DEFAULT_MENTION_EVENTS = ["error", "auth", "disk_critical", "update_failed", "crash_recovered", "sidecar_down"];
+
 // Settings that require a process restart to take effect
 // Each entry is [nestedPath, formElementId] for change detection
 //
@@ -742,6 +754,7 @@ export class SettingsController {
       trustForwardedProtoSwitch.checked = !!config.network?.trust_forwarded_proto;
     }
     this.app.setInputValue("cfg-trusted-proxies", (config.network?.trusted_proxies || []).join(", "));
+    this.app.setInputValue("cfg-public-url", config.network?.public_url || "");
     this.app.setInputValue("cfg-probe-targets", (config.connectivity?.probe_targets || []).join(", "));
     const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
     if (dpapiFallbackSwitch) {
@@ -923,6 +936,11 @@ export class SettingsController {
       .map((s) => s.trim())
       .filter(Boolean);
 
+    // Always sent, empty included: "" is the meaningful "no public address,
+    // link embeds at YouTube/Twitch instead", so a cleared field has to reach
+    // the server rather than leave the stored URL standing.
+    const publicUrl = this.app.getInputValue("cfg-public-url");
+
     const probeTargetsEl = document.getElementById("cfg-probe-targets");
     const probeTargets = (probeTargetsEl?.value || "")
       .split(",")
@@ -944,6 +962,7 @@ export class SettingsController {
       tls_key_path: tlsKeyPath,
       trust_forwarded_proto: trustForwardedProto,
       trusted_proxies: trustedProxies,
+      public_url: publicUrl,
     };
     // network_access is sent only when the select actually holds a value.
     //
@@ -1813,33 +1832,102 @@ export class SettingsController {
             </div>`;
         }
 
+        // The mention chip row exists only while there is somebody to ping.
+        // It is drawn over the same vocabulary as the event filter above and
+        // lit from the RESOLVED list, so an absent key shows the ruling's
+        // defaults without ever having written them down.
+        const mention = notif.mention || "";
+        let mentionHtml = "";
+        if (mention) {
+          const active = this._resolveMentionEvents(notif);
+          const grouped = NOTIFICATION_EVENT_GROUPS.map((group) => {
+            const chips = group.events
+              .map((evt) => {
+                const variant = active.includes(evt.id) ? 'variant="primary"' : "";
+                return `<sl-tag size="small" ${variant} data-notif-action="toggle-mention-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
+              })
+              .join("");
+            return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
+          }).join("");
+          mentionHtml = `
+            <div class="notification-events">
+              <div class="notification-event-group">
+                <span class="notification-events-label">Mentions:</span>
+              </div>
+              ${grouped}
+            </div>`;
+        }
+
+        const enabled = notif.enabled !== false;
         return `
-      <div class="notification-card" data-index="${idx}">
+      <div class="notification-card${enabled ? "" : " notification-card--disabled"}" data-index="${idx}">
         <div class="notification-card-header">
           <div class="notification-card-url" title="${this.app.escapeHtml(notif.url || "")}">${this.app.escapeHtml(notif.url || "")}</div>
+          ${enabled ? "" : '<sl-badge variant="neutral">Muted</sl-badge>'}
+          <sl-switch size="small" ${enabled ? "checked" : ""} title="${enabled ? "Delivering" : "Muted — kept, but delivers nothing"}" data-notif-action="toggle-enabled" data-notif-index="${idx}"></sl-switch>
           <sl-icon-button name="send" label="Send test notification" data-notif-action="test" data-notif-index="${idx}"></sl-icon-button>
           <sl-icon-button name="trash" label="Delete" data-notif-action="delete" data-notif-index="${idx}"></sl-icon-button>
         </div>
+        <sl-input size="small" label="Mention" placeholder="&lt;@&amp;ROLE_ID&gt;, @here, @everyone" value="${this.app.escapeHtml(mention)}" data-notif-action="mention-input" data-notif-index="${idx}"></sl-input>
+        ${mentionHtml}
         ${eventsHtml}
       </div>`;
       })
       .join("");
 
-    // Event delegation for notification actions — attach once
+    // Event delegation for notification actions — attach once.
+    //
+    // Split by event type on purpose. <sl-switch> and <sl-input> bubble a
+    // plain `click` as well as their own `sl-change`, and
+    // closest("[data-notif-action]") matches them both ways: without the
+    // early return below the switch would PUT twice per toggle and the
+    // mention field would PUT every time it is focused.
     if (!container._notifDelegated) {
       container._notifDelegated = true;
       container.addEventListener("click", (e) => {
         const el = e.target.closest("[data-notif-action]");
         if (!el) return;
         const action = el.dataset.notifAction;
+        if (action === "toggle-enabled" || action === "mention-input") return;
         const idx = parseInt(el.dataset.notifIndex);
         if (action === "delete") this.deleteNotification(idx);
         else if (action === "test") this.testNotification(this.app.config.notifications?.[idx]?.url, el);
         else if (action === "toggle-event") this.toggleNotificationEvent(idx, el.dataset.eventId);
+        else if (action === "toggle-mention-event") this.toggleMentionEvent(idx, el.dataset.eventId);
         else if (action === "clear-filter") this.clearNotificationFilter(idx);
         else if (action === "enable-filter") this.enableNotificationFilter(idx);
       });
+      // The two value-bearing card controls. Both auto-save, so the event is
+      // stopped here: #notifications-list sits inside .settings-content, whose
+      // sl-change/sl-input delegates mark the whole form dirty and raise the
+      // "unsaved changes" banner — over an edit that is already stored.
+      container.addEventListener("sl-change", (e) => {
+        const el = e.target.closest("[data-notif-action]");
+        if (!el) return;
+        const action = el.dataset.notifAction;
+        if (action !== "toggle-enabled" && action !== "mention-input") return;
+        e.stopPropagation();
+        const idx = parseInt(el.dataset.notifIndex);
+        if (action === "toggle-enabled") this.toggleNotificationEnabled(idx);
+        else this.setNotificationMention(idx, el.value);
+      });
+      // Same banner problem one event earlier: sl-input fires per keystroke.
+      container.addEventListener("sl-input", (e) => {
+        if (e.target.closest('[data-notif-action="mention-input"]')) e.stopPropagation();
+      });
     }
+  }
+
+  /**
+   * The effective mention filter for one target, mirroring
+   * config.ResolveMentionEvents: no mention means nothing is ever pinged, an
+   * ABSENT list means the ruling's defaults, and an explicit list — empty
+   * included — means exactly itself.
+   */
+  _resolveMentionEvents(notif) {
+    if (!notif || !notif.mention) return [];
+    if (!Array.isArray(notif.mention_events)) return [...DEFAULT_MENTION_EVENTS];
+    return notif.mention_events;
   }
 
   /**
@@ -1934,6 +2022,90 @@ export class SettingsController {
       }
       this.renderNotificationsList();
     }
+  }
+
+  /**
+   * Mute / un-mute one target. The target and its whole filter stay in the
+   * config; only delivery stops. Written explicitly either way (never
+   * deleted back to absent) so the state an operator chose reads the same in
+   * the config file as it does here.
+   */
+  async toggleNotificationEnabled(index) {
+    const notif = this.app.config.notifications?.[index];
+    if (!notif) return;
+
+    const previousEnabled = notif.enabled;
+    // Absent counts as enabled, the same reading the card renders with.
+    notif.enabled = notif.enabled === false;
+
+    try {
+      await this._saveNotificationsOnly();
+    } catch {
+      // Revert on failure — including back to ABSENT, which is what a config
+      // written before this key looks like.
+      if (previousEnabled === undefined) delete notif.enabled;
+      else notif.enabled = previousEnabled;
+    }
+    this.renderNotificationsList();
+  }
+
+  /**
+   * Commit the mention field. Called on sl-change (blur/Enter), never on
+   * sl-input — one PUT per edit, not one per keystroke.
+   *
+   * mention_events is deliberately left alone when the mention is cleared:
+   * the server treats the list as inert while there is nobody to ping, so an
+   * operator who retypes a mention gets their own filter back rather than
+   * the defaults.
+   */
+  async setNotificationMention(index, value) {
+    const notif = this.app.config.notifications?.[index];
+    if (!notif) return;
+
+    const next = (value || "").trim();
+    if (next === (notif.mention || "")) return;
+
+    const previousMention = notif.mention;
+    if (next) notif.mention = next;
+    else delete notif.mention;
+
+    try {
+      await this._saveNotificationsOnly();
+    } catch {
+      if (previousMention === undefined) delete notif.mention;
+      else notif.mention = previousMention;
+    }
+    this.renderNotificationsList();
+  }
+
+  /**
+   * Tick or untick one mention chip.
+   *
+   * The first click writes the RESOLVED list out explicitly, defaults and
+   * all: until now the key was absent and DEFAULT_MENTION_EVENTS applied, and
+   * the operator has just disagreed with one of them. Unlike
+   * toggleNotificationEvent this never deletes the key when the last chip
+   * goes out — an absent mention_events means "the default six", so emptying
+   * the row has to be written as an explicit [] ("never") or the pings the
+   * operator just switched off all come back.
+   */
+  async toggleMentionEvent(index, eventId) {
+    const notif = this.app.config.notifications?.[index];
+    if (!notif || !notif.mention) return;
+
+    const previousEvents = notif.mention_events;
+    const resolved = this._resolveMentionEvents(notif);
+    notif.mention_events = resolved.includes(eventId)
+      ? resolved.filter((id) => id !== eventId)
+      : [...resolved, eventId];
+
+    try {
+      await this._saveNotificationsOnly();
+    } catch {
+      if (previousEvents === undefined) delete notif.mention_events;
+      else notif.mention_events = previousEvents;
+    }
+    this.renderNotificationsList();
   }
 
   async toggleNotificationEvent(index, eventId) {
