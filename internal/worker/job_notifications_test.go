@@ -2,9 +2,13 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
@@ -271,5 +275,158 @@ func TestFinishedEmbedDropsTheDeadTwitchImage(t *testing.T) {
 	}
 	if c.Opts.Thumbnail != "" {
 		t.Error("the finished embed shows the same picture twice — it has always used the full-width image alone")
+	}
+}
+
+// TestErrorStageClassifiesTheFinalizeErrors pins the one signal there is: the
+// prefixes the orchestrator itself writes.
+//
+// Mutants this kill:
+//   - matching "mux" anywhere in the string: an ffmpeg stderr tail from a
+//     DOWNLOAD failure that happens to mention muxing flips the answer.
+//   - dropping the two non-"mux" finalize prefixes: "no media files to mux"
+//     and "create output dir" are mux-stage failures that do not start with
+//     the word.
+func TestErrorStageClassifiesTheFinalizeErrors(t *testing.T) {
+	for msg, want := range map[string]string{
+		"mux: ffmpeg: exit status 1 (stderr: …)":                           "mux",
+		"mux produced 12s from a 3600s input (3588s missing) — the copy …": "mux",
+		"mux segment 3: ffmpeg: exit status 1":                             "mux",
+		"no media files to mux":                                            "mux",
+		"no media files to mux for segment 2":                              "mux",
+		"create output dir: mkdir E:\\out: access is denied":               "mux",
+		"twitch channel is offline":                                        "download",
+		"failed to fetch segment 1234: context deadline exceeded":          "download",
+		"ffmpeg stderr mentions muxing somewhere in the tail":              "download",
+		// The two finalize returns the prefixes still miss — pinned so the
+		// residual is a fact in the suite, not only in a report.
+		"create segment output dir: mkdir: denied":    "download",
+		"no segment files found in staging directory": "download",
+	} {
+		if got := errorStage(msg); got != want {
+			t.Errorf("errorStage(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
+
+// TestJobFailedNamesTheStageAndTheStaging is audit M8: the embed reported an
+// error string and left the operator to guess whether Retry (which DELETES
+// staging) or Resume (which preserves it) is the right button.
+//
+// Mutants this kill:
+//   - claiming "Resume available" for a Twitch job: Resume is YouTube-only in
+//     both UIs and the route answers 400.
+//   - reading the staging flag before the error is committed, or from the
+//     output directory.
+func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+
+	t.Run("mux failure with staging preserved", func(t *testing.T) {
+		rec.Reset()
+		job := &database.Job{ID: "vidE1", VideoID: "vidE1", Platform: "youtube", Title: "Failed", Status: database.StatusDownloading}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(stagingBase, job.ID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "video.mp4"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		w.setJobError(job, errors.New("mux: ffmpeg: exit status 1"))
+
+		calls := rec.ByEvent("error")
+		if len(calls) != 1 {
+			t.Fatalf("recorded %d error calls, want 1", len(calls))
+		}
+		if got := notifyField(t, calls[0], "Stage"); got != "mux" {
+			t.Errorf("Stage = %q", got)
+		}
+		if got := notifyField(t, calls[0], "Staging"); got != "preserved — Resume available" {
+			t.Errorf("Staging = %q", got)
+		}
+	})
+
+	t.Run("download failure with nothing staged", func(t *testing.T) {
+		rec.Reset()
+		job := &database.Job{ID: "vidE2", VideoID: "vidE2", Platform: "youtube", Title: "Failed", Status: database.StatusDownloading}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+
+		w.setJobError(job, errors.New("twitch channel is offline"))
+
+		c := rec.ByEvent("error")[0]
+		if got := notifyField(t, c, "Stage"); got != "download" {
+			t.Errorf("Stage = %q", got)
+		}
+		if got := notifyField(t, c, "Staging"); got != "removed" {
+			t.Errorf("Staging = %q", got)
+		}
+	})
+
+	t.Run("twitch never promises Resume", func(t *testing.T) {
+		rec.Reset()
+		job := &database.Job{ID: "tw_E3", VideoID: "E3", Platform: "twitch", Title: "Failed", Status: database.StatusDownloading}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(stagingBase, job.ID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "video.ts"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		w.setJobError(job, errors.New("mux: ffmpeg: exit status 1"))
+
+		if got := notifyField(t, rec.ByEvent("error")[0], "Staging"); got != "preserved" {
+			t.Errorf("Staging = %q — Resume is YouTube-only in both UIs and the route answers 400", got)
+		}
+	})
+}
+
+// TestTrimCreatedIsOneEmbed is audit C2.
+//
+// Mutant: emitting Segments for a single-file trim — the field claims a split
+// that never happened.
+func TestTrimCreatedIsOneEmbed(t *testing.T) {
+	rec := notificationtest.New()
+	size := int64(1 << 20)
+	f := NotifyFacts(&database.Job{
+		ID: "vidT", VideoID: "vidT", Platform: "youtube", Title: "Source",
+		ChannelName: "A Channel", URL: "https://www.youtube.com/watch?v=vidT",
+	})
+
+	rec.Send(notifications.TrimCreated(f, notifications.TrimFacts{
+		TimeRange: "0:10 - 0:40", Duration: 30 * time.Second, Size: &size,
+	}))
+	c := rec.ByEvent("trim_created")[0]
+	if c.Title != "Trim Created" {
+		t.Errorf("title = %q", c.Title)
+	}
+	notifyField(t, c, "Source Video")
+	notifyField(t, c, "File Size")
+	for _, fl := range c.Fields {
+		if fl.Name == "Segments" {
+			t.Error("a single-file trim must not report Segments")
+		}
+	}
+
+	rec.Reset()
+	rec.Send(notifications.TrimCreated(f, notifications.TrimFacts{
+		TimeRange: "0:10 - 0:40", Duration: 30 * time.Second, Parts: 3,
+	}))
+	if got := notifyField(t, rec.ByEvent("trim_created")[0], "Segments"); got != "3 segments" {
+		t.Errorf("Segments = %q", got)
 	}
 }

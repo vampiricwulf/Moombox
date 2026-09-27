@@ -1230,6 +1230,36 @@ func parkReasonForError(err error) database.ParkReason {
 	return database.ParkReasonAuth
 }
 
+// errorStage answers "which button fixes this" from the only signal the error
+// carries: the prefix the orchestrator writes.
+//
+// Four finalize shapes exist and all four are the mux stage: muxAndFinalize's
+// fmt.Errorf("mux: %w", err) (orchestrator_mux.go:790), verifyMuxedDuration's
+// short-output refusal "mux produced …" (:160), "no media files to mux…"
+// (:786, :1407) and "create output dir: %w" (:605, :751, :936). The "mux"
+// prefix also keeps "mux segment N:" (:1412, :1427) on the mux side. All of
+// them reach setJobError unwrapped — ExecuteWithChat returns the finalize
+// error straight through — so the prefix survives. Everything else is the
+// download stage.
+//
+// The prefixes are anchored deliberately: an ffmpeg stderr tail from a
+// DOWNLOAD failure can mention muxing anywhere in its 500 characters, and a
+// substring match would flip the answer for the case that matters most.
+//
+// Known limit: two finalize returns still read as "download" — "create segment
+// output dir: …" (orchestrator_mux.go:1384) and "no segment files found in
+// staging directory" (:1524). Naming them would mean teaching every producer a
+// stage argument; the prefixes below are what exists today.
+func errorStage(errMsg string) string {
+	// "mux" alone covers "mux: …", "mux produced …" and "mux segment N: …".
+	for _, p := range []string{"mux", "no media files to mux", "create output dir"} {
+		if strings.HasPrefix(errMsg, p) {
+			return "mux"
+		}
+	}
+	return "download"
+}
+
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Free the queue slot BEFORE committing the error to DB so a concurrent
 	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
@@ -1314,14 +1344,34 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			if notifURL == "" && job.VideoID != "" {
 				notifURL = "https://www.youtube.com/watch?v=" + job.VideoID
 			}
+			var stagingBase string
+			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			// "preserved" is the same predicate the resume route gates on
+			// (HasStagingFiles), and Resume is YouTube-only in both UIs — a
+			// Twitch job told "Resume available" gets a 400.
+			staging := "removed"
+			if HasStagingFiles(stagingBase, job.ID) {
+				staging = "preserved"
+				if job.Platform != "twitch" {
+					staging = "preserved — Resume available"
+				}
+			}
+			asides := len(ScanAsides(stagingBase, job.ID).Groups)
+
 			fields := notifications.NewFieldBuilder().
-				AddInline("Channel", job.ChannelName).
+				AddInline("Channel", notifications.EscapeMarkdown(job.ChannelName)).
 				AddInline(notifications.IDLabel(job.Platform), job.VideoID).
+				// Error is ALREADY wrapped by N1 — worker.go:1332 is one of the
+				// four sites N1 escapes. Carry N1's line through unchanged; a
+				// second wrap renders every \* as \\*. ChannelName is NOT one
+				// of N1's four, so the wrap above is new and single.
 				Add("Error", notifications.EscapeMarkdown(errMsg)).
-				// Terminal-after-retries: say the automation gave up so the
-				// operator knows this needs a manual look.
+				AddInline("Stage", errorStage(errMsg)).
+				AddInline("Staging", staging).
 				AddIf(job.AutoRetryCount > 0, "Automatic Retries",
 					fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+				AddIf(asides > 0, "Set-aside recordings",
+					fmt.Sprintf("%d — Recover to mux them", asides)).
 				Build()
 			w.notifier.Send("Job Failed",
 				fmt.Sprintf("Job failed for: %s", job.Title),

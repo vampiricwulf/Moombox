@@ -184,8 +184,5 @@ func computeStreamEndFallback(job *database.Job) string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-// formatFileSize formats bytes into human-readable string.
-var formatFileSize = utils.FormatFileSize
-
 // formatDurationHuman formats a time.Duration into a human-readable string (e.g. "1h 23m", "5m 30s").
 var formatDurationHuman = utils.FormatDurationHuman
