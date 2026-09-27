@@ -646,6 +646,55 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 	return nil
 }
 
+// sendMuxingStarting announces the mux for BOTH finalize shapes.
+//
+// It used to sit inline in muxAndFinalize, 28 lines BELOW the
+// `len(segments) > 0` branch that returns into finalizeMultiSegmentJob — so
+// every quality-split and gap-split job silently skipped the `muxing` event,
+// which operations.md documents as "FFmpeg mux step begins". A subscriber got
+// it for some jobs and not others with no pattern they could see. Called
+// before the branch now; owner ruling keeps `muxing` as its own event rather
+// than folding it into `finished`.
+//
+// The job is re-read rather than taken from the status write that follows,
+// because the two finalize shapes write that status in different places and
+// none of the fields below depends on it.
+func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
+	if o.notifier == nil {
+		return
+	}
+	job := jobCtx.Job
+	if fresh, err := o.db.GetJob(jobCtx.Job.ID); err == nil && fresh != nil {
+		job = fresh
+	}
+
+	fb := notifications.NewFieldBuilder()
+	if job.LastVideoSeq != nil {
+		fb.AddInline("Video Segments", fmt.Sprintf("%d", *job.LastVideoSeq))
+	}
+	if job.LastAudioSeq != nil {
+		fb.AddInline("Audio Segments", fmt.Sprintf("%d", *job.LastAudioSeq))
+	}
+	if job.TotalChatMessages != nil {
+		fb.AddInline("Chat Messages", fmt.Sprintf("%d", *job.TotalChatMessages))
+	}
+	if job.DownloadStartedAt != "" {
+		if startTime, err := time.Parse(time.RFC3339, job.DownloadStartedAt); err == nil {
+			fb.AddInline("Download Time", formatDurationHuman(time.Since(startTime)))
+		}
+	}
+	o.notifier.Send("Muxing Starting",
+		fmt.Sprintf("Download complete, muxing: %s", jobCtx.Job.Title),
+		notifications.TypeMuxing,
+		fb.Build(),
+		notifications.SendOptions{
+			URL:       jobCtx.Job.URL,
+			Thumbnail: jobCtx.Job.ThumbnailURL,
+			Event:     "muxing",
+		},
+	)
+}
+
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
 	o.logger.Info("muxing", "jobID", jobCtx.Job.ID)
 
@@ -666,6 +715,11 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// No-op when the job has no seg_N staging dirs.
 	o.muxUnrecordedSegments(ctx, jobCtx)
 
+	// A7: announce the mux BEFORE the shape is chosen. The branch below
+	// returns into finalizeMultiSegmentJob, which never reached the inline
+	// send this replaces.
+	o.sendMuxingStarting(jobCtx)
+
 	// Multi-segment path: if the job has segments (from part splitting),
 	// the individual part .mp4 files are already muxed. We just need to
 	// handle assets (chat, thumbnail, description) and set the job as finished.
@@ -675,42 +729,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 	}
 
-	freshJob := o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	})
-	if freshJob == nil {
-		freshJob = jobCtx.Job
-	}
-
-	// Send "Muxing Starting" notification with enriched fields (matching TypeScript muxFinalize)
-	if o.notifier != nil {
-		var muxFields []notifications.Field
-		if freshJob.LastVideoSeq != nil {
-			muxFields = append(muxFields, notifications.Field{Name: "Video Segments", Value: fmt.Sprintf("%d", *freshJob.LastVideoSeq), Inline: true})
-		}
-		if freshJob.LastAudioSeq != nil {
-			muxFields = append(muxFields, notifications.Field{Name: "Audio Segments", Value: fmt.Sprintf("%d", *freshJob.LastAudioSeq), Inline: true})
-		}
-		if freshJob.TotalChatMessages != nil {
-			muxFields = append(muxFields, notifications.Field{Name: "Chat Messages", Value: fmt.Sprintf("%d", *freshJob.TotalChatMessages), Inline: true})
-		}
-		if freshJob.DownloadStartedAt != "" {
-			if startTime, err := time.Parse(time.RFC3339, freshJob.DownloadStartedAt); err == nil {
-				elapsed := time.Since(startTime)
-				muxFields = append(muxFields, notifications.Field{Name: "Download Time", Value: formatDurationHuman(elapsed), Inline: true})
-			}
-		}
-		o.notifier.Send("Muxing Starting",
-			fmt.Sprintf("Download complete, muxing: %s", jobCtx.Job.Title),
-			notifications.TypeMuxing,
-			muxFields,
-			notifications.SendOptions{
-				URL:       jobCtx.Job.URL,
-				Thumbnail: jobCtx.Job.ThumbnailURL,
-				Event:     "muxing",
-			},
-		)
-	}
 
 	// Resolve output path — template may contain subdirectory (e.g. "${channel}/...")
 	filenameBase := jobCtx.Filename
@@ -1477,6 +1498,10 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 		// if the recovery above (or earlier background muxes) produced DB
 		// segments, finalize from those.
 		if segments, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segments) > 0 {
+			// The off-queue mux verb on a post-split job: it reaches
+			// finalizeMultiSegmentJob without passing through muxAndFinalize,
+			// so it needs its own announcement. A manual mux is a mux.
+			o.sendMuxingStarting(jobCtx)
 			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 		}
 		return fmt.Errorf("no segment files found in staging directory")

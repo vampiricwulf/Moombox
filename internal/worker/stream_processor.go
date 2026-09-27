@@ -571,7 +571,13 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 	}
 
 	// Notifications
-	if notifyStartTimeConfirmed && (info.IsUpcoming || info.IsLive) && sp.notifier != nil {
+	//
+	// IsUpcoming && !IsLive, not ||: a stream first observed ALREADY LIVE
+	// produced a "Scheduled:" embed seconds before "YouTube Download
+	// Starting", which carries the same time in its own "Scheduled For"
+	// field. Two embeds for one moment, the first of them announcing a
+	// schedule for a stream that had already begun.
+	if notifyStartTimeConfirmed && info.IsUpcoming && !info.IsLive && sp.notifier != nil {
 		startsAt := info.ScheduledStartTime
 		if t, err := time.Parse(time.RFC3339, startsAt); err == nil {
 			startsAt = fmt.Sprintf("<t:%d:f>", t.Unix())

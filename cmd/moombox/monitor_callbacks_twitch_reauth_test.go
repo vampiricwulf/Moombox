@@ -2,12 +2,14 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 // Arc 10 R5's last hop. OnCredentialsChanged now fires for both platforms, and
@@ -70,7 +72,9 @@ func TestUnknownPlatformDoesNotBroadcast(t *testing.T) {
 // calls a check) and a real empty database, following
 // monitor_callbacks_recovery_test.go's fixture. The empty DB is load-bearing:
 // resumeCookieParkedJobs finds no jobs, so `resumed` stays 0, so notifyMgr is
-// never touched and may stay nil.
+// never touched and may stay nil. Since A4 the empty DB is only half of that —
+// the close also fires when a failure was ANNOUNCED for the platform, so this
+// fixture's wasNotified answers false and keeps that second edge shut too.
 func repairCallbackState(t *testing.T) (*runState, *int, *int) {
 	t.Helper()
 	log, err := logger.New(filepath.Join(t.TempDir(), "repair.log"), "error", 4096, 1)
@@ -96,8 +100,41 @@ func repairCallbackState(t *testing.T) (*runState, *int, *int) {
 	s.wireCredentialRepairCallbacks(
 		func() int { calls++; return 1 },
 		func() int { memoClears++; return 2 },
+		// No failure was ever announced in these fixtures, so the A4 close
+		// stays shut and notifyMgr is never reached — which is what lets it
+		// stay nil here.
+		func(string) bool { return false },
 	)
 	return s, &calls, &memoClears
+}
+
+// repairCallbackStateWithNotice is repairCallbackState with a recorder
+// installed as the notifier and a caller-chosen wasNotified, for the tests that
+// assert on the embed rather than on the broadcast counters.
+func repairCallbackStateWithNotice(t *testing.T, wasNotified func(string) bool) (*runState, *notificationtest.Recorder) {
+	t.Helper()
+	log, err := logger.New(filepath.Join(t.TempDir(), "repair.log"), "error", 4096, 1)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	log.SuppressStdout()
+	t.Cleanup(log.Close)
+
+	db, err := database.Open(filepath.Join(t.TempDir(), "repair.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	rec := notificationtest.New()
+	s := &runState{
+		log:           log,
+		db:            db,
+		cookieRefresh: cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log),
+		notifyMgr:     rec,
+	}
+	s.wireCredentialRepairCallbacks(func() int { return 0 }, func() int { return 0 }, wasNotified)
+	return s, rec
 }
 
 // TestBothRepairEdgesBroadcastForTwitch is the Task 3 review's finding 1.
@@ -150,4 +187,37 @@ func TestAYouTubeRepairDoesNotBroadcast(t *testing.T) {
 	if *calls != 0 {
 		t.Errorf("a YouTube repair broadcast to Twitch chat sessions %d times, want 0", *calls)
 	}
+}
+
+// TestAuthRecoveredFiresWithNothingParked is A4. The close was gated on
+// resumed > 0, so a platform whose cookies died BETWEEN recordings got the
+// loudest family Moombox sends — "Cookie Auto-Refresh Failed", Error, a
+// 30-minute cooldown — and then, once the operator repaired it, silence. The
+// failure that opened the incident had no close.
+//
+// THE MUTANT: restoring `if resumed > 0`. The first subtest records nothing.
+func TestAuthRecoveredFiresWithNothingParked(t *testing.T) {
+	t.Run("a notified failure gets its close even with no parked jobs", func(t *testing.T) {
+		s, rec := repairCallbackStateWithNotice(t, func(string) bool { return true })
+		s.cookieRefresh.OnAuthRecovered("youtube")
+
+		got := rec.ByEvent("auth")
+		if len(got) != 1 {
+			t.Fatalf("recorded %d auth notifications, want 1: %+v", len(got), rec.Calls())
+		}
+		if got[0].Title != "Authentication Recovered" {
+			t.Errorf("title = %q, want \"Authentication Recovered\"", got[0].Title)
+		}
+		if !strings.Contains(got[0].Description, "no jobs were parked") {
+			t.Errorf("description = %q — with nothing resumed it must say so rather than claim 0 jobs were resumed", got[0].Description)
+		}
+	})
+
+	t.Run("no prior failure means no close", func(t *testing.T) {
+		s, rec := repairCallbackStateWithNotice(t, func(string) bool { return false })
+		s.cookieRefresh.OnAuthRecovered("youtube")
+		if got := rec.Calls(); len(got) != 0 {
+			t.Errorf("recorded %d notifications for a recovery nobody was told about: %+v", len(got), got)
+		}
+	})
 }

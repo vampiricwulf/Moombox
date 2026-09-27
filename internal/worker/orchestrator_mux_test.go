@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 // assertNoTempSurvives fails if any *.tmp entry is left in dir. The twin of
@@ -262,5 +265,147 @@ func TestDescriptionExcerptCutsOnARuneBoundary(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-12:])
+	}
+}
+
+// muxTestOrchestrator builds an orchestrator over a real temp database with a
+// recorder installed, plus a JobContext for a job carrying `segments` recorded
+// parts.
+//
+// The logger is the package's discardLogger (worker_test.go), which every other
+// orchestrator fixture in this package already uses — a second no-op logger
+// type would be four lines of duplication for nothing.
+func muxTestOrchestrator(t *testing.T, rec *notificationtest.Recorder, segments int) (*DownloadOrchestrator, *JobContext) {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "mux.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	job := &database.Job{
+		ID:       "yt_mux",
+		VideoID:  "mux",
+		Title:    "A Job",
+		Platform: "youtube",
+		Status:   database.StatusDownloading,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	for i := range segments {
+		// Segment's fields are SegmentIndex/Quality/Filename
+		// (internal/database/types.go) — there is no PartNumber.
+		if err := db.AddSegment(&database.Segment{
+			JobID:        job.ID,
+			SegmentIndex: i,
+			Quality:      "1080p60",
+			Filename:     fmt.Sprintf("part%d.mp4", i+1),
+		}); err != nil {
+			t.Fatalf("AddSegment: %v", err)
+		}
+	}
+	stored, err := db.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	o := &DownloadOrchestrator{db: db, notifier: rec, logger: discardLogger{}}
+	return o, &JobContext{Job: stored}
+}
+
+// TestMuxingStartingFiresForAMultiPartJob is A7. muxAndFinalize returns into
+// finalizeMultiSegmentJob 28 lines before the "Muxing Starting" send, so every
+// quality-split and gap-split job skipped the event operations.md documents as
+// "FFmpeg mux step begins". A subscriber received it for single-file jobs and
+// not for split ones, with no pattern visible from the outside.
+//
+// THE MUTANT: moving the send back below the `len(segments) > 0` branch. The
+// multi-part subtest then records zero muxing notifications.
+func TestMuxingStartingFiresForAMultiPartJob(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		segments int
+	}{
+		{"single-file finalize", 0},
+		{"multi-part finalize", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := notificationtest.New()
+			o, jobCtx := muxTestOrchestrator(t, rec, tc.segments)
+
+			o.sendMuxingStarting(jobCtx)
+
+			got := rec.ByEvent("muxing")
+			if len(got) != 1 {
+				t.Fatalf("recorded %d muxing notifications, want 1: %+v", len(got), rec.Calls())
+			}
+			if got[0].Title != "Muxing Starting" {
+				t.Errorf("title = %q, want %q", got[0].Title, "Muxing Starting")
+			}
+		})
+	}
+}
+
+// TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape is the placement
+// assertion the helper test above cannot make: sendMuxingStarting must be
+// reached on the path that RETURNS into finalizeMultiSegmentJob, not only on
+// the one that falls through to the single-file mux.
+//
+// Driving the whole of muxAndFinalize needs FFmpeg and staged media, so this
+// asserts on the source instead: the send call must appear BEFORE the
+// `finalizeMultiSegmentJob` return in the file. A source assertion is weak on
+// its own — paired with the behavioural test above, it is what pins the one
+// thing that broke.
+func TestMuxAndFinalizeAnnouncesTheMuxBeforeChoosingAShape(t *testing.T) {
+	src, err := os.ReadFile("orchestrator_mux.go")
+	if err != nil {
+		t.Fatalf("read orchestrator_mux.go: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func (o *DownloadOrchestrator) muxAndFinalize(")
+	if start < 0 {
+		t.Fatal("muxAndFinalize not found")
+	}
+	body = body[start:]
+	sendAt := strings.Index(body, "o.sendMuxingStarting(jobCtx)")
+	branchAt := strings.Index(body, "return o.finalizeMultiSegmentJob(")
+	if sendAt < 0 {
+		t.Fatal("muxAndFinalize does not call sendMuxingStarting")
+	}
+	if branchAt < 0 {
+		t.Fatal("the multi-segment branch is gone — re-read this test before changing it")
+	}
+	if sendAt > branchAt {
+		t.Error("sendMuxingStarting is BELOW the multi-segment return — every split job skips the muxing event again (A7)")
+	}
+}
+
+// TestMuxFromStagingAnnouncesTheMux is the THIRD shape. muxFromStaging is the
+// off-queue mux verb (`A M` in the TUI, POST /api/jobs/{id}/mux); for a
+// post-split job with no root media it calls finalizeMultiSegmentJob directly,
+// bypassing muxAndFinalize — so fixing A7 in muxAndFinalize alone would still
+// leave the manual mux silent. A manual mux is a mux, and the documented event
+// is "FFmpeg mux step begins".
+//
+// The job is Twitch on purpose: finalizeMultiSegmentJob's Tier-4 part merge is
+// YouTube-gated, and that is the one branch in this path that would reach the
+// (nil) muxer. The finalize's own outcome is not asserted — only that the
+// announcement went out before it.
+//
+// THE MUTANT: dropping the o.sendMuxingStarting(jobCtx) line above the direct
+// finalizeMultiSegmentJob return.
+func TestMuxFromStagingAnnouncesTheMux(t *testing.T) {
+	rec := notificationtest.New()
+	o, jobCtx := muxTestOrchestrator(t, rec, 2)
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"platform": "twitch"})
+	jobCtx.Job.Platform = "twitch"
+	jobCtx.StagingDir = t.TempDir() // no root media -> the direct-finalize arm
+	jobCtx.OutputDir = t.TempDir()
+	jobCtx.Filename = "a-job"
+
+	_ = o.muxFromStaging(context.Background(), jobCtx)
+
+	if got := len(rec.ByEvent("muxing")); got != 1 {
+		t.Errorf("the off-queue mux recorded %d muxing notifications, want 1: %+v", got, rec.Calls())
 	}
 }

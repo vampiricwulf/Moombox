@@ -54,6 +54,55 @@ func TestStreamProcessorNotifiesThroughTheSenderSeam(t *testing.T) {
 	}
 }
 
+// TestScheduledDoesNotFireForAStreamAlreadyLive is C6. The condition was
+// `IsUpcoming || IsLive`, so a stream first observed already live produced a
+// "Scheduled: <title>" embed seconds before "YouTube Download Starting" —
+// which carries the same start time in its own "Scheduled For" field. Two
+// embeds for one moment, the first of them announcing a schedule for a stream
+// that had already begun.
+//
+// THE MUTANT: restoring the ||. The "already live" subtest then records one.
+func TestScheduledDoesNotFireForAStreamAlreadyLive(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		isUpcoming bool
+		isLive     bool
+		want       int
+	}{
+		{"upcoming", true, false, 1},
+		{"already live on first sight", true, true, 0},
+		{"live, not upcoming", false, true, 0},
+		{"neither (a VOD)", false, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := database.Open(filepath.Join(t.TempDir(), "c6.db"))
+			if err != nil {
+				t.Fatalf("database.Open: %v", err)
+			}
+			t.Cleanup(func() { db.Close() })
+
+			rec := notificationtest.New()
+			sp := &StreamProcessor{db: db, notifier: rec}
+			job := &database.Job{ID: "yt_c6", VideoID: "c6", Status: database.StatusUpcoming}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatalf("AddJob: %v", err)
+			}
+			stored, _ := db.GetJob("yt_c6")
+
+			sp.updateJobMetadata(stored, &youtube.VideoInfo{
+				Title:              "A Stream",
+				ScheduledStartTime: "2026-10-01T12:00:00Z",
+				IsUpcoming:         tc.isUpcoming,
+				IsLive:             tc.isLive,
+			}, false)
+
+			if got := len(rec.ByEvent("scheduled")); got != tc.want {
+				t.Errorf("recorded %d \"scheduled\" notifications, want %d: %+v", got, tc.want, rec.Calls())
+			}
+		})
+	}
+}
+
 // TestRecorderSatisfiesBothInterfaces pins the two seams by assignment. A
 // Recorder that stops satisfying Notifier cannot stand in for runState's
 // notifyMgr, which is where cmd/moombox's defect tests install it (Task 6).
