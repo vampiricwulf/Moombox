@@ -38,7 +38,6 @@ const NOTIFICATION_EVENT_GROUPS = [
   {
     name: "Connectivity",
     events: [
-      { id: "connectivity_pause", label: "Download Paused (Offline)" },
       { id: "connectivity_resume", label: "Download Resumed" },
       { id: "connectivity_split", label: "Finalized During Outage" },
       { id: "connectivity_restored", label: "Outage Alert" },

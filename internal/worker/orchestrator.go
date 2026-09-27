@@ -653,7 +653,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 							notifications.TypeError,
 							[]notifications.Field{
 								{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
-								{Name: "Video ID", Value: jobCtx.Job.VideoID, Inline: true},
+								{Name: notifications.IDLabel(jobCtx.Job.Platform), Value: jobCtx.Job.VideoID, Inline: true},
 								{Name: "Error", Value: notifications.EscapeMarkdown(trimErr.Error())},
 							},
 							notifications.SendOptions{

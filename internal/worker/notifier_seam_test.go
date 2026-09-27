@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
@@ -111,4 +114,45 @@ func TestRecorderSatisfiesBothInterfaces(t *testing.T) {
 	var _ notifications.Notifier = notificationtest.New()
 	var _ notifications.Sender = (*notifications.Manager)(nil)
 	var _ notifications.Notifier = (*notifications.Manager)(nil)
+}
+
+// TestTwitchResumeEmbedCarriesThePause is C8's payload half. The pause embed
+// was sent WHILE THE MACHINE WAS OFFLINE — three attempts inside ~7s of backoff
+// plus dial timeouts, so it arrived only when the outage was shorter than the
+// send — and the resume that followed said nothing about how long the download
+// had been down. One embed now carries both.
+//
+// THE MUTANT: restoring the pause send (the pause subtest records two), or
+// dropping the Paused field (the resume subtest's field lookup fails).
+func TestTwitchResumeEmbedCarriesThePause(t *testing.T) {
+	rec := notificationtest.New()
+	o := &DownloadOrchestrator{notifier: rec, logger: discardLogger{}} // the package's existing no-op logger (Task 6 used it instead of adding muxTestLogger)
+	jobCtx := &JobContext{Job: &database.Job{ID: "tw_1", Title: "A Stream", ChannelName: "chan", Platform: "twitch"}}
+	pausedAt := time.Now().Add(-4 * time.Minute)
+
+	o.sendTwitchSessionNotification(jobCtx, "Twitch Download Resumed",
+		"Connectivity restored, resuming download: "+jobCtx.Job.Title,
+		notifications.TypeDownload, "connectivity_resume", QualityInfo{Label: "1080p60"}, 2,
+		twitchOutageField(pausedAt))
+
+	if got := len(rec.ByEvent("connectivity_pause")); got != 0 {
+		t.Errorf("recorded %d connectivity_pause notifications — the undeliverable pause embed is retired", got)
+	}
+	got := rec.ByEvent("connectivity_resume")
+	if len(got) != 1 {
+		t.Fatalf("recorded %d resume notifications, want 1", len(got))
+	}
+	paused, ok := got[0].Field("Paused")
+	if !ok {
+		t.Fatalf("the resume embed carries no Paused field: %+v", got[0].Fields)
+	}
+	if !strings.Contains(paused, fmt.Sprintf("<t:%d:R>", pausedAt.Unix())) {
+		t.Errorf("Paused = %q, want a <t:%d:R> relative timestamp", paused, pausedAt.Unix())
+	}
+	if !strings.Contains(paused, "resumed after") {
+		t.Errorf("Paused = %q, want the outage duration", paused)
+	}
+	if part, _ := got[0].Field("Part"); part != "2" {
+		t.Errorf("Part = %q, want 2", part)
+	}
 }
