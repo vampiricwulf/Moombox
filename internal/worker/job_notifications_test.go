@@ -309,6 +309,91 @@ func TestErrorStageClassifiesTheFinalizeErrors(t *testing.T) {
 	}
 }
 
+// TestAuthenticationRequiredCarriesTheJob is Arc N2b's I1.
+//
+// The per-job "Authentication Required" is the auth burst: one dead cookie
+// parks N jobs and produces N of these. isBatchable
+// (internal/notifications/batch.go) admits `auth` into the 5 s coalescing
+// window only when the send carries a JobID — the platform-level cookie
+// alerts in cmd/moombox/monitor_callbacks.go deliberately carry none, because
+// they are cooldown-deduped and must not be delayed. This send carried none
+// either, so the one family the window exists for never entered it.
+//
+// Mutants this kills:
+//   - leaving JobID/Platform off: the burst never coalesces and the footer
+//     reads "Moombox" for the alert an operator most needs to tell apart.
+//   - dropping the Author: the deep link (manager.go) rewrites the title only
+//     for a send that has BOTH a JobID and an Author, so the embed would be
+//     the one job embed with an id and no dashboard link.
+//   - reading job.URL instead of the facts: NotifyFacts carries the YouTube
+//     watch-URL fallback for a row whose url is empty.
+func TestAuthenticationRequiredCarriesTheJob(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+
+	t.Run("a known channel", func(t *testing.T) {
+		rec.Reset()
+		chID := "UC_auth"
+		job := &database.Job{
+			ID: "vidA1", VideoID: "vidA1", Platform: "youtube", Title: "Members Only",
+			ChannelName: "A Channel", ChannelID: &chID,
+			ChannelAvatarURL: "https://yt3.example/a.jpg",
+			Status:           database.StatusDownloading,
+		}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+
+		w.setJobError(job, ErrCookiesRequired)
+
+		calls := rec.ByEvent("auth")
+		if len(calls) != 1 {
+			t.Fatalf("recorded %d auth calls, want 1", len(calls))
+		}
+		c := calls[0]
+		if c.Title != "Authentication Required" {
+			t.Fatalf("title = %q", c.Title)
+		}
+		if c.Opts.JobID != job.ID || c.Opts.Platform != "youtube" {
+			t.Errorf("opts = {JobID:%q Platform:%q}, want {%q %q} — without them isBatchable rejects "+
+				"the send and the per-job auth burst never coalesces",
+				c.Opts.JobID, c.Opts.Platform, job.ID, "youtube")
+		}
+		if c.Opts.URL != "https://www.youtube.com/watch?v=vidA1" {
+			t.Errorf("opts.URL = %q, want the watch-URL fallback NotifyFacts carries", c.Opts.URL)
+		}
+		if c.Opts.Author == nil {
+			t.Fatal("opts.Author is nil — the deep link rewrites only a send that has one")
+		}
+		if c.Opts.Author.Name != "A Channel" || c.Opts.Author.URL != "https://www.youtube.com/channel/UC_auth" {
+			t.Errorf("opts.Author = %+v, want the RAW name and the channel page", *c.Opts.Author)
+		}
+	})
+
+	t.Run("an unknown channel", func(t *testing.T) {
+		rec.Reset()
+		job := &database.Job{
+			ID: "vidA2", VideoID: "vidA2", Platform: "youtube", Title: "Members Only",
+			Status: database.StatusDownloading,
+		}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+
+		w.setJobError(job, ErrCookiesRequired)
+
+		c := rec.ByEvent("auth")[0]
+		if c.Opts.JobID != job.ID {
+			t.Errorf("opts.JobID = %q, want %q", c.Opts.JobID, job.ID)
+		}
+		if c.Opts.Author != nil {
+			t.Errorf("opts.Author = %+v with no channel, want nil", *c.Opts.Author)
+		}
+	})
+}
+
 // TestJobFailedNamesTheStageAndTheStaging is audit M8: the embed reported an
 // error string and left the operator to guess whether Retry (which DELETES
 // staging) or Resume (which preserves it) is the right button.

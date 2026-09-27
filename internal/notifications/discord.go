@@ -105,8 +105,8 @@ type discordPayload struct {
 	Embeds  []discordEmbed `json:"embeds"`
 	// AllowedMentions is the EXPORTED notifications.AllowedMentions
 	// (manager.go), not a payload-private twin: Arc N2b resolves one per
-	// (target, event) and hands it over in SendOptions, so the wire shape and
-	// the option are the same type by construction.
+	// (target, event) and hands it over on the Message, so the wire shape and
+	// the resolved object are the same type by construction.
 	AllowedMentions *AllowedMentions `json:"allowed_mentions,omitempty"`
 }
 
@@ -159,8 +159,9 @@ func footerText(opts SendOptions) string {
 
 // MentionParse maps a configured mention to the allowed_mentions object that
 // makes it actually ping, or nil for a form we do not recognise — which keeps
-// an unvalidated config string from becoming an unrestricted ping. Arc N2b
-// calls it when it fills SendOptions.
+// an unvalidated config string from becoming an unrestricted ping. buildTargets
+// calls it once per target, and Manager.Send puts what mentionFor returns onto
+// the Message.
 func MentionParse(mention string) *AllowedMentions {
 	switch {
 	case mention == "@everyone" || mention == "@here":

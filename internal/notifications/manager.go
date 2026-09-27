@@ -211,8 +211,8 @@ func effectiveTier(opts SendOptions) Tier {
 // non-nil on a sent object — the webhook default is {"parse": ["users"]}, so an
 // omitted list silently re-widens a role ping into "every user id in the text".
 //
-// Exported because Arc N2b resolves one per (target, event) and puts it in
-// SendOptions; MentionParse (discord.go) is the resolver.
+// Exported because Arc N2b resolves one per (target, event) and puts it onto
+// the Message; MentionParse (discord.go) is the resolver.
 type AllowedMentions struct {
 	Parse []string `json:"parse"`
 	Roles []string `json:"roles,omitempty"`
@@ -238,16 +238,11 @@ type SendOptions struct {
 	// TierUnset to derive it from Event.
 	Tier Tier
 
-	// Mention is the literal ping text ("<@&id>", "<@id>", "@everyone",
-	// "@here") a target is configured with, and MentionAllowed is the resolved
-	// allowed_mentions object for it — nil when THIS event is not in that
-	// target's mention_events, which is what stops the ping. Both are filled
-	// by Arc N2b (MentionParse resolves the object from the configured text);
-	// N1 defines the fields and the payload shape they produce. Embeds never
-	// mention on their own (per Discord API docs), so a ping needs the message
-	// `content` plus a matching `allowed_mentions` — see buildPayload.
-	Mention        string
-	MentionAllowed *AllowedMentions
+	// There is deliberately NO mention here. A ping is per TARGET and per
+	// MESSAGE, never per producer and never per embed: Manager.Send resolves
+	// it from targetQueue.mentionFor and writes it onto the Message, because
+	// `content` and `allowed_mentions` are the level Discord applies them at
+	// and an embed can never ping anyone. See Message (message.go).
 }
 
 // defaultWaitTimeout bounds Manager.Wait during graceful shutdown. Tests
@@ -753,17 +748,23 @@ func (m *Manager) BeginShutdown() {
 	if m == nil {
 		return
 	}
+	// The flag goes FIRST. A flushed batch is enqueued like any other item and
+	// the drain goroutine can pop it the instant it lands; storing the flag
+	// afterwards leaves a window in which that pop reads false and spends the
+	// 2 s + 5 s retry ladder inside the process's 10 s force-exit.
+	m.shuttingDown.Store(true)
+
 	// A window open when shutdown begins is delivered, not evaporated. Flushed
-	// BEFORE the flag, and before Wait's closeDrain, because enqueue drops with
-	// a Warn once q.closing is set (queue.go) — a flush after that would emit
-	// the batch straight into the drop path.
+	// AFTER the flag so the batch is itself single-attempt, and still before
+	// Wait's closeDrain, because enqueue drops with a Warn once q.closing is
+	// set (queue.go) — a flush after that would emit the batch straight into
+	// the drop path. enqueue never reads shuttingDown; only pop does.
 	m.targetsMu.RLock()
 	targets := m.targets
 	m.targetsMu.RUnlock()
 	for _, q := range targets {
 		q.batch.Flush()
 	}
-	m.shuttingDown.Store(true)
 }
 
 // effectiveWaitTimeout returns waitTimeout, or defaultWaitTimeout when the

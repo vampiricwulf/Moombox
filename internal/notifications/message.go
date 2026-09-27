@@ -19,11 +19,16 @@ type Embed struct {
 // mention that applies to the whole message. The mention is message-level
 // because Discord's `content` and `allowed_mentions` are message-level — an
 // embed can never ping anyone — so a batch pings once however many embeds it
-// carries.
+// carries. SendOptions declares no mention at all: Manager.Send resolves the
+// ping per target and writes it HERE, and setting one on an embed's Opts
+// would ping nobody.
 //
-// SendOptions keeps its Mention/MentionAllowed fields for the producers that
-// set them; the delivery path reads the ones HERE, because that is the level
-// Discord applies them at.
+// Two per-message bounds hold, both enforced by splitMessages (batch.go) as it
+// chops a flushed window: at most maxEmbedsPerMessage (Discord's ten, an
+// eleventh being a permanent 400 for the WHOLE message), and at most
+// limitTotal characters summed over the CLAMPED embeds — the same conversion
+// buildPayload uses, so what the splitter measures is what goes on the wire.
+// One is one embed by construction; everything larger comes from the batcher.
 type Message struct {
 	Embeds         []Embed
 	Mention        string
@@ -32,6 +37,11 @@ type Message struct {
 
 // One is the single-embed Message every non-batched send is — the shape all
 // ~36 producer sites still produce, byte for byte.
+//
+// fields is stored BY REFERENCE — the caller owns the copy. Manager.Send makes
+// it (one allocation per send) precisely because the usual caller hands over a
+// FieldBuilder buffer it is free to reuse, and a queued item can now sit for
+// seconds. A new caller of One that passes a live buffer gets aliasing.
 func One(title, description string, color int, fields []Field, opts SendOptions) Message {
 	return Message{Embeds: []Embed{{
 		Title:       title,

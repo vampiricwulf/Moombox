@@ -210,6 +210,24 @@ func TestTwitchChatDowngradeSendsOneNoticeNamingTheChannel(t *testing.T) {
 	if v, ok := got.field("Channel"); !ok || v != "TestChan" {
 		t.Errorf("Channel field = %q (present=%v), want %q", v, ok, "TestChan")
 	}
+	// Arc N2b's I1. This notice is PER JOB, and isBatchable
+	// (internal/notifications/batch.go) admits `auth` into the 5 s coalescing
+	// window only when the send carries a JobID — so without these the burst
+	// one dead cookie produces never folds, the footer reads "Moombox"
+	// instead of "Moombox · twitch · job-1234", and the deep link, which
+	// needs a JobID and an Author both, never applies. The same NotifyFacts
+	// mapper feeds this as feeds the worker's "Authentication Required", so
+	// one row cannot describe itself two ways.
+	if got.opts.JobID != "job-1234" || got.opts.Platform != "twitch" {
+		t.Errorf("opts = {JobID:%q Platform:%q}, want {%q %q}",
+			got.opts.JobID, got.opts.Platform, "job-1234", "twitch")
+	}
+	if got.opts.Author == nil {
+		t.Fatal("opts.Author is nil — the deep link rewrites only a send that has one")
+	}
+	if got.opts.Author.Name != "TestChan" {
+		t.Errorf("opts.Author = %+v, want the row's channel name", *got.opts.Author)
+	}
 	// The description is pinned EXACTLY, and the second half of it is why.
 	//
 	// Chat is where a broken Twitch credential is detected, not the extent of

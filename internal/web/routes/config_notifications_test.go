@@ -176,10 +176,94 @@ func TestNotificationsApplyUsesTheSharedDecode(t *testing.T) {
 	if arm == nil {
 		t.Fatal("the // Notifications arm of applyConfigUpdates was not found")
 	}
-	if !strings.Contains(string(arm), "json.Unmarshal") {
+	if !strings.Contains(string(arm), "decodeConfigEntries") {
 		t.Error("the notifications arm still builds config.NotificationConfig field by field; " +
 			"every field a later arc adds would then need a route edit, and N3's `mode` would be " +
-			"erased by any unrelated Settings save. Decode the array the way the channels arm does.")
+			"erased by any unrelated Settings save. Decode the array the way the channels arm does, " +
+			"through the shared decodeConfigEntries helper.")
+	}
+}
+
+// TestConfigPutRejectsATypeMismatchedEntry is T3-I1, for BOTH arms that decode
+// an object array.
+//
+// The bug it pins is a silent one, which is what made it worth a 400: a single
+// mistyped field — `"enabled": "false"` rather than false — used to fail the
+// decode for the WHOLE array, the `if … == nil` guard then skipped the
+// assignment, and every configured webhook (or every channel) disappeared from
+// the saved config while the route answered 200. The web editor cannot produce
+// the state; an API caller, a script, or a hand-rolled PUT can.
+//
+// THE MUTANT: dropping either decode gate from validateConfigUpdates. The PUT
+// answers 200 and the stored array is gone.
+func TestConfigPutRejectsATypeMismatchedEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		updates map[string]any
+		wantKey string
+		wantMsg string
+	}{
+		{
+			name: "notifications enabled as a string",
+			updates: map[string]any{"notifications": []any{
+				map[string]any{"url": "discord://1/aaa", "enabled": "false"},
+			}},
+			wantKey: "notifications[0].enabled",
+			wantMsg: "expected bool, got string",
+		},
+		{
+			name: "notifications mention_events as a number",
+			updates: map[string]any{"notifications": []any{
+				map[string]any{"url": "discord://1/aaa"},
+				map[string]any{"url": "discord://2/bbb", "mention_events": 5},
+			}},
+			wantKey: "notifications[1].mention_events",
+			wantMsg: "expected array, got number",
+		},
+		{
+			name: "channels enabled as a string",
+			updates: map[string]any{"channels": []any{
+				map[string]any{"id": "UC_abc", "platform": "youtube", "enabled": "yes"},
+			}},
+			wantKey: "channels[0].enabled",
+			wantMsg: "expected bool, got string",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newConfigRoutesFixture(t)
+			// Something stored, so "the array survived" is a real assertion.
+			putConfig(t, f, map[string]any{"notifications": []any{
+				map[string]any{"url": "discord://9/zzz"},
+			}})
+
+			rec := putConfigExpect(t, f, tc.updates)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d, want 400 — a type-mismatched entry used to save as a 200 that lost "+
+					"the whole array (body: %s)", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Details map[string]string `json:"details"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode 400 body: %v (%s)", err, rec.Body.String())
+			}
+			got, ok := resp.Details[tc.wantKey]
+			if !ok {
+				t.Fatalf("details = %v, want a %q entry naming the entry index and the field",
+					resp.Details, tc.wantKey)
+			}
+			if got != tc.wantMsg {
+				t.Errorf("details[%q] = %q, want %q", tc.wantKey, got, tc.wantMsg)
+			}
+
+			// And nothing was written: the rejected PUT must not be the one
+			// that empties the stored array.
+			var stored []config.NotificationConfig
+			f.store.Read(func(c *config.MoomboxConfig) { stored = append(stored, c.Notifications...) })
+			if len(stored) != 1 || stored[0].URL == "" {
+				t.Errorf("stored notifications = %v, want the one target the earlier save wrote", stored)
+			}
+		})
 	}
 }
 

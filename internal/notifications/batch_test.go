@@ -13,14 +13,14 @@ import (
 // currently armed. No test in this file sleeps.
 type fakeBatchClock struct {
 	mu    sync.Mutex
-	armed []func()
+	armed []*fakeTimer
 }
 
 func (c *fakeBatchClock) AfterFunc(_ time.Duration, f func()) batchTimer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	t := &fakeTimer{c: c, idx: len(c.armed)}
-	c.armed = append(c.armed, f)
+	t := &fakeTimer{c: c, f: f}
+	c.armed = append(c.armed, t)
 	return t
 }
 
@@ -29,26 +29,58 @@ func (c *fakeBatchClock) fire() {
 	due := c.armed
 	c.armed = nil
 	c.mu.Unlock()
-	for _, f := range due {
-		if f != nil {
-			f()
+	// OUTSIDE c.mu: a callback flushes, which emits, which can Add and arm the
+	// next window through AfterFunc.
+	for _, t := range due {
+		if t.disarm() {
+			t.f()
 		}
 	}
 }
 
+// fakeTimer is ONE armed callback, identified by its own pointer.
+//
+// Identity is not an index into c.armed: fire() resets that slice, so an index
+// a stale timer kept would later address a DIFFERENT, live timer and its
+// Stop() would silently disarm someone else's window. The spent flag lives on
+// the timer for the same reason.
 type fakeTimer struct {
-	c   *fakeBatchClock
-	idx int
+	c     *fakeBatchClock
+	f     func()
+	spent bool // fired or stopped; either way it can never run again
 }
 
-func (t *fakeTimer) Stop() bool {
+// disarm marks this timer spent and reports whether it was this call that did
+// so — so a Stop() racing fire() cannot let the callback run twice.
+func (t *fakeTimer) disarm() bool {
 	t.c.mu.Lock()
 	defer t.c.mu.Unlock()
-	if t.idx < len(t.c.armed) && t.c.armed[t.idx] != nil {
-		t.c.armed[t.idx] = nil
-		return true
+	if t.spent {
+		return false
 	}
-	return false
+	t.spent = true
+	return true
+}
+
+func (t *fakeTimer) Stop() bool { return t.disarm() }
+
+// live reports whether this timer is still waiting to fire.
+func (t *fakeTimer) live() bool {
+	t.c.mu.Lock()
+	defer t.c.mu.Unlock()
+	return !t.spent
+}
+
+// messageRunes is the character count Discord applies its per-MESSAGE 6000
+// against: the sum of embedSize over the message's CLAMPED embeds. Only the
+// assertions below need the whole-message sum — splitMessages keeps a running
+// total as it goes — so it lives here rather than in batch.go.
+func messageRunes(embeds []Embed) int {
+	total := 0
+	for i := range embeds {
+		total += embedSize(embeds[i])
+	}
+	return total
 }
 
 func collector() (*[]Message, *sync.Mutex, emitFunc) {
@@ -330,13 +362,14 @@ func TestBatcherFlushOnShutdown(t *testing.T) {
 	// opens a fresh window, and the timer the first one left behind would close
 	// it early — a 5 s window that lasts whatever was left of its predecessor's.
 	clk.mu.Lock()
+	still := append([]*fakeTimer(nil), clk.armed...)
+	clk.mu.Unlock()
 	armed := 0
-	for _, f := range clk.armed {
-		if f != nil {
+	for _, tm := range still {
+		if tm.live() {
 			armed++
 		}
 	}
-	clk.mu.Unlock()
 	if armed != 0 {
 		t.Errorf("Flush left %d timer(s) armed — the next window inherits one and closes early", armed)
 	}

@@ -214,21 +214,13 @@ func splitMessages(pending []Embed) [][]Embed {
 	return append(out, pending[start:len(pending):len(pending)])
 }
 
-// messageRunes is the character count Discord applies its per-MESSAGE 6000
-// against: the sum of embedRunes over the message's CLAMPED embeds. It goes
-// through toDiscordEmbed (discord.go), the same conversion buildPayload will
-// use, so the size the splitter measures is the size the payload will have.
-func messageRunes(embeds []Embed) int {
-	total := 0
-	for i := range embeds {
-		total += embedSize(embeds[i])
-	}
-	return total
-}
-
-// embedSize is one CLAMPED embed's contribution to that total. Separate from
-// messageRunes only so the splitter can size each embed once instead of
-// re-summing the message it is building.
+// embedSize is one CLAMPED embed's contribution to the per-MESSAGE character
+// total Discord applies its 6000 against. It goes through toDiscordEmbed
+// (discord.go), the same conversion buildPayload will use, so the size
+// splitMessages measures is the size the payload will have. Sizing each embed
+// once is also what lets the splitter accumulate a running total instead of
+// re-summing the message it is building; the test-only sum over a whole
+// message lives in batch_test.go.
 func embedSize(e Embed) int {
 	de := toDiscordEmbed(e)
 	return embedRunes(&de)

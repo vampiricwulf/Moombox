@@ -14,7 +14,7 @@ func boolPtr(b bool) *bool { return &b }
 // TestBuildTargetsSkipsDisabled pins the mute switch. A disabled target must
 // leave the delivery list entirely — not deliver-and-discard — so HasTargets
 // reports false when everything is muted and the HasTargets guards in the
-// monitor and disk paths stop building embeds nobody will read.
+// monitor and update-available paths stop building embeds nobody will read.
 func TestBuildTargetsSkipsDisabled(t *testing.T) {
 	cfg := &config.MoomboxConfig{Notifications: []config.NotificationConfig{
 		{URL: "discord://1/aaa", Enabled: boolPtr(false)},
@@ -30,10 +30,10 @@ func TestBuildTargetsSkipsDisabled(t *testing.T) {
 	}}
 	m := NewManager(allOff, testLogger{})
 	if m.HasTargets() {
-		t.Error("HasTargets reported true with every target disabled — all FOUR producer guards " +
-			"(cmd/moombox/helpers.go update-available, cmd/moombox/main.go disk, and both " +
-			"cmd/moombox/monitor_callbacks.go Stream Found sites) would keep building embeds " +
-			"that go nowhere")
+		t.Error("HasTargets reported true with every target disabled — all THREE producer guards " +
+			"(cmd/moombox/helpers.go update-available, and both cmd/moombox/monitor_callbacks.go " +
+			"Stream Found sites) would keep building embeds that go nowhere. The disk alerts " +
+			"build unconditionally and are not one of them")
 	}
 }
 

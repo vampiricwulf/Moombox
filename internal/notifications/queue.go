@@ -15,6 +15,11 @@ import (
 // roughly one delivery per second against a healthy webhook, 256 is over four
 // minutes of backlog — long enough that reaching the cap means Discord is
 // down, not that Moombox is busy.
+//
+// The unit is a MESSAGE, and since batching (batch.go) those two bursts arrive
+// coalesced: `found`, `added` and the per-job `auth` reach this queue as
+// ten-embed messages, so 256 items is up to 2,560 of those embeds. What can
+// still fill it one item at a time is the non-batchable families.
 const notificationQueueCap = 256
 
 // dropWarnInterval is how often ONE target may say it is shedding.
@@ -25,6 +30,11 @@ const notificationQueueCap = 256
 // pays, and 1,743 near-identical lines bury the incident they are reporting.
 // The count is the diagnostic, not the line per victim, so the lines coalesce
 // and each one carries the total since the last.
+//
+// That measurement predates batching (batch.go), when a find was one item: the
+// same sweep now arrives ten embeds to an item, so it takes roughly ten times
+// the catalogue to reach the same line count. The reasoning is unchanged — the
+// non-batchable families still arrive one item per send.
 const dropWarnInterval = 5 * time.Second
 
 // queued is one MESSAGE waiting for one target. The tier is resolved once at
