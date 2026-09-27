@@ -575,6 +575,21 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Network.TrustedProxies = valid
 		}
 	}
+	// network.public_url: empty is unset. A value that cannot be an absolute
+	// browsable origin is both reported and cleared — there is no sensible
+	// default host to substitute, and leaving an unusable value in place
+	// would paste a dead link into every job embed.
+	if cfg.Network.PublicURL != "" {
+		canonical, err := ValidatePublicURL(cfg.Network.PublicURL)
+		if err != nil {
+			fail("network.public_url %q is not usable: %v", cfg.Network.PublicURL, err)
+			if !reportOnly {
+				cfg.Network.PublicURL = ""
+			}
+		} else if !reportOnly {
+			cfg.Network.PublicURL = canonical
+		}
+	}
 	// ClientTokenTTLDays: 1 day to 10 years. Default to 365d (1y) if unset or out of range.
 	if cfg.Network.ClientTokenTTLDays <= 0 || cfg.Network.ClientTokenTTLDays > 3650 {
 		fail("network.client_token_ttl_days %d out of range 1..3650", cfg.Network.ClientTokenTTLDays)
@@ -966,6 +981,43 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			fail("channel %q archive_slots %d out of range 1..100", ch.Name, *ch.ArchiveSlots)
 			if !reportOnly {
 				ch.ArchiveSlots = nil
+			}
+		}
+	}
+
+	// notifications[i].mention / mention_events. mention is validated as a
+	// well-formed Discord mention token — the four forms are syntactic, so
+	// this needs no vocabulary. mention_events gets a SHAPE-only pass (trim,
+	// drop blanks, dedupe, preserve order); the event-name vocabulary check
+	// happens at buildTargets and the web save path, the two places that can
+	// see internal/notifications.KnownEvents without an import cycle back
+	// into this package.
+	for i := range cfg.Notifications {
+		n := &cfg.Notifications[i]
+		if n.Mention != "" {
+			canonical, _, _, err := ParseMention(n.Mention)
+			if err != nil {
+				fail("notifications[%d].mention %q is not usable: %v", i, n.Mention, err)
+				if !reportOnly {
+					n.Mention = ""
+				}
+			} else if !reportOnly {
+				n.Mention = canonical
+			}
+		}
+		if n.MentionEvents != nil {
+			seen := make(map[string]bool, len(*n.MentionEvents))
+			shaped := make([]string, 0, len(*n.MentionEvents))
+			for _, e := range *n.MentionEvents {
+				e = strings.TrimSpace(e)
+				if e == "" || seen[e] {
+					continue
+				}
+				seen[e] = true
+				shaped = append(shaped, e)
+			}
+			if !reportOnly {
+				n.MentionEvents = &shaped
 			}
 		}
 	}

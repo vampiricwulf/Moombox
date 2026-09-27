@@ -23,6 +23,7 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 ### 2. Default Value
 `internal/config/config.go` → `Defaults()` — Set the default value. For FlexDuration: `FlexDuration{Value: 10}`.
 - A default that differs by CPU architecture goes through `platformDefaults(goarch)` in the same file — arm64-motivated caps only (ruling R3: "any future cap whose value was picked for arm's memory belongs here"). `goarch` is a parameter, not `runtime.GOARCH` read inline, so both branches are testable on one host.
+- Not every field needs an entry here: `network.public_url` has none because `""` is both its zero value and its documented "unset" state, and `loadFromFile` decodes over `Defaults()` — the same fact step 9's "no migration" rests on for a key like this.
 
 ### 3. Config Validation
 `internal/config/config.go` → `validateOrNormalize(cfg, reportOnly)` — Add bounds checking, enum validation, or path sanitization. It is the one implementation behind two entry points (DECISIONS #9): `Validate(cfg)` (`reportOnly=true`) reports issues without mutating, and `Normalize(cfg)` (`reportOnly=false`) replaces the offending field with its default. Load normalises; Save validates first and refuses to write a failing config.
@@ -55,7 +56,7 @@ Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go
 - `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
 - `OnChannelChange()` → `kickMonitors` to re-evaluate channels
-- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save
+- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events` keys all hot-reload through it too (the restart list stays at 16)
 - `OnGoSoftLimitChange(mb)` → `debug.SetMemoryLimit` (0 restores the boot limit)
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
 - `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
