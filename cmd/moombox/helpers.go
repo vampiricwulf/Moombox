@@ -118,7 +118,7 @@ func checkAndBroadcastUpdate(
 	ctx context.Context,
 	upd *updater.Updater,
 	wsHub *web.WebSocketHub,
-	notifyMgr *notifications.Manager,
+	notifyMgr notifications.Notifier,
 	tuiCh chan<- tui.UpdateStatusMsg,
 	log *logger.Logger,
 	configStore *config.Store,

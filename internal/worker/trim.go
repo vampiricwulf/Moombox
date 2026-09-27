@@ -24,7 +24,7 @@ type TrimService struct {
 	muxer     *engine.Muxer
 	muxerMu   sync.RWMutex // guards muxer across SetFfmpegPath hot-reload vs. in-flight trims
 	db        *database.Database
-	notifier  *notifications.Manager
+	notifier  notifications.Sender
 	activeMu  sync.Mutex
 	activeOps map[string]bool // tracks in-flight trim operations per job
 	logger    interface {
@@ -51,7 +51,7 @@ func NewTrimService(db *database.Database, ffmpegPath string, logger interface {
 }
 
 // SetNotifier sets the notification manager for trim notifications.
-func (ts *TrimService) SetNotifier(nm *notifications.Manager) {
+func (ts *TrimService) SetNotifier(nm notifications.Sender) {
 	ts.notifier = nm
 }
 

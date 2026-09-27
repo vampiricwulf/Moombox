@@ -127,6 +127,34 @@ func (b *FieldBuilder) Build() []Field {
 	return b.fields
 }
 
+// Sender is the one method every notification producer needs, and the seam
+// every producer holds instead of *Manager.
+//
+// Before it existed, worker, routes and cmd each held the concrete manager,
+// whose only constructor resolves Discord webhook URLs — so 43 of the 46
+// trigger rows an audit inventoried had no test that could assert the embed,
+// and the three that did were pure renderers that never reached a Send.
+// internal/notifications/notificationtest.Recorder is the test implementation.
+type Sender interface {
+	Send(title, description string, ntype NotificationType, fields []Field, opts SendOptions)
+}
+
+// Notifier is the OWNER surface: a Sender plus the three lifecycle calls only
+// cmd/moombox makes — the cost gate before building an embed (HasTargets), the
+// config hot-apply (Reload), and the shutdown pair (BeginShutdown then Wait).
+//
+// Separate from Sender on purpose. A producer that could call Reload could
+// reload the targets from a download goroutine; a producer that could call
+// Wait could block a hot path on Discord. Handing every producer the narrow
+// half is what keeps that impossible.
+type Notifier interface {
+	Sender
+	HasTargets() bool
+	Reload(cfg *config.MoomboxConfig)
+	BeginShutdown()
+	Wait()
+}
+
 // SendOptions provides optional parameters for a notification.
 type SendOptions struct {
 	URL       string // Link URL for the embed title
@@ -379,7 +407,19 @@ func (m *Manager) Reload(cfg *config.MoomboxConfig) {
 }
 
 // Send dispatches a notification to all matching targets asynchronously.
+//
+// A nil *Manager is a no-op. Every consumer field is the Sender interface now,
+// and a TYPED nil — a (*Manager)(nil) assigned into one — produces a NON-nil
+// interface holding a nil pointer, which the `if x.notifier != nil` guards at
+// ~20 call sites wave straight through (internal/worker/worker.go:313 is the
+// live example). Every production assignment today passes a real *Manager, so
+// this is insurance against a future typed nil rather than a live bug — and it
+// is still required, because nothing else would catch one.
 func (m *Manager) Send(title, description string, ntype NotificationType, fields []Field, opts SendOptions) {
+	if m == nil {
+		return
+	}
+
 	// Snapshot under RLock so a concurrent Reload can't swap the slice
 	// mid-iteration. The slice is replaced wholesale, never mutated in
 	// place, so iterating the snapshot after release is safe.
@@ -435,6 +475,14 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		}(target.sender)
 	}
 }
+
+// BeginShutdown puts every target into single-attempt mode.
+//
+// Declared here rather than with the queue it drives (Task 4), because
+// Notifier names it and cmd/moombox's runState field is typed Notifier from
+// this task onward — without it *Manager does not satisfy the interface and
+// cmd/moombox/services.go:827 stops compiling. Task 4 gives it the atomic flag.
+func (m *Manager) BeginShutdown() {}
 
 // effectiveWaitTimeout returns waitTimeout, or defaultWaitTimeout when the
 // field was never set (zero or negative).

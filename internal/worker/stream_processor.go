@@ -89,7 +89,7 @@ type StreamProcessor struct {
 	cfg         *config.MoomboxConfig // captured for early-init reads before SetConfigStore
 	configStore *config.Store         // shared config store (set via SetConfigStore)
 	db          *database.Database
-	notifier    *notifications.Manager
+	notifier    notifications.Sender
 	logger      logger
 	isOnline    func() bool
 
@@ -151,7 +151,7 @@ func (sp *StreamProcessor) readConfig(fn func(*config.MoomboxConfig)) {
 }
 
 // SetNotifier sets the notification manager for the stream processor.
-func (sp *StreamProcessor) SetNotifier(nm *notifications.Manager) {
+func (sp *StreamProcessor) SetNotifier(nm notifications.Sender) {
 	sp.notifier = nm
 }
 

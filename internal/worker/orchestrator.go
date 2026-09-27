@@ -66,7 +66,7 @@ type DownloadOrchestrator struct {
 	cipherSolver *cipher.GojaResolver
 	routedCipher cipher.Solver
 	potProvider  *bgutils.PotProvider
-	notifier     *notifications.Manager
+	notifier     notifications.Sender
 	conn         Connectivity
 	// twitchChats is the live Twitch IRC chat downloaders, shared with the
 	// DownloadWorker that owns this orchestrator (NewDownloadWorker assigns
@@ -92,7 +92,7 @@ type DownloadOrchestrator struct {
 // used for sig/n-param URL decryption in download strategies.  cs
 // (*GojaResolver) is kept for GetSts, InvalidateSolver, and other
 // goja-internal operations.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.GojaResolver, routedCs cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.GojaResolver, routedCs cipher.Solver, pp *bgutils.PotProvider, nm notifications.Sender, conn Connectivity) *DownloadOrchestrator {
 	muxRootCtx, muxRootCancel := context.WithCancel(context.Background())
 	return &DownloadOrchestrator{
 		muxer:         engine.NewMuxer(ffmpegPath, logger),
