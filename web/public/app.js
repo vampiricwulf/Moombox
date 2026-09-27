@@ -145,6 +145,12 @@ export class MoomboxApp {
         this.updateCheckCountdown();
       }
     }, { passive: true });
+    // Deep link from a notification embed: {public_url}/#job=<id>. The SPA has
+    // no job route — details live in a modal — so the hash is the whole
+    // mechanism and needs no server change. Handled on hashchange here and
+    // once per initial_state below (the jobs list is what it searches, and on
+    // a cold load that list arrives with the socket, not with the document).
+    window.addEventListener("hashchange", () => this._consumeJobHash());
     // Idle-tick sweep: re-evaluate archive boundary in case no job_update
     // arrives but enough time has passed for a Finished job to cross the
     // hide_finished_age_days threshold.
@@ -1141,6 +1147,9 @@ export class MoomboxApp {
             this._verifyJobExists(this.selectedJobId);
           }
         }
+        // Safe to re-run on every reconnect: _consumeJobHash clears the hash
+        // before it looks anything up, so the second call finds nothing.
+        this._consumeJobHash();
         break;
       }
 
@@ -1462,6 +1471,61 @@ export class MoomboxApp {
     } finally {
       if (this._verifyingJobId === jobId) this._verifyingJobId = null;
     }
+  }
+
+  /**
+   * Open the job named by a `#job=<id>` hash, then clear the hash.
+   * Called after initial_state (the jobs list is the thing it searches) and on
+   * hashchange. Idempotent: the hash is cleared before the lookup, so a
+   * reconnect's second initial_state is a no-op.
+   *
+   * The clear is `history.replaceState(null, "", location.pathname + location.search)`
+   * — jsdom implements it, and unlike assigning location.hash it leaves no
+   * history entry for the operator to Back into and re-trigger.
+   */
+  async _consumeJobHash() {
+    const hash = window.location.hash;
+    if (!hash.startsWith("#job=")) return;
+    // Split on the first "=" by hand and decode with decodeURIComponent —
+    // never URLSearchParams. JobDeepLink (internal/notifications/mentions.go)
+    // builds this fragment with url.PathEscape, which leaves "&", "=" and "+"
+    // unescaped: URLSearchParams would truncate an id at a literal "&" and
+    // turn a literal "+" into a space, neither of which PathEscape produces.
+    const raw = hash.slice("#job=".length);
+    let jobId = raw;
+    try {
+      jobId = decodeURIComponent(raw);
+    } catch {
+      // Malformed percent-escape — fall back to the raw fragment rather than
+      // dropping the deep link entirely.
+    }
+    // Clear before the lookup: an idempotent no-op on the next call, so a
+    // reconnect's second initial_state (or a stray hashchange) never re-opens
+    // a dialog the operator has since closed.
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+
+    const job = this.jobs.find((j) => j.id === jobId) || this.archivedJobs.find((j) => j.id === jobId);
+    if (job) {
+      this.details.showJobDetails(job);
+      return;
+    }
+    // Not in memory — the commonest deep link (a Finished job past the
+    // archive boundary) lands here, since archivedJobs is fetched lazily and
+    // is empty on a cold load. Mirrors _verifyJobExists's response handling.
+    try {
+      const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+      if (resp.ok) {
+        const fetched = await resp.json();
+        const existingIdx = this.archivedJobs.findIndex((j) => j.id === fetched.id);
+        if (existingIdx !== -1) this.archivedJobs[existingIdx] = fetched;
+        else this.archivedJobs.push(fetched);
+        this.details.showJobDetails(fetched);
+        return;
+      }
+    } catch {
+      // Network error — fall through to the toast below.
+    }
+    this.showToast("Job not found", "danger");
   }
 
   formatCountdown(epochMs) {

@@ -1,15 +1,15 @@
 # Frontend JS tests
 
 Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. Seventeen
+dependencies, no DOM — and just import from `../public/modules/`. Eighteen
 suites drive their module inside a jsdom document:
 `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`,
 `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`,
-`job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`,
-`player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`,
-`resolution-picker.test.mjs`, `settings-notifications.test.mjs`,
-`settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs` and
-`update-check-debounce.test.mjs`.
+`job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`,
+`open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`,
+`render-diff.test.mjs`, `resolution-picker.test.mjs`,
+`settings-notifications.test.mjs`, `settings-reorder-budget.test.mjs`,
+`sidecar-warning.test.mjs` and `update-check-debounce.test.mjs`.
 jsdom is the only dev dependency, and it is **optional**.
 
 ## Running
@@ -35,7 +35,7 @@ modules.
 
 ## The DOM suites (jsdom)
 
-The seventeen suites listed above are the ones that need a DOM. Install jsdom
+The eighteen suites listed above are the ones that need a DOM. Install jsdom
 **inside `web/tests/`** — never at the repo root:
 
 ```bash
@@ -52,10 +52,10 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 171
+checkout without `npm ci` reports them as **skipped**, never failed — the 177
 DOM tests (player 63, render-diff 16, app 13, a11y-controls 12, boot-and-login 12,
-settings-notifications 11, job-progress 8, job-asides 7, log-panel 4,
-open-folder 4, resolution-picker 4, settings-reorder-budget 4,
+settings-notifications 11, job-progress 8, job-asides 7, job-deeplink 6,
+log-panel 4, open-folder 4, resolution-picker 4, settings-reorder-budget 4,
 update-check-debounce 4, archive-boundary 3, sidecar-warning 3, app-resync 2,
 release-notes-toast 1), leaving 131 tests
 that need no DOM — the eight pure suites, the two stylesheet-text tests in
@@ -65,13 +65,13 @@ five pure helper tests in `player.test.mjs` (task 3's two colour tests, task
 in `resolution-picker.test.mjs`, whose other four tests do need one:
 
 ```
-ℹ tests 302
+ℹ tests 308
 ℹ pass 131
 ℹ fail 0
-ℹ skipped 171
+ℹ skipped 177
 ```
 
-With jsdom installed the same command reports `tests 302` / `pass 302` /
+With jsdom installed the same command reports `tests 308` / `pass 308` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
@@ -81,7 +81,7 @@ than a silent skip.
 | Suite | Needs jsdom |
 |-------|-------------|
 | `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
-| `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `settings-notifications.test.mjs`, `settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
+| `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`, `job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `settings-notifications.test.mjs`, `settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
 | `resolution-picker.test.mjs` | partly — 2 pure mapping tests, 4 jsdom picker tests |
 
 ## The player harness
