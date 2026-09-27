@@ -19,6 +19,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -56,6 +57,7 @@ type jobsFixture struct {
 	stagingDir string
 	tw         *fakeTwitchFetcher
 	yt         *fakeYouTubeFetcher
+	notify     *notificationtest.Recorder
 }
 
 // newJobsFixture wires JobRoutes against real DB + temp filesystem +
@@ -90,9 +92,10 @@ func newJobsFixture(t *testing.T) *jobsFixture {
 
 	tw := &fakeTwitchFetcher{}
 	yt := &fakeYouTubeFetcher{}
+	notify := notificationtest.New()
 
 	r := chi.NewRouter()
-	JobRoutes(r, db, store, nil, apiRL, tw, yt, nil)
+	JobRoutes(r, db, store, nil, apiRL, tw, yt, notify)
 
 	return &jobsFixture{
 		router:     r,
@@ -102,6 +105,7 @@ func newJobsFixture(t *testing.T) *jobsFixture {
 		stagingDir: stagingDir,
 		tw:         tw,
 		yt:         yt,
+		notify:     notify,
 	}
 }
 
@@ -126,6 +130,16 @@ func (f *jobsFixture) addJob(t *testing.T, id string, mutate func(*database.Job)
 		t.Fatalf("AddJob %s: %v", id, err)
 	}
 	return job
+}
+
+// post issues a JSON POST through the fixture's router.
+func (f *jobsFixture) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	return rec
 }
 
 func doRequest(t *testing.T, router chi.Router, method, target string, body any) *httptest.ResponseRecorder {
