@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,15 +23,40 @@ const (
 	// discordMaxAttempts bounds total delivery attempts (first try +
 	// retries) across transport errors, Discord 5xx, and 429 responses.
 	discordMaxAttempts = 3
-	// discordRetryAfterCap rejects absurd 429 Retry-After values rather
-	// than sleeping the goroutine (and its manager semaphore slot) into
-	// next week.
+	// discordRetryAfterCap rejects absurd 429 Retry-After values — and bounds
+	// the pre-emptive empty-bucket sleep — rather than parking a target's
+	// whole queue into next week.
 	discordRetryAfterCap = 30 * time.Second
-	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding
-	// one notification's worst-case semaphore hold at ~3×15s requests +
-	// 30s sleep. Two large Retry-After waits would exceed it — a webhook
-	// still rate-limited after one honored wait gives up instead.
+	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding one
+	// notification's worst-case hold on its target's queue at ~3x15s requests
+	// + 30s sleep = ~75s. Two large Retry-After waits would exceed it — a
+	// webhook still rate-limited after one honored wait gives up instead.
+	//
+	// The PRE-EMPTIVE empty-bucket wait (waitForBucket, ≤ discordRetryAfterCap
+	// per attempt) is deliberately outside this budget, so the true worst-case
+	// hold is ~75s plus those waits. Counting them here would let one
+	// legitimate 30s bucket wait forfeit the retries a following 5xx needs —
+	// the budget exists to stop a wedged webhook from parking a queue, and a
+	// bucket wait is the opposite: the sender doing what Discord asked.
 	discordMaxSleepTotal = 30 * time.Second
+	// shutdownBucketWaitCap bounds how long a SINGLE-attempt send (SendOnce —
+	// in practice the shutdown path) will wait out a known-empty rate bucket.
+	// The process force-exits 10s into shutdown, so honouring a window a full
+	// discordRetryAfterCap away would lose the embed to os.Exit AND starve
+	// every item behind it in that target's FIFO queue. Past this cap SendOnce
+	// posts immediately and lets the 429 drop the item: the same outcome as
+	// not waiting, minus the seconds spent.
+	shutdownBucketWaitCap = 2 * time.Second
+	// bucketSkewPad is added to every empty-bucket deadline learned from
+	// X-RateLimit-Reset-After. The header is millisecond precision, so a value
+	// rounded to NEAREST lets a sender that wakes exactly on it arrive up to
+	// half a millisecond before the server's window actually closes — and that
+	// request 429s. Measured on a fake Discord that rounds to nearest: 1-3
+	// such 429s per 400 requests without the pad, zero with it. Discord's own
+	// client libraries apply the same small offset for the same reason. The
+	// cost is 50ms of extra latency on a send that was already waiting out a
+	// window.
+	bucketSkewPad = 50 * time.Millisecond
 	// discordErrBodyBytes bounds how much of a rejected webhook's response
 	// body is quoted back in the error. Discord's 4xx bodies are small JSON
 	// objects naming what it refused ({"message": "Unknown Webhook", "code":
@@ -54,12 +80,34 @@ var discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{2 * time.Second,
 var discordHTTPClient = httpx.Client(2 * discordTimeout)
 
 // DiscordWebhook sends notifications via Discord webhook.
+//
+// One instance per target, held by that target's queue (manager.go), so the
+// bucket state below is learned once and reused for every embed to that
+// webhook — including across a config hot-reload, because applyTargets keeps a
+// surviving target's queue and therefore this pointer.
 type DiscordWebhook struct {
 	URL string
+
+	// bucketMu guards bucketRefillsAt. One sender goroutine per target means
+	// there is no contention in production; the mutex is for SendTest (which
+	// builds its own instance) and for the race detector.
+	bucketMu sync.Mutex
+	// bucketRefillsAt is when this webhook's rate bucket next has room, set
+	// from an X-RateLimit-Remaining: 0 response. Zero means "not known empty".
+	bucketRefillsAt time.Time
 }
 
 type discordPayload struct {
-	Embeds []discordEmbed `json:"embeds"`
+	// Content is the only place a mention can live: per Discord API docs
+	// (resources/message.mdx) allowed_mentions governs "mentions in the
+	// message content, or components", so an embed can never ping anyone.
+	Content string         `json:"content,omitempty"`
+	Embeds  []discordEmbed `json:"embeds"`
+	// AllowedMentions is the EXPORTED notifications.AllowedMentions
+	// (manager.go), not a payload-private twin: Arc N2b resolves one per
+	// (target, event) and hands it over in SendOptions, so the wire shape and
+	// the option are the same type by construction.
+	AllowedMentions *AllowedMentions `json:"allowed_mentions,omitempty"`
 }
 
 type discordEmbed struct {
@@ -67,6 +115,7 @@ type discordEmbed struct {
 	Description string         `json:"description,omitempty"`
 	Color       int            `json:"color,omitempty"`
 	URL         string         `json:"url,omitempty"`
+	Author      *discordAuthor `json:"author,omitempty"`
 	Fields      []discordField `json:"fields,omitempty"`
 	Thumbnail   *discordImage  `json:"thumbnail,omitempty"`
 	Image       *discordImage  `json:"image,omitempty"`
@@ -79,6 +128,12 @@ type discordEmbed struct {
 // Field carries the JSON tags directly. Audit reports/small-packages.md.
 type discordField = Field
 
+type discordAuthor struct {
+	Name    string `json:"name"`
+	URL     string `json:"url,omitempty"`
+	IconURL string `json:"icon_url,omitempty"`
+}
+
 type discordImage struct {
 	URL string `json:"url"`
 }
@@ -87,18 +142,70 @@ type discordFooter struct {
 	Text string `json:"text"`
 }
 
-// buildPayload assembles the embed JSON shared by Send and sendOnce.
+// footerText renders the embed footer. "Moombox Go" was a rewrite-era suffix
+// that identified nothing; with several channels and several jobs landing in
+// one Discord channel, the platform and the job id are what let an operator
+// tell two embeds apart without opening the link.
+func footerText(opts SendOptions) string {
+	text := "Moombox"
+	if opts.Platform != "" {
+		text += " · " + opts.Platform
+	}
+	if opts.JobID != "" {
+		text += " · " + opts.JobID
+	}
+	return text
+}
+
+// MentionParse maps a configured mention to the allowed_mentions object that
+// makes it actually ping, or nil for a form we do not recognise — which keeps
+// an unvalidated config string from becoming an unrestricted ping. Arc N2b
+// calls it when it fills SendOptions.
+func MentionParse(mention string) *AllowedMentions {
+	switch {
+	case mention == "@everyone" || mention == "@here":
+		return &AllowedMentions{Parse: []string{"everyone"}}
+	case strings.HasPrefix(mention, "<@&") && strings.HasSuffix(mention, ">"):
+		id := strings.TrimSuffix(strings.TrimPrefix(mention, "<@&"), ">")
+		if id == "" {
+			return nil
+		}
+		return &AllowedMentions{Parse: []string{}, Roles: []string{id}}
+	case strings.HasPrefix(mention, "<@") && strings.HasSuffix(mention, ">"):
+		id := strings.TrimSuffix(strings.TrimPrefix(mention, "<@"), ">")
+		// <@!id> is the legacy nickname form; Discord still accepts it in
+		// content and the id is what allowed_mentions needs either way.
+		id = strings.TrimPrefix(id, "!")
+		if id == "" {
+			return nil
+		}
+		return &AllowedMentions{Parse: []string{}, Users: []string{id}}
+	}
+	return nil
+}
+
+// buildPayload assembles the embed JSON shared by Send and SendOnce.
 func buildPayload(title, description string, color int, fields []Field, opts SendOptions) ([]byte, error) {
 	embed := discordEmbed{
 		Title:       title,
 		Description: description,
 		Color:       color,
-		Footer:      &discordFooter{Text: "Moombox Go"},
+		Footer:      &discordFooter{Text: footerText(opts)},
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if opts.URL != "" {
 		embed.URL = opts.URL
+	}
+
+	// Discord rejects an author object with no name (a permanent 400), so a
+	// half-filled Author is dropped rather than sent.
+	if opts.Author != nil && opts.Author.Name != "" {
+		embed.Author = &discordAuthor{
+			Name:    opts.Author.Name,
+			URL:     opts.Author.URL,
+			IconURL: opts.Author.IconURL,
+		}
 	}
 
 	if opts.Thumbnail != "" {
@@ -111,35 +218,66 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 
 	if len(fields) > 0 {
 		// discordField is a type alias for Field, so this is a direct copy
-		// rather than an element-by-element conversion.
+		// rather than an element-by-element conversion. It stays a copy
+		// because the clamp below rewrites values in place; the caller's own
+		// buffer is already protected a layer up, where Manager.Send copies
+		// into the queued item.
 		embed.Fields = append([]discordField(nil), fields...)
 	}
 
-	body, err := json.Marshal(discordPayload{Embeds: []discordEmbed{embed}})
+	// One clamp for all ~36 send sites. Over ANY Discord limit is a 400, and
+	// the ladder below treats a non-429 4xx as permanent, so an unclamped
+	// embed is a silently dropped alert.
+	clampEmbed(&embed)
+
+	payload := discordPayload{Embeds: []discordEmbed{embed}}
+
+	// A mention rides the message content, never the embed. A nil
+	// MentionAllowed is the per-event gate N2b fills from mention_events:
+	// no object, no ping. MentionParse is where an unrecognised form becomes
+	// that nil.
+	if opts.MentionAllowed != nil && opts.Mention != "" {
+		payload.Content = opts.Mention
+		payload.AllowedMentions = opts.MentionAllowed
+	}
+
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal discord payload: %w", err)
 	}
 	return body, nil
 }
 
-// sendOnce performs a single delivery attempt with NO retries — used by
-// SendTest, where an interactive caller wants the immediate outcome
-// (surfacing a 429 beats sleeping through its Retry-After).
-func (d *DiscordWebhook) sendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
+// SendOnce performs a single delivery attempt with NO retries.
+//
+// Two callers: SendTest, where an interactive settings flow wants the
+// immediate outcome (surfacing a 429 beats sleeping through its Retry-After),
+// and the per-target queue during shutdown, where the 10s force-exit leaves no
+// room for the ladder.
+//
+// A known-empty rate bucket is therefore honoured only when it refills within
+// shutdownBucketWaitCap (2s); a window further away than that is not waited
+// for at all — this posts, and the 429 Discord answers with drops the item
+// just as the wait would have, without spending the force-exit's remaining
+// seconds or starving the items queued behind this one. So the bound stays
+// shutdownBucketWaitCap plus the single-attempt request timeout (~15s).
+func (d *DiscordWebhook) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
 	body, err := buildPayload(title, description, color, fields, opts)
 	if err != nil {
 		return err
 	}
-	status, retryAfter, snippet, err := d.post(body)
+	d.waitForBucketWithin(shutdownBucketWaitCap)
+	r, err := d.post(body)
+	d.noteBucket(r)
 	switch {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
-	case status < 400:
+	case r.status < 400:
 		return nil
-	case status == http.StatusTooManyRequests:
-		return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+	case r.status == http.StatusTooManyRequests:
+		return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	default:
-		return discordStatusErr(status, snippet)
+		return discordStatusErr(r.status, r.snippet)
 	}
 }
 
@@ -159,33 +297,38 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	var lastErr error
 	var slept time.Duration
 	for attempt := 1; ; attempt++ {
-		status, retryAfter, snippet, err := d.post(body)
+		// Pre-emptive: if the last response said the bucket was empty, wait
+		// out its window instead of spending one of three attempts on the 429
+		// Discord has already promised.
+		d.waitForBucket()
+		r, err := d.post(body)
+		d.noteBucket(r)
 
 		var delay time.Duration
 		switch {
 		case err != nil:
 			lastErr = fmt.Errorf("discord webhook request: %w", err)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
-		case status < 400:
+		case r.status < 400:
 			return nil
-		case status == http.StatusTooManyRequests:
+		case r.status == http.StatusTooManyRequests:
 			// Validate in FLOAT space before converting: values past ~9.2e9s
 			// (or Inf) overflow time.Duration to a NEGATIVE on amd64, which
 			// would slip past a Duration-space cap check and turn the sleep
 			// into a zero-delay hammer. !(secs > 0) is deliberately NaN-proof.
-			secs, parseErr := strconv.ParseFloat(retryAfter, 64)
+			secs, parseErr := strconv.ParseFloat(r.retryAfter, 64)
 			if parseErr != nil || !(secs > 0) || secs > discordRetryAfterCap.Seconds() {
 				// Missing, malformed, or absurd Retry-After — surface the
 				// 429 directly rather than guessing a sleep.
-				return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+				return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			}
-			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			delay = time.Duration(secs * float64(time.Second))
-		case status >= 500:
-			lastErr = discordStatusErr(status, snippet)
+		case r.status >= 500:
+			lastErr = discordStatusErr(r.status, r.snippet)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
 		default:
-			return discordStatusErr(status, snippet)
+			return discordStatusErr(r.status, r.snippet)
 		}
 
 		if attempt == discordMaxAttempts {
@@ -193,7 +336,7 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 		}
 		if slept+delay > discordMaxSleepTotal {
 			// Cumulative-sleep budget exhausted (e.g. a second large
-			// Retry-After) — bound the semaphore-slot hold instead of
+			// Retry-After) — bound this target queue's hold instead of
 			// waiting out an extended rate-limit.
 			return fmt.Errorf("%w (retry budget exhausted after %d attempts)", lastErr, attempt)
 		}
@@ -231,16 +374,109 @@ func discordStatusErr(status int, snippet string) error {
 	return fmt.Errorf("discord webhook returned %d: %s", status, snippet)
 }
 
-// post performs one webhook POST attempt, returning the HTTP status (0 on
-// transport error), the Retry-After header value, and — for a >=400 status —
-// a sanitised prefix of the response body.
-func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet string, err error) {
+// waitForBucket honours what Discord last told us about this webhook's rate
+// bucket: an X-RateLimit-Remaining of 0 means the NEXT request 429s until the
+// window resets, so sleeping through it costs one wait and saves an attempt
+// out of the three this notification has. Per Discord API docs
+// (topics/rate-limits.mdx) the bucket is discoverable only from these headers —
+// there is no published numeric cap.
+//
+// Capped by discordRetryAfterCap for the same reason a 429's Retry-After is:
+// an absurd reset must not park a target's whole queue into next week. The
+// retry ladder is what makes the wait worth taking — a single-attempt send has
+// no second chance to spend it on, which is why SendOnce calls
+// waitForBucketWithin instead.
+func (d *DiscordWebhook) waitForBucket() {
+	wait := d.bucketWait()
+	if wait <= 0 {
+		return
+	}
+	if wait > discordRetryAfterCap {
+		wait = discordRetryAfterCap
+	}
+	time.Sleep(wait)
+}
+
+// waitForBucketWithin honours the empty-bucket window only when it closes
+// within max, and otherwise returns at once rather than clamping to max.
+// Waiting part of a window buys nothing: the request still lands inside it and
+// still 429s, so a caller that cannot afford the whole wait is better off
+// spending nothing. SendOnce is that caller.
+func (d *DiscordWebhook) waitForBucketWithin(max time.Duration) {
+	wait := d.bucketWait()
+	if wait <= 0 || wait > max {
+		return
+	}
+	time.Sleep(wait)
+}
+
+// bucketWait reports how long until this webhook's bucket refills, or 0 when
+// it was never marked empty (or the window has already passed).
+func (d *DiscordWebhook) bucketWait() time.Duration {
+	d.bucketMu.Lock()
+	until := d.bucketRefillsAt
+	d.bucketMu.Unlock()
+	if until.IsZero() {
+		return 0
+	}
+	return time.Until(until)
+}
+
+// noteBucket records (or clears) the empty-bucket deadline from one response.
+//
+// A 429 is deliberately EXCLUDED: Discord sets Remaining: 0 on one, and the
+// ladder already honours its Retry-After, so arming the pre-emptive sleep from
+// the same response would wait the window twice and spend the cumulative-sleep
+// budget on the duplicate.
+func (d *DiscordWebhook) noteBucket(r discordResponse) {
+	if r.status == http.StatusTooManyRequests || r.rateRemain == "" {
+		return
+	}
+	remaining, err := strconv.Atoi(r.rateRemain)
+	if err != nil {
+		return
+	}
+	if remaining > 0 {
+		d.bucketMu.Lock()
+		d.bucketRefillsAt = time.Time{}
+		d.bucketMu.Unlock()
+		return
+	}
+	// Validate in FLOAT space before converting, for the reason the 429 arm
+	// documents: a value past ~9.2e9s (or Inf) overflows time.Duration to a
+	// NEGATIVE on amd64. !(secs > 0) is deliberately NaN-proof.
+	secs, err := strconv.ParseFloat(r.rateReset, 64)
+	if err != nil || !(secs > 0) {
+		return
+	}
+	if secs > discordRetryAfterCap.Seconds() {
+		secs = discordRetryAfterCap.Seconds()
+	}
+	// bucketSkewPad covers the header's millisecond rounding — see its comment.
+	d.bucketMu.Lock()
+	d.bucketRefillsAt = time.Now().Add(time.Duration(secs*float64(time.Second)) + bucketSkewPad)
+	d.bucketMu.Unlock()
+}
+
+// discordResponse is what one attempt learned. Grouped rather than returned as
+// five bare values: the rate-limit pair has to travel with the status, and a
+// six-value signature is where a caller starts transposing arguments.
+type discordResponse struct {
+	status     int    // 0 on a transport error
+	retryAfter string // Retry-After, 429 only
+	rateRemain string // X-RateLimit-Remaining
+	rateReset  string // X-RateLimit-Reset-After, in seconds
+	snippet    string // sanitised body prefix, >= 400 only
+}
+
+// post performs one webhook POST attempt.
+func (d *DiscordWebhook) post(body []byte) (discordResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), discordTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(body))
 	if err != nil {
-		return 0, "", "", fmt.Errorf("create discord request: %w", err)
+		return discordResponse{}, fmt.Errorf("create discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -248,25 +484,32 @@ func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet stri
 	if err != nil {
 		// Transport errors are *url.Error, whose Error() embeds the FULL
 		// request URL — i.e. the webhook token. Redact before the error
-		// reaches any log line or HTTP response body (the manager's async
-		// failure log, SendTest's route response, retry-loop wrap all flow
-		// through here).
+		// reaches any log line or HTTP response body (the queue's failure
+		// log, SendTest's route response, retry-loop wrap all flow through
+		// here).
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
-			return 0, "", "", fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+			return discordResponse{}, fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
 		}
-		return 0, "", "", err
+		return discordResponse{}, err
 	}
 	defer func() {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
+
+	out := discordResponse{
+		status:     resp.StatusCode,
+		retryAfter: resp.Header.Get("Retry-After"),
+		rateRemain: resp.Header.Get("X-RateLimit-Remaining"),
+		rateReset:  resp.Header.Get("X-RateLimit-Reset-After"),
+	}
 	if resp.StatusCode >= 400 {
 		// Read the reason BEFORE the deferred drain throws the rest away.
 		// The read error is intentionally ignored: a partial read (e.g. the
 		// connection drops mid-body) still yields whatever prefix arrived,
 		// which is a usable snippet — better than discarding it outright.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
-		snippet = discordErrSnippet(b)
+		out.snippet = discordErrSnippet(b)
 	}
-	return resp.StatusCode, resp.Header.Get("Retry-After"), snippet, nil
+	return out, nil
 }

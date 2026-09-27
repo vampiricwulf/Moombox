@@ -215,7 +215,7 @@ type DownloadWorker struct {
 	// orchestrator, which is otherwise entirely internal to this package.
 	twitchChats *twitchChatRegistry
 	streamProc  *StreamProcessor
-	notifier    *notifications.Manager
+	notifier    notifications.Sender
 	logger      logger
 	wg          sync.WaitGroup // tracks in-flight processJob goroutines
 	notifyJob   chan struct{}  // signal to re-check for new jobs (non-blocking send)
@@ -279,7 +279,7 @@ type DownloadWorkerDeps struct {
 
 	PotProvider   *bgutils.PotProvider
 	TwitchService *twitch.Service
-	Notifier      *notifications.Manager
+	Notifier      notifications.Sender
 	Conn          Connectivity
 }
 
@@ -298,7 +298,7 @@ func NewDownloadWorker(
 	var routedCs cipher.Solver
 	var pp *bgutils.PotProvider
 	var tw *twitch.Service
-	var nm *notifications.Manager
+	var nm notifications.Sender
 	var conn Connectivity
 	if deps != nil {
 		cs = deps.CipherSolver
@@ -1329,7 +1329,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			fields := notifications.NewFieldBuilder().
 				AddInline("Channel", job.ChannelName).
 				AddInline(notifications.IDLabel(job.Platform), job.VideoID).
-				Add("Error", errMsg).
+				Add("Error", notifications.EscapeMarkdown(errMsg)).
 				// Terminal-after-retries: say the automation gave up so the
 				// operator knows this needs a manual look.
 				AddIf(job.AutoRetryCount > 0, "Automatic Retries",

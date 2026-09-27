@@ -184,7 +184,7 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 // JobRoutes registers job-related API routes. The Store carries the cfg
 // pointer + lock; all read sites here go through store.Read so the
 // migration drops the per-route cfgMu plumbing.
-func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager) {
+func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier notifications.Sender) {
 	// GET /api/jobs
 	r.Get("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
 		jobs, err := db.GetAllJobs()

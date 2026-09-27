@@ -646,6 +646,65 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 	return nil
 }
 
+// sendMuxingStarting announces the mux for all THREE mux shapes: both
+// finalize paths inside muxAndFinalize (single-file and multi-segment) and
+// muxFromStaging's direct-finalize arm, which reaches FFmpeg without passing
+// through muxAndFinalize at all.
+//
+// It used to sit inline in muxAndFinalize, 28 lines BELOW the
+// `len(segments) > 0` branch that returns into finalizeMultiSegmentJob — so
+// every quality-split and gap-split job silently skipped the `muxing` event,
+// which operations.md documents as "FFmpeg mux step begins". A subscriber got
+// it for some jobs and not others with no pattern they could see. Called
+// before the branch now; owner ruling keeps `muxing` as its own event rather
+// than folding it into `finished`.
+//
+// The job is re-read rather than taken from the status write that follows,
+// because the two finalize shapes write that status in different places and
+// none of the fields below depends on it.
+func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
+	if o.notifier == nil {
+		return
+	}
+	job := jobCtx.Job
+	if fresh, err := o.db.GetJob(jobCtx.Job.ID); err == nil && fresh != nil {
+		job = fresh
+	} else if err != nil {
+		// Not fatal — the in-memory job carries the same fields, only
+		// staler — but a database read failing here is worth a line, because
+		// nothing else in this function would show it and the counts in the
+		// embed would simply look behind.
+		o.logger.Debug("muxing notification: job re-read failed, using the in-memory job",
+			"jobID", jobCtx.Job.ID, "err", err)
+	}
+
+	fb := notifications.NewFieldBuilder()
+	if job.LastVideoSeq != nil {
+		fb.AddInline("Video Segments", fmt.Sprintf("%d", *job.LastVideoSeq))
+	}
+	if job.LastAudioSeq != nil {
+		fb.AddInline("Audio Segments", fmt.Sprintf("%d", *job.LastAudioSeq))
+	}
+	if job.TotalChatMessages != nil {
+		fb.AddInline("Chat Messages", fmt.Sprintf("%d", *job.TotalChatMessages))
+	}
+	if job.DownloadStartedAt != "" {
+		if startTime, err := time.Parse(time.RFC3339, job.DownloadStartedAt); err == nil {
+			fb.AddInline("Download Time", formatDurationHuman(time.Since(startTime)))
+		}
+	}
+	o.notifier.Send("Muxing Starting",
+		fmt.Sprintf("Download complete, muxing: %s", jobCtx.Job.Title),
+		notifications.TypeMuxing,
+		fb.Build(),
+		notifications.SendOptions{
+			URL:       jobCtx.Job.URL,
+			Thumbnail: jobCtx.Job.ThumbnailURL,
+			Event:     "muxing",
+		},
+	)
+}
+
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
 	o.logger.Info("muxing", "jobID", jobCtx.Job.ID)
 
@@ -666,6 +725,11 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// No-op when the job has no seg_N staging dirs.
 	o.muxUnrecordedSegments(ctx, jobCtx)
 
+	// A7: announce the mux BEFORE the shape is chosen. The branch below
+	// returns into finalizeMultiSegmentJob, which never reached the inline
+	// send this replaces.
+	o.sendMuxingStarting(jobCtx)
+
 	// Multi-segment path: if the job has segments (from part splitting),
 	// the individual part .mp4 files are already muxed. We just need to
 	// handle assets (chat, thumbnail, description) and set the job as finished.
@@ -675,42 +739,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 	}
 
-	freshJob := o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	})
-	if freshJob == nil {
-		freshJob = jobCtx.Job
-	}
-
-	// Send "Muxing Starting" notification with enriched fields (matching TypeScript muxFinalize)
-	if o.notifier != nil {
-		var muxFields []notifications.Field
-		if freshJob.LastVideoSeq != nil {
-			muxFields = append(muxFields, notifications.Field{Name: "Video Segments", Value: fmt.Sprintf("%d", *freshJob.LastVideoSeq), Inline: true})
-		}
-		if freshJob.LastAudioSeq != nil {
-			muxFields = append(muxFields, notifications.Field{Name: "Audio Segments", Value: fmt.Sprintf("%d", *freshJob.LastAudioSeq), Inline: true})
-		}
-		if freshJob.TotalChatMessages != nil {
-			muxFields = append(muxFields, notifications.Field{Name: "Chat Messages", Value: fmt.Sprintf("%d", *freshJob.TotalChatMessages), Inline: true})
-		}
-		if freshJob.DownloadStartedAt != "" {
-			if startTime, err := time.Parse(time.RFC3339, freshJob.DownloadStartedAt); err == nil {
-				elapsed := time.Since(startTime)
-				muxFields = append(muxFields, notifications.Field{Name: "Download Time", Value: formatDurationHuman(elapsed), Inline: true})
-			}
-		}
-		o.notifier.Send("Muxing Starting",
-			fmt.Sprintf("Download complete, muxing: %s", jobCtx.Job.Title),
-			notifications.TypeMuxing,
-			muxFields,
-			notifications.SendOptions{
-				URL:       jobCtx.Job.URL,
-				Thumbnail: jobCtx.Job.ThumbnailURL,
-				Event:     "muxing",
-			},
-		)
-	}
 
 	// Resolve output path — template may contain subdirectory (e.g. "${channel}/...")
 	filenameBase := jobCtx.Filename
@@ -1040,7 +1071,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			finFields,
 			notifications.SendOptions{
 				URL:   jobCtx.Job.URL,
-				Image: jobCtx.Job.ThumbnailURL,
+				Image: finishedImage(jobCtx.Job),
 				Event: "finished",
 			},
 		)
@@ -1191,6 +1222,22 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	}
 }
 
+// finishedImage is the full-width image URL for a "Download Finished" embed,
+// or "" for Twitch.
+//
+// Twitch preview URLs are live-only: they 404 as soon as the broadcast ends
+// (see the thumbnail note in orchestrator_twitch.go), and "Download Finished"
+// is by definition sent after it did — so every Twitch finished embed carried
+// an image that could not load. Owner ruling: drop it. Uploading the saved
+// thumbnail_file as a multipart attachment is the option that would restore
+// one, and is deliberately not this arc.
+func finishedImage(job *database.Job) string {
+	if job == nil || job.Platform == "twitch" {
+		return ""
+	}
+	return job.ThumbnailURL
+}
+
 // sendFinishedNotification sends a "Download Finished" notification with enriched fields.
 func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, finishedJob *database.Job, outputFile string, probeData *ffprobeData, info os.FileInfo) {
 	if o.notifier == nil {
@@ -1263,16 +1310,21 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		}
 		fb.AddInline("Trimmed Range", fmt.Sprintf("%s - %s", startStr, endStr))
 	}
-	// Description excerpt — Discord embeds cap field values around 1024
-	// chars, but we keep the notification short. 297 + "..." == 300 total
-	// (audit reports/worker.md F40).
+	// Description excerpt. Cut on a RUNE boundary through the notifications
+	// clamp: the old desc[:descMaxLen-3] was a byte slice, and a Japanese
+	// description (the norm here) splits mid-rune, after which encoding/json
+	// emits U+FFFD and the operator reads mojibake. Escaped too — a
+	// description is job-supplied text and renders Discord markdown.
+	//
+	// CLAMP FIRST, then escape. The other order cuts 300 runes out of the
+	// ESCAPED text, so a cut landing between a backslash and the character it
+	// escapes leaves the excerpt ending in a stray "\…". Escaping afterwards
+	// can at most double the length — 600 runes, still well inside the 1024
+	// the field clamp enforces — and the 300 runes shown are 300 runes of the
+	// operator's description rather than 300 of Moombox's punctuation.
 	const descMaxLen = 300
 	if finishedJob.Description != "" {
-		desc := finishedJob.Description
-		if len(desc) > descMaxLen {
-			desc = desc[:descMaxLen-3] + "..."
-		}
-		fb.Add("Description", desc)
+		fb.Add("Description", notifications.EscapeMarkdown(notifications.ClampRunes(finishedJob.Description, descMaxLen)))
 	}
 	o.notifier.Send("Download Finished",
 		fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),
@@ -1280,7 +1332,7 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		fb.Build(),
 		notifications.SendOptions{
 			URL:   jobCtx.Job.URL,
-			Image: jobCtx.Job.ThumbnailURL,
+			Image: finishedImage(jobCtx.Job),
 			Event: "finished",
 		},
 	)
@@ -1463,6 +1515,10 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 		// if the recovery above (or earlier background muxes) produced DB
 		// segments, finalize from those.
 		if segments, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segments) > 0 {
+			// The off-queue mux verb on a post-split job: it reaches
+			// finalizeMultiSegmentJob without passing through muxAndFinalize,
+			// so it needs its own announcement. A manual mux is a mux.
+			o.sendMuxingStarting(jobCtx)
 			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 		}
 		return fmt.Errorf("no segment files found in staging directory")

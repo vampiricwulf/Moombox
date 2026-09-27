@@ -65,7 +65,7 @@ type runState struct {
 	routedCipher cipher.Solver
 
 	// --- Worker + notifications ---
-	notifyMgr *notifications.Manager
+	notifyMgr notifications.Notifier
 	dlWorker  *worker.DownloadWorker
 	trimSvc   *worker.TrimService
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -15,6 +16,46 @@ func (l testLogger) Debug(msg string, args ...any) {}
 func (l testLogger) Info(msg string, args ...any)  {}
 func (l testLogger) Warn(msg string, args ...any)  {}
 func (l testLogger) Error(msg string, args ...any) {}
+
+// notifConfigWithURLs builds a config whose only content is unfiltered
+// notification targets, in order.
+func notifConfigWithURLs(urls ...string) *config.MoomboxConfig {
+	cfg := &config.MoomboxConfig{}
+	for _, u := range urls {
+		cfg.Notifications = append(cfg.Notifications, config.NotificationConfig{URL: u})
+	}
+	return cfg
+}
+
+// itoa avoids pulling strconv into the queue tests for one call.
+func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// newTestManager starts a Manager over ready-made senders exactly as
+// NewManager does — applyTargets is the only path that creates queues and
+// starts goroutines, so a test that built the slice by hand would be testing a
+// Manager production never produces.
+func newTestManager(t *testing.T, waitTimeout time.Duration, targets ...notificationTarget) *Manager {
+	t.Helper()
+	return newTestManagerWithLogger(t, testLogger{}, waitTimeout, targets...)
+}
+
+func newTestManagerWithLogger(t *testing.T, lg interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, waitTimeout time.Duration, targets ...notificationTarget,
+) *Manager {
+	t.Helper()
+	m := &Manager{logger: lg, waitTimeout: waitTimeout}
+	m.applyTargets(targets)
+	t.Cleanup(func() {
+		for _, q := range m.targets {
+			q.stopDiscard()
+		}
+	})
+	return m
+}
 
 // recordingSender captures delivered titles so filter tests can assert
 // which notifications actually reached a target.
@@ -30,6 +71,10 @@ func (r *recordingSender) Send(title, _ string, _ int, _ []Field, _ SendOptions)
 	return nil
 }
 
+func (r *recordingSender) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
+	return r.Send(title, description, color, fields, opts)
+}
+
 func (r *recordingSender) titles() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -41,13 +86,11 @@ func (r *recordingSender) titles() []string {
 // split-off event, while unrelated events stay filtered.
 func TestEventAliasRoutesToLegacyFilter(t *testing.T) {
 	rec := &recordingSender{}
-	m := &Manager{
-		logger:    testLogger{},
-		semaphore: make(chan struct{}, maxInflightNotifications),
-		targets: []notificationTarget{
-			{sender: rec, events: map[string]bool{"disk_warning": true}},
-		},
-	}
+	m := newTestManager(t, time.Second, notificationTarget{
+		sender: rec,
+		events: map[string]bool{"disk_warning": true},
+		key:    "k",
+	})
 
 	m.Send("critical", "", TypeError, nil, SendOptions{Event: "disk_critical"})
 	m.Send("unrelated", "", TypeInfo, nil, SendOptions{Event: "finished"})
@@ -80,13 +123,11 @@ func TestEmptyEventFilterEntryMatchesNothing(t *testing.T) {
 	// Send-side guard: even a hostile "" key in the filter must not match
 	// non-aliased events through the alias zero-value lookup.
 	rec := &recordingSender{}
-	m2 := &Manager{
-		logger:    testLogger{},
-		semaphore: make(chan struct{}, maxInflightNotifications),
-		targets: []notificationTarget{
-			{sender: rec, events: map[string]bool{"": true}},
-		},
-	}
+	m2 := newTestManager(t, time.Second, notificationTarget{
+		sender: rec,
+		events: map[string]bool{"": true},
+		key:    "k",
+	})
 	m2.Send("leaked", "", TypeInfo, nil, SendOptions{Event: "finished"})
 	m2.Wait()
 	if got := rec.titles(); len(got) != 0 {
@@ -282,11 +323,7 @@ func TestHasTargetsEmpty(t *testing.T) {
 }
 
 func TestHasTargetsWithTarget(t *testing.T) {
-	m := &Manager{
-		targets: []notificationTarget{
-			{sender: nil},
-		},
-	}
+	m := &Manager{targets: []*targetQueue{{}}}
 	if !m.HasTargets() {
 		t.Error("expected HasTargets() == true when targets exist")
 	}
@@ -298,17 +335,73 @@ func TestHasTargetsWithTarget(t *testing.T) {
 // one-per-config-load summary can be asserted — including that it never
 // carries a URL (the webhook path IS the secret).
 type countingLogger struct {
-	infos []string
-	args  [][]any
+	mu       sync.Mutex
+	infos    []string
+	args     [][]any
+	warns    []string
+	warnArgs [][]any
 }
 
 func (l *countingLogger) Debug(string, ...any) {}
+
 func (l *countingLogger) Info(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.infos = append(l.infos, msg)
 	l.args = append(l.args, args)
 }
-func (l *countingLogger) Warn(string, ...any)  {}
+
+func (l *countingLogger) Warn(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, msg+" "+fmt.Sprint(args...))
+	l.warnArgs = append(l.warnArgs, args)
+}
+
 func (l *countingLogger) Error(string, ...any) {}
+
+// sawWarnContaining reports whether any Warn line (message or args) carries s.
+func (l *countingLogger) sawWarnContaining(s string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, w := range l.warns {
+		if strings.Contains(w, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// warnsContaining counts the Warn lines whose message or args carry s.
+func (l *countingLogger) warnsContaining(s string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, w := range l.warns {
+		if strings.Contains(w, s) {
+			n++
+		}
+	}
+	return n
+}
+
+// sumWarnArg adds up the int value logged under `key` across every Warn line,
+// so a test can assert that coalesced counts still total what was shed.
+func (l *countingLogger) sumWarnArg(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	total := 0
+	for _, args := range l.warnArgs {
+		for i := 0; i+1 < len(args); i += 2 {
+			if k, ok := args[i].(string); ok && k == key {
+				if v, ok := args[i+1].(int); ok {
+					total += v
+				}
+			}
+		}
+	}
+	return total
+}
 
 // TestBuildTargetsDedupesByResolvedURL is MON-6. parseTarget already
 // normalises discord://ID/TOKEN and the full https:// form to the same

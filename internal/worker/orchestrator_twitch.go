@@ -792,12 +792,17 @@ sessionLoop:
 		// recovery sets it again, and the checks below route back to the
 		// wait instead of finalizing mid-broadcast.
 		offlineCancelled.Store(false)
+		// The pause instant, stamped where the flag is consumed. NOT sent:
+		// a "download paused, connectivity lost" embed has no connectivity to
+		// travel over, so its three attempts and ~7 s of backoff delivered it
+		// only when the outage was shorter than the send itself (audit C8 —
+		// the same fallacy the connectivity_lost removal fixed). The resume
+		// embed below carries it, and an outage that never resumes is covered
+		// by connectivity_split.
+		pausedAt := time.Now()
 
 		o.logger.Warn("Twitch download paused — connectivity lost; waiting to resume same broadcast",
 			"part", segmentIndex+1, "jobID", jobCtx.Job.ID)
-		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Paused — Connectivity Lost",
-			fmt.Sprintf("Waiting for internet to resume download: %s", jobCtx.Job.Title),
-			notifications.TypeWarning, "connectivity_pause", currentQuality, segmentIndex+1)
 		// Progress line for the pause: the downloader is dead (session
 		// cancelled), so nothing else writes it — without this the job card
 		// freezes on the last segment counter for the whole outage. The
@@ -901,7 +906,8 @@ sessionLoop:
 			"part", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Resumed",
 			fmt.Sprintf("Connectivity restored, resuming download: %s", jobCtx.Job.Title),
-			notifications.TypeDownload, "connectivity_resume", currentQuality, segmentIndex+1)
+			notifications.TypeDownload, "connectivity_resume", currentQuality, segmentIndex+1,
+			twitchOutageField(pausedAt))
 	}
 
 	tracker.Finalize()
@@ -1119,9 +1125,23 @@ func (o *DownloadOrchestrator) buildTwitchProbeFn(variant *TwitchVariantInfo) fu
 	}
 }
 
+// twitchOutageField renders the outage an embed is reporting the end of: when
+// it began, as a Discord relative timestamp that keeps counting in the client,
+// and how long it lasted. This is what the retired connectivity_pause embed
+// used to carry, folded into the one embed that can actually be delivered.
+func twitchOutageField(pausedAt time.Time) notifications.Field {
+	return notifications.Field{
+		Name: "Paused",
+		Value: fmt.Sprintf("<t:%d:R> · resumed after %s",
+			pausedAt.Unix(), formatDurationHuman(time.Since(pausedAt))),
+		Inline: true,
+	}
+}
+
 // sendTwitchSessionNotification delivers a session-lifecycle notification
-// (outage pause/resume, finalize-after-outage) with the shared
-// channel/quality/part field shape. No-op when the notifier is nil.
+// (outage resume, finalize-after-outage) with the shared channel/quality/part
+// field shape, plus any extra fields the caller adds. No-op when the notifier
+// is nil.
 func (o *DownloadOrchestrator) sendTwitchSessionNotification(
 	jobCtx *JobContext,
 	title, desc string,
@@ -1129,16 +1149,18 @@ func (o *DownloadOrchestrator) sendTwitchSessionNotification(
 	event string,
 	quality QualityInfo,
 	partNo int,
+	extra ...notifications.Field,
 ) {
 	if o.notifier == nil {
 		return
 	}
-	o.notifier.Send(title, desc, ntype,
-		[]notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
-			{Name: "Quality", Value: quality.Label, Inline: true},
-			{Name: "Part", Value: fmt.Sprintf("%d", partNo), Inline: true},
-		},
+	fields := []notifications.Field{
+		{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+		{Name: "Quality", Value: quality.Label, Inline: true},
+		{Name: "Part", Value: fmt.Sprintf("%d", partNo), Inline: true},
+	}
+	fields = append(fields, extra...)
+	o.notifier.Send(title, desc, ntype, fields,
 		notifications.SendOptions{
 			URL:       jobCtx.Job.URL,
 			Thumbnail: jobCtx.Job.ThumbnailURL,

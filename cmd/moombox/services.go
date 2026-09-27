@@ -149,10 +149,11 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 // loop parked behind it drops every message for the duration.
 //
 // It is NOT that a webhook is posted synchronously — notifications.Manager.Send
-// hands each target to its own semaphore-bounded goroutine and returns, and
-// handleRecoveryNeeded's auto_enabled=true arm spawns its own goroutine for the
-// browser pass. The reason is the unbounded synchronous chain above, plus a
-// contract at chat.go that is unconditional.
+// appends to each target's queue and returns, leaving the delivery to that
+// target's own draining goroutine, and handleRecoveryNeeded's
+// auto_enabled=true arm spawns its own goroutine for the browser pass. The
+// reason is the unbounded synchronous chain above, plus a contract at chat.go
+// that is unconditional.
 //
 // Fire-and-forget is correct rather than convenient: the mark is idempotent —
 // writing the same reason twice is the same status — and the downloader

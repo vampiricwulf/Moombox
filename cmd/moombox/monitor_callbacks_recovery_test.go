@@ -243,7 +243,7 @@ func TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal(t *testing.T) 
 // for whatever arrives next.
 func TestDeclinedRecoveryDoesNotSpendTheCooldown(t *testing.T) {
 	s, sent := recoveryTestState(t)
-	notify := withAuthFailureCooldown(recoveryNotifier(sent))
+	notify, _ := withAuthFailureCooldown(recoveryNotifier(sent))
 
 	bothDead := stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed)
 	declined := func(context.Context) (cookies.RefreshResult, error) {
@@ -291,7 +291,7 @@ func TestDeclinedRecoveryDoesNotSpendTheCooldown(t *testing.T) {
 // decline not spending it.
 func TestAuthFailureCooldownStillSuppressesARepeat(t *testing.T) {
 	s, sent := recoveryTestState(t)
-	notify := withAuthFailureCooldown(recoveryNotifier(sent))
+	notify, _ := withAuthFailureCooldown(recoveryNotifier(sent))
 	bothDead := stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed)
 
 	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)

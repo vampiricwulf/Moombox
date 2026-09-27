@@ -307,6 +307,11 @@ func clearYouTubeMembershipMemo(platform string, clear func() int) int {
 const (
 	authRecoveredResumedBody       = "Resumed %d job(s) waiting on %s cookies — backlog re-queues and drains at archive_slots per channel"
 	credentialsObservedResumedBody = "Resumed %d job(s) parked on %s credentials after re-checking the saved credentials — backlog re-queues and drains at archive_slots per channel"
+
+	// The close when the repair found nothing to resume. Its own sentence
+	// rather than the resumed one with a 0 in it: "Resumed 0 job(s)" reads as
+	// a failure to resume, when what happened is that nothing needed it.
+	authRecoveredNoParkedBody = "%s cookies are working again — no jobs were parked, so nothing needed resuming"
 )
 
 // wireCredentialRepairCallbacks installs the two RefreshService callbacks that
@@ -332,7 +337,7 @@ const (
 // broadcast is DownloadWorker.ReauthenticateTwitchChats in production, and
 // clearMembershipMemo is FeedMonitor.ResetMembershipMemo, both taken as funcs
 // so this method can be driven directly — wireMonitorCallbacks cannot be.
-func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMembershipMemo func() int) {
+func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMembershipMemo func() int, wasNotified func(platform string) bool) {
 	// reauth is the half both edges share. reauthenticateTwitchChats filters
 	// the platform and is nil-safe, so this is safe to call from either.
 	//
@@ -378,11 +383,28 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 		resumed := resumeCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, "")
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+		}
+		// A4: the close fires whenever a failure was ANNOUNCED for this
+		// platform, not only when a job happened to be parked, and only once
+		// per announced failure. A platform whose cookies died between
+		// recordings produced "Cookie Auto-Refresh Failed" and then, after the
+		// operator fixed it, nothing.
+		//
+		// Still gated, not unconditional: OnAuthRecovered also fires on the
+		// first successful validate of a perfectly healthy process, and a
+		// "recovered" embed for a platform that was never reported broken is
+		// noise that teaches an operator to ignore the family.
+		announced := wasNotified != nil && wasNotified(platform)
+		if resumed > 0 || announced {
+			desc := fmt.Sprintf(authRecoveredResumedBody, resumed, platform)
+			if resumed == 0 {
+				desc = fmt.Sprintf(authRecoveredNoParkedBody, platform)
+			}
 			// Event "auth" pairs with the worker's "Authentication Required"
 			// emit — an empty Event would bypass every target's allowlist
 			// (unfilterable) since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
-				fmt.Sprintf(authRecoveredResumedBody, resumed, platform),
+				desc,
 				notifications.TypeInfo,
 				[]notifications.Field{
 					{Name: "Platform", Value: platform, Inline: true},
@@ -594,10 +616,16 @@ type authFailureNotifier func(platform, title, desc string, ntype notifications.
 // platforms can arrive here concurrently. The lock covers the read-and-stamp
 // only and is released before `send`, so one target's dispatch cannot hold up
 // the other platform's decision.
-func withAuthFailureCooldown(send authFailureNotifier) authFailureNotifier {
+//
+// It returns the wrapped notifier AND a wasNotified predicate. A4: the
+// "Authentication Recovered" close used to fire only when the repair resumed a
+// job, so a platform whose cookies died BETWEEN recordings got the failure
+// family — the loudest thing Moombox sends — and no close at all. This map is
+// the only record of whether the operator was ever told, so the close reads it.
+func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, func(platform string) bool) {
 	var mu sync.Mutex
 	last := make(map[string]time.Time)
-	return func(platform, title, desc string, ntype notifications.NotificationType) {
+	notify := func(platform, title, desc string, ntype notifications.NotificationType) {
 		mu.Lock()
 		if time.Since(last[platform]) < 30*time.Minute {
 			mu.Unlock()
@@ -607,6 +635,23 @@ func withAuthFailureCooldown(send authFailureNotifier) authFailureNotifier {
 		mu.Unlock()
 		send(platform, title, desc, ntype)
 	}
+	// A non-zero stamp means a failure was ANNOUNCED for this platform in this
+	// process. The close CONSUMES it: one close per failure episode, and the
+	// next failure after a close is a new episode that announces at once
+	// rather than sitting inside the old one's cooldown. Clearing the stamp
+	// (rather than keeping a separate "already closed" bool) is what makes
+	// those two halves one decision: the 30-minute cooldown exists to suppress
+	// repeats INSIDE an episode, and a recovery ends the episode.
+	wasNotified := func(platform string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if last[platform].IsZero() {
+			return false
+		}
+		delete(last, platform)
+		return true
+	}
+	return notify, wasNotified
 }
 
 // cookieRefresher is the single outward call runCookieRecovery makes on the
@@ -1043,7 +1088,7 @@ func membershipConfirmedNonMember(verdict youtube.SessionAuthState, hasAccess bo
 //
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
-	notifyAuthFailure := withAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
+	notifyAuthFailure, authFailureAnnounced := withAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
 		s.notifyMgr.Send(title, desc, ntype,
 			[]notifications.Field{{Name: "Platform", Value: platform, Inline: true}},
 			notifications.SendOptions{Event: "auth"},
@@ -1095,7 +1140,7 @@ func (s *runState) wireMonitorCallbacks() {
 	// clear's receiver is not guarded and does not need to be, because
 	// buildServices has already constructed s.feedMon and this same function
 	// dereferences it unconditionally a few dozen lines below.
-	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats, s.feedMon.ResetMembershipMemo)
+	s.wireCredentialRepairCallbacks(s.dlWorker.ReauthenticateTwitchChats, s.feedMon.ResetMembershipMemo, authFailureAnnounced)
 
 	// ProbeVideo callback for monitors (metadata check before job creation).
 	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight
@@ -1603,7 +1648,7 @@ func (s *runState) wireMonitorCallbacks() {
 				[]notifications.Field{
 					{Name: "Channel", Value: channelID, Inline: true},
 					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Last Error", Value: lastErr},
+					{Name: "Last Error", Value: notifications.EscapeMarkdown(lastErr)},
 				},
 				notifications.SendOptions{Event: "channel_unhealthy"},
 			)
