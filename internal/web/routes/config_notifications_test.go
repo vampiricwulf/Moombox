@@ -203,13 +203,8 @@ func TestDefaultMentionEventsMirroredInSettingsJS(t *testing.T) {
 	if strings.Join(js, ",") != strings.Join(config.DefaultMentionEvents(), ",") {
 		t.Errorf("settings.js DEFAULT_MENTION_EVENTS = %v, Go = %v", js, config.DefaultMentionEvents())
 	}
-	// The vocabulary the chips are drawn from must know every default that is
-	// already a real key. sidecar_down arrives with Arc N2a; until then it is
-	// inert by design, so it is exempt rather than asserted.
+	// The vocabulary the chips are drawn from must know every default.
 	for _, e := range config.DefaultMentionEvents() {
-		if e == "sidecar_down" {
-			continue
-		}
 		if !notifications.KnownEvents[e] {
 			t.Errorf("default mention event %q is not in the vocabulary", e)
 		}

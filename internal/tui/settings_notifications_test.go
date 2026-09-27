@@ -159,11 +159,10 @@ func TestNotifEditMentionToggleWritesExplicitList(t *testing.T) {
 
 // TestNotifEditKeepsMentionIDsWithNoRow: a resolved mention id this build's
 // EventGroups has no row for cannot be unticked, so a toggle on an unrelated
-// row must not write it out of existence. Live today for sidecar_down, which
-// config.DefaultMentionEvents() carries and Arc N2a adds to the registry — but
-// the rule outlives that: settings.js rebuilds from its RESOLVED list for
-// exactly this reason (its NOTIFICATION_EVENT_GROUPS comment says so), and an
-// id from a newer release in a hand-edited config is the same case.
+// row must not write it out of existence. settings.js rebuilds from its
+// RESOLVED list for exactly this reason (its NOTIFICATION_EVENT_GROUPS comment
+// says so); an id from a newer release in a hand-edited config is the case
+// that stays live in every build.
 func TestNotifEditKeepsMentionIDsWithNoRow(t *testing.T) {
 	const noRow = "an_event_from_a_newer_release"
 	stored := []string{"finished", noRow}
