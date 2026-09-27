@@ -178,13 +178,24 @@ func twitchChatDowngradeNotice(job *database.Job, channel, reason string) (
 		{Name: "Job", Value: job.ID, Inline: true},
 		{Name: "Reason", Value: reason, Inline: true},
 	}
+	// The one row→facts mapper, exactly as the worker's "Authentication
+	// Required" and "Job Failed" sends use it. This notice is per JOB, and
+	// isBatchable (internal/notifications/batch.go) admits `auth` into the 5 s
+	// coalescing window only when it carries a JobID — so without these the
+	// per-job auth burst never folds, the footer reads "Moombox" instead of
+	// "Moombox · twitch · {id}", and the dashboard deep link, which keys on
+	// JobID and Author both, never applies.
+	f := NotifyFacts(job)
 	opts = notifications.SendOptions{
-		URL:       job.URL,
-		Thumbnail: job.ThumbnailURL,
+		URL:       f.URL,
+		Thumbnail: f.ThumbnailURL,
 		// The same event as the worker's "Authentication Required" and the
 		// monitor's auth-loss alerts: an operator filtering for credential
 		// trouble is filtering for this too.
-		Event: "auth",
+		Event:    "auth",
+		Author:   notifyAuthor(f),
+		Platform: f.Platform,
+		JobID:    f.ID,
 	}
 	return title, description, fields, opts
 }

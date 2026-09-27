@@ -211,8 +211,8 @@ func effectiveTier(opts SendOptions) Tier {
 // non-nil on a sent object — the webhook default is {"parse": ["users"]}, so an
 // omitted list silently re-widens a role ping into "every user id in the text".
 //
-// Exported because Arc N2b resolves one per (target, event) and puts it in
-// SendOptions; MentionParse (discord.go) is the resolver.
+// Exported because Arc N2b resolves one per (target, event) and puts it onto
+// the Message; MentionParse (discord.go) is the resolver.
 type AllowedMentions struct {
 	Parse []string `json:"parse"`
 	Roles []string `json:"roles,omitempty"`
@@ -238,16 +238,11 @@ type SendOptions struct {
 	// TierUnset to derive it from Event.
 	Tier Tier
 
-	// Mention is the literal ping text ("<@&id>", "<@id>", "@everyone",
-	// "@here") a target is configured with, and MentionAllowed is the resolved
-	// allowed_mentions object for it — nil when THIS event is not in that
-	// target's mention_events, which is what stops the ping. Both are filled
-	// by Arc N2b (MentionParse resolves the object from the configured text);
-	// N1 defines the fields and the payload shape they produce. Embeds never
-	// mention on their own (per Discord API docs), so a ping needs the message
-	// `content` plus a matching `allowed_mentions` — see buildPayload.
-	Mention        string
-	MentionAllowed *AllowedMentions
+	// There is deliberately NO mention here. A ping is per TARGET and per
+	// MESSAGE, never per producer and never per embed: Manager.Send resolves
+	// it from targetQueue.mentionFor and writes it onto the Message, because
+	// `content` and `allowed_mentions` are the level Discord applies them at
+	// and an embed can never ping anyone. See Message (message.go).
 }
 
 // defaultWaitTimeout bounds Manager.Wait during graceful shutdown. Tests
@@ -267,13 +262,23 @@ type Manager struct {
 	// byKey indexes targets by resolved webhook URL so Reload can tell a
 	// surviving target from a new one.
 	byKey map[string]*targetQueue
+	// publicURL is network.public_url: the dashboard base every job embed's
+	// title links into. Guarded by targetsMu like the targets themselves, and
+	// written BEFORE applyTargets by both NewManager and Reload, so a Send
+	// that already sees the new targets can never still see the old base.
+	publicURL string
 	// shuttingDown flips once, in BeginShutdown; every queue holds a pointer
 	// to it and reads it per delivery.
 	shuttingDown atomic.Bool
 	// waitTimeout bounds Wait; zero means defaultWaitTimeout (test literals
 	// omit it). Set once at construction, never written afterwards.
 	waitTimeout time.Duration
-	logger      interface {
+	// clock is the time source every target's coalescing window is armed from
+	// (batch.go). Set once at construction and never written afterwards, so
+	// applyTargets can read it under targetsMu like waitTimeout; nil means
+	// realBatchClock{}, which is what a hand-built Manager in a test gets.
+	clock  batchClock
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -289,6 +294,13 @@ type notificationTarget struct {
 	// key is the RESOLVED webhook URL: the dedupe identity, and what Reload
 	// matches a surviving target on.
 	key string
+	// mention is the canonical ping text ("" = this target never pings),
+	// mentionAllowed the allowed_mentions object MentionParse resolved for it
+	// ONCE at build time, and mentionEvents the filter that decides which
+	// events carry the ping (nil whenever mention is "").
+	mention        string
+	mentionAllowed *AllowedMentions
+	mentionEvents  map[string]bool
 }
 
 // sender is one delivery destination.
@@ -296,9 +308,11 @@ type notificationTarget struct {
 // Send runs the full retry ladder; SendOnce makes exactly one attempt — used
 // during shutdown (the 10s force-exit cannot accommodate a 2s+5s ladder) and by
 // SendTest, where an interactive caller wants the immediate outcome.
+// Both take a whole Message — one POST, one to ten embeds — because Discord's
+// content, allowed_mentions and 6000-character total are all per MESSAGE.
 type sender interface {
-	Send(title, description string, color int, fields []Field, opts SendOptions) error
-	SendOnce(title, description string, color int, fields []Field, opts SendOptions) error
+	Send(msg Message) error
+	SendOnce(msg Message) error
 }
 
 // parseTarget resolves a configured notification URL into a sender.
@@ -358,11 +372,11 @@ func SendTest(url string) error {
 	if err != nil {
 		return err
 	}
-	return s.SendOnce("Test Notification",
+	return s.SendOnce(One("Test Notification",
 		"Moombox notifications are configured correctly",
 		TypeSuccess.Color(),
 		[]Field{{Name: "Status", Value: "Working", Inline: true}},
-		SendOptions{})
+		SendOptions{}))
 }
 
 // buildTargets converts the configured notification list into live targets,
@@ -389,6 +403,19 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 	for _, nc := range cfg.Notifications {
 		url := nc.URL
 		if url == "" {
+			continue
+		}
+
+		// A disabled target is kept in the config, with its filter and its
+		// mention intact, and delivers nothing. This is the mute an operator
+		// previously had to fake by deleting the webhook (the web UI's
+		// "untick every event" route silently subscribed them to EVERYTHING
+		// instead — an empty filter means all events).
+		//
+		// Before parseTarget and before the dedupe, so a disabled entry can
+		// neither shadow its enabled twin nor warn about a URL nobody uses.
+		if !nc.IsEnabled() {
+			logger.Info("notification target disabled — skipping", "url", redactURLForLog(url))
 			continue
 		}
 
@@ -426,6 +453,54 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			}
 		}
 
+		// Resolve the ping once per config load: the canonical text, the wire
+		// object, and the filter that says which events carry it.
+		var (
+			mention        string
+			mentionAllowed *AllowedMentions
+			mentionEvents  map[string]bool
+		)
+		// TWO parsers, two jobs. config.ParseMention validates the operator's
+		// string and hands back its canonical form — it lives in
+		// internal/config because that is where validateOrNormalize and both
+		// Settings editors need it, and internal/config cannot import this
+		// package (the import runs the other way). MentionParse
+		// (internal/notifications/discord.go) turns that canonical string into
+		// the wire object; N1 wrote it for this call and its doc comment says
+		// so. Do NOT rebuild the object from (form, id): MentionParse returns
+		// Parse: []string{} for the role and user forms, and Parse is
+		// json:"parse" WITHOUT omitempty precisely so an empty list is on the
+		// wire — a nil there marshals to "parse": null and re-widens the ping
+		// to the webhook default.
+		if canonical, _, _, err := config.ParseMention(nc.Mention); err == nil && canonical != "" {
+			mention = canonical
+			mentionAllowed = MentionParse(canonical)
+		}
+		if mention != "" && mentionAllowed != nil {
+			// ResolveMentionEvents encodes the three states: the default six
+			// when the key was never written, the stored list otherwise, and
+			// an explicit empty list as "never". An empty non-nil map is what
+			// carries "never" through to mentionFor — nil there would read as
+			// "no mention configured".
+			resolved := nc.ResolveMentionEvents()
+			mentionEvents = make(map[string]bool, len(resolved))
+			for _, e := range resolved {
+				if e == "" {
+					logger.Warn("notification target mentions on an empty event name — ignored",
+						"url", redactURLForLog(url))
+					continue
+				}
+				// Only an OPERATOR-written list is vocabulary-checked. The
+				// default list is ours, so warning about it would be noise
+				// about our own defaults at every startup.
+				if nc.MentionEvents != nil && !KnownEvents[e] {
+					logger.Warn("notification target mentions on an unknown event — it will never match",
+						"event", e, "url", redactURLForLog(url))
+				}
+				mentionEvents[e] = true
+			}
+		}
+
 		// Dedupe on the RESOLVED webhook URL, not the configured string: the
 		// two spellings of one webhook differ as text and resolve to the same
 		// destination. The FIRST occurrence wins — its sender and its slot in
@@ -441,7 +516,10 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// outright. nil means "every event", so a webhook listed once
 				// unfiltered and once filtered keeps the wider subscription the
 				// operator configured; narrowing it would silently drop alerts
-				// the config asked for.
+				// the config asked for. The MENTION is not unioned: the first
+				// occurrence's ping wins outright, like its sender and its
+				// slot, because two mentions have no wider form to merge into
+				// and pinging both would double one alert's noise.
 				switch {
 				case targets[idx].events == nil || events == nil:
 					targets[idx].events = nil
@@ -456,9 +534,12 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		}
 
 		targets = append(targets, notificationTarget{
-			sender: s,
-			events: events,
-			key:    key,
+			sender:         s,
+			events:         events,
+			key:            key,
+			mention:        mention,
+			mentionAllowed: mentionAllowed,
+			mentionEvents:  mentionEvents,
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
@@ -498,12 +579,17 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 	for _, t := range built {
 		if q, survives := previous[t.key]; survives && t.key != "" {
 			q.setEvents(t.events)
+			// The freshly built target is discarded here, so without this a
+			// save that changes ONLY mention or mention_events is accepted by
+			// both UIs, written to the file, and then ignored until restart —
+			// the same defect setEvents exists to prevent for the filter.
+			q.setMention(t)
 			next = append(next, q)
 			byKey[t.key] = q
 			delete(previous, t.key)
 			continue
 		}
-		q := newTargetQueue(t, m.logger, &m.shuttingDown)
+		q := newTargetQueue(t, m.logger, &m.shuttingDown, m.clock)
 		next = append(next, q)
 		if t.key != "" {
 			byKey[t.key] = q
@@ -518,8 +604,16 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 	m.byKey = byKey
 	m.targetsMu.Unlock()
 
-	// Outside the lock: stopDiscard takes the queue's own mutex and logs.
+	// Outside the lock: stopDiscard takes the queue's own mutex and logs, and
+	// so does the flush that precedes it.
 	for _, q := range retired {
+		// Flush the open window before the queue stops accepting. The flushed
+		// items land in a queue stopDiscard then drops, with N1's own "target
+		// removed — discarding its queued notifications" Warn naming the count
+		// (or the drain delivers them first, if it wins the race). That is the
+		// honest outcome for a webhook the operator has just deleted; losing
+		// them inside the batcher, with no line anywhere, is not.
+		q.batch.Stop()
 		q.stopDiscard()
 	}
 }
@@ -535,7 +629,12 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 	m := &Manager{
 		logger:      logger,
 		waitTimeout: defaultWaitTimeout,
+		clock:       realBatchClock{},
 	}
+	// Before applyTargets, which takes the same lock itself — see publicURL.
+	m.targetsMu.Lock()
+	m.publicURL = cfg.Network.PublicURL
+	m.targetsMu.Unlock()
 	m.applyTargets(buildTargets(cfg, logger))
 
 	if len(m.targets) > 0 {
@@ -553,6 +652,11 @@ func (m *Manager) Reload(cfg *config.MoomboxConfig) {
 	if m == nil {
 		return
 	}
+	// Before applyTargets, for the same reason NewManager writes it first: a
+	// Send that already sees the new targets must never see the old base URL.
+	m.targetsMu.Lock()
+	m.publicURL = cfg.Network.PublicURL
+	m.targetsMu.Unlock()
 	m.applyTargets(buildTargets(cfg, m.logger))
 	m.targetsMu.RLock()
 	n := len(m.targets)
@@ -579,9 +683,27 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// place, so iterating the snapshot after release is safe.
 	m.targetsMu.RLock()
 	targets := m.targets
+	pub := m.publicURL
 	m.targetsMu.RUnlock()
 	if len(targets) == 0 {
 		return
+	}
+
+	// The deep-link rewrite is install-wide, not per target, so it happens
+	// once — before the queued item every target receives is built.
+	//
+	// With no Author there is NO rewrite: the platform page would have nowhere
+	// to move to, and trading the only link to the video for a dashboard link
+	// is a net loss. N2a gives every job send an Author, so that arm is the
+	// pre-N2a and System-send case.
+	if pub != "" && opts.JobID != "" && opts.Author != nil {
+		// COPY the Author. It is a pointer the producer still owns and every
+		// target shares — writing through it would leak this rewrite into the
+		// caller's value and into the next send that reuses it.
+		author := *opts.Author
+		author.URL = opts.URL
+		opts.Author = &author
+		opts.URL = JobDeepLink(pub, opts.JobID)
 	}
 
 	// fields is COPIED here, once for every send rather than once per target.
@@ -590,19 +712,28 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// FieldBuilder's buffer it is free to reuse for its next send. One
 	// allocation per send buys the guarantee that what is delivered is what
 	// was asked for.
-	it := queued{
-		title:       title,
-		description: description,
-		color:       ntype.Color(),
-		fields:      append([]Field(nil), fields...),
-		opts:        opts,
-		tier:        effectiveTier(opts),
-	}
+	msg := One(title, description, ntype.Color(), append([]Field(nil), fields...), opts)
 	for _, q := range targets {
 		if !q.allows(opts.Event) {
 			continue
 		}
-		q.enqueue(it)
+		// The filter runs BEFORE the coalescing stage, so a target never
+		// accumulates an embed it would not have sent.
+		//
+		// The batcher decides immediately-or-coalesce from isBatchable(opts)
+		// and re-wraps the embed into a Message on the way out, which is also
+		// where the item's tier is derived (enqueueBatch) — from the embeds it
+		// actually carries rather than from this one send.
+		//
+		// The ping lands on the MESSAGE, not on the embed's opts: Discord
+		// applies content and allowed_mentions per message, so a batch of ten
+		// embeds pings once. The one Embed is shared across every target, which
+		// is safe because nothing mutates an Embed after One builds it (its
+		// fields were already copied once above); the *AllowedMentions is built
+		// once in buildTargets and never written after, so sharing that pointer
+		// across targets and sends is safe too.
+		mention, allowed := q.mentionFor(opts.Event)
+		q.batch.Add(msg.Embeds[0], mention, allowed)
 	}
 }
 
@@ -617,7 +748,23 @@ func (m *Manager) BeginShutdown() {
 	if m == nil {
 		return
 	}
+	// The flag goes FIRST. A flushed batch is enqueued like any other item and
+	// the drain goroutine can pop it the instant it lands; storing the flag
+	// afterwards leaves a window in which that pop reads false and spends the
+	// 2 s + 5 s retry ladder inside the process's 10 s force-exit.
 	m.shuttingDown.Store(true)
+
+	// A window open when shutdown begins is delivered, not evaporated. Flushed
+	// AFTER the flag so the batch is itself single-attempt, and still before
+	// Wait's closeDrain, because enqueue drops with a Warn once q.closing is
+	// set (queue.go) — a flush after that would emit the batch straight into
+	// the drop path. enqueue never reads shuttingDown; only deliver does (queue.go).
+	m.targetsMu.RLock()
+	targets := m.targets
+	m.targetsMu.RUnlock()
+	for _, q := range targets {
+		q.batch.Flush()
+	}
 }
 
 // effectiveWaitTimeout returns waitTimeout, or defaultWaitTimeout when the
@@ -656,6 +803,14 @@ func (m *Manager) Wait() {
 
 	timeout := m.effectiveWaitTimeout()
 	deadline := time.After(timeout)
+	// The open coalescing windows go out first. The order is not cosmetic:
+	// enqueue drops with a Warn once q.closing is set (queue.go), so a flush
+	// after closeDrain would emit every open window straight into the drop
+	// path — including `moombox add`'s "Video Added", whose whole delivery is
+	// this flush.
+	for _, q := range targets {
+		q.batch.Flush()
+	}
 	for _, q := range targets {
 		q.closeDrain()
 	}

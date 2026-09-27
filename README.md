@@ -677,7 +677,10 @@ Send Discord webhook notifications for stream and system events:
 ```toml
 [[notifications]]
 url = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
-events = ["found", "finished", "error"]  # Optional filter (default: all events)
+enabled = true                            # Optional: false mutes the target without deleting it
+events = ["found", "finished", "error"]   # Optional filter (default: all events)
+mention = "<@&ROLE_ID>"                   # Optional: ping a role, a user (<@USER_ID>), @everyone, or @here
+mention_events = ["error", "auth"]        # Optional: which events the ping rides along with (default: the six below)
 ```
 
 Discord webhooks only — the shorthand `discord://ID/TOKEN` works too. The full
@@ -685,6 +688,19 @@ list of event keys, and what each one fires on, is the event table in
 [docs/spec/operations.md](docs/spec/operations.md#notifications-discord-webhooks);
 both settings UIs offer the same list as toggles — chips in the web dashboard,
 checkboxes in the TUI — so you rarely need to write one by hand.
+
+### Mentions and dashboard links
+
+`mention` pings alongside the events a target is configured for — embeds can't mention on their
+own, so the ping rides in the message text instead. `mention_events` narrows
+which events carry it; leave it unset for the default six (`error`, `auth`,
+`disk_critical`, `update_failed`, `crash_recovered`, `sidecar_down`), or set it
+to `[]` for a mention that never fires. Set `network.public_url` to your
+dashboard's externally reachable address and a job embed's title links
+straight to that job (`{public_url}/#job=<id>`) instead of the platform page,
+which moves to the channel/author line. See
+[docs/spec/operations.md](docs/spec/operations.md#target-options) for the
+full rules.
 
 ## Job Status Flow
 

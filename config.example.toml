@@ -49,6 +49,16 @@
 # Applies immediately — no restart needed. Example:
 # trusted_proxies = ["172.18.0.0/16"]
 
+# Externally reachable base URL of this dashboard, e.g. "https://moombox.example.com"
+# or "http://192.168.1.10:774" on a LAN. Used only to link back to the dashboard
+# from notification embeds (a job's title links to "{public_url}/#job=<id>").
+# Moombox never binds to it or validates that it reaches this process — it's a
+# reverse proxy, tunnel, or port forward the operator has separately set up.
+# Must be an absolute http(s) URL with a host and no query, fragment, or
+# credentials. Leave unset (default) to omit the dashboard link from embeds.
+# Applies immediately — no restart needed.
+# public_url = "https://moombox.example.com"
+
 # ─── Paths ────────────────────────────────────────────────────────────────────
 [paths]
 
@@ -300,26 +310,22 @@
 # probe_targets = ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]  # host:port TCP targets raced to detect internet reachability (requires restart)
 
 # ─── Webhook Notifications ──────────────────────────────────────────────────
-# Send webhook notifications for stream events.
-# Works with Discord, Slack, ntfy, or any service that accepts POST webhooks.
+# Send Discord webhook notifications for stream events. Discord only —
+# parseTarget accepts a full Discord webhook URL or a "discord://ID/TOKEN"
+# shorthand, nothing else.
 # You can add multiple [[notifications]] blocks for different endpoints.
 #
-# Available events for filtering:
-#   found       — New video detected in RSS feed
-#   added       — Video manually added by user
-#   scheduled   — Upcoming stream scheduled
-#   live        — Stream went live
-#   downloading — Download started
-#   muxing      — FFmpeg muxing started
-#   finished    — Download completed successfully
-#   error       — Download failed
-#   auth        — Authentication issue (COOKIES? status)
-#   cancelled   — Job cancelled by user
+# The full event vocabulary is documented in docs/spec/operations.md under
+# "Event Types". A target with no "events" filter receives all of them.
 #
 # [[notifications]]
 # url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
-# events = ["live", "finished", "error"]   # Optional: only send these events (default: all)
-# tags = ["important"]                     # Optional: tags for routing/filtering
+# enabled = true                           # Optional: false mutes this target without deleting it (default: true)
+# events = ["found", "finished", "error"]  # Optional: only send these events (default: all)
+# mention = "<@&123456789012345678>"       # Optional: content line to ping a role (<@&ID>), a user (<@ID>), @everyone, or @here
+# mention_events = ["error", "auth"]       # Optional: which events the mention rides along with.
+#                                             Omit entirely to use the default six (error, auth, disk_critical,
+#                                             update_failed, crash_recovered, sidecar_down); set to [] to never mention.
 
 # ─── Channels ─────────────────────────────────────────────────────────────────
 # Add channels to monitor. Each [[channels]] block defines one channel.

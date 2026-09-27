@@ -1337,14 +1337,27 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
 				Add("Reason", reason).
 				Build()
+			// The same row→facts mapper the Job Failed send below uses, for
+			// the same three reasons and one more. This is a PER-JOB auth
+			// alert — one dead cookie parks N jobs — and isBatchable
+			// (internal/notifications/batch.go) admits `auth` into the 5 s
+			// coalescing window only when it carries a JobID, so without
+			// these the burst this arc exists to fold never folds. The footer
+			// reads "Moombox" with no platform and no id for the one alert an
+			// operator most needs to tell apart, and the deep link, which
+			// keys on JobID and Author both, never applies.
+			af := NotifyFacts(job)
 			w.notifier.Send("Authentication Required",
 				fmt.Sprintf("Cookies needed: %s", notifications.EscapeMarkdown(job.Title)),
 				notifications.TypeWarning,
 				authFields,
 				notifications.SendOptions{
-					URL:       job.URL,
-					Thumbnail: job.ThumbnailURL,
+					URL:       af.URL,
+					Thumbnail: af.ThumbnailURL,
 					Event:     "auth",
+					Author:    notifyAuthor(af),
+					Platform:  af.Platform,
+					JobID:     af.ID,
 				},
 			)
 		} else {
@@ -1391,10 +1404,6 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				AddIf(asides > 0, "Set-aside recordings",
 					fmt.Sprintf("%d — Recover to mux them", asides)).
 				Build()
-			var author *notifications.Author
-			if f.Channel != "" {
-				author = &notifications.Author{Name: f.Channel, IconURL: f.ChannelAvatarURL, URL: f.ChannelURL}
-			}
 			w.notifier.Send("Job Failed",
 				fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
 				notifications.TypeError,
@@ -1403,7 +1412,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 					URL:       f.URL,
 					Thumbnail: f.ThumbnailURL,
 					Event:     "error",
-					Author:    author,
+					Author:    notifyAuthor(f),
 					Platform:  f.Platform,
 					JobID:     f.ID,
 				},

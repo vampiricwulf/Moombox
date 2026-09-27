@@ -627,6 +627,12 @@
                                 placeholder="1.1.1.1:443, 8.8.8.8:443, 9.9.9.9:443"
                                 help-text="Comma-separated host:port TCP targets raced to detect internet reachability. Leave empty to keep the current targets. Requires restart."
                             ></sl-input>
+                            <sl-input
+                                id="cfg-public-url"
+                                label="Public Dashboard URL"
+                                placeholder="https://moombox.example.com"
+                                help-text="The address you reach this dashboard on from outside. Used only in webhook notifications: a job embed's title links here and opens that job. Leave empty to keep linking to YouTube/Twitch. Applies immediately."
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Password</h4>

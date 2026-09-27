@@ -78,6 +78,22 @@ type NetworkConfig struct {
 	// first-time password setup) intentionally ignore this setting and
 	// keep requiring a direct loopback connection.
 	TrustedProxies []string `toml:"trusted_proxies,omitempty" json:"trusted_proxies,omitempty"`
+
+	// PublicURL is the externally reachable base URL of this dashboard
+	// ("https://moombox.example.com", or "http://192.168.1.10:774" on a LAN).
+	// Empty means unset, which is the default and the pre-2.8.9 behaviour.
+	//
+	// Its only consumer is the notification manager: when set, a job embed's
+	// TITLE links to {public_url}/#job=<id> (the dashboard opens that job's
+	// details) and the platform page moves to the embed's author line. Moombox
+	// never binds to it, never validates that it reaches this process, and
+	// never redirects to it — it is a string the operator knows and Moombox
+	// does not (a reverse proxy, a tunnel, a port forward).
+	//
+	// Validated as an absolute http(s) URL with a host, no query, no fragment
+	// and no userinfo; a trailing slash is trimmed on the way in because the
+	// manager appends "/#job=". Hot-reloadable — read at send time.
+	PublicURL string `toml:"public_url,omitempty" json:"public_url,omitempty"`
 }
 
 // PathsConfig holds file and directory path settings.
@@ -448,8 +464,29 @@ func (c *ChannelConfig) GetPlatform() string {
 // round-tripped but read by nothing — leftover keys in existing TOML files
 // are ignored harmlessly by the decoder.)
 type NotificationConfig struct {
-	URL    string   `toml:"url,omitempty" json:"url,omitempty"`
-	Events []string `toml:"events,omitempty" json:"events,omitempty"`
+	URL string `toml:"url,omitempty" json:"url,omitempty"`
+	// Enabled is a mute switch: false keeps the target and its whole filter
+	// in the config but delivers nothing. Absent means enabled, so every
+	// config written before this key keeps working. A pointer for exactly
+	// that reason, mirroring ChannelConfig.Enabled.
+	Enabled *bool    `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	Events  []string `toml:"events,omitempty" json:"events,omitempty"`
+	// Mention is the content line prepended to this target's messages so a
+	// Discord role or user is actually pinged: "<@&ROLE_ID>", "<@USER_ID>",
+	// "@everyone" or "@here". Empty means no ping. An embed can never mention
+	// anyone on its own, which is why this is a separate key rather than
+	// something a producer could put in a description.
+	Mention string `toml:"mention,omitempty" json:"mention,omitempty"`
+	// MentionEvents is which events the Mention rides along with. THREE
+	// states, which is why it is a pointer to a slice and not a slice:
+	//   nil              — the key was never written; DefaultMentionEvents()
+	//                      applies (the owner's 2026-09-27 ruling).
+	//   pointer to empty — written as `mention_events = []`; mention NEVER.
+	//   pointer to a list— exactly those events.
+	// A plain []string cannot express the middle state: `omitempty` omits an
+	// empty slice from both the TOML and the JSON encoding, so "never" would
+	// reload as "the default six".
+	MentionEvents *[]string `toml:"mention_events,omitempty" json:"mention_events,omitempty"`
 }
 
 // TemplateVariables holds template variables for output filenames.

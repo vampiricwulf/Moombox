@@ -47,7 +47,30 @@ func newTestManagerWithLogger(t *testing.T, lg interface {
 }, waitTimeout time.Duration, targets ...notificationTarget,
 ) *Manager {
 	t.Helper()
-	m := &Manager{logger: lg, waitTimeout: waitTimeout}
+	return newTestManagerWithClockAndLogger(t, realBatchClock{}, lg, waitTimeout, targets...)
+}
+
+// newTestManagerWithClock is newTestManager's third form: the same Manager,
+// with a fake clock behind every target's coalescing window (batch.go), so a
+// batching test closes a window by hand instead of sleeping out batchWindow.
+// Production passes realBatchClock{}.
+func newTestManagerWithClock(t *testing.T, clk batchClock, waitTimeout time.Duration, targets ...notificationTarget) *Manager {
+	t.Helper()
+	return newTestManagerWithClockAndLogger(t, clk, testLogger{}, waitTimeout, targets...)
+}
+
+// newTestManagerWithClockAndLogger is the one body the three forms share. The
+// clock is threaded through applyTargets → newTargetQueue, which is the only
+// path that creates queues and starts goroutines.
+func newTestManagerWithClockAndLogger(t *testing.T, clk batchClock, lg interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, waitTimeout time.Duration, targets ...notificationTarget,
+) *Manager {
+	t.Helper()
+	m := &Manager{logger: lg, waitTimeout: waitTimeout, clock: clk}
 	m.applyTargets(targets)
 	t.Cleanup(func() {
 		for _, q := range m.targets {
@@ -57,6 +80,29 @@ func newTestManagerWithLogger(t *testing.T, lg interface {
 	return m
 }
 
+// newTestManagerWithClockFromConfig builds the targets from cfg — so a Reload's
+// diff has the same RESOLVED keys to match survivors on that production would —
+// and then swaps each built target's live DiscordWebhook for the test sender at
+// the same index. The swap is what keeps the package off the network: a target
+// built from a real discord:// URL would otherwise POST to Discord.
+func newTestManagerWithClockFromConfig(t *testing.T, clk batchClock, lg interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, cfg *config.MoomboxConfig, senders ...sender,
+) *Manager {
+	t.Helper()
+	built := buildTargets(cfg, lg)
+	if len(built) != len(senders) {
+		t.Fatalf("cfg built %d targets but %d test senders were given", len(built), len(senders))
+	}
+	for i := range built {
+		built[i].sender = senders[i]
+	}
+	return newTestManagerWithClockAndLogger(t, clk, lg, 5*time.Second, built...)
+}
+
 // recordingSender captures delivered titles so filter tests can assert
 // which notifications actually reached a target.
 type recordingSender struct {
@@ -64,15 +110,15 @@ type recordingSender struct {
 	sent []string
 }
 
-func (r *recordingSender) Send(title, _ string, _ int, _ []Field, _ SendOptions) error {
+func (r *recordingSender) Send(msg Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sent = append(r.sent, title)
+	r.sent = append(r.sent, msg.logTitle())
 	return nil
 }
 
-func (r *recordingSender) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
-	return r.Send(title, description, color, fields, opts)
+func (r *recordingSender) SendOnce(msg Message) error {
+	return r.Send(msg)
 }
 
 func (r *recordingSender) titles() []string {

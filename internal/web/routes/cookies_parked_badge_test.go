@@ -116,6 +116,10 @@ globalThis.__makeApp = function (jobs, parkedBaseline) {
     _evaluateArchiveBoundary() { return false; },
     _pruneArchivedAgainstActive() { return false; },
     _verifyJobExists() {},
+    // The #job=<id> deep link (Task 6): initial_state calls this
+    // unconditionally, fire-and-forget, once the badge/render work above is
+    // done. A no-op here is correct — this harness never sets location.hash.
+    _consumeJobHash() {},
     settings: { refreshBackfillBadges() {} },
     stats: { updateActiveIndicator() {}, updateDiskIndicator() {} },
     // The Arc I controllers handleMessage reaches: the log panel, the details

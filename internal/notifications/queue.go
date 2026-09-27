@@ -15,6 +15,11 @@ import (
 // roughly one delivery per second against a healthy webhook, 256 is over four
 // minutes of backlog — long enough that reaching the cap means Discord is
 // down, not that Moombox is busy.
+//
+// The unit is a MESSAGE, and since batching (batch.go) those two bursts arrive
+// coalesced: `found`, `added` and the per-job `auth` reach this queue as
+// ten-embed messages, so 256 items is up to 2,560 of those embeds. What can
+// still fill it one item at a time is the non-batchable families.
 const notificationQueueCap = 256
 
 // dropWarnInterval is how often ONE target may say it is shedding.
@@ -25,18 +30,18 @@ const notificationQueueCap = 256
 // pays, and 1,743 near-identical lines bury the incident they are reporting.
 // The count is the diagnostic, not the line per victim, so the lines coalesce
 // and each one carries the total since the last.
+//
+// That measurement predates batching (batch.go), when a find was one item: the
+// same sweep now arrives ten embeds to an item, so it takes roughly ten times
+// the catalogue to reach the same line count. The reasoning is unchanged — the
+// non-batchable families still arrive one item per send.
 const dropWarnInterval = 5 * time.Second
 
-// queued is one embed waiting for one target. The fields mirror Send's
-// parameters; the tier is resolved once at enqueue so the overflow policy
-// never has to re-derive it.
+// queued is one MESSAGE waiting for one target. The tier is resolved once at
+// enqueue so the overflow policy never has to re-derive it.
 type queued struct {
-	title       string
-	description string
-	color       int
-	fields      []Field
-	opts        SendOptions
-	tier        Tier
+	msg  Message
+	tier Tier
 }
 
 // targetQueue is one destination, its FIFO, and the single goroutine that
@@ -72,6 +77,14 @@ type targetQueue struct {
 	closing bool // drain what is queued, then exit (Wait)
 	discard bool // drop what is queued, then exit (a removed target)
 
+	// The ping, as buildTargets resolved it. Guarded by mu like events,
+	// because a Reload swaps them on a surviving queue while Send reads them.
+	// mention is "" when this target never pings; mentionEvents is nil then
+	// too, and an EMPTY non-nil map is the explicit "never".
+	mention        string
+	mentionAllowed *AllowedMentions
+	mentionEvents  map[string]bool
+
 	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
 	// of shed are counted separately because they mean different things: the
 	// oldest-low-priority kind is the policy working (chatter making room for
@@ -86,6 +99,11 @@ type targetQueue struct {
 	wake chan struct{}
 	// done closes when the goroutine has exited.
 	done chan struct{}
+
+	// batch is the coalescing stage in FRONT of this queue (batch.go). It has
+	// its own mutex and is never guarded by mu — Send calls it, and it calls
+	// back in through enqueueBatch.
+	batch *batcher
 }
 
 func newTargetQueue(t notificationTarget, logger interface {
@@ -93,17 +111,40 @@ func newTargetQueue(t notificationTarget, logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}, shuttingDown *atomic.Bool,
+}, shuttingDown *atomic.Bool, clock batchClock,
 ) *targetQueue {
-	return &targetQueue{
-		sender:       t.sender,
-		key:          t.key,
-		events:       t.events,
-		shuttingDown: shuttingDown,
-		logger:       logger,
-		wake:         make(chan struct{}, 1),
-		done:         make(chan struct{}),
+	q := &targetQueue{
+		sender:         t.sender,
+		key:            t.key,
+		events:         t.events,
+		mention:        t.mention,
+		mentionAllowed: t.mentionAllowed,
+		mentionEvents:  t.mentionEvents,
+		shuttingDown:   shuttingDown,
+		logger:         logger,
+		wake:           make(chan struct{}, 1),
+		done:           make(chan struct{}),
 	}
+	// The coalescing stage sits in front of THIS queue. It lives on the queue,
+	// not on the notificationTarget that built it, because applyTargets keeps a
+	// surviving target's queue and throws the freshly built target away — a
+	// batcher hung on the latter would take every open window with it on each
+	// unrelated config save, silently.
+	q.batch = newBatcher(batchWindow, clock, q.enqueueBatch, logger)
+	return q
+}
+
+// enqueueBatch is the batcher's exit: it wraps one coalesced Message in a
+// queue item — tier from batchIsLowTier, the message keeping whatever single
+// mention the flush chose — and hands it to the ordinary FIFO. Named apart
+// from enqueue, which takes an already-built queued item and is what this
+// calls.
+func (q *targetQueue) enqueueBatch(msg Message) {
+	tier := TierNormal
+	if batchIsLowTier(msg.Embeds) {
+		tier = TierLow
+	}
+	q.enqueue(queued{msg: msg, tier: tier})
 }
 
 // signal nudges the draining goroutine without ever blocking the caller —
@@ -143,6 +184,47 @@ func (q *targetQueue) setEvents(events map[string]bool) {
 	q.mu.Unlock()
 }
 
+// mentionFor returns the content mention this target attaches to event and the
+// matching allowed_mentions object, or ("", nil) when the target has no
+// mention configured or the event is not in its mention filter.
+//
+// Alias-aware by the same rule and the same eventAliases table as allows, so a
+// target that asked to be pinged for the broader legacy event is still pinged
+// for the more specific one that split from it. Unlike allows, an EMPTY event
+// pings nobody: an empty Event bypasses the delivery filter by design, and
+// carrying that exemption over to the ping would mean any send that forgot its
+// event name mentioned everyone.
+func (q *targetQueue) mentionFor(event string) (string, *AllowedMentions) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.mention == "" || q.mentionAllowed == nil || event == "" {
+		return "", nil
+	}
+	if q.mentionEvents[event] {
+		return q.mention, q.mentionAllowed
+	}
+	// The ok-check matters for the same reason it does in allows: a bare map
+	// miss yields "", and an "" key in the filter would then match every
+	// non-aliased event.
+	if alias, hasAlias := eventAliases[event]; hasAlias && q.mentionEvents[alias] {
+		return q.mention, q.mentionAllowed
+	}
+	return "", nil
+}
+
+// setMention swaps the mention on a target that survived a Reload — the twin
+// of setEvents, and required for the same reason: applyTargets keeps a
+// survivor's queue and discards the freshly built notificationTarget, so
+// without this a save that changes only `mention` or `mention_events` is
+// silently ignored for every webhook that survived the diff.
+func (q *targetQueue) setMention(t notificationTarget) {
+	q.mu.Lock()
+	q.mention = t.mention
+	q.mentionAllowed = t.mentionAllowed
+	q.mentionEvents = t.mentionEvents
+	q.mu.Unlock()
+}
+
 // pending is the queue depth, for tests and for the discard report.
 func (q *targetQueue) pending() int {
 	q.mu.Lock()
@@ -162,7 +244,7 @@ func (q *targetQueue) enqueue(it queued) {
 	if q.closing || q.discard {
 		q.mu.Unlock()
 		q.logger.Warn("dropping notification — the target is shutting down",
-			"event", it.opts.Event, "title", it.title)
+			"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
 	}
 	if len(q.items) < notificationQueueCap {
@@ -185,7 +267,7 @@ func (q *targetQueue) enqueue(it queued) {
 			q.logger.Warn("notification queue full — shedding notifications",
 				"cap", notificationQueueCap, "dropped_newest", nNewest,
 				"dropped_oldest_low_priority", nOldest,
-				"event", it.opts.Event, "title", it.title)
+				"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		}
 		return
 	}
@@ -198,7 +280,7 @@ func (q *targetQueue) enqueue(it queued) {
 		q.logger.Warn("notification queue full — shedding notifications",
 			"cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
 			"dropped_newest", nNewest,
-			"event", dropped.opts.Event, "title", dropped.title)
+			"event", dropped.msg.logEvent(), "title", dropped.msg.logTitle())
 	}
 	q.signal()
 }
@@ -335,9 +417,9 @@ func (q *targetQueue) deliver(it queued) {
 		// Owner ruling: shutdown sends are single-attempt and the 10s
 		// force-exit stays. A 2s+5s retry ladder cannot finish inside a window
 		// the worker stop may already have spent.
-		err = q.sender.SendOnce(it.title, it.description, it.color, it.fields, it.opts)
+		err = q.sender.SendOnce(it.msg)
 	} else {
-		err = q.sender.Send(it.title, it.description, it.color, it.fields, it.opts)
+		err = q.sender.Send(it.msg)
 	}
 	if err != nil {
 		q.logger.Error("notification send failed", "err", err)

@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -17,25 +18,28 @@ type gateSender struct {
 
 	mu     sync.Mutex
 	titles []string
-	once   []string // titles delivered via SendOnce
+	once   []string  // titles delivered via SendOnce
+	msgs   []Message // the whole messages, for the tests that count embeds
 }
 
 func newGateSender() *gateSender { return &gateSender{gate: make(chan struct{})} }
 
-func (g *gateSender) Send(title, _ string, _ int, _ []Field, _ SendOptions) error {
+func (g *gateSender) Send(msg Message) error {
 	<-g.gate
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.titles = append(g.titles, title)
+	g.titles = append(g.titles, msg.logTitle())
+	g.msgs = append(g.msgs, msg)
 	return nil
 }
 
-func (g *gateSender) SendOnce(title, _ string, _ int, _ []Field, _ SendOptions) error {
+func (g *gateSender) SendOnce(msg Message) error {
 	<-g.gate
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.titles = append(g.titles, title)
-	g.once = append(g.once, title)
+	g.titles = append(g.titles, msg.logTitle())
+	g.msgs = append(g.msgs, msg)
+	g.once = append(g.once, msg.logTitle())
 	return nil
 }
 
@@ -51,6 +55,12 @@ func (g *gateSender) singleAttempts() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]string(nil), g.once...)
+}
+
+func (g *gateSender) deliveredMessages() []Message {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]Message(nil), g.msgs...)
 }
 
 // waitFor polls cond until it holds or the deadline passes. The queue is
@@ -102,16 +112,22 @@ func TestQueueDeliversInFIFOOrder(t *testing.T) {
 // THE MUTANT: dropping the newest unconditionally (the `error` never arrives),
 // or dropping the oldest unconditionally (a queue full of alerts starts
 // shedding alerts).
+//
+// The low-tier event here is `scheduled`, not `found`: both are TierLow
+// (lowTierEvents), but `found` COALESCES (batch.go), so 257 of them would
+// reach this queue as 26 ten-embed items and the cap would never be touched.
+// This test is about the queue's overflow policy, so it uses the low-tier
+// event that still arrives one per item.
 func TestQueueOverflowDropsTheOldestLowTier(t *testing.T) {
 	g := newGateSender()
 	m := newTestManager(t, 5*time.Second, notificationTarget{sender: g, key: "k1"})
 
 	// One send is popped immediately and blocks on the gate; the next
 	// notificationQueueCap fill the queue exactly.
-	m.Send("found-0", "", TypeInfo, nil, SendOptions{Event: "found"})
+	m.Send("low-0", "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	waitFor(t, "the head to be in flight", func() bool { return m.targets[0].pending() == 0 })
 	for i := 1; i <= notificationQueueCap; i++ {
-		m.Send("found-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+		m.Send("low-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	}
 	if got := m.targets[0].pending(); got != notificationQueueCap {
 		t.Fatalf("queue holds %d, want %d before the overflow", got, notificationQueueCap)
@@ -128,11 +144,11 @@ func TestQueueOverflowDropsTheOldestLowTier(t *testing.T) {
 	if !strings.Contains(joined, "the-alert") {
 		t.Errorf("the alert was dropped at a full queue — that is exactly the old semaphore's bug: %v", got)
 	}
-	if strings.Contains(joined, "found-1,") {
-		t.Errorf("found-1 survived — the OLDEST queued low-tier entry is the one that goes: %v", got[:5])
+	if strings.Contains(joined, "low-1,") {
+		t.Errorf("low-1 survived — the OLDEST queued low-tier entry is the one that goes: %v", got[:5])
 	}
-	if !strings.Contains(joined, "found-0") {
-		t.Errorf("found-0 was the in-flight item and must still be delivered: %v", got[:5])
+	if !strings.Contains(joined, "low-0") {
+		t.Errorf("low-0 was the in-flight item and must still be delivered: %v", got[:5])
 	}
 }
 
@@ -163,6 +179,78 @@ func TestQueueOverflowDropsTheNewestWhenNothingIsLowTier(t *testing.T) {
 	}
 }
 
+// TestQueueCapCountsMessagesNotEmbeds is T8-M3: the unit of everything in this
+// file changed when batching landed.
+//
+// notificationQueueCap, dropped_oldest_low_priority, dropped_newest and pop's
+// "dropped" total now count MESSAGES of one to ten embeds, not embeds. The two
+// overflow tests above reach the cap with `scheduled` precisely BECAUSE
+// `found` coalesces; this one is the other side of that sentence — it drives
+// the cap with the coalescing event and pins that 256 items is 256 messages,
+// and that shedding one sheds every embed it was carrying.
+//
+// THE MUTANT: counting embeds anywhere — at the cap, or when a victim is shed.
+// A cap in embeds would start shedding at the 26th window here, and a shed
+// that dropped one embed out of a message would leave a half-message on the
+// wire.
+func TestQueueCapCountsMessagesNotEmbeds(t *testing.T) {
+	const perWindow = 3
+	g := newGateSender()
+	clk := &fakeBatchClock{}
+	m := newTestManagerWithClock(t, clk, 5*time.Second, notificationTarget{sender: g, key: "k1"})
+
+	// window closes one whole coalescing window of `found`s: perWindow sends,
+	// then the timer. Each window leaves the batcher as exactly one message.
+	window := func(n int) {
+		for j := 0; j < perWindow; j++ {
+			m.Send("w"+itoa(n)+"-"+itoa(j), "", TypeInfo, nil,
+				SendOptions{Event: "found", JobID: "w" + itoa(n) + "-" + itoa(j)})
+		}
+		clk.fire()
+	}
+
+	// The first window is popped immediately and blocks on the gate; the next
+	// notificationQueueCap fill the queue exactly.
+	window(0)
+	waitFor(t, "the head to be in flight", func() bool { return m.targets[0].pending() == 0 })
+	for i := 1; i <= notificationQueueCap; i++ {
+		window(i)
+	}
+	if got := m.targets[0].pending(); got != notificationQueueCap {
+		t.Fatalf("queue holds %d messages, want %d — %d embeds went in, so a cap counted in embeds "+
+			"would have started shedding long ago",
+			got, notificationQueueCap, notificationQueueCap*perWindow)
+	}
+
+	// The overflow: one more window at a full queue. Everything queued is
+	// TierLow, so the OLDEST message goes — all perWindow of its embeds.
+	window(notificationQueueCap + 1)
+	if got := m.targets[0].pending(); got != notificationQueueCap {
+		t.Fatalf("queue holds %d messages after the overflow, want %d", got, notificationQueueCap)
+	}
+
+	g.release()
+	waitFor(t, "the queue to drain", func() bool {
+		return len(g.deliveredMessages()) == notificationQueueCap+1
+	})
+
+	got := g.deliveredMessages()
+	embeds := 0
+	for _, msg := range got {
+		embeds += len(msg.Embeds)
+		for _, e := range msg.Embeds {
+			if strings.HasPrefix(e.Title, "w1-") {
+				t.Errorf("embed %q survived — its message was the shed one, and a message is shed whole",
+					e.Title)
+			}
+		}
+	}
+	if want := (notificationQueueCap + 1) * perWindow; embeds != want {
+		t.Errorf("delivered %d embeds in %d messages, want %d — one whole message (%d embeds) is shed, "+
+			"no more and no less", embeds, len(got), want, perWindow)
+	}
+}
+
 // TestOverflowWarnsAreCoalescedWithoutLosingTheCount is T4-m3.
 //
 // The scenario is a backfill re-scan (R B) while Discord is unreachable: every
@@ -177,21 +265,26 @@ func TestQueueOverflowDropsTheNewestWhenNothingIsLowTier(t *testing.T) {
 //
 // THE MUTANT: warning per drop (the first assertion sees ~1,000 lines), or
 // coalescing without the drain-time flush (the total reads 1).
+//
+// `scheduled` rather than `found` for the reason
+// TestQueueOverflowDropsTheOldestLowTier gives: both are TierLow, but `found`
+// coalesces into ten-embed items before it ever reaches this queue, and this
+// test is about what the QUEUE does when 1,000 items arrive at a full one.
 func TestOverflowWarnsAreCoalescedWithoutLosingTheCount(t *testing.T) {
 	g := newGateSender()
 	lg := &countingLogger{}
 	m := newTestManagerWithLogger(t, lg, 5*time.Second, notificationTarget{sender: g, key: "k1"})
 
 	// One in flight against the gate, then exactly cap queued behind it.
-	m.Send("found-0", "", TypeInfo, nil, SendOptions{Event: "found"})
+	m.Send("low-0", "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	waitFor(t, "the head to be in flight", func() bool { return m.targets[0].pending() == 0 })
 	for i := 1; i <= notificationQueueCap; i++ {
-		m.Send("found-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+		m.Send("low-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	}
 
 	const overflow = 1000
 	for i := range overflow {
-		m.Send("spill-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+		m.Send("spill-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	}
 
 	// The burst runs in milliseconds, so it is one coalescing window: one line.
@@ -223,16 +316,16 @@ type fieldSender struct {
 	fields []Field
 }
 
-func (f *fieldSender) Send(_, _ string, _ int, fields []Field, _ SendOptions) error {
+func (f *fieldSender) Send(msg Message) error {
 	<-f.gate
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.fields = fields
+	f.fields = msg.Embeds[0].Fields
 	return nil
 }
 
-func (f *fieldSender) SendOnce(t, d string, c int, fields []Field, o SendOptions) error {
-	return f.Send(t, d, c, fields, o)
+func (f *fieldSender) SendOnce(msg Message) error {
+	return f.Send(msg)
 }
 
 func (f *fieldSender) got() []Field {
@@ -299,10 +392,10 @@ func (l *reentrantLogger) Warn(string, ...any) {
 // then times out on its watchdog instead of returning.
 func TestPopLogsOutsideTheQueueLock(t *testing.T) {
 	lg := &reentrantLogger{}
-	q := newTargetQueue(notificationTarget{sender: newGateSender(), key: "k1"}, lg, nil)
+	q := newTargetQueue(notificationTarget{sender: newGateSender(), key: "k1"}, lg, nil, nil)
 	lg.q = q
 
-	q.enqueue(queued{title: "doomed", tier: TierLow})
+	q.enqueue(queued{msg: One("doomed", "", 0, nil, SendOptions{}), tier: TierLow})
 	q.mu.Lock()
 	q.discard = true
 	q.mu.Unlock()
@@ -410,6 +503,75 @@ func TestBeginShutdownSendsSingleAttempt(t *testing.T) {
 
 	if got := g.singleAttempts(); len(got) != 1 || got[0] != "shutting-down" {
 		t.Errorf("single-attempt deliveries = %v, want [shutting-down] — a shutdown send must not run the retry ladder", got)
+	}
+}
+
+// attemptSender fails every delivery — the state in which the difference
+// between Send and SendOnce is the 2 s + 5 s retry ladder — and counts which
+// method the queue chose.
+type attemptSender struct {
+	mu   sync.Mutex
+	send int
+	once int
+}
+
+func (s *attemptSender) Send(Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.send++
+	return errDeliveryFailed
+}
+
+func (s *attemptSender) SendOnce(Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.once++
+	return errDeliveryFailed
+}
+
+func (s *attemptSender) counts() (send, once int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.send, s.once
+}
+
+var errDeliveryFailed = errors.New("discord is down")
+
+// TestBeginShutdownFlushesTheOpenWindowSingleAttempt is T8-M1.
+//
+// BeginShutdown flushes every open coalescing window so the batch it holds is
+// not evaporated — but the flush ENQUEUES, and the drain goroutine can pop
+// what it enqueued immediately. Storing shuttingDown after the flush therefore
+// leaves a window in which deliver reads false and the flushed batch takes
+// the full 2 s + 5 s retry ladder, inside the process's 10 s force-exit.
+//
+// THE MUTANT: moving m.shuttingDown.Store(true) back below the flush loop.
+// With one embed the window is a single enqueue and the drain goroutine loses
+// the wake-up race almost every time (a probe exposed 0 of 400), so the window
+// here is WIDE on purpose: 200 coalesced embeds split into 20 messages, and
+// the goroutine has the remaining nineteen emits' worth of wall clock to pop
+// the first one while the flag is still false. With the flag stored first
+// there is no interleaving at all, so the assertion never flakes the other
+// way.
+func TestBeginShutdownFlushesTheOpenWindowSingleAttempt(t *testing.T) {
+	const embeds = 200
+	s := &attemptSender{}
+	clk := &fakeBatchClock{}
+	m := newTestManagerWithClock(t, clk, 5*time.Second, notificationTarget{sender: s, key: "k1"})
+
+	// Batchable sends: they sit in the open window and nothing is queued yet.
+	for i := 0; i < embeds; i++ {
+		m.Send("Stream Found", "", TypeInfo, nil, SendOptions{Event: "found", JobID: itoa(i)})
+	}
+	m.BeginShutdown()
+	m.Wait()
+
+	send, once := s.counts()
+	wantMessages := embeds / maxEmbedsPerMessage
+	if send != 0 || once != wantMessages {
+		t.Errorf("the flushed window took %d laddered attempt(s) and %d single attempt(s), want 0 and %d — "+
+			"BeginShutdown must store shuttingDown BEFORE it flushes, or the batch it just rescued "+
+			"spends the shutdown budget on a 2s+5s ladder", send, once, wantMessages)
 	}
 }
 

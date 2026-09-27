@@ -40,13 +40,13 @@ func firstEmbed(t *testing.T, p map[string]any) map[string]any {
 // THE MUTANT: dropping the `author` key, or serialising it when Name is empty
 // (Discord rejects an author object with no name — a permanent 400).
 func TestPayloadCarriesTheAuthorBlock(t *testing.T) {
-	body, err := buildPayload("T", "D", 0x1, nil, SendOptions{
+	body, err := buildPayload(One("T", "D", 0x1, nil, SendOptions{
 		Author: &Author{
 			Name:    "Some Channel",
 			IconURL: "https://example.invalid/avatar.jpg",
 			URL:     "https://example.invalid/channel",
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("buildPayload: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestPayloadCarriesTheAuthorBlock(t *testing.T) {
 	}
 
 	t.Run("an author with no name is omitted entirely", func(t *testing.T) {
-		body, err := buildPayload("T", "D", 0x1, nil, SendOptions{Author: &Author{IconURL: "https://example.invalid/a.jpg"}})
+		body, err := buildPayload(One("T", "D", 0x1, nil, SendOptions{Author: &Author{IconURL: "https://example.invalid/a.jpg"}}))
 		if err != nil {
 			t.Fatalf("buildPayload: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestFooterNamesThePlatformAndJob(t *testing.T) {
 		{"job only", SendOptions{JobID: "yt_abc"}, "Moombox · yt_abc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := buildPayload("T", "D", 0x1, nil, tc.opts)
+			body, err := buildPayload(One("T", "D", 0x1, nil, tc.opts))
 			if err != nil {
 				t.Fatalf("buildPayload: %v", err)
 			}
@@ -132,10 +132,9 @@ func TestMentionPayloadShape(t *testing.T) {
 		{"here", "@here", nil, nil, []any{"everyone"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := buildPayload("T", "D", 0x1, nil, SendOptions{
-				Mention:        tc.mention,
-				MentionAllowed: MentionParse(tc.mention),
-			})
+			msg := One("T", "D", 0x1, nil, SendOptions{})
+			msg.Mention, msg.MentionAllowed = tc.mention, MentionParse(tc.mention)
+			body, err := buildPayload(msg)
 			if err != nil {
 				t.Fatalf("buildPayload: %v", err)
 			}
@@ -177,7 +176,7 @@ func TestMentionPayloadShape(t *testing.T) {
 	}
 
 	t.Run("no mention means no content and no allowed_mentions", func(t *testing.T) {
-		body, err := buildPayload("T", "D", 0x1, nil, SendOptions{})
+		body, err := buildPayload(One("T", "D", 0x1, nil, SendOptions{}))
 		if err != nil {
 			t.Fatalf("buildPayload: %v", err)
 		}
@@ -191,7 +190,9 @@ func TestMentionPayloadShape(t *testing.T) {
 	})
 
 	t.Run("a mention the target is not allowed for is not sent", func(t *testing.T) {
-		body, err := buildPayload("T", "D", 0x1, nil, SendOptions{Mention: "@everyone", MentionAllowed: nil})
+		msg := One("T", "D", 0x1, nil, SendOptions{})
+		msg.Mention, msg.MentionAllowed = "@everyone", nil
+		body, err := buildPayload(msg)
 		if err != nil {
 			t.Fatalf("buildPayload: %v", err)
 		}
@@ -201,7 +202,7 @@ func TestMentionPayloadShape(t *testing.T) {
 	})
 
 	// MentionParse is where the "unrecognised form is dropped" rule lives now
-	// that the object travels in SendOptions: N2b resolves the configured text
+	// that the object travels on the Message: N2b resolves the configured text
 	// through it, so a config string that is not a mention must resolve to nil
 	// rather than to an unrestricted ping.
 	t.Run("MentionParse rejects everything that is not a mention form", func(t *testing.T) {
@@ -246,11 +247,11 @@ func TestEffectiveTierDerivesFromTheEvent(t *testing.T) {
 // TestSendOptionsStillCarriesTheOldKeys guards against a rename sweeping away
 // a field 36 producers set.
 func TestSendOptionsStillCarriesTheOldKeys(t *testing.T) {
-	body, err := buildPayload("T", "D", 0x1, nil, SendOptions{
+	body, err := buildPayload(One("T", "D", 0x1, nil, SendOptions{
 		URL:       "https://example.invalid/watch",
 		Thumbnail: "https://example.invalid/t.jpg",
 		Image:     "https://example.invalid/i.jpg",
-	})
+	}))
 	if err != nil {
 		t.Fatalf("buildPayload: %v", err)
 	}

@@ -62,13 +62,22 @@ func (m *SettingsModel) updateTextInputForField() {
 		return
 	}
 
-	// Notification edit mode - URL field
-	if sec.name == "Integrations" && m.notifMode == "edit" && m.notifEditFocus == 0 {
-		m.textInput.EchoMode = textinput.EchoNormal
-		m.textInput.Validate = nil
-		m.textInput.SetValue(m.notifEditURL)
-		m.textInput.Focus()
-		return
+	// Notification edit mode - the two text rows (URL and Mention)
+	if sec.name == "Integrations" && m.notifMode == "edit" {
+		switch m.notifEditFocus {
+		case notifEditURLRow:
+			m.textInput.EchoMode = textinput.EchoNormal
+			m.textInput.Validate = nil
+			m.textInput.SetValue(m.notifEditURL)
+			m.textInput.Focus()
+			return
+		case notifEditMentionRow:
+			m.textInput.EchoMode = textinput.EchoNormal
+			m.textInput.Validate = nil
+			m.textInput.SetValue(m.notifEditMention)
+			m.textInput.Focus()
+			return
+		}
 	}
 
 	// Normal field sections
@@ -168,10 +177,16 @@ func (m *SettingsModel) syncFromTextInput() {
 		return
 	}
 
-	// Notification edit - URL
-	if sec.name == "Integrations" && m.notifMode == "edit" && m.notifEditFocus == 0 {
-		m.notifEditURL = val
-		return
+	// Notification edit - the two text rows
+	if sec.name == "Integrations" && m.notifMode == "edit" {
+		switch m.notifEditFocus {
+		case notifEditURLRow:
+			m.notifEditURL = val
+			return
+		case notifEditMentionRow:
+			m.notifEditMention = val
+			return
+		}
 	}
 
 	// Normal fields

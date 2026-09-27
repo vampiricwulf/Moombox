@@ -47,3 +47,23 @@ func NotifyFacts(j *database.Job) notifications.JobFacts {
 	}
 	return f
 }
+
+// notifyAuthor is this package's copy of the builders' authorFor
+// (internal/notifications/builders.go): the embed's author line, or nil when
+// the channel is unknown.
+//
+// A copy because authorFor is unexported and the builders are the only callers
+// inside that package — the three job sends this package assembles by hand
+// (the "Job Failed" embed, the per-job "Authentication Required", and the
+// Twitch chat downgrade) cannot reach it. One copy here rather than three
+// inline blocks is what makes "the same row produces the same Author" true by
+// construction rather than by three sites agreeing.
+//
+// The name is RAW for the same reason it is there: Discord renders no markdown
+// in the author bar, so escaping would show the backslashes.
+func notifyAuthor(f notifications.JobFacts) *notifications.Author {
+	if f.Channel == "" {
+		return nil
+	}
+	return &notifications.Author{Name: f.Channel, IconURL: f.ChannelAvatarURL, URL: f.ChannelURL}
+}

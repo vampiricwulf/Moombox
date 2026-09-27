@@ -488,6 +488,7 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | ClientTokenTTLDays | int | 365 | `client_token_ttl_days` | Valid range: 1-3650. Also enforced by `PUT /api/config` (`validateConfigUpdates`), so an out-of-range value is a field error, not a silent clamp. |
 | TrustForwardedProto | bool | false | `trust_forwarded_proto` | Only behind a TLS-terminating proxy that strips the client's own header. Hot-reloadable: a config save re-applies it (`OnTrustForwardedProtoChange`). |
 | TrustedProxies | []string | `[]` | `trusted_proxies` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored. Entries must parse as an IP or CIDR (invalid ones are reported and dropped). Hot-reloadable — no restart. See [security.md](security.md) |
+| PublicURL | string | "" | `public_url` | Externally reachable dashboard base URL. Empty means unset. Consumed only by the notification manager, which links a job embed's title to `{public_url}/#job=<id>`. Must be an absolute http(s) URL with a host and no query, fragment, or userinfo — validated by `ValidatePublicURL`, which also trims a trailing slash. An unusable value is reported and cleared, never substituted. Hot-reloadable — read at send time. |
 
 #### [paths]
 
@@ -612,11 +613,13 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 #### [[notifications]] (array of tables)
 
-| Field | Type | TOML Key |
-|-------|------|----------|
-| URL | string | `url` | Webhook URL |
-| Tags | []string | `tags` | Filter tags |
-| Events | []string | `events` | Event types to notify on |
+| Field | Type | TOML Key | Notes |
+|-------|------|----------|-------|
+| URL | string | `url` | Discord webhook URL, full or `discord://ID/TOKEN` shorthand |
+| Enabled | *bool | `enabled` | nil defaults to true (`IsEnabled`), mirroring `ChannelConfig.Enabled`. `false` mutes the target without deleting its filter. |
+| Events | []string | `events` | Event types to notify on. Empty/absent means all. Vocabulary is `notifications.EventGroups`, not enforced here (would be an import cycle) — checked at `buildTargets` and the web save path. |
+| Mention | string | `mention` | Content line pinging a role (`<@&ID>`), a user (`<@ID>`, also accepts the legacy `<@!ID>` nickname spelling), `@everyone`, or `@here`. Empty means no ping. Validated and canonicalised by `ParseMention`. |
+| MentionEvents | *[]string | `mention_events` | Which events `Mention` rides along with. Three states: absent → `DefaultMentionEvents()` (`error`, `auth`, `disk_critical`, `update_failed`, `crash_recovered`, `sidecar_down`); pointer to an empty list (`mention_events = []`) → never; pointer to a list → exactly those events. See `ResolveMentionEvents`. |
 
 ### FlexDuration
 

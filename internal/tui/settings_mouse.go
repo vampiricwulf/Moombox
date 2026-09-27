@@ -94,7 +94,7 @@ func (m *SettingsModel) handleMouseScroll(down bool) {
 	case "Integrations":
 		if m.notifMode == "edit" {
 			if down {
-				total := 1 + len(allNotifEvents)
+				total := notifEditEventBase + len(allNotifEvents)
 				if m.notifEditFocus < total-1 {
 					m.notifEditFocus++
 					m.updateTextInputForField()
@@ -377,19 +377,29 @@ func (m *SettingsModel) handleMouseChannelClick(contentY int) {
 func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 	if m.notifMode == "edit" {
 		// Original (unscrolled) layout:
-		// Line 0: title  | Line 1: URL field | Line 2: empty
-		// Line 3: "Events (Space to toggle):" | Line 4+: event groups
+		// Line 0: title | Line 1: URL | Line 2: Enabled | Line 3: Mention
+		// Line 4: empty | Line 5: "Events (...)" | Line 6+: event groups
 		// renderNotifEdit pins the title (line 0) and scrolls the body to keep
 		// focus visible, so map the on-screen row back through that offset.
 		origLine := notifEditClickLine(contentY, m.notifEditScrollStart)
-		if origLine == 1 {
-			m.notifEditFocus = 0
+		switch origLine {
+		case notifEditURLRow + 1, notifEditMentionRow + 1:
+			m.notifEditFocus = origLine - 1
+			m.updateTextInputForField()
+			return
+		case notifEditEnabledRow + 1:
+			// Focus AND flip, the same way a click on the channel editor's
+			// Enabled row does — the row is the control.
+			m.notifEditFocus = notifEditEnabledRow
+			m.notifEditEnabled = !m.notifEditEnabled
 			m.updateTextInputForField()
 			return
 		}
 		// Map event lines: clickNotifEvent accounts for group headers/blanks.
-		if origLine >= 4 {
-			m.clickNotifEvent(origLine - 4)
+		// notifEditEventBase+3 = the first event-group line: the three form
+		// rows, plus the title, the blank and the "Events" header above them.
+		if eventsTop := notifEditEventBase + 3; origLine >= eventsTop {
+			m.clickNotifEvent(origLine - eventsTop)
 		}
 		return
 	}
@@ -437,7 +447,7 @@ func (m *SettingsModel) clickNotifEvent(eventLine int) {
 		// Events in this group
 		for _, event := range group.events {
 			if eventLine == line {
-				m.notifEditFocus = flatIdx + 1
+				m.notifEditFocus = flatIdx + notifEditEventBase
 				m.notifEditEvents[event] = !m.notifEditEvents[event]
 				m.updateTextInputForField()
 				return
