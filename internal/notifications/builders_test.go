@@ -310,6 +310,57 @@ func TestEscapeReachesEveryJobSuppliedString(t *testing.T) {
 	}
 }
 
+// TestChatMessagesRendersAtZero is the ruled restore. The old single-part site
+// rendered the count whenever the job had one, zero included; the first draft
+// of this builder guarded `> 0` and silently turned "the chat capture ran and
+// caught nothing" into "no chat capture at all" — two different facts about an
+// archive, and only one of them is a reason to go looking.
+//
+// Mutants this kills:
+//   - the `> 0` guard coming back (both shapes assert the zero).
+//   - rendering a field for a nil pointer, which really is unknown.
+func TestChatMessagesRendersAtZero(t *testing.T) {
+	zero, some := 0, 4210
+	shapes := map[string][]Part{
+		"single-part": {{File: "a.mp4"}},
+		"multi-part":  {{Quality: "1080p60"}, {Quality: "720p60"}},
+	}
+	for shape, parts := range shapes {
+		t.Run(shape, func(t *testing.T) {
+			f := ytFacts()
+
+			f.ChatMessages = &zero
+			_, _, _, fields, _ := DownloadFinished(f, parts)
+			if got := mustField(t, fields, "Chat Messages"); got != "0" {
+				t.Errorf("Chat Messages = %q, want %q — a capture that caught nothing is a fact, not an unknown", got, "0")
+			}
+
+			f.ChatMessages = &some
+			_, _, _, fields, _ = DownloadFinished(f, parts)
+			if got := mustField(t, fields, "Chat Messages"); got != "4210" {
+				t.Errorf("Chat Messages = %q, want %q", got, "4210")
+			}
+
+			f.ChatMessages = nil
+			_, _, _, fields, _ = DownloadFinished(f, parts)
+			mustNotHaveField(t, fields, "Chat Messages")
+		})
+	}
+}
+
+// TestTrimCreatedOmitsAnUnknownSourceVideo is the symmetry addIDField already
+// keeps: no builder puts an empty-valued field on the wire, because Discord
+// answers one with a permanent 400 and discord.go drops the whole embed.
+func TestTrimCreatedOmitsAnUnknownSourceVideo(t *testing.T) {
+	_, _, _, fields, _ := TrimCreated(JobFacts{}, TrimFacts{Duration: time.Minute})
+	mustNotHaveField(t, fields, "Source Video")
+	for _, fl := range fields {
+		if fl.Value == "" {
+			t.Errorf("field %q has an empty value — Discord answers that with a permanent 400", fl.Name)
+		}
+	}
+}
+
 // TestDescriptionExcerptIsRuneSafeAndBounded pins the COMPOSITION the builder
 // uses, at the product budget. ClampRunes' own boundary behaviour is pinned
 // exhaustively by N1 in limits_test.go; what this adds is that

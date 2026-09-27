@@ -110,3 +110,30 @@ func TestDiskMonitoringRecoveredClosesAReadFailure(t *testing.T) {
 		t.Errorf("title = %q", calls[0].Title)
 	}
 }
+
+// TestDiskCompositeCloseSendsBothIncidents: one reading can end TWO incidents —
+// monitoring that was reported as failing, and a space warning that was open
+// before it failed. Both are separate alerts, so both get their own close.
+//
+// Mutants this kills:
+//   - a `return` after the monitoring close: the space alert hangs forever.
+//   - swapping the two blocks: the closes arrive in the wrong order.
+func TestDiskCompositeCloseSendsBothIncidents(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	now := time.Now()
+
+	d.onReading(diskReading("warn", 91), "./output", now) // opens the space incident
+	d.onReadFailure("./output")                           // 1st failed read: silent
+	d.onReadFailure("./output")                           // 2nd: "Disk Monitoring Failed"
+	rec.Reset()
+
+	d.onReading(diskReading("ok", 40), "./output", now.Add(20*time.Minute))
+	got := rec.Calls()
+	if len(got) != 2 {
+		t.Fatalf("a reading that closes both incidents recorded %d embeds, want 2", len(got))
+	}
+	if got[0].Title != "Disk Monitoring Recovered" || got[1].Title != "Disk Space Recovered" {
+		t.Errorf("order = %q, %q — the monitoring close comes first", got[0].Title, got[1].Title)
+	}
+}

@@ -318,6 +318,11 @@ func TestErrorStageClassifiesTheFinalizeErrors(t *testing.T) {
 //     both UIs and the route answers 400.
 //   - reading the staging flag before the error is committed, or from the
 //     output directory.
+//   - leaving the description's title RAW beside an escaped Channel field: one
+//     embed rendering the same string two ways.
+//   - dropping Platform/JobID/Author from the one job send that is not a
+//     builder call — Arc N3's terminal edit on "error" and Arc N2b's deep link
+//     both key on Opts.JobID.
 func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
@@ -329,7 +334,15 @@ func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 
 	t.Run("mux failure with staging preserved", func(t *testing.T) {
 		rec.Reset()
-		job := &database.Job{ID: "vidE1", VideoID: "vidE1", Platform: "youtube", Title: "Failed", Status: database.StatusDownloading}
+		chID := "UC_abc"
+		job := &database.Job{
+			ID: "vidE1", VideoID: "vidE1", Platform: "youtube",
+			// Markdown-hostile on purpose: the description and the Channel
+			// field must render the same way.
+			Title: "*Failed* _hard_", ChannelName: "A Channel",
+			ChannelID: &chID, ChannelAvatarURL: "https://yt3.example/a.jpg",
+			Status: database.StatusDownloading,
+		}
 		if _, err := db.AddJob(job); err != nil {
 			t.Fatal(err)
 		}
@@ -352,6 +365,48 @@ func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 		}
 		if got := notifyField(t, calls[0], "Staging"); got != "preserved — Resume available" {
 			t.Errorf("Staging = %q", got)
+		}
+		if want := "Job failed for: " + notifications.EscapeMarkdown(job.Title); calls[0].Description != want {
+			t.Errorf("description = %q, want %q — the title is escaped exactly where the Channel field beside it is", calls[0].Description, want)
+		}
+		if calls[0].Opts.JobID != job.ID || calls[0].Opts.Platform != "youtube" {
+			t.Errorf("opts = {JobID:%q Platform:%q}, want {%q %q}",
+				calls[0].Opts.JobID, calls[0].Opts.Platform, job.ID, "youtube")
+		}
+		if calls[0].Opts.URL != "https://www.youtube.com/watch?v=vidE1" {
+			t.Errorf("opts.URL = %q, want the watch-URL fallback NotifyFacts carries", calls[0].Opts.URL)
+		}
+		if calls[0].Opts.Author == nil {
+			t.Fatal("opts.Author is nil — the failure embed names its channel like every other job embed")
+		}
+		if calls[0].Opts.Author.Name != "A Channel" || calls[0].Opts.Author.URL != "https://www.youtube.com/channel/UC_abc" {
+			t.Errorf("opts.Author = %+v, want the RAW name and the channel page", *calls[0].Opts.Author)
+		}
+	})
+
+	t.Run("a row with no channel name emits no empty field", func(t *testing.T) {
+		rec.Reset()
+		job := &database.Job{ID: "vidE4", Platform: "youtube", Title: "Failed", Status: database.StatusDownloading}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+
+		w.setJobError(job, errors.New("twitch channel is offline"))
+
+		c := rec.ByEvent("error")[0]
+		for _, f := range c.Fields {
+			if f.Value == "" {
+				t.Errorf("field %q has an empty value — Discord answers that with a 400 discord.go treats as permanent, and the whole embed is dropped", f.Name)
+			}
+		}
+		if _, ok := c.Field("Channel"); ok {
+			t.Error("Channel is present for a row that has none")
+		}
+		if _, ok := c.Field("Video ID"); ok {
+			t.Error("Video ID is present for a row that has none")
+		}
+		if c.Opts.Author != nil {
+			t.Errorf("opts.Author = %+v with no channel, want nil", *c.Opts.Author)
 		}
 	})
 

@@ -94,4 +94,13 @@ func TestCancelRouteSendsTheOneCancelEmbed(t *testing.T) {
 	if calls[0].Opts.URL != "https://www.youtube.com/watch?v=vid9" {
 		t.Errorf("opts.URL = %q, want the watch-URL fallback for a row with no url", calls[0].Opts.URL)
 	}
+	// The pre-change literal at this site set NEITHER, so these two are what
+	// make this a change pin rather than a regression pin: Arc N3 keys
+	// edit-in-place on JobID and the footer reads both.
+	if calls[0].Opts.JobID != "vid9" {
+		t.Errorf("opts.JobID = %q, want %q", calls[0].Opts.JobID, "vid9")
+	}
+	if calls[0].Opts.Platform != "youtube" {
+		t.Errorf("opts.Platform = %q, want %q", calls[0].Opts.Platform, "youtube")
+	}
 }

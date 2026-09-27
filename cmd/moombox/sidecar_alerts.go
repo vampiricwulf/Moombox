@@ -56,6 +56,14 @@ type sidecarAlerts struct {
 	// last is the most recent snapshot, read by the debounce when it fires so
 	// the embed names the CURRENT reason and restart count.
 	last sidecar.Health
+	// stopped closes the door teardown cannot close on its own. PublishHealth
+	// copies the subscriber slice and fans out OFF the lock, so a publish that
+	// is already in flight still delivers to this subscriber after unsubscribe
+	// returned — and without this flag that late delivery arms a fresh timer
+	// that stop() has already run past, announcing a dead sidecar during
+	// shutdown. Unsubscribing cannot prevent the delivery; only the subscriber
+	// can refuse it.
+	stopped bool
 }
 
 func newSidecarAlerts(notify notifications.Sender, log interface {
@@ -73,6 +81,10 @@ func newSidecarAlerts(notify notifications.Sender, log interface {
 // manager, whose Send queues and returns.
 func (a *sidecarAlerts) onHealth(h sidecar.Health) {
 	a.mu.Lock()
+	if a.stopped {
+		a.mu.Unlock()
+		return
+	}
 	a.last = h
 
 	if !h.Healthy {
@@ -132,9 +144,14 @@ func (a *sidecarAlerts) fireDown(epoch uint64) {
 	if reason == "" {
 		reason = "unknown"
 	}
+	// The outage is logged as well as announced. The recovery already was, and
+	// a log that records only the return reads as if nothing went wrong.
+	a.log.Warn("BotGuard sidecar down alert", "reason", reason, "restarts", h.Restarts)
 	a.notify.Send("BotGuard Sidecar Down",
-		fmt.Sprintf("The BotGuard sidecar has been unhealthy for over %s — PO tokens are falling back to the slower in-process solver until it returns",
-			sidecarDownDebounce),
+		// Seconds, spelled out: time.Duration prints a 60-second window as
+		// "1m0s", which is the right value in the wrong words for a sentence.
+		fmt.Sprintf("The BotGuard sidecar has been unhealthy for over %d s — PO tokens are falling back to the slower in-process solver until it returns",
+			int(sidecarDownDebounce.Seconds())),
 		notifications.TypeError,
 		[]notifications.Field{
 			{Name: "Reason", Value: notifications.EscapeMarkdown(reason)},
@@ -144,11 +161,14 @@ func (a *sidecarAlerts) fireDown(epoch uint64) {
 	)
 }
 
-// stop cancels a pending debounce. Called from the unsubscribe wireSidecarAlerts
-// returns, so a shutdown cannot fire an alert on the way out.
+// stop cancels a pending debounce AND latches the alerter shut. Called from
+// the unsubscribe wireSidecarAlerts returns, so a shutdown cannot fire an alert
+// on the way out — including from a publish whose fan-out was already past the
+// unsubscribe when it ran.
 func (a *sidecarAlerts) stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.stopped = true
 	if a.timer != nil {
 		a.timer.Stop()
 		a.timer = nil

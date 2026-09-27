@@ -60,7 +60,8 @@ type JobFacts struct {
 	TotalTime time.Duration
 	// SegmentCounter is the job-level sequence pair, e.g. "V: 1234 A: 1230".
 	SegmentCounter string
-	// ChatMessages is nil when the job captured no chat at all.
+	// ChatMessages is nil when the job captured no chat at all; a non-nil zero
+	// means the capture ran and caught nothing, which is rendered.
 	ChatMessages *int
 	// FormatSelection and TrimmedRange are pre-rendered by the orchestrator,
 	// which owns the itag and timestamp vocabularies.
@@ -151,6 +152,10 @@ func authorFor(f JobFacts) *Author {
 // jobOpts is the SendOptions every job embed shares. Image (the full-width
 // picture) is set only by DownloadFinished, and only for a platform whose
 // preview survives the stream.
+//
+// The builders never read config. Arc N2b's manager rewrites URL and
+// Author.URL at SEND time when `network.public_url` is set, which is why the
+// values assembled here are always the platform's own pages.
 func jobOpts(f JobFacts, event string) SendOptions {
 	return SendOptions{
 		URL:       f.URL,
@@ -257,6 +262,10 @@ func JobCancelled(f JobFacts) (string, string, NotificationType, []Field, SendOp
 // The colour is the OUTCOME, not the code path. A job whose recording is
 // knowingly short is Warning, because a green "Successfully archived" over a
 // truncated archive says the opposite of the truth (audit A5).
+//
+// With an EMPTY parts slice no File/Parts/Qualities/size/Resolution field is
+// rendered at all — the job-level fields still are. That is the contract, not
+// an oversight: a caller that produced a file passes at least one Part.
 func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationType, []Field, SendOptions) {
 	var totalSize int64
 	var totalDuration time.Duration
@@ -289,7 +298,9 @@ func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationTyp
 		fb.AddInlineIf(len(escaped) > 0, "Qualities", strings.Join(escaped, " -> "))
 	}
 	if len(parts) > 0 {
-		fb.AddInlineIf(resolutionLabel(parts[0]) != "", "Resolution", resolutionLabel(parts[0]))
+		if res := resolutionLabel(parts[0]); res != "" {
+			fb.AddInline("Resolution", res)
+		}
 	}
 	if totalSize > 0 {
 		name := "File Size"
@@ -301,7 +312,10 @@ func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationTyp
 	fb.AddInlineIf(totalDuration > 0, "Duration", utils.FormatDurationHuman(totalDuration)).
 		AddInlineIf(f.TotalTime > 0, "Total Time", utils.FormatDurationHuman(f.TotalTime)).
 		AddInlineIf(f.SegmentCounter != "", "Segments", f.SegmentCounter)
-	if f.ChatMessages != nil && *f.ChatMessages > 0 {
+	// Non-nil is the whole test: a capture that ran and caught nothing is a
+	// fact about the archive ("Chat Messages: 0"), not an unknown, and the
+	// single-part site rendered it that way before this builder existed.
+	if f.ChatMessages != nil {
 		fb.AddInline("Chat Messages", fmt.Sprintf("%d", *f.ChatMessages))
 	}
 	fb.AddIf(f.FormatSelection != "", "Format Selection", f.FormatSelection).
@@ -350,7 +364,10 @@ func TrimCreated(f JobFacts, t TrimFacts) (string, string, NotificationType, []F
 	dur := utils.FormatDurationHuman(t.Duration)
 	name := EscapeMarkdown(displayName(f))
 	fb := NewFieldBuilder().
-		Add("Source Video", name).
+		// AddIf, for the same reason addIDField guards its own value: an
+		// all-unknown JobFacts would otherwise put an empty-valued field on the
+		// wire and Discord answers that with a permanent 400.
+		AddIf(name != "", "Source Video", name).
 		AddInlineIf(t.TimeRange != "", "Time Range", t.TimeRange).
 		AddInline("Duration", dur).
 		AddInlineIf(t.Parts > 1, "Segments", fmt.Sprintf("%d segments", t.Parts))
