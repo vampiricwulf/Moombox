@@ -59,7 +59,16 @@ type DiscordWebhook struct {
 }
 
 type discordPayload struct {
-	Embeds []discordEmbed `json:"embeds"`
+	// Content is the only place a mention can live: per Discord API docs
+	// (resources/message.mdx) allowed_mentions governs "mentions in the
+	// message content, or components", so an embed can never ping anyone.
+	Content string         `json:"content,omitempty"`
+	Embeds  []discordEmbed `json:"embeds"`
+	// AllowedMentions is the EXPORTED notifications.AllowedMentions
+	// (manager.go), not a payload-private twin: Arc N2b resolves one per
+	// (target, event) and hands it over in SendOptions, so the wire shape and
+	// the option are the same type by construction.
+	AllowedMentions *AllowedMentions `json:"allowed_mentions,omitempty"`
 }
 
 type discordEmbed struct {
@@ -67,6 +76,7 @@ type discordEmbed struct {
 	Description string         `json:"description,omitempty"`
 	Color       int            `json:"color,omitempty"`
 	URL         string         `json:"url,omitempty"`
+	Author      *discordAuthor `json:"author,omitempty"`
 	Fields      []discordField `json:"fields,omitempty"`
 	Thumbnail   *discordImage  `json:"thumbnail,omitempty"`
 	Image       *discordImage  `json:"image,omitempty"`
@@ -79,6 +89,12 @@ type discordEmbed struct {
 // Field carries the JSON tags directly. Audit reports/small-packages.md.
 type discordField = Field
 
+type discordAuthor struct {
+	Name    string `json:"name"`
+	URL     string `json:"url,omitempty"`
+	IconURL string `json:"icon_url,omitempty"`
+}
+
 type discordImage struct {
 	URL string `json:"url"`
 }
@@ -87,18 +103,70 @@ type discordFooter struct {
 	Text string `json:"text"`
 }
 
+// footerText renders the embed footer. "Moombox Go" was a rewrite-era suffix
+// that identified nothing; with several channels and several jobs landing in
+// one Discord channel, the platform and the job id are what let an operator
+// tell two embeds apart without opening the link.
+func footerText(opts SendOptions) string {
+	text := "Moombox"
+	if opts.Platform != "" {
+		text += " · " + opts.Platform
+	}
+	if opts.JobID != "" {
+		text += " · " + opts.JobID
+	}
+	return text
+}
+
+// MentionParse maps a configured mention to the allowed_mentions object that
+// makes it actually ping, or nil for a form we do not recognise — which keeps
+// an unvalidated config string from becoming an unrestricted ping. Arc N2b
+// calls it when it fills SendOptions.
+func MentionParse(mention string) *AllowedMentions {
+	switch {
+	case mention == "@everyone" || mention == "@here":
+		return &AllowedMentions{Parse: []string{"everyone"}}
+	case strings.HasPrefix(mention, "<@&") && strings.HasSuffix(mention, ">"):
+		id := strings.TrimSuffix(strings.TrimPrefix(mention, "<@&"), ">")
+		if id == "" {
+			return nil
+		}
+		return &AllowedMentions{Parse: []string{}, Roles: []string{id}}
+	case strings.HasPrefix(mention, "<@") && strings.HasSuffix(mention, ">"):
+		id := strings.TrimSuffix(strings.TrimPrefix(mention, "<@"), ">")
+		// <@!id> is the legacy nickname form; Discord still accepts it in
+		// content and the id is what allowed_mentions needs either way.
+		id = strings.TrimPrefix(id, "!")
+		if id == "" {
+			return nil
+		}
+		return &AllowedMentions{Parse: []string{}, Users: []string{id}}
+	}
+	return nil
+}
+
 // buildPayload assembles the embed JSON shared by Send and sendOnce.
 func buildPayload(title, description string, color int, fields []Field, opts SendOptions) ([]byte, error) {
 	embed := discordEmbed{
 		Title:       title,
 		Description: description,
 		Color:       color,
-		Footer:      &discordFooter{Text: "Moombox Go"},
+		Footer:      &discordFooter{Text: footerText(opts)},
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if opts.URL != "" {
 		embed.URL = opts.URL
+	}
+
+	// Discord rejects an author object with no name (a permanent 400), so a
+	// half-filled Author is dropped rather than sent.
+	if opts.Author != nil && opts.Author.Name != "" {
+		embed.Author = &discordAuthor{
+			Name:    opts.Author.Name,
+			URL:     opts.Author.URL,
+			IconURL: opts.Author.IconURL,
+		}
 	}
 
 	if opts.Thumbnail != "" {
@@ -111,11 +179,24 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 
 	if len(fields) > 0 {
 		// discordField is a type alias for Field, so this is a direct copy
-		// rather than an element-by-element conversion.
+		// rather than an element-by-element conversion. It MUST stay a copy:
+		// the clamp below rewrites values in place, and the caller's slice is
+		// often a FieldBuilder's buffer reused for a later send.
 		embed.Fields = append([]discordField(nil), fields...)
 	}
 
-	body, err := json.Marshal(discordPayload{Embeds: []discordEmbed{embed}})
+	payload := discordPayload{Embeds: []discordEmbed{embed}}
+
+	// A mention rides the message content, never the embed. A nil
+	// MentionAllowed is the per-event gate N2b fills from mention_events:
+	// no object, no ping. MentionParse is where an unrecognised form becomes
+	// that nil.
+	if opts.MentionAllowed != nil && opts.Mention != "" {
+		payload.Content = opts.Mention
+		payload.AllowedMentions = opts.MentionAllowed
+	}
+
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal discord payload: %w", err)
 	}

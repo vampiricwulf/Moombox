@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // assertNoTempSurvives fails if any *.tmp entry is left in dir. The twin of
@@ -204,4 +206,32 @@ func TestWriteDescriptionAtomicReplacesTheTargetRatherThanRewritingIt(t *testing
 		t.Errorf("content after the write = %q, want the new body", got)
 	}
 	assertNoTempSurvives(t, dir)
+}
+
+// TestFinishedImageIsDroppedForTwitch pins the §0 ruling. A Twitch preview URL
+// 404s the moment the broadcast ends, and "Download Finished" is sent after it
+// did, so the full-width image on every Twitch finished embed was permanently
+// broken. YouTube thumbnails outlive the stream and keep theirs.
+//
+// THE MUTANT: reverting either call site to jobCtx.Job.ThumbnailURL.
+func TestFinishedImageIsDroppedForTwitch(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		want     string
+	}{
+		{"youtube", "https://i.ytimg.com/vi/x/maxresdefault.jpg"},
+		{"twitch", ""},
+		{"", "https://i.ytimg.com/vi/x/maxresdefault.jpg"},
+	} {
+		job := &database.Job{
+			Platform:     tc.platform,
+			ThumbnailURL: "https://i.ytimg.com/vi/x/maxresdefault.jpg",
+		}
+		if got := finishedImage(job); got != tc.want {
+			t.Errorf("finishedImage(platform=%q) = %q, want %q", tc.platform, got, tc.want)
+		}
+	}
+	if got := finishedImage(nil); got != "" {
+		t.Errorf("finishedImage(nil) = %q, want \"\"", got)
+	}
 }

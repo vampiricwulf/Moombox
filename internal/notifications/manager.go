@@ -155,12 +155,95 @@ type Notifier interface {
 	Wait()
 }
 
+// Author is the embed's author line: the channel that produced the job,
+// rendered above the title with its avatar. Job.ChannelAvatarURL has existed
+// since the rewrite and reached no embed until this field did.
+type Author struct {
+	Name    string // required by Discord — an author object without one is a 400
+	IconURL string
+	URL     string
+}
+
+// Tier ranks a notification for the per-target queue's overflow policy
+// (queue.go). It is NOT a delivery priority: the queue is strictly FIFO, and
+// the tier is consulted only when the queue is full and something has to go.
+type Tier int
+
+const (
+	// TierUnset lets the manager derive the tier from SendOptions.Event. It is
+	// the zero value so that the ~36 existing send sites, none of which set a
+	// tier, keep getting the right answer.
+	TierUnset Tier = iota
+	// TierNormal is never dropped while any TierLow entry is queued.
+	TierNormal
+	// TierLow is the high-volume discovery family. A backfill re-scan (R B)
+	// creates a `found` per catalogue row; a dead cookie parks N jobs. Those
+	// are what a full queue sheds, never an alert.
+	TierLow
+)
+
+// lowTierEvents is TierUnset's derivation table. Deliberately small: only the
+// four events a single operation can produce in the dozens.
+var lowTierEvents = map[string]bool{
+	"found":       true,
+	"added":       true,
+	"scheduled":   true,
+	"rescheduled": true,
+}
+
+// effectiveTier resolves the tier the queue should use for one send.
+func effectiveTier(opts SendOptions) Tier {
+	if opts.Tier != TierUnset {
+		return opts.Tier
+	}
+	if lowTierEvents[opts.Event] {
+		return TierLow
+	}
+	return TierNormal
+}
+
+// AllowedMentions is Discord's allowed_mentions object: exactly what the
+// message `content` is permitted to ping. Parse is NOT omitempty and is always
+// non-nil on a sent object — the webhook default is {"parse": ["users"]}, so an
+// omitted list silently re-widens a role ping into "every user id in the text".
+//
+// Exported because Arc N2b resolves one per (target, event) and puts it in
+// SendOptions; MentionParse (discord.go) is the resolver.
+type AllowedMentions struct {
+	Parse []string `json:"parse"`
+	Roles []string `json:"roles,omitempty"`
+	Users []string `json:"users,omitempty"`
+}
+
 // SendOptions provides optional parameters for a notification.
 type SendOptions struct {
 	URL       string // Link URL for the embed title
-	Event     string // Event name for filtering (e.g. "download_start")
+	Event     string // Event name for filtering (e.g. "finished")
 	Thumbnail string // Thumbnail image URL
 	Image     string // Full-width image URL
+
+	// Author is the embed's author line (channel name + avatar + channel page).
+	Author *Author
+	// Platform and JobID feed the footer ("Moombox · {platform} · {job id}").
+	// JobID is also the key Arc N3's edit-in-place mode stores a Discord
+	// message id against, which is why it is an option rather than a footer
+	// string: a caller must not be able to spell it differently.
+	Platform string
+	JobID    string
+	// Tier ranks this send for the queue's overflow policy. Leave it
+	// TierUnset to derive it from Event.
+	Tier Tier
+
+	// Mention is the literal ping text ("<@&id>", "<@id>", "@everyone",
+	// "@here") a target is configured with, and MentionAllowed is the resolved
+	// allowed_mentions object for it — nil when THIS event is not in that
+	// target's mention_events, which is what stops the ping. Both are filled
+	// by Arc N2b (MentionParse resolves the object from the configured text);
+	// N1 defines the fields and the payload shape they produce. Embeds never
+	// mention on their own (per Discord API docs), so a ping needs the message
+	// `content` plus a matching `allowed_mentions` — see buildPayload.
+	Mention        string
+	MentionAllowed *AllowedMentions
 }
 
 // maxInflightNotifications caps the number of concurrent notification

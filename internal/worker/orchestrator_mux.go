@@ -1040,7 +1040,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			finFields,
 			notifications.SendOptions{
 				URL:   jobCtx.Job.URL,
-				Image: jobCtx.Job.ThumbnailURL,
+				Image: finishedImage(jobCtx.Job),
 				Event: "finished",
 			},
 		)
@@ -1191,6 +1191,22 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	}
 }
 
+// finishedImage is the full-width image URL for a "Download Finished" embed,
+// or "" for Twitch.
+//
+// Twitch preview URLs are live-only: they 404 as soon as the broadcast ends
+// (see the thumbnail note in orchestrator_twitch.go), and "Download Finished"
+// is by definition sent after it did — so every Twitch finished embed carried
+// an image that could not load. Owner ruling: drop it. Uploading the saved
+// thumbnail_file as a multipart attachment is the option that would restore
+// one, and is deliberately not this arc.
+func finishedImage(job *database.Job) string {
+	if job == nil || job.Platform == "twitch" {
+		return ""
+	}
+	return job.ThumbnailURL
+}
+
 // sendFinishedNotification sends a "Download Finished" notification with enriched fields.
 func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, finishedJob *database.Job, outputFile string, probeData *ffprobeData, info os.FileInfo) {
 	if o.notifier == nil {
@@ -1280,7 +1296,7 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		fb.Build(),
 		notifications.SendOptions{
 			URL:   jobCtx.Job.URL,
-			Image: jobCtx.Job.ThumbnailURL,
+			Image: finishedImage(jobCtx.Job),
 			Event: "finished",
 		},
 	)
