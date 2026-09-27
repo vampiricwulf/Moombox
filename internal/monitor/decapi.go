@@ -188,6 +188,12 @@ func (dm *DecapiMonitor) SetOnChannelUnhealthy(fn func(channelID string, consecu
 	dm.health.onUnhealthy = fn
 }
 
+// SetOnChannelHealthy installs the callback fired once when a channel that
+// crossed the threshold answers a check again.
+func (dm *DecapiMonitor) SetOnChannelHealthy(fn func(channelID string)) {
+	dm.health.onHealthy = fn
+}
+
 // NewDecapiMonitor creates a new DECAPI monitor. The Store carries the
 // cfg+lock used to read channel list and interval settings; all reads
 // happen under configStore.Read so a config-reload doesn't race against

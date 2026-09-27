@@ -37,7 +37,7 @@ var EventGroups = []EventGroup{
 	// release instead of going silent through every outage.
 	{"Connectivity", []string{"connectivity_resume", "connectivity_split", "connectivity_restored"}},
 	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
-	{"System", []string{"disk_warning", "disk_critical", "update_available", "update_applied", "update_failed", "crash_recovered", "channel_unhealthy"}},
+	{"System", []string{"disk_warning", "disk_critical", "disk_ok", "update_available", "update_applied", "update_failed", "crash_recovered", "channel_unhealthy", "channel_healthy", "sidecar_down", "sidecar_restored"}},
 }
 
 // KnownEvents is the flat membership set derived from EventGroups, PLUS every
@@ -75,6 +75,12 @@ var KnownEvents = func() map[string]bool {
 // the retired one receives the folded embed instead of going silent. A
 // retirement entry is a migration with an expiry — it names the release it
 // should be deleted in — where a split entry is permanent.
+//
+// A third idiom: the CLOSE. A recovery key (e.g. "disk_ok") is aliased to the
+// alert it ends, so a target that already filters the alert also receives the
+// close without a config edit, and a target that wants only the all-clear can
+// subscribe to the close alone. Like a split, a close entry is permanent — the
+// pairing is the point, not a migration to expire.
 var eventAliases = map[string]string{
 	"disk_critical": "disk_warning",
 	// C8: the pause embed was undeliverable by construction (it was sent
@@ -83,7 +89,20 @@ var eventAliases = map[string]string{
 	// keeps receiving that folded embed. DELETE THIS ENTRY one release after
 	// the retirement ships — it is a migration, not a permanent mapping.
 	"connectivity_resume": "connectivity_pause",
+	// The recovery halves. Each close is its own key, so a target can
+	// subscribe to the all-clear alone; the alias means a target that already
+	// filters the ALERT receives its close without a config edit, which is
+	// the whole point of an incident having an end (§0 ruling).
+	"disk_ok":          "disk_warning",
+	"channel_healthy":  "channel_unhealthy",
+	"sidecar_restored": "sidecar_down",
 }
+
+// AliasOf returns the older, broader event a newer key splits from, or "" when
+// the key stands alone. Exported for the vocabulary parity test, which is the
+// only thing outside this package that needs to see the mapping — the filter
+// itself applies it internally.
+func AliasOf(event string) string { return eventAliases[event] }
 
 // IDLabel returns the embed field name for a job's platform ID: Twitch
 // broadcasts/VODs carry stream IDs, everything else video IDs. Centralized

@@ -769,20 +769,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				w.EnqueueJob(job.ID)
 			}
 			if notifier != nil {
-				notifier.Send(
-					"Twitch Video Added",
-					fmt.Sprintf("Manually added: %s", job.Title),
-					notifications.TypeInfo,
-					[]notifications.Field{
-						{Name: "Channel", Value: job.ChannelName, Inline: true},
-						{Name: "Stream ID", Value: job.ID, Inline: true},
-					},
-					notifications.SendOptions{
-						URL:       job.URL,
-						Thumbnail: job.ThumbnailURL,
-						Event:     "added",
-					},
-				)
+				notifier.Send(notifications.JobAdded(worker.NotifyFacts(job)))
 			}
 			// Content-Type must be set before the explicit WriteHeader —
 			// headers set afterwards are silently dropped for non-gzip
@@ -857,23 +844,18 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if notifier != nil {
-			fields := []notifications.Field{
-				{Name: "Channel", Value: job.ChannelName, Inline: true},
-				{Name: "Video ID", Value: videoID, Inline: true},
-			}
+			facts := worker.NotifyFacts(job)
 			if body.SelectedVideoItag != nil {
-				label := fmt.Sprintf("itag %d", *body.SelectedVideoItag)
+				facts.VideoFormat = fmt.Sprintf("itag %d", *body.SelectedVideoItag)
 				if *body.SelectedVideoItag == -1 {
-					label = "None (audio only)"
+					facts.VideoFormat = "None (audio only)"
 				}
-				fields = append(fields, notifications.Field{Name: "Video Format", Value: label, Inline: true})
 			}
 			if body.SelectedAudioItag != nil {
-				label := fmt.Sprintf("itag %d", *body.SelectedAudioItag)
+				facts.AudioFormat = fmt.Sprintf("itag %d", *body.SelectedAudioItag)
 				if *body.SelectedAudioItag == -1 {
-					label = "None (video only)"
+					facts.AudioFormat = "None (video only)"
 				}
-				fields = append(fields, notifications.Field{Name: "Audio Format", Value: label, Inline: true})
 			}
 			if body.StartTime != nil || body.EndTime != nil {
 				startSec := 0.0
@@ -896,19 +878,9 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 					durS := int(dur) % 60
 					rangeValue = fmt.Sprintf("%s (%d:%02d)", rangeValue, durMin, durS)
 				}
-				fields = append(fields, notifications.Field{Name: "Time Range", Value: rangeValue})
+				facts.TimeRange = rangeValue
 			}
-			notifier.Send(
-				"Video Added",
-				fmt.Sprintf("Manually added: %s", job.Title),
-				notifications.TypeInfo,
-				fields,
-				notifications.SendOptions{
-					URL:       job.URL,
-					Thumbnail: job.ThumbnailURL,
-					Event:     "added",
-				},
-			)
+			notifier.Send(notifications.JobAdded(facts))
 		}
 
 		// Set before WriteHeader — see the Twitch-create path above.
@@ -951,25 +923,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if notifier != nil && !workerWillNotify {
-			idLabel := notifications.IDLabel(job.Platform)
-			notifyURL := job.URL
-			if notifyURL == "" {
-				notifyURL = "https://www.youtube.com/watch?v=" + job.VideoID
-			}
-			notifier.Send(
-				"Job Cancelled",
-				fmt.Sprintf("Cancelled: %s", job.Title),
-				notifications.TypeCancelled,
-				[]notifications.Field{
-					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: idLabel, Value: job.VideoID, Inline: true},
-				},
-				notifications.SendOptions{
-					URL:       notifyURL,
-					Thumbnail: job.ThumbnailURL,
-					Event:     "cancelled",
-				},
-			)
+			notifier.Send(notifications.JobCancelled(worker.NotifyFacts(job)))
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})

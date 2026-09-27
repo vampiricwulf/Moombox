@@ -196,30 +196,13 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 		return nil, fmt.Errorf("save trim record: %w", err)
 	}
 
-	// Send "Trim Created" notification (matches TS NotificationType.INFO + format)
+	// Send "Trim Created" notification
 	if ts.notifier != nil {
-		timeRange := fmt.Sprintf("%s - %s", FormatSecondsToTimestamp(startTime), FormatSecondsToTimestamp(endTime))
-		durStr := formatDurationHuman(time.Duration(duration) * time.Second)
-		fields := []notifications.Field{
-			{Name: "Source Video", Value: job.Title, Inline: false},
-			{Name: "Time Range", Value: timeRange, Inline: true},
-			{Name: "Duration", Value: durStr, Inline: true},
-		}
-		if fileSize != nil {
-			fields = append(fields, notifications.Field{
-				Name: "File Size", Value: formatFileSize(*fileSize), Inline: true,
-			})
-		}
-		ts.notifier.Send("Trim Created",
-			fmt.Sprintf("Created %s trim from \"%s\"", durStr, job.Title),
-			notifications.TypeInfo,
-			fields,
-			notifications.SendOptions{
-				URL:       job.URL,
-				Thumbnail: job.ThumbnailURL,
-				Event:     "trim_created",
-			},
-		)
+		ts.notifier.Send(notifications.TrimCreated(NotifyFacts(job), notifications.TrimFacts{
+			TimeRange: fmt.Sprintf("%s - %s", FormatSecondsToTimestamp(startTime), FormatSecondsToTimestamp(endTime)),
+			Duration:  time.Duration(duration) * time.Second,
+			Size:      fileSize,
+		}))
 	}
 
 	ts.logger.Info("trim created", "trimID", trimID, "path", trimPath)
@@ -501,33 +484,12 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 
 	// Send notification
 	if ts.notifier != nil {
-		timeRange := fmt.Sprintf("%s - %s", FormatSecondsToTimestamp(startTime), FormatSecondsToTimestamp(endTime))
-		durStr := formatDurationHuman(time.Duration(trimDuration) * time.Second)
-		fields := []notifications.Field{
-			{Name: "Source Video", Value: job.Title, Inline: false},
-			{Name: "Time Range", Value: timeRange, Inline: true},
-			{Name: "Duration", Value: durStr, Inline: true},
-		}
-		if len(involved) > 1 {
-			fields = append(fields, notifications.Field{
-				Name: "Segments", Value: fmt.Sprintf("%d segments", len(involved)), Inline: true,
-			})
-		}
-		if fileSize != nil {
-			fields = append(fields, notifications.Field{
-				Name: "File Size", Value: formatFileSize(*fileSize), Inline: true,
-			})
-		}
-		ts.notifier.Send("Trim Created",
-			fmt.Sprintf("Created %s trim from \"%s\"", durStr, job.Title),
-			notifications.TypeInfo,
-			fields,
-			notifications.SendOptions{
-				URL:       job.URL,
-				Thumbnail: job.ThumbnailURL,
-				Event:     "trim_created",
-			},
-		)
+		ts.notifier.Send(notifications.TrimCreated(NotifyFacts(job), notifications.TrimFacts{
+			TimeRange: fmt.Sprintf("%s - %s", FormatSecondsToTimestamp(startTime), FormatSecondsToTimestamp(endTime)),
+			Duration:  time.Duration(trimDuration) * time.Second,
+			Size:      fileSize,
+			Parts:     len(involved),
+		}))
 	}
 
 	ts.logger.Info("multi-segment trim created", "trimID", trimID, "path", trimPath,
