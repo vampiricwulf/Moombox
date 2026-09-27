@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -156,6 +157,113 @@ func TestNotifEditMentionToggleWritesExplicitList(t *testing.T) {
 	}
 }
 
+// TestNotifEditKeepsMentionIDsWithNoRow: a resolved mention id this build's
+// EventGroups has no row for cannot be unticked, so a toggle on an unrelated
+// row must not write it out of existence. Live today for sidecar_down, which
+// config.DefaultMentionEvents() carries and Arc N2a adds to the registry — but
+// the rule outlives that: settings.js rebuilds from its RESOLVED list for
+// exactly this reason (its NOTIFICATION_EVENT_GROUPS comment says so), and an
+// id from a newer release in a hand-edited config is the same case.
+func TestNotifEditKeepsMentionIDsWithNoRow(t *testing.T) {
+	const noRow = "an_event_from_a_newer_release"
+	stored := []string{"finished", noRow}
+	m := newNotifEditModel(t, []config.NotificationConfig{
+		{URL: "discord://1/aaa", Mention: "@here", MentionEvents: &stored},
+	})
+	m.handleNotifKey(keyEnter)
+
+	// One toggle on an unrelated row — the only thing that makes the list
+	// explicit, and the moment the drop used to happen.
+	m.notifEditFocus = notifEditEventBase
+	m.handleNotifEditKey("m")
+	m.handleNotifEditKey(keyEnter)
+
+	got := m.notifications[0].MentionEvents
+	if got == nil {
+		t.Fatal("the toggle wrote no list at all")
+	}
+	if !slices.Contains(*got, noRow) {
+		t.Errorf("mention_events = %v — %q has no row to untick and was silently dropped by a toggle "+
+			"somewhere else; settings.js keeps it through its resolved list", *got, noRow)
+	}
+	if !slices.Contains(*got, "finished") {
+		t.Errorf("mention_events = %v, want the stored %q kept too", *got, "finished")
+	}
+}
+
+// TestNotifEditWritesNoMentionListWithoutAMention: with nobody to ping the
+// list is inert, so `m` must not invent one. Writing it would freeze today's
+// defaults into the config file, and a mention typed later — in either UI —
+// would then get that frozen list instead of the shipped one. That is the very
+// failure the three-way rule exists to prevent.
+func TestNotifEditWritesNoMentionListWithoutAMention(t *testing.T) {
+	m := newNotifEditModel(t, nil)
+	m.handleNotifKey("a")
+	m.notifEditURL = "discord://1/aaa" // no mention typed
+	m.notifEditFocus = notifEditEventBase
+	m.handleNotifEditKey("m")
+	m.handleNotifEditKey(keyEnter)
+
+	if got := m.notifications[0].MentionEvents; got != nil {
+		t.Errorf("mention_events = %v with no mention set, want absent so a mention typed later still "+
+			"picks up the shipped default list", *got)
+	}
+}
+
+// TestNotifEditClearedMentionLeavesTheStoredList: clearing the mention must
+// leave the stored filter alone, so an operator who retypes one gets their own
+// filter back rather than the defaults — settings.js says so in
+// setNotificationMention's doc comment and implements it the same way.
+func TestNotifEditClearedMentionLeavesTheStoredList(t *testing.T) {
+	stored := []string{"finished", "muxing"}
+	m := newNotifEditModel(t, []config.NotificationConfig{
+		{URL: "discord://1/aaa", Mention: "@here", MentionEvents: &stored},
+	})
+	m.handleNotifKey(keyEnter)
+	m.notifEditMention = "" // the operator cleared it
+	m.notifEditFocus = notifEditEventBase
+	m.handleNotifEditKey("m")
+	m.handleNotifEditKey(keyEnter)
+
+	got := m.notifications[0].MentionEvents
+	if got == nil {
+		t.Fatal("clearing the mention erased the stored list")
+	}
+	if !slices.Equal(*got, []string{"finished", "muxing"}) {
+		t.Errorf("mention_events = %v, want the stored list untouched while there is nobody to ping", *got)
+	}
+}
+
+// TestNotifEditRejectsAnUnparseableMention pins the save-time gate: unlike
+// the URL, config.validateOrNormalize CLEARS a bad mention instead of
+// refusing the save, so without this the typo round-trips into a target that
+// pings nobody with nothing said about it.
+func TestNotifEditRejectsAnUnparseableMention(t *testing.T) {
+	m := newNotifEditModel(t, nil)
+	m.handleNotifKey("a")
+	m.notifEditURL = "discord://1/aaa"
+	m.notifEditMention = "@nobody"
+	m.handleNotifEditKey(keyEnter)
+	if m.status != saveError {
+		t.Fatalf("an unparseable mention was accepted (%d targets stored)", len(m.notifications))
+	}
+	if !strings.Contains(m.errorMsg, "mention") {
+		t.Errorf("the error did not name the field: %q", m.errorMsg)
+	}
+}
+
+// TestNotifEditEnabledRowClickFlipsIt: the row IS the control, the same way
+// handleMouseChannelClick cycles a fieldToggle row.
+func TestNotifEditEnabledRowClickFlipsIt(t *testing.T) {
+	m := newNotifEditModel(t, nil)
+	m.notifMode, m.notifEditEnabled = "edit", true
+	m.notifEditEvents = map[string]bool{}
+	m.handleMouseNotifClick(notifEditEnabledRow + 1)
+	if m.notifEditFocus != notifEditEnabledRow || m.notifEditEnabled {
+		t.Errorf("focus=%d enabled=%v, want %d/false", m.notifEditFocus, m.notifEditEnabled, notifEditEnabledRow)
+	}
+}
+
 // TestNotifEditMKeyTogglesTheFocusedEventsMention pins the column's key.
 func TestNotifEditMKeyTogglesTheFocusedEventsMention(t *testing.T) {
 	first := allNotifEvents[0]
@@ -190,6 +298,10 @@ func TestHandleMouseNotifClickMapsThroughTheNewRows(t *testing.T) {
 	if !m.notifEditEvents[firstEvent] {
 		t.Errorf("a click on the first event row (contentY=8) did not toggle %q — the mouse map still "+
 			"assumes the pre-N2b row offsets", firstEvent)
+	}
+	if m.notifEditFocus != notifEditEventBase {
+		t.Errorf("notifEditFocus = %d, want %d — the click toggled the right event but focused "+
+			"the wrong row, so the next Space would hit the Enabled toggle", m.notifEditFocus, notifEditEventBase)
 	}
 }
 

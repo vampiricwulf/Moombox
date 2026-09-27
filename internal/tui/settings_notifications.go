@@ -74,6 +74,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 				for _, e := range *n.MentionEvents {
 					m.notifEditMentionEvents[e] = true
 				}
+				m.notifEditMentionExtras = notifMentionIDsWithNoRow(*n.MentionEvents)
 			}
 			m.notifEditFocus = 0
 			m.notifMode = "edit"
@@ -158,6 +159,23 @@ func (m *SettingsModel) seedMentionDefaults() {
 	for _, e := range defaults {
 		m.notifEditMentionEvents[e] = true
 	}
+	m.notifEditMentionExtras = notifMentionIDsWithNoRow(defaults)
+}
+
+// notifMentionIDsWithNoRow returns the ids in a resolved mention list that
+// this build's EventGroups has no row for, in their original order.
+func notifMentionIDsWithNoRow(ids []string) []string {
+	known := make(map[string]bool, len(allNotifEvents))
+	for _, e := range allNotifEvents {
+		known[e] = true
+	}
+	var out []string
+	for _, e := range ids {
+		if !known[e] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (m *SettingsModel) handleNotifEditKey(key string) string {
@@ -231,9 +249,25 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		// the shipped list), and the first toggle makes the whole list
 		// explicit — including the all-off case, which is an empty list
 		// ("never"), not an absent key ("the default six").
-		if m.notifEditMentionTouched {
+		// With no mention there is nobody to ping, so the list is inert: the
+		// stored one is left exactly as it is, and none is invented. Both are
+		// what settings.js does (toggleMentionEvent opens with
+		// `if (!notif || !notif.mention) return`, and setNotificationMention
+		// deliberately leaves the list alone when the mention is cleared), so
+		// an operator who retypes a mention gets their own filter back rather
+		// than today's defaults frozen into their config file.
+		if m.notifEditMentionTouched && mention != "" {
 			mentionEvents := []string{}
 			for _, e := range allNotifEvents {
+				if m.notifEditMentionEvents[e] {
+					mentionEvents = append(mentionEvents, e)
+				}
+			}
+			// Ids with no row cannot be unticked, so they ride along rather
+			// than being dropped by a toggle elsewhere — settings.js keeps
+			// them the same way, through its resolved list. The map lookup
+			// still honours an explicit false.
+			for _, e := range m.notifEditMentionExtras {
 				if m.notifEditMentionEvents[e] {
 					mentionEvents = append(mentionEvents, e)
 				}

@@ -423,6 +423,12 @@ type SettingsModel struct {
 	// save, so the target keeps following the shipped default list instead of
 	// freezing today's defaults into their config file.
 	notifEditMentionTouched bool
+	// notifEditMentionExtras holds resolved mention ids this build's
+	// EventGroups has no row for (sidecar_down until Arc N2a lands, or a
+	// hand-written id). They cannot be unticked, so they ride along on save
+	// instead of being dropped by a toggle on an unrelated row — settings.js
+	// keeps them the same way, through its resolved list.
+	notifEditMentionExtras []string
 	// notifEditScrollStart is the body scroll offset renderNotifEdit applied on
 	// the last render (0 = not scrolled). Mouse click mapping reads it to map an
 	// on-screen row back to the original (unscrolled) line.
