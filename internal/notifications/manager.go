@@ -278,7 +278,12 @@ type Manager struct {
 	// waitTimeout bounds Wait; zero means defaultWaitTimeout (test literals
 	// omit it). Set once at construction, never written afterwards.
 	waitTimeout time.Duration
-	logger      interface {
+	// clock is the time source every target's coalescing window is armed from
+	// (batch.go). Set once at construction and never written afterwards, so
+	// applyTargets can read it under targetsMu like waitTimeout; nil means
+	// realBatchClock{}, which is what a hand-built Manager in a test gets.
+	clock  batchClock
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -589,7 +594,7 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			delete(previous, t.key)
 			continue
 		}
-		q := newTargetQueue(t, m.logger, &m.shuttingDown)
+		q := newTargetQueue(t, m.logger, &m.shuttingDown, m.clock)
 		next = append(next, q)
 		if t.key != "" {
 			byKey[t.key] = q
@@ -604,8 +609,16 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 	m.byKey = byKey
 	m.targetsMu.Unlock()
 
-	// Outside the lock: stopDiscard takes the queue's own mutex and logs.
+	// Outside the lock: stopDiscard takes the queue's own mutex and logs, and
+	// so does the flush that precedes it.
 	for _, q := range retired {
+		// Flush the open window before the queue stops accepting. The flushed
+		// items land in a queue stopDiscard then drops, with N1's own "target
+		// removed — discarding its queued notifications" Warn naming the count
+		// (or the drain delivers them first, if it wins the race). That is the
+		// honest outcome for a webhook the operator has just deleted; losing
+		// them inside the batcher, with no line anywhere, is not.
+		q.batch.Stop()
 		q.stopDiscard()
 	}
 }
@@ -621,6 +634,7 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 	m := &Manager{
 		logger:      logger,
 		waitTimeout: defaultWaitTimeout,
+		clock:       realBatchClock{},
 	}
 	// Before applyTargets, which takes the same lock itself — see publicURL.
 	m.targetsMu.Lock()
@@ -704,24 +718,27 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// allocation per send buys the guarantee that what is delivered is what
 	// was asked for.
 	msg := One(title, description, ntype.Color(), append([]Field(nil), fields...), opts)
-	it := queued{msg: msg, tier: effectiveTier(opts)}
 	for _, q := range targets {
 		if !q.allows(opts.Event) {
 			continue
 		}
-		// queued is a value and so is Message, so this is the per-target copy.
-		// The Embeds slice is shared across the copies, which is safe because
-		// nothing mutates an Embed after One builds it (its fields were already
-		// copied once above); the *AllowedMentions is built once in
-		// buildTargets and never written after, so sharing that pointer across
-		// targets and sends is safe too.
+		// The filter runs BEFORE the coalescing stage, so a target never
+		// accumulates an embed it would not have sent.
+		//
+		// The batcher decides immediately-or-coalesce from isBatchable(opts)
+		// and re-wraps the embed into a Message on the way out, which is also
+		// where the item's tier is derived (enqueueBatch) — from the embeds it
+		// actually carries rather than from this one send.
 		//
 		// The ping lands on the MESSAGE, not on the embed's opts: Discord
 		// applies content and allowed_mentions per message, so a batch of ten
-		// embeds pings once.
-		perItem := it
-		perItem.msg.Mention, perItem.msg.MentionAllowed = q.mentionFor(opts.Event)
-		q.enqueue(perItem)
+		// embeds pings once. The one Embed is shared across every target, which
+		// is safe because nothing mutates an Embed after One builds it (its
+		// fields were already copied once above); the *AllowedMentions is built
+		// once in buildTargets and never written after, so sharing that pointer
+		// across targets and sends is safe too.
+		mention, allowed := q.mentionFor(opts.Event)
+		q.batch.Add(msg.Embeds[0], mention, allowed)
 	}
 }
 
@@ -735,6 +752,16 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 func (m *Manager) BeginShutdown() {
 	if m == nil {
 		return
+	}
+	// A window open when shutdown begins is delivered, not evaporated. Flushed
+	// BEFORE the flag, and before Wait's closeDrain, because enqueue drops with
+	// a Warn once q.closing is set (queue.go) — a flush after that would emit
+	// the batch straight into the drop path.
+	m.targetsMu.RLock()
+	targets := m.targets
+	m.targetsMu.RUnlock()
+	for _, q := range targets {
+		q.batch.Flush()
 	}
 	m.shuttingDown.Store(true)
 }
@@ -775,6 +802,14 @@ func (m *Manager) Wait() {
 
 	timeout := m.effectiveWaitTimeout()
 	deadline := time.After(timeout)
+	// The open coalescing windows go out first. The order is not cosmetic:
+	// enqueue drops with a Warn once q.closing is set (queue.go), so a flush
+	// after closeDrain would emit every open window straight into the drop
+	// path — including `moombox add`'s "Video Added", whose whole delivery is
+	// this flush.
+	for _, q := range targets {
+		q.batch.Flush()
+	}
 	for _, q := range targets {
 		q.closeDrain()
 	}

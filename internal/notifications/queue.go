@@ -89,6 +89,11 @@ type targetQueue struct {
 	wake chan struct{}
 	// done closes when the goroutine has exited.
 	done chan struct{}
+
+	// batch is the coalescing stage in FRONT of this queue (batch.go). It has
+	// its own mutex and is never guarded by mu — Send calls it, and it calls
+	// back in through enqueueBatch.
+	batch *batcher
 }
 
 func newTargetQueue(t notificationTarget, logger interface {
@@ -96,9 +101,9 @@ func newTargetQueue(t notificationTarget, logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}, shuttingDown *atomic.Bool,
+}, shuttingDown *atomic.Bool, clock batchClock,
 ) *targetQueue {
-	return &targetQueue{
+	q := &targetQueue{
 		sender:         t.sender,
 		key:            t.key,
 		events:         t.events,
@@ -110,6 +115,26 @@ func newTargetQueue(t notificationTarget, logger interface {
 		wake:           make(chan struct{}, 1),
 		done:           make(chan struct{}),
 	}
+	// The coalescing stage sits in front of THIS queue. It lives on the queue,
+	// not on the notificationTarget that built it, because applyTargets keeps a
+	// surviving target's queue and throws the freshly built target away — a
+	// batcher hung on the latter would take every open window with it on each
+	// unrelated config save, silently.
+	q.batch = newBatcher(batchWindow, clock, q.enqueueBatch, logger)
+	return q
+}
+
+// enqueueBatch is the batcher's exit: it wraps one coalesced Message in a
+// queue item — tier from batchIsLowTier, the message keeping whatever single
+// mention the flush chose — and hands it to the ordinary FIFO. Named apart
+// from enqueue, which takes an already-built queued item and is what this
+// calls.
+func (q *targetQueue) enqueueBatch(msg Message) {
+	tier := TierNormal
+	if batchIsLowTier(msg.Embeds) {
+		tier = TierLow
+	}
+	q.enqueue(queued{msg: msg, tier: tier})
 }
 
 // signal nudges the draining goroutine without ever blocking the caller —

@@ -73,7 +73,7 @@ func TestMentionFor(t *testing.T) {
 		if len(got) != 1 {
 			t.Fatalf("buildTargets returned %d targets", len(got))
 		}
-		return newTargetQueue(got[0], testLogger{}, nil)
+		return newTargetQueue(got[0], testLogger{}, nil, nil)
 	}
 	never := []string{}
 	only := []string{"finished"}
@@ -145,7 +145,7 @@ func TestMentionAllowedPerForm(t *testing.T) {
 		built := buildTargets(&config.MoomboxConfig{Notifications: []config.NotificationConfig{
 			{URL: "discord://1/aaa", Mention: tc.mention},
 		}}, testLogger{})[0]
-		_, got := newTargetQueue(built, testLogger{}, nil).mentionFor("error")
+		_, got := newTargetQueue(built, testLogger{}, nil, nil).mentionFor("error")
 		if got == nil || !reflect.DeepEqual(*got, tc.want) {
 			t.Errorf("mentionFor for %s = %+v, want %+v", tc.mention, got, tc.want)
 		}

@@ -102,16 +102,22 @@ func TestQueueDeliversInFIFOOrder(t *testing.T) {
 // THE MUTANT: dropping the newest unconditionally (the `error` never arrives),
 // or dropping the oldest unconditionally (a queue full of alerts starts
 // shedding alerts).
+//
+// The low-tier event here is `scheduled`, not `found`: both are TierLow
+// (lowTierEvents), but `found` COALESCES (batch.go), so 257 of them would
+// reach this queue as 26 ten-embed items and the cap would never be touched.
+// This test is about the queue's overflow policy, so it uses the low-tier
+// event that still arrives one per item.
 func TestQueueOverflowDropsTheOldestLowTier(t *testing.T) {
 	g := newGateSender()
 	m := newTestManager(t, 5*time.Second, notificationTarget{sender: g, key: "k1"})
 
 	// One send is popped immediately and blocks on the gate; the next
 	// notificationQueueCap fill the queue exactly.
-	m.Send("found-0", "", TypeInfo, nil, SendOptions{Event: "found"})
+	m.Send("low-0", "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	waitFor(t, "the head to be in flight", func() bool { return m.targets[0].pending() == 0 })
 	for i := 1; i <= notificationQueueCap; i++ {
-		m.Send("found-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+		m.Send("low-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	}
 	if got := m.targets[0].pending(); got != notificationQueueCap {
 		t.Fatalf("queue holds %d, want %d before the overflow", got, notificationQueueCap)
@@ -128,11 +134,11 @@ func TestQueueOverflowDropsTheOldestLowTier(t *testing.T) {
 	if !strings.Contains(joined, "the-alert") {
 		t.Errorf("the alert was dropped at a full queue — that is exactly the old semaphore's bug: %v", got)
 	}
-	if strings.Contains(joined, "found-1,") {
-		t.Errorf("found-1 survived — the OLDEST queued low-tier entry is the one that goes: %v", got[:5])
+	if strings.Contains(joined, "low-1,") {
+		t.Errorf("low-1 survived — the OLDEST queued low-tier entry is the one that goes: %v", got[:5])
 	}
-	if !strings.Contains(joined, "found-0") {
-		t.Errorf("found-0 was the in-flight item and must still be delivered: %v", got[:5])
+	if !strings.Contains(joined, "low-0") {
+		t.Errorf("low-0 was the in-flight item and must still be delivered: %v", got[:5])
 	}
 }
 
@@ -177,21 +183,26 @@ func TestQueueOverflowDropsTheNewestWhenNothingIsLowTier(t *testing.T) {
 //
 // THE MUTANT: warning per drop (the first assertion sees ~1,000 lines), or
 // coalescing without the drain-time flush (the total reads 1).
+//
+// `scheduled` rather than `found` for the reason
+// TestQueueOverflowDropsTheOldestLowTier gives: both are TierLow, but `found`
+// coalesces into ten-embed items before it ever reaches this queue, and this
+// test is about what the QUEUE does when 1,000 items arrive at a full one.
 func TestOverflowWarnsAreCoalescedWithoutLosingTheCount(t *testing.T) {
 	g := newGateSender()
 	lg := &countingLogger{}
 	m := newTestManagerWithLogger(t, lg, 5*time.Second, notificationTarget{sender: g, key: "k1"})
 
 	// One in flight against the gate, then exactly cap queued behind it.
-	m.Send("found-0", "", TypeInfo, nil, SendOptions{Event: "found"})
+	m.Send("low-0", "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	waitFor(t, "the head to be in flight", func() bool { return m.targets[0].pending() == 0 })
 	for i := 1; i <= notificationQueueCap; i++ {
-		m.Send("found-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+		m.Send("low-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	}
 
 	const overflow = 1000
 	for i := range overflow {
-		m.Send("spill-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "found"})
+		m.Send("spill-"+itoa(i), "", TypeInfo, nil, SendOptions{Event: "scheduled"})
 	}
 
 	// The burst runs in milliseconds, so it is one coalescing window: one line.
@@ -299,7 +310,7 @@ func (l *reentrantLogger) Warn(string, ...any) {
 // then times out on its watchdog instead of returning.
 func TestPopLogsOutsideTheQueueLock(t *testing.T) {
 	lg := &reentrantLogger{}
-	q := newTargetQueue(notificationTarget{sender: newGateSender(), key: "k1"}, lg, nil)
+	q := newTargetQueue(notificationTarget{sender: newGateSender(), key: "k1"}, lg, nil, nil)
 	lg.q = q
 
 	q.enqueue(queued{msg: One("doomed", "", 0, nil, SendOptions{}), tier: TierLow})
