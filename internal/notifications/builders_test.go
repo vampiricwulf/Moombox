@@ -130,6 +130,38 @@ func TestBuildersOmitTheAuthorWhenTheChannelIsUnknown(t *testing.T) {
 	}
 }
 
+// TestBuildersOmitTheIDFieldWhenTheVideoIDIsUnknown covers the same "omit what
+// you do not know" promise JobFacts makes, at the one field that was breaking
+// it, for all three builders that emit an id and on both platforms (the LABEL
+// differs, so a guard added to only one of them would still ship the other).
+//
+// Mutant: AddInline instead of AddInlineIf — Field.Value has no omitempty and
+// nothing downstream drops an empty one, so Discord 400s on the field and
+// discord.go treats a non-429 4xx as permanent: the whole embed is dropped
+// after one attempt, not retried.
+func TestBuildersOmitTheIDFieldWhenTheVideoIDIsUnknown(t *testing.T) {
+	for _, base := range []JobFacts{ytFacts(), twFacts()} {
+		f := base
+		f.VideoID = ""
+		cases := map[string]func() []Field{
+			"JobAdded":     func() []Field { _, _, _, fields, _ := JobAdded(f); return fields },
+			"StreamFound":  func() []Field { _, _, _, fields, _ := StreamFound(f); return fields },
+			"JobCancelled": func() []Field { _, _, _, fields, _ := JobCancelled(f); return fields },
+		}
+		for name, build := range cases {
+			t.Run(f.Platform+"/"+name, func(t *testing.T) {
+				fields := build()
+				mustNotHaveField(t, fields, IDLabel(f.Platform))
+				for _, fl := range fields {
+					if fl.Value == "" {
+						t.Errorf("field %q has an empty value — Discord answers that with a permanent 400", fl.Name)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestJobAddedPerPlatformAndEntryPoint is the C3 unification: four call sites,
 // one shape.
 //

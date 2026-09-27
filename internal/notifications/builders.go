@@ -172,8 +172,17 @@ func jobOpts(f JobFacts, event string) SendOptions {
 // of the embed to paste somewhere else. Discord's italic needs a MATCHED pair
 // of underscores, so a single id renders verbatim; the cosmetic risk is an
 // id that happens to hold two, against a real cost to every id.
+//
+// The guard is AddInlineIf, not AddInline, and that is not a style choice:
+// Field.Value carries no omitempty, clampEmbed never drops an empty value and
+// buildPayload copies the slice straight through, so an unknown id would put
+// {"name":"Video ID","value":""} on the wire. Discord answers an empty field
+// value with a 400, and DiscordWebhook.Send treats a non-429 4xx as permanent
+// — the WHOLE embed is dropped after one attempt. N1 guards the same class one
+// layer down for the author object; this is JobFacts' "omit what you do not
+// know" promise kept at the only field that was breaking it.
 func addIDField(b *FieldBuilder, f JobFacts) *FieldBuilder {
-	return b.AddInline(IDLabel(f.Platform), f.VideoID)
+	return b.AddInlineIf(f.VideoID != "", IDLabel(f.Platform), f.VideoID)
 }
 
 // resolutionLabel renders "1920x1080 @60fps", or "" when nothing was probed.
