@@ -1,7 +1,9 @@
 package main
 
 import (
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // cliAddedFacts describes a job added from the command line.
@@ -33,4 +35,25 @@ func cliAddedFacts(platform, jobID, jobURL, channelLogin string) notifications.J
 		f.ThumbnailURL = youtubeThumbnailURL(jobID)
 	}
 	return f
+}
+
+// notifyStreamFound is the one discovery embed, for both monitors.
+//
+// A package-level function rather than two inline sends inside
+// wireMonitorCallbacks' closures: those closures need a runState, three live
+// monitors and a database to reach, which is why neither discovery embed had a
+// test before (audit §4, coverage root cause). Everything the two sites differ
+// by is a parameter.
+//
+// channelURL is the channel's page when the caller knows one the job row
+// cannot derive — a Twitch row's channel_id is always NULL, and its login is
+// only on the monitor's stream info. category is the Twitch game, empty for
+// YouTube.
+func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, category string) {
+	f := worker.NotifyFacts(job)
+	if channelURL != "" {
+		f.ChannelURL = channelURL
+	}
+	f.Category = category
+	n.Send(notifications.StreamFound(f))
 }

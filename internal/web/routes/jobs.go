@@ -923,25 +923,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		}
 
 		if notifier != nil && !workerWillNotify {
-			idLabel := notifications.IDLabel(job.Platform)
-			notifyURL := job.URL
-			if notifyURL == "" {
-				notifyURL = "https://www.youtube.com/watch?v=" + job.VideoID
-			}
-			notifier.Send(
-				"Job Cancelled",
-				fmt.Sprintf("Cancelled: %s", job.Title),
-				notifications.TypeCancelled,
-				[]notifications.Field{
-					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: idLabel, Value: job.VideoID, Inline: true},
-				},
-				notifications.SendOptions{
-					URL:       notifyURL,
-					Thumbnail: job.ThumbnailURL,
-					Event:     "cancelled",
-				},
-			)
+			notifier.Send(notifications.JobCancelled(worker.NotifyFacts(job)))
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})

@@ -1410,18 +1410,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
 		if s.notifyMgr.HasTargets() {
-			s.notifyMgr.Send("Stream Found",
-				fmt.Sprintf("Found matching stream: %s", title),
-				notifications.TypeInfo,
-				[]notifications.Field{
-					{Name: "Channel", Value: ch.Name, Inline: true},
-					{Name: "Video ID", Value: videoID, Inline: true},
-				},
-				notifications.SendOptions{
-					Event:     "found",
-					URL:       videoURL,
-					Thumbnail: youtubeThumbnailURL(videoID),
-				})
+			notifyStreamFound(s.notifyMgr, job, "", "")
 		}
 	}
 
@@ -1501,24 +1490,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// broadcasts the new job; no explicit BroadcastJobsUpdate
 		// needed. DECISIONS #21 consumer migration.
 		if s.notifyMgr.HasTargets() {
-			twitchFields := []notifications.Field{
-				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
-				{Name: "Stream ID", Value: info.StreamID, Inline: true},
-			}
-			if info.GameCategory != "" {
-				twitchFields = append(twitchFields, notifications.Field{
-					Name: "Category", Value: info.GameCategory, Inline: true,
-				})
-			}
-			s.notifyMgr.Send("Twitch Stream Found",
-				fmt.Sprintf("Live: %s", title),
-				notifications.TypeInfo,
-				twitchFields,
-				notifications.SendOptions{
-					Event:     "found",
-					URL:       "https://twitch.tv/" + info.ChannelLogin,
-					Thumbnail: info.ThumbnailURL,
-				})
+			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
 		}
 	}
 

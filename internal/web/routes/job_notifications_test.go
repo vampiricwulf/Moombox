@@ -3,6 +3,8 @@ package routes
 import (
 	"net/http"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestAddRoutesSendOneJobAddedEmbed is the route half of audit C3: the two add
@@ -65,4 +67,31 @@ func TestAddRoutesSendOneJobAddedEmbed(t *testing.T) {
 			t.Error("the Twitch add embed lost the avatar the row carries")
 		}
 	})
+}
+
+// TestCancelRouteSendsTheOneCancelEmbed is C5's route half. The route only
+// sends when the worker did not (jobs.go dedupes on CancelJob's bool), so this
+// fixture's nil worker is exactly the shape that reaches the send.
+func TestCancelRouteSendsTheOneCancelEmbed(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "vid9", func(j *database.Job) {
+		j.Status = database.StatusUpcoming
+		j.Title = "Cancel Me"
+		j.URL = ""
+	})
+
+	rec := f.post(t, "/api/jobs/vid9/cancel", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST cancel = %d, want 200", rec.Code)
+	}
+	calls := f.notify.ByEvent("cancelled")
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d cancelled calls, want 1", len(calls))
+	}
+	if calls[0].Title != "Job Cancelled" {
+		t.Errorf("title = %q", calls[0].Title)
+	}
+	if calls[0].Opts.URL != "https://www.youtube.com/watch?v=vid9" {
+		t.Errorf("opts.URL = %q, want the watch-URL fallback for a row with no url", calls[0].Opts.URL)
+	}
 }

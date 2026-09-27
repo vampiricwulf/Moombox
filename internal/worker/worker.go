@@ -1072,19 +1072,7 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 		})
 
 		if w.notifier != nil {
-			w.notifier.Send("Download Cancelled",
-				fmt.Sprintf("Cancelled: %s", job.Title),
-				notifications.TypeCancelled,
-				[]notifications.Field{
-					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
-				},
-				notifications.SendOptions{
-					URL:       job.URL,
-					Thumbnail: job.ThumbnailURL,
-					Event:     "cancelled",
-				},
-			)
+			w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
 		}
 	} else {
 		// Shutdown: preserve existing status so job resumes on restart
