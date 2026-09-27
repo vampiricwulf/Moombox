@@ -63,6 +63,20 @@ func (s *runState) shutdown() bool {
 		s.log.Debug(fmt.Sprintf("[Moombox] Stopped %s", name))
 	}
 
+	// Single-attempt notifications from here on. The force-exit above fires
+	// 10 s from now and routinely does (a worker stop can legitimately spend
+	// the whole window draining a segment mux), so the three-attempt ladder
+	// with its 2 s + 5 s backoff cannot finish — an embed emitted during the
+	// stop would be retried into a process that is already gone. One attempt
+	// is what fits; operations.md documents the cap rather than promising a
+	// drain that cannot happen (owner ruling).
+	//
+	// Through stopService like every other step: it is the only thing in this
+	// function with panic recovery, and a shutdown path that can panic its way
+	// past the remaining teardown is exactly what that closure exists to
+	// prevent — cheap here, since the call is one atomic store.
+	stopService("Notifications (single-attempt mode)", s.notifyMgr.BeginShutdown)
+
 	// 1. Stop monitors
 	stopService("TwitchMonitor", s.twitchMon.Stop)
 	stopService("DecapiMonitor", s.decapiMon.Stop)

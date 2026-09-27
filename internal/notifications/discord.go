@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,13 +23,13 @@ const (
 	// discordMaxAttempts bounds total delivery attempts (first try +
 	// retries) across transport errors, Discord 5xx, and 429 responses.
 	discordMaxAttempts = 3
-	// discordRetryAfterCap rejects absurd 429 Retry-After values rather
-	// than sleeping the goroutine (and its manager semaphore slot) into
-	// next week.
+	// discordRetryAfterCap rejects absurd 429 Retry-After values — and bounds
+	// the pre-emptive empty-bucket sleep — rather than parking a target's
+	// whole queue into next week.
 	discordRetryAfterCap = 30 * time.Second
-	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding
-	// one notification's worst-case semaphore hold at ~3×15s requests +
-	// 30s sleep. Two large Retry-After waits would exceed it — a webhook
+	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding one
+	// notification's worst-case hold on its target's queue at ~3x15s requests
+	// + 30s sleep. Two large Retry-After waits would exceed it — a webhook
 	// still rate-limited after one honored wait gives up instead.
 	discordMaxSleepTotal = 30 * time.Second
 	// discordErrBodyBytes bounds how much of a rejected webhook's response
@@ -54,8 +55,21 @@ var discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{2 * time.Second,
 var discordHTTPClient = httpx.Client(2 * discordTimeout)
 
 // DiscordWebhook sends notifications via Discord webhook.
+//
+// One instance per target, held by that target's queue (manager.go), so the
+// bucket state below is learned once and reused for every embed to that
+// webhook — including across a config hot-reload, because applyTargets keeps a
+// surviving target's queue and therefore this pointer.
 type DiscordWebhook struct {
 	URL string
+
+	// bucketMu guards bucketRefillsAt. One sender goroutine per target means
+	// there is no contention in production; the mutex is for SendTest (which
+	// builds its own instance) and for the race detector.
+	bucketMu sync.Mutex
+	// bucketRefillsAt is when this webhook's rate bucket next has room, set
+	// from an X-RateLimit-Remaining: 0 response. Zero means "not known empty".
+	bucketRefillsAt time.Time
 }
 
 type discordPayload struct {
@@ -219,16 +233,18 @@ func (d *DiscordWebhook) SendOnce(title, description string, color int, fields [
 	if err != nil {
 		return err
 	}
-	status, retryAfter, snippet, err := d.post(body)
+	d.waitForBucket()
+	r, err := d.post(body)
+	d.noteBucket(r)
 	switch {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
-	case status < 400:
+	case r.status < 400:
 		return nil
-	case status == http.StatusTooManyRequests:
-		return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+	case r.status == http.StatusTooManyRequests:
+		return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	default:
-		return discordStatusErr(status, snippet)
+		return discordStatusErr(r.status, r.snippet)
 	}
 }
 
@@ -248,33 +264,38 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	var lastErr error
 	var slept time.Duration
 	for attempt := 1; ; attempt++ {
-		status, retryAfter, snippet, err := d.post(body)
+		// Pre-emptive: if the last response said the bucket was empty, wait
+		// out its window instead of spending one of three attempts on the 429
+		// Discord has already promised.
+		d.waitForBucket()
+		r, err := d.post(body)
+		d.noteBucket(r)
 
 		var delay time.Duration
 		switch {
 		case err != nil:
 			lastErr = fmt.Errorf("discord webhook request: %w", err)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
-		case status < 400:
+		case r.status < 400:
 			return nil
-		case status == http.StatusTooManyRequests:
+		case r.status == http.StatusTooManyRequests:
 			// Validate in FLOAT space before converting: values past ~9.2e9s
 			// (or Inf) overflow time.Duration to a NEGATIVE on amd64, which
 			// would slip past a Duration-space cap check and turn the sleep
 			// into a zero-delay hammer. !(secs > 0) is deliberately NaN-proof.
-			secs, parseErr := strconv.ParseFloat(retryAfter, 64)
+			secs, parseErr := strconv.ParseFloat(r.retryAfter, 64)
 			if parseErr != nil || !(secs > 0) || secs > discordRetryAfterCap.Seconds() {
 				// Missing, malformed, or absurd Retry-After — surface the
 				// 429 directly rather than guessing a sleep.
-				return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+				return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			}
-			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			delay = time.Duration(secs * float64(time.Second))
-		case status >= 500:
-			lastErr = discordStatusErr(status, snippet)
+		case r.status >= 500:
+			lastErr = discordStatusErr(r.status, r.snippet)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
 		default:
-			return discordStatusErr(status, snippet)
+			return discordStatusErr(r.status, r.snippet)
 		}
 
 		if attempt == discordMaxAttempts {
@@ -282,7 +303,7 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 		}
 		if slept+delay > discordMaxSleepTotal {
 			// Cumulative-sleep budget exhausted (e.g. a second large
-			// Retry-After) — bound the semaphore-slot hold instead of
+			// Retry-After) — bound this target queue's hold instead of
 			// waiting out an extended rate-limit.
 			return fmt.Errorf("%w (retry budget exhausted after %d attempts)", lastErr, attempt)
 		}
@@ -320,16 +341,86 @@ func discordStatusErr(status int, snippet string) error {
 	return fmt.Errorf("discord webhook returned %d: %s", status, snippet)
 }
 
-// post performs one webhook POST attempt, returning the HTTP status (0 on
-// transport error), the Retry-After header value, and — for a >=400 status —
-// a sanitised prefix of the response body.
-func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet string, err error) {
+// waitForBucket honours what Discord last told us about this webhook's rate
+// bucket: an X-RateLimit-Remaining of 0 means the NEXT request 429s until the
+// window resets, so sleeping through it costs one wait and saves an attempt
+// out of the three this notification has. Per Discord API docs
+// (topics/rate-limits.mdx) the bucket is discoverable only from these headers —
+// there is no published numeric cap.
+//
+// Capped by discordRetryAfterCap for the same reason a 429's Retry-After is:
+// an absurd reset must not park a target's whole queue into next week.
+func (d *DiscordWebhook) waitForBucket() {
+	d.bucketMu.Lock()
+	until := d.bucketRefillsAt
+	d.bucketMu.Unlock()
+	if until.IsZero() {
+		return
+	}
+	wait := time.Until(until)
+	if wait <= 0 {
+		return
+	}
+	if wait > discordRetryAfterCap {
+		wait = discordRetryAfterCap
+	}
+	time.Sleep(wait)
+}
+
+// noteBucket records (or clears) the empty-bucket deadline from one response.
+//
+// A 429 is deliberately EXCLUDED: Discord sets Remaining: 0 on one, and the
+// ladder already honours its Retry-After, so arming the pre-emptive sleep from
+// the same response would wait the window twice and spend the cumulative-sleep
+// budget on the duplicate.
+func (d *DiscordWebhook) noteBucket(r discordResponse) {
+	if r.status == http.StatusTooManyRequests || r.rateRemain == "" {
+		return
+	}
+	remaining, err := strconv.Atoi(r.rateRemain)
+	if err != nil {
+		return
+	}
+	if remaining > 0 {
+		d.bucketMu.Lock()
+		d.bucketRefillsAt = time.Time{}
+		d.bucketMu.Unlock()
+		return
+	}
+	// Validate in FLOAT space before converting, for the reason the 429 arm
+	// documents: a value past ~9.2e9s (or Inf) overflows time.Duration to a
+	// NEGATIVE on amd64. !(secs > 0) is deliberately NaN-proof.
+	secs, err := strconv.ParseFloat(r.rateReset, 64)
+	if err != nil || !(secs > 0) {
+		return
+	}
+	if secs > discordRetryAfterCap.Seconds() {
+		secs = discordRetryAfterCap.Seconds()
+	}
+	d.bucketMu.Lock()
+	d.bucketRefillsAt = time.Now().Add(time.Duration(secs * float64(time.Second)))
+	d.bucketMu.Unlock()
+}
+
+// discordResponse is what one attempt learned. Grouped rather than returned as
+// five bare values: the rate-limit pair has to travel with the status, and a
+// six-value signature is where a caller starts transposing arguments.
+type discordResponse struct {
+	status     int    // 0 on a transport error
+	retryAfter string // Retry-After, 429 only
+	rateRemain string // X-RateLimit-Remaining
+	rateReset  string // X-RateLimit-Reset-After, in seconds
+	snippet    string // sanitised body prefix, >= 400 only
+}
+
+// post performs one webhook POST attempt.
+func (d *DiscordWebhook) post(body []byte) (discordResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), discordTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(body))
 	if err != nil {
-		return 0, "", "", fmt.Errorf("create discord request: %w", err)
+		return discordResponse{}, fmt.Errorf("create discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -337,25 +428,32 @@ func (d *DiscordWebhook) post(body []byte) (status int, retryAfter, snippet stri
 	if err != nil {
 		// Transport errors are *url.Error, whose Error() embeds the FULL
 		// request URL — i.e. the webhook token. Redact before the error
-		// reaches any log line or HTTP response body (the manager's async
-		// failure log, SendTest's route response, retry-loop wrap all flow
-		// through here).
+		// reaches any log line or HTTP response body (the queue's failure
+		// log, SendTest's route response, retry-loop wrap all flow through
+		// here).
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
-			return 0, "", "", fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+			return discordResponse{}, fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
 		}
-		return 0, "", "", err
+		return discordResponse{}, err
 	}
 	defer func() {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
+
+	out := discordResponse{
+		status:     resp.StatusCode,
+		retryAfter: resp.Header.Get("Retry-After"),
+		rateRemain: resp.Header.Get("X-RateLimit-Remaining"),
+		rateReset:  resp.Header.Get("X-RateLimit-Reset-After"),
+	}
 	if resp.StatusCode >= 400 {
 		// Read the reason BEFORE the deferred drain throws the rest away.
 		// The read error is intentionally ignored: a partial read (e.g. the
 		// connection drops mid-body) still yields whatever prefix arrived,
 		// which is a usable snippet — better than discarding it outright.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
-		snippet = discordErrSnippet(b)
+		out.snippet = discordErrSnippet(b)
 	}
-	return resp.StatusCode, resp.Header.Get("Retry-After"), snippet, nil
+	return out, nil
 }
