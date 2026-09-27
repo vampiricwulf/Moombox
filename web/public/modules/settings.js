@@ -56,11 +56,15 @@ const NOTIFICATION_EVENT_GROUPS = [
     events: [
       { id: "disk_warning", label: "Disk Warning" },
       { id: "disk_critical", label: "Disk Critical" },
+      { id: "disk_ok", label: "Disk Recovered" },
       { id: "update_available", label: "Update Available" },
       { id: "update_applied", label: "Update Applied" },
       { id: "update_failed", label: "Update Failed" },
       { id: "crash_recovered", label: "Crash Recovered" },
       { id: "channel_unhealthy", label: "Channel Unhealthy" },
+      { id: "channel_healthy", label: "Channel Recovered" },
+      { id: "sidecar_down", label: "Sidecar Down" },
+      { id: "sidecar_restored", label: "Sidecar Restored" },
     ],
   },
 ];
