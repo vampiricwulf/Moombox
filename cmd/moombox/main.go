@@ -266,6 +266,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// wiring — see monitor_callbacks.go.
 	s.wireMonitorCallbacks()
 
+	// BotGuard sidecar liveness -> webhooks. The TUI's own subscriber
+	// (tui_wiring.go) draws the status bar; this one is the headless half,
+	// and it runs whether or not a TUI does.
+	unsubSidecarAlerts := s.wireSidecarAlerts()
+	defer unsubSidecarAlerts()
+
 	// =========================================================================
 	// Start services (consumers first)
 	// =========================================================================
