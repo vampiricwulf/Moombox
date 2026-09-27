@@ -164,6 +164,15 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				}
 			}
 		}
+		// public_url: validated at the API edge with the same
+		// config.ValidatePublicURL the apply arm canonicalises with, so a
+		// value the route accepts is never one Normalize then silently
+		// rewrites behind the operator's back.
+		if v, ok := net["public_url"].(string); ok {
+			if _, err := config.ValidatePublicURL(v); err != nil {
+				errs["network.public_url"] = err.Error()
+			}
+		}
 		// Empty means "no TLS material configured" — legitimate.
 		for _, f := range []pathField{{"tls_cert_path", false}, {"tls_key_path", false}} {
 			if v, ok := net[f.key].(string); ok {
@@ -466,6 +475,26 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
+	// Notifications — mention must be a well-formed Discord mention token
+	// (config.ParseMention's four accepted forms); a token Discord cannot
+	// resolve renders as literal text and pings nobody, which looks like a
+	// delivery failure. Unknown event names are NOT errors here: they are
+	// stripped in applyConfigUpdates, where an all-unknown Events filter is
+	// deliberately left as written rather than rejected or emptied.
+	if notifs, ok := updates["notifications"].([]any); ok {
+		for i, raw := range notifs {
+			nm, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if v, ok := nm["mention"].(string); ok && v != "" {
+				if _, _, _, err := config.ParseMention(v); err != nil {
+					errs[fmt.Sprintf("notifications[%d].mention", i)] = err.Error()
+				}
+			}
+		}
+	}
+
 	return errs
 }
 
@@ -506,6 +535,14 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 				}
 			}
 			cfg.Network.TrustedProxies = proxies
+		}
+		if v, ok := net["public_url"].(string); ok {
+			// The error case is unreachable here — validateConfigUpdates
+			// already rejected an unusable value — but fall back to leaving
+			// the stored value untouched rather than writing garbage.
+			if canonical, err := config.ValidatePublicURL(v); err == nil {
+				cfg.Network.PublicURL = canonical
+			}
 		}
 	}
 
@@ -747,25 +784,62 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	}
 
 	// Notifications
+	// Decoded via json.Marshal/json.Unmarshal, the same idiom the channels
+	// arm below already uses, rather than rebuilt field by field: every
+	// tagged field carries through unconditionally, so a field a later arc
+	// adds (N3's `mode`) needs no route edit here and survives a save
+	// written before it existed — the SPA round-trips the whole stored array
+	// on every settings save, so a field this route didn't know about would
+	// otherwise be silently dropped.
 	if notifs, ok := updates["notifications"].([]any); ok {
-		var configs []config.NotificationConfig
-		for _, n := range notifs {
-			if nm, ok := n.(map[string]any); ok {
-				nc := config.NotificationConfig{}
-				if v, ok := nm["url"].(string); ok {
-					nc.URL = v
-				}
-				if v, ok := nm["events"].([]any); ok {
-					for _, e := range v {
-						if s, ok := e.(string); ok {
-							nc.Events = append(nc.Events, s)
-						}
+		data, _ := json.Marshal(notifs)
+		var ncs []config.NotificationConfig
+		if json.Unmarshal(data, &ncs) == nil {
+			for i := range ncs {
+				n := &ncs[i]
+				if n.Mention != "" {
+					// Unreachable on error — validateConfigUpdates already
+					// rejected an unusable mention — so an error here leaves
+					// the decoded (operator-typed) value untouched.
+					if canonical, _, _, err := config.ParseMention(n.Mention); err == nil {
+						n.Mention = canonical
 					}
 				}
-				configs = append(configs, nc)
+				// Unknown event names are stripped UNLESS doing so would
+				// empty an otherwise non-empty filter: buildTargets treats an
+				// absent/nil Events filter as "every event", so reducing an
+				// all-garbage filter to empty would turn "matches nothing"
+				// into "matches everything". The manager's startup Warn is
+				// what tells the operator about the garbage that survives,
+				// and the web UI's own chip editor can't produce this state.
+				if len(n.Events) > 0 {
+					kept := make([]string, 0, len(n.Events))
+					for _, e := range n.Events {
+						if notifications.KnownEvents[e] {
+							kept = append(kept, e)
+						}
+					}
+					if len(kept) > 0 {
+						n.Events = kept
+					}
+				}
+				// mention_events has no such trap — stripping only ever
+				// narrows who gets pinged, and an emptied list is the
+				// meaningful "never" — so unknown entries are dropped
+				// unconditionally, all the way down to an explicit empty
+				// list.
+				if n.MentionEvents != nil {
+					kept := make([]string, 0, len(*n.MentionEvents))
+					for _, e := range *n.MentionEvents {
+						if notifications.KnownEvents[e] {
+							kept = append(kept, e)
+						}
+					}
+					n.MentionEvents = &kept
+				}
 			}
+			cfg.Notifications = ncs
 		}
-		cfg.Notifications = configs
 	}
 
 	// Channels
@@ -899,6 +973,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldFfmpeg := cfg.Paths.FfmpegPath
 		oldReorderPerJob := cfg.Downloader.ReorderBufferMB
 		oldReorderBudget := cfg.Downloader.ReorderBudgetMB
+		oldPublicURL := cfg.Network.PublicURL
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -925,6 +1000,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newFfmpeg := cfg.Paths.FfmpegPath
 		newReorderPerJob := cfg.Downloader.ReorderBufferMB
 		newReorderBudget := cfg.Downloader.ReorderBudgetMB
+		newPublicURL := cfg.Network.PublicURL
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -946,7 +1022,16 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			if _, hasChannels := updates["channels"]; hasChannels && callbacks.OnChannelChange != nil {
 				callbacks.OnChannelChange()
 			}
-			if _, hasNotifs := updates["notifications"]; hasNotifs && callbacks.OnNotificationsChange != nil {
+			// public_url lives in [network], not [notifications], but the
+			// notification manager is its only consumer — it reads the base
+			// URL at send time from the config Reload hands it. The web
+			// form's Save sends `network` WITHOUT `notifications` when no
+			// webhook is configured, so without this second trigger a
+			// public_url change would sit unread until the next restart.
+			// (The TUI has no such gap: its save path calls Reload
+			// unconditionally — cmd/moombox/tui_wiring.go.)
+			_, hasNotifs := updates["notifications"]
+			if (hasNotifs || newPublicURL != oldPublicURL) && callbacks.OnNotificationsChange != nil {
 				callbacks.OnNotificationsChange()
 			}
 			if newGoSoft != oldGoSoft && callbacks.OnGoSoftLimitChange != nil {

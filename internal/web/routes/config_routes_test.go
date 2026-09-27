@@ -28,6 +28,7 @@ type configRoutesFixture struct {
 	goSoft     atomic.Int32           // last value passed to OnGoSoftLimitChange
 	trustProto atomic.Pointer[bool]   // last value passed to OnTrustForwardedProtoChange
 	ffmpeg     atomic.Pointer[string] // last value passed to OnFfmpegPathChange
+	notifs     atomic.Bool            // OnNotificationsChange was invoked
 }
 
 func newConfigRoutesFixture(t *testing.T) *configRoutesFixture {
@@ -48,6 +49,7 @@ func newConfigRoutesFixture(t *testing.T) *configRoutesFixture {
 		OnGoSoftLimitChange:         func(mb int) { f.goSoft.Store(int32(mb)) },
 		OnTrustForwardedProtoChange: func(b bool) { f.trustProto.Store(&b) },
 		OnFfmpegPathChange:          func(p string) { f.ffmpeg.Store(&p) },
+		OnNotificationsChange:       func() { f.notifs.Store(true) },
 	}
 	ConfigRoutes(r, store, cb)
 
