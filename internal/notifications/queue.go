@@ -72,6 +72,14 @@ type targetQueue struct {
 	closing bool // drain what is queued, then exit (Wait)
 	discard bool // drop what is queued, then exit (a removed target)
 
+	// The ping, as buildTargets resolved it. Guarded by mu like events,
+	// because a Reload swaps them on a surviving queue while Send reads them.
+	// mention is "" when this target never pings; mentionEvents is nil then
+	// too, and an EMPTY non-nil map is the explicit "never".
+	mention        string
+	mentionAllowed *AllowedMentions
+	mentionEvents  map[string]bool
+
 	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
 	// of shed are counted separately because they mean different things: the
 	// oldest-low-priority kind is the policy working (chatter making room for
@@ -96,13 +104,16 @@ func newTargetQueue(t notificationTarget, logger interface {
 }, shuttingDown *atomic.Bool,
 ) *targetQueue {
 	return &targetQueue{
-		sender:       t.sender,
-		key:          t.key,
-		events:       t.events,
-		shuttingDown: shuttingDown,
-		logger:       logger,
-		wake:         make(chan struct{}, 1),
-		done:         make(chan struct{}),
+		sender:         t.sender,
+		key:            t.key,
+		events:         t.events,
+		mention:        t.mention,
+		mentionAllowed: t.mentionAllowed,
+		mentionEvents:  t.mentionEvents,
+		shuttingDown:   shuttingDown,
+		logger:         logger,
+		wake:           make(chan struct{}, 1),
+		done:           make(chan struct{}),
 	}
 }
 
@@ -140,6 +151,47 @@ func (q *targetQueue) allows(event string) bool {
 func (q *targetQueue) setEvents(events map[string]bool) {
 	q.mu.Lock()
 	q.events = events
+	q.mu.Unlock()
+}
+
+// mentionFor returns the content mention this target attaches to event and the
+// matching allowed_mentions object, or ("", nil) when the target has no
+// mention configured or the event is not in its mention filter.
+//
+// Alias-aware by the same rule and the same eventAliases table as allows, so a
+// target that asked to be pinged for the broader legacy event is still pinged
+// for the more specific one that split from it. Unlike allows, an EMPTY event
+// pings nobody: an empty Event bypasses the delivery filter by design, and
+// carrying that exemption over to the ping would mean any send that forgot its
+// event name mentioned everyone.
+func (q *targetQueue) mentionFor(event string) (string, *AllowedMentions) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.mention == "" || q.mentionAllowed == nil || event == "" {
+		return "", nil
+	}
+	if q.mentionEvents[event] {
+		return q.mention, q.mentionAllowed
+	}
+	// The ok-check matters for the same reason it does in allows: a bare map
+	// miss yields "", and an "" key in the filter would then match every
+	// non-aliased event.
+	if alias, hasAlias := eventAliases[event]; hasAlias && q.mentionEvents[alias] {
+		return q.mention, q.mentionAllowed
+	}
+	return "", nil
+}
+
+// setMention swaps the mention on a target that survived a Reload — the twin
+// of setEvents, and required for the same reason: applyTargets keeps a
+// survivor's queue and discards the freshly built notificationTarget, so
+// without this a save that changes only `mention` or `mention_events` is
+// silently ignored for every webhook that survived the diff.
+func (q *targetQueue) setMention(t notificationTarget) {
+	q.mu.Lock()
+	q.mention = t.mention
+	q.mentionAllowed = t.mentionAllowed
+	q.mentionEvents = t.mentionEvents
 	q.mu.Unlock()
 }
 

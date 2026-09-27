@@ -267,6 +267,11 @@ type Manager struct {
 	// byKey indexes targets by resolved webhook URL so Reload can tell a
 	// surviving target from a new one.
 	byKey map[string]*targetQueue
+	// publicURL is network.public_url: the dashboard base every job embed's
+	// title links into. Guarded by targetsMu like the targets themselves, and
+	// written BEFORE applyTargets by both NewManager and Reload, so a Send
+	// that already sees the new targets can never still see the old base.
+	publicURL string
 	// shuttingDown flips once, in BeginShutdown; every queue holds a pointer
 	// to it and reads it per delivery.
 	shuttingDown atomic.Bool
@@ -289,6 +294,13 @@ type notificationTarget struct {
 	// key is the RESOLVED webhook URL: the dedupe identity, and what Reload
 	// matches a surviving target on.
 	key string
+	// mention is the canonical ping text ("" = this target never pings),
+	// mentionAllowed the allowed_mentions object MentionParse resolved for it
+	// ONCE at build time, and mentionEvents the filter that decides which
+	// events carry the ping (nil whenever mention is "").
+	mention        string
+	mentionAllowed *AllowedMentions
+	mentionEvents  map[string]bool
 }
 
 // sender is one delivery destination.
@@ -392,6 +404,19 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			continue
 		}
 
+		// A disabled target is kept in the config, with its filter and its
+		// mention intact, and delivers nothing. This is the mute an operator
+		// previously had to fake by deleting the webhook (the web UI's
+		// "untick every event" route silently subscribed them to EVERYTHING
+		// instead — an empty filter means all events).
+		//
+		// Before parseTarget and before the dedupe, so a disabled entry can
+		// neither shadow its enabled twin nor warn about a URL nobody uses.
+		if !nc.IsEnabled() {
+			logger.Info("notification target disabled — skipping", "url", redactURLForLog(url))
+			continue
+		}
+
 		s, err := parseTarget(url)
 		if err != nil {
 			// Redacted: even a near-valid URL carries a real secret; a
@@ -426,6 +451,54 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			}
 		}
 
+		// Resolve the ping once per config load: the canonical text, the wire
+		// object, and the filter that says which events carry it.
+		var (
+			mention        string
+			mentionAllowed *AllowedMentions
+			mentionEvents  map[string]bool
+		)
+		// TWO parsers, two jobs. config.ParseMention validates the operator's
+		// string and hands back its canonical form — it lives in
+		// internal/config because that is where validateOrNormalize and both
+		// Settings editors need it, and internal/config cannot import this
+		// package (the import runs the other way). MentionParse
+		// (internal/notifications/discord.go) turns that canonical string into
+		// the wire object; N1 wrote it for this call and its doc comment says
+		// so. Do NOT rebuild the object from (form, id): MentionParse returns
+		// Parse: []string{} for the role and user forms, and Parse is
+		// json:"parse" WITHOUT omitempty precisely so an empty list is on the
+		// wire — a nil there marshals to "parse": null and re-widens the ping
+		// to the webhook default.
+		if canonical, _, _, err := config.ParseMention(nc.Mention); err == nil && canonical != "" {
+			mention = canonical
+			mentionAllowed = MentionParse(canonical)
+		}
+		if mention != "" && mentionAllowed != nil {
+			// ResolveMentionEvents encodes the three states: the default six
+			// when the key was never written, the stored list otherwise, and
+			// an explicit empty list as "never". An empty non-nil map is what
+			// carries "never" through to mentionFor — nil there would read as
+			// "no mention configured".
+			resolved := nc.ResolveMentionEvents()
+			mentionEvents = make(map[string]bool, len(resolved))
+			for _, e := range resolved {
+				if e == "" {
+					logger.Warn("notification target mentions on an empty event name — ignored",
+						"url", redactURLForLog(url))
+					continue
+				}
+				// Only an OPERATOR-written list is vocabulary-checked. The
+				// default list is ours, so warning about it would be noise
+				// about our own defaults at every startup.
+				if nc.MentionEvents != nil && !KnownEvents[e] {
+					logger.Warn("notification target mentions on an unknown event — it will never match",
+						"event", e, "url", redactURLForLog(url))
+				}
+				mentionEvents[e] = true
+			}
+		}
+
 		// Dedupe on the RESOLVED webhook URL, not the configured string: the
 		// two spellings of one webhook differ as text and resolve to the same
 		// destination. The FIRST occurrence wins — its sender and its slot in
@@ -441,7 +514,10 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// outright. nil means "every event", so a webhook listed once
 				// unfiltered and once filtered keeps the wider subscription the
 				// operator configured; narrowing it would silently drop alerts
-				// the config asked for.
+				// the config asked for. The MENTION is not unioned: the first
+				// occurrence's ping wins outright, like its sender and its
+				// slot, because two mentions have no wider form to merge into
+				// and pinging both would double one alert's noise.
 				switch {
 				case targets[idx].events == nil || events == nil:
 					targets[idx].events = nil
@@ -456,9 +532,12 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		}
 
 		targets = append(targets, notificationTarget{
-			sender: s,
-			events: events,
-			key:    key,
+			sender:         s,
+			events:         events,
+			key:            key,
+			mention:        mention,
+			mentionAllowed: mentionAllowed,
+			mentionEvents:  mentionEvents,
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
@@ -498,6 +577,11 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 	for _, t := range built {
 		if q, survives := previous[t.key]; survives && t.key != "" {
 			q.setEvents(t.events)
+			// The freshly built target is discarded here, so without this a
+			// save that changes ONLY mention or mention_events is accepted by
+			// both UIs, written to the file, and then ignored until restart —
+			// the same defect setEvents exists to prevent for the filter.
+			q.setMention(t)
 			next = append(next, q)
 			byKey[t.key] = q
 			delete(previous, t.key)
@@ -536,6 +620,10 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 		logger:      logger,
 		waitTimeout: defaultWaitTimeout,
 	}
+	// Before applyTargets, which takes the same lock itself — see publicURL.
+	m.targetsMu.Lock()
+	m.publicURL = cfg.Network.PublicURL
+	m.targetsMu.Unlock()
 	m.applyTargets(buildTargets(cfg, logger))
 
 	if len(m.targets) > 0 {
@@ -553,6 +641,11 @@ func (m *Manager) Reload(cfg *config.MoomboxConfig) {
 	if m == nil {
 		return
 	}
+	// Before applyTargets, for the same reason NewManager writes it first: a
+	// Send that already sees the new targets must never see the old base URL.
+	m.targetsMu.Lock()
+	m.publicURL = cfg.Network.PublicURL
+	m.targetsMu.Unlock()
 	m.applyTargets(buildTargets(cfg, m.logger))
 	m.targetsMu.RLock()
 	n := len(m.targets)
@@ -579,9 +672,27 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// place, so iterating the snapshot after release is safe.
 	m.targetsMu.RLock()
 	targets := m.targets
+	pub := m.publicURL
 	m.targetsMu.RUnlock()
 	if len(targets) == 0 {
 		return
+	}
+
+	// The deep-link rewrite is install-wide, not per target, so it happens
+	// once — before the queued item every target receives is built.
+	//
+	// With no Author there is NO rewrite: the platform page would have nowhere
+	// to move to, and trading the only link to the video for a dashboard link
+	// is a net loss. N2a gives every job send an Author, so that arm is the
+	// pre-N2a and System-send case.
+	if pub != "" && opts.JobID != "" && opts.Author != nil {
+		// COPY the Author. It is a pointer the producer still owns and every
+		// target shares — writing through it would leak this rewrite into the
+		// caller's value and into the next send that reuses it.
+		author := *opts.Author
+		author.URL = opts.URL
+		opts.Author = &author
+		opts.URL = JobDeepLink(pub, opts.JobID)
 	}
 
 	// fields is COPIED here, once for every send rather than once per target.
@@ -602,7 +713,14 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		if !q.allows(opts.Event) {
 			continue
 		}
-		q.enqueue(it)
+		// queued is a value, so this is the per-target copy. fields is shared
+		// across the copies, which is safe because it was already copied once
+		// above and nothing downstream mutates it; the *AllowedMentions is
+		// built once in buildTargets and never written after, so sharing that
+		// pointer across targets and sends is safe too.
+		perItem := it
+		perItem.opts.Mention, perItem.opts.MentionAllowed = q.mentionFor(opts.Event)
+		q.enqueue(perItem)
 	}
 }
 
