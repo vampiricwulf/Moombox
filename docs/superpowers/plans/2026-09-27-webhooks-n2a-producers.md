@@ -13,11 +13,12 @@
 **Depends on Arc N1 (merged first).** This plan consumes N1's interfaces **by the spec's names** and must be re-read against the merged tree before Task 1 starts:
 
 - `notifications.Sender` — `interface { Send(title, description string, ntype NotificationType, fields []Field, opts SendOptions) }`; `*Manager` satisfies it and `Send` on a nil `*Manager` is a no-op.
-- `notificationtest.Recorder` (`internal/notifications/notificationtest`) — implements `Sender`, records `Call{Title, Description, Type, Fields, Opts}`, exposes `Calls()`, `ByEvent(e)`, `Reset()`, safe for concurrent use.
+- `notificationtest.Recorder` (`internal/notifications/notificationtest`) — constructed with `notificationtest.New()` (`recorder.go:54`); implements `Notifier` and therefore `Sender`; records `Call{Title, Description, Type, Fields, Opts}` with a `Call.Field(name) (string, bool)` lookup (`recorder.go:35`); exposes `Calls()`, `ByEvent(e)`, `Reset()`, `HasTargets() == true`, `Reload`, `BeginShutdown`, `Wait`; safe for concurrent use, and `Calls()`/`ByEvent()` deep-copy `Fields`.
+- `ClampRunes(s string, limit int) string` (`internal/notifications/limits.go:37`) — the rune-safe cut, exported by N1 **for this arc's Description excerpt**; it marks the cut with `…` and counts CHARACTERS, not bytes.
 - `SendOptions{URL, Event, Thumbnail, Image, Author *Author, Platform, JobID, Tier, Mention, MentionAllowed}` with `Author{Name, IconURL, URL string}`.
 - `EscapeMarkdown(s string) string`.
 - The alias-known rule: `KnownEvents` contains alias values as well as `EventGroups` members.
-- N1's rune-boundary clamp in `buildPayload` is the payload safety net; this arc's 300-character description **excerpt** is a separate product-level cut and stays rune-safe on its own.
+- N1's payload clamp is the safety net (Discord's 1024-character field limit); this arc's 300-character description **excerpt** is a separate product-level budget that spends the SAME `ClampRunes`, so the two can never disagree about where a multi-byte character ends. This arc writes no truncator of its own.
 
 **Never cite a line number inside `internal/notifications/manager.go` or `internal/notifications/discord.go`** — N1 rewrites both. Every line number in this plan that points at a producer file was verified at `1d2df1d4`; verify each one again after `git merge main`, because N1 edits `orchestrator_mux.go`, `stream_processor.go`, `orchestrator_twitch.go`, `orchestrator.go`, `monitor_callbacks.go` and every consumer's notifier field type.
 
@@ -108,9 +109,9 @@ Whichever arc merges second merges `main` first (Task 9 Step 1). Conflicts shoul
 
 | File | Task | Responsibility after this arc |
 |---|---|---|
-| `internal/notifications/builders.go` — **new** | 1, 4, 5 | `JobFacts`, `Part`, `TrimFacts`, the five builders, and the private helpers `jobOpts`, `authorFor`, `displayName`, `resolutionLabel`, `excerpt`. |
+| `internal/notifications/builders.go` — **new** | 1, 4, 5 | `JobFacts`, `Part`, `TrimFacts`, the five builders, and the private helpers `jobOpts`, `authorFor`, `displayName`, `resolutionLabel`, `addIDField`. No truncator of its own — the Description excerpt spends N1's `ClampRunes`. |
 | `internal/notifications/builders_test.go` — **new** | 1, 4, 5 | Table tests per builder per platform; the escape rule; the excerpt's rune boundary; the truth fields. |
-| `internal/notifications/events.go` | 6 | `EventGroups` System group gains `sidecar_down`, `sidecar_restored`, `disk_ok`, `channel_healthy`; `eventAliases` gains `disk_ok → disk_warning` and `channel_healthy → channel_unhealthy`. |
+| `internal/notifications/events.go` | 6 | `EventGroups` System group gains `sidecar_down`, `sidecar_restored`, `disk_ok`, `channel_healthy`; `eventAliases` **gains three entries in place** (`disk_ok → disk_warning`, `channel_healthy → channel_unhealthy`, `sidecar_restored → sidecar_down`) beside the two N1 already carries; new exported reader `AliasOf`. |
 | `internal/worker/notify_facts.go` — **new** | 2 | `NotifyFacts(*database.Job) notifications.JobFacts` — the one mapper, including the YouTube watch-URL fallback and the YouTube channel-page derivation. |
 | `internal/worker/notify_facts_test.go` — **new** | 2 | The mapper's per-platform output and both fallbacks. |
 | `internal/web/routes/jobs.go` | 2, 3 | The Twitch add (`:772`), YouTube add (`:901`) and cancel (`:959`) sends become builder calls; the `notifier` parameter is `notifications.Sender` (N1). |
@@ -121,7 +122,8 @@ Whichever arc merges second merges `main` first (Task 9 Step 1). Conflicts shoul
 | `cmd/moombox/job_notifications_test.go` — **new** | 2, 3 | Recorder tests for both. |
 | `cmd/moombox/monitor_callbacks.go` | 3, 8 | The two `found` sends become `notifyStreamFound`; `unhealthyNotify` becomes `channelHealthNotifiers`, wired with `SetOnChannelHealthy`. |
 | `internal/worker/worker.go` | 3, 5 | `handleCancellation`'s send becomes `notifications.JobCancelled`; `setJobError`'s "Job Failed" gains Stage / Staging / Set-aside recordings; new `errorStage` helper. |
-| `internal/worker/orchestrator_mux.go` | 4 | One `sendDownloadFinished` + `finishedFacts` replaces the two inline finished builders; new `formatSelectionLabel`, `trimmedRangeLabel`. |
+| `internal/worker/orchestrator_mux.go` | 4 | One `sendDownloadFinished` + `finishedFacts` replaces the two inline finished builders; new `formatSelectionLabel`, `trimmedRangeLabel`; N1's `finishedImage` and the `descMaxLen` clamp line are deleted with the sends that used them. |
+| `internal/worker/orchestrator_mux_test.go` | 4 | N1's `TestFinishedImageIsDroppedForTwitch` and `TestDescriptionExcerptCutsOnARuneBoundary` deleted with the code they pin. |
 | `internal/worker/trim.go` | 5 | Both "Trim Created" sends become `notifications.TrimCreated`. |
 | `internal/worker/job_notifications_test.go` — **new** | 3, 4, 5 | Recorder tests for cancel, both finished shapes, the truth fields, both trims and Job Failed. |
 | `internal/monitor/health.go` | 8 | `healthTracker` gains `onHealthy`; `recordSuccess` fires it once per notified streak. |
@@ -150,7 +152,7 @@ The five families exist today as ten hand-rolled `Send` calls that disagree with
 - Create: `internal/notifications/builders_test.go`
 
 **Interfaces:**
-- Consumes (from N1, in this same package): `NotificationType` with `TypeInfo`/`TypeSuccess`/`TypeWarning`/`TypeCancelled`, `Field`, `FieldBuilder` + `NewFieldBuilder`/`Add`/`AddInline`/`AddIf`/`AddInlineIf`/`Build`, `SendOptions`, `Author`, `EscapeMarkdown(string) string`, `IDLabel(platform string) string`.
+- Consumes (from N1, in this same package): `NotificationType` with `TypeInfo`/`TypeSuccess`/`TypeWarning`/`TypeCancelled`, `Field`, `FieldBuilder` + `NewFieldBuilder`/`Add`/`AddInline`/`AddIf`/`AddInlineIf`/`Build`, `SendOptions`, `Author`, `EscapeMarkdown(s string) string` (`limits.go:89`), `ClampRunes(s string, limit int) string` (`limits.go:37`), `IDLabel(platform string) string`.
 - Consumes: `utils.FormatFileSize(bytes int64) string` and `utils.FormatDurationHuman(d time.Duration) string` (`internal/utils/format.go:12`, `internal/utils/format.go:72`).
 - Produces, in package `notifications` — **these exact names and signatures are used unchanged by Tasks 2–5:**
   - `type JobFacts struct { … }` (every field documented in Step 3)
@@ -161,7 +163,7 @@ The five families exist today as ten hand-rolled `Send` calls that disagree with
   - `func JobCancelled(f JobFacts) (string, string, NotificationType, []Field, SendOptions)`
   - `func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationType, []Field, SendOptions)`
   - `func TrimCreated(f JobFacts, t TrimFacts) (string, string, NotificationType, []Field, SendOptions)`
-  - unexported: `excerpt`, `displayName`, `authorFor`, `jobOpts`, `addIDField`, `resolutionLabel`
+  - unexported: `displayName`, `authorFor`, `jobOpts`, `addIDField`, `resolutionLabel`, and the constant `descriptionExcerptLen`
 
 Every return tuple is `Sender.Send`'s parameter list in order, so a producer writes `n.Send(notifications.StreamFound(f))`.
 
@@ -449,26 +451,35 @@ func TestEscapeReachesEveryJobSuppliedString(t *testing.T) {
 	}
 }
 
-// TestExcerptCutsOnARuneBoundary is the fix for the byte cut the audit found
-// in the Description excerpt (Content quality, "Truncation bug"): a Japanese
-// description — the norm for this install's content — was split mid-rune and
-// encoding/json then emitted U+FFFD.
+// TestDescriptionExcerptIsRuneSafeAndBounded pins the COMPOSITION the builder
+// uses, at the product budget. ClampRunes' own boundary behaviour is pinned
+// exhaustively by N1 in limits_test.go; what this adds is that
+// DownloadFinished spends the 300 on the DESCRIPTION and escapes afterwards.
 //
-// Mutant: s[:max-3] — the assertion below finds an invalid rune.
-func TestExcerptCutsOnARuneBoundary(t *testing.T) {
-	long := strings.Repeat("あ", 400) // 3 bytes each: every byte boundary but one is mid-rune
-	got := excerpt(long, descriptionExcerptLen)
-	if !strings.HasSuffix(got, "...") {
-		t.Errorf("excerpt did not mark the cut: %q", got[len(got)-9:])
-	}
+// Mutants this kill:
+//   - a byte-based cut in place of ClampRunes: 300 bytes of Japanese is 100
+//     characters, and the rune count below catches it.
+//   - escaping before clamping: the clamp would then spend budget on
+//     backslashes and could cut one away from the character it protects.
+func TestDescriptionExcerptIsRuneSafeAndBounded(t *testing.T) {
+	f := ytFacts()
+	f.Description = strings.Repeat("あ", 500) // 3 bytes each
+	_, _, _, fields, _ := DownloadFinished(f, []Part{{File: "a.mp4"}})
+	got := mustField(t, fields, "Description")
 	if !utf8.ValidString(got) {
-		t.Error("excerpt produced invalid UTF-8 — the cut landed mid-rune")
+		t.Error("the excerpt is not valid UTF-8 — the cut landed mid-rune")
 	}
-	if len(got) > descriptionExcerptLen {
-		t.Errorf("excerpt is %d bytes, want at most %d", len(got), descriptionExcerptLen)
+	if n := utf8.RuneCountInString(got); n != descriptionExcerptLen {
+		t.Errorf("excerpt = %d runes, want %d", n, descriptionExcerptLen)
 	}
-	if short := "already short"; excerpt(short, descriptionExcerptLen) != short {
-		t.Error("excerpt altered a string that was already under the limit")
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("excerpt does not carry the clamp marker: %q", got)
+	}
+	short := "already short"
+	f.Description = short
+	_, _, _, fields, _ = DownloadFinished(f, []Part{{File: "a.mp4"}})
+	if got := mustField(t, fields, "Description"); got != short {
+		t.Errorf("Description = %q — a string already under the budget was altered", got)
 	}
 }
 ```
@@ -479,10 +490,10 @@ Add `"unicode/utf8"` to the test's import block.
 
 ```bash
 cd /d/Git/Moombox/.worktrees/webhooks-n2a-producers
-GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -timeout 300s -run 'TestJobBuilders|TestBuildersOmit|TestJobAdded|TestStreamFound|TestJobCancelled|TestEscapeReaches|TestExcerptCuts' ./internal/notifications/
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test -count=1 -timeout 300s -run 'TestJobBuilders|TestBuildersOmit|TestJobAdded|TestStreamFound|TestJobCancelled|TestEscapeReaches|TestDescriptionExcerpt' ./internal/notifications/
 ```
 
-Expected: FAIL to build — `undefined: JobFacts`, `undefined: Part`, `undefined: TrimFacts`, `undefined: JobAdded`, `undefined: StreamFound`, `undefined: JobCancelled`, `undefined: DownloadFinished`, `undefined: TrimCreated`, `undefined: excerpt`, `undefined: descriptionExcerptLen`.
+Expected: FAIL to build — `undefined: JobFacts`, `undefined: Part`, `undefined: TrimFacts`, `undefined: JobAdded`, `undefined: StreamFound`, `undefined: JobCancelled`, `undefined: DownloadFinished`, `undefined: TrimCreated`, `undefined: descriptionExcerptLen`. (`ClampRunes`, `EscapeMarkdown`, `Field`, `FieldBuilder`, `SendOptions` and `Author` all exist — N1 shipped them.)
 
 - [ ] **Step 3: Create `internal/notifications/builders.go`**
 
@@ -493,7 +504,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -606,28 +616,13 @@ type TrimFacts struct {
 }
 
 // descriptionExcerptLen bounds the Description field at the PRODUCT level: a
-// finished embed is a notification, not a copy of the video page. N1's payload
-// clamp is a separate and much larger safety net (Discord's 1024-byte field
-// limit); this cut exists so the embed stays readable, and it is rune-safe so
-// the two can never disagree about where a multi-byte character ends.
-const descriptionExcerptLen = 300
-
-// excerpt truncates s to at most max BYTES, cutting on a rune boundary and
-// marking the cut.
+// finished embed is a notification, not a copy of the video page.
 //
-// The inline version it replaces cut by byte (desc[:descMaxLen-3]), which
-// split a Japanese description — the norm for this install's content —
-// mid-rune, after which encoding/json emitted U+FFFD.
-func excerpt(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	cut := max - len("...")
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "..."
-}
+// The cut itself is ClampRunes (limits.go) — the same rune-safe clamp the
+// payload safety net uses, which Arc N1 exported for precisely this producer
+// excerpt, so the two can never disagree about where a multi-byte character
+// ends. Nothing in this file truncates on its own.
+const descriptionExcerptLen = 300
 
 // displayName is what an embed calls the job: its title, or its id when no
 // title was ever fetched. `moombox add` runs no metadata fetch and writes the
@@ -803,10 +798,10 @@ func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationTyp
 	fb.AddIf(f.FormatSelection != "", "Format Selection", f.FormatSelection).
 		AddInlineIf(f.TrimmedRange != "", "Trimmed Range", f.TrimmedRange)
 	if f.Description != "" {
-		// Excerpt FIRST, escape second: escaping inserts backslashes, and a
-		// cut applied afterwards could slice one away from the character it
-		// protects.
-		fb.Add("Description", EscapeMarkdown(excerpt(f.Description, descriptionExcerptLen)))
+		// CLAMP FIRST, escape second — the same order N1's site used: escaping
+		// inserts backslashes, and a cut applied afterwards could slice one
+		// away from the character it protects.
+		fb.Add("Description", EscapeMarkdown(ClampRunes(f.Description, descriptionExcerptLen)))
 	}
 
 	// The truth fields last, so they read as the postscript they are.
@@ -867,7 +862,7 @@ func TrimCreated(f JobFacts, t TrimFacts) (string, string, NotificationType, []F
 ```bash
 cd /d/Git/Moombox/.worktrees/webhooks-n2a-producers
 export GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp
-go test -count=1 -timeout 300s -run 'TestJobBuilders|TestBuildersOmit|TestJobAdded|TestStreamFound|TestJobCancelled|TestEscapeReaches|TestExcerptCuts' -v ./internal/notifications/
+go test -count=1 -timeout 300s -run 'TestJobBuilders|TestBuildersOmit|TestJobAdded|TestStreamFound|TestJobCancelled|TestEscapeReaches|TestDescriptionExcerpt' -v ./internal/notifications/
 go test -count=1 -timeout 300s ./internal/notifications/
 go vet ./internal/notifications/
 gofmt -l ./internal/notifications
@@ -913,8 +908,9 @@ avatar, channel page); every job embed carries Platform, JobID and the video's
 platform URL. Job-supplied strings are markdown-escaped and the author name is
 not, because Discord renders no markdown there. A finished job with an
 incomplete tail is Warning-coloured and says so, and the description excerpt
-cuts on a rune boundary — the byte cut it replaces split a Japanese
-description mid-rune and made encoding/json emit U+FFFD.
+spends Arc N1's ClampRunes rather than a second truncator — N1 exported it for
+this producer excerpt, and 300 bytes of a Japanese description is 100
+characters.
 
 No producer is adopted yet; the sites move in the tasks that follow.
 
@@ -935,7 +931,7 @@ Four sites create a job by hand and four embeds describe it differently (audit r
 - Create: `cmd/moombox/job_notifications_test.go`
 - Create: `internal/web/routes/job_notifications_test.go`
 - Modify: `internal/web/routes/jobs.go` (the Twitch add send at `:771-786`; the YouTube add field block + send at `:859-911`)
-- Modify: `internal/web/routes/jobs_test.go` (`jobsFixture` at `:51-59` and `newJobsFixture` at `:64-104` gain a recorder; a `post` helper is added)
+- Modify: `internal/web/routes/jobs_test.go` (`jobsFixture` at `:51-59` and `newJobsFixture` at `:65-106` gain a recorder; a `post` helper is added) — N1 does not touch this file
 - Modify: `cmd/moombox/addvideo.go` (`:105-109`, `:141-145`)
 
 **Interfaces:**
@@ -1097,7 +1093,7 @@ func TestCLIAddedFactsGainsAThumbnailAndChannel(t *testing.T) {
 // observe, which the addVideo function itself cannot offer (it loads config,
 // opens the database and calls os.Exit).
 func TestCLIAddedFactsProduceAJobAddedEmbed(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	rec.Send(notifications.JobAdded(cliAddedFacts("youtube", "abc123", "https://www.youtube.com/watch?v=abc123", "")))
 
 	calls := rec.ByEvent("added")
@@ -1157,7 +1153,7 @@ func TestAddRoutesSendOneJobAddedEmbed(t *testing.T) {
 		if calls[0].Opts.Author == nil || calls[0].Opts.Author.Name != "A Channel" {
 			t.Error("the add embed carries no author line")
 		}
-		if _, ok := fieldNamed(calls[0].Fields, "Video Format"); !ok {
+		if _, ok := calls[0].Field("Video Format"); !ok {
 			t.Error("the selected video itag is missing from the embed")
 		}
 	})
@@ -1166,7 +1162,7 @@ func TestAddRoutesSendOneJobAddedEmbed(t *testing.T) {
 		f := newJobsFixture(t)
 		// IsLive is load-bearing: internal/web/routes/jobs.go:712 gates the
 		// live-add branch on it, and without it the route falls to the
-		// tw_manual_<login>_<unixnano> fallback at :723 — every assertion
+		// tw_manual_<login>_<unixnano> fallback at :728 — every assertion
 		// below would still pass while testing a path this subtest does not
 		// name.
 		f.tw.streamMeta = &TwitchJobMetadata{
@@ -1185,7 +1181,7 @@ func TestAddRoutesSendOneJobAddedEmbed(t *testing.T) {
 		if calls[0].Title != "Job Added" {
 			t.Errorf("title = %q — the Twitch route still names the platform in its title", calls[0].Title)
 		}
-		if v, ok := fieldNamed(calls[0].Fields, "Stream ID"); !ok || v != "tw_12345" {
+		if v, ok := calls[0].Field("Stream ID"); !ok || v != "tw_12345" {
 			t.Errorf("Stream ID = %q (present=%v), want the job id the old send carried", v, ok)
 		}
 		if calls[0].Opts.Author == nil || calls[0].Opts.Author.IconURL == "" {
@@ -1194,25 +1190,18 @@ func TestAddRoutesSendOneJobAddedEmbed(t *testing.T) {
 	})
 }
 
-// fieldNamed is the routes-package field lookup the notification tests share.
-func fieldNamed(fields []notifications.Field, name string) (string, bool) {
-	for _, f := range fields {
-		if f.Name == name {
-			return f.Value, true
-		}
-	}
-	return "", false
-}
 ```
 
-Add `"github.com/vampiricwulf/Moombox/internal/notifications"`; `database` is imported only if the final test body needs it. `f.post` does not exist yet — Step 2 writes it, because this is the first task that uses it. Read `TwitchJobMetadata`'s and `YouTubeJobMetadata`'s real field names in `internal/web/routes/jobs.go` before running and correct the literals if they differ.
+**No field-lookup helper is written in this package.** N1's `Call.Field(name) (string, bool)` (`internal/notifications/notificationtest/recorder.go:35`) is exactly that lookup — write `calls[0].Field("Video Format")` and delete the `fieldNamed` shape entirely. (`builders_test.go`'s own `mustField`/`fieldValue` stay: that file is `package notifications` and cannot import `notificationtest` without an import cycle.)
+
+This file imports only `net/http`, `testing` and `internal/database` — the recorded calls are read through `Call.Field` and `Call.Opts`, so no `internal/notifications` import is needed here. `f.post` does not exist yet — Step 2 writes it, because this is the first task that uses it. Read `TwitchJobMetadata`'s and `YouTubeJobMetadata`'s real field names in `internal/web/routes/jobs.go` before running and correct the literals if they differ.
 
 - [ ] **Step 2: Wire the recorder into `jobsFixture`, and give it the `post` helper it lacks**
 
 In `internal/web/routes/jobs_test.go`, add a `notify *notificationtest.Recorder` field to `jobsFixture` (`:51-59`), build one in `newJobsFixture` and pass it as `JobRoutes`' last argument in place of the current `nil` (`:95`). Every existing test keeps working — a recorder with nothing asserted against it is inert.
 
 ```go
-	notify := notificationtest.NewRecorder()
+	notify := notificationtest.New()
 
 	r := chi.NewRouter()
 	JobRoutes(r, db, store, nil, apiRL, tw, yt, notify)
@@ -1466,7 +1455,7 @@ Two discovery sites and two cancel sites, four embeds, three titles (audit C4, C
 **Files:**
 - Modify: `cmd/moombox/job_notifications.go` (add `notifyStreamFound`)
 - Modify: `cmd/moombox/job_notifications_test.go`
-- Modify: `cmd/moombox/monitor_callbacks.go` (the YouTube found send at `:1367-1380`; the Twitch found send at `:1458-1477`)
+- Modify: `cmd/moombox/monitor_callbacks.go` (the YouTube found send at `:1412-1425`, guard at `:1412`; the Twitch found send at `:1503-1526`, guard at `:1503`) — N1 inserted ~45 lines into this file, so these are the post-merge numbers
 - Modify: `internal/worker/worker.go` (`handleCancellation`'s send at `:1075-1087`)
 - Create: `internal/worker/job_notifications_test.go`
 - Modify: `internal/web/routes/jobs.go` (the cancel send at `:953-973`)
@@ -1492,7 +1481,7 @@ Append to `cmd/moombox/job_notifications_test.go`:
 //   - sending the category for YouTube, where it is always empty.
 func TestNotifyStreamFoundIsOneEmbedForBothMonitors(t *testing.T) {
 	t.Run("youtube", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		chID := "UC_abc"
 		notifyStreamFound(rec, &database.Job{
 			ID: "vid1", VideoID: "vid1", Platform: "youtube", Title: "A Stream",
@@ -1516,7 +1505,7 @@ func TestNotifyStreamFoundIsOneEmbedForBothMonitors(t *testing.T) {
 	})
 
 	t.Run("twitch", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		notifyStreamFound(rec, &database.Job{
 			ID: "tw_9", VideoID: "9", Platform: "twitch", Title: "Streamer — live",
 			ChannelName: "Streamer", ChannelAvatarURL: "https://static.example/p.png",
@@ -1552,16 +1541,18 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
-// notifyField returns the value of the named field on one recorded call.
+// notifyField is the fatal-on-missing wrapper around N1's Call.Field
+// (notificationtest/recorder.go:35), which already answers
+// `value, ok := call.Field(name)`. This adds only the t.Fatalf, so a missing
+// field names the embed it was missing from instead of failing three
+// assertions later on an empty string.
 func notifyField(t *testing.T, c notificationtest.Call, name string) string {
 	t.Helper()
-	for _, f := range c.Fields {
-		if f.Name == name {
-			return f.Value
-		}
+	v, ok := c.Field(name)
+	if !ok {
+		t.Fatalf("field %q missing from %q; got %+v", name, c.Title, c.Fields)
 	}
-	t.Fatalf("field %q missing from %q; got %+v", name, c.Title, c.Fields)
-	return ""
+	return v
 }
 
 // TestUserCancelSendsTheOneCancelEmbed is audit C5's worker half: the
@@ -1573,7 +1564,7 @@ func notifyField(t *testing.T, c notificationtest.Call, name string) string {
 func TestUserCancelSendsTheOneCancelEmbed(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	w.notifier = rec
 
 	job := &database.Job{
@@ -1584,7 +1575,19 @@ func TestUserCancelSendsTheOneCancelEmbed(t *testing.T) {
 	if _, err := db.AddJob(job); err != nil {
 		t.Fatal(err)
 	}
-	w.queue.Cancel(job.ID)
+	// Cancel flags ONLY a job the queue is already PROCESSING
+	// (internal/worker/queue.go:387 — "Only flag jobs that are actually
+	// processing"), so the row has to be enqueued and dequeued first.
+	// Without that, nothing is flagged, handleCancellation takes the SHUTDOWN
+	// branch and sends nothing — the test would be red before the change and
+	// red after it.
+	w.queue.Enqueue(job.ID, database.StatusDownloading)
+	if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
+		t.Fatal("Dequeue returned no job — the cancel path needs a processing run")
+	}
+	if !w.queue.Cancel(job.ID) {
+		t.Fatal("Cancel did not flag a user cancel")
+	}
 	w.handleCancellation(job)
 
 	calls := rec.ByEvent("cancelled")
@@ -1600,7 +1603,7 @@ func TestUserCancelSendsTheOneCancelEmbed(t *testing.T) {
 }
 ```
 
-`w.queue.Cancel` / `w.notifier` are package-internal; confirm the exact spellings against `internal/worker/worker.go` (`WasCancelled` is read at `:1060`) before running, and use whatever the queue's user-cancel setter is actually called.
+Add `"context"` to this file's import block. `w.queue` and `w.notifier` are package-internal fields; the three queue methods are `Enqueue(jobID string, status database.JobStatus)` (`internal/worker/queue.go:104`), `Dequeue(ctx context.Context) (string, context.Context, bool)` (`:157`) and `Cancel(jobID string) bool` (`:387`).
 
 Append to `internal/web/routes/job_notifications_test.go`:
 
@@ -1643,7 +1646,7 @@ go test -count=1 -timeout 300s -run 'TestUserCancelSendsTheOneCancelEmbed' ./int
 go test -count=1 -timeout 300s -run 'TestCancelRouteSendsTheOneCancelEmbed' ./internal/web/routes/
 ```
 
-Expected: `cmd/moombox` FAILS to build with `undefined: notifyStreamFound`; the worker test FAILS with `title = "Download Cancelled", want "Job Cancelled"`; the routes test FAILS with `title = "Job Cancelled"` passing but the `Opts.URL` assertion red only if the fallback moved — record the actual first failure, which is `recorded 0 cancelled calls` if `w == nil` short-circuits, in which case fix the fixture's expectation before proceeding.
+Expected: `cmd/moombox` FAILS to build with `undefined: notifyStreamFound`; the worker test FAILS with `title = "Download Cancelled", want "Job Cancelled"`; the routes test FAILS the same way, `title = "Job Cancelled"` already matching but the fields/URL coming from the old inline block.
 
 - [ ] **Step 3: Add `notifyStreamFound` to `cmd/moombox/job_notifications.go`**
 
@@ -1674,7 +1677,7 @@ Add the `internal/database` and `internal/worker` imports.
 
 - [ ] **Step 4: Adopt at the four sites**
 
-`cmd/moombox/monitor_callbacks.go`, the YouTube found send (`:1367-1380`) becomes:
+`cmd/moombox/monitor_callbacks.go`, the YouTube found send (`:1412-1425`) becomes:
 
 ```go
 		if s.notifyMgr.HasTargets() {
@@ -1682,7 +1685,7 @@ Add the `internal/database` and `internal/worker` imports.
 		}
 ```
 
-and the Twitch found send (`:1458-1477`):
+and the Twitch found send (`:1503-1526`):
 
 ```go
 		if s.notifyMgr.HasTargets() {
@@ -1690,7 +1693,7 @@ and the Twitch found send (`:1458-1477`):
 		}
 ```
 
-**Leave the `HasTargets()` guards exactly as N1 left them.** If N1 changed `runState.notifyMgr` to a `notifications.Sender` (spec §1 lists `cmd/moombox/runstate.go` among the fields it narrows) the guard will not compile, because `Sender` carries only `Send`; in that case N1 has already removed or replaced these guards and this task keeps whatever shape it left. N2a neither adds nor removes a `HasTargets` guard.
+**Both `HasTargets()` guards stay exactly as they are.** N1 typed `runState.notifyMgr` as `notifications.Notifier` (`cmd/moombox/runstate.go:68`), a superset of `Sender` that carries `HasTargets`/`Reload`/`BeginShutdown`/`Wait`, so they compile unchanged. N2a neither adds nor removes a `HasTargets` guard anywhere — with the one exception of the disk send, Task 8 Step 6, which is called out there and reported.
 
 `internal/worker/worker.go`, `handleCancellation` (`:1074-1088`):
 
@@ -1761,10 +1764,13 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- cmd/
 
 ### Task 4: One `DownloadFinished` send, and the finished embed's outcome truth
 
-Two builders describe the same moment with different field sets (audit C1): the multi-part one at `orchestrator_mux.go:998-1047` reports Segments / Qualities / Total Size and drops the format selection, the trimmed range and the description; the single-part one at `:1195-1286` reports File / File Size / Format Selection / Trimmed Range / Description and knows nothing about parts. Both send a green "Successfully archived" for a job whose tail is incomplete, whose chat capture stopped early, or whose staging still holds recordings nobody has muxed (audit A5, A6) — the embed says the opposite of the truth at exactly the moment the operator could act on it.
+Two builders describe the same moment with different field sets (audit C1): the multi-part one at `orchestrator_mux.go:1028-1077` reports Segments / Qualities / Total Size and drops the format selection, the trimmed range and the description; the single-part one at `:1242-1337` reports File / File Size / Format Selection / Trimmed Range / Description and knows nothing about parts. Both send a green "Successfully archived" for a job whose tail is incomplete, whose chat capture stopped early, or whose staging still holds recordings nobody has muxed (audit A5, A6) — the embed says the opposite of the truth at exactly the moment the operator could act on it.
+
+**Every line number below is against `main` at `bbe0e674` (N1 merged).** N1 inserted `sendMuxingStarting` (~60 lines) and `finishedImage` (~16) into this file, so the numbers moved from the pre-N1 tree; re-verify each before editing.
 
 **Files:**
-- Modify: `internal/worker/orchestrator_mux.go` (the multi-part block at `:997-1047`; `sendFinishedNotification` at `:1195-1286`)
+- Modify: `internal/worker/orchestrator_mux.go` (the multi-part block at `:1028-1077`; `finishedImage` at `:1225-1240` — **deleted**; `sendFinishedNotification` at `:1242-1337`)
+- Modify: `internal/worker/orchestrator_mux_test.go` (N1's `TestFinishedImageIsDroppedForTwitch` at `:217-243` and `TestDescriptionExcerptCutsOnARuneBoundary` at `:262` — **both deleted**, see Steps 4 and 6)
 - Modify: `internal/worker/job_notifications_test.go`
 
 **Interfaces:**
@@ -1802,7 +1808,7 @@ func finishedJobRow() *database.Job {
 //   - keeping TypeSuccess: the colour is the only thing most readers see.
 //   - adding the Tail field without the colour, or vice versa.
 func TestFinishedEmbedIsWarningWhenTheTailIsIncomplete(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 	j := finishedJobRow()
 	j.IncompleteTail = true
@@ -1828,7 +1834,7 @@ func TestFinishedEmbedIsWarningWhenTheTailIsIncomplete(t *testing.T) {
 // capture with thousands of messages reads as complete, which is the exact
 // ranking bug chatStatusForOutcome exists to prevent.
 func TestFinishedEmbedReportsAnIncompleteChat(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 	j := finishedJobRow()
 	j.ChatStatus = chatStatusIncomplete
@@ -1850,7 +1856,7 @@ func TestFinishedEmbedReportsAnIncompleteChat(t *testing.T) {
 // Mutant: scanning the OUTPUT dir instead of the staging dir — the count is
 // always zero and the field never appears.
 func TestFinishedEmbedCountsSetAsideRecordings(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 	j := finishedJobRow()
 
@@ -1875,7 +1881,7 @@ func TestFinishedEmbedCountsSetAsideRecordings(t *testing.T) {
 func TestFinishedEmbedShapesPerPartCount(t *testing.T) {
 	vItag, aItag := 299, 251
 	t.Run("single part", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 		j := finishedJobRow()
 		j.SelectedVideoItag, j.SelectedAudioItag = &vItag, &aItag
@@ -1899,7 +1905,7 @@ func TestFinishedEmbedShapesPerPartCount(t *testing.T) {
 	})
 
 	t.Run("three parts", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 		j := finishedJobRow()
 		j.SelectedVideoItag, j.SelectedAudioItag = &vItag, &aItag
@@ -1932,7 +1938,7 @@ func TestFinishedEmbedShapesPerPartCount(t *testing.T) {
 	// Mutants this kills: dropping the LengthSeconds -> Part.Duration line, or
 	// the probeData -> Width/Height/Fps lines, or filepath.Base.
 	t.Run("the single-part producer fills the Part", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 		j := finishedJobRow() // LengthSeconds = 3600
 
@@ -1958,7 +1964,7 @@ func TestFinishedEmbedShapesPerPartCount(t *testing.T) {
 // Mutant: setting Image unconditionally — the Twitch embed renders a broken
 // picture and nothing in the suite notices.
 func TestFinishedEmbedDropsTheDeadTwitchImage(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	o := &DownloadOrchestrator{logger: discardLogger{}, notifier: rec}
 	j := finishedJobRow()
 	j.Platform = "twitch"
@@ -1997,7 +2003,7 @@ Expected: FAIL to build — `o.sendDownloadFinished undefined (type *DownloadOrc
 
 - [ ] **Step 3: Add the shared send and its facts to `internal/worker/orchestrator_mux.go`**
 
-Insert immediately BEFORE `sendFinishedNotification` (`:1195`):
+Insert immediately BEFORE `finishedImage` (`:1225`), which Step 4 deletes:
 
 ```go
 // sendDownloadFinished is the ONE "Download Finished" send. Both finalize
@@ -2100,14 +2106,14 @@ func trimmedRangeLabel(j *database.Job) string {
 }
 ```
 
-- [ ] **Step 4: Replace `sendFinishedNotification`'s body (`:1195-1286`)**
+- [ ] **Step 4: Replace `sendFinishedNotification`'s body (`:1242-1337`) and delete `finishedImage` (`:1225-1240`)**
 
 The whole function becomes the single-part Part assembly:
 
 ```go
 // sendFinishedNotification is the single-part finalize path's call into the
 // shared finished send. It exists as its own function only because its caller
-// (:839) holds the probe result and the FileInfo, which nothing else does.
+// (:870) holds the probe result and the FileInfo, which nothing else does.
 func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, finishedJob *database.Job, outputFile string, probeData *ffprobeData, info os.FileInfo) {
 	if finishedJob == nil {
 		finishedJob = jobCtx.Job
@@ -2126,9 +2132,16 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 }
 ```
 
-Everything it used to build — the FieldBuilder, the resolution string, the itag label, the trimmed range, the 300-byte description cut — is gone; `formatSelectionLabel`, `trimmedRangeLabel` and `notifications.excerpt` own those now. **The `descMaxLen` constant at `:1269` and its byte slice go with it.** N1 turned that cut rune-safe at the site; this task moves the responsibility into the builder, where it is rune-safe for every caller. Do not leave a second truncator behind.
+Everything it used to build — the FieldBuilder, the resolution string, the itag label, the trimmed range, the 300-rune description clamp — is gone; `formatSelectionLabel`, `trimmedRangeLabel` and the builder's own `EscapeMarkdown(ClampRunes(…, descriptionExcerptLen))` own those now. **The `descMaxLen` constant at `:1325` and the `EscapeMarkdown(ClampRunes(...))` line at `:1327` go with it** — N1 already made that cut rune-safe here, and this task moves the SAME composition into the builder, where every caller gets it. Do not leave a second truncator behind.
 
-- [ ] **Step 5: Replace the multi-part block (`:997-1047`)**
+**Delete `finishedImage` (`:1225-1240`) too, in this commit.** N1 added it for the §0 Twitch ruling and calls it at exactly the two sends this task replaces (`:1074` and `:1335`); `DownloadFinished` now carries the rule. Left in place it is unreachable production code kept alive only by its own test, and the rule would live in two files.
+
+Two N1 tests in `internal/worker/orchestrator_mux_test.go` go with the code they pin:
+
+- `TestFinishedImageIsDroppedForTwitch` (`:217-243`) — `TestFinishedEmbedDropsTheDeadTwitchImage` (Step 1) asserts the same youtube/twitch cases through a recorded send, and the nil-job case is covered by `sendDownloadFinished`'s own `finishedJob == nil` fallback.
+- `TestDescriptionExcerptCutsOnARuneBoundary` (`:262`) — it builds its own closure so it still COMPILES, but after this step it pins a composition no worker code performs. Task 1's `TestDescriptionExcerptIsRuneSafeAndBounded` pins the same composition at the only place that still performs it.
+
+- [ ] **Step 5: Replace the multi-part block (`:1028-1077`)**
 
 ```go
 	// Send notification
@@ -2162,7 +2175,7 @@ Everything it used to build — the FieldBuilder, the resolution string, the ita
 	}
 ```
 
-The `qualityLabels`/`finFields` locals and the inline resolution, total-time and chat-message blocks are deleted. `totalSize` and `totalDuration` (`:923-929`) stay — the DB update above still writes them — but the embed no longer reads them: the builder sums the parts, so the two can never drift.
+The `qualityLabels`/`finFields` locals and the inline resolution, total-time and chat-message blocks are deleted, along with this site's `finishedImage(jobCtx.Job)` call (`:1074`). `totalSize` and `totalDuration` (`:953-960`) stay — the DB update above still writes them — but the embed no longer reads them: the builder sums the parts, so the two can never drift.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -2181,7 +2194,7 @@ Expected: the five new tests PASS; the package is `ok` (the FFmpeg-backed mux te
 
 ```bash
 cd /d/Git/Moombox/.worktrees/webhooks-n2a-producers
-git add internal/worker/orchestrator_mux.go internal/worker/job_notifications_test.go
+git add internal/worker/orchestrator_mux.go internal/worker/orchestrator_mux_test.go internal/worker/job_notifications_test.go
 git commit -m "feat(worker): one finished embed, and it tells the truth
 
 Two builders described the same moment with different field sets. The
@@ -2203,11 +2216,14 @@ the first time anything has told an operator that the Recover verb has work to
 do. The finished embed's image is dropped for Twitch, whose preview URL 404s
 the moment the stream ends.
 
-The 300-byte description cut goes with the old builder. The excerpt now lives
-in the shared builder and cuts on a rune boundary for every caller.
+finishedImage and its test go with the two call sites: the Twitch ruling now
+lives in DownloadFinished, pinned by TestFinishedEmbedDropsTheDeadTwitchImage,
+which asserts the same cases through a recorded send. The description clamp
+goes the same way — the builder spends ClampRunes, which Arc N1 exported for
+this producer excerpt, so there is one truncator and not two.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/worker/orchestrator_mux.go internal/worker/job_notifications_test.go
+Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/worker/orchestrator_mux.go internal/worker/orchestrator_mux_test.go internal/worker/job_notifications_test.go
 ```
 
 ---
@@ -2222,7 +2238,7 @@ Two trim builders differ only by a Segments field (audit C2). And "Job Failed" (
 - Modify: `internal/worker/job_notifications_test.go`
 
 **Interfaces:**
-- Consumes: `notifications.TrimCreated`, `notifications.TrimFacts`, `NotifyFacts` (Tasks 1–2); `HasStagingFiles(stagingBase, jobID string) bool` (`internal/worker/staging.go:10`); `ScanAsides(stagingBase, jobID string) AsideReport` (`internal/worker/orchestrator_mux.go:359`); `(*DownloadWorker).readConfig` (`internal/worker/worker.go:252`); `config.PathsConfig.EffectiveStagingDir()`.
+- Consumes: `notifications.TrimCreated`, `notifications.TrimFacts`, `NotifyFacts` (Tasks 1–2); `HasStagingFiles(stagingBase, jobID string) bool` (`internal/worker/staging.go:10`); `ScanAsides(stagingBase, jobID string) AsideReport` (`internal/worker/orchestrator_mux.go:359`); `(*DownloadWorker).readConfig` (`internal/worker/worker.go:257`); `config.PathsConfig.EffectiveStagingDir()`.
 - Produces: `func errorStage(errMsg string) string` in package `worker`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2273,7 +2289,7 @@ func TestErrorStageClassifiesTheFinalizeErrors(t *testing.T) {
 func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	w.notifier = rec
 
 	var stagingBase string
@@ -2352,7 +2368,7 @@ func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 // Mutant: emitting Segments for a single-file trim — the field claims a split
 // that never happened.
 func TestTrimCreatedIsOneEmbed(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	size := int64(1 << 20)
 	f := NotifyFacts(&database.Job{
 		ID: "vidT", VideoID: "vidT", Platform: "youtube", Title: "Source",
@@ -2404,10 +2420,10 @@ In `internal/worker/worker.go`, above `setJobError` (`:1245`):
 // carries: the prefix the orchestrator writes.
 //
 // Four finalize shapes exist and all four are the mux stage: muxAndFinalize's
-// fmt.Errorf("mux: %w", err) (orchestrator_mux.go:759), verifyMuxedDuration's
+// fmt.Errorf("mux: %w", err) (orchestrator_mux.go:790), verifyMuxedDuration's
 // short-output refusal "mux produced …" (:160), "no media files to mux…"
-// (:755, :1355) and "create output dir: %w" (:605, :720, :905). The "mux"
-// prefix also keeps "mux segment N:" (:1360, :1375) on the mux side. All of
+// (:786, :1407) and "create output dir: %w" (:605, :751, :936). The "mux"
+// prefix also keeps "mux segment N:" (:1412, :1427) on the mux side. All of
 // them reach setJobError unwrapped — ExecuteWithChat returns the finalize
 // error straight through — so the prefix survives. Everything else is the
 // download stage.
@@ -2417,8 +2433,8 @@ In `internal/worker/worker.go`, above `setJobError` (`:1245`):
 // substring match would flip the answer for the case that matters most.
 //
 // Known limit: two finalize returns still read as "download" — "create segment
-// output dir: …" (orchestrator_mux.go:1332) and "no segment files found in
-// staging directory" (:1468). Naming them would mean teaching every producer a
+// output dir: …" (orchestrator_mux.go:1384) and "no segment files found in
+// staging directory" (:1524). Naming them would mean teaching every producer a
 // stage argument; the prefixes below are what exists today.
 func errorStage(errMsg string) string {
 	// "mux" alone covers "mux: …", "mux produced …" and "mux segment N: …".
@@ -2469,7 +2485,7 @@ Leave the `notifURL` fallback exactly as N1 left it — if N1 has not already re
 
 **Before writing this block, open `internal/worker/worker.go:1332` on the merged tree and copy N1's exact `Error` line into it. Do not add a second `EscapeMarkdown`.**
 
-`worker.go:1332` is the **only** N1↔N2a escape overlap. The other three N1 escape sites resolve without a collision: `internal/worker/orchestrator.go:657` ("Trim Failed") is not touched by this arc; `cmd/moombox/monitor_callbacks.go:1606` (`Last Error`) is rewritten wholesale by Task 8, whose paste carries exactly one `EscapeMarkdown(lastErr)`; and `internal/worker/orchestrator_mux.go:1273` (the Description excerpt) is **deleted** by Task 4, after which `DownloadFinished` applies the escape once. Every other builder output is escaped once per site — `Title` through `displayName`, `Channel`, `Category`, `Part.File`, `Description` — with two deliberate exemptions, `Author.Name` (raw, pinned by a test) and `VideoID` (raw, documented on `addIDField`).
+`worker.go:1332` is the **only** N1↔N2a escape overlap. The other three N1 escape sites resolve without a collision: `internal/worker/orchestrator.go:657` ("Trim Failed") is not touched by this arc; `cmd/moombox/monitor_callbacks.go:1651` (`Last Error`) is rewritten wholesale by Task 8, whose paste carries exactly one `EscapeMarkdown(lastErr)`; and `internal/worker/orchestrator_mux.go:1327` (the `EscapeMarkdown(ClampRunes(...))` Description excerpt) is **deleted** by Task 4, after which `DownloadFinished` performs the same composition once. Every other builder output is escaped once per site — `Title` through `displayName`, `Channel`, `Category`, `Part.File`, `Description` — with two deliberate exemptions, `Author.Name` (raw, pinned by a test) and `VideoID` (raw, documented on `addIDField`).
 
 - [ ] **Step 4: Adopt `TrimCreated` at both trim sites**
 
@@ -2551,15 +2567,15 @@ Four alerts have no close (audit A1, A2, A3 and the "Symmetric pairs with a miss
 This task lands the vocabulary FIRST so Tasks 7 and 8 send keys that are already canonical, already offered by both UIs and already documented. It also pins the Go and JavaScript registries against each other, which nothing has ever done (audit §4, "Web/Go vocabulary mirror").
 
 **Files:**
-- Modify: `internal/notifications/events.go` (`EventGroups` System group at `:31`; `eventAliases` at `:53-55`)
-- Modify: `web/public/modules/settings.js` (`NOTIFICATION_EVENT_GROUPS` System group at `:55-66`)
+- Modify: `internal/notifications/events.go` (`EventGroups` System group at `:40`; the `eventAliases` doc comment at `:65-77` and the map at `:78-86`) — N1 added a 12-line Connectivity comment above these, so they sit lower than in the pre-N1 tree
+- Modify: `web/public/modules/settings.js` (`NOTIFICATION_EVENT_GROUPS` System group at `:54-65` — N1 removed the `connectivity_pause` entry)
 - Create: `internal/tui/settings_notification_vocab_parity_test.go`
 - Modify: `docs/spec/operations.md` (the Event Types table, `:461-488`; the `finished` row `:469`; the `error` row `:470`)
 - Modify: `SPEC.md` (the Notifications-Detail event list, `:885`)
 
 **Interfaces:**
-- Consumes: `notifications.EventGroups`, `notifications.KnownEvents` (`internal/notifications/events.go:21`, `:37`); `notifEventGroups` / `allNotifEvents` (`internal/tui/settings.go:270`, `:279`); `settingsVM(t)` (`internal/tui/settings_js_vm_test.go:23`) over `webtest.SettingsVM` (`internal/webtest/settings_vm.go:54`).
-- Produces: the four event ids `sidecar_down`, `sidecar_restored`, `disk_ok`, `channel_healthy` in both registries, plus two alias entries.
+- Consumes: `notifications.EventGroups`, `notifications.KnownEvents` (`internal/notifications/events.go:21`, `:52`); `notifEventGroups` / `allNotifEvents` (`internal/tui/settings.go:270`, `:279`); `settingsVM(t)` (`internal/tui/settings_js_vm_test.go:23`) over `webtest.SettingsVM` (`internal/webtest/settings_vm.go:54`).
+- Produces: the four event ids `sidecar_down`, `sidecar_restored`, `disk_ok`, `channel_healthy` in both registries, three new alias entries beside N1's two, and the exported reader `AliasOf`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2699,18 +2715,28 @@ func TestNotificationVocabulariesAgree(t *testing.T) {
 //   - aliasing the wrong way round (alert -> close): the alias map maps the
 //     NEWER key to the OLDER one it split from, and reversing it would make a
 //     target that filters only disk_ok start receiving disk warnings.
+//   - retyping the map instead of editing it in place, which drops N1's
+//     connectivity_resume retirement entry.
 func TestRecoveryEventsAreKnownAndAliased(t *testing.T) {
 	for _, e := range []string{"sidecar_down", "sidecar_restored", "disk_ok", "channel_healthy"} {
 		if !notifications.KnownEvents[e] {
 			t.Errorf("%q is not a known event — NewManager warns on a config that lists it", e)
 		}
 	}
+	// All FOUR entries, not just this arc's three: the map is edited in place
+	// and the one thing that must never happen to it is an entry being lost.
+	// N1's connectivity_resume retirement is the entry a careless retype
+	// drops, and dropping it silences a legacy connectivity_pause filter
+	// through every outage.
+	//
 	// closeEv, not close: the builtin is shadowed otherwise, which vet lets
 	// pass and staticcheck's predeclared check does not.
 	for closeEv, alert := range map[string]string{
-		"disk_ok":          "disk_warning",
-		"channel_healthy":  "channel_unhealthy",
-		"sidecar_restored": "sidecar_down",
+		"disk_ok":             "disk_warning",
+		"channel_healthy":     "channel_unhealthy",
+		"sidecar_restored":    "sidecar_down",
+		"disk_critical":       "disk_warning",
+		"connectivity_resume": "connectivity_pause",
 	} {
 		if got := notifications.AliasOf(closeEv); got != alert {
 			t.Errorf("alias of %q = %q, want %q", closeEv, got, alert)
@@ -2719,7 +2745,7 @@ func TestRecoveryEventsAreKnownAndAliased(t *testing.T) {
 }
 ```
 
-`eventAliases` is unexported, so `TestRecoveryEventsAreKnownAndAliased`'s second half needs a reader. Add it to `events.go` in Step 3 as `AliasOf` — **or**, if N1 already exported an equivalent (it needs one for the alias-known rule), use N1's name and delete the assertion's dependency on a new symbol. Check the merged tree before writing the test.
+`eventAliases` is unexported and N1 exports **no** reader for it — its own code indexes the map directly — so `TestRecoveryEventsAreKnownAndAliased`'s second half needs one. Step 3 adds `AliasOf`, and Step 2's expected `undefined: notifications.AliasOf` is therefore correct as written.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -2732,7 +2758,7 @@ Expected: `TestNotificationVocabulariesAgree` PASSES (the two registries agree t
 
 - [ ] **Step 3: Add the keys and aliases to `internal/notifications/events.go`**
 
-The System group (`:31`) gains all four — the sidecar, the disk and the channel are all process-level facts, and `disk_warning` / `channel_unhealthy` already live there:
+The System group (`:40`) gains all four — the sidecar, the disk and the channel are all process-level facts, and `disk_warning` / `channel_unhealthy` already live there:
 
 ```go
 	{"System", []string{"disk_warning", "disk_critical", "disk_ok", "update_available", "update_applied", "update_failed", "crash_recovered", "channel_unhealthy", "channel_healthy", "sidecar_down", "sidecar_restored"}},
@@ -2740,11 +2766,15 @@ The System group (`:31`) gains all four — the sidecar, the disk and the channe
 
 Each close sits immediately after its alert so both editors read as pairs.
 
-`eventAliases` (`:53-55`) gains two entries, keeping the existing NEWER→OLDER direction:
+`eventAliases` (`:78-86`) **GAINS three entries** — the map already carries two, `disk_critical` and N1's `connectivity_resume ← connectivity_pause` retirement. **Do not retype the map from this plan; edit it in place.** Deleting N1's entry turns three of its tests red (`TestRetiredConnectivityPauseIsAliasedNotForgotten`, `TestALegacyPauseFilterStillReceivesTheResume`, `TestKnownEventsCoversEveryAliasValue`) and makes a legacy `connectivity_pause` filter go silent through every outage — the exact migration N1 shipped to prevent. The result, keeping the existing NEWER→OLDER direction:
 
 ```go
 var eventAliases = map[string]string{
 	"disk_critical": "disk_warning",
+	// C8 (N1): the retired connectivity_pause key. DELETE one release after
+	// the retirement ships — it is a migration, not a permanent mapping.
+	// (N1's full comment stays; it is abbreviated here.)
+	"connectivity_resume": "connectivity_pause",
 	// The recovery halves. Each close is its own key, so a target can
 	// subscribe to the all-clear alone; the alias means a target that already
 	// filters the ALERT receives its close without a config edit, which is
@@ -2761,11 +2791,11 @@ var eventAliases = map[string]string{
 func AliasOf(event string) string { return eventAliases[event] }
 ```
 
-The doc comment above `eventAliases` describes only the disk_critical case today; extend its first paragraph to say that the map also carries each recovery key to the alert it closes.
+The doc comment above `eventAliases` (`:65-77`) already names two idioms — the SPLIT (`disk_critical`) and the RETIREMENT (`connectivity_resume`). Add a third short paragraph for the CLOSE: a recovery key aliased to the alert it ends, permanent like a split rather than expiring like a retirement.
 
 - [ ] **Step 4: Mirror the four keys in `web/public/modules/settings.js`**
 
-The System group (`:55-66`) becomes:
+The System group (`:54-65`) becomes:
 
 ```js
   {
@@ -2792,7 +2822,7 @@ The TUI needs no edit: `notifEventGroups` derives from `notifications.EventGroup
 
 - [ ] **Step 5: Document the four keys and the two changed rows**
 
-`docs/spec/operations.md`, in the Event Types table (`:461-488`). Insert `disk_ok` after `disk_critical` (`:483`) and `channel_healthy` after `channel_unhealthy` (`:488`), then the two sidecar rows:
+`docs/spec/operations.md`, in the Event Types table (`:461-488`). Insert `disk_ok` after `disk_critical` (`:482`) and `channel_healthy` after `channel_unhealthy` (`:487`), then the two sidecar rows:
 
 ```
 | `disk_ok` | Disk usage fell back under the warning threshold after a warning or critical alert was sent ("Disk Space Recovered"), or disk monitoring recovered after a read-failure alert ("Disk Monitoring Recovered"). Success-coloured; the close of the `disk_warning`/`disk_critical` family. Targets filtering on `disk_warning` also receive it, via the manager's event alias, so an incident that was reported always gets an end. A reading that closes both incidents at once sends both embeds — two alerts, two closes |
@@ -2883,7 +2913,7 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
 **Files:**
 - Create: `cmd/moombox/sidecar_alerts.go`
 - Create: `cmd/moombox/sidecar_alerts_test.go`
-- Modify: `cmd/moombox/main.go` (beside `s.wireMonitorCallbacks()` at `:266`)
+- Modify: `cmd/moombox/main.go` (beside `s.wireMonitorCallbacks()` at `:267` — N1 does not touch this file, so every `main.go` citation in Tasks 7 and 8 is still the pre-N1 number)
 
 **Interfaces:**
 - Consumes: `sidecar.Health{Healthy bool; Reason string; Restarts uint64; Since time.Time}` and `sidecar.SubscribeHealth(fn func(Health)) (unsubscribe func())` (`internal/bgutils/sidecar/health.go:18-29`, `:71-91`); `notifications.Sender`, `notificationtest.Recorder` (N1); `runState.notifyMgr`, `runState.log`.
@@ -2948,7 +2978,7 @@ func (c *fakeClock) last(t *testing.T) *fakeTimer {
 
 func newTestSidecarAlerts(t *testing.T) (*sidecarAlerts, *notificationtest.Recorder, *fakeClock) {
 	t.Helper()
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	clk := &fakeClock{}
 	a := newSidecarAlerts(rec, &nopLogger{}, clk.after)
 	return a, rec, clk
@@ -3251,7 +3281,7 @@ func (s *runState) wireSidecarAlerts() func() {
 
 - [ ] **Step 4: Wire it in `cmd/moombox/main.go`**
 
-Immediately after `s.wireMonitorCallbacks()` (`:266`):
+Immediately after `s.wireMonitorCallbacks()` (`:267`):
 
 ```go
 	// BotGuard sidecar liveness -> webhooks. The TUI's own subscriber
@@ -3318,13 +3348,13 @@ The disk decision lives inside a 190-line closure in the stats ticker and is unt
 - Create: `cmd/moombox/disk_alerts_test.go`
 - Create: `cmd/moombox/channel_health_test.go`
 - Modify: `cmd/moombox/main.go` (the stats-ticker state at `:666-675`; the disk block at `:752-846`)
-- Modify: `cmd/moombox/monitor_callbacks.go` (`unhealthyNotify` at `:1586-1617`)
-- Modify: `internal/monitor/health.go` (`healthTracker` at `:35-41`; `recordSuccess` at `:56-65`)
+- Modify: `cmd/moombox/monitor_callbacks.go` (`unhealthyNotify` at `:1631-1656`; the three `SetOnChannelUnhealthy` wirings at `:1660-1662`) — post-N1 numbers
+- Modify: `internal/monitor/health.go` (`healthTracker` at `:35-41`; `recordSuccess` at `:57-65`) — `internal/monitor` is untouched by N1
 - Modify: `internal/monitor/feed.go` (`:278-282`), `internal/monitor/decapi.go` (`:185-189`), `internal/monitor/twitch.go` (`:79-83`)
 - Modify: `internal/monitor/health_test.go` — **APPEND to the existing 94-line file**; it already holds `TestHealthTrackerStreakAndReset`, `TestHealthTrackerFiresOnceAtThreshold`, `TestHealthTrackerPrune` and `findHealth`, and its import block already has `errors` and `testing`. Writing it fresh destroys all four.
 
 **Interfaces:**
-- Consumes: `routes.DiskStatus{Free, Total uint64; UsedPct float64; WarnLevel string}` (`internal/web/routes/stats.go:18-23`); `channelHealthReporter` and `siblingReachable(siblings []channelHealthReporter, channelID string, now time.Time) bool` (`cmd/moombox/monitor_callbacks.go:472-474`, `:484`); `notifications.Sender`, `notificationtest.Recorder`.
+- Consumes: `routes.DiskStatus{Free, Total uint64; UsedPct float64; WarnLevel string}` (`internal/web/routes/stats.go:18-23`); `channelHealthReporter` and `siblingReachable(siblings []channelHealthReporter, channelID string, now time.Time) bool` (`cmd/moombox/monitor_callbacks.go:492-494`, `:506`); `notifications.Sender`, `notificationtest.Recorder`.
 - Produces:
   - `internal/monitor`: `healthTracker.onHealthy func(channelID string)`; `(*FeedMonitor).SetOnChannelHealthy`, `(*DecapiMonitor).SetOnChannelHealthy`, `(*TwitchMonitor).SetOnChannelHealthy`, each `func(fn func(channelID string))`
   - `cmd/moombox`: `type diskAlerts struct{…}` with `newDiskAlerts`, `onReading(ds *routes.DiskStatus, outputDir string, now time.Time)`, `onReadFailure(outputDir string)`; `func channelHealthNotifiers(n notifications.Sender, log …, platform string, siblings ...channelHealthReporter) (func(string, int, string), func(string))`
@@ -3412,7 +3442,7 @@ func diskReading(level string, usedPct float64) *routes.DiskStatus {
 //     recovery on its first reading, and again after every ok reading.
 //   - not clearing lastLevel: the second warning episode never closes.
 func TestDiskAllClearClosesAWarningThatWasSent(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	d := newDiskAlerts(rec, nopLoggerForTest())
 	now := time.Now()
 
@@ -3448,7 +3478,7 @@ func TestDiskAllClearClosesAWarningThatWasSent(t *testing.T) {
 // must not alter: a level change sends immediately, the same level waits 30
 // minutes.
 func TestDiskWarningCooldownIsUnchanged(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	d := newDiskAlerts(rec, nopLoggerForTest())
 	now := time.Now()
 
@@ -3474,7 +3504,7 @@ func TestDiskWarningCooldownIsUnchanged(t *testing.T) {
 //     (the alert is on the second, ~12 minutes in).
 //   - not resetting the counter: the next failure streak never alerts.
 func TestDiskMonitoringRecoveredClosesAReadFailure(t *testing.T) {
-	rec := notificationtest.NewRecorder()
+	rec := notificationtest.New()
 	d := newDiskAlerts(rec, nopLoggerForTest())
 	now := time.Now()
 
@@ -3527,7 +3557,7 @@ import (
 //   - firing the close for a channel that never alerted at all.
 func TestChannelHealthNotifiersPairAnAlertWithItsClose(t *testing.T) {
 	t.Run("alert then close", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		unhealthy, healthy := channelHealthNotifiers(rec, &nopLogger{}, "youtube")
 
 		unhealthy("UC_dead", 20, "404")
@@ -3553,7 +3583,7 @@ func TestChannelHealthNotifiersPairAnAlertWithItsClose(t *testing.T) {
 	})
 
 	t.Run("a suppressed alert has no close", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		// A sibling that vouches for the channel suppresses the alert.
 		unhealthy, healthy := channelHealthNotifiers(rec, &nopLogger{}, "youtube", freshSibling("UC_ok"))
 
@@ -3568,7 +3598,7 @@ func TestChannelHealthNotifiersPairAnAlertWithItsClose(t *testing.T) {
 	})
 
 	t.Run("a recovery with no alert says nothing", func(t *testing.T) {
-		rec := notificationtest.NewRecorder()
+		rec := notificationtest.New()
 		_, healthy := channelHealthNotifiers(rec, &nopLogger{}, "twitch")
 		healthy("streamer")
 		if got := len(rec.Calls()); got != 0 {
@@ -3578,7 +3608,7 @@ func TestChannelHealthNotifiersPairAnAlertWithItsClose(t *testing.T) {
 }
 ```
 
-There is no `freshSibling` today — `cmd/moombox/monitor_callbacks_test.go:11-13` has the `fakeHealthReporter` type and `TestSiblingReachable` builds its reporters with a closure local to the test (`:31`). Add the constructor to `channel_health_test.go`, and give it a **fresh** timestamp: `siblingReachable` vouches only on `ConsecutiveErrors == 0 && LastCheckedAt != 0 && now - LastCheckedAt <= crossMonitorVouchWindow` (20 min, `cmd/moombox/monitor_callbacks.go:24-29`, `:492-495`), so a zero or stale one makes the "suppressed alert has no close" subtest pass for the wrong reason.
+There is no `freshSibling` today — `cmd/moombox/monitor_callbacks_test.go:11-13` has the `fakeHealthReporter` type and `TestSiblingReachable` builds its reporters with a closure local to the test (`:31`). Add the constructor to `channel_health_test.go`, and give it a **fresh** timestamp: `siblingReachable` vouches only on `ConsecutiveErrors == 0 && LastCheckedAt != 0 && now - LastCheckedAt <= crossMonitorVouchWindow` (20 min, `cmd/moombox/monitor_callbacks.go:29`, condition at `:514-517`), so a zero or stale one makes the "suppressed alert has no close" subtest pass for the wrong reason.
 
 ```go
 func freshSibling(channelID string) channelHealthReporter {
@@ -3658,7 +3688,7 @@ func (fm *FeedMonitor) SetOnChannelHealthy(fn func(channelID string)) {
 
 - [ ] **Step 4: Replace `unhealthyNotify` with `channelHealthNotifiers` in `cmd/moombox/monitor_callbacks.go`**
 
-The closure at `:1586-1617` becomes a package-level function — a test cannot reach a closure inside `wireMonitorCallbacks`, which is why the send has never been asserted (only `siblingReachable` has):
+The closure at `:1631-1656` becomes a package-level function — a test cannot reach a closure inside `wireMonitorCallbacks`, which is why the send has never been asserted (only `siblingReachable` has):
 
 ```go
 // channelHealthNotifiers returns the unhealthy/healthy callback pair for one
@@ -3738,7 +3768,7 @@ func channelHealthNotifiers(
 }
 ```
 
-The wiring at `:1615-1617` becomes:
+The wiring at `:1660-1662` becomes:
 
 ```go
 	// YouTube channels are covered by both the RSS feed and DECAPI monitors, so
@@ -4031,11 +4061,14 @@ Every producer line number in this plan was read at `1d2df1d4`, before N1. N1 ed
 ```bash
 cd /d/Git/Moombox/.worktrees/webhooks-n2a-producers
 grep -rnE '\.Send\(\s*"' --include='*.go' internal/worker internal/web/routes cmd/moombox | grep -v _test.go
+grep -rn -A1 --include='*.go' '\.Send($' internal/worker internal/web/routes cmd/moombox | grep -v _test.go
 ```
 
-The pattern is deliberately receiver-agnostic: the sends this arc adds use `d.notify` and `a.notify`, which a `notifier.Send(` / `notifyMgr.Send(` / `n.Send(` pattern misses, and the disk titles are built with `fmt.Sprintf` so they carry no literal at all. The baseline at `1d2df1d4` is 23 literal-titled sends.
+**Both forms, and the second is load-bearing.** `internal/web/routes/jobs.go` writes every one of its three sends as `notifier.Send(` then the title on the NEXT line, so the single-line pattern returns nothing at all from the package that owns two of the five unified families. The receiver is left out of both patterns on purpose: this arc's new sends use `d.notify` and `a.notify`, which a `notifier.Send(` / `notifyMgr.Send(` pattern would miss. Baseline at N1's merge (`bbe0e674`): **26 single-line + 3 multi-line = 29** literal-titled sends.
 
-Expected — the load-bearing half only: **none of `"Video Added"`, `"Twitch Video Added"`, `"Stream Found"`, `"Twitch Stream Found"`, `"Download Cancelled"`, `"Job Cancelled"`, `"Download Finished"` or `"Trim Created"` may remain** as a literal at a call site. Those five families come from `internal/notifications/builders.go` now. Everything else the grep returns is a send this arc deliberately did not unify (the two download-starting titles, "Muxing Starting", the split builders, "Trim Deleted", "Trim Failed", "Authentication Required", "Job Failed", the two YouTube schedule titles, the cookie family, "Channel Not Responding", "Channel Responding Again", "Outage Alert", the two sidecar titles and the update/crash System titles).
+Expected — the load-bearing half only: **none of `"Video Added"`, `"Twitch Video Added"`, `"Stream Found"`, `"Twitch Stream Found"`, `"Download Cancelled"`, `"Job Cancelled"`, `"Download Finished"` or `"Trim Created"` may remain** as a literal at a call site, in either form. Those five families come from `internal/notifications/builders.go` now.
+
+Everything else the two greps return is a send this arc deliberately did not unify: "YouTube Download Starting", "Twitch Download Starting", "Muxing Starting", "Trim Deleted", "Trim Failed", "Authentication Required", "Job Failed", "YouTube Start Time Confirmed", "YouTube Schedule Changed", "Authentication Recovered", "Parked Jobs Re-evaluated", "Channel Not Responding", "Update Available", "Update Applied", "Previous Update Failed", "Recovered From Crash", "Disk Monitoring Failed" — plus this arc's five new ones: "Channel Responding Again", "BotGuard Sidecar Down", "BotGuard Sidecar Restored", "Disk Space Recovered", "Disk Monitoring Recovered". The split/connectivity builders and "Outage Alert" appear in neither grep: their titles are computed, not literal.
 
 - [ ] **Step 3: The merge-candidate gates**
 
@@ -4104,12 +4137,14 @@ Expected: no `--- SKIP` among them. A SKIP means FFmpeg is not on this host's PA
 **Residuals to carry into the owner report** (none of them blocks the merge):
 
 1. **Field gate — the first real recovery embed.** `sidecar_down` needs a sidecar the supervisor genuinely cannot restart for a minute; `disk_ok` needs a real disk filling and being freed; `channel_healthy` needs a channel to fail twenty consecutive checks and come back. All three are pinned by fixtures and none has been seen in the field.
-2. **`errorStage` classifies by prefix, and two finalize returns still escape it.** `"create segment output dir: …"` (`internal/worker/orchestrator_mux.go:1332`) and `"no segment files found in staging directory"` (`:1468`) read as "download". Naming them properly means threading a stage argument through `setJobError`, which touches every failure path — a follow-up, not this arc.
+2. **`errorStage` classifies by prefix, and two finalize returns still escape it.** `"create segment output dir: …"` (`internal/worker/orchestrator_mux.go:1384`) and `"no segment files found in staging directory"` (`:1524`) read as "download". Naming them properly means threading a stage argument through `setJobError`, which touches every failure path — a follow-up, not this arc.
 3. **The CLI Twitch add's description no longer names the media type.** Today it reads `"Manually added Twitch vod: tw_v123"`; the unified builder says `"Manually added: tw_v123"`. The id still distinguishes the two shapes (a VOD add's id is `tw_v<digits>`, a live add's is the channel login) and the platform is in the author line and footer, so the loss is the word, not the fact.
 4. **The multi-part `Duration` figure can move by up to a second.** The old builder truncated the summed float to whole seconds once; the builder sums per-part `time.Duration` values instead, so a three-part job's rendered duration may differ from the row's `length_seconds` by sub-second rounding. More accurate, not less, but it is a visible change.
 5. **"Chat Messages" is now omitted at zero on the single-part path.** It used to render `0` whenever the pointer was non-nil; the unified builder requires `> 0`, matching what the multi-part path always did.
 6. **The `HasTargets()` guard around the disk sends is gone** (Task 8 Step 6). `Manager.Send` returns immediately with no targets, so nothing observable changed, but it is a deliberate deletion rather than an oversight.
-7. **`M1` (recover-asides outcome), `M2` (members-only marker on Stream Found), `M3` (backlog find at creation vs admission), `M5` (respawn counter), `M7` (Twitch chat re-authenticated) are NOT in this arc.** The spec scoped N2a to A1/A2/A3/A5/A6/M8 and C1–C5; the remaining MAYBEs are still open owner calls.
+7. **A one-segment multi-part job now gets the SINGLE-part embed shape.** `finalizeMultiSegmentJob` reaches `renameSinglePartToPlain` (`internal/worker/orchestrator_mux.go:948-950`) for a job whose split produced exactly one part; its embed used to say `Segments: 1 segments` with a one-entry `Qualities`, and now says `File` / `File Size`. That matches what the file on disk is actually called, so it is an improvement — but it is a visible change to an embed shape.
+8. **"Muxing Starting" is left without `Platform`, `JobID` or `Author`.** After this arc it is the one job-lifecycle embed with no footer job id and no author line while its five neighbours have both. Out of scope — spec §2 names five families and `muxing` is not one — and deliberately NOT widened here; worth a follow-up.
+9. **`M1` (recover-asides outcome), `M2` (members-only marker on Stream Found), `M3` (backlog find at creation vs admission), `M5` (respawn counter), `M7` (Twitch chat re-authenticated) are NOT in this arc.** The spec scoped N2a to A1/A2/A3/A5/A6/M8 and C1–C5; the remaining MAYBEs are still open owner calls.
 
 - [ ] **Step 8: Delete this plan and commit**
 
