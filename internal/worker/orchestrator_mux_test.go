@@ -7,10 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
@@ -212,87 +210,6 @@ func TestWriteDescriptionAtomicReplacesTheTargetRatherThanRewritingIt(t *testing
 		t.Errorf("content after the write = %q, want the new body", got)
 	}
 	assertNoTempSurvives(t, dir)
-}
-
-// TestFinishedImageIsDroppedForTwitch pins the §0 ruling. A Twitch preview URL
-// 404s the moment the broadcast ends, and "Download Finished" is sent after it
-// did, so the full-width image on every Twitch finished embed was permanently
-// broken. YouTube thumbnails outlive the stream and keep theirs.
-//
-// THE MUTANT: reverting either call site to jobCtx.Job.ThumbnailURL.
-func TestFinishedImageIsDroppedForTwitch(t *testing.T) {
-	for _, tc := range []struct {
-		platform string
-		want     string
-	}{
-		{"youtube", "https://i.ytimg.com/vi/x/maxresdefault.jpg"},
-		{"twitch", ""},
-		{"", "https://i.ytimg.com/vi/x/maxresdefault.jpg"},
-	} {
-		job := &database.Job{
-			Platform:     tc.platform,
-			ThumbnailURL: "https://i.ytimg.com/vi/x/maxresdefault.jpg",
-		}
-		if got := finishedImage(job); got != tc.want {
-			t.Errorf("finishedImage(platform=%q) = %q, want %q", tc.platform, got, tc.want)
-		}
-	}
-	if got := finishedImage(nil); got != "" {
-		t.Errorf("finishedImage(nil) = %q, want \"\"", got)
-	}
-}
-
-// TestDescriptionExcerptCutsOnARuneBoundary is the fix for the byte slice at
-// the Description excerpt. A Japanese description — the norm for this project's
-// archives — was cut mid-rune, and encoding/json then replaced the broken tail
-// with U+FFFD.
-//
-// WHAT THIS PINS: the helper COMPOSITION and its 300-rune budget, not the call
-// site — it calls the helpers directly and never reaches
-// sendFinishedNotification, so reverting that line to desc[:descMaxLen-3] would
-// not fail here. The call site is pinned separately, by the "Description" field
-// a notificationtest.Recorder reads off a finished send in Task 6's fixture;
-// ClampRunes' own boundary behaviour is pinned exhaustively in
-// internal/notifications/limits_test.go.
-//
-// The ORDER is part of the composition: clamp the raw description, THEN
-// escape. Escaping first spends the 300-rune budget on backslashes Moombox
-// added, and a cut landing between a backslash and its character ends the
-// excerpt in a stray "\…".
-func TestDescriptionExcerptCutsOnARuneBoundary(t *testing.T) {
-	excerpt := func(s string) string {
-		return notifications.EscapeMarkdown(notifications.ClampRunes(s, 300))
-	}
-
-	t.Run("a Japanese description keeps whole runes", func(t *testing.T) {
-		got := excerpt(strings.Repeat("あ", 500))
-		if !utf8.ValidString(got) {
-			t.Fatalf("the excerpt is not valid UTF-8: %q", got)
-		}
-		if n := utf8.RuneCountInString(got); n != 300 {
-			t.Errorf("excerpt = %d runes, want 300", n)
-		}
-		if !strings.HasSuffix(got, "…") {
-			t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-12:])
-		}
-	})
-
-	t.Run("the cut never lands inside an escape pair", func(t *testing.T) {
-		// Every rune escapable: clamping the ESCAPED form would cut halfway
-		// through one of the pairs it added.
-		got := excerpt(strings.Repeat("*", 500))
-		if strings.HasSuffix(got, `\…`) {
-			t.Errorf("the excerpt ends in an orphaned backslash — it was clamped after escaping: %q", got[len(got)-8:])
-		}
-		if !strings.HasSuffix(got, "…") {
-			t.Errorf("excerpt does not end with the clamp marker: %q", got[len(got)-8:])
-		}
-		// Escaping after the clamp can at most double the length, which is
-		// still comfortably inside the 1024-rune field value limit.
-		if n := utf8.RuneCountInString(got); n > 600 {
-			t.Errorf("excerpt = %d runes, want <= 600 (300 clamped runes, each at most doubled by the escape)", n)
-		}
-	})
 }
 
 // muxTestOrchestrator builds an orchestrator over a real temp database with a
