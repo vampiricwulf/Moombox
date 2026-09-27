@@ -234,6 +234,39 @@ test("a slow fetch for an earlier id cannot clobber a newer selection", { skip }
   );
 });
 
+// MUTANT: claim the generation token only on the fetch path — a newer deep
+// link that resolves from MEMORY (a live job, which is what most embeds link
+// to) then never bumps it, and the earlier link's slow fallback fetch still
+// reopens its own dialog over the newer selection.
+test("a newer link resolved from memory also cancels an earlier slow fetch", { skip }, async () => {
+  let releaseFirst;
+  const firstPending = new Promise((resolve) => { releaseFirst = resolve; });
+  const OLD = { ...ARCHIVED_JOB, id: "jOld", videoId: "jOld", title: "The earlier link" };
+  const NEWER = { ...ARCHIVED_JOB, id: "jLive", videoId: "jLive", title: "The newer, in-memory link" };
+
+  const h = await harness.makeApp({
+    url: "http://localhost/#job=jOld",
+    routes: {
+      "GET /api/jobs/jOld": () => firstPending.then(() => OLD),
+    },
+  });
+  // jLive is in memory from the start; jOld is not, so its fallback fetch is
+  // now pending. The operator follows the in-memory link.
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [NEWER] } });
+  h.window.location.hash = "#job=jLive";
+  h.window.dispatchEvent(new h.window.Event("hashchange"));
+  await h.flush();
+  assert.equal(h.app.selectedJobId, "jLive", "precondition: the in-memory link opened");
+
+  releaseFirst();
+  await h.flush();
+
+  assert.equal(
+    h.app.selectedJobId, "jLive",
+    "the stale fetch for jOld reopened its own details over the in-memory selection",
+  );
+});
+
 // MUTANT: match any hash rather than requiring the "#job=" prefix — a normal
 // in-page hash (e.g. a future "#settings" deep link) would be swallowed and
 // cleared on the very next initial_state/hashchange.

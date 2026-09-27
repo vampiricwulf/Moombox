@@ -190,8 +190,8 @@ func TestNotificationsApplyUsesTheSharedDecode(t *testing.T) {
 // The bug it pins is a silent one, which is what made it worth a 400: a single
 // mistyped field — `"enabled": "false"` rather than false — used to fail the
 // decode for the WHOLE array, the `if … == nil` guard then skipped the
-// assignment, and every configured webhook (or every channel) disappeared from
-// the saved config while the route answered 200. The web editor cannot produce
+// assignment, and the whole array update was silently dropped (the stored
+// list stayed as it was) while the route answered 200. The web editor cannot produce
 // the state; an API caller, a script, or a hand-rolled PUT can.
 //
 // THE MUTANT: dropping either decode gate from validateConfigUpdates. The PUT
@@ -238,8 +238,8 @@ func TestConfigPutRejectsATypeMismatchedEntry(t *testing.T) {
 
 			rec := putConfigExpect(t, f, tc.updates)
 			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("got %d, want 400 — a type-mismatched entry used to save as a 200 that lost "+
-					"the whole array (body: %s)", rec.Code, rec.Body.String())
+				t.Fatalf("got %d, want 400 — a type-mismatched entry used to answer 200 and silently drop "+
+					"the whole array update (body: %s)", rec.Code, rec.Body.String())
 			}
 			var resp struct {
 				Details map[string]string `json:"details"`

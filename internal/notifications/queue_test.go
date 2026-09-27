@@ -542,7 +542,7 @@ var errDeliveryFailed = errors.New("discord is down")
 // BeginShutdown flushes every open coalescing window so the batch it holds is
 // not evaporated — but the flush ENQUEUES, and the drain goroutine can pop
 // what it enqueued immediately. Storing shuttingDown after the flush therefore
-// leaves a window in which that pop reads false and the flushed batch takes
+// leaves a window in which deliver reads false and the flushed batch takes
 // the full 2 s + 5 s retry ladder, inside the process's 10 s force-exit.
 //
 // THE MUTANT: moving m.shuttingDown.Store(true) back below the flush loop.

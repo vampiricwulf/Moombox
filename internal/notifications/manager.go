@@ -758,7 +758,7 @@ func (m *Manager) BeginShutdown() {
 	// AFTER the flag so the batch is itself single-attempt, and still before
 	// Wait's closeDrain, because enqueue drops with a Warn once q.closing is
 	// set (queue.go) — a flush after that would emit the batch straight into
-	// the drop path. enqueue never reads shuttingDown; only pop does.
+	// the drop path. enqueue never reads shuttingDown; only deliver does (queue.go).
 	m.targetsMu.RLock()
 	targets := m.targets
 	m.targetsMu.RUnlock()

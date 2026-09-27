@@ -453,8 +453,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		// The decode gate, ahead of the per-field rules. applyConfigUpdates
 		// decodes this array through the same helper and assigns nothing when
 		// the decode fails, so without a 400 here one type-mismatched field
-		// in one entry silently loses the WHOLE channels list and the route
-		// still answers 200.
+		// in one entry silently drops the whole channels update behind a 200
+		// (the stored list stays as it was; the operator's edit vanishes).
 		if _, decErrs := decodeConfigEntries[config.ChannelConfig]("channels", chs); decErrs != nil {
 			maps.Copy(errs, decErrs)
 		}
@@ -494,8 +494,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	// deliberately left as written rather than rejected or emptied.
 	if notifs, ok := updates["notifications"].([]any); ok {
 		// Same decode gate as the channels arm above, and the same reason:
-		// `"enabled": "false"` on one target used to lose every configured
-		// webhook behind a 200.
+		// `"enabled": "false"` on one target used to drop the whole
+		// notifications update behind a 200.
 		if _, decErrs := decodeConfigEntries[config.NotificationConfig]("notifications", notifs); decErrs != nil {
 			maps.Copy(errs, decErrs)
 		}
@@ -522,8 +522,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 // One helper, and it decodes ENTRY BY ENTRY, because the failure it exists for
 // is per entry and used to be silent: a single type-mismatched field
 // (`"enabled": "false"` on a raw PUT) made json.Unmarshal fail for the WHOLE
-// array, the `if … == nil` guard around the assignment skip, and the entire
-// stored list vanish from the save — while the route answered 200. The
+// array, the `if … == nil` guard around the assignment skip, and the whole
+// array update drop silently (the stored list stayed as it was) — while the route answered 200. The
 // per-entry decode is what lets the error name the entry and the field, so
 // validateConfigUpdates can turn it into a 400 instead.
 //

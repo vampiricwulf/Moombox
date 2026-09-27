@@ -52,9 +52,9 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 181
+checkout without `npm ci` reports them as **skipped**, never failed — the 182
 DOM tests (player 63, render-diff 16, app 13, settings-notifications 13,
-a11y-controls 12, boot-and-login 12, job-deeplink 8, job-progress 8,
+a11y-controls 12, boot-and-login 12, job-deeplink 9, job-progress 8,
 job-asides 7, log-panel 4, open-folder 4, resolution-picker 4,
 settings-reorder-budget 4, update-check-debounce 4, archive-boundary 3,
 sidecar-warning 3, app-resync 2, release-notes-toast 1), leaving 131 tests
@@ -65,13 +65,13 @@ five pure helper tests in `player.test.mjs` (task 3's two colour tests, task
 in `resolution-picker.test.mjs`, whose other four tests do need one:
 
 ```
-ℹ tests 312
+ℹ tests 313
 ℹ pass 131
 ℹ fail 0
-ℹ skipped 181
+ℹ skipped 182
 ```
 
-With jsdom installed the same command reports `tests 312` / `pass 312` /
+With jsdom installed the same command reports `tests 313` / `pass 313` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only

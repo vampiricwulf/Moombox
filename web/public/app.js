@@ -1504,6 +1504,11 @@ export class MoomboxApp {
     // a dialog the operator has since closed.
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
 
+    // Claim the generation token for EVERY deep link, before the in-memory
+    // lookup: a newer link that resolves from memory (a live job, which is
+    // what most embeds link to) must also cancel an earlier link's slow
+    // fallback fetch, or that fetch reopens its own dialog over the newer one.
+    this._consumingJobId = jobId;
     const job = this.jobs.find((j) => j.id === jobId) || this.archivedJobs.find((j) => j.id === jobId);
     if (job) {
       this.details.showJobDetails(job);
@@ -1513,12 +1518,12 @@ export class MoomboxApp {
     // archive boundary) lands here, since archivedJobs is fetched lazily and
     // is empty on a cold load. Mirrors _verifyJobExists's response handling.
     //
-    // The generation token is that method's `_verifyingJobId` guard in the
-    // form this path needs: hashchange can fire again (a second embed's link,
-    // or Back) while this fetch is in flight, and without it a slow answer
-    // for the EARLIER id would open its dialog over the newer selection. The
-    // token is the id, so a re-entrant call for the same id is harmless.
-    this._consumingJobId = jobId;
+    // The generation token (claimed above) is that method's `_verifyingJobId`
+    // guard in the form this path needs: hashchange can fire again (a second
+    // embed's link, or Back) while this fetch is in flight, and without it a
+    // slow answer for the EARLIER id would open its dialog over the newer
+    // selection. The token is the id, so a re-entrant call for the same id is
+    // harmless.
     let status = 0;
     try {
       const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
@@ -1526,6 +1531,7 @@ export class MoomboxApp {
       status = resp.status;
       if (resp.ok) {
         const fetched = await resp.json();
+        if (this._consumingJobId !== jobId) return; // superseded while the body was read
         const existingIdx = this.archivedJobs.findIndex((j) => j.id === fetched.id);
         if (existingIdx !== -1) this.archivedJobs[existingIdx] = fetched;
         else this.archivedJobs.push(fetched);
@@ -1533,6 +1539,7 @@ export class MoomboxApp {
         return;
       }
     } catch {
+      if (this._consumingJobId !== jobId) return; // superseded — the toast is not ours to show
       // Network error — status stays 0 and the toast says so below.
     } finally {
       if (this._consumingJobId === jobId) this._consumingJobId = null;
