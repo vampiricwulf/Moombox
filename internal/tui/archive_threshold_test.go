@@ -102,6 +102,11 @@ func TestSetHideFinishedAgeDaysInvalidatesTheRenderCache(t *testing.T) {
 	var before, after string
 	var seqBefore, seqAfter uint64
 	observeInOneSecond(t, func() {
+		// A retry re-enters this closure with whatever the previous
+		// (discarded) attempt left behind. Reset to the constructor's
+		// default threshold first so every attempt — first try or retry —
+		// starts from the same unarchived baseline.
+		m.SetHideFinishedAgeDays(30)
 		m.renderCache = ""
 		before = m.View()
 		seqBefore = m.rebuildSeq
