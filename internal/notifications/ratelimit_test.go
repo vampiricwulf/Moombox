@@ -154,6 +154,82 @@ func TestA429DoesNotAlsoArmTheBucketSleep(t *testing.T) {
 	}
 }
 
+// TestSendOnceHonoursTheBucketOnlyWithinTheShutdownCap is the ruling on this
+// task's review. SendOnce is the shutdown path, and the bucket it reads belongs
+// to the target's persistent *DiscordWebhook — so an alert spike just before
+// the user quits can leave it armed for seconds. The process force-exits 10s
+// in: a window that closes soon is still worth waiting out, but one further
+// away than shutdownBucketWaitCap is not, because the 429 that follows an
+// immediate post drops the item exactly as the wait would have, without
+// starving every item queued behind it in the meantime.
+//
+// THE MUTANT: calling the uncapped waitForBucket here (what this task shipped
+// first). The far-bucket branch then blocks the full 3s and fails its bound.
+func TestSendOnceHonoursTheBucketOnlyWithinTheShutdownCap(t *testing.T) {
+	// hitCounter serves both branches: whatever the server answers, exactly
+	// one request must reach it.
+	newServer := func(t *testing.T, handle http.HandlerFunc) (*httptest.Server, func() int) {
+		var hits int
+		var mu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			mu.Lock()
+			hits++
+			mu.Unlock()
+			handle(rw, req)
+		}))
+		t.Cleanup(srv.Close)
+		return srv, func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return hits
+		}
+	}
+
+	t.Run("a window inside the cap is waited out", func(t *testing.T) {
+		srv, hits := newServer(t, func(rw http.ResponseWriter, _ *http.Request) {
+			rw.WriteHeader(http.StatusNoContent)
+		})
+		d := &DiscordWebhook{URL: srv.URL}
+		// Arm the bucket the way an earlier Send would have.
+		d.noteBucket(discordResponse{status: http.StatusOK, rateRemain: "0", rateReset: "0.15"})
+
+		start := time.Now()
+		if err := d.SendOnce("t", "", 0, nil, SendOptions{}); err != nil {
+			t.Fatalf("SendOnce: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed < 140*time.Millisecond {
+			t.Errorf("SendOnce returned after %v — a 150ms window is inside the %v cap and must be waited out", elapsed, shutdownBucketWaitCap)
+		}
+		if got := hits(); got != 1 {
+			t.Errorf("server saw %d requests, want exactly 1", got)
+		}
+	})
+
+	t.Run("a window past the cap is not", func(t *testing.T) {
+		// A real empty bucket answers 429, which is what makes skipping the
+		// wait free: the item is dropped either way, seconds earlier.
+		srv, hits := newServer(t, func(rw http.ResponseWriter, _ *http.Request) {
+			rw.Header().Set("Retry-After", "3")
+			rw.WriteHeader(http.StatusTooManyRequests)
+		})
+		d := &DiscordWebhook{URL: srv.URL}
+		d.noteBucket(discordResponse{status: http.StatusOK, rateRemain: "0", rateReset: "3"})
+
+		start := time.Now()
+		err := d.SendOnce("t", "", 0, nil, SendOptions{})
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("SendOnce against a 429: want an error, got nil")
+		}
+		if elapsed > 100*time.Millisecond {
+			t.Errorf("SendOnce took %v — a 3s window is past the %v cap and must not be slept (the 10s force-exit would eat it)", elapsed, shutdownBucketWaitCap)
+		}
+		if got := hits(); got != 1 {
+			t.Errorf("server saw %d requests, want exactly 1", got)
+		}
+	})
+}
+
 // TestSendOnceMakesExactlyOneAttempt is what BeginShutdown depends on.
 func TestSendOnceMakesExactlyOneAttempt(t *testing.T) {
 	var hits int

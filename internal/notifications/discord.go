@@ -32,6 +32,14 @@ const (
 	// + 30s sleep. Two large Retry-After waits would exceed it — a webhook
 	// still rate-limited after one honored wait gives up instead.
 	discordMaxSleepTotal = 30 * time.Second
+	// shutdownBucketWaitCap bounds how long a SINGLE-attempt send (SendOnce —
+	// in practice the shutdown path) will wait out a known-empty rate bucket.
+	// The process force-exits 10s into shutdown, so honouring a window a full
+	// discordRetryAfterCap away would lose the embed to os.Exit AND starve
+	// every item behind it in that target's FIFO queue. Past this cap SendOnce
+	// posts immediately and lets the 429 drop the item: the same outcome as
+	// not waiting, minus the seconds spent.
+	shutdownBucketWaitCap = 2 * time.Second
 	// discordErrBodyBytes bounds how much of a rejected webhook's response
 	// body is quoted back in the error. Discord's 4xx bodies are small JSON
 	// objects naming what it refused ({"message": "Unknown Webhook", "code":
@@ -227,13 +235,20 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 // Two callers: SendTest, where an interactive settings flow wants the
 // immediate outcome (surfacing a 429 beats sleeping through its Retry-After),
 // and the per-target queue during shutdown, where the 10s force-exit leaves no
-// room for the ladder. Bounded by the single-attempt request timeout (~15s).
+// room for the ladder.
+//
+// A known-empty rate bucket is therefore honoured only when it refills within
+// shutdownBucketWaitCap (2s); a window further away than that is not waited
+// for at all — this posts, and the 429 Discord answers with drops the item
+// just as the wait would have, without spending the force-exit's remaining
+// seconds or starving the items queued behind this one. So the bound stays
+// shutdownBucketWaitCap plus the single-attempt request timeout (~15s).
 func (d *DiscordWebhook) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
 	body, err := buildPayload(title, description, color, fields, opts)
 	if err != nil {
 		return err
 	}
-	d.waitForBucket()
+	d.waitForBucketWithin(shutdownBucketWaitCap)
 	r, err := d.post(body)
 	d.noteBucket(r)
 	switch {
@@ -349,15 +364,12 @@ func discordStatusErr(status int, snippet string) error {
 // there is no published numeric cap.
 //
 // Capped by discordRetryAfterCap for the same reason a 429's Retry-After is:
-// an absurd reset must not park a target's whole queue into next week.
+// an absurd reset must not park a target's whole queue into next week. The
+// retry ladder is what makes the wait worth taking — a single-attempt send has
+// no second chance to spend it on, which is why SendOnce calls
+// waitForBucketWithin instead.
 func (d *DiscordWebhook) waitForBucket() {
-	d.bucketMu.Lock()
-	until := d.bucketRefillsAt
-	d.bucketMu.Unlock()
-	if until.IsZero() {
-		return
-	}
-	wait := time.Until(until)
+	wait := d.bucketWait()
 	if wait <= 0 {
 		return
 	}
@@ -365,6 +377,31 @@ func (d *DiscordWebhook) waitForBucket() {
 		wait = discordRetryAfterCap
 	}
 	time.Sleep(wait)
+}
+
+// waitForBucketWithin honours the empty-bucket window only when it closes
+// within max, and otherwise returns at once rather than clamping to max.
+// Waiting part of a window buys nothing: the request still lands inside it and
+// still 429s, so a caller that cannot afford the whole wait is better off
+// spending nothing. SendOnce is that caller.
+func (d *DiscordWebhook) waitForBucketWithin(max time.Duration) {
+	wait := d.bucketWait()
+	if wait <= 0 || wait > max {
+		return
+	}
+	time.Sleep(wait)
+}
+
+// bucketWait reports how long until this webhook's bucket refills, or 0 when
+// it was never marked empty (or the window has already passed).
+func (d *DiscordWebhook) bucketWait() time.Duration {
+	d.bucketMu.Lock()
+	until := d.bucketRefillsAt
+	d.bucketMu.Unlock()
+	if until.IsZero() {
+		return 0
+	}
+	return time.Until(until)
 }
 
 // noteBucket records (or clears) the empty-bucket deadline from one response.
