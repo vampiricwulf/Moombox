@@ -1031,50 +1031,28 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		if finishedJob == nil {
 			finishedJob = jobCtx.Job
 		}
-
-		var qualityLabels []string
+		parts := make([]notifications.Part, 0, len(segments))
 		for _, seg := range segments {
-			qualityLabels = append(qualityLabels, seg.Quality)
-		}
-		finFields := []notifications.Field{
-			{Name: "Segments", Value: fmt.Sprintf("%d segments", len(segments)), Inline: true},
-			{Name: "Qualities", Value: strings.Join(qualityLabels, " -> "), Inline: true},
-			{Name: "Total Size", Value: formatFileSize(totalSize), Inline: true},
-			{Name: "Duration", Value: formatDurationHuman(time.Duration(totalDuration) * time.Second), Inline: true},
-		}
-		// Resolution from first segment
-		if len(segments) > 0 && segments[0].VideoWidth != nil && segments[0].VideoHeight != nil &&
-			*segments[0].VideoWidth > 0 && *segments[0].VideoHeight > 0 {
-			res := fmt.Sprintf("%dx%d", *segments[0].VideoWidth, *segments[0].VideoHeight)
-			if segments[0].VideoFps != nil && *segments[0].VideoFps > 0 {
-				res += fmt.Sprintf(" @%dfps", *segments[0].VideoFps)
+			p := notifications.Part{
+				File:     seg.Filename,
+				Quality:  seg.Quality,
+				Duration: time.Duration(seg.DurationSeconds * float64(time.Second)),
 			}
-			finFields = append(finFields, notifications.Field{Name: "Resolution", Value: res, Inline: true})
-		}
-		// Total time
-		if finishedJob.DownloadStartedAt != "" {
-			if startedAt, err := time.Parse(time.RFC3339, finishedJob.DownloadStartedAt); err == nil {
-				finFields = append(finFields, notifications.Field{
-					Name: "Total Time", Value: formatDurationHuman(time.Since(startedAt)), Inline: true,
-				})
+			if seg.FileSize != nil {
+				p.Size = *seg.FileSize
 			}
+			if seg.VideoWidth != nil {
+				p.Width = *seg.VideoWidth
+			}
+			if seg.VideoHeight != nil {
+				p.Height = *seg.VideoHeight
+			}
+			if seg.VideoFps != nil {
+				p.Fps = *seg.VideoFps
+			}
+			parts = append(parts, p)
 		}
-		// Chat messages
-		if finishedJob.TotalChatMessages != nil && *finishedJob.TotalChatMessages > 0 {
-			finFields = append(finFields, notifications.Field{
-				Name: "Chat Messages", Value: fmt.Sprintf("%d", *finishedJob.TotalChatMessages), Inline: true,
-			})
-		}
-		o.notifier.Send("Download Finished",
-			fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),
-			notifications.TypeSuccess,
-			finFields,
-			notifications.SendOptions{
-				URL:   jobCtx.Job.URL,
-				Image: finishedImage(jobCtx.Job),
-				Event: "finished",
-			},
-		)
+		o.sendDownloadFinished(jobCtx, finishedJob, parts)
 	}
 
 	return nil
@@ -1222,120 +1200,123 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	}
 }
 
-// finishedImage is the full-width image URL for a "Download Finished" embed,
-// or "" for Twitch.
+// sendDownloadFinished is the ONE "Download Finished" send. Both finalize
+// paths reach it: the single-part path with one Part, the multi-segment path
+// with one per part. Before this there were two builders for the same moment
+// with different field sets, and the split job's embed silently dropped the
+// format selection, the trimmed range and the description for no recorded
+// reason (audit C1).
 //
-// Twitch preview URLs are live-only: they 404 as soon as the broadcast ends
-// (see the thumbnail note in orchestrator_twitch.go), and "Download Finished"
-// is by definition sent after it did — so every Twitch finished embed carried
-// an image that could not load. Owner ruling: drop it. Uploading the saved
-// thumbnail_file as a multipart attachment is the option that would restore
-// one, and is deliberately not this arc.
-func finishedImage(job *database.Job) string {
-	if job == nil || job.Platform == "twitch" {
-		return ""
-	}
-	return job.ThumbnailURL
-}
-
-// sendFinishedNotification sends a "Download Finished" notification with enriched fields.
-func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, finishedJob *database.Job, outputFile string, probeData *ffprobeData, info os.FileInfo) {
+// It is called BEFORE cleanupStagingAfterMux runs (processJob), which is what
+// makes the set-aside count answerable at all.
+func (o *DownloadOrchestrator) sendDownloadFinished(jobCtx *JobContext, finishedJob *database.Job, parts []notifications.Part) {
 	if o.notifier == nil {
 		return
 	}
 	if finishedJob == nil {
 		finishedJob = jobCtx.Job
 	}
-	fb := notifications.NewFieldBuilder()
-	fb.Add("File", filepath.Base(outputFile))
-	if probeData != nil && probeData.Width > 0 && probeData.Height > 0 {
-		res := fmt.Sprintf("%dx%d", probeData.Width, probeData.Height)
-		if probeData.Fps > 0 {
-			res += fmt.Sprintf(" @%dfps", probeData.Fps)
+	o.notifier.Send(notifications.DownloadFinished(o.finishedFacts(jobCtx, finishedJob), parts))
+}
+
+// finishedFacts describes a finished job to the embed builder, including the
+// three outcome truths the embed never carried:
+//
+//   - incomplete_tail: the recording is knowingly short and Resume appends the
+//     rest. finalizeIncompleteTail writes the flag and logs it; the embed said
+//     "Successfully archived" in green (audit A5).
+//   - chat_status == incomplete: the capture STOPPED, which is not the same as
+//     running out of chat. Read off the row rather than off the message count,
+//     which is the ranking chatStatusForOutcome exists to reject.
+//   - set-aside recordings still in staging: Arc A built the Recover verb and
+//     nothing ever said there was something to recover (audit A6).
+//
+// The row is the fresh one UpdateJobFields returned, so all three are current.
+func (o *DownloadOrchestrator) finishedFacts(jobCtx *JobContext, j *database.Job) notifications.JobFacts {
+	f := NotifyFacts(j)
+	if j.DownloadStartedAt != "" {
+		if startedAt, err := time.Parse(time.RFC3339, j.DownloadStartedAt); err == nil {
+			f.TotalTime = time.Since(startedAt)
 		}
-		fb.AddInline("Resolution", res)
+	}
+	if j.LastVideoSeq != nil {
+		f.SegmentCounter = fmt.Sprintf("V: %d", *j.LastVideoSeq)
+		if j.LastAudioSeq != nil {
+			f.SegmentCounter += fmt.Sprintf(" A: %d", *j.LastAudioSeq)
+		}
+	}
+	f.ChatMessages = j.TotalChatMessages
+	f.FormatSelection = formatSelectionLabel(j)
+	f.TrimmedRange = trimmedRangeLabel(j)
+	f.Description = j.Description
+	f.IncompleteTail = j.IncompleteTail
+	f.ChatIncomplete = j.ChatStatus == chatStatusIncomplete
+	if jobCtx != nil && jobCtx.StagingDir != "" {
+		f.AsideCount = len(asideReport(jobCtx.StagingDir).Groups)
+	}
+	return f
+}
+
+// formatSelectionLabel renders the itags the operator chose, or "" when they
+// took the defaults. -1 is the sentinel for "none of this stream".
+func formatSelectionLabel(j *database.Job) string {
+	if j.SelectedVideoItag == nil && j.SelectedAudioItag == nil {
+		return ""
+	}
+	var out string
+	if j.SelectedVideoItag != nil {
+		out = fmt.Sprintf("Video: itag %d", *j.SelectedVideoItag)
+		if *j.SelectedVideoItag == -1 {
+			out = "Video: None"
+		}
+	}
+	if j.SelectedAudioItag != nil {
+		if out != "" {
+			out += ", "
+		}
+		if *j.SelectedAudioItag == -1 {
+			out += "Audio: None"
+		} else {
+			out += fmt.Sprintf("Audio: itag %d", *j.SelectedAudioItag)
+		}
+	}
+	return out
+}
+
+// trimmedRangeLabel renders the post-download trim bounds, or "" when the job
+// had none. An absent start is 0:00 and an absent end is the end of the file.
+func trimmedRangeLabel(j *database.Job) string {
+	if j.StartTime == nil && j.EndTime == nil {
+		return ""
+	}
+	startStr, endStr := "0:00", "end"
+	if j.StartTime != nil {
+		startStr = FormatSecondsToTimestamp(*j.StartTime)
+	}
+	if j.EndTime != nil {
+		endStr = FormatSecondsToTimestamp(*j.EndTime)
+	}
+	return fmt.Sprintf("%s - %s", startStr, endStr)
+}
+
+// sendFinishedNotification is the single-part finalize path's call into the
+// shared finished send. It exists as its own function only because its caller
+// (:870) holds the probe result and the FileInfo, which nothing else does.
+func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, finishedJob *database.Job, outputFile string, probeData *ffprobeData, info os.FileInfo) {
+	if finishedJob == nil {
+		finishedJob = jobCtx.Job
+	}
+	p := notifications.Part{File: filepath.Base(outputFile)}
+	if probeData != nil {
+		p.Width, p.Height, p.Fps = probeData.Width, probeData.Height, probeData.Fps
 	}
 	if info != nil {
-		fb.AddInline("File Size", formatFileSize(info.Size()))
+		p.Size = info.Size()
 	}
 	if finishedJob.LengthSeconds != nil && *finishedJob.LengthSeconds > 0 {
-		fb.AddInline("Duration", formatDurationHuman(time.Duration(*finishedJob.LengthSeconds)*time.Second))
+		p.Duration = time.Duration(*finishedJob.LengthSeconds) * time.Second
 	}
-	if finishedJob.DownloadStartedAt != "" {
-		if startTime, err := time.Parse(time.RFC3339, finishedJob.DownloadStartedAt); err == nil {
-			fb.AddInline("Total Time", formatDurationHuman(time.Since(startTime)))
-		}
-	}
-	if finishedJob.LastVideoSeq != nil {
-		segStr := fmt.Sprintf("V: %d", *finishedJob.LastVideoSeq)
-		if finishedJob.LastAudioSeq != nil {
-			segStr += fmt.Sprintf(" A: %d", *finishedJob.LastAudioSeq)
-		}
-		fb.AddInline("Segments", segStr)
-	}
-	if finishedJob.TotalChatMessages != nil {
-		fb.AddInline("Chat Messages", fmt.Sprintf("%d", *finishedJob.TotalChatMessages))
-	}
-	// Format selection (matching TS muxFinalize notification enrichment)
-	if finishedJob.SelectedVideoItag != nil || finishedJob.SelectedAudioItag != nil {
-		var formatInfo string
-		if finishedJob.SelectedVideoItag != nil {
-			if *finishedJob.SelectedVideoItag == -1 {
-				formatInfo = "Video: None"
-			} else {
-				formatInfo = fmt.Sprintf("Video: itag %d", *finishedJob.SelectedVideoItag)
-			}
-		}
-		if finishedJob.SelectedAudioItag != nil {
-			if formatInfo != "" {
-				formatInfo += ", "
-			}
-			if *finishedJob.SelectedAudioItag == -1 {
-				formatInfo += "Audio: None"
-			} else {
-				formatInfo += fmt.Sprintf("Audio: itag %d", *finishedJob.SelectedAudioItag)
-			}
-		}
-		fb.Add("Format Selection", formatInfo)
-	}
-	// Trimmed range
-	if finishedJob.StartTime != nil || finishedJob.EndTime != nil {
-		startStr := "0:00"
-		endStr := "end"
-		if finishedJob.StartTime != nil {
-			startStr = FormatSecondsToTimestamp(*finishedJob.StartTime)
-		}
-		if finishedJob.EndTime != nil {
-			endStr = FormatSecondsToTimestamp(*finishedJob.EndTime)
-		}
-		fb.AddInline("Trimmed Range", fmt.Sprintf("%s - %s", startStr, endStr))
-	}
-	// Description excerpt. Cut on a RUNE boundary through the notifications
-	// clamp: the old desc[:descMaxLen-3] was a byte slice, and a Japanese
-	// description (the norm here) splits mid-rune, after which encoding/json
-	// emits U+FFFD and the operator reads mojibake. Escaped too — a
-	// description is job-supplied text and renders Discord markdown.
-	//
-	// CLAMP FIRST, then escape. The other order cuts 300 runes out of the
-	// ESCAPED text, so a cut landing between a backslash and the character it
-	// escapes leaves the excerpt ending in a stray "\…". Escaping afterwards
-	// can at most double the length — 600 runes, still well inside the 1024
-	// the field clamp enforces — and the 300 runes shown are 300 runes of the
-	// operator's description rather than 300 of Moombox's punctuation.
-	const descMaxLen = 300
-	if finishedJob.Description != "" {
-		fb.Add("Description", notifications.EscapeMarkdown(notifications.ClampRunes(finishedJob.Description, descMaxLen)))
-	}
-	o.notifier.Send("Download Finished",
-		fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),
-		notifications.TypeSuccess,
-		fb.Build(),
-		notifications.SendOptions{
-			URL:   jobCtx.Job.URL,
-			Image: finishedImage(jobCtx.Job),
-			Event: "finished",
-		},
-	)
+	o.sendDownloadFinished(jobCtx, finishedJob, []notifications.Part{p})
 }
 
 // muxSegment muxes a single part and persists it to the database. Called at

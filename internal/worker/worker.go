@@ -1072,19 +1072,7 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 		})
 
 		if w.notifier != nil {
-			w.notifier.Send("Download Cancelled",
-				fmt.Sprintf("Cancelled: %s", job.Title),
-				notifications.TypeCancelled,
-				[]notifications.Field{
-					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
-				},
-				notifications.SendOptions{
-					URL:       job.URL,
-					Thumbnail: job.ThumbnailURL,
-					Event:     "cancelled",
-				},
-			)
+			w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
 		}
 	} else {
 		// Shutdown: preserve existing status so job resumes on restart
@@ -1242,6 +1230,40 @@ func parkReasonForError(err error) database.ParkReason {
 	return database.ParkReasonAuth
 }
 
+// errorStage answers "which button fixes this" from the only signal the error
+// carries: the prefix the orchestrator writes.
+//
+// Four finalize shapes exist in orchestrator_mux.go and all four are the mux
+// stage: muxAndFinalize's fmt.Errorf("mux: %w", err), verifyMuxedDuration's
+// short-output refusal "mux produced …", "no media files to mux…" and
+// "create output dir: %w". The "mux" prefix also keeps "mux segment N:" on the
+// mux side. All of them reach setJobError unwrapped — ExecuteWithChat returns
+// the finalize error straight through — so the prefix survives. Everything
+// else is the download stage.
+//
+// No line numbers here on purpose: an earlier draft carried them and every one
+// had already drifted by the end of the arc. The citation gate does not read
+// Go comments, so nothing would have caught it; the error strings below are
+// greppable and cannot drift.
+//
+// The prefixes are anchored deliberately: an ffmpeg stderr tail from a
+// DOWNLOAD failure can mention muxing anywhere in its 500 characters, and a
+// substring match would flip the answer for the case that matters most.
+//
+// Known limit: two finalize returns in the same file still read as "download"
+// — "create segment output dir: …" and "no segment files found in staging
+// directory". Naming them would mean teaching every producer a stage argument;
+// the prefixes below are what exists today.
+func errorStage(errMsg string) string {
+	// "mux" alone covers "mux: …", "mux produced …" and "mux segment N: …".
+	for _, p := range []string{"mux", "no media files to mux", "create output dir"} {
+		if strings.HasPrefix(errMsg, p) {
+			return "mux"
+		}
+	}
+	return "download"
+}
+
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Free the queue slot BEFORE committing the error to DB so a concurrent
 	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
@@ -1306,14 +1328,19 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			if reason == "" {
 				reason = "Members-only content"
 			}
+			// Guarded, and the title escaped: the two shapes the Job Failed
+			// send below keeps. An empty field value is a permanent Discord
+			// 400 that drops the whole embed, and a raw title beside an
+			// escaped one renders two ways in one embed.
+			authFields := notifications.NewFieldBuilder().
+				AddInlineIf(job.ChannelName != "", "Channel", job.ChannelName).
+				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
+				Add("Reason", reason).
+				Build()
 			w.notifier.Send("Authentication Required",
-				fmt.Sprintf("Cookies needed: %s", job.Title),
+				fmt.Sprintf("Cookies needed: %s", notifications.EscapeMarkdown(job.Title)),
 				notifications.TypeWarning,
-				[]notifications.Field{
-					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
-					{Name: "Reason", Value: reason, Inline: false},
-				},
+				authFields,
 				notifications.SendOptions{
 					URL:       job.URL,
 					Thumbnail: job.ThumbnailURL,
@@ -1321,28 +1348,64 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				},
 			)
 		} else {
-			// URL fallback: use stored URL, or construct YouTube URL (matches TS)
-			notifURL := job.URL
-			if notifURL == "" && job.VideoID != "" {
-				notifURL = "https://www.youtube.com/watch?v=" + job.VideoID
+			// The one row→facts mapper, so the only job send that is not a
+			// builder call still carries the identity every builder sets: the
+			// URL with its watch fallback, the author line, the platform and
+			// the job id. Arc N3's terminal edit on "error" and Arc N2b's deep
+			// link both key on Opts.JobID, and an embed with none can be
+			// neither edited nor linked.
+			f := NotifyFacts(job)
+			var stagingBase string
+			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			// "preserved" is the same predicate the resume route gates on
+			// (HasStagingFiles), and Resume is YouTube-only in both UIs — a
+			// Twitch job told "Resume available" gets a 400.
+			staging := "removed"
+			if HasStagingFiles(stagingBase, job.ID) {
+				staging = "preserved"
+				if job.Platform != "twitch" {
+					staging = "preserved — Resume available"
+				}
 			}
+			asides := len(ScanAsides(stagingBase, job.ID).Groups)
+
 			fields := notifications.NewFieldBuilder().
-				AddInline("Channel", job.ChannelName).
-				AddInline(notifications.IDLabel(job.Platform), job.VideoID).
+				// Guarded for the same reason the builders guard their id
+				// field: Field.Value carries no omitempty, clampEmbed never
+				// drops an empty value, and Discord answers one with a 400 that
+				// discord.go treats as permanent — the whole embed is dropped
+				// after a single attempt.
+				AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
+				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
+				// Error is ALREADY wrapped by N1 — this Error field is one of
+				// the four sites N1 escapes. Carry N1's line through unchanged;
+				// a second wrap renders every \* as \\*. ChannelName is NOT one
+				// of N1's four, so the wrap above is new and single. (No line
+				// number: the one this comment used to carry was stale within
+				// the arc, and nothing checks comments.)
 				Add("Error", notifications.EscapeMarkdown(errMsg)).
-				// Terminal-after-retries: say the automation gave up so the
-				// operator knows this needs a manual look.
+				AddInline("Stage", errorStage(errMsg)).
+				AddInline("Staging", staging).
 				AddIf(job.AutoRetryCount > 0, "Automatic Retries",
 					fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+				AddIf(asides > 0, "Set-aside recordings",
+					fmt.Sprintf("%d — Recover to mux them", asides)).
 				Build()
+			var author *notifications.Author
+			if f.Channel != "" {
+				author = &notifications.Author{Name: f.Channel, IconURL: f.ChannelAvatarURL, URL: f.ChannelURL}
+			}
 			w.notifier.Send("Job Failed",
-				fmt.Sprintf("Job failed for: %s", job.Title),
+				fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
 				notifications.TypeError,
 				fields,
 				notifications.SendOptions{
-					URL:       notifURL,
-					Thumbnail: job.ThumbnailURL,
+					URL:       f.URL,
+					Thumbnail: f.ThumbnailURL,
 					Event:     "error",
+					Author:    author,
+					Platform:  f.Platform,
+					JobID:     f.ID,
 				},
 			)
 		}

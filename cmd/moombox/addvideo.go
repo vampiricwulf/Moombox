@@ -102,11 +102,11 @@ func addVideo(input string) {
 		}
 		if added {
 			fmt.Printf("Added Twitch %s %s to queue.\n", tw.Type, jobID)
-			notifyMgr.Send("Video Added",
-				fmt.Sprintf("Manually added Twitch %s: %s", tw.Type, jobID),
-				notifications.TypeInfo,
-				[]notifications.Field{{Name: "ID", Value: jobID, Inline: true}},
-				notifications.SendOptions{URL: jobURL, Event: "added"})
+			login := ""
+			if tw.Type != utils.TwitchVOD {
+				login = tw.Value
+			}
+			notifyMgr.Send(notifications.JobAdded(cliAddedFacts("twitch", jobID, jobURL, login)))
 		} else {
 			fmt.Printf("Failed to add %s (may already exist).\n", jobID)
 		}
@@ -138,11 +138,7 @@ func addVideo(input string) {
 		}
 		if added {
 			fmt.Printf("Added %s to queue.\n", videoID)
-			notifyMgr.Send("Video Added",
-				fmt.Sprintf("Manually added: %s", videoID),
-				notifications.TypeInfo,
-				[]notifications.Field{{Name: "Video ID", Value: videoID, Inline: true}},
-				notifications.SendOptions{URL: videoURL, Event: "added"})
+			notifyMgr.Send(notifications.JobAdded(cliAddedFacts("youtube", videoID, videoURL, "")))
 		} else {
 			fmt.Printf("Failed to add %s (may already exist).\n", videoID)
 		}

@@ -38,6 +38,18 @@ type healthTracker struct {
 	// onUnhealthy fires once when a channel crosses unhealthyThreshold
 	// consecutive failures. Set by the wiring layer; nil = track only.
 	onUnhealthy func(channelID string, consecutive int, lastErr string)
+	// onHealthy fires ONCE when a channel that crossed the threshold answers
+	// a check again. It is the pair of onUnhealthy: the unhealthy alert tells
+	// an operator to go and check a rename, a ban or a typo, and without this
+	// nothing ever tells them to stop. Set by the wiring layer; nil = track
+	// only.
+	//
+	// It fires on the tracker's `notified` flag, which says an alert was
+	// RAISED here. Whether that alert was actually delivered is a question one
+	// layer up — cmd/moombox suppresses an alert a sibling monitor
+	// contradicts — so the wiring, not this tracker, decides whether the close
+	// is worth sending.
+	onHealthy func(channelID string)
 }
 
 func newHealthTracker() *healthTracker {
@@ -53,15 +65,22 @@ func (h *healthTracker) state(id string) *channelState {
 	return s
 }
 
-// recordSuccess clears a channel's failure streak.
+// recordSuccess clears a channel's failure streak, and fires onHealthy once
+// when the streak it clears had crossed the threshold.
 func (h *healthTracker) recordSuccess(id string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	s := h.state(id)
 	s.lastCheckedAt = time.Now()
 	s.lastError = ""
 	s.consecutiveErrors = 0
+	fire := s.notified
 	s.notified = false
+	cb := h.onHealthy
+	h.mu.Unlock()
+
+	if fire && cb != nil {
+		cb(id)
+	}
 }
 
 // recordError bumps a channel's failure streak and fires onUnhealthy once

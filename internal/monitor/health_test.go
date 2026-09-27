@@ -84,6 +84,56 @@ func TestHealthTrackerPrune(t *testing.T) {
 	}
 }
 
+// TestRecordSuccessFiresOnHealthyOnlyAfterAStreakWasNotified is audit A3's
+// tracker half: recordSuccess cleared `notified` with no callback, so the
+// unhealthy alert had no pair.
+//
+// Mutants this kill:
+//   - firing on every success: a healthy channel would publish a recovery on
+//     every poll, forever.
+//   - firing without clearing `notified`: the next success fires a second
+//     recovery for the same streak.
+func TestRecordSuccessFiresOnHealthyOnlyAfterAStreakWasNotified(t *testing.T) {
+	h := newHealthTracker()
+	var healthy []string
+	h.onHealthy = func(id string) { healthy = append(healthy, id) }
+
+	// A success with no streak behind it says nothing.
+	h.recordSuccess("ch1")
+	if len(healthy) != 0 {
+		t.Fatalf("onHealthy fired %d times with no prior streak, want 0", len(healthy))
+	}
+
+	for i := 0; i < unhealthyThreshold; i++ {
+		h.recordError("ch1", errors.New("boom"))
+	}
+	h.recordSuccess("ch1")
+	if len(healthy) != 1 || healthy[0] != "ch1" {
+		t.Fatalf("onHealthy = %v, want exactly one call for ch1", healthy)
+	}
+
+	h.recordSuccess("ch1")
+	if len(healthy) != 1 {
+		t.Fatalf("onHealthy fired %d times, want 1 — the streak was already closed", len(healthy))
+	}
+}
+
+// TestRecordSuccessBelowTheThresholdIsSilent: a short failure run never
+// alerted, so it has nothing to close.
+func TestRecordSuccessBelowTheThresholdIsSilent(t *testing.T) {
+	h := newHealthTracker()
+	fired := 0
+	h.onHealthy = func(string) { fired++ }
+
+	for i := 0; i < unhealthyThreshold-1; i++ {
+		h.recordError("ch1", errors.New("blip"))
+	}
+	h.recordSuccess("ch1")
+	if fired != 0 {
+		t.Errorf("onHealthy fired %d times for a streak that never alerted, want 0", fired)
+	}
+}
+
 func findHealth(h *healthTracker, id string) ChannelHealth {
 	for _, ch := range h.snapshot() {
 		if ch.ChannelID == id {

@@ -474,8 +474,8 @@ These are the event strings used for filtering. A target with no event filter re
 | `rescheduled` | Stream scheduled start time changed |
 | `downloading` | Download begins or resumes |
 | `muxing` | FFmpeg mux step begins — for every mux, including a manual one (`A M` / `POST /api/jobs/{id}/mux`), and for both finalize shapes, single-file and multi-part (quality/gap-split). The multi-part path used to return before the send and silently skip it |
-| `finished` | Job completed successfully |
-| `error` | Job failed |
+| `finished` | Job completed successfully. Warning-coloured rather than Success when the row carries `incomplete_tail` — the recording is knowingly short and Resume appends the rest — and the embed also reports an incomplete chat capture and any set-aside recordings still waiting in staging |
+| `error` | Job failed. The embed names the stage (`mux` or `download`, read off the error prefixes the orchestrator writes — `mux…`, `no media files to mux`, `create output dir`) and whether staging survived, which is the Retry-versus-Resume distinction: Retry deletes staging, Resume preserves it |
 | `cancelled` | Job cancelled by user |
 | `auth` | Any credential problem or recovery — cookies expired, member-only content, refresh failure, COOKIES? jobs resumed, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
 | `quality_split` | Stream quality changed mid-download; previous part closed |
@@ -488,11 +488,15 @@ These are the event strings used for filtering. A target with no event filter re
 | `trim_error` | Trim operation failed |
 | `disk_warning` | Disk usage exceeds warning threshold (also fired for monitoring-read failures) |
 | `disk_critical` | Disk usage exceeds critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
+| `disk_ok` | Disk usage fell back under the warning threshold after a warning or critical alert was sent ("Disk Space Recovered"), or disk monitoring recovered after a read-failure alert ("Disk Monitoring Recovered"). Success-coloured; the close of the `disk_warning`/`disk_critical` family. Targets filtering on `disk_warning` also receive it, via the manager's event alias, so an incident that was reported always gets an end. A reading that closes both incidents at once sends both embeds — two alerts, two closes |
 | `update_available` | New version detected |
 | `update_applied` | Moombox restarted on a different version than the previous run (embed reports whether the web dashboard came back) |
 | `update_failed` | A failed-update marker (`.update-broken` / `.update-failed`) was found at boot — manual attention needed |
 | `crash_recovered` | The launcher respawned Moombox after an abnormal exit |
 | `channel_unhealthy` | A monitored channel failed a sustained streak of checks on EVERY monitor covering it (renamed/banned/misconfigured) — its streams are being missed. Cross-monitor confirmed: a YouTube channel still reachable via DECAPI while its RSS feed 404s during peak hours does NOT fire (avoids the false positive). |
+| `channel_healthy` | A channel that fired `channel_unhealthy` answered a check again. Fires only when the alert was actually SENT — a streak suppressed by the cross-monitor confirmation has no alert to close. Aliased to `channel_unhealthy` |
+| `sidecar_down` | The BotGuard sidecar has been unhealthy for a continuous 60 seconds. Error-coloured and mention-eligible. The supervisor's restart ladder handles everything shorter, so this is the failure it could not fix: PO tokens fall back to the slower in-process goja solver until it returns. Carries the reason the child died and how many successful restarts this process has made |
+| `sidecar_restored` | The sidecar is healthy again after a `sidecar_down` was sent. Success-coloured. Aliased to `sidecar_down`, so a target that filters the outage also receives its close |
 
 The canonical event vocabulary is `notifications.EventGroups`
 (internal/notifications/events.go). The TUI filter editor derives from it

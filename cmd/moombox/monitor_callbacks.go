@@ -521,6 +521,82 @@ func siblingReachable(siblings []channelHealthReporter, channelID string, now ti
 	return false
 }
 
+// channelHealthNotifiers returns the unhealthy/healthy callback pair for one
+// monitor: the alert and its close.
+//
+// Package-level, like withAuthFailureCooldown, because the decision it makes
+// needs a test and wireMonitorCallbacks' closure cannot be reached from one.
+//
+// The `sent` set is the whole reason the close is decided HERE rather than in
+// internal/monitor's tracker. The tracker knows a streak crossed the threshold;
+// it does not know that the alert was suppressed because a sibling monitor
+// still reaches the channel. Closing a suppressed streak would announce a
+// recovery from an incident the operator was never told about.
+func channelHealthNotifiers(
+	n notifications.Sender,
+	log interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	},
+	platform string,
+	siblings ...channelHealthReporter,
+) (func(channelID string, consecutive int, lastErr string), func(channelID string)) {
+	var mu sync.Mutex
+	sent := map[string]bool{}
+
+	unhealthy := func(channelID string, consecutive int, lastErr string) {
+		// Cross-monitor confirmation: a channel is only "not responding" if
+		// EVERY monitor covering it has lost it. YouTube serves RSS 404/5xx
+		// during peak hours while the independent DECAPI monitor keeps
+		// working, so a lone feed-monitor failure is a false positive — its
+		// streams are still being seen. Suppress unless no sibling vouches.
+		if siblingReachable(siblings, channelID, time.Now()) {
+			log.Info("channel unhealthy on one monitor but still reachable via another — suppressing alert",
+				"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
+			return
+		}
+		log.Warn("channel failing monitor checks — verify it still exists",
+			"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
+		mu.Lock()
+		sent[channelID] = true
+		mu.Unlock()
+		n.Send("Channel Not Responding",
+			fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
+			notifications.TypeWarning,
+			[]notifications.Field{
+				{Name: "Channel", Value: channelID, Inline: true},
+				{Name: "Platform", Value: platform, Inline: true},
+				{Name: "Last Error", Value: notifications.EscapeMarkdown(lastErr)},
+			},
+			notifications.SendOptions{Event: "channel_unhealthy"},
+		)
+	}
+
+	healthy := func(channelID string) {
+		mu.Lock()
+		fire := sent[channelID]
+		delete(sent, channelID)
+		mu.Unlock()
+		if !fire {
+			return
+		}
+		log.Info("channel responding again", "platform", platform, "channel", channelID)
+		n.Send("Channel Responding Again",
+			fmt.Sprintf("A %s channel that stopped answering monitor checks is being reached again", platform),
+			notifications.TypeSuccess,
+			[]notifications.Field{
+				{Name: "Channel", Value: channelID, Inline: true},
+				{Name: "Platform", Value: platform, Inline: true},
+			},
+			notifications.SendOptions{Event: "channel_healthy"},
+		)
+	}
+
+	return unhealthy, healthy
+}
+
 // resumeOnRedetect decides what a live re-detection of an EXISTING job does.
 // Only a Finished job with preserved resume data (incomplete_tail) AND
 // staging files still on disk resumes; Cancelled is a human decision;
@@ -1410,18 +1486,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
 		if s.notifyMgr.HasTargets() {
-			s.notifyMgr.Send("Stream Found",
-				fmt.Sprintf("Found matching stream: %s", title),
-				notifications.TypeInfo,
-				[]notifications.Field{
-					{Name: "Channel", Value: ch.Name, Inline: true},
-					{Name: "Video ID", Value: videoID, Inline: true},
-				},
-				notifications.SendOptions{
-					Event:     "found",
-					URL:       videoURL,
-					Thumbnail: youtubeThumbnailURL(videoID),
-				})
+			notifyStreamFound(s.notifyMgr, job, "", "")
 		}
 	}
 
@@ -1501,24 +1566,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// broadcasts the new job; no explicit BroadcastJobsUpdate
 		// needed. DECISIONS #21 consumer migration.
 		if s.notifyMgr.HasTargets() {
-			twitchFields := []notifications.Field{
-				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
-				{Name: "Stream ID", Value: info.StreamID, Inline: true},
-			}
-			if info.GameCategory != "" {
-				twitchFields = append(twitchFields, notifications.Field{
-					Name: "Category", Value: info.GameCategory, Inline: true,
-				})
-			}
-			s.notifyMgr.Send("Twitch Stream Found",
-				fmt.Sprintf("Live: %s", title),
-				notifications.TypeInfo,
-				twitchFields,
-				notifications.SendOptions{
-					Event:     "found",
-					URL:       "https://twitch.tv/" + info.ChannelLogin,
-					Thumbnail: info.ThumbnailURL,
-				})
+			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
 		}
 	}
 
@@ -1628,38 +1676,26 @@ func (s *runState) wireMonitorCallbacks() {
 	// One notification per streak, per monitor; the /api/status
 	// channelHealth surface shows the live state. platform label is set per
 	// monitor so the operator knows which source flagged it.
-	unhealthyNotify := func(platform string, siblings ...channelHealthReporter) func(channelID string, consecutive int, lastErr string) {
-		return func(channelID string, consecutive int, lastErr string) {
-			// Cross-monitor confirmation: a channel is only "not responding" if
-			// EVERY monitor covering it has lost it. YouTube serves RSS 404/5xx
-			// during peak hours while the independent DECAPI monitor keeps
-			// working, so a lone feed-monitor failure is a false positive — its
-			// streams are still being seen. Suppress unless no sibling vouches.
-			if siblingReachable(siblings, channelID, time.Now()) {
-				s.log.Info("channel unhealthy on one monitor but still reachable via another — suppressing alert",
-					"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
-				return
-			}
-			s.log.Warn("channel failing monitor checks — verify it still exists",
-				"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
-			s.notifyMgr.Send("Channel Not Responding",
-				fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
-				notifications.TypeWarning,
-				[]notifications.Field{
-					{Name: "Channel", Value: channelID, Inline: true},
-					{Name: "Platform", Value: platform, Inline: true},
-					{Name: "Last Error", Value: notifications.EscapeMarkdown(lastErr)},
-				},
-				notifications.SendOptions{Event: "channel_unhealthy"},
-			)
-		}
-	}
+	//
 	// YouTube channels are covered by both the RSS feed and DECAPI monitors, so
 	// each cross-confirms against the other before alerting. Twitch has a single
 	// (reliable GQL) monitor with no sibling to confirm against.
-	s.feedMon.SetOnChannelUnhealthy(unhealthyNotify("youtube", s.decapiMon))
-	s.decapiMon.SetOnChannelUnhealthy(unhealthyNotify("youtube", s.feedMon))
-	s.twitchMon.SetOnChannelUnhealthy(unhealthyNotify("twitch"))
+	//
+	// Each monitor gets its OWN pair, so each keeps its own `sent` set — which
+	// is right: the feed monitor losing a channel and DECAPI losing it are
+	// separate incidents with separate closes, exactly as the two alerts are
+	// separate today.
+	feedUnhealthy, feedHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", s.decapiMon)
+	s.feedMon.SetOnChannelUnhealthy(feedUnhealthy)
+	s.feedMon.SetOnChannelHealthy(feedHealthy)
+
+	decapiUnhealthy, decapiHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", s.feedMon)
+	s.decapiMon.SetOnChannelUnhealthy(decapiUnhealthy)
+	s.decapiMon.SetOnChannelHealthy(decapiHealthy)
+
+	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch")
+	s.twitchMon.SetOnChannelUnhealthy(twitchUnhealthy)
+	s.twitchMon.SetOnChannelHealthy(twitchHealthy)
 
 	// Initialize per-job log tracking with existing jobs (matches TS
 	// knownJobIds). Terminal rows are skipped by SyncJobLogTracking: their
