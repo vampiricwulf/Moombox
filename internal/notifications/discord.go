@@ -145,7 +145,7 @@ func MentionParse(mention string) *AllowedMentions {
 	return nil
 }
 
-// buildPayload assembles the embed JSON shared by Send and sendOnce.
+// buildPayload assembles the embed JSON shared by Send and SendOnce.
 func buildPayload(title, description string, color int, fields []Field, opts SendOptions) ([]byte, error) {
 	embed := discordEmbed{
 		Title:       title,
@@ -208,10 +208,13 @@ func buildPayload(title, description string, color int, fields []Field, opts Sen
 	return body, nil
 }
 
-// sendOnce performs a single delivery attempt with NO retries — used by
-// SendTest, where an interactive caller wants the immediate outcome
-// (surfacing a 429 beats sleeping through its Retry-After).
-func (d *DiscordWebhook) sendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
+// SendOnce performs a single delivery attempt with NO retries.
+//
+// Two callers: SendTest, where an interactive settings flow wants the
+// immediate outcome (surfacing a 429 beats sleeping through its Retry-After),
+// and the per-target queue during shutdown, where the 10s force-exit leaves no
+// room for the ladder. Bounded by the single-attempt request timeout (~15s).
+func (d *DiscordWebhook) SendOnce(title, description string, color int, fields []Field, opts SendOptions) error {
 	body, err := buildPayload(title, description, color, fields, opts)
 	if err != nil {
 		return err

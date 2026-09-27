@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -249,28 +250,26 @@ type SendOptions struct {
 	MentionAllowed *AllowedMentions
 }
 
-// maxInflightNotifications caps the number of concurrent notification
-// goroutines. Beyond this, Send drops the notification with a Warn log
-// rather than spawning unbounded goroutines under load — Discord
-// rate-limits each webhook to 30 req/min anyway, so a higher cap would
-// just queue requests for the rate-limiter to throttle. 16 is well
-// above the steady-state for a healthy Moombox instance and gives
-// enough headroom for a brief burst (e.g. multiple job-completion
-// events firing in the same second). Audit reports/small-packages.md.
-const maxInflightNotifications = 16
-
 // defaultWaitTimeout bounds Manager.Wait during graceful shutdown. Tests
 // inject a shorter waitTimeout; a Manager built without one uses this.
 const defaultWaitTimeout = 30 * time.Second
 
 // Manager dispatches notifications to configured targets.
+//
+// One QUEUE per target, one goroutine per queue. Send is a non-blocking append
+// — it is called from worker, monitor and HTTP goroutines and must never wait
+// on Discord.
 type Manager struct {
-	// targetsMu guards targets: Reload (config hot-apply) rebuilds the
-	// slice while Send/HasTargets read it from worker goroutines.
+	// targetsMu guards targets and byKey: Reload (config hot-apply) rebuilds
+	// them while Send/HasTargets read from worker goroutines.
 	targetsMu sync.RWMutex
-	targets   []notificationTarget
-	wg        sync.WaitGroup
-	semaphore chan struct{}
+	targets   []*targetQueue
+	// byKey indexes targets by resolved webhook URL so Reload can tell a
+	// surviving target from a new one.
+	byKey map[string]*targetQueue
+	// shuttingDown flips once, in BeginShutdown; every queue holds a pointer
+	// to it and reads it per delivery.
+	shuttingDown atomic.Bool
 	// waitTimeout bounds Wait; zero means defaultWaitTimeout (test literals
 	// omit it). Set once at construction, never written afterwards.
 	waitTimeout time.Duration
@@ -282,13 +281,24 @@ type Manager struct {
 	}
 }
 
+// notificationTarget is one destination as buildTargets resolved it, before
+// the manager gives it a queue and a goroutine.
 type notificationTarget struct {
 	sender sender
 	events map[string]bool // nil means all events
+	// key is the RESOLVED webhook URL: the dedupe identity, and what Reload
+	// matches a surviving target on.
+	key string
 }
 
+// sender is one delivery destination.
+//
+// Send runs the full retry ladder; SendOnce makes exactly one attempt — used
+// during shutdown (the 10s force-exit cannot accommodate a 2s+5s ladder) and by
+// SendTest, where an interactive caller wants the immediate outcome.
 type sender interface {
 	Send(title, description string, color int, fields []Field, opts SendOptions) error
+	SendOnce(title, description string, color int, fields []Field, opts SendOptions) error
 }
 
 // parseTarget resolves a configured notification URL into a sender.
@@ -348,13 +358,11 @@ func SendTest(url string) error {
 	if err != nil {
 		return err
 	}
-	title := "Test Notification"
-	desc := "Moombox notifications are configured correctly"
-	fields := []Field{{Name: "Status", Value: "Working", Inline: true}}
-	if d, ok := s.(*DiscordWebhook); ok {
-		return d.sendOnce(title, desc, TypeSuccess.Color(), fields, SendOptions{})
-	}
-	return s.Send(title, desc, TypeSuccess.Color(), fields, SendOptions{})
+	return s.SendOnce("Test Notification",
+		"Moombox notifications are configured correctly",
+		TypeSuccess.Color(),
+		[]Field{{Name: "Status", Value: "Working", Inline: true}},
+		SendOptions{})
 }
 
 // buildTargets converts the configured notification list into live targets,
@@ -450,6 +458,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		targets = append(targets, notificationTarget{
 			sender: s,
 			events: events,
+			key:    key,
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
@@ -463,6 +472,48 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 	return targets
 }
 
+// applyTargets installs built as the live target set.
+//
+// The DIFF is on the resolved webhook URL. A target that is still configured
+// keeps its existing queue — and therefore its pending items, its in-flight
+// delivery and the rate bucket its sender has learned — because a config save
+// that touches an unrelated section must not cost every webhook its bucket
+// state and its backlog. A target that is gone is told to discard after its
+// in-flight item; a new one gets a goroutine.
+func (m *Manager) applyTargets(built []notificationTarget) {
+	m.targetsMu.Lock()
+	previous := m.byKey
+	next := make([]*targetQueue, 0, len(built))
+	byKey := make(map[string]*targetQueue, len(built))
+	for _, t := range built {
+		if q, survives := previous[t.key]; survives && t.key != "" {
+			q.setEvents(t.events)
+			next = append(next, q)
+			byKey[t.key] = q
+			delete(previous, t.key)
+			continue
+		}
+		q := newTargetQueue(t, m.logger, &m.shuttingDown)
+		next = append(next, q)
+		if t.key != "" {
+			byKey[t.key] = q
+		}
+		go q.run()
+	}
+	retired := make([]*targetQueue, 0, len(previous))
+	for _, q := range previous {
+		retired = append(retired, q)
+	}
+	m.targets = next
+	m.byKey = byKey
+	m.targetsMu.Unlock()
+
+	// Outside the lock: stopDiscard takes the queue's own mutex and logs.
+	for _, q := range retired {
+		q.stopDiscard()
+	}
+}
+
 // NewManager creates a new notification manager from config. See
 // parseTarget for the accepted URL forms (Discord-only, intentionally).
 func NewManager(cfg *config.MoomboxConfig, logger interface {
@@ -473,10 +524,9 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 }) *Manager {
 	m := &Manager{
 		logger:      logger,
-		semaphore:   make(chan struct{}, maxInflightNotifications),
-		targets:     buildTargets(cfg, logger),
 		waitTimeout: defaultWaitTimeout,
 	}
+	m.applyTargets(buildTargets(cfg, logger))
 
 	if len(m.targets) > 0 {
 		logger.Info("notifications initialized", "targets", len(m.targets))
@@ -490,11 +540,14 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 // restart (and neither UI flagged the section as restart-required).
 // In-flight sends keep the sender they captured; new Sends see the new list.
 func (m *Manager) Reload(cfg *config.MoomboxConfig) {
-	targets := buildTargets(cfg, m.logger)
-	m.targetsMu.Lock()
-	m.targets = targets
-	m.targetsMu.Unlock()
-	m.logger.Info("notification targets reloaded", "targets", len(targets))
+	if m == nil {
+		return
+	}
+	m.applyTargets(buildTargets(cfg, m.logger))
+	m.targetsMu.RLock()
+	n := len(m.targets)
+	m.targetsMu.RUnlock()
+	m.logger.Info("notification targets reloaded", "targets", n)
 }
 
 // Send dispatches a notification to all matching targets asynchronously.
@@ -521,59 +574,35 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		return
 	}
 
-	color := ntype.Color()
-
-	for _, target := range targets {
-		// Check event filter. An event that split from a broader legacy name
-		// (eventAliases) also matches targets allowlisting the old name, so
-		// pre-split filters keep receiving the new event after an upgrade.
-		// The alias lookup needs the ok-check: a bare eventAliases[...] map
-		// miss yields "", and a garbage events=[""] filter entry would then
-		// match EVERY non-aliased event, inverting the allowlist.
-		if target.events != nil && opts.Event != "" {
-			alias, hasAlias := eventAliases[opts.Event]
-			if !target.events[opts.Event] && (!hasAlias || !target.events[alias]) {
-				continue
-			}
-		}
-
-		// Bound concurrent senders. Try-send into the semaphore so a
-		// burst of events doesn't spawn a goroutine flood that Discord
-		// will just throttle anyway. On overflow, drop with a Warn —
-		// notifications are non-critical, so dropping is preferable to
-		// blocking the caller (which is often a worker on a hot path).
-		select {
-		case m.semaphore <- struct{}{}:
-		default:
-			m.logger.Warn("dropping notification — too many in flight",
-				"cap", maxInflightNotifications, "title", title, "event", opts.Event)
+	it := queued{
+		title:       title,
+		description: description,
+		color:       ntype.Color(),
+		fields:      fields,
+		opts:        opts,
+		tier:        effectiveTier(opts),
+	}
+	for _, q := range targets {
+		if !q.allows(opts.Event) {
 			continue
 		}
-
-		// Send asynchronously (tracked by WaitGroup for graceful shutdown)
-		m.wg.Add(1)
-		go func(s sender) {
-			defer m.wg.Done()
-			defer func() { <-m.semaphore }()
-			defer func() {
-				if r := recover(); r != nil {
-					m.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
-				}
-			}()
-			if err := s.Send(title, description, color, fields, opts); err != nil {
-				m.logger.Error("notification send failed", "err", err)
-			}
-		}(target.sender)
+		q.enqueue(it)
 	}
 }
 
 // BeginShutdown puts every target into single-attempt mode.
 //
-// Declared here rather than with the queue it drives (Task 4), because
-// Notifier names it and cmd/moombox's runState field is typed Notifier from
-// this task onward — without it *Manager does not satisfy the interface and
-// cmd/moombox/services.go:827 stops compiling. Task 4 gives it the atomic flag.
-func (m *Manager) BeginShutdown() {}
+// Owner ruling: the 10s force-exit (cmd/moombox/shutdown.go) stays, and a
+// worker stop ahead of it can legitimately spend the whole window, so a
+// three-attempt ladder with a 2s+5s backoff simply does not fit. One attempt
+// per embed is what can be delivered, and operations.md says so rather than
+// promising a drain that cannot happen.
+func (m *Manager) BeginShutdown() {
+	if m == nil {
+		return
+	}
+	m.shuttingDown.Store(true)
+}
 
 // effectiveWaitTimeout returns waitTimeout, or defaultWaitTimeout when the
 // field was never set (zero or negative).
@@ -584,39 +613,46 @@ func (m *Manager) effectiveWaitTimeout() time.Duration {
 	return m.waitTimeout
 }
 
-// Wait blocks until all in-flight notification goroutines have finished
-// or the wait timeout (defaultWaitTimeout, 30 s, unless injected) expires, whichever comes first.
-// Call during graceful shutdown to avoid losing notifications.
+// Wait stops accepting new notifications for every target, drains what is
+// already queued, and returns when the last goroutine has exited or the wait
+// timeout (defaultWaitTimeout, 30 s, unless injected) expires.
 //
-// **Single-call**: Wait drains the WaitGroup once. Subsequent Send calls
-// after Wait returns will spawn new goroutines that no future Wait will
-// drain. The graceful-shutdown sequence in cmd/moombox stops the worker
-// (which is the dominant Send caller) before invoking Wait, so this is
-// the correct ordering — calling Wait again after that is a no-op.
-// Audit reports/small-packages.md.
+// **Single-call**: after Wait returns, every queue is closed and later Sends
+// are dropped with a Warn. The graceful-shutdown sequence in cmd/moombox stops
+// the worker — the dominant Send caller — before invoking Wait, so this is the
+// correct ordering. In practice the process's own 10 s force-exit, not this
+// timeout, is what bounds the drain; BeginShutdown is what makes the attempts
+// fit inside it.
 func (m *Manager) Wait() {
-	done := make(chan struct{})
-	go func() {
-		defer func() {
-			if r := recover(); r != nil && m.logger != nil {
-				m.logger.Error("panic in notification wait", "panic", r)
-			}
-		}()
-		m.wg.Wait()
-		close(done)
-	}()
+	if m == nil {
+		return
+	}
+	m.targetsMu.RLock()
+	targets := m.targets
+	m.targetsMu.RUnlock()
+
 	timeout := m.effectiveWaitTimeout()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		if m.logger != nil {
-			m.logger.Warn("notification wait timed out", "after", timeout)
+	deadline := time.After(timeout)
+	for _, q := range targets {
+		q.closeDrain()
+	}
+	for _, q := range targets {
+		select {
+		case <-q.done:
+		case <-deadline:
+			if m.logger != nil {
+				m.logger.Warn("notification wait timed out", "after", timeout)
+			}
+			return
 		}
 	}
 }
 
 // HasTargets returns true if any notification targets are configured.
 func (m *Manager) HasTargets() bool {
+	if m == nil {
+		return false
+	}
 	m.targetsMu.RLock()
 	defer m.targetsMu.RUnlock()
 	return len(m.targets) > 0
