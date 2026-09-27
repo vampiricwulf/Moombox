@@ -389,7 +389,7 @@ Shutdown is triggered by context cancellation (from signal handler, restart trig
 
 1. **Stop monitors** — TwitchMonitor, DecapiMonitor, FeedMonitor (prevents new job creation)
 2. **Stop download worker** — Waits for active downloads to save state (resume files)
-3. **Flush notifications** — `notifyMgr.Wait()` blocks until all in-flight notification goroutines complete
+3. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 10-second force-exit, not `Wait`'s 30-second timeout: step 2 can legitimately spend the whole window draining a segment mux, so the drain gets 0–10 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
 4. **Stop cookie services** — CookieRefresh, AutoCookies
 5. **Cleanup PO token provider** — Releases Goja VMs
 6. **Stop web server** — Closes HTTP listener and WebSocket connections
@@ -462,18 +462,17 @@ These are the event strings used for filtering. A target with no event filter re
 |-------|------------|
 | `found` | Monitor detects a new stream/video |
 | `added` | Job manually added (API or CLI) |
-| `scheduled` | Upcoming stream detected with scheduled start time |
+| `scheduled` | An UPCOMING stream's scheduled start time was confirmed (`IsUpcoming && !IsLive`). A stream first observed already live does not fire it — "Download Starting" carries the same time in its own "Scheduled For" field |
 | `rescheduled` | Stream scheduled start time changed |
 | `downloading` | Download begins or resumes |
-| `muxing` | FFmpeg mux step begins |
+| `muxing` | FFmpeg mux step begins — for every mux, including a manual one (`A M` / `POST /api/jobs/{id}/mux`), and for both finalize shapes, single-file and multi-part (quality/gap-split). Until v2.9 the multi-part path returned before the send and silently skipped it |
 | `finished` | Job completed successfully |
 | `error` | Job failed |
 | `cancelled` | Job cancelled by user |
 | `auth` | Any credential problem or recovery — cookies expired, member-only content, refresh failure, COOKIES? jobs resumed, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
 | `quality_split` | Stream quality changed mid-download; previous part closed |
 | `gap_split` | Twitch live segments expired unrecoverably; part closed, new part at live edge |
-| `connectivity_pause` | Twitch live download paused — connectivity lost, waiting to resume |
-| `connectivity_resume` | Connectivity restored; same job resumed |
+| `connectivity_resume` | Connectivity restored; the same Twitch job resumed. Carries the pause instant as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, for one release |
 | `connectivity_split` | Broadcast/VOD lost during the outage; captured data finalized |
 | `connectivity_restored` | Global connectivity restored — fires the "Outage Alert": start/end as Discord dynamic timestamps plus the duration. Deliberately the ONLY global-outage event: a lost-connectivity webhook has no connectivity to deliver over, so there is no `connectivity_lost` (removed in v2.8; stale filter entries warn at startup and strip on the next UI save) |
 | `trim_created` | Trim clip created |
@@ -494,6 +493,13 @@ web/public/modules/settings.js) that MUST be updated in lockstep. Filtered
 targets treat the vocabulary as an allowlist, the TUI's edit-save path
 strips unknown events from hand-edited configs, and `NewManager` logs a
 warning for any configured filter entry outside the vocabulary.
+
+`connectivity_pause` is **retired**. It is absent from `EventGroups`, so
+neither UI offers it and the TUI strips it from a hand-edited config on the
+next save; it remains in `KnownEvents` (so no startup warning) and is the
+target of `eventAliases`' `connectivity_resume` entry (so an unmigrated filter
+keeps receiving the folded embed). The alias is a migration and is removed one
+release after v2.9.
 
 ### Credential Notifications
 
@@ -516,15 +522,18 @@ Every notification below carries `Event: "auth"`, so one filter entry covers the
 
 ### Dispatch Behavior
 
-- **Asynchronous:** Each notification is dispatched in a goroutine tracked by a `sync.WaitGroup`
-- **Panic recovery:** Each goroutine has `defer recover()` — a panic in one notification sender cannot crash the application
-- **Event filtering:** If a target has an event filter list, only matching events are sent. Targets with no filter receive everything.
-- **Timeout:** Discord webhook HTTP requests have a 15-second timeout per attempt
-- **Retry:** Bounded delivery loop, max 3 attempts total — transport errors and Discord 5xx back off 2s/5s; 429 honors a validated `Retry-After` (≤30s); other 4xx are permanent. Cumulative sleep is capped at 30s so a notification's semaphore slot can't be held past ~75s worst-case.
-- **Hot-reload:** Notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. No restart required.
-- **Save-time validation:** Webhook URLs are validated at save (web `validateConfigUpdates` + TUI editor) via `notifications.ValidateURL`; `POST /api/notifications/test {url}` sends a single-attempt test embed (used by the web Test buttons and the TUI `T` action, including for unsaved URLs).
-- **Graceful shutdown:** `Manager.Wait()` blocks until all in-flight notifications complete (called during shutdown step 3)
-- **Embed format:** Discord rich embeds with title, description, color (by notification type), optional fields, thumbnail, image, footer ("Moombox Go"), and ISO 8601 timestamp
+- **Per-target FIFO queues.** One bounded queue (256 entries, `notificationQueueCap`) and one draining goroutine per target, created by `applyTargets` (`internal/notifications/manager.go`). `Send` snapshots the target list under an RWMutex, applies each filter, and appends — it never blocks the caller and never spawns. Because one goroutine drains a target, a job's embeds can never reorder, and a burst can never put several concurrent POSTs into one webhook's rate bucket.
+- **Drop policy.** On a full queue the OLDEST low-tier entry goes — `found`, `added`, `scheduled`, `rescheduled` (`Tier`, `internal/notifications/manager.go`) — with a Warn naming the event and title. With nothing low-tier queued, the ARRIVAL is dropped instead, so an older alert is never displaced by a newer one. Alerts (`error`, `auth`, everything in System) are never the victim.
+- **Panic recovery:** each queue's goroutine carries a top-level `recover`, and each delivery carries its own — a panic in one send cannot strand every later notification for that target.
+- **Event filtering:** if a target has an event filter list, only matching events are sent. Targets with no filter receive everything. An event that split from a broader legacy name also matches targets allowlisting the old name (`eventAliases`, `internal/notifications/events.go`).
+- **Timeout:** Discord webhook HTTP requests have a 15-second timeout per attempt.
+- **Retry:** bounded delivery loop, max 3 attempts total — transport errors and Discord 5xx back off 2s/5s; 429 honors a validated `Retry-After` (≤30s); other 4xx are permanent. Cumulative sleep is capped at 30s, bounding one notification's hold on its target's queue at ~75s worst case.
+- **Rate bucket:** `X-RateLimit-Remaining` and `X-RateLimit-Reset-After` are read from every non-429 response. A remaining count of 0 arms a pre-emptive sleep (capped at 30s) on that webhook's sender, so the next embed waits out the window instead of spending one of its three attempts on a 429 Discord has already promised. Per Discord's rate-limit docs the bucket is discoverable only from these headers — there is no published numeric cap.
+- **Embed limits:** every embed is clamped on rune boundaries inside `buildPayload` before it is sent — title 256, description 4096, field name 256, field value 1024, footer 2048, author name 256, at most 25 fields and 6000 characters in total, with a `…` marker. Over any one of them is a permanent 400, so an unclamped embed was a silently dropped alert. Producers use `ClampRunes` (`internal/notifications/limits.go`) for their own excerpts and `EscapeMarkdown` (same file) for job-supplied text.
+- **Hot-reload:** notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. The diff is on the resolved webhook URL: a target that is still configured keeps its goroutine, its queued backlog and its learned rate bucket; a removed one finishes its in-flight delivery and exits, discarding the rest with one Warn naming the count. No restart required.
+- **Save-time validation:** webhook URLs are validated at save (web `validateConfigUpdates` + TUI editor) via `notifications.ValidateURL`; `POST /api/notifications/test {url}` sends a single-attempt test embed (used by the web Test buttons and the TUI `T` action, including for unsaved URLs). Both `discord.com` and the legacy `discordapp.com` host are accepted; the latter is canonicalised, so the two spellings of one webhook collapse to one target.
+- **Graceful shutdown:** `BeginShutdown` switches every target to single-attempt delivery, then `Wait` drains the queues — see the Shutdown Sequence above for the 10-second cap that actually bounds it. That single attempt's own rate-bucket wait is capped at 2s (`shutdownBucketWaitCap`), not the Rate bucket bullet's normal 30s: a wait that long could outrun the force-exit on its own, or starve every item still behind it in that target's queue.
+- **Embed format:** Discord rich embeds with title, description, color (by notification type), optional fields, an author line (channel name, avatar, channel page), thumbnail, image, footer (`Moombox · {platform} · {job id}`, or just `Moombox`), and an ISO 8601 timestamp. A mention, when a target is configured for one, rides the message `content` with a matching `allowed_mentions` — embeds never mention on their own.
 
 ### Notification Type Colors
 

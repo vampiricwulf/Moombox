@@ -64,7 +64,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - **Native PO Token generation** — Built-in BotGuard solver using [Goja](https://github.com/dop251/goja) (pure-Go JavaScript engine, no CGo or V8)
 - **yt-dlp compatibility** — Built-in PO Token HTTP endpoint and bundled yt-dlp plugin
 - **YouTube cipher decryption** — Native implementation of signature and n-parameter decryption via Goja
-- **Webhook notifications** — Notifications for stream events via any webhook-compatible service (Discord, Slack, ntfy, etc.)
+- **Discord webhook notifications** — Rich embeds for every stream and system event, with a per-target event filter
 - **Single binary** — Compiles to a single executable with embedded web assets, no external runtime dependencies
 - **Built-in FFmpeg installer** — Install FFmpeg via Chocolatey or Winget directly from the setup flow, with UAC elevation support and script review for non-admin users
 
@@ -672,15 +672,19 @@ cookie_file = "./cookies.txt"
 
 ## Webhook Notifications
 
-Send webhook notifications for stream events:
+Send Discord webhook notifications for stream and system events:
 
 ```toml
 [[notifications]]
 url = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
-events = ["live", "finished", "error"]  # Optional filter (default: all events)
+events = ["found", "finished", "error"]  # Optional filter (default: all events)
 ```
 
-Available events: `found`, `added`, `scheduled`, `live`, `downloading`, `muxing`, `finished`, `error`, `auth`, `cancelled`
+Discord webhooks only — the shorthand `discord://ID/TOKEN` works too. The full
+list of event keys, and what each one fires on, is the event table in
+[docs/spec/operations.md](docs/spec/operations.md#notifications-discord-webhooks);
+both settings UIs offer the same list as checkboxes, so you rarely need to
+write one by hand.
 
 ## Job Status Flow
 

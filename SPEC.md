@@ -872,7 +872,7 @@ Run `bash references/update-all.sh` to pull all upstream repos and see new commi
 
 ### Notifications
 
-Discord webhooks with async dispatch. The `NotificationManager` validates webhook URLs, formats Discord embeds with color-coded types (Info=blue, Success=green, Warning=yellow, Error=red, Download=teal, Muxing=purple, Cancelled=orange), and dispatches asynchronously via `sync.WaitGroup`. Supports event-based filtering per webhook target — see the event list below and the table in `docs/spec/operations.md`.
+Discord webhooks with queued dispatch. The `NotificationManager` validates webhook URLs, formats Discord embeds with color-coded types (Info=blue, Success=green, Warning=yellow, Error=red, Download=teal, Muxing=purple, Cancelled=orange), and hands each one to a per-target FIFO queue drained by a single goroutine. Supports event-based filtering per webhook target — see the event list below and the table in `docs/spec/operations.md`.
 
 **Deep-dive:** [docs/spec/operations.md](docs/spec/operations.md)
 
@@ -882,11 +882,11 @@ Discord webhooks with async dispatch. The `NotificationManager` validates webhoo
 
 The notification system supports Discord webhooks with event-based filtering. Each `[[notifications]]` config entry has a webhook URL and an optional event filter list. If no filter is specified, all events are sent.
 
-**Notification events:** `found`, `added`, `scheduled`, `rescheduled`, `downloading`, `quality_split`, `gap_split`, `muxing`, `finished`, `error`, `cancelled`, `auth`, `connectivity_pause`, `connectivity_resume`, `connectivity_split`, `trim_created`, `trim_deleted`, `trim_error`, `disk_warning`, `update_available` — see `docs/spec/operations.md` for the per-event table; new events must be registered in both UI filter registries.
+**Notification events:** `found`, `added`, `scheduled`, `rescheduled`, `downloading`, `quality_split`, `gap_split`, `muxing`, `finished`, `error`, `cancelled`, `auth`, `connectivity_resume`, `connectivity_split`, `connectivity_restored`, `trim_created`, `trim_deleted`, `trim_error`, `disk_warning`, `disk_critical`, `update_available`, `update_applied`, `update_failed`, `crash_recovered`, `channel_unhealthy` — see `docs/spec/operations.md` for the per-event table; new events must be registered in both UI filter registries. `connectivity_pause` was retired in v2.9 and is kept working as a legacy filter entry by an event alias.
 
-**Discord embed format:** Title, description, colored sidebar (type-specific), fields (inline key-value pairs), optional URL link, optional thumbnail image. The embed color encodes the notification type: blue=info, green=success, yellow=warning, red=error, teal=download, purple=muxing, orange=cancelled.
+**Discord embed format:** Title, description, colored sidebar (type-specific), fields (inline key-value pairs), optional URL link, an author line (channel name + avatar + channel page), an optional thumbnail and full-width image, and a footer (`Moombox · {platform} · {job id}`). When a target is configured for one, the MESSAGE — not the embed — also carries a mention in `content` with a matching `allowed_mentions`; embeds never mention on their own. Every string is clamped to Discord's limits on a rune boundary before it is sent.
 
-Dispatch is asynchronous — `Manager.Send()` returns immediately and the HTTP POST to Discord happens in a background goroutine tracked by `sync.WaitGroup`. The `Wait()` method blocks until all pending notifications are delivered, which is called during shutdown to ensure no notifications are lost.
+Dispatch is queued, not fire-and-forget: `Manager.Send()` returns immediately after appending to each matching target's bounded FIFO, and one goroutine per target delivers in order. `BeginShutdown()` switches to single-attempt delivery and `Wait()` drains the queues, both called during shutdown; the process's 10-second force-exit is what actually bounds the drain.
 
 ---
 
