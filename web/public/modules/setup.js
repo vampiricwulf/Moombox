@@ -837,7 +837,7 @@ export class SetupController {
     const currentHttps = location.protocol === "https:";
     if (newPort !== currentPort || httpsEnabled !== currentHttps) {
       const protocol = httpsEnabled ? "https" : "http";
-      this._redirectUrl = `${protocol}://${location.hostname}:${newPort}`;
+      this._redirectUrl = `${protocol}://${window.location.hostname}:${newPort}`;
     } else {
       this._redirectUrl = null;
     }
