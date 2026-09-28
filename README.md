@@ -710,9 +710,10 @@ Discord message per job and then rewrites it in place as the job progresses —
 found, scheduled, downloading, splits, muxing, finished all land on the same
 message, which grows a Status line and a short history instead of a new embed
 each time. Failures and credential alerts stay separate posts, because those are
-the ones that ping — and they are the only ones that can: a mention on a
-lifecycle event rides the edited message as text, and Discord does not notify
-anyone on an edit. The message id is remembered on the job, so a restart keeps
+the ones that ping — and, once the message exists, the only ones that can: a
+mention on a lifecycle event rides the edited message as text, and Discord
+does not notify anyone on an edit (the event that creates the message is a
+real post and does). The message id is remembered on the job, so a restart keeps
 editing the same message; if someone deletes it in Discord, the next event posts
 a fresh one. Default is `"separate"` — the classic one-embed-per-event
 behaviour.

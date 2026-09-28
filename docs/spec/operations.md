@@ -542,11 +542,13 @@ its job id; the eight that did not before this arc now do.
 
 A target's mention rides an edited message the same way it rides a separate one
 — it is message-level `content`, not an embed field, so a PATCH carries it too.
-It rides as TEXT, though: Discord does not notify on an edit, so on an
-edit-mode target only the events that stay separate posts (`error`,
-`cancelled`, `auth`, `trim_*`, System) can actually ping. An operator who adds
-`finished` to `mention_events` on such a target sees the mention in the
-message and gets no notification from it.
+It rides as TEXT once the message exists, though: Discord does not notify on
+an edit, so on an edit-mode target only the events that stay separate posts
+(`error`, `cancelled`, `auth`, `trim_*`, System) — and whichever lifecycle
+event happens to CREATE the job's message, which is a real POST — can
+actually ping. An operator who adds `finished` to `mention_events` on such a
+target sees the mention in the message and gets a notification only when
+`finished` is the event that created it.
 
 `error` and `cancelled` do **both**: the lifecycle message is edited to its
 terminal look, and the separate embed is still posted, when a lifecycle
