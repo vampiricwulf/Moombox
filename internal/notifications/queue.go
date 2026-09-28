@@ -85,6 +85,13 @@ type targetQueue struct {
 	mentionAllowed *AllowedMentions
 	mentionEvents  map[string]bool
 
+	// dispatch is the ONE decision point for a queued message: an edit-mode
+	// target's single-embed lifecycle event is created or rewritten here;
+	// everything else — including every multi-embed batch — posts exactly as
+	// it did before edit mode existed. Guarded by mu like mention/events,
+	// because applyTargets rebinds it on a surviving queue.
+	dispatch func(msg Message, once bool) error
+
 	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
 	// of shed are counted separately because they mean different things: the
 	// oldest-low-priority kind is the policy working (chatter making room for
@@ -223,6 +230,31 @@ func (q *targetQueue) setMention(t notificationTarget) {
 	q.mentionAllowed = t.mentionAllowed
 	q.mentionEvents = t.mentionEvents
 	q.mu.Unlock()
+}
+
+// setDispatch rebinds the decision function on a target that survived a
+// Reload — the twin of setEvents and setMention, and required for the same
+// reason: applyTargets keeps a survivor's queue and discards the freshly
+// built notificationTarget, so a `mode` change would otherwise be accepted
+// by both UIs, written to the file, and ignored until restart.
+func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error) {
+	q.mu.Lock()
+	q.dispatch = fn
+	q.mu.Unlock()
+}
+
+// dispatchFor runs the bound decision function under mu (a Reload rebinds it
+// on a surviving queue), falling back to the plain send when no Manager
+// bound one — a bare targetQueue in a test must still deliver.
+func (q *targetQueue) dispatchFor(msg Message) error {
+	q.mu.Lock()
+	d := q.dispatch
+	q.mu.Unlock()
+	once := q.shuttingDown != nil && q.shuttingDown.Load()
+	if d == nil {
+		return sendPlain(q.sender, msg, once)
+	}
+	return d(msg, once)
 }
 
 // pending is the queue depth, for tests and for the discard report.
@@ -412,15 +444,11 @@ func (q *targetQueue) deliver(it queued) {
 			q.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
 		}
 	}()
-	var err error
-	if q.shuttingDown != nil && q.shuttingDown.Load() {
-		// Owner ruling: shutdown sends are single-attempt and the 10s
-		// force-exit stays. A 2s+5s retry ladder cannot finish inside a window
-		// the worker stop may already have spent.
-		err = q.sender.SendOnce(it.msg)
-	} else {
-		err = q.sender.Send(it.msg)
-	}
+	// Owner ruling: shutdown sends are single-attempt and the 10s force-exit
+	// stays — dispatch carries the flag through to the edit path too, because
+	// a 2s+5s retry ladder cannot finish inside a window the worker stop may
+	// already have spent.
+	err := q.dispatchFor(it.msg)
 	if err != nil {
 		q.logger.Error("notification send failed", "err", err)
 	}

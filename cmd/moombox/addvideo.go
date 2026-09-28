@@ -57,6 +57,10 @@ func addVideo(input string) {
 
 	// Init notification manager for "Video Added" dispatch (matches TS addVideo)
 	notifyMgr := notifications.NewManager(cfg, &nopLogger{})
+	// `added` is a lifecycle event, and this side process writes it against
+	// the same database the daemon reads — without the store an edit-mode
+	// target would open a message here that the daemon could never edit.
+	notifyMgr.SetMessageStore(db)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
