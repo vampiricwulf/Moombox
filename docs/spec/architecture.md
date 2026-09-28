@@ -180,7 +180,7 @@ cmd/sign/main.go                       -- CI signing tool (Ed25519)
 
 internal/config     (6 files, ~2,110)  -- TOML config, FlexDuration, channel terms
 internal/updater    (3 files, ~870)    -- GitHub release checker + self-updater + Ed25519
-internal/ytdlpplugin (1 file,  ~330)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI R Y overlay)
+internal/ytdlpplugin (1 file,  ~330)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI E Y overlay)
 internal/logger     (1 file,  ~760)    -- slog wrapper, file rotation, ring buffer, pub/sub
 internal/database   (8 files, ~3,920)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
 internal/stats      (1 file,  ~70)     -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
