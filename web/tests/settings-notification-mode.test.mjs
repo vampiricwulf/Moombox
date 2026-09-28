@@ -88,6 +88,48 @@ test("switching back to Separate is sent explicitly", { skip }, async () => {
   assert.equal(put.body.notifications[2].mode, "separate");
 });
 
+// MUTANT: drop the `previous === next` guard. A click on the chip that is
+// already active then PUTs, toasts "Notifications updated" and — because the
+// route fires OnNotificationsChange on the mere presence of a `notifications`
+// key — reloads the manager, which flushes every target's open batch window.
+test("clicking the already-active chip issues no PUT", { skip }, async () => {
+  const h = await openSettings();
+  // The third target is stored as edit; the second is explicitly separate.
+  cards(h)[2].querySelector('[data-notif-action="set-mode"][data-mode="edit"]').click();
+  cards(h)[1].querySelector('[data-notif-action="set-mode"][data-mode="separate"]').click();
+  await h.flush();
+
+  assert.equal(
+    h.http.matching("/api/config", "PUT").length,
+    0,
+    "a no-op mode click must not save — the reload it triggers flushes every open batch window",
+  );
+  assert.equal(h.app.config.notifications[2].mode, "edit");
+  assert.equal(h.app.config.notifications[1].mode, "separate");
+});
+
+// MUTANT: revert with a bare `notif.mode = previous`. A failed save then
+// leaves `mode: undefined` as an OWN key on a target whose key was absent —
+// the two siblings (enabled, mention) both delete it back to absent.
+test("a rejected save reverts an absent mode back to absent", { skip }, async () => {
+  const h = await harness.makeApp({
+    initialState: { config: structuredClone(CONFIG) },
+    routes: { "PUT /api/config": () => harness.response({ status: 500, body: { error: "nope" } }) },
+  });
+  h.app.config = structuredClone(CONFIG);
+  h.app.settings.renderNotificationsList();
+
+  cards(h)[0].querySelector('[data-notif-action="set-mode"][data-mode="edit"]').click();
+  await h.flush();
+
+  const notif = h.app.config.notifications[0];
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(notif, "mode"),
+    false,
+    "the revert left a `mode` own key on a target whose key was absent",
+  );
+});
+
 // MUTANT: forget that a mode switch must not disturb the event filter — the
 // operator loses their allowlist by pressing a mode button.
 test("a mode switch preserves the target's other keys", { skip }, async () => {

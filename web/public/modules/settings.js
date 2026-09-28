@@ -2150,16 +2150,29 @@ export class SettingsController {
    * rebuilds each notification entry from the payload, so a key this card omits
    * is simply lost. Writing the value out keeps the web card and the TUI editor
    * round-tripping the same states, and keeps the payload readable.
+   *
+   * Clicking the chip that is already active returns early, the same guard
+   * setNotificationMention has: the PUT would store what is already stored,
+   * but PUT /api/config fires OnNotificationsChange on the mere presence of a
+   * `notifications` key, and that reload FLUSHES every target's open batch
+   * window. A no-op click must not shorten another job's coalescing window.
    */
   async setNotificationMode(index, mode) {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
     const previous = notif.mode;
-    notif.mode = mode === "edit" ? "edit" : "separate";
+    const next = mode === "edit" ? "edit" : "separate";
+    // undefined !== "separate", so an absent key is still written out
+    // explicitly the first time the Separate chip is clicked.
+    if (previous === next) return;
+    notif.mode = next;
     try {
       await this._saveNotificationsOnly();
     } catch {
-      notif.mode = previous;
+      // Revert on failure — including back to ABSENT, which is what a config
+      // written before this key looks like, and what both siblings do.
+      if (previous === undefined) delete notif.mode;
+      else notif.mode = previous;
     }
     this.renderNotificationsList();
   }

@@ -407,8 +407,9 @@ func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 			return
 		}
 		// Map event lines: clickNotifEvent accounts for group headers/blanks.
-		// notifEditEventBase+3 = the first event-group line: the three form
-		// rows, plus the title, the blank and the "Events" header above them.
+		// notifEditEventBase+3 = the first event-group line: the
+		// notifEditEventBase form rows, plus the title, the blank and the
+		// "Events" header above them.
 		if eventsTop := notifEditEventBase + 3; origLine >= eventsTop {
 			m.clickNotifEvent(origLine - eventsTop)
 		}

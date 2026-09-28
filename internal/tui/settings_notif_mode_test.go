@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/textinput"
@@ -55,8 +56,8 @@ func TestNotifEditTogglesDeliveryMode(t *testing.T) {
 }
 
 // TestNotifEditSavePreservesMode is the one that matters: the Enter path
-// rebuilds config.NotificationConfig from scratch, so every per-target field
-// the editor does not carry is silently dropped on the next save.
+// copies the stored target and overwrites only the fields the editor owns, so
+// a field it never assigns is silently dropped on the next save.
 func TestNotifEditSavePreservesMode(t *testing.T) {
 	m := &SettingsModel{
 		notifMode:         "edit",
@@ -122,6 +123,39 @@ func TestNotifEditModeSurvivesAUrlOnlyEdit(t *testing.T) {
 	if got := m.notifications[0]; got.Mode != "edit" {
 		t.Errorf("Mode = %q after a URL-only edit, want edit — the open seeded the wrong mode "+
 			"or the save dropped it", got.Mode)
+	}
+}
+
+// TestNotifEditHeadRowOrderMatchesTheFocusIndices pins the ORDER the four
+// head rows render in. The mouse map, the focus marker and the scroll window
+// all address a head row by line number, so a row's screen line must equal
+// its focus index + 1 (the title is pinned at line 0).
+//
+// MUTANT: move the Delivery block above Mention in renderNotifEdit. Every
+// other test in the package stays green while a click on Mention toggles the
+// mode and the focus marker sits one row off.
+func TestNotifEditHeadRowOrderMatchesTheFocusIndices(t *testing.T) {
+	m := newNotifEditModel(t, []config.NotificationConfig{{URL: "discord://1/a"}})
+	m.handleNotifKey(keyEnter) // open the editor, seeding every row
+	m.notifEditScrollStart = 0
+
+	ls := strings.Split(m.renderNotifEdit(100, 1000), "\n")
+	for _, row := range []struct {
+		index int
+		label string
+	}{
+		{notifEditURLRow, "Webhook URL"},
+		{notifEditEnabledRow, "Enabled"},
+		{notifEditMentionRow, "Mention"},
+		{notifEditDeliveryRow, "Delivery"},
+	} {
+		line := row.index + 1
+		if line >= len(ls) {
+			t.Fatalf("the editor rendered %d lines, too few to hold row %d (%s)", len(ls), row.index, row.label)
+		}
+		if !strings.Contains(ls[line], row.label) {
+			t.Errorf("line %d = %q, want the %s row (focus index %d + 1)", line, ls[line], row.label, row.index)
+		}
 	}
 }
 
