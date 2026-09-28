@@ -324,7 +324,7 @@ func feedbackColor(msg string, stated feedbackSeverity) color.Color {
 	// Chord feedback (yellow) — prefix match on known chord categories
 	if strings.HasPrefix(msg, "Press ") || strings.HasPrefix(msg, "Action:") ||
 		strings.HasPrefix(msg, "Request:") || strings.HasPrefix(msg, "Open:") ||
-		strings.HasPrefix(msg, "Quit:") {
+		strings.HasPrefix(msg, "Extras:") || strings.HasPrefix(msg, "Quit:") {
 		return ColorYellow
 	}
 

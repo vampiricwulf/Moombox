@@ -21,6 +21,7 @@ func TestFeedbackColorChordMessages(t *testing.T) {
 		"Action: Resume Job",
 		"Request: Update Channel",
 		"Open: Stream URL",
+		"Extras: Y yt-dlp | L Login | I Import Cookies | T Stats (3s)",
 		"Quit: Confirm with Q",
 	}
 	for _, msg := range tests {
