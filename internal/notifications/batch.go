@@ -177,16 +177,16 @@ func (b *batcher) Flush() {
 // holding reaches its queue instead of vanishing with the batcher.
 func (b *batcher) Stop() { b.Flush() }
 
-// setMode swaps the target's delivery mode, FLUSHING the open window first.
+// setMode swaps the target's delivery mode, releasing the open window first.
 //
 // A batcher holding pending `found` embeds when its target switches to edit
-// mode is delivered on the flip rather than dropped: a one-embed window goes
-// out through the already-rebound dispatch and becomes that job's lifecycle
-// message; a multi-embed window posts plain (dispatchOne's single-embed
-// guard) — the same reason applyTargets flushes a retired target's window
-// rather than letting it evaporate. Flushing on the way back to separate mode
-// costs nothing (the window is empty, because edit mode never opened one) and
-// keeps the rule one sentence long.
+// mode has that window delivered on the flip rather than dropped: a one-embed
+// window goes out through the already-rebound dispatch and becomes that job's
+// lifecycle message; a multi-embed window posts plain (dispatchOne's
+// single-embed guard) — the same reason applyTargets flushes a retired
+// target's window rather than letting it evaporate. Releasing the window on
+// the way back to separate mode costs nothing (it is empty, because edit mode
+// never opened one) and keeps the rule one sentence long.
 //
 // The window and the mode move under ONE hold, and the emit happens after it:
 // an Add landing between a flush and a later swap would otherwise join a
