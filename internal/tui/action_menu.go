@@ -25,7 +25,7 @@ type ActionMenuItem struct {
 	Chord          string                   // e.g. "A A", "R C", "F"
 	Label          string                   // e.g. "Add Video"
 	HintLabel      string                   // short label for chord feedback, e.g. "Add", "Retry", "Tokens"
-	Category       string                   // "Action", "Request", "Open", "Filter", "Other"
+	Category       string                   // "Action", "Request", "Open", "Extras", "Filter", "Other"
 	NeedsJob       bool                     // true → transitions to job selector
 	NeedsConfirm   bool                     // true → transitions to confirm prompt
 	SupportsBatch  bool                     // true → dispatchAction implements a batch path for selected jobs
