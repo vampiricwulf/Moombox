@@ -499,7 +499,7 @@ The TUI uses a chord-based keybinding system with a single source of truth:
 - `buildMenuItems()` in `internal/tui/app_actions.go` defines all chords, their display text, action menu entries, hint bar text, and help text in one place.
 - `dispatchAction(chord, job)` is the unified handler that executes the action for any chord.
 
-**Chord prefixes:** A=Action (AC=Cancel, AD=Delete, AR=Resume, AI=Reinitialize, AA=Add), R=Request (RC=Recheck Cookies, RF=Refresh Cookies from Browser), O=Open (OF=Folder, OS=Stream Page, OW=Web UI), Q=Quit (QQ=Quit confirm). **Single keys:** F=Filter, M=Action Menu, `=Settings, ?=Help. **Confirm chords** require a third keypress within 3 seconds (e.g., "Q" then "Q" within 3s to quit).
+**Chord prefixes:** A=Action (AC=Cancel, AD=Delete, AR=Resume, AI=Reinitialize, AA=Add), R=Request (RC=Recheck Cookies, RF=Refresh Cookies from Browser), O=Open (OF=Folder, OS=Stream Page, OW=Web UI), E=Extras (EY=yt-dlp Plugin, EL=Cookie Login, EI=Import Cookie File, ET=Statistics), Q=Quit (QQ=Quit confirm). **Single keys:** F=Filter, M=Action Menu, `=Settings, ?=Help. **Confirm chords** require a third keypress within 3 seconds (e.g., "Q" then "Q" within 3s to quit).
 
 ### WebSocket Protocol
 

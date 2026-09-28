@@ -66,13 +66,13 @@ func TestYtdlpDialogShowsStatusAndInstalls(t *testing.T) {
 		}, nil
 	}
 	app.OnInstallYtdlpPlugin = func() error { installCalls++; return nil }
-	if !ryOffered(t, app) {
-		t.Fatal("R Y missing with the callbacks wired")
+	if !eyOffered(t, app) {
+		t.Fatal("E Y missing with the callbacks wired")
 	}
 
-	_, cmd := app.dispatchAction("R Y", nil)
+	_, cmd := app.dispatchAction("E Y", nil)
 	if !app.ytdlpDlg.IsVisible() || !strings.Contains(app.ytdlpDlg.View(), "Loading") {
-		t.Fatal("R Y must open the overlay in its loading state")
+		t.Fatal("E Y must open the overlay in its loading state")
 	}
 	app.Update(runCmd(t, cmd)) // execute the batch and feed its status msg back
 
@@ -103,8 +103,8 @@ func TestYtdlpDialogShowsStatusAndInstalls(t *testing.T) {
 	}
 
 	app.OnYtdlpPluginStatus = nil
-	if ryOffered(t, app) {
-		t.Fatal("R Y offered without the status callback")
+	if eyOffered(t, app) {
+		t.Fatal("E Y offered without the status callback")
 	}
 }
 
@@ -116,7 +116,7 @@ func TestYtdlpDialogReportsErrors(t *testing.T) {
 	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
 		return ytdlpplugin.Info{}, errors.New("cannot determine yt-dlp plugin directory")
 	}
-	_, cmd := app.dispatchAction("R Y", nil)
+	_, cmd := app.dispatchAction("E Y", nil)
 	app.Update(runCmd(t, cmd))
 	if !strings.Contains(app.ytdlpDlg.View(), "cannot determine yt-dlp plugin directory") {
 		t.Errorf("the status error is not rendered:\n%s", app.ytdlpDlg.View())
@@ -154,7 +154,7 @@ func TestYtdlpDialogRefreshReloads(t *testing.T) {
 		calls++
 		return ytdlpplugin.Info{Installed: true, PluginDir: "/plug", CurrentPort: 7740, InstalledPort: intPtr(7740)}, nil
 	}
-	_, cmd := app.dispatchAction("R Y", nil)
+	_, cmd := app.dispatchAction("E Y", nil)
 	app.Update(runCmd(t, cmd))
 	if calls != 1 {
 		t.Fatalf("open ran the status callback %d times, want 1", calls)
@@ -169,34 +169,34 @@ func TestYtdlpDialogRefreshReloads(t *testing.T) {
 	}
 }
 
-// TestYtdlpPluginChordExistsOnlyWhenWired: nil status callback ⇒ no R Y in
+// TestYtdlpPluginChordExistsOnlyWhenWired: nil status callback ⇒ no E Y in
 // dispatch, menu or help; wired ⇒ all three, and dispatch opens the overlay.
 func TestYtdlpPluginChordExistsOnlyWhenWired(t *testing.T) {
 	app := NewApp()
 	app.OnYtdlpPluginStatus = nil
-	if ryOffered(t, app) {
-		t.Fatal("R Y offered with no callback")
+	if eyOffered(t, app) {
+		t.Fatal("E Y offered with no callback")
 	}
-	app.dispatchAction("R Y", nil)
+	app.dispatchAction("E Y", nil)
 	if app.ytdlpDlg.IsVisible() {
-		t.Fatal("dispatching R Y with no callback opened an overlay that can never load")
+		t.Fatal("dispatching E Y with no callback opened an overlay that can never load")
 	}
 	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) {
 		return ytdlpplugin.Info{}, nil
 	}
-	if !ryOffered(t, app) {
-		t.Fatal("R Y missing with the callback wired")
+	if !eyOffered(t, app) {
+		t.Fatal("E Y missing with the callback wired")
 	}
-	app.dispatchAction("R Y", nil)
+	app.dispatchAction("E Y", nil)
 	if !app.ytdlpDlg.IsVisible() {
-		t.Fatal("dispatching R Y did not open the overlay")
+		t.Fatal("dispatching E Y did not open the overlay")
 	}
 }
 
-// ryOffered reports whether R Y is reachable by the two derived routes an
+// eyOffered reports whether E Y is reachable by the two derived routes an
 // operator has — the action menu and the help overlay, which is built from
-// the menu. Same shape as riOffered (cookie_import_dialog_test.go).
-func ryOffered(t *testing.T, app *App) bool {
+// the menu. Same shape as eiOffered (cookie_import_dialog_test.go).
+func eyOffered(t *testing.T, app *App) bool {
 	t.Helper()
 	items := app.buildMenuItems()
 	if len(items) == 0 {
@@ -204,7 +204,7 @@ func ryOffered(t *testing.T, app *App) bool {
 	}
 	menu := false
 	for _, it := range items {
-		if strings.TrimSpace(it.Chord) == "R Y" {
+		if strings.TrimSpace(it.Chord) == "E Y" {
 			menu = true
 		}
 	}
@@ -213,13 +213,13 @@ func ryOffered(t *testing.T, app *App) bool {
 	help := false
 	for _, sec := range h.orderedSections() {
 		for _, k := range sec.keys {
-			if strings.TrimSpace(k.key) == "R Y" {
+			if strings.TrimSpace(k.key) == "E Y" {
 				help = true
 			}
 		}
 	}
 	if menu != help {
-		t.Fatalf("R Y is in the menu (%v) but not the help overlay (%v) — the two reads disagree", menu, help)
+		t.Fatalf("E Y is in the menu (%v) but not the help overlay (%v) — the two reads disagree", menu, help)
 	}
 	return menu
 }
@@ -244,7 +244,7 @@ func TestYtdlpDialogFlagsAnUnrecognisedFile(t *testing.T) {
 			ExtractedPath: "/plug/moombox",
 		}, nil
 	}
-	_, cmd := app.dispatchAction("R Y", nil)
+	_, cmd := app.dispatchAction("E Y", nil)
 	app.Update(runCmd(t, cmd))
 
 	v := app.ytdlpDlg.View()

@@ -74,12 +74,12 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | logger/ | ~760 | 1 | 2 | slog wrapper, file rotation, ring buffer, pub/sub |
 | connectivity/ | ~480 | 3 | 3 | Reachability monitor; gates stream-end verdicts during outages |
 | jobfilter/ | ~470 | 2 | 3 | Dashboard filter language (Go twin of `filter-parser.js`/`filter-engine.js`), used by the TUI's `/` filter box |
-| ytdlpplugin/ | ~330 | 1 | 1 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's R Y overlay |
+| ytdlpplugin/ | ~330 | 1 | 1 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
 | constants/ | ~320 | 1 | 2 | Hardcoded values (client configs, UAs, URLs) |
 | disk/ | ~130 | 3 | 2 | Disk space queries: kernel32 on Windows, statfs on Linux |
 | httpx/ | ~110 | 1 | 1 | Shared keep-alive-tuned http.Client/Transport shapes |
 | bgutils/embed/ | ~80 | 4 | 0 | go:embed boundary for the Node binaries + sidecar tarball |
-| stats/ | ~70 | 1 | 1 | Figures shared by the Web Stats tab and the TUI's R T overlay — job aggregates, disk reading |
+| stats/ | ~70 | 1 | 1 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |
 | webtest/ | ~70 | 1 | 1 | Shared goja harness for evaluating shipped Web UI JS (`settings.js`) from Go tests |
 
 ### Totals

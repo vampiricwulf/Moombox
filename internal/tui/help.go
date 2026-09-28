@@ -75,6 +75,7 @@ var categoryHelpTitles = map[string]string{
 	"Action":  "Action (A)",
 	"Request": "Request (R)",
 	"Open":    "Open (O)",
+	"Extras":  "Extras (E)",
 }
 
 // helpViewportKeyMap returns a KeyMap with only arrow keys and pgup/pgdn,
@@ -231,10 +232,11 @@ func (m *HelpModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
-// sectionsFromMenu generates help sections for Action/Request/Open from menu items.
+// sectionsFromMenu generates help sections for Action/Request/Open/Extras from menu items.
 func (m *HelpModel) sectionsFromMenu() []helpSection {
-	// Preserve category order
-	categoryOrder := []string{"Action", "Request", "Open"}
+	// Preserve category order — the same left-to-right order the status
+	// bar's chord hints are in.
+	categoryOrder := []string{"Action", "Request", "Open", "Extras"}
 	grouped := make(map[string][]helpKey)
 
 	for _, item := range m.menuItems {
@@ -273,7 +275,7 @@ func (m *HelpModel) sectionsFromMenu() []helpSection {
 func (m *HelpModel) orderedSections() []helpSection {
 	var sections []helpSection
 
-	// Dynamic sections from menu items (Action, Request, Open)
+	// Dynamic sections from menu items (Action, Request, Open, Extras)
 	if len(m.menuItems) > 0 {
 		sections = append(sections, m.sectionsFromMenu()...)
 	}

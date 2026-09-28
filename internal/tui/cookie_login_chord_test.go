@@ -8,16 +8,16 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
-// rlIsOffered reports whether R L is reachable by the three routes an operator
+// elIsOffered reports whether E L is reachable by the three routes an operator
 // has: the chord dispatcher, the action menu, and the help overlay. All three,
 // because they are three separate reads of OnStartAutoCookie and a fix that
 // restored one would look complete from the others. Same shape as rfIsOffered
 // in cookie_forcerefresh_chord_test.go, deliberately — the two chords answer
 // the same question about the same service.
-func rlIsOffered(t *testing.T, app *App) (dispatch, menu, help bool) {
+func elIsOffered(t *testing.T, app *App) (dispatch, menu, help bool) {
 	t.Helper()
 
-	app.dispatchAction("R L", nil)
+	app.dispatchAction("E L", nil)
 	dispatch = app.setupWiz.IsVisible() && app.setupWiz.cookieOnly
 	app.setupWiz.closeCookieLogin() // the funnel, not Close(): leaves no cookieOnly behind
 
@@ -26,7 +26,7 @@ func rlIsOffered(t *testing.T, app *App) (dispatch, menu, help bool) {
 		t.Fatal("buildMenuItems returned nothing — nothing below can be concluded")
 	}
 	for _, it := range items {
-		if strings.TrimSpace(it.Chord) == "R L" {
+		if strings.TrimSpace(it.Chord) == "E L" {
 			menu = true
 		}
 	}
@@ -35,7 +35,7 @@ func rlIsOffered(t *testing.T, app *App) (dispatch, menu, help bool) {
 	h.SetMenuItems(items)
 	for _, sec := range h.orderedSections() {
 		for _, k := range sec.keys {
-			if strings.TrimSpace(k.key) == "R L" {
+			if strings.TrimSpace(k.key) == "E L" {
 				help = true
 			}
 		}
@@ -66,28 +66,28 @@ func wiredCookieLoginApp() *App {
 // callback unconditionally, so the chord exists on every real install,
 // including one with auto_enabled off: StartSetup is acquisition, never gated.
 //
-// The nil row gives the wired row its meaning: without it, "R L is offered"
+// The nil row gives the wired row its meaning: without it, "E L is offered"
 // would be satisfied by a build that offers every chord unconditionally.
 func TestCookieLoginChordExistsWheneverTheWizardCanStartALogin(t *testing.T) {
 	t.Run("wired", func(t *testing.T) {
-		dispatch, menu, help := rlIsOffered(t, wiredCookieLoginApp())
+		dispatch, menu, help := elIsOffered(t, wiredCookieLoginApp())
 		if !dispatch {
-			t.Error("R L opened no cookie-login overlay although the callback is wired")
+			t.Error("E L opened no cookie-login overlay although the callback is wired")
 		}
 		if !menu {
-			t.Error("R L is absent from the action menu although the callback is wired")
+			t.Error("E L is absent from the action menu although the callback is wired")
 		}
 		if !help {
-			t.Error("R L is absent from help although the callback is wired — an operator cannot " +
+			t.Error("E L is absent from help although the callback is wired — an operator cannot " +
 				"discover a chord that is documented nowhere")
 		}
 	})
 
 	t.Run("not wired", func(t *testing.T) {
 		app := NewApp() // SetSetupCallbacks never called
-		dispatch, menu, help := rlIsOffered(t, app)
+		dispatch, menu, help := elIsOffered(t, app)
 		if dispatch || menu || help {
-			t.Fatalf("premise lost: R L is offered with no interactive-setup callback "+
+			t.Fatalf("premise lost: E L is offered with no interactive-setup callback "+
 				"(dispatch=%v menu=%v help=%v)", dispatch, menu, help)
 		}
 	})
@@ -102,10 +102,10 @@ func TestCookieLoginChordExistsWheneverTheWizardCanStartALogin(t *testing.T) {
 func TestCookieLoginChordOpensAtTheCookieStep(t *testing.T) {
 	app := wiredCookieLoginApp()
 
-	app.dispatchAction("R L", nil)
+	app.dispatchAction("E L", nil)
 
 	if !app.setupWiz.IsVisible() {
-		t.Fatal("R L opened nothing")
+		t.Fatal("E L opened nothing")
 	}
 	if app.setupWiz.mode != setupModeSimple {
 		t.Errorf("mode = %v, want setupModeSimple", app.setupWiz.mode)
@@ -142,7 +142,7 @@ func TestCookieLoginChordPreselectsThePlatformTheBadgeIsAlarmingAbout(t *testing
 			app.statusBar.SetActivePlatforms(tc.ytA, tc.twA)
 			app.statusBar.SetCookieStatus(tc.yt, tc.tw)
 
-			app.dispatchAction("R L", nil)
+			app.dispatchAction("E L", nil)
 
 			if app.setupWiz.cookieFocus != tc.wantFocus {
 				t.Errorf("cookieFocus = %d, want %d", app.setupWiz.cookieFocus, tc.wantFocus)
@@ -152,13 +152,13 @@ func TestCookieLoginChordPreselectsThePlatformTheBadgeIsAlarmingAbout(t *testing
 }
 
 // TestReloginBadgeNamesTheChordTheMenuRegisters pins the tie between the
-// badge's hand-typed chord text (status_bar.go:647, the literal "R L") and
-// buildMenuItems' registration (app_actions.go:556, Chord: "R L") — nothing
+// badge's hand-typed chord text (status_bar.go:647, the literal "E L") and
+// buildMenuItems' registration (app_actions.go:556, Chord: "E L") — nothing
 // else compares them, so a re-lettering of one would leave the badge naming a
 // chord the menu no longer offers, or vice versa.
 //
 // MUTANTS: the badge literal -> "R X" (caught here); the menu's Chord -> "R X"
-// (caught here AND by the dispatch tests, since the case is still "R L").
+// (caught here AND by the dispatch tests, since the case is still "E L").
 func TestReloginBadgeNamesTheChordTheMenuRegisters(t *testing.T) {
 	app := wiredCookieLoginApp()
 	chord := ""
@@ -180,25 +180,25 @@ func TestReloginBadgeNamesTheChordTheMenuRegisters(t *testing.T) {
 // TestCookieLoginChordRefusesWithoutTheService pins the DEFENSIVE branch: a
 // direct dispatch with no interactive-setup callback opens nothing and says
 // so. From the keyboard this branch is unreachable — processSecondKey resolves
-// the second key against buildMenuItems, and with the callback nil R L is not
-// registered, so the operator sees the chord system's own "Invalid Chord: R L"
+// the second key against buildMenuItems, and with the callback nil E L is not
+// registered, so the operator sees the chord system's own "Invalid Chord: E L"
 // and finds no menu or help entry (the "not wired" row above pins that). The
 // guard exists so a programmatic caller cannot open an overlay whose every
 // Enter dead-ends, and so the two reads of OnStartAutoCookie — buildMenuItems
 // and this case — cannot disagree silently.
 //
-// MUTANT: drop the nil check. dispatchAction("R L") on a bare App then opens
+// MUTANT: drop the nil check. dispatchAction("E L") on a bare App then opens
 // the overlay with nothing behind it.
 func TestCookieLoginChordRefusesWithoutTheService(t *testing.T) {
 	app := NewApp()
 
-	app.dispatchAction("R L", nil)
+	app.dispatchAction("E L", nil)
 
 	if app.setupWiz.IsVisible() {
-		t.Error("R L opened a login overlay with no auto-cookie service behind it")
+		t.Error("E L opened a login overlay with no auto-cookie service behind it")
 	}
 	if app.feedback.msg == "" {
-		t.Fatal("R L refused silently — a direct caller cannot tell that from a no-op")
+		t.Fatal("E L refused silently — a direct caller cannot tell that from a no-op")
 	}
 	if !strings.Contains(strings.ToLower(app.feedback.msg), "cookie login") {
 		t.Errorf("the refusal does not name what was refused: %q", app.feedback.msg)

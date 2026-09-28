@@ -862,7 +862,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// A wrong INPUT, not a server fault and not a condition that
 			// clears: 400 with the sentinel's own sentence, which names the
 			// two accepted values and the one it was given. StartSetup owns
-			// the rule — the TUI's R L chord and the first-run wizard call it
+			// the rule — the TUI's E L chord and the first-run wizard call it
 			// directly — so this arm renders that decision rather than
 			// repeating its list here, where the copy would be free to drift.
 			case errors.Is(err, cookies.ErrUnsupportedPlatform):

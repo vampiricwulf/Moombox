@@ -613,9 +613,9 @@ func (s *runState) runTUI() {
 		return result, err
 	}
 
-	// R I — import a Netscape cookies.txt the operator exported elsewhere.
+	// E I — import a Netscape cookies.txt the operator exported elsewhere.
 	//
-	// The browser-free half of R L, and on a headless host the only
+	// The browser-free half of E L, and on a headless host the only
 	// re-authentication route there is: StartSetup needs a browser it can put
 	// on a screen, and this needs a file. It is the same gesture the Web
 	// dashboard's import panel makes (POST /api/cookies/import), through the
@@ -686,7 +686,7 @@ func (s *runState) runTUI() {
 		}
 	}
 
-	// R Y — the yt-dlp plugin overlay. Both closures read the SAME port getter
+	// E Y — the yt-dlp plugin overlay. Both closures read the SAME port getter
 	// and HTTPS flag wireRoutes hands routes.YtdlpRoutes, so the terminal and
 	// the dashboard cannot disagree about which port the plugin should point
 	// at or whether the one on disk matches.

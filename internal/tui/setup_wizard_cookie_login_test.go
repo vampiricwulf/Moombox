@@ -71,7 +71,7 @@ func TestOpenCookieLoginLandsOnTheCookieStep(t *testing.T) {
 // TestCookieLoginOverlayCancelsWhateverItLeavesBehind pins the abandon rule.
 // AutoCookieService holds the setup slot until someone cancels, finishes, or
 // the server-side reap notices the browser is gone, so walking out with a
-// browser open must release it — otherwise the next R L, and the next periodic
+// browser open must release it — otherwise the next E L, and the next periodic
 // refresh, meet ErrSetupInProgress for the whole grace window.
 //
 // MUTANT: make closeCookieLogin call m.Close() directly. The third subtest then

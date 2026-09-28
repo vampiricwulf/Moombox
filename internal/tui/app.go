@@ -132,7 +132,7 @@ type (
 		Title string
 		Err   string
 	}
-	// cookieImportResultMsg is the async result of OnImportCookieFile (R I).
+	// cookieImportResultMsg is the async result of OnImportCookieFile (E I).
 	// The whole cookies.ImportResult, not a bool: the overlay words each
 	// platform off the outcome AND the verdict, and neither survives being
 	// flattened. Err is the error VALUE rather than a string because the
@@ -302,7 +302,7 @@ type (
 		Err string
 	}
 
-	// Async results for the R Y yt-dlp plugin overlay. Info is the same
+	// Async results for the E Y yt-dlp plugin overlay. Info is the same
 	// ytdlpplugin.Info GET /api/ytdlp-plugin/status returns — read straight
 	// from the package the route's own body uses, so the terminal never has to
 	// import the HTTP layer for one struct; Err is the error VALUE rather than
@@ -315,7 +315,7 @@ type (
 		Err error
 	}
 
-	// statsSnapshotMsg is the async result of OnGetStats — the R T overlay's
+	// statsSnapshotMsg is the async result of OnGetStats — the E T overlay's
 	// open, its r key, and the 60 s refresh tick all go through it. Epoch is
 	// the App.statsEpoch the fetch started under; a result that outlives its
 	// open is dropped rather than painted over the new one.
@@ -324,7 +324,7 @@ type (
 		Snap  stats.Snapshot
 		Err   error
 	}
-	// statsRefreshTickMsg fires every statsRefreshInterval while the R T
+	// statsRefreshTickMsg fires every statsRefreshInterval while the E T
 	// overlay is open (the Web Stats tab's own poll cadence); ignored once
 	// the overlay is closed, OnGetStats is nil, or Epoch names an earlier
 	// open (see App.statsEpoch).
@@ -383,7 +383,7 @@ type SidecarStatusMsg struct {
 
 // chordState tracks the two-key chord system state machine.
 type chordState struct {
-	prefix     string    // "a", "r", "o", "q" or ""
+	prefix     string    // "a", "r", "o", "e", "q" or ""
 	prefixTime time.Time // when prefix was pressed
 	action     string    // second key (for confirm step), empty if waiting
 	actionTime time.Time // when confirm prompt shown
@@ -408,7 +408,7 @@ type App struct {
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
 
-	// statsEpoch names the current R T session. It is bumped on every open
+	// statsEpoch names the current E T session. It is bumped on every open
 	// and every close, and both stats messages carry the epoch they were
 	// created under, so exactly one 60 s refresh chain is alive at a time:
 	// ticks and fetch results from an earlier open are dropped instead of
@@ -657,7 +657,7 @@ type App struct {
 	// flattened form could not be worded truthfully.
 	OnForceRefreshCookies func() (cookies.RefreshResult, error)
 	// OnImportCookieFile imports a Netscape cookies.txt from disk through
-	// AutoCookieService.ImportCookies — the R I chord, and the TUI's half of
+	// AutoCookieService.ImportCookies — the E I chord, and the TUI's half of
 	// the Web dashboard's import panel. nil when there is no auto-cookie
 	// service, and nil DELETES the chord rather than making it inert: like
 	// OnForceRefreshCookies, dispatchAction, buildMenuItems and the help
@@ -670,21 +670,21 @@ type App struct {
 	OnImportCookieFile func(path string) (cookies.ImportResult, error)
 
 	// OnYtdlpPluginStatus reports the yt-dlp PO-token plugin's state for the
-	// port and scheme this process is actually serving on — the R Y overlay's
+	// port and scheme this process is actually serving on — the E Y overlay's
 	// body, and the same ytdlpplugin.Status the dashboard's Integrations card
 	// reads through routes.YtdlpPluginStatus. nil DELETES the chord rather than making it inert, like
 	// OnImportCookieFile: an overlay whose only content can never load is
 	// worse than a chord that is not offered.
 	OnYtdlpPluginStatus func() (ytdlpplugin.Info, error)
 	// OnInstallYtdlpPlugin (re)writes the yt-dlp plugin for the live port —
-	// the R Y overlay's I key. Distinct from the setup wizard's
+	// the E Y overlay's I key. Distinct from the setup wizard's
 	// OnInstallYtdlp, which reports nothing back.
 	//
 	// It does NOT gate the chord: with a status callback and no install one,
 	// the overlay is still worth reading and I says so instead of no-opping.
 	OnInstallYtdlpPlugin func() error
 
-	// OnGetStats returns the numbers the Web Stats tab shows (the R T
+	// OnGetStats returns the numbers the Web Stats tab shows (the E T
 	// chord); nil deletes the chord.
 	OnGetStats func() (stats.Snapshot, error)
 

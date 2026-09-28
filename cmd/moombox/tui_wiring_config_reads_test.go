@@ -9,7 +9,7 @@ import (
 )
 
 // CORE-24: four closures wired in runTUI read s.cfg.Network.HTTPSEnabled and
-// s.cfg.Paths.FfmpegPath directly. They outlive wiring — the R Y overlay and
+// s.cfg.Paths.FfmpegPath directly. They outlive wiring — the E Y overlay and
 // the setup wizard's FFmpeg probe fire whenever the operator opens them — and
 // PUT /api/config replaces the whole struct under the store's write lock, so
 // an unlocked field read is a genuine data race, not a stale-value nuisance.

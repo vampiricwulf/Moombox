@@ -10,7 +10,7 @@ import (
 // entries, feedback hints, and help text" — which nothing was checking.
 //
 // The help overlay derives sections only for the categories in
-// categoryHelpTitles (Action, Request, Open); every other category is
+// categoryHelpTitles (Action, Request, Open, Extras); every other category is
 // dropped by sectionsFromMenu and covered by hand in quickKeys. That split
 // is deliberate (the static text is written for newcomers and is richer
 // than the terse menu labels), but it silently drops any chord added to a

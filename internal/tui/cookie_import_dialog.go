@@ -14,14 +14,14 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
-// The three steps of the R I overlay.
+// The three steps of the E I overlay.
 const (
 	cookieImportStepPath    = iota // typing the path
 	cookieImportStepRunning        // App.OnImportCookieFile is in flight
 	cookieImportStepResult         // the per-platform outcome is on screen
 )
 
-// CookieImportDialogModel is the R I overlay: a path prompt, then the import
+// CookieImportDialogModel is the E I overlay: a path prompt, then the import
 // runs through App.OnImportCookieFile, then the per-platform outcome is shown
 // in place.
 //
@@ -61,7 +61,7 @@ func (m *CookieImportDialogModel) IsVisible() bool { return m.visible }
 // IsImporting reports whether the overlay is on the spinner step, waiting for
 // the import IT started.
 //
-// Narrower than IsVisible on purpose: Esc during a slow import and then R I
+// Narrower than IsVisible on purpose: Esc during a slow import and then E I
 // again leaves a VISIBLE dialog that is a fresh path prompt, and the first
 // import's result must not overwrite it with an outcome for a different file.
 func (m *CookieImportDialogModel) IsImporting() bool {

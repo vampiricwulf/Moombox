@@ -21,7 +21,7 @@ import (
 func (s *AutoCookieService) StartSetup(platform string) error {
 	// Validated BEFORE the lock and before the claim: a wrong value must never
 	// take the setup slot, and the two callers that are not the HTTP route —
-	// the TUI's R L chord and the first-run wizard — reach this and nothing
+	// the TUI's E L chord and the first-run wizard — reach this and nothing
 	// else. The empty string is not an error; it is what a caller that omits
 	// the field sends, and it has always meant YouTube.
 	//

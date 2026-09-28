@@ -399,7 +399,7 @@ func (a *App) deleteClientTokenCmd(id string) tea.Cmd {
 }
 
 // ytdlpStatusCmd reads the yt-dlp plugin's state off the UI goroutine — the
-// R Y overlay's open, its R key, and the reload that follows a successful
+// E Y overlay's open, its R key, and the reload that follows a successful
 // install all go through it.
 func (a *App) ytdlpStatusCmd() tea.Cmd {
 	statusFn := a.OnYtdlpPluginStatus
@@ -438,12 +438,12 @@ func (a *App) fetchStatsCmd(epoch int) tea.Cmd {
 	})
 }
 
-// statsRefreshInterval is the R T overlay's refresh cadence while open — the
+// statsRefreshInterval is the E T overlay's refresh cadence while open — the
 // Web Stats tab's own poll interval.
 const statsRefreshInterval = 60 * time.Second
 
 // statsRefreshTick schedules the overlay's 60 s refresh (the Web's poll) for
-// one overlay session. Only two places call it: the R T open, which starts
+// one overlay session. Only two places call it: the E T open, which starts
 // the session's single chain, and the tick arm, which re-arms that same
 // chain. A fetch result never does — that is what multiplied the chains.
 func statsRefreshTick(epoch int) tea.Cmd {

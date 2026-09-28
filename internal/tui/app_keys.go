@@ -366,7 +366,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if a.statsDlg.IsVisible() {
 		switch a.statsDlg.HandleKey(key) {
 		case "refresh":
-			// Re-fetch on the open session's epoch — the chain R T started
+			// Re-fetch on the open session's epoch — the chain E T started
 			// keeps ticking, and starting a second one here is what made
 			// every r press double the polling.
 			return a, tea.Batch(a.statsDlg.Open(), a.fetchStatsCmd(a.statsEpoch))
@@ -614,7 +614,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 
 	// No active chord — check if key is a prefix
 	switch key {
-	case "a", "r", "o", "q":
+	case "a", "r", "o", "e", "q":
 		a.seenChordHint = true
 		a.chord = chordState{prefix: key, prefixTime: now}
 		a.setFeedback(a.chordFeedback(key))
