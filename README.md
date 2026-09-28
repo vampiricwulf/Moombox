@@ -705,7 +705,7 @@ full rules.
 
 ### One message per job
 
-**One message per job.** Set `mode = "edit"` on a target and Moombox posts one
+Set `mode = "edit"` on a target and Moombox posts one
 Discord message per job and then rewrites it in place as the job progresses —
 found, scheduled, downloading, splits, muxing, finished all land on the same
 message, which grows a Status line and a short history instead of a new embed
