@@ -226,7 +226,7 @@ All 43 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `settings_view.go` | Settings rendering: header, hint line, action buttons, field rows, and each sub-editor's view. |
 | `settings_keys.go` | Settings key handling: section and field navigation, edit mode, save/close routing. |
 | `settings_channels.go` | Channel sub-editor: add, edit, delete, and the four per-channel overrides. |
-| `settings_notifications.go` | Notification sub-editor: webhook list, per-event toggles, test send, the per-target `enabled` mute and `mention` text field, and the `m` key, which toggles a highlighted event row in the mention (`@`) column. |
+| `settings_notifications.go` | Notification sub-editor: webhook list, per-event toggles, test send, the per-target `enabled` mute, the `mention` text field, the `m` key, which toggles a highlighted event row in the mention (`@`) column, and the Delivery row (Separate messages / One message per job, Space toggles). |
 | `settings_security.go` | Security sub-editor: password set/remove, network access, and the external-access predicate `isExternalAccess`. |
 | `settings_components.go` | The overlay's `textinput` components, including the decimal-capable fields backed by `config.FlexDuration`. |
 | `settings_mouse.go` | Mouse support for the Settings overlay: click tabs, fields, toggles/cycles, and action buttons. |
