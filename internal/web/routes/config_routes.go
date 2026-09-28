@@ -489,7 +489,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	// Notifications — mention must be a well-formed Discord mention token
 	// (config.ParseMention's four accepted forms); a token Discord cannot
 	// resolve renders as literal text and pings nobody, which looks like a
-	// delivery failure. Unknown event names are NOT errors here: they are
+	// delivery failure. mode must be one of the two the file loader accepts.
+	// Unknown event names are NOT errors here: they are
 	// stripped in applyConfigUpdates, where an all-unknown Events filter is
 	// deliberately left as written rather than rejected or emptied.
 	if notifs, ok := updates["notifications"].([]any); ok {
@@ -507,6 +508,16 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			if v, ok := nm["mention"].(string); ok && v != "" {
 				if _, _, _, err := config.ParseMention(v); err != nil {
 					errs[fmt.Sprintf("notifications[%d].mention", i)] = err.Error()
+				}
+			}
+			// The per-target delivery mode. Matches the config-side constraint
+			// in validateOrNormalize — a value the file loader would refuse
+			// must not be reachable through a PUT either.
+			if v, ok := nm["mode"].(string); ok {
+				switch v {
+				case "", "separate", "edit":
+				default:
+					errs[fmt.Sprintf("notifications[%d].mode", i)] = `mode must be "separate" or "edit"`
 				}
 			}
 		}

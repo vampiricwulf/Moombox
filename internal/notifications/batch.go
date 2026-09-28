@@ -97,17 +97,18 @@ func newBatcher(window time.Duration, clock batchClock, emit emitFunc, logger in
 // was closed. mention/mentionAllowed travel with the embed so a flush can
 // decide the message's single ping.
 func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
-	// Arc N3's edit-in-place mode gates the whole stage here, as the first
-	// thing Add does:
-	//
-	//	if b.mode == modeEdit {
-	//		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
-	//		return
-	//	}
-	//
-	// An edited message is ONE job's embed rewritten in place, so it can never
-	// share a POST with another job's. Everything below is written as if every
-	// target is separate-mode, which in N2b every target is.
+	// Edit mode gates the whole stage, as the first thing Add does: an edited
+	// message is ONE job's embed rewritten in place, so it can never share a
+	// POST with another job's. Everything below is written as if the target is
+	// separate-mode, which past this point it is.
+	b.mu.Lock()
+	editMode := b.mode == ModeEdit
+	b.mu.Unlock()
+	if editMode {
+		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
+		return
+	}
+
 	if !isBatchable(e.Opts) {
 		// Deliberately AHEAD of the embeds already coalesced: an error must not
 		// wait 5 s behind a backfill sweep. This is the one ordering change
