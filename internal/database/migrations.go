@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 19
+const schemaVersion = 20
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -148,7 +148,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     queue_priority INTEGER NOT NULL DEFAULT 1,
     incomplete_tail INTEGER NOT NULL DEFAULT 0,
     park_reason TEXT NOT NULL DEFAULT '',
-    park_identity TEXT NOT NULL DEFAULT ''
+    park_identity TEXT NOT NULL DEFAULT '',
+    notification_msgs TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -699,6 +700,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 20 {
+		if err := db.migrateV20(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(20); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -816,6 +826,28 @@ func (db *Database) migrateV19() error {
 	// written last), so a duplicate-column error is expected and benign.
 	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN park_identity TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v19 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV20 adds notification_msgs to jobs: the per-target Discord message
+// ids an edit-mode notification target rewrites in place for this job. See
+// the Job.NotificationMsgs doc comment in types.go.
+//
+// Nullable with NO default, unlike every other column added since v13: the
+// absence of a lifecycle message is SQL NULL, and an empty string would be a
+// second spelling of it that every reader would then have to know about.
+// (Spelled out as prose, not punctuation: a bare pair of single quotes in a
+// doc comment is rewritten by gofmt's doc-comment normalisation into a
+// typographic close-quote, which then trips `gofmt -l`.)
+//
+//	notification_msgs TEXT
+func (db *Database) migrateV20() error {
+	ctx := db.getCtx()
+	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
+	// written last), so a duplicate-column error is expected and benign.
+	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN notification_msgs TEXT`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v20 alter: %w", err)
 	}
 	return nil
 }

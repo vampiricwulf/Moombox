@@ -147,6 +147,22 @@ type Job struct {
 	// json:"-" on purpose. It is credential-derived and of no use to any UI;
 	// the user-facing signal is ParkReason plus the job's error text.
 	ParkIdentity string `json:"-"`
+	// NotificationMsgs maps a notification target's stable key — the first 16
+	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
+	// notifications.buildTargets dedupes on — to the id of the one Discord
+	// message that target rewrites in place for this job (per-target
+	// `mode = "edit"`). Empty/absent for every job on a separate-mode install,
+	// which is the default.
+	//
+	// Written ONCE per (job, target), on the first successful POST, through
+	// UpdateNotificationMsgs: a silent single-column write that bumps no
+	// updated_at and wakes no subscriber (owner ruling 2026-09-27). It is not
+	// in fieldToColumn on purpose — UpdateJobFields must never be able to
+	// write it, because that is the path that fans out to every UI.
+	//
+	// json:"-" on purpose. It pairs a fingerprint of a webhook URL (which IS
+	// the credential) with a Discord message id, and no UI displays either.
+	NotificationMsgs map[string]string `json:"-"`
 	// IncompleteTail marks a Finished job whose recording is known to be missing
 	// tail segments (finalized behind head after refresh attempts). Staging +
 	// resume sidecar are preserved; Retry/Resume are allowed and clear the flag
