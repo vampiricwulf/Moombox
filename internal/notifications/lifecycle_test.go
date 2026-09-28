@@ -435,6 +435,72 @@ func TestSecondTargetKeepsHistoryAfterFirstTargetsRelease(t *testing.T) {
 	}
 }
 
+// TestClosedFlagClearsWhenATargetOpensANewMessage: `release` marks a target
+// closed BY KEY, and a message-less terminal marks one on a job the target
+// holds no message for (a filter that excludes every creating event, or a
+// create that never landed). That flag must not outlive the next message the
+// target opens: `release`'s closed-set loop reads it against the ids in
+// `msgs`, so a stale one makes every message-holding target look closed and
+// the OTHER target's terminal release takes the whole job entry — and with it
+// this target's History.
+//
+// MUTANT: remove `delete(j.closed, key)` from `remember`. Target B's
+// `finished` drops the entry although A had reopened, so A's terminal PATCH
+// renders a one-line History ("Finished") instead of the three states it saw.
+// Every other test in the suite stays green.
+func TestClosedFlagClearsWhenATargetOpensANewMessage(t *testing.T) {
+	fa := newFakeDiscord(t, okCreated("MA"))
+	fb := newFakeDiscord(t, okCreated("MB"))
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(newMemStore())
+	tgtA := notificationTarget{sender: &DiscordWebhook{URL: fa.URL()}, mode: ModeEdit, msgKey: targetMsgKey(fa.URL())}
+	tgtB := notificationTarget{sender: &DiscordWebhook{URL: fb.URL()}, mode: ModeEdit, msgKey: targetMsgKey(fb.URL())}
+
+	send := func(tgt notificationTarget, event string) {
+		t.Helper()
+		if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: event, JobID: "yt_1"}), false); err != nil {
+			t.Fatalf("%s: %v", event, err)
+		}
+	}
+	// B opens the job's message first, so the entry has an open target and A's
+	// message-less terminal cannot simply drop it.
+	send(tgtB, "found")
+	// A's first word about this job is a failure it holds no message for: a
+	// plain post, and a `closed` flag with no message behind it.
+	send(tgtA, "error")
+	if calls := fa.calls(); len(calls) != 1 || calls[0].Method != http.MethodPost || calls[0].Query != "" {
+		t.Fatalf("target A's error = %+v, want one plain POST", calls)
+	}
+	// A is retried and now DOES open a message on the same job, accruing its
+	// own story over three states.
+	send(tgtA, "downloading")
+	send(tgtA, "muxing")
+	// B's terminal edit closes B. A reopened, so the entry must survive.
+	send(tgtB, "finished")
+	if n := m.tracker().trackedJobs(); n != 1 {
+		t.Errorf("tracked jobs after B's finished = %d, want 1 — A reopened and is still telling its story", n)
+	}
+	send(tgtA, "finished")
+
+	last := fa.calls()[len(fa.calls())-1]
+	if last.Method != http.MethodPatch || !strings.HasSuffix(last.Path, "/messages/MA") {
+		t.Fatalf("target A's finished = %s %s, want a PATCH of its own message MA", last.Method, last.Path)
+	}
+	var history string
+	for _, f := range last.Body.Embeds[0].Fields {
+		if f.Name == historyFieldName {
+			history = f.Value
+		}
+	}
+	if n := len(strings.Split(history, "\n")); n != 3 {
+		t.Errorf("target A's terminal History has %d lines (%q), want the 3 states it saw since it reopened", n, history)
+	}
+	// Both stories are closed now, so the entry goes.
+	if n := m.tracker().trackedJobs(); n != 0 {
+		t.Errorf("tracked jobs after BOTH targets finished = %d, want 0", n)
+	}
+}
+
 // TestTrackerCapsTrackedJobs: jobs that never reach a terminal event (cancelled
 // outside the notifier, deleted, filtered to mid-lifecycle keys) must not
 // retain an entry each, forever, in a process that runs for months.
