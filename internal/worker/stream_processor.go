@@ -582,6 +582,16 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 		if t, err := time.Parse(time.RFC3339, startsAt); err == nil {
 			startsAt = fmt.Sprintf("<t:%d:f>", t.Unix())
 		}
+		// The one row→facts mapper, exactly as the worker's "Authentication
+		// Required" send uses it (worker.go). `scheduled` is one of the
+		// eleven lifecycle events, and Manager.planLifecycle
+		// (internal/notifications/lifecycle.go) keys on Opts.JobID: without
+		// it an edit-mode target could never fold this embed into the job's
+		// one message, and the dashboard deep link — which needs JobID and
+		// Author both — would never apply. NotifyFacts also supplies the
+		// YouTube watch-URL fallback for a row whose url is still blank,
+		// which a freshly discovered upcoming stream's often is.
+		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Start Time Confirmed",
 			fmt.Sprintf("Scheduled: %s", job.Title),
 			notifications.TypeInfo,
@@ -590,9 +600,12 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 				{Name: "Starts At", Value: startsAt, Inline: true},
 			},
 			notifications.SendOptions{
-				URL:       job.URL,
-				Thumbnail: job.ThumbnailURL,
+				URL:       f.URL,
+				Thumbnail: f.ThumbnailURL,
 				Event:     "scheduled",
+				Author:    notifyAuthor(f),
+				Platform:  f.Platform,
+				JobID:     f.ID,
 			},
 		)
 	}
@@ -604,6 +617,10 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 			}
 			return raw
 		}
+		// Same mapper, same three identity fields, same reason as the
+		// confirmation above: `rescheduled` is a lifecycle event too, and the
+		// two are the same job's story.
+		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Schedule Changed",
 			fmt.Sprintf("Rescheduled: %s", job.Title),
 			notifications.TypeInfo,
@@ -613,9 +630,12 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 				{Name: "New Time", Value: fmtTime(info.ScheduledStartTime), Inline: true},
 			},
 			notifications.SendOptions{
-				URL:       job.URL,
-				Thumbnail: job.ThumbnailURL,
+				URL:       f.URL,
+				Thumbnail: f.ThumbnailURL,
 				Event:     "rescheduled",
+				Author:    notifyAuthor(f),
+				Platform:  f.Platform,
+				JobID:     f.ID,
 			},
 		)
 	}

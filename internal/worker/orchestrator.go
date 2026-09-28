@@ -238,14 +238,23 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 				Name: "Post-Download Trim", Value: startStr + " - " + endStr,
 			})
 		}
+		// The one row→facts mapper (notify_facts.go), as every other job send
+		// in this package uses it. `downloading` is a lifecycle event and
+		// Manager.planLifecycle keys on Opts.JobID, so an embed without one
+		// can never be folded into the job's edited message; the footer's
+		// platform and the dashboard deep link ride along with it.
+		f := NotifyFacts(jobCtx.Job)
 		o.notifier.Send("YouTube Download Starting",
 			desc,
 			notifications.TypeDownload,
 			startFields,
 			notifications.SendOptions{
-				URL:       jobCtx.Job.URL,
-				Thumbnail: jobCtx.Job.ThumbnailURL,
+				URL:       f.URL,
+				Thumbnail: f.ThumbnailURL,
 				Event:     "downloading",
+				Author:    notifyAuthor(f),
+				Platform:  f.Platform,
+				JobID:     f.ID,
 			},
 		)
 	}
