@@ -108,7 +108,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 1. **Config** — `config.Load()` reads TOML, applies defaults, runs legacy migrations
 2. **Logger** — slog wrapper with file rotation, ring buffer, pub/sub
 3. **Updater** — GitHub release checker, cleans up `.old` binary from previous update
-4. **Database** — SQLite WAL, 1 connection, migrations to schema v16, batch update goroutine
+4. **Database** — SQLite WAL, 1 connection, migrations to the current schema version (`docs/spec/appendix-metrics.md`, where the volatile numbers live), batch update goroutine
 5. **CookieJar** — Netscape cookie file parsing, in-memory cookie store
 6. **YouTube Service** — PlayerAPI + Auth + format selector, fetches homepage for visitor data and API key
 7. **Twitch Service** — GQL API + Auth + EmoteResolver
