@@ -456,11 +456,12 @@ URL validation rejects non-HTTPS Discord webhook URLs and URLs with invalid ID/t
 
 ### Target Options
 
-Each entry in the `[[notifications]]` array is a `NotificationConfig` (`internal/config/types.go`) and carries three options besides its URL and event filter:
+Each entry in the `[[notifications]]` array is a `NotificationConfig` (`internal/config/types.go`) and carries four options besides its URL and event filter:
 
 - **`enabled`** — a mute switch. `false` keeps the target, its filter and its mention in the config but delivers nothing; absent means enabled (`IsEnabled`, `internal/config/notifications.go`). `buildTargets` (`internal/notifications/manager.go`), called by both `NewManager` and `Reload`, skips a disabled target before it is ever given a queue and logs the skip at Info with the URL redacted. `HasTargets` (`internal/notifications/manager.go`) reports false once every configured target is muted (same as no targets at all), which correctly short-circuits the three producer guards that check it before building an embed nobody would see: the update-available check in `cmd/moombox/helpers.go` and both Stream Found call sites in `cmd/moombox/monitor_callbacks.go`. The disk alerts (`cmd/moombox/disk_alerts.go`) build unconditionally; with every target muted, `Send` has no queue to hand them to.
 - **`mention` + `mention_events`** — `mention` is a Discord ping: a role (`<@&ROLE_ID>`), a user (`<@USER_ID>`, also accepting the legacy `<@!USER_ID>` nickname spelling), `@everyone`, or `@here`. `ParseMention` (`internal/config/notifications.go`) validates and canonicalises it; `MentionParse` (`internal/notifications/discord.go`) turns the canonical text into the `allowed_mentions` object Discord requires beside a ping in `content` — a role or user ping produces an empty `parse` list plus the id under `roles`/`users`, `@everyone`/`@here` produce `parse: ["everyone"]`. `mention_events` picks which events carry the ping and is alias-aware the same way an event filter is (`mentionFor`, `internal/notifications/queue.go`): a target that mentions on a legacy event name is still pinged for the event it split into. Three states, not two: the key absent means the default six (`DefaultMentionEvents`, `internal/config/notifications.go` — `error`, `auth`, `disk_critical`, `update_failed`, `crash_recovered`, `sidecar_down`); `mention_events = []` means never; a written list means exactly those events (`ResolveMentionEvents`, `internal/config/notifications.go`). A config save that touches only `mention` or `mention_events` on a surviving target is picked up by the same reload as an event-filter change, through `setMention` (`internal/notifications/queue.go`), the mention twin of `setEvents`.
-- **`network.public_url`** — not a per-target key, but the config field (`PublicURL`, `internal/config/types.go`) every target's deep link depends on. When set, a job embed's title links to `{public_url}/#job=<id>` (`JobDeepLink`, `internal/notifications/mentions.go`) instead of the platform page, which moves to the embed's author line instead; a send with no `Author` gets no rewrite, since there is nowhere for the platform link to move to. Three live cases have none: the whole System family (a disk alert names no channel); every lifecycle send that carries no `JobID` either — `downloading`, `muxing`, `scheduled`/`rescheduled`, the `gap_split`/`quality_split` pair, the three `connectivity_*` events, `trim_error`/`trim_deleted`; and a job whose channel is unknown, which is what `moombox add` produces (`cliAddedFacts`, `cmd/moombox/job_notifications.go`, sets no `Channel` for a YouTube add or a Twitch VOD add), so that embed keeps the platform link in its title. `network.public_url` is validated and canonicalised by `ValidatePublicURL` (`internal/config/notifications.go`) — an absolute http(s) URL, no query, no fragment, no userinfo, trailing slash trimmed. It is read at send time (`Manager.Send`, `internal/notifications/manager.go`) from the same field `Reload` writes under the same lock, so a save from either editor applies without a restart.
+- **`mode`** — `"separate"` (default) or `"edit"`. See **Delivery Modes** below.
+- **`network.public_url`** — not a per-target key, but the config field (`PublicURL`, `internal/config/types.go`) every target's deep link depends on. When set, a job embed's title links to `{public_url}/#job=<id>` (`JobDeepLink`, `internal/notifications/mentions.go`) instead of the platform page, which moves to the embed's author line instead; a send with no `Author` gets no rewrite, since there is nowhere for the platform link to move to. Three families have none now. The whole System family (a disk alert names no channel); the platform-level credential sends, which carry only their event (`cmd/moombox/monitor_callbacks.go`, three `auth` sites) — the per-job "Authentication Required" alert is not one of them and does carry both; and `connectivity_restored`, the global-outage alert, for the same reason (`cmd/moombox/monitor_callbacks.go`). Separately, a job whose channel is unknown has an `Author` of nil even though it carries a `JobID` — that is what `moombox add` produces (`cliAddedFacts`, `cmd/moombox/job_notifications.go`, sets no `Channel` for a YouTube add or a Twitch VOD add), so that embed keeps the platform link in its title. The eight mid-lifecycle sends that used to be in the same boat — `downloading`, `muxing`, `scheduled`/`rescheduled`, the `gap_split`/`quality_split` pair, and the two `connectivity_*` events — carry all three now: Arc N3 routed every one of them through the same `NotifyFacts`/`notifyAuthor` pair (`internal/worker/notify_facts.go`) the rest of the package uses, so their embeds deep-link and carry the channel author line too. The two trim sends went the same way in the same arc — `sendTrimFailed` (`internal/worker/orchestrator.go`) and the `trim_deleted` half of `DeleteTrim` (`internal/worker/trim.go`) — so no job send in the program builds its options by hand any more. `network.public_url` is validated and canonicalised by `ValidatePublicURL` (`internal/config/notifications.go`) — an absolute http(s) URL, no query, no fragment, no userinfo, trailing slash trimmed. It is read at send time (`Manager.Send`, `internal/notifications/manager.go`) from the same field `Reload` writes under the same lock, so a save from either editor applies without a restart.
 
 ### Event Types
 
@@ -513,6 +514,106 @@ target of `eventAliases`' `connectivity_resume` entry (so an unmigrated filter
 keeps receiving the folded embed). The alias is a migration and is removed one
 release after the retirement ships.
 
+### Delivery Modes
+
+Each target carries a `mode`: `"separate"` (the default) or `"edit"`.
+
+**`separate`** — one message per event, never rewritten. This is what every
+target did before the `mode` key existed and what an unset `mode` still means.
+
+**`edit`** — one Discord message per job, per target. The first ALLOWED
+lifecycle event creates it (`POST …?wait=true`, which per the Discord API docs
+"waits for server confirmation of message send before response, and returns the
+created message body" — the only way to learn the id); every later allowed
+lifecycle event rewrites it in place with
+`PATCH /webhooks/{id}/{token}/messages/{message_id}`. The rewritten embed
+carries the new event's own title, description and fields plus two more: a
+**Status** field naming the current state, and a **History** field of
+`<t:unix:R> State` lines, one per state that reached this target, clamped to the
+field budget by dropping the OLDEST lines.
+
+The lifecycle set is `found`, `added`, `scheduled`, `rescheduled`,
+`downloading`, `quality_split`, `gap_split`, `connectivity_resume`,
+`connectivity_split`, `muxing`, `finished` (`lifecycleEvents`,
+`internal/notifications/lifecycle.go`). Everything else — `error`, `cancelled`,
+`auth`, the `trim_*` family and all of System — is always its own post: those
+may carry a mention, and an edit notifies nobody. Every lifecycle event carries
+its job id; the eight that did not before this arc now do.
+
+A target's mention rides an edited message the same way it rides a separate one
+— it is message-level `content`, not an embed field, so a PATCH carries it too.
+It rides as TEXT once the message exists, though: Discord does not notify on
+an edit, so on an edit-mode target only the events that stay separate posts
+(`error`, `cancelled`, `auth`, `trim_*`, System) — and whichever lifecycle
+event happens to CREATE the job's message, which is a real POST — can
+actually ping. An operator who adds `finished` to `mention_events` on such a
+target sees the mention in the message and gets a notification only when
+`finished` is the event that created it.
+
+`error` and `cancelled` do **both**: the lifecycle message is edited to its
+terminal look, and the separate embed is still posted, when a lifecycle
+message is already open; a terminal event never creates one, so a target
+whose first word about a job is "failed" simply posts it. Two messages on
+failure, by design — the separate one is what pings.
+
+There are no progress edits. A cadence-driven PATCH would spend the bucket for
+nothing.
+
+**What persists.** The created message's id is stored on the job row, in
+`jobs.notification_msgs` (schema 20) — a JSON object keyed by the first 16 hex
+digits of SHA-256 over the RESOLVED webhook URL, the same value target dedupe
+uses. It is written ONCE per (job, target), on the first successful POST,
+through `UpdateNotificationMsgs`: a silent single-column write that bumps no
+`updated_at` and wakes no subscriber. A restart therefore keeps editing the same
+message. The History does not persist — the message keeps being edited, but its
+History begins again at the first state after the restart.
+
+Ids are keyed on the resolved URL, so the two spellings of one webhook share one
+message; a target the operator removed leaves an orphaned entry that nothing
+reads; a target the operator adds starts a new message at its next allowed
+event; and deleting the job drops the row and the ids with it (no DELETE is ever
+sent to Discord).
+
+The in-memory half — the message ids a running process is holding, and the
+History lines — is released when a job reaches its terminal edit, and capped at
+`maxTrackedJobs` for jobs that never do. That is a cache eviction, not a close:
+the persisted id is what survives, so a Retry after a release re-reads the row
+once and keeps editing the same message.
+
+**During shutdown** every request on this path is single-attempt, like every
+other send: the owner's ruling caps a graceful shutdown at 10 s, and one
+lifecycle edit's retry ladder could spend all of it.
+
+**When the message is gone.** A PATCH answered `404` with `Unknown Message`
+(code 10008) makes the notifier post a new message and overwrite the stored id.
+A `404` naming `Unknown Webhook` (10015) is not that — the webhook itself was
+revoked, and it stays a permanent failure.
+
+**Budget.** Edits buy channel quiet, not request budget: per the Discord API
+docs the rate-limit bucket's top-level resource is `webhook_id + webhook_token`,
+so a PATCH spends the same bucket as a POST and goes through the same
+three-attempt loop, the same `Retry-After` handling and the same per-target
+FIFO. That FIFO is what makes edit mode safe — a job's states can never
+reorder, and a retried edit can never land after a later one.
+
+**Batching does not apply.** The 5 s `found`/`added`/`auth` window is
+separate-mode only: for an edit-mode target the `found` embed IS the job's
+lifecycle message, and coalescing it would defeat one-message-per-job.
+
+**A mode flip flushes the open window.** `applyTargets`
+(`internal/notifications/manager.go`) rebinds a surviving queue's dispatch
+decision through `setDispatch` (`internal/notifications/queue.go`) BEFORE it
+calls `setMode` (`internal/notifications/batch.go`) to flush that target's
+batcher. A flip INTO edit mode therefore flushes through the already-rebound
+edit path: a window holding exactly one pending **lifecycle** embed (a `found`
+or an `added`) is delivered by the edit branch of `dispatchOne`
+(`internal/notifications/lifecycle.go`) and becomes
+that job's newly created lifecycle message; a window holding more than one is
+still several jobs sharing a POST, so the same function's single-embed guard
+sends it as an ordinary multi-embed post instead, and each job's next event
+opens its own lifecycle message under the new mode. A flip back to separate
+mode flushes an always-empty window, because edit mode never opens one.
+
 ### Credential Notifications
 
 Every notification below carries `Event: "auth"`, so one filter entry covers the family. An empty `Event` would bypass every target's allowlist — the filter applies only when `Event != ""` — which is why none of them omits it.
@@ -542,6 +643,8 @@ A `Message` is one queue item, so the per-target FIFO's drop policy and the orde
 
 A retired target's open window is flushed into its queue before that queue starts discarding: `applyTargets` (`internal/notifications/manager.go`) stops the batcher before it retires the queue, so a webhook removed mid-window does not take its coalesced embeds with it. The flush is about ACCOUNTING, not about delivery — once in the queue the flushed message is treated exactly like anything else already queued for a removed target, which means it either wins the race with `stopDiscard` and goes out, or meets the same "target removed — discarding its queued notifications" Warn an ordinary queued item would. Without the flush it would simply vanish with the batcher, counted nowhere. `BeginShutdown` and `Wait` (`internal/notifications/manager.go`) flush every open window immediately, AFTER switching targets to single-attempt delivery — so the rescued batch is itself single-attempt rather than spending the shutdown budget on a 2s/5s ladder — and before closing the drain, since `enqueue` drops with a Warn once the queue is closing. A window open at shutdown is delivered, never held open to wait out its own 5 seconds.
 
+The window is separate-mode only: an edit-mode target's `found` embed IS the job's lifecycle message, so it is never coalesced. See **Delivery Modes**.
+
 ### Dispatch Behavior
 
 - **Per-target FIFO queues.** One bounded queue (256 entries, `notificationQueueCap`) and one draining goroutine per target, created by `applyTargets` (`internal/notifications/manager.go`). `Send` snapshots the target list under an RWMutex, applies each filter, and appends — it never blocks the caller and never spawns. Because one goroutine drains a target, a job's embeds can never reorder, and a burst can never put several concurrent POSTs into one webhook's rate bucket.
@@ -555,6 +658,7 @@ A retired target's open window is flushed into its queue before that queue start
 - **Rate bucket:** `X-RateLimit-Remaining` and `X-RateLimit-Reset-After` are read from every non-429 response. A remaining count of 0 arms a pre-emptive sleep (capped at 30s, plus a 50ms `bucketSkewPad` covering the header's millisecond rounding) on that webhook's sender, so the next embed waits out the window instead of spending one of its three attempts on a 429 Discord has already promised. Per Discord's rate-limit docs the bucket is discoverable only from these headers — there is no published numeric cap.
 - **Embed limits:** every embed is clamped on rune boundaries inside `buildPayload` before it is sent — title 256, description 4096, field name 256, field value 1024, footer 2048, author name 256, at most 25 fields and 6000 characters in total, with a `…` marker. Over any one of them is a permanent 400, so an unclamped embed was a silently dropped alert. Producers use `ClampRunes` (`internal/notifications/limits.go`) for their own excerpts and `EscapeMarkdown` (same file) for job-supplied text.
 - **Hot-reload:** notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. The diff is on the resolved webhook URL: a target that is still configured keeps its goroutine, its queued backlog and its learned rate bucket; a removed one finishes its in-flight delivery and exits, discarding the rest with one Warn naming the count. No restart required.
+- **Delivery mode:** per target, `separate` (default) or `edit` — see **Delivery Modes** above. Hot-reloads with the rest of the notifications array; no restart.
 - **Save-time validation:** webhook URLs are validated at save (web `validateConfigUpdates` + TUI editor) via `notifications.ValidateURL`; `POST /api/notifications/test {url}` sends a single-attempt test embed (used by the web Test buttons and the TUI `T` action, including for unsaved URLs). Both `discord.com` and the legacy `discordapp.com` host are accepted; the latter is canonicalised, so the two spellings of one webhook collapse to one target.
 - **Graceful shutdown:** `BeginShutdown` switches every target to single-attempt delivery, then `Wait` drains the queues — see the Shutdown Sequence above for the 10-second cap that actually bounds it. That single attempt's own rate-bucket wait is capped at 2s (`shutdownBucketWaitCap`), not the Rate bucket bullet's normal 30s: a wait that long could outrun the force-exit on its own, or starve every item still behind it in that target's queue.
 - **Embed format:** Discord rich embeds with title, description, color (by notification type), optional fields, an author line (channel name, avatar, channel page), thumbnail, image, footer (`Moombox · {platform} · {job id}`, or just `Moombox`), and an ISO 8601 timestamp. A mention, when a target is configured for one, rides the message `content` with a matching `allowed_mentions` — embeds never mention on their own.
@@ -669,6 +773,8 @@ The script pulls each repository, displays new commits since the last pull, and 
 | `internal/updater/signing.go` | Ed25519 verification, embedded public key |
 | `internal/notifications/manager.go` | Notification dispatch, event filtering, target management |
 | `internal/notifications/discord.go` | Discord webhook sender |
+| `internal/notifications/lifecycle.go` | Edit-in-place lifecycle messages: the event set, the per-(job, target) message-id store, the POST-or-PATCH decision, the Status/History rewrite |
+| `internal/notifications/discord_edit.go` | `?wait=true` create + `PATCH …/messages/{id}` edit, and the Unknown-Message refusal |
 | `internal/disk/disk_windows.go` | Disk space queries via kernel32 (Windows) |
 | `internal/disk/disk_unix.go` | Disk space queries via statfs (Linux) |
 | `internal/config/config.go` | Default values, validation (including disk thresholds) |

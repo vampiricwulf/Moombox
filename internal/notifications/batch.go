@@ -70,6 +70,13 @@ type batcher struct {
 	mentionAllowed *AllowedMentions
 	// timer is armed by the first item of a window and disarmed by the flush.
 	timer batchTimer
+	// mode is the target's delivery mode (lifecycle.go), set at construction
+	// by newTargetQueue and rebound by applyTargets through setMode on every
+	// config load. ModeEdit turns this whole stage off for the target: an
+	// edited message is ONE job's embed rewritten in place, so it can never
+	// share a POST with another job's. The zero value reads as ModeSeparate,
+	// which is what a bare newBatcher gets.
+	mode string
 }
 
 func newBatcher(window time.Duration, clock batchClock, emit emitFunc, logger interface {
@@ -90,17 +97,18 @@ func newBatcher(window time.Duration, clock batchClock, emit emitFunc, logger in
 // was closed. mention/mentionAllowed travel with the embed so a flush can
 // decide the message's single ping.
 func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
-	// Arc N3's edit-in-place mode gates the whole stage here, as the first
-	// thing Add does:
-	//
-	//	if b.mode == modeEdit {
-	//		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
-	//		return
-	//	}
-	//
-	// An edited message is ONE job's embed rewritten in place, so it can never
-	// share a POST with another job's. Everything below is written as if every
-	// target is separate-mode, which in N2b every target is.
+	// Edit mode gates the whole stage, as the first thing Add does: an edited
+	// message is ONE job's embed rewritten in place, so it can never share a
+	// POST with another job's. Everything below is written as if the target is
+	// separate-mode, which past this point it is.
+	b.mu.Lock()
+	editMode := b.mode == ModeEdit
+	b.mu.Unlock()
+	if editMode {
+		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
+		return
+	}
+
 	if !isBatchable(e.Opts) {
 		// Deliberately AHEAD of the embeds already coalesced: an error must not
 		// wait 5 s behind a backfill sweep. This is the one ordering change
@@ -168,6 +176,50 @@ func (b *batcher) Flush() {
 // Stop flushes and disarms. A retired target calls it so the window it was
 // holding reaches its queue instead of vanishing with the batcher.
 func (b *batcher) Stop() { b.Flush() }
+
+// setMode swaps the target's delivery mode, FLUSHING the open window first.
+//
+// A batcher holding pending `found` embeds when its target switches to edit
+// mode is delivered on the flip rather than dropped: a one-embed window goes
+// out through the already-rebound dispatch and becomes that job's lifecycle
+// message; a multi-embed window posts plain (dispatchOne's single-embed
+// guard) — the same reason applyTargets flushes a retired target's window
+// rather than letting it evaporate. Flushing on the way back to separate mode
+// costs nothing (the window is empty, because edit mode never opened one) and
+// keeps the rule one sentence long.
+//
+// The window and the mode move under ONE hold, and the emit happens after it:
+// an Add landing between a flush and a later swap would otherwise join a
+// window that had just been emptied, arm its timer under the mode the flip is
+// leaving, and make that embed wait out the full 5 s on a target that is now
+// in edit mode — where a later event emitting at once would overtake it and
+// append the job's History out of order.
+//
+// Both sides are normalised, so the first bind of a fresh batcher (already
+// born in its target's mode — see newTargetQueue) is a no-op.
+func (b *batcher) setMode(mode string) {
+	mode = normalizeTargetMode(mode)
+	b.mu.Lock()
+	if normalizeTargetMode(b.mode) == mode {
+		b.mu.Unlock()
+		return
+	}
+	if b.timer != nil {
+		// Disarm before releasing the window, exactly as Flush does: a timer
+		// that has not fired yet must not emit these embeds a second time.
+		b.timer.Stop()
+		b.timer = nil
+	}
+	pending, mention, allowed := b.pending, b.mention, b.mentionAllowed
+	b.pending, b.mention, b.mentionAllowed = nil, "", nil
+	b.mode = mode
+	b.mu.Unlock()
+
+	// OUTSIDE b.mu — emit reaches q.enqueue and the queue's own mutex.
+	for _, embeds := range splitMessages(pending) {
+		b.emit(Message{Embeds: embeds, Mention: mention, MentionAllowed: allowed})
+	}
+}
 
 // isBatchable reports whether a send coalesces.
 //

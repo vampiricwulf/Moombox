@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -258,7 +259,8 @@ func (db *Database) prepareStatements() error {
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
-		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity
+		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
+		notification_msgs
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -432,8 +434,9 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 // updateSingleColumnSilent. Restricting to this set prevents accidental misuse
 // for fields that should trigger subscriber notifications.
 var silentColumns = map[string]struct{}{
-	"resume_position": {},
-	"chat_offset":     {},
+	"resume_position":   {},
+	"chat_offset":       {},
+	"notification_msgs": {},
 }
 
 // updateSingleColumnSilent sets a single column on jobs WITHOUT bumping
@@ -483,6 +486,75 @@ func (db *Database) UpdateChatOffset(jobID string, offset float64) bool {
 	return db.updateSingleColumnSilent(jobID, "chat_offset", offset, "UpdateChatOffset")
 }
 
+// decodeNotificationMsgs turns the stored JSON object into the per-target
+// message-id map. NULL, an empty/blank string, malformed JSON, a non-object
+// and an empty object all read as nil.
+//
+// Deliberately total: this runs inside scanJobRow, which is the ONE path every
+// job read in the program goes through. A corrupt value here must degrade to
+// "this job has no lifecycle message, post a new one" — never fail the scan
+// and take the dashboard, the TUI and the worker down with it.
+func decodeNotificationMsgs(v sql.NullString) map[string]string {
+	if !v.Valid || strings.TrimSpace(v.String) == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(v.String), &m); err != nil {
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// UpdateNotificationMsgs stores a job's per-target lifecycle message ids
+// WITHOUT bumping updated_at or notifying subscribers. The notifier is the
+// only reader and no UI displays the value, so a subscriber frame per write
+// would be pure noise (owner ruling 2026-09-27: one write per job per target,
+// on the first successful POST only).
+//
+// An empty or nil map stores SQL NULL rather than "{}" — the absence of a
+// lifecycle message has exactly one spelling. Returns true when a row was
+// actually updated, so a job deleted between the POST and its response
+// answers false instead of silently reporting success.
+func (db *Database) UpdateNotificationMsgs(jobID string, msgs map[string]string) bool {
+	var value any
+	if len(msgs) > 0 {
+		b, err := json.Marshal(msgs)
+		if err != nil {
+			if db.logger != nil {
+				db.logger.Error("UpdateNotificationMsgs: marshal failed", "jobID", jobID, "err", err)
+			}
+			return false
+		}
+		value = string(b)
+	}
+	return db.updateSingleColumnSilent(jobID, "notification_msgs", value, "UpdateNotificationMsgs")
+}
+
+// NotificationMsgs reads just the lifecycle message-id map for one job.
+//
+// A narrow single-column read on purpose: the notifier needs this on the first
+// lifecycle event of every job, and GetJob would drag the gaps and trims joins
+// along for a column nothing else on that path uses. An unknown job, a read
+// error and a corrupt value all answer nil.
+func (db *Database) NotificationMsgs(jobID string) map[string]string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var raw sql.NullString
+	err := db.db.QueryRowContext(db.getCtx(),
+		"SELECT notification_msgs FROM jobs WHERE id = ?", jobID).Scan(&raw)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) && db.logger != nil {
+			db.logger.Warn("NotificationMsgs: read failed", "jobID", jobID, "err", err)
+		}
+		return nil
+	}
+	return decodeNotificationMsgs(raw)
+}
+
 // rowScanner is implemented by both *sql.Row and *sql.Rows, allowing a single
 // scanJobRow function to serve both the single-row and iteration paths.
 type rowScanner interface {
@@ -495,6 +567,7 @@ type rowScanner interface {
 func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched, incompleteTail int
+	var notifMsgs sql.NullString
 	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -510,6 +583,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,
+		&notifMsgs,
 	)
 	if err != nil {
 		return nil, err
@@ -519,6 +593,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	j.AllowNonStream = intToBool(allowNonStream)
 	j.Watched = intToBool(watched)
 	j.IncompleteTail = intToBool(incompleteTail)
+	j.NotificationMsgs = decodeNotificationMsgs(notifMsgs)
 	return &j, nil
 }
 

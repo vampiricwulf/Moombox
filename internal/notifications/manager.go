@@ -17,7 +17,18 @@ import (
 // discordapp.com is Discord's legacy domain and still serves webhooks; a URL
 // pasted from an old bookmark was rejected outright before it was accepted here
 // (audit R6). parseTarget canonicalises it to discord.com.
-var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+`)
+//
+// ANCHORED at both ends: without the trailing `$` the pattern matched a
+// PREFIX, so anything glued after the token came along to the wire — a ")"
+// copied out of a Markdown link, a trailing space or newline from a paste, or
+// a "/../evil" that resolves onto another path entirely.
+//
+// The tail is deliberately not a bare `$`: an optional trailing slash is what
+// a browser's address bar hands back, and an optional query is the forum-
+// thread form "?thread_id=…" that Discord documents and that execWaitURL and
+// messageURL are both written around. A fragment is not admitted — it never
+// reaches the server, and both builders drop it.
+var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#]*)?$`)
 
 // redactURLForLog reduces an arbitrary notification URL to scheme://host for
 // log lines. Webhook URLs routinely embed secrets in their path or query
@@ -284,6 +295,11 @@ type Manager struct {
 		Warn(msg string, args ...any)
 		Error(msg string, args ...any)
 	}
+	// lifecycle holds the per-(job, target) message ids edit-mode targets
+	// rewrite. Created lazily by tracker() so the package's bare &Manager{...}
+	// test literals need no extra field.
+	lifecycle   *lifecycleTracker
+	trackerOnce sync.Once
 }
 
 // notificationTarget is one destination as buildTargets resolved it, before
@@ -301,6 +317,18 @@ type notificationTarget struct {
 	mention        string
 	mentionAllowed *AllowedMentions
 	mentionEvents  map[string]bool
+	// mode is "separate" (default) or "edit" — see lifecycle.go.
+	mode string
+	// msgKey is targetMsgKey(resolved webhook URL): the stable key this
+	// target's lifecycle message ids are stored under. Empty for a transport
+	// with no resolved URL, which disables edit mode for it.
+	//
+	// Precomputed rather than derived from `key` at each send. `key` IS the
+	// resolved URL and targetMsgKey hashes it, so deriving lazily would run a
+	// SHA-256 per lifecycle embed on the sender goroutine and would keep
+	// handing the raw webhook URL — the credential — to the hot path the
+	// hashing exists to keep it out of.
+	msgKey string
 }
 
 // sender is one delivery destination.
@@ -520,6 +548,12 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// occurrence's ping wins outright, like its sender and its
 				// slot, because two mentions have no wider form to merge into
 				// and pinging both would double one alert's noise.
+				//
+				// The MODE is not unioned either, for the same reason and by
+				// the same rule: the first occurrence's `mode` (and the
+				// msgKey derived from the shared resolved URL) is what
+				// survives, so a webhook listed twice cannot be half edited
+				// and half separate.
 				switch {
 				case targets[idx].events == nil || events == nil:
 					targets[idx].events = nil
@@ -540,6 +574,8 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			mention:        mention,
 			mentionAllowed: mentionAllowed,
 			mentionEvents:  mentionEvents,
+			mode:           normalizeTargetMode(nc.Mode),
+			msgKey:         targetMsgKey(key),
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
@@ -572,11 +608,46 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 // that cannot name itself must either be given a synthetic key or retired
 // here explicitly.
 func (m *Manager) applyTargets(built []notificationTarget) {
+	// The mode each queue must end up in, applied AFTER the lock is dropped:
+	// setMode flushes an open coalescing window, which reaches q.enqueue and
+	// can log — the same two reasons the retired-target flush below is outside
+	// the lock (and queue.go's pop() note: a lock held across a queue Warn is
+	// what a logger re-entering the manager deadlocks on).
+	modes := make([]struct {
+		q    *targetQueue
+		mode string
+	}, 0, len(built))
+
 	m.targetsMu.Lock()
 	previous := m.byKey
 	next := make([]*targetQueue, 0, len(built))
 	byKey := make(map[string]*targetQueue, len(built))
 	for _, t := range built {
+		// bind installs THIS target's POST-or-PATCH decision on whichever
+		// queue it ends up with, and records the mode its batcher must move
+		// to. It runs in BOTH arms for the same reason setEvents and
+		// setMention do: a survivor keeps its queue and the freshly built
+		// notificationTarget is thrown away, so a `mode` flip would otherwise
+		// be accepted by both UIs and ignored until restart. `tgt` is the
+		// per-iteration copy the closure captures.
+		tgt := t
+		bind := func(q *targetQueue) {
+			// The SENDER comes from the queue, never from the freshly built
+			// target: a survivor keeps the sender it already has, and with it
+			// the rate bucket that sender has learned (the whole reason the
+			// diff keeps the queue). Binding tgt.sender would hand every
+			// survivor a brand-new *DiscordWebhook on each unrelated config
+			// save, silently resetting its bucket state.
+			bound := tgt
+			bound.sender = q.sender
+			q.setDispatch(func(msg Message, once bool) error {
+				return m.dispatchOne(bound, msg, once)
+			})
+			modes = append(modes, struct {
+				q    *targetQueue
+				mode string
+			}{q, normalizeTargetMode(tgt.mode)})
+		}
 		if q, survives := previous[t.key]; survives && t.key != "" {
 			q.setEvents(t.events)
 			// The freshly built target is discarded here, so without this a
@@ -584,12 +655,14 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			// both UIs, written to the file, and then ignored until restart —
 			// the same defect setEvents exists to prevent for the filter.
 			q.setMention(t)
+			bind(q)
 			next = append(next, q)
 			byKey[t.key] = q
 			delete(previous, t.key)
 			continue
 		}
 		q := newTargetQueue(t, m.logger, &m.shuttingDown, m.clock)
+		bind(q)
 		next = append(next, q)
 		if t.key != "" {
 			byKey[t.key] = q
@@ -603,6 +676,16 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 	m.targets = next
 	m.byKey = byKey
 	m.targetsMu.Unlock()
+
+	// Outside the lock, and BEFORE the retired targets are stopped: a batcher
+	// whose target just switched to edit mode delivers the window it is
+	// holding on the flip rather than dropping it — a one-embed window goes
+	// out through the already-rebound dispatch and becomes that job's
+	// lifecycle message; a multi-embed window posts plain (dispatchOne's
+	// single-embed guard). A mode that did not change is a no-op.
+	for _, mc := range modes {
+		mc.q.batch.setMode(mc.mode)
+	}
 
 	// Outside the lock: stopDiscard takes the queue's own mutex and logs, and
 	// so does the flush that precedes it.

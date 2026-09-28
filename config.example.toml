@@ -326,6 +326,9 @@
 # mention_events = ["error", "auth"]       # Optional: which events the mention rides along with.
 #                                             Omit entirely to use the default six (error, auth, disk_critical,
 #                                             update_failed, crash_recovered, sidecar_down); set to [] to never mention.
+# mode = "separate"                        # Optional: "separate" (default: one message per event) or
+#                                             "edit" (one message per job, rewritten in place as it
+#                                             progresses; alerts stay separate)
 
 # ─── Channels ─────────────────────────────────────────────────────────────────
 # Add channels to monitor. Each [[channels]] block defines one channel.

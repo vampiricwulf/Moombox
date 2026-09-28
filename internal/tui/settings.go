@@ -290,10 +290,11 @@ var allNotifEvents = func() []string {
 // in the editor's renderer and mouse map goes through these, because three of
 // them were hard-coded +1 before the Enabled and Mention rows existed.
 const (
-	notifEditURLRow     = 0
-	notifEditEnabledRow = 1
-	notifEditMentionRow = 2
-	notifEditEventBase  = 3
+	notifEditURLRow      = 0
+	notifEditEnabledRow  = 1
+	notifEditMentionRow  = 2
+	notifEditDeliveryRow = 3
+	notifEditEventBase   = 4
 )
 
 // notifEventNameWidth is the column the per-event @ mention marker starts at,
@@ -407,8 +408,14 @@ type SettingsModel struct {
 	notifMode       string // "list" or "edit"
 	notifEditURL    string
 	notifEditEvents map[string]bool
+	// notifEditDelivery is the per-TARGET delivery mode being edited,
+	// "separate" or "edit". Deliberately not named notifEditMode: notifMode
+	// above is the SUB-EDITOR's mode ("list" / "edit"), a different axis that
+	// happens to share the word.
+	notifEditDelivery string
 	// notifEditFocus indexes the edit form's rows: 0 = Webhook URL,
-	// 1 = Enabled, 2 = Mention, notifEditEventBase+n = the nth event row.
+	// 1 = Enabled, 2 = Mention, 3 = Delivery, notifEditEventBase+n = the nth
+	// event row.
 	notifEditFocus int
 	// notifEditEnabled is the per-target mute. Absent in config means
 	// delivering, so an existing target opens on IsEnabled().

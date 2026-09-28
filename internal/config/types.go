@@ -487,6 +487,15 @@ type NotificationConfig struct {
 	// empty slice from both the TOML and the JSON encoding, so "never" would
 	// reload as "the default six".
 	MentionEvents *[]string `toml:"mention_events,omitempty" json:"mention_events,omitempty"`
+	// Mode is how this target delivers a job's lifecycle events: "separate"
+	// (the default — one message per event, never edited) or "edit" (one
+	// message per job, created by the first allowed lifecycle event and
+	// rewritten by every later one). Empty means "separate".
+	//
+	// Opt-in per target by owner ruling (2026-09-27): filters, docs and both
+	// UIs are built around one-event-one-embed, so edit mode is something an
+	// operator asks for, never something they are given.
+	Mode string `toml:"mode,omitempty" json:"mode,omitempty"`
 }
 
 // TemplateVariables holds template variables for output filenames.

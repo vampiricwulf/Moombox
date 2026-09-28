@@ -985,13 +985,16 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
-	// notifications[i].mention / mention_events. mention is validated as a
+	// notifications[i].mention / mention_events / mode. mention is validated as a
 	// well-formed Discord mention token — the four forms are syntactic, so
 	// this needs no vocabulary. mention_events gets a SHAPE-only pass (trim,
 	// drop blanks, dedupe, preserve order); the event-name vocabulary check
 	// happens at buildTargets and the web save path, the two places that can
 	// see internal/notifications.KnownEvents without an import cycle back
-	// into this package.
+	// into this package. mode is a two-word closed vocabulary ("separate" or
+	// "edit", empty meaning separate) spelled out here rather than imported,
+	// for the same no-cycle reason — internal/notifications.ModeEdit is the
+	// other half of the pair.
 	for i := range cfg.Notifications {
 		n := &cfg.Notifications[i]
 		if n.Mention != "" {
@@ -1003,6 +1006,19 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				}
 			} else if !reportOnly {
 				n.Mention = canonical
+			}
+		}
+		switch strings.TrimSpace(n.Mode) {
+		case "", "separate", "edit":
+			// Canonicalise the empty spelling away so every reader sees one
+			// value for "the default".
+			if !reportOnly {
+				n.Mode = strings.TrimSpace(n.Mode)
+			}
+		default:
+			fail("notifications[%d].mode %q must be \"separate\" or \"edit\"", i, n.Mode)
+			if !reportOnly {
+				n.Mode = "separate"
 			}
 		}
 		if n.MentionEvents != nil {

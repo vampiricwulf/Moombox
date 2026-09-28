@@ -65,6 +65,10 @@ const (
 	// arbitrarily large, and this error reaches log files and SendTest's HTTP
 	// response.
 	discordErrBodyBytes = 256
+	// discordMessageBodyBytes bounds the ?wait=true response read. A webhook
+	// message object with one embed is a few KB; 64 KiB is slack, and the only
+	// field parsed out of it is "id".
+	discordMessageBodyBytes = 64 << 10
 )
 
 // discordRetryBackoff is the inter-attempt sleep schedule for transport
@@ -287,7 +291,7 @@ func (d *DiscordWebhook) SendOnce(msg Message) error {
 		return err
 	}
 	d.waitForBucketWithin(shutdownBucketWaitCap)
-	r, err := d.post(body)
+	r, err := d.do(http.MethodPost, d.URL, body, false)
 	d.noteBucket(r)
 	switch {
 	case err != nil:
@@ -307,13 +311,22 @@ func (d *DiscordWebhook) Send(msg Message) error {
 	if err != nil {
 		return err
 	}
+	_, err = d.deliver(http.MethodPost, d.URL, body, false)
+	return err
+}
 
-	// Bounded delivery loop: transport errors and Discord 5xx retry on the
-	// fixed backoff schedule, 429 honors a validated Retry-After, other 4xx
-	// are permanent (bad payload, revoked webhook — retrying just spams).
-	// Alerts exist precisely for flaky moments; the previous single-shot
-	// behavior dropped e.g. a "recording failed" embed on the first
-	// connection reset.
+// deliver runs the bounded delivery loop against one method+URL and returns
+// the successful attempt's response body (nil unless wantBody).
+//
+// Transport errors and Discord 5xx retry on the fixed backoff schedule, 429
+// honors a validated Retry-After, other 4xx are permanent. POST and PATCH go
+// through this ONE loop on purpose: per the Discord API docs the bucket's
+// top-level resource is webhook_id + webhook_token, so an edit spends the same
+// budget as a post and must obey the same schedule.
+//
+// Alerts exist precisely for flaky moments; the previous single-shot behavior
+// dropped e.g. a "recording failed" embed on the first connection reset.
+func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) ([]byte, error) {
 	var lastErr error
 	var slept time.Duration
 	for attempt := 1; ; attempt++ {
@@ -321,7 +334,7 @@ func (d *DiscordWebhook) Send(msg Message) error {
 		// out its window instead of spending one of three attempts on the 429
 		// Discord has already promised.
 		d.waitForBucket()
-		r, err := d.post(body)
+		r, err := d.do(method, endpoint, body, wantBody)
 		d.noteBucket(r)
 
 		var delay time.Duration
@@ -330,7 +343,7 @@ func (d *DiscordWebhook) Send(msg Message) error {
 			lastErr = fmt.Errorf("discord webhook request: %w", err)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
 		case r.status < 400:
-			return nil
+			return r.body, nil
 		case r.status == http.StatusTooManyRequests:
 			// Validate in FLOAT space before converting: values past ~9.2e9s
 			// (or Inf) overflow time.Duration to a NEGATIVE on amd64, which
@@ -340,7 +353,7 @@ func (d *DiscordWebhook) Send(msg Message) error {
 			if parseErr != nil || !(secs > 0) || secs > discordRetryAfterCap.Seconds() {
 				// Missing, malformed, or absurd Retry-After — surface the
 				// 429 directly rather than guessing a sleep.
-				return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
+				return nil, fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			}
 			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			delay = time.Duration(secs * float64(time.Second))
@@ -348,17 +361,17 @@ func (d *DiscordWebhook) Send(msg Message) error {
 			lastErr = discordStatusErr(r.status, r.snippet)
 			delay = discordRetryBackoff[min(attempt-1, len(discordRetryBackoff)-1)]
 		default:
-			return discordStatusErr(r.status, r.snippet)
+			return nil, discordStatusErr(r.status, r.snippet)
 		}
 
 		if attempt == discordMaxAttempts {
-			return fmt.Errorf("%w (gave up after %d attempts)", lastErr, discordMaxAttempts)
+			return nil, fmt.Errorf("%w (gave up after %d attempts)", lastErr, discordMaxAttempts)
 		}
 		if slept+delay > discordMaxSleepTotal {
 			// Cumulative-sleep budget exhausted (e.g. a second large
 			// Retry-After) — bound this target queue's hold instead of
 			// waiting out an extended rate-limit.
-			return fmt.Errorf("%w (retry budget exhausted after %d attempts)", lastErr, attempt)
+			return nil, fmt.Errorf("%w (retry budget exhausted after %d attempts)", lastErr, attempt)
 		}
 		slept += delay
 		time.Sleep(delay)
@@ -387,11 +400,13 @@ func discordErrSnippet(b []byte) string {
 // when Discord sent one. Used by every site that reports a status — 4xx and
 // 5xx alike: the 5xx text is what an operator sees after the retry budget is
 // spent, which is precisely when the reason matters.
+//
+// The concrete *discordHTTPError (discord_edit.go) keeps the status and
+// snippet reachable with errors.As after the retry loop has wrapped the error,
+// which is how the edit path tells a 404/10008 from every other refusal. The
+// rendered text is unchanged.
 func discordStatusErr(status int, snippet string) error {
-	if snippet == "" {
-		return fmt.Errorf("discord webhook returned %d", status)
-	}
-	return fmt.Errorf("discord webhook returned %d: %s", status, snippet)
+	return &discordHTTPError{Status: status, Snippet: snippet}
 }
 
 // waitForBucket honours what Discord last told us about this webhook's rate
@@ -487,14 +502,25 @@ type discordResponse struct {
 	rateRemain string // X-RateLimit-Remaining
 	rateReset  string // X-RateLimit-Reset-After, in seconds
 	snippet    string // sanitised body prefix, >= 400 only
+	body       []byte // the 2xx response body, read only when wantBody is set
 }
 
-// post performs one webhook POST attempt.
-func (d *DiscordWebhook) post(body []byte) (discordResponse, error) {
+// do performs one webhook request attempt against method+endpoint. Same
+// returns post had, plus the 2xx response body when wantBody is set.
+//
+// The method and target are parameters rather than the fixed POST d.URL
+// because the edit path issues PATCH against the per-message route; per the
+// Discord API docs both share the webhook's rate-limit bucket, so they must
+// share this one request path and the loop above it.
+//
+// The parameter is named endpoint, not url: the body reaches for *url.Error
+// to redact the token out of a transport error, and a parameter named url
+// would shadow the net/url import.
+func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool) (discordResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), discordTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return discordResponse{}, fmt.Errorf("create discord request: %w", err)
 	}
@@ -530,6 +556,10 @@ func (d *DiscordWebhook) post(body []byte) (discordResponse, error) {
 		// which is a usable snippet — better than discarding it outright.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
 		out.snippet = discordErrSnippet(b)
+	} else if wantBody {
+		// Only the ?wait=true POST needs this; every other call leaves the
+		// body to the deferred drain.
+		out.body, _ = io.ReadAll(io.LimitReader(resp.Body, discordMessageBodyBytes))
 	}
 	return out, nil
 }

@@ -245,6 +245,12 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 		trimDuration := target.EndTime - target.StartTime
 		timeRange := fmt.Sprintf("%s - %s", FormatSecondsToTimestamp(target.StartTime), FormatSecondsToTimestamp(target.EndTime))
 		durStr := formatDurationHuman(time.Duration(trimDuration) * time.Second)
+		// The one row->facts mapper (notify_facts.go), as every other job send
+		// in this package uses it. `trim_deleted` is never a lifecycle event —
+		// it stays a separate post — but the footer's platform, the author
+		// line and the dashboard deep link are the job's either way, and the
+		// deep link needs JobID and Author together.
+		f := NotifyFacts(job)
 		ts.notifier.Send("Trim Deleted",
 			fmt.Sprintf("Trim deleted for: %s", job.Title),
 			notifications.TypeInfo,
@@ -254,9 +260,12 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 				{Name: "Duration", Value: durStr, Inline: true},
 			},
 			notifications.SendOptions{
-				URL:       job.URL,
-				Thumbnail: job.ThumbnailURL,
+				URL:       f.URL,
+				Thumbnail: f.ThumbnailURL,
 				Event:     "trim_deleted",
+				Author:    notifyAuthor(f),
+				Platform:  f.Platform,
+				JobID:     f.ID,
 			},
 		)
 	}

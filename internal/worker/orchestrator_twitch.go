@@ -144,14 +144,24 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if jobCtx.Job.TwitchCategory != "" {
 			startFields = append(startFields, notifications.Field{Name: "Category", Value: jobCtx.Job.TwitchCategory, Inline: true})
 		}
+		// The YouTube twin of this send (orchestrator.go) carries the same
+		// three identity fields off the same mapper, for the same reason:
+		// `downloading` is a lifecycle event and Manager.planLifecycle keys
+		// on Opts.JobID. NotifyFacts leaves a Twitch row's URL alone — the
+		// watch-URL fallback is YouTube-only, because there is nothing to
+		// guess here.
+		f := NotifyFacts(jobCtx.Job)
 		o.notifier.Send("Twitch Download Starting",
 			desc,
 			notifications.TypeDownload,
 			startFields,
 			notifications.SendOptions{
-				URL:       jobCtx.Job.URL,
-				Thumbnail: jobCtx.Job.ThumbnailURL,
+				URL:       f.URL,
+				Thumbnail: f.ThumbnailURL,
 				Event:     "downloading",
+				Author:    notifyAuthor(f),
+				Platform:  f.Platform,
+				JobID:     f.ID,
 			},
 		)
 	}
@@ -1160,11 +1170,21 @@ func (o *DownloadOrchestrator) sendTwitchSessionNotification(
 		{Name: "Part", Value: fmt.Sprintf("%d", partNo), Inline: true},
 	}
 	fields = append(fields, extra...)
+	// The event stays the caller's — this helper serves connectivity_resume
+	// and connectivity_split, and only the caller knows which outage shape it
+	// is reporting. The identity, though, is the row's: both keys are
+	// lifecycle events, and Manager.planLifecycle keys on Opts.JobID, so
+	// without these three an edit-mode target posts them beside the job's
+	// message instead of into it.
+	f := NotifyFacts(jobCtx.Job)
 	o.notifier.Send(title, desc, ntype, fields,
 		notifications.SendOptions{
-			URL:       jobCtx.Job.URL,
-			Thumbnail: jobCtx.Job.ThumbnailURL,
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
 			Event:     event,
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
 		},
 	)
 }

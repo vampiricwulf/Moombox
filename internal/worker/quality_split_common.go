@@ -162,6 +162,10 @@ func (o *DownloadOrchestrator) sendGapSplitNotification(
 	if o.notifier == nil {
 		return
 	}
+	// The one row→facts mapper (notify_facts.go). `gap_split` is a lifecycle
+	// event, and Manager.planLifecycle keys on Opts.JobID: a part boundary
+	// belongs IN the job's edited message, not beside it.
+	f := NotifyFacts(jobCtx.Job)
 	o.notifier.Send(
 		"Twitch Stream Gap — New Part Started",
 		fmt.Sprintf("Segments expired before they could be downloaded; part %d is complete and part %d continues at the live edge: %s",
@@ -173,9 +177,12 @@ func (o *DownloadOrchestrator) sendGapSplitNotification(
 			{Name: "Completed Part", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
 		},
 		notifications.SendOptions{
-			URL:       jobCtx.Job.URL,
-			Thumbnail: jobCtx.Job.ThumbnailURL,
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
 			Event:     "gap_split",
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
 		},
 	)
 }
@@ -202,6 +209,9 @@ func (o *DownloadOrchestrator) sendQualitySplitNotification(
 	if !partCompleted {
 		partField = notifications.Field{Name: "Short Span", Value: "discarded (under 10s)", Inline: true}
 	}
+	// Same mapper, same reason as the gap split above: `quality_split` is a
+	// lifecycle event keyed on Opts.JobID.
+	f := NotifyFacts(jobCtx.Job)
 	o.notifier.Send(
 		fmt.Sprintf("%s Quality Split", platformTitle),
 		fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
@@ -213,9 +223,12 @@ func (o *DownloadOrchestrator) sendQualitySplitNotification(
 			partField,
 		},
 		notifications.SendOptions{
-			URL:       jobCtx.Job.URL,
-			Thumbnail: jobCtx.Job.ThumbnailURL,
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
 			Event:     "quality_split",
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
 		},
 	)
 }

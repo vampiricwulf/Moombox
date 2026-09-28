@@ -378,7 +378,8 @@ func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 	if m.notifMode == "edit" {
 		// Original (unscrolled) layout:
 		// Line 0: title | Line 1: URL | Line 2: Enabled | Line 3: Mention
-		// Line 4: empty | Line 5: "Events (...)" | Line 6+: event groups
+		// Line 4: Delivery | Line 5: empty | Line 6: "Events (...)"
+		// Line 7+: event groups
 		// renderNotifEdit pins the title (line 0) and scrolls the body to keep
 		// focus visible, so map the on-screen row back through that offset.
 		origLine := notifEditClickLine(contentY, m.notifEditScrollStart)
@@ -394,10 +395,21 @@ func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 			m.notifEditEnabled = !m.notifEditEnabled
 			m.updateTextInputForField()
 			return
+		case notifEditDeliveryRow + 1:
+			// Focus AND flip, like the Enabled row — the row is the control.
+			m.notifEditFocus = notifEditDeliveryRow
+			if m.notifEditDelivery == "edit" {
+				m.notifEditDelivery = "separate"
+			} else {
+				m.notifEditDelivery = "edit"
+			}
+			m.updateTextInputForField()
+			return
 		}
 		// Map event lines: clickNotifEvent accounts for group headers/blanks.
-		// notifEditEventBase+3 = the first event-group line: the three form
-		// rows, plus the title, the blank and the "Events" header above them.
+		// notifEditEventBase+3 = the first event-group line: the
+		// notifEditEventBase form rows, plus the title, the blank and the
+		// "Events" header above them.
 		if eventsTop := notifEditEventBase + 3; origLine >= eventsTop {
 			m.clickNotifEvent(origLine - eventsTop)
 		}

@@ -825,6 +825,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 9. Notification manager
 	// =========================================================================
 	notifyMgr := notifications.NewManager(cfg, log)
+	// Edit-mode targets keep one Discord message per job and need its id to
+	// survive a restart; the ids live on the job row (schema 20).
+	notifyMgr.SetMessageStore(db)
 	s.notifyMgr = notifyMgr
 
 	// =========================================================================

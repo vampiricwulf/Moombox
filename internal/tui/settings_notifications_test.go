@@ -282,8 +282,8 @@ func TestNotifEditMKeyTogglesTheFocusedEventsMention(t *testing.T) {
 }
 
 // TestHandleMouseNotifClickMapsThroughTheNewRows guards the index shift: the
-// edit form gained two rows above the event list, so every hard-coded offset
-// in the mouse map had to move with it.
+// edit form gained three rows above the event list, so every hard-coded
+// offset in the mouse map had to move with it.
 func TestHandleMouseNotifClickMapsThroughTheNewRows(t *testing.T) {
 	firstEvent := notifEventGroups[0].events[0]
 	m := newNotifEditModel(t, nil)
@@ -291,12 +291,12 @@ func TestHandleMouseNotifClickMapsThroughTheNewRows(t *testing.T) {
 	m.notifEditEvents = map[string]bool{}
 	m.notifEditMentionEvents = map[string]bool{}
 	m.notifEditScrollStart = 0
-	// Unscrolled layout: 0 title, 1 URL, 2 Enabled, 3 Mention, 4 blank,
-	// 5 "Events", 6 group0 blank, 7 group0 header, 8 group0 event0.
-	m.handleMouseNotifClick(8)
+	// Unscrolled layout: 0 title, 1 URL, 2 Enabled, 3 Mention, 4 Delivery,
+	// 5 blank, 6 "Events", 7 group0 blank, 8 group0 header, 9 group0 event0.
+	m.handleMouseNotifClick(9)
 	if !m.notifEditEvents[firstEvent] {
-		t.Errorf("a click on the first event row (contentY=8) did not toggle %q — the mouse map still "+
-			"assumes the pre-N2b row offsets", firstEvent)
+		t.Errorf("a click on the first event row (contentY=9) did not toggle %q — the mouse map still "+
+			"assumes the pre-N3 row offsets", firstEvent)
 	}
 	if m.notifEditFocus != notifEditEventBase {
 		t.Errorf("notifEditFocus = %d, want %d — the click toggled the right event but focused "+
@@ -306,8 +306,7 @@ func TestHandleMouseNotifClickMapsThroughTheNewRows(t *testing.T) {
 
 // TestNotifEditPreservesFieldsTheEditorDoesNotShow: the Enter arm built a
 // fresh NotificationConfig from the rows on screen, so editing a webhook's
-// URL from the TUI erased every key the form has no row for. N3's `mode` is
-// the next one, and it would go the first time anyone fixes a typo.
+// URL from the TUI erased every key the form has no row for.
 //
 // The load-bearing assertion is MentionEvents, the one key today that the
 // editor stores without rebuilding: an UNTOUCHED @ column must leave the
@@ -315,8 +314,10 @@ func TestHandleMouseNotifClickMapsThroughTheNewRows(t *testing.T) {
 // rebuild-from-scratch drops it back to nil and silently returns the target to
 // the default six. Events is asserted beside it as the documented no-widening
 // case — it round-trips through the checkbox seed either way, so on its own it
-// would not catch the rebuild. When N3 lands, add a `mode` assertion here
-// rather than replacing these.
+// would not catch the rebuild. N3's `mode` has its own copy of this shape in
+// TestNotifEditModeSurvivesAUrlOnlyEdit (settings_notif_mode_test.go) — it
+// has a row of its own now, so it does not belong in a test named for the
+// fields the editor does not show.
 func TestNotifEditPreservesFieldsTheEditorDoesNotShow(t *testing.T) {
 	stored := []string{"finished"}
 	m := newNotifEditModel(t, []config.NotificationConfig{

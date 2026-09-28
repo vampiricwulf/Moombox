@@ -693,14 +693,26 @@ func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 			fb.AddInline("Download Time", formatDurationHuman(time.Since(startTime)))
 		}
 	}
+	// The one row→facts mapper (notify_facts.go), off the RE-READ row rather
+	// than jobCtx.Job — that re-read is what the rest of this embed is built
+	// from, and the author line is exactly the kind of field a long download
+	// can have filled in since the context was last refreshed. `muxing` is a
+	// lifecycle event and Manager.planLifecycle keys on Opts.JobID: without
+	// it this stage could never be folded into the job's edited message, and
+	// the dashboard deep link, which needs JobID and Author both, would not
+	// apply.
+	f := NotifyFacts(job)
 	o.notifier.Send("Muxing Starting",
-		fmt.Sprintf("Download complete, muxing: %s", jobCtx.Job.Title),
+		fmt.Sprintf("Download complete, muxing: %s", job.Title),
 		notifications.TypeMuxing,
 		fb.Build(),
 		notifications.SendOptions{
-			URL:       jobCtx.Job.URL,
-			Thumbnail: jobCtx.Job.ThumbnailURL,
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
 			Event:     "muxing",
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
 		},
 	)
 }

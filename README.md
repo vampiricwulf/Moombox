@@ -681,6 +681,7 @@ enabled = true                            # Optional: false mutes the target wit
 events = ["found", "finished", "error"]   # Optional filter (default: all events)
 mention = "<@&ROLE_ID>"                   # Optional: ping a role, a user (<@USER_ID>), @everyone, or @here
 mention_events = ["error", "auth"]        # Optional: which events the ping rides along with (default: the six below)
+mode = "separate"                         # or "edit" — one message per job, rewritten in place
 ```
 
 Discord webhooks only — the shorthand `discord://ID/TOKEN` works too. The full
@@ -701,6 +702,21 @@ straight to that job (`{public_url}/#job=<id>`) instead of the platform page,
 which moves to the channel/author line. See
 [docs/spec/operations.md](docs/spec/operations.md#target-options) for the
 full rules.
+
+### One message per job
+
+Set `mode = "edit"` on a target and Moombox posts one
+Discord message per job and then rewrites it in place as the job progresses —
+found, scheduled, downloading, splits, muxing, finished all land on the same
+message, which grows a Status line and a short history instead of a new embed
+each time. Failures and credential alerts stay separate posts, because those are
+the ones that ping — and, once the message exists, the only ones that can: a
+mention on a lifecycle event rides the edited message as text, and Discord
+does not notify anyone on an edit (the event that creates the message is a
+real post and does). The message id is remembered on the job, so a restart keeps
+editing the same message; if someone deletes it in Discord, the next event posts
+a fresh one. Default is `"separate"` — the classic one-embed-per-event
+behaviour.
 
 ## Job Status Flow
 
