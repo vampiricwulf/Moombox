@@ -10,7 +10,7 @@ import (
 )
 
 // TestStartSetupRejectsAnUnknownPlatform is COOKIES-8 at the service boundary,
-// which is where the non-HTTP callers live (the TUI's R L chord and the
+// which is where the non-HTTP callers live (the TUI's E L chord and the
 // first-run wizard both call StartSetup directly).
 //
 // Before this, StartSetup forwarded any string: the login URL fell through to

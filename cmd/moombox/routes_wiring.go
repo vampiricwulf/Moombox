@@ -266,7 +266,7 @@ func (s *runState) broadcastHideFinishedAge() {
 // auto-pick (port 0) only ActualPort knows the real number — a captured value
 // would write a plugin file pointing at ":0" forever.
 //
-// Shared with the TUI's R Y overlay (tui_wiring.go), which asks the same
+// Shared with the TUI's E Y overlay (tui_wiring.go), which asks the same
 // question about the same plugin file and must not answer it differently.
 func (s *runState) currentWebPort() int {
 	if s.webServer != nil && s.webServer.ActualPort() > 0 {

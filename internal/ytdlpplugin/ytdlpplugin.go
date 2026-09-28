@@ -3,7 +3,7 @@
 //
 // It lives outside internal/web/routes because two very different surfaces ask
 // the same questions about that one file on disk — GET /api/ytdlp-plugin/status
-// for the dashboard's Integrations card, and the TUI's R Y overlay — and the
+// for the dashboard's Integrations card, and the TUI's E Y overlay — and the
 // terminal must not have to import the HTTP layer (and, transitively, the
 // BotGuard embed blobs) to read a struct. Its own imports are stdlib only.
 package ytdlpplugin
@@ -28,7 +28,7 @@ func ParseInstalled(content string) (scheme string, port int) {
 	return m[1], port
 }
 
-// Info is what GET /api/ytdlp-plugin/status reports and what the TUI's R Y
+// Info is what GET /api/ytdlp-plugin/status reports and what the TUI's E Y
 // overlay shows. The JSON tags are the wire contract: settings.js's
 // loadYtdlpPluginStatus reads all eight keys, and they were an inline
 // map[string]any until the TUI needed the same answer.
@@ -58,7 +58,7 @@ type Info struct {
 // Status reads the installed plugin file, if any, and reports it against the
 // port and scheme this process is actually serving on.
 //
-// Shared by the GET route and the TUI's R Y overlay rather than reimplemented
+// Shared by the GET route and the TUI's E Y overlay rather than reimplemented
 // for the terminal: "installed" and "mismatched" are file-parsing verdicts,
 // and two copies of the parse are two answers to the same question.
 //
@@ -104,7 +104,7 @@ func Status(port int, httpsEnabled bool) (Info, error) {
 }
 
 // Install writes the yt-dlp PO token provider plugin to the standard yt-dlp
-// plugin directory. Called from the TUI setup wizard, the R Y overlay's I key
+// plugin directory. Called from the TUI setup wizard, the E Y overlay's I key
 // and the web install route.
 func Install(port int, httpsEnabled bool) error {
 	pluginDir := Dir()

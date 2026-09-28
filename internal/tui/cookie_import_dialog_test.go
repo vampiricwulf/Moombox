@@ -123,9 +123,9 @@ func TestCookieImportDialogRendersEveryOutcome(t *testing.T) {
 func TestCookieImportTypingIsNotDoubled(t *testing.T) {
 	app := NewApp()
 	app.OnImportCookieFile = func(string) (cookies.ImportResult, error) { return cookies.ImportResult{}, nil }
-	app.dispatchAction("R I", nil)
+	app.dispatchAction("E I", nil)
 	if !app.cookieImportDlg.IsVisible() {
-		t.Fatal("R I did not open the dialog")
+		t.Fatal("E I did not open the dialog")
 	}
 
 	for _, r := range "abc" {
@@ -148,7 +148,7 @@ func TestCookieImportResultSurvivesAClosedOverlay(t *testing.T) {
 	// Closed while importing — the answer goes to the feedback line.
 	app := NewApp()
 	app.OnImportCookieFile = func(string) (cookies.ImportResult, error) { return cookies.ImportResult{}, nil }
-	app.dispatchAction("R I", nil)
+	app.dispatchAction("E I", nil)
 	app.cookieImportDlg.SetImporting()
 	app.cookieImportDlg.Close()
 	app.Update(cookieImportResultMsg{Result: cookies.ImportResult{
@@ -162,7 +162,7 @@ func TestCookieImportResultSurvivesAClosedOverlay(t *testing.T) {
 
 	// Re-opened after Esc — the stale result must not overwrite the fresh
 	// prompt, and it still reaches the feedback line.
-	app.dispatchAction("R I", nil)
+	app.dispatchAction("E I", nil)
 	app.Update(cookieImportResultMsg{Result: cookies.ImportResult{TwitchOutcome: cookies.ImportRolledBack}})
 	if app.cookieImportDlg.step != cookieImportStepPath {
 		t.Errorf("a stale result replaced a re-opened path prompt (step %d)", app.cookieImportDlg.step)
@@ -191,32 +191,32 @@ func TestImportResultSummaryWordsBothFacts(t *testing.T) {
 	}
 }
 
-// TestImportCookieChordExistsOnlyWhenWired: nil callback ⇒ no R I in
+// TestImportCookieChordExistsOnlyWhenWired: nil callback ⇒ no E I in
 // dispatch, menu or help; wired ⇒ all three, and dispatch opens the dialog.
 func TestImportCookieChordExistsOnlyWhenWired(t *testing.T) {
 	app := NewApp()
 	app.OnImportCookieFile = nil
-	if riOffered(t, app) {
-		t.Fatal("R I offered with no callback")
+	if eiOffered(t, app) {
+		t.Fatal("E I offered with no callback")
 	}
-	app.dispatchAction("R I", nil)
+	app.dispatchAction("E I", nil)
 	if app.cookieImportDlg.IsVisible() {
-		t.Fatal("dispatching R I with no callback opened a dialog whose Enter dead-ends")
+		t.Fatal("dispatching E I with no callback opened a dialog whose Enter dead-ends")
 	}
 	app.OnImportCookieFile = func(string) (cookies.ImportResult, error) { return cookies.ImportResult{}, nil }
-	if !riOffered(t, app) {
-		t.Fatal("R I missing with the callback wired")
+	if !eiOffered(t, app) {
+		t.Fatal("E I missing with the callback wired")
 	}
-	app.dispatchAction("R I", nil)
+	app.dispatchAction("E I", nil)
 	if !app.cookieImportDlg.IsVisible() {
-		t.Fatal("dispatching R I did not open the dialog")
+		t.Fatal("dispatching E I did not open the dialog")
 	}
 }
 
-// riOffered reports whether R I is reachable by the two derived routes an
+// eiOffered reports whether E I is reachable by the two derived routes an
 // operator has — the action menu and the help overlay, which is built from
 // the menu. Dispatch is asserted separately by its own visible side effect.
-func riOffered(t *testing.T, app *App) bool {
+func eiOffered(t *testing.T, app *App) bool {
 	t.Helper()
 	items := app.buildMenuItems()
 	if len(items) == 0 {
@@ -224,7 +224,7 @@ func riOffered(t *testing.T, app *App) bool {
 	}
 	menu := false
 	for _, it := range items {
-		if strings.TrimSpace(it.Chord) == "R I" {
+		if strings.TrimSpace(it.Chord) == "E I" {
 			menu = true
 		}
 	}
@@ -233,13 +233,13 @@ func riOffered(t *testing.T, app *App) bool {
 	help := false
 	for _, sec := range h.orderedSections() {
 		for _, k := range sec.keys {
-			if strings.TrimSpace(k.key) == "R I" {
+			if strings.TrimSpace(k.key) == "E I" {
 				help = true
 			}
 		}
 	}
 	if menu != help {
-		t.Fatalf("R I is in the menu (%v) but not the help overlay (%v) — the two reads disagree", menu, help)
+		t.Fatalf("E I is in the menu (%v) but not the help overlay (%v) — the two reads disagree", menu, help)
 	}
 	return menu
 }

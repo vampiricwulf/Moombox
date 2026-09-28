@@ -27,7 +27,7 @@ const statsDialogMaxWidth = 76
 // its border and title rather than its footer.
 const statsDialogFullHeight = 27
 
-// StatsDialogModel is the R T overlay: the Web Stats tab's disk bar, six
+// StatsDialogModel is the E T overlay: the Web Stats tab's disk bar, six
 // storage figures, seven activity figures and uptime, from the same
 // stats.Snapshot the /api/stats handler renders.
 //

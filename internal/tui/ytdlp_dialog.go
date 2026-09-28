@@ -11,7 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
-// YtdlpDialogModel is the R Y overlay: what the yt-dlp PO-token plugin looks
+// YtdlpDialogModel is the E Y overlay: what the yt-dlp PO-token plugin looks
 // like from here — installed or not, where, and whether the port it was
 // written for is still the port this process serves on — plus the one key
 // that fixes the last of those.

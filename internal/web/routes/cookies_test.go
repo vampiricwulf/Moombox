@@ -1679,7 +1679,7 @@ func TestTheLoopbackRefusalCarriesALength(t *testing.T) {
 // been asked — a wrong input silently accepted.
 //
 // There is ONE rule and it lives in StartSetup, where the callers that are not
-// this route reach it (the TUI's R L chord, the first-run wizard). The route's
+// this route reach it (the TUI's E L chord, the first-run wizard). The route's
 // share is to render the sentinel as a wrong INPUT — 400, not the 500 its
 // default arm gave — so a second hard-coded platform list here would be a copy
 // free to drift from the one that decides.

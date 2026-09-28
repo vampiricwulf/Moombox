@@ -33,7 +33,7 @@ func redirectPluginDir(t *testing.T) string {
 }
 
 // TestStatusReportsInstallAndPortMismatch pins the computation the GET route
-// and the TUI's R Y overlay share: absent → installed → the same file read
+// and the TUI's E Y overlay share: absent → installed → the same file read
 // against a different port.
 func TestStatusReportsInstallAndPortMismatch(t *testing.T) {
 	pluginDir := redirectPluginDir(t)

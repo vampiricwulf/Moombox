@@ -373,7 +373,7 @@ type ImportResult struct {
 //
 // The caller runs the auth re-check. Every gesture that can write cookies.txt
 // must end in one (Arc 10 R4) and this one has TWO callers: the Web import
-// route in internal/web/routes, and the TUI's R I wiring in
+// route in internal/web/routes, and the TUI's E I wiring in
 // cmd/moombox/tui_wiring.go (which goes through recheckAfterCookieWrite, as
 // the other cmd/moombox writers do). Both — like the two setup-wizard finishes
 // — run it themselves rather than through the OnPassCompleted seam. Firing

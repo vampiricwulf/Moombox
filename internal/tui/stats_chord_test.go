@@ -12,9 +12,9 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/stats"
 )
 
-func rtOffered(app *App) bool {
+func etOffered(app *App) bool {
 	for _, it := range app.buildMenuItems() {
-		if it.Chord == "R T" {
+		if it.Chord == "E T" {
 			return true
 		}
 	}
@@ -92,15 +92,15 @@ func statsBatch(t *testing.T, cmd tea.Cmd) []tea.Cmd {
 	return batch
 }
 
-// TestStatsChordOpensLoadsAndRefreshes: R T exists only with the callback;
+// TestStatsChordOpensLoadsAndRefreshes: E T exists only with the callback;
 // dispatch opens the overlay loading, the fetch fills it, r re-fetches, the
 // 60 s tick re-fetches while open and is ignored once closed; a fetch error
 // renders in the overlay.
 func TestStatsChordOpensLoadsAndRefreshes(t *testing.T) {
 	app := NewApp()
 	app.OnGetStats = nil
-	if rtOffered(app) {
-		t.Fatal("R T offered without OnGetStats")
+	if etOffered(app) {
+		t.Fatal("E T offered without OnGetStats")
 	}
 	calls := 0
 	app.OnGetStats = func() (stats.Snapshot, error) {
@@ -109,12 +109,12 @@ func TestStatsChordOpensLoadsAndRefreshes(t *testing.T) {
 		s.JobCount = 1000 + calls
 		return s, nil
 	}
-	if !rtOffered(app) {
-		t.Fatal("R T missing with OnGetStats wired")
+	if !etOffered(app) {
+		t.Fatal("E T missing with OnGetStats wired")
 	}
-	_, cmd := app.dispatchAction("R T", nil)
+	_, cmd := app.dispatchAction("E T", nil)
 	if !app.statsDlg.IsVisible() || !strings.Contains(app.statsDlg.View(), "Loading") {
-		t.Fatal("R T must open the overlay loading")
+		t.Fatal("E T must open the overlay loading")
 	}
 	applyStatsCmd(app, cmd) // drains the batch and feeds the messages back through app.Update
 	if calls != 1 || !strings.Contains(stripANSI(app.statsDlg.View()), "1,001") {
@@ -142,7 +142,7 @@ func TestStatsChordOpensLoadsAndRefreshes(t *testing.T) {
 		t.Fatal("a tick after close must not fetch")
 	}
 	app.OnGetStats = func() (stats.Snapshot, error) { return stats.Snapshot{}, errors.New("db closed") }
-	_, cmd = app.dispatchAction("R T", nil)
+	_, cmd = app.dispatchAction("E T", nil)
 	applyStatsCmd(app, cmd)
 	if !strings.Contains(app.statsDlg.View(), "db closed") {
 		t.Fatal("fetch error must render in the overlay")
@@ -150,7 +150,7 @@ func TestStatsChordOpensLoadsAndRefreshes(t *testing.T) {
 }
 
 // TestStatsRefreshChainIsSingular: the 60 s refresh is the Web's setInterval —
-// exactly one chain per open, started at R T and re-armed only by its own
+// exactly one chain per open, started at E T and re-armed only by its own
 // tick. A fetch result never schedules one, r never schedules one, and a tick
 // or a snapshot from a retired open is dropped, so r presses and reopens
 // cannot leave parallel chains polling for the rest of the session.
@@ -164,13 +164,13 @@ func TestStatsRefreshChainIsSingular(t *testing.T) {
 		return s, nil
 	}
 
-	_, cmd := app.dispatchAction("R T", nil)
+	_, cmd := app.dispatchAction("E T", nil)
 	subs := statsBatch(t, cmd)
 	if len(subs) < 2 || !isRefreshTick(subs[len(subs)-1]) {
-		t.Fatalf("the refresh tick must be LAST in the R T batch (%d commands) — a consumer that stops at the first real message would otherwise sit out the 60 s timer", len(subs))
+		t.Fatalf("the refresh tick must be LAST in the E T batch (%d commands) — a consumer that stops at the first real message would otherwise sit out the 60 s timer", len(subs))
 	}
 	if ticks := applyStatsCmd(app, cmd); ticks != 1 {
-		t.Fatalf("R T must start exactly one refresh chain, got %d", ticks)
+		t.Fatalf("E T must start exactly one refresh chain, got %d", ticks)
 	}
 	openEpoch := app.statsEpoch
 
@@ -206,7 +206,7 @@ func TestStatsRefreshChainIsSingular(t *testing.T) {
 	if app.statsEpoch == openEpoch {
 		t.Fatal("closing must retire the open's epoch")
 	}
-	_, cmd = app.dispatchAction("R T", nil)
+	_, cmd = app.dispatchAction("E T", nil)
 	applyStatsCmd(app, cmd)
 	reopened, view := calls, stripANSI(app.statsDlg.View())
 

@@ -454,7 +454,7 @@ func (m *SetupWizardModel) armCookieTick() tea.Cmd {
 	return cookieCountdownTick(m.cookieTickGen)
 }
 
-// OpenCookieLogin opens the wizard at its cookie step alone — the R L chord's
+// OpenCookieLogin opens the wizard at its cookie step alone — the E L chord's
 // entrance, for an install that is already set up.
 //
 // It deliberately does NOT go through Open(). Open() is the FIRST-RUN entrance:
@@ -501,7 +501,7 @@ func (m *SetupWizardModel) OpenCookieLogin(platform string) {
 // closeCookieLogin ends a cookie-login overlay, cancelling an in-flight setup
 // first. The cancel is not decoration: AutoCookieService holds the acquisition
 // slot until someone cancels, finishes, or the server-side reap notices the
-// browser is gone, so leaving with a browser open would meet the next R L —
+// browser is gone, so leaving with a browser open would meet the next E L —
 // and the next periodic refresh — with ErrSetupInProgress for the whole grace
 // window. Every way OUT funnels through here rather than calling Close()
 // directly, so a later exit added beside one of them inherits the release

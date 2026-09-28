@@ -260,7 +260,7 @@ func TestStatusBarZeroWidth(t *testing.T) {
 // visible: TestCookieLoginChordPreselectsThePlatformTheBadgeIsAlarmingAbout
 // cannot see this mutant because an inactive-but-flagged YouTube yields
 // cookieFocus 0 whether ReloginPlatform says "" or "youtube" — but a bar that
-// shows no YouTube alert must not carry (R L) regardless. The mirror row does
+// shows no YouTube alert must not carry (E L) regardless. The mirror row does
 // the same check for an inactive-but-flagged Twitch.
 //
 // MUTANT: drop `m.ytActive &&` from ReloginPlatform (status_bar.go:131). Both
@@ -272,7 +272,7 @@ func TestInactiveYouTubeReloginNamesNoChord(t *testing.T) {
 	if got := m.ReloginPlatform(); got != "" {
 		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
 	}
-	if full := stripANSI(m.renderCookieStatus(tierFull, m.tallyJobs())); strings.Contains(full, "R L") {
+	if full := stripANSI(m.renderCookieStatus(tierFull, m.tallyJobs())); strings.Contains(full, "E L") {
 		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
 	}
 
@@ -283,20 +283,20 @@ func TestInactiveYouTubeReloginNamesNoChord(t *testing.T) {
 	if got := mtw.ReloginPlatform(); got != "" {
 		t.Errorf("ReloginPlatform() = %q for an inactive platform, want \"\"", got)
 	}
-	if full := stripANSI(mtw.renderCookieStatus(tierFull, mtw.tallyJobs())); strings.Contains(full, "R L") {
+	if full := stripANSI(mtw.renderCookieStatus(tierFull, mtw.tallyJobs())); strings.Contains(full, "E L") {
 		t.Errorf("the bar names a remedy for an alarm it does not show: %q", full)
 	}
 }
 
 // TestReloginBadgeNamesTheChordThatAnswersIt pins R2: a bar that says
 // "YT: Re-login" and stops has named a problem and no remedy. The dashboard's
-// equivalent warning is clickable; R L is the TUI's click, and the badge is
+// equivalent warning is clickable; E L is the TUI's click, and the badge is
 // where an operator is looking when they need it.
 //
 // MUTANTS, one per assertion:
 //   - drop the append → the widest bar names no remedy at all;
 //   - append per platform instead of once → the both-flagged row reads
-//     "YT: Re-login (R L) TW: Re-login (R L)", spending scarce width twice;
+//     "YT: Re-login (E L) TW: Re-login (E L)", spending scarce width twice;
 //   - append at tierCompact or below → the compact assertion fails (the hint
 //     outlived the first squeeze); append at a LOWER tier but not tierFull →
 //     that rung is wider than the one above it, which the ladder sweep at the
@@ -314,25 +314,25 @@ func TestReloginBadgeNamesTheChordThatAnswersIt(t *testing.T) {
 
 	m1 := flagged(CookieStatusRelogin, CookieStatusOK)
 	full := stripANSI(m1.renderCookieStatus(tierFull, m1.tallyJobs()))
-	if !strings.Contains(full, "R L") {
+	if !strings.Contains(full, "E L") {
 		t.Errorf("the re-login badge names no chord at tierFull: %q", full)
 	}
 
 	m2 := flagged(CookieStatusRelogin, CookieStatusRelogin)
 	both := stripANSI(m2.renderCookieStatus(tierFull, m2.tallyJobs()))
-	if got := strings.Count(both, "R L"); got != 1 {
+	if got := strings.Count(both, "E L"); got != 1 {
 		t.Errorf("the chord is named %d times with both platforms flagged, want 1: %q", got, both)
 	}
 
 	m3 := flagged(CookieStatusRelogin, CookieStatusOK)
 	compact := stripANSI(m3.renderCookieStatus(tierCompact, m3.tallyJobs()))
-	if strings.Contains(compact, "R L") {
+	if strings.Contains(compact, "E L") {
 		t.Errorf("the hint survived past tierFull, which breaks the monotonic ladder: %q", compact)
 	}
 
 	m4 := flagged(CookieStatusOK, CookieStatusOK)
 	healthy := stripANSI(m4.renderCookieStatus(tierFull, m4.tallyJobs()))
-	if strings.Contains(healthy, "R L") {
+	if strings.Contains(healthy, "E L") {
 		t.Errorf("a healthy bar advertises a cookie login: %q", healthy)
 	}
 

@@ -358,10 +358,10 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return cookieForceRefreshResultMsg{Result: result, Err: err}
 			})
 		}
-	case "R L":
+	case "E L":
 		// Defensive, and unreachable from the keyboard: with no callback the
 		// chord is not registered (buildMenuItems below), so processSecondKey
-		// reports "Invalid Chord: R L" before this case is consulted. The guard
+		// reports "Invalid Chord: E L" before this case is consulted. The guard
 		// keeps a direct caller from opening an overlay whose every Enter
 		// dead-ends. StartSetup's own refusals — service stopped, a setup or
 		// refresh already running, no supported browser — arrive on the
@@ -375,8 +375,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// Preselect whatever the status bar is alarming about, so answering a
 		// "TW: Re-login" badge does not open on YouTube.
 		a.setupWiz.OpenCookieLogin(a.statusBar.ReloginPlatform())
-	case "R I":
-		// Defensive for the same reason R L's guard is, and unreachable the
+	case "E I":
+		// Defensive for the same reason E L's guard is, and unreachable the
 		// same way: with no callback the chord is not registered, so
 		// processSecondKey never reaches this case. The guard keeps a direct
 		// caller from opening an overlay whose Enter dead-ends.
@@ -387,8 +387,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		a.clearFeedback()
 		a.cookieImportDlg.SetSize(a.width, a.height)
 		return a, a.cookieImportDlg.Open()
-	case "R Y":
-		// Defensive for the same reason R I's guard is, and unreachable the
+	case "E Y":
+		// Defensive for the same reason E I's guard is, and unreachable the
 		// same way: with no status callback the chord is not registered, so
 		// processSecondKey never reaches this case.
 		if a.OnYtdlpPluginStatus == nil {
@@ -397,7 +397,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		a.ytdlpDlg.SetSize(a.width, a.height)
 		return a, tea.Batch(a.ytdlpDlg.Open(), a.ytdlpStatusCmd())
-	case "R T":
+	case "E T":
 		if a.OnGetStats == nil {
 			a.setFeedback("Statistics are unavailable")
 			return a, nil
@@ -604,6 +604,8 @@ func (a *App) chordFeedback(prefix string) string {
 		label = "Request"
 	case "o":
 		label = "Open"
+	case "e":
+		label = "Extras"
 	default:
 		label = strings.ToUpper(prefix)
 	}
@@ -853,29 +855,6 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	if a.OnForceRefreshCookies != nil {
 		items = append(items, ActionMenuItem{Chord: "R F", Label: "Refresh Cookies from Browser", HintLabel: "Refresh Cookies", Category: "Request"})
 	}
-	// R L: open the setup wizard's cookie step alone, so an interactive login
-	// is reachable after first run. Gated on the callback for the same reason
-	// R F is, and cmd/moombox binds it unconditionally: StartSetup is
-	// acquisition and is never gated on cookies.auto_enabled.
-	if a.setupWiz.OnStartAutoCookie != nil {
-		items = append(items, ActionMenuItem{Chord: "R L", Label: "Cookie Login", HintLabel: "Login", Category: "Request"})
-	}
-	// R I: the browser-free half of the same answer R L gives. It imports a
-	// Netscape cookies.txt the operator exported elsewhere, through the same
-	// verify-and-roll-back path as the Web dashboard's import panel — the one
-	// re-authentication route that works on a headless host.
-	if a.OnImportCookieFile != nil {
-		items = append(items, ActionMenuItem{Chord: "R I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Request"})
-	}
-	// R Y: the terminal's half of the dashboard's Integrations card. Gated on
-	// the STATUS callback alone — the overlay is worth reading on a host where
-	// the install would fail, and I explains itself there.
-	if a.OnYtdlpPluginStatus != nil {
-		items = append(items, ActionMenuItem{Chord: "R Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Request"})
-	}
-	if a.OnGetStats != nil {
-		items = append(items, ActionMenuItem{Chord: "R T", Label: "Statistics", HintLabel: "Stats", Category: "Request"})
-	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
 	}
@@ -921,6 +900,38 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O G", Label: "Open GitHub Page", HintLabel: "GitHub", Category: "Open"},
 	)
+
+	// Extras — the four side errands that used to crowd Request: none of them
+	// acts on a job or asks the running program for anything, and all four are
+	// conditional on their own callback being set.
+	//
+	// Emitted AFTER every Open item on purpose: the action menu heads a group
+	// wherever consecutive Category changes (action_menu.go), so an Extras
+	// item slipped in earlier would cut Open into two headed halves.
+	//
+	// E Y: the terminal's half of the dashboard's Integrations card. Gated on
+	// the STATUS callback alone — the overlay is worth reading on a host where
+	// the install would fail, and I explains itself there.
+	if a.OnYtdlpPluginStatus != nil {
+		items = append(items, ActionMenuItem{Chord: "E Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Extras"})
+	}
+	// E L: open the setup wizard's cookie step alone, so an interactive login
+	// is reachable after first run. Gated on the callback for the same reason
+	// R F is, and cmd/moombox binds it unconditionally: StartSetup is
+	// acquisition and is never gated on cookies.auto_enabled.
+	if a.setupWiz.OnStartAutoCookie != nil {
+		items = append(items, ActionMenuItem{Chord: "E L", Label: "Cookie Login", HintLabel: "Login", Category: "Extras"})
+	}
+	// E I: the browser-free half of the same answer E L gives. It imports a
+	// Netscape cookies.txt the operator exported elsewhere, through the same
+	// verify-and-roll-back path as the Web dashboard's import panel — the one
+	// re-authentication route that works on a headless host.
+	if a.OnImportCookieFile != nil {
+		items = append(items, ActionMenuItem{Chord: "E I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Extras"})
+	}
+	if a.OnGetStats != nil {
+		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras"})
+	}
 
 	// Filter + Other
 	items = append(items,

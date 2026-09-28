@@ -20,7 +20,7 @@ type YtdlpPluginInfo = ytdlpplugin.Info
 
 // YtdlpPluginStatus reads the installed plugin file, if any, and reports it
 // against the port and scheme this process is actually serving on — the body
-// of the GET route below and of the TUI's R Y overlay. See ytdlpplugin.Status.
+// of the GET route below and of the TUI's E Y overlay. See ytdlpplugin.Status.
 func YtdlpPluginStatus(port int, httpsEnabled bool) (YtdlpPluginInfo, error) {
 	return ytdlpplugin.Status(port, httpsEnabled)
 }

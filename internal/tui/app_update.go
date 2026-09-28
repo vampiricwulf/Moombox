@@ -547,7 +547,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cookieImportResultMsg:
 		// IsImporting, not IsVisible: the overlay that gets this result must be
-		// the one that STARTED it. Esc during a slow import and then R I again
+		// the one that STARTED it. Esc during a slow import and then E I again
 		// leaves a visible dialog that is a fresh path prompt, and the first
 		// import's outcome landing on it would describe a different file.
 		//

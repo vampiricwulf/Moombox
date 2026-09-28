@@ -1,5 +1,5 @@
 // Package stats derives the figures both dashboards show — the Web Stats tab
-// and the TUI's R T overlay — from the job aggregate and the disk reading.
+// and the TUI's E T overlay — from the job aggregate and the disk reading.
 // It imports only the database package so the TUI can use it without the
 // HTTP layer.
 package stats
@@ -20,7 +20,7 @@ type Disk struct {
 	WarnLevel string // "ok", "warn", "critical"; "" when no reading exists yet
 }
 
-// Snapshot is every number the Web Stats tab and the TUI R T overlay show,
+// Snapshot is every number the Web Stats tab and the TUI E T overlay show,
 // derived once here from the job aggregate and the disk reading.
 type Snapshot struct {
 	Disk Disk
