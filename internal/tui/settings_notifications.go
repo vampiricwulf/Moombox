@@ -76,6 +76,13 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 				}
 				m.notifEditMentionExtras = notifMentionIDsWithNoRow(*n.MentionEvents)
 			}
+			// Anything that is not the opt-in "edit" reads as separate — an
+			// absent key included, which is what every config written before
+			// this key looks like.
+			m.notifEditDelivery = "edit"
+			if strings.TrimSpace(n.Mode) != "edit" {
+				m.notifEditDelivery = "separate"
+			}
 			m.notifEditFocus = 0
 			m.notifMode = "edit"
 			m.updateTextInputForField()
@@ -90,6 +97,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		m.notifEditMention = ""
 		m.notifEditMentionTouched = false
 		m.seedMentionDefaults()
+		m.notifEditDelivery = "separate"
 		m.notifEditFocus = 0
 		m.notifIndex = len(m.notifications)
 		m.notifMode = "edit"
@@ -231,6 +239,10 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 			n = m.notifications[m.notifIndex]
 		}
 		n.URL = strings.TrimSpace(m.notifEditURL)
+		// Written explicitly either way, "separate" included, so the two
+		// editors round-trip the same value — the web card commits under the
+		// same rule.
+		n.Mode = m.notifEditDelivery
 		// An empty selection stores Events = nil, which the manager, the web
 		// card and operations.md all read as "all events". Silence is the
 		// Enabled toggle, not an empty filter.
@@ -303,6 +315,14 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		// key into the focused input, and this arm must not also act on it.
 		if m.notifEditFocus == notifEditEnabledRow {
 			m.notifEditEnabled = !m.notifEditEnabled
+			return ""
+		}
+		if m.notifEditFocus == notifEditDeliveryRow {
+			if m.notifEditDelivery == "edit" {
+				m.notifEditDelivery = "separate"
+			} else {
+				m.notifEditDelivery = "edit"
+			}
 			return ""
 		}
 		if eventIdx := m.notifEditFocus - notifEditEventBase; eventIdx >= 0 && eventIdx < len(allNotifEvents) {

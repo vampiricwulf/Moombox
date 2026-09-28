@@ -291,11 +291,11 @@ func TestHandleMouseNotifClickMapsThroughTheNewRows(t *testing.T) {
 	m.notifEditEvents = map[string]bool{}
 	m.notifEditMentionEvents = map[string]bool{}
 	m.notifEditScrollStart = 0
-	// Unscrolled layout: 0 title, 1 URL, 2 Enabled, 3 Mention, 4 blank,
-	// 5 "Events", 6 group0 blank, 7 group0 header, 8 group0 event0.
-	m.handleMouseNotifClick(8)
+	// Unscrolled layout: 0 title, 1 URL, 2 Enabled, 3 Mention, 4 Delivery,
+	// 5 blank, 6 "Events", 7 group0 blank, 8 group0 header, 9 group0 event0.
+	m.handleMouseNotifClick(9)
 	if !m.notifEditEvents[firstEvent] {
-		t.Errorf("a click on the first event row (contentY=8) did not toggle %q — the mouse map still "+
+		t.Errorf("a click on the first event row (contentY=9) did not toggle %q — the mouse map still "+
 			"assumes the pre-N2b row offsets", firstEvent)
 	}
 	if m.notifEditFocus != notifEditEventBase {

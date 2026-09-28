@@ -548,6 +548,11 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 		if n.Mention != "" {
 			line += DimStyle.Render(" " + n.Mention)
 		}
+		// Only the opt-in mode is called out: "separate" is what every target
+		// has always done, so saying so on every row would be noise.
+		if strings.TrimSpace(n.Mode) == "edit" {
+			line += DimStyle.Render(" · one message per job")
+		}
 
 		lines = append(lines, line)
 	}
@@ -626,6 +631,32 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 		mentionLine += DimStyle.Render(" (<@&ROLE_ID>, <@USER_ID>, @here, @everyone)")
 	}
 	lines = append(lines, mentionLine)
+
+	// Delivery — the per-target mode. Rendered here, after Mention, because
+	// the head rows sit on lines 1..notifEditEventBase and a row's line has to
+	// match its focus index (notifEditDeliveryRow = 3 → line 4); the mouse map
+	// and the focus arithmetic both read it that way.
+	deliveryFocused := m.notifEditFocus == notifEditDeliveryRow
+	deliveryPrefix := "  "
+	deliveryPrefixColor := ColorWhite
+	deliveryLabelStyle := DimStyle
+	if deliveryFocused {
+		deliveryPrefix = "> "
+		deliveryPrefixColor = ColorCyan
+		deliveryLabelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
+	}
+	deliveryMark, deliveryWord, deliveryColor := " ", "Separate messages", ColorGray
+	if m.notifEditDelivery == "edit" {
+		deliveryMark, deliveryWord, deliveryColor = "x", "One message per job", ColorGreen
+	}
+	deliveryLine := lipgloss.NewStyle().Foreground(deliveryPrefixColor).Render(deliveryPrefix) +
+		deliveryLabelStyle.Render(padRight("Delivery", labelW)) +
+		lipgloss.NewStyle().Foreground(deliveryColor).Render("["+deliveryMark+"]") +
+		lipgloss.NewStyle().Foreground(ColorWhite).Render(" "+deliveryWord)
+	if deliveryFocused {
+		deliveryLine += DimStyle.Render("  (Space to toggle)")
+	}
+	lines = append(lines, deliveryLine)
 
 	// Events header
 	lines = append(lines, "")
