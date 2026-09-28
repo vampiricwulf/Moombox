@@ -5,7 +5,7 @@ description: Use when adding database tables, columns, or indexes — covers sch
 
 # Database Migrations
 
-Schema changes use incremental version-based migrations in `internal/database/migrations.go`. Current schema version: **v16**. Versioning uses SQLite's built-in `PRAGMA user_version` (since v11), read via `readUserVersion()` and written via `writeUserVersion()` — the value is `%d`-interpolated because PRAGMA statements accept no bind parameters. Pre-v11 databases with the legacy `schema_version` table are carried forward automatically; a database NEWER than the binary is refused loudly (downgrade guard).
+Schema changes use incremental version-based migrations in `internal/database/migrations.go`. Current schema version: **v20**. Versioning uses SQLite's built-in `PRAGMA user_version` (since v11), read via `readUserVersion()` and written via `writeUserVersion()` — the value is `%d`-interpolated because PRAGMA statements accept no bind parameters. Pre-v11 databases with the legacy `schema_version` table are carried forward automatically; a database NEWER than the binary is refused loudly (downgrade guard).
 
 ## Checklist
 

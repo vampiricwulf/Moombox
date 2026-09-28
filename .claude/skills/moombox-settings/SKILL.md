@@ -56,7 +56,7 @@ Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go
 - `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
 - `OnChannelChange()` → `kickMonitors` to re-evaluate channels
-- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events` keys all hot-reload through it too (the restart list stays at 16)
+- `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events`/`mode` keys all hot-reload through it too (the restart list stays at 16)
 - `OnGoSoftLimitChange(mb)` → `debug.SetMemoryLimit` (0 restores the boot limit)
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
 - `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
