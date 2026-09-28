@@ -1,6 +1,8 @@
 package database
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 )
 
@@ -41,6 +43,55 @@ func TestMigrationV20Idempotent(t *testing.T) {
 	}
 	if err := db.migrateV20(); err != nil {
 		t.Fatalf("third run: %v", err)
+	}
+}
+
+// TestMigrationV20UpgradesAV19Database pins the UPGRADE half, which
+// TestFreshSchemaMatchesMigratedSchema cannot: it builds both of its databases
+// through createSchema, so the column is already there and a deleted ALTER
+// still passes. This test presents migrateV20 with a table that lacks the
+// column — the shape every existing install has.
+func TestMigrationV20UpgradesAV19Database(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "v19.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddJob(&Job{ID: "yt_up", VideoID: "up", URL: "u", Status: StatusFinished}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE jobs DROP COLUMN notification_msgs`); err != nil {
+		t.Fatalf("make a v19-shaped table: %v", err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 19`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db2, err := Open(path) // replays the version < 20 block
+	if err != nil {
+		t.Fatalf("v19 -> v20 upgrade failed: %v", err)
+	}
+	defer db2.Close()
+	if v, _ := db2.readUserVersion(); v != 20 {
+		t.Errorf("user_version = %d, want 20", v)
+	}
+	j, err := db2.GetJob("yt_up")
+	if err != nil {
+		t.Fatalf("existing row unreadable after upgrade: %v", err)
+	}
+	if j.NotificationMsgs != nil {
+		t.Errorf("upgraded row = %v, want nil", j.NotificationMsgs)
+	}
+	if !db2.UpdateNotificationMsgs("yt_up", map[string]string{"k": "1"}) {
+		t.Error("the upgraded column is not writable")
 	}
 }
 

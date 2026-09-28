@@ -834,9 +834,9 @@ func (db *Database) migrateV19() error {
 // ids an edit-mode notification target rewrites in place for this job. See
 // the Job.NotificationMsgs doc comment in types.go.
 //
-// Nullable with NO default, unlike every other column added since v13: the
-// absence of a lifecycle message is SQL NULL, and an empty string would be a
-// second spelling of it that every reader would then have to know about.
+// Nullable with NO default, like channel_id (v16): the absence of a lifecycle
+// message is SQL NULL, and an empty string would be a second spelling of it
+// that every reader would then have to know about.
 // (Spelled out as prose, not punctuation: a bare pair of single quotes in a
 // doc comment is rewritten by gofmt's doc-comment normalisation into a
 // typographic close-quote, which then trips `gofmt -l`.)
