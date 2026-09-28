@@ -833,8 +833,8 @@ export class SetupController {
     // Detect if dashboard URL will change (port or HTTPS toggle).
     // After restart the old URL is dead, so we redirect instead of polling.
     const newPort = port || 774;
-    const currentPort = parseInt(location.port) || (location.protocol === "https:" ? 443 : 80);
-    const currentHttps = location.protocol === "https:";
+    const currentPort = parseInt(window.location.port) || (window.location.protocol === "https:" ? 443 : 80);
+    const currentHttps = window.location.protocol === "https:";
     if (newPort !== currentPort || httpsEnabled !== currentHttps) {
       const protocol = httpsEnabled ? "https" : "http";
       this._redirectUrl = `${protocol}://${window.location.hostname}:${newPort}`;
@@ -1021,7 +1021,7 @@ export class SetupController {
           const reloadBtn = document.createElement("sl-button");
           reloadBtn.variant = "primary";
           reloadBtn.textContent = "Reload Page";
-          reloadBtn.addEventListener("click", () => location.reload());
+          reloadBtn.addEventListener("click", () => window.location.reload());
           failInner.appendChild(failMsg);
           failInner.appendChild(reloadBtn);
           waitingEl.appendChild(failInner);

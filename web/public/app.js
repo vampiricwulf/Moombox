@@ -3722,7 +3722,7 @@ window.fetch = async function (...args) {
       const rawUrl = typeof input === "string"
         ? input
         : (input instanceof URL ? input.href : input?.url || "");
-      if (rawUrl) pathname = new URL(rawUrl, location.origin).pathname;
+      if (rawUrl) pathname = new URL(rawUrl, window.location.origin).pathname;
     } catch { /* malformed url — fall through to reload */ }
     if (!pathname.startsWith("/api/auth/")) {
       // Session expired — reload to get login page
