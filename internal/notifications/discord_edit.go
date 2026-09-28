@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -18,11 +20,21 @@ import (
 // webhook itself was revoked, and re-posting would fail the same way forever.
 var ErrUnknownMessage = errors.New("discord: unknown message")
 
-// waitQuery makes a webhook POST answer with the created message instead of a
-// bare 204. Per the Discord API docs (resources/webhook.mdx), ?wait=true
-// "waits for server confirmation of message send before response, and returns
-// the created message body" — the only way to learn the id an edit needs.
+// waitQuery is the last-resort suffix execWaitURL falls back to when d.URL
+// will not parse. Per the Discord API docs (resources/webhook.mdx),
+// ?wait=true "waits for server confirmation of message send before response,
+// and returns the created message body" — the only way to learn the id an edit
+// needs.
 const waitQuery = "?wait=true"
+
+// unknownMessageCode matches Discord's numeric error code for "Unknown
+// Message" as a JSON FIELD, not as bare digits: a refusal body that echoes the
+// requested path can carry 10008 inside a message snowflake
+// ("/messages/1418889000000010008"), and a substring test on the digits reads
+// that as recoverable — re-POSTing forever to a revoked webhook, which is the
+// exact outcome patchMessage's 10015 row exists to prevent. \s* absorbs
+// discordErrSnippet's whitespace collapsing, and \b keeps 100081 from matching.
+var unknownMessageCode = regexp.MustCompile(`"code"\s*:\s*10008\b`)
 
 // discordHTTPError carries the status and sanitised body prefix of a Discord
 // refusal so a caller can branch on WHICH refusal it got. Only the edit path
@@ -52,23 +64,59 @@ func isUnknownMessage(err error) bool {
 	if he.Status != http.StatusNotFound {
 		return false
 	}
-	return strings.Contains(he.Snippet, "Unknown Message") || strings.Contains(he.Snippet, "10008")
+	return strings.Contains(he.Snippet, "Unknown Message") || unknownMessageCode.MatchString(he.Snippet)
+}
+
+// execWaitURL is the webhook's execute route with wait=true added to whatever
+// query the configured URL already carries.
+//
+// Built through net/url rather than by appending a literal "?wait=true":
+// discordWebhookRe (manager.go) is unanchored, so ValidateURL accepts a
+// webhook URL with a query — and ?thread_id= is Discord's documented way to
+// post into a forum thread. Concatenating would fold wait into THAT
+// parameter's value ("thread_id=456?wait=true"), Discord would answer its
+// non-wait 204, and edit mode would silently post a duplicate per event that
+// can never be edited. A fragment is dropped for the same reason: it never
+// reaches the server, so it would swallow the suffix entirely.
+func (d *DiscordWebhook) execWaitURL() string {
+	u, err := url.Parse(d.URL)
+	if err != nil {
+		return d.URL + waitQuery
+	}
+	q := u.Query()
+	q.Set("wait", "true")
+	u.RawQuery, u.Fragment = q.Encode(), ""
+	return u.String()
 }
 
 // messageURL is the per-message edit endpoint,
 // PATCH /webhooks/{id}/{token}/messages/{message_id} (Discord API docs,
-// resources/webhook.mdx). d.URL is already the resolved
-// https://discord.com/api/webhooks/ID/TOKEN form, so the route is a suffix.
+// resources/webhook.mdx). The route is a PATH suffix, so it is appended to the
+// parsed URL's path rather than to the whole string: a configured
+// "…/TOKEN?thread_id=456" would otherwise put "/messages/999" inside the query
+// and PATCH the execute route. thread_id survives (it identifies the forum
+// thread on both routes); wait never does — the edit route takes no such
+// parameter. Going through u.String() also escapes messageID, which reaches
+// here straight out of the database column with no shape validation.
 func (d *DiscordWebhook) messageURL(messageID string) string {
-	return strings.TrimRight(d.URL, "/") + "/messages/" + messageID
+	u, err := url.Parse(d.URL)
+	if err != nil {
+		return strings.TrimRight(d.URL, "/") + "/messages/" + url.PathEscape(messageID)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/messages/" + messageID
+	u.RawPath, u.Fragment = "", ""
+	q := u.Query()
+	q.Del("wait")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // postWait creates a message and returns its id, for a target that will later
 // rewrite it in place. Same loop, same retry schedule and same rate-limit
-// bucket as an ordinary Send — the only differences are ?wait=true and that
-// the response body is read.
+// bucket as an ordinary Send — the only differences are wait=true and that the
+// response body is read.
 func (d *DiscordWebhook) postWait(body []byte) (string, error) {
-	respBody, err := d.deliver(http.MethodPost, d.URL+waitQuery, body, true)
+	respBody, err := d.deliver(http.MethodPost, d.execWaitURL(), body, true)
 	if err != nil {
 		return "", err
 	}
@@ -79,7 +127,8 @@ func (d *DiscordWebhook) postWait(body []byte) (string, error) {
 // as ErrUnknownMessage so the caller can re-post; every other refusal is
 // permanent and reaches the caller unchanged.
 func (d *DiscordWebhook) patchMessage(messageID string, body []byte) error {
-	return asEditRefusal(messageID, mustErr(d.deliver(http.MethodPatch, d.messageURL(messageID), body, false)))
+	_, err := d.deliver(http.MethodPatch, d.messageURL(messageID), body, false)
+	return asEditRefusal(messageID, err)
 }
 
 // postWaitOnce and patchMessageOnce are the shutdown twins of the two above:
@@ -89,13 +138,16 @@ func (d *DiscordWebhook) patchMessage(messageID string, body []byte) error {
 // beside Send. The queue selects these while it is shutting down.
 func (d *DiscordWebhook) postWaitOnce(body []byte) (string, error) {
 	// Mirrors SendOnce exactly: honour a known-empty bucket only if it
-	// refills inside the shutdown cap, then learn from the response.
+	// refills inside the shutdown cap, learn from the response, and report a
+	// 429 as the rate limit it is rather than as an anonymous status.
 	d.waitForBucketWithin(shutdownBucketWaitCap)
-	r, err := d.do(http.MethodPost, d.URL+waitQuery, body, true)
+	r, err := d.do(http.MethodPost, d.execWaitURL(), body, true)
 	d.noteBucket(r)
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("discord webhook request: %w", err)
+	case r.status == http.StatusTooManyRequests:
+		return "", fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	case r.status >= 400:
 		return "", discordStatusErr(r.status, r.snippet)
 	}
@@ -109,6 +161,8 @@ func (d *DiscordWebhook) patchMessageOnce(messageID string, body []byte) error {
 	switch {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
+	case r.status == http.StatusTooManyRequests:
+		return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	case r.status >= 400:
 		return asEditRefusal(messageID, discordStatusErr(r.status, r.snippet))
 	}
@@ -119,20 +173,21 @@ func (d *DiscordWebhook) patchMessageOnce(messageID string, body []byte) error {
 // ErrUnknownMessage and passes every other refusal through unchanged. One
 // helper so the retrying and single-attempt edit paths cannot disagree about
 // which 404 is recoverable.
+//
+// TWO %w verbs: the caller matches ErrUnknownMessage with errors.Is, and the
+// status and snippet stay reachable with errors.As on *discordHTTPError — the
+// wrap must not be the one path in the package where that information is lost.
 func asEditRefusal(messageID string, err error) error {
 	if err == nil {
 		return nil
 	}
 	if isUnknownMessage(err) {
-		return fmt.Errorf("%w (message %s): %v", ErrUnknownMessage, messageID, err)
+		return fmt.Errorf("%w (message %s): %w", ErrUnknownMessage, messageID, err)
 	}
 	return err
 }
 
-// mustErr drops deliver's unused body return at the PATCH call sites.
-func mustErr(_ []byte, err error) error { return err }
-
-// parseCreatedID pulls the id out of a ?wait=true response.
+// parseCreatedID pulls the id out of a wait=true response.
 func parseCreatedID(respBody []byte) (string, error) {
 	var created struct {
 		ID string `json:"id"`

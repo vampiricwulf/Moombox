@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -164,6 +166,14 @@ func TestPatchMessageUnknownMessageIsRecoverable(t *testing.T) {
 		{"unknown webhook", http.StatusNotFound, `{"message":"Unknown Webhook","code":10015}`, false},
 		{"bare 404", http.StatusNotFound, ``, false},
 		{"bad request", http.StatusBadRequest, `{"message":"Invalid Form Body","code":50035}`, false},
+		// A refusal that echoes the requested path: the message snowflake
+		// ends in the digits 10008, and a substring test on the digits reads
+		// this revoked webhook as recoverable and re-POSTs to it forever.
+		{"unknown webhook echoing a 10008 id", http.StatusNotFound, `{"message":"Unknown Webhook","code":10015,"path":"/messages/1418889000000010008"}`, false},
+		// The code field still counts when the body is spaced out — and
+		// discordErrSnippet collapses whitespace runs, so the matcher has to
+		// tolerate what it leaves behind.
+		{"spaced code field", http.StatusNotFound, `{"message":"Gone", "code": 10008}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeDiscord(t, func(_ int, _ recordedReq, rw http.ResponseWriter) {
@@ -253,6 +263,149 @@ func TestPatchMessageOnceStillRecognisesUnknownMessage(t *testing.T) {
 	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 	if err := d.patchMessageOnce("999", body); !errors.Is(err, ErrUnknownMessage) {
 		t.Errorf("err = %v, want ErrUnknownMessage", err)
+	}
+}
+
+// TestUnknownMessageStillCarriesTheHTTPError: asEditRefusal wraps with TWO %w,
+// so the one path that re-labels a refusal is not also the one path where the
+// status and snippet stop being reachable. Every other refusal patchMessage
+// passes through keeps them.
+//
+// MUTANT: use %v for the underlying error — errors.Is still finds
+// ErrUnknownMessage and errors.As silently stops finding *discordHTTPError.
+func TestUnknownMessageStillCarriesTheHTTPError(t *testing.T) {
+	f := newFakeDiscord(t, func(_ int, _ recordedReq, rw http.ResponseWriter) {
+		rw.WriteHeader(http.StatusNotFound)
+		io.WriteString(rw, `{"message":"Unknown Message","code":10008}`)
+	})
+	d := &DiscordWebhook{URL: f.URL()}
+	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
+	err := d.patchMessage("999", body)
+	if !errors.Is(err, ErrUnknownMessage) {
+		t.Fatalf("err = %v, want ErrUnknownMessage", err)
+	}
+	var he *discordHTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("errors.As to *discordHTTPError = false through the ErrUnknownMessage wrap (err = %v)", err)
+	}
+	if he.Status != http.StatusNotFound {
+		t.Errorf("recovered status = %d, want 404", he.Status)
+	}
+	if !strings.Contains(he.Snippet, "Unknown Message") {
+		t.Errorf("recovered snippet = %q, want the refusal body", he.Snippet)
+	}
+}
+
+// TestEditURLsSurviveAThreadIDQuery: discordWebhookRe (manager.go) is
+// unanchored, so ValidateURL accepts a webhook URL carrying ?thread_id= —
+// Discord's documented way to post into a forum thread, and a shape that
+// works today in separate mode.
+//
+// MUTANT: build either URL by concatenation. The POST query becomes
+// "thread_id=456?wait=true" with no wait parameter at all, so Discord answers
+// its non-wait 204 AFTER creating a message that can never be edited; the
+// PATCH lands on the execute route with "/messages/999" buried in the query.
+func TestEditURLsSurviveAThreadIDQuery(t *testing.T) {
+	f := newFakeDiscord(t, okCreated("77"))
+	d := &DiscordWebhook{URL: f.URL() + "/api/webhooks/123/TOK?thread_id=456"}
+
+	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
+	if _, err := d.postWait(body); err != nil {
+		t.Fatalf("postWait: %v", err)
+	}
+	if err := d.patchMessage("999", body); err != nil {
+		t.Fatalf("patchMessage: %v", err)
+	}
+	calls := f.calls()
+	if len(calls) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(calls))
+	}
+
+	if calls[0].Path != "/api/webhooks/123/TOK" {
+		t.Errorf("POST path = %q, want /api/webhooks/123/TOK", calls[0].Path)
+	}
+	post, err := url.ParseQuery(calls[0].Query)
+	if err != nil {
+		t.Fatalf("POST query %q: %v", calls[0].Query, err)
+	}
+	if post.Get("wait") != "true" {
+		t.Errorf("POST query = %q, want a wait=true parameter of its own", calls[0].Query)
+	}
+	if post.Get("thread_id") != "456" {
+		t.Errorf("POST query = %q, want thread_id=456 kept", calls[0].Query)
+	}
+
+	if calls[1].Path != "/api/webhooks/123/TOK/messages/999" {
+		t.Errorf("PATCH path = %q, want /api/webhooks/123/TOK/messages/999", calls[1].Path)
+	}
+	patch, err := url.ParseQuery(calls[1].Query)
+	if err != nil {
+		t.Fatalf("PATCH query %q: %v", calls[1].Query, err)
+	}
+	if patch.Get("thread_id") != "456" {
+		t.Errorf("PATCH query = %q, want thread_id=456 kept — it names the forum thread on both routes", calls[1].Query)
+	}
+	if patch.Has("wait") {
+		t.Errorf("PATCH query = %q — the edit route takes no wait parameter", calls[1].Query)
+	}
+}
+
+// TestMessageURLNormalisesTheConfiguredURL pins the two remaining shapes
+// ValidateURL admits (a fragment, a trailing slash) and the escaping of an id
+// that came straight out of the jobs column — decodeNotificationMsgs does no
+// shape validation, so whatever is stored reaches this builder verbatim.
+func TestMessageURLNormalisesTheConfiguredURL(t *testing.T) {
+	const base = "https://discord.com/api/webhooks/123/TOK"
+	for _, tc := range []struct{ name, webhookURL, id, want string }{
+		{"plain", base, "999", base + "/messages/999"},
+		{"trailing slash", base + "/", "999", base + "/messages/999"},
+		{"fragment dropped", base + "#frag", "999", base + "/messages/999"},
+		{"wait stripped", base + "?wait=true", "999", base + "/messages/999"},
+		{"id with a query separator", base, "9?x=1", base + "/messages/9%3Fx=1"},
+		{"id with a space", base, "9 9", base + "/messages/9%209"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &DiscordWebhook{URL: tc.webhookURL}
+			if got := d.messageURL(tc.id); got != tc.want {
+				t.Errorf("messageURL(%q) on %q = %q, want %q", tc.id, tc.webhookURL, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEditOnceVariantsReportA429LikeSendOnce: the twins' doc comment claims
+// they mirror SendOnce, and SendOnce has a dedicated 429 arm. Without it an
+// operator reads "discord webhook returned 429" and has to decode the status
+// and dig the Retry-After out of the quoted body himself.
+func TestEditOnceVariantsReportA429LikeSendOnce(t *testing.T) {
+	handler := func(_ int, _ recordedReq, rw http.ResponseWriter) {
+		rw.Header().Set("Retry-After", "3")
+		rw.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(rw, `{"message":"You are being rate limited.","retry_after":3}`)
+	}
+	const want = "discord rate limited (retry-after: 3)"
+	for _, tc := range []struct {
+		name string
+		call func(*DiscordWebhook, []byte) error
+	}{
+		{"SendOnce", func(d *DiscordWebhook, _ []byte) error {
+			return d.SendOnce(One("t", "d", 0, nil, SendOptions{}))
+		}},
+		{"postWaitOnce", func(d *DiscordWebhook, b []byte) error { _, err := d.postWaitOnce(b); return err }},
+		{"patchMessageOnce", func(d *DiscordWebhook, b []byte) error { return d.patchMessageOnce("999", b) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeDiscord(t, handler)
+			d := &DiscordWebhook{URL: f.URL()}
+			body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
+			err := tc.call(d, body)
+			if err == nil {
+				t.Fatal("a 429 was reported as success")
+			}
+			if err.Error() != want {
+				t.Errorf("err = %q, want %q", err, want)
+			}
+		})
 	}
 }
 
