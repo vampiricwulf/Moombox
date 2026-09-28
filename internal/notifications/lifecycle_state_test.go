@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -110,6 +111,34 @@ func drain(t *testing.T, m *Manager) {
 	}
 }
 
+// waitCalls waits for the fake to have recorded at least n requests, WITHOUT
+// touching the batcher — the difference from drain, and the whole point.
+//
+// drain flushes every open coalescing window on each poll, so a row that uses
+// it can never observe whether something else (setMode, a timer) did the
+// flush: the test helper always does it first. Any row where the batcher is
+// part of what is under test must wait with this instead. It reports whether
+// the count arrived so the caller can phrase its own failure.
+func waitCalls(t *testing.T, f *fakeDiscord, n int, within time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if len(f.calls()) >= n {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The STORE assertions in this file poll with queue_test.go's waitFor rather
+// than reading straight after drain. drain cannot cover them: pop() removes
+// the head from q.items BEFORE deliver runs, so pending() reads 0 while the
+// POST, its response parse and the store write are all still in flight — with
+// a 50 ms handler the naked read fails 5/5.
+
 // titleFor names the embed for a test send. lifecycleLabels is the same map
 // the Status field reads, so "quality_split" reads "Quality split" rather
 // than the "Quality_split" a naive upper-first would produce.
@@ -182,6 +211,13 @@ func TestStateMachineFirstPostsThenEdits(t *testing.T) {
 		got[1] != http.MethodPatch || got[4] != http.MethodPatch {
 		t.Fatalf("methods = %v, want POST then four PATCHes", got)
 	}
+	// The create must ask for the message back: without ?wait=true Discord
+	// answers 204 with no body (API docs, resources/webhook.mdx) and there is
+	// no id to edit. Pinned here too, not only on the unit tests, because this
+	// is the row that claims the whole POST-then-PATCH spine works.
+	if calls[0].Query != "wait=true" {
+		t.Errorf("the creating POST's query = %q, want wait=true", calls[0].Query)
+	}
 	for i, c := range calls[1:] {
 		if !strings.HasSuffix(c.Path, "/messages/M1") {
 			t.Errorf("edit %d targeted %q, want .../messages/M1", i, c.Path)
@@ -196,9 +232,13 @@ func TestStateMachineFirstPostsThenEdits(t *testing.T) {
 			t.Errorf("History is missing %q: %q", want, hist)
 		}
 	}
-	if got := st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())]; got != "M1" {
-		t.Errorf("stored id = %q, want M1", got)
-	}
+	// The store write trails the wire: pending() is already 0 while the POST's
+	// response is being parsed and remembered, so these two read through
+	// waitFor rather than through drain's 5 ms settle.
+	waitFor(t, "the created id to be stored", func() bool {
+		return st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())] == "M1"
+	})
+	waitFor(t, "the silent write", func() bool { return st.writeCount() >= 1 })
 	if st.writeCount() != 1 {
 		t.Errorf("silent writes = %d, want exactly 1 (one per job per target)", st.writeCount())
 	}
@@ -240,8 +280,12 @@ func TestRestartResumesFromTheStoredID(t *testing.T) {
 	if got := methods(calls); len(got) != 2 || got[0] != http.MethodPatch || got[1] != http.MethodPatch {
 		t.Fatalf("methods = %v, want two PATCHes", got)
 	}
-	if !strings.HasSuffix(calls[0].Path, "/messages/BOOT1") {
-		t.Errorf("first edit targeted %q, want .../messages/BOOT1", calls[0].Path)
+	// EVERY edit, not just the first: "keeps editing the same message after a
+	// restart" is only half-said if the second PATCH's target is unchecked.
+	for i, c := range calls {
+		if !strings.HasSuffix(c.Path, "/messages/BOOT1") {
+			t.Errorf("edit %d targeted %q, want .../messages/BOOT1", i, c.Path)
+		}
 	}
 	if st.writeCount() != 0 {
 		t.Errorf("a resumed job wrote %d times, want 0 — the id was already stored", st.writeCount())
@@ -266,13 +310,23 @@ func TestFreshProcessWithNoIDPosts(t *testing.T) {
 // TestRemovedTargetIsIgnored: ids are keyed on the resolved URL, so a target
 // the operator deleted leaves an orphaned entry that nothing ever reads — and
 // a DIFFERENT webhook must not inherit it.
+//
+// BOTH targets are installed first and `gone` is then removed by a reload, so
+// "the removed target received 0 requests" is a real statement about the
+// retirement path (applyTargets → stopDiscard) rather than a tautology about a
+// queue that never existed.
 func TestRemovedTargetIsIgnored(t *testing.T) {
 	gone := newFakeDiscord(t, okCreated("OLD"))
 	live := newFakeDiscord(t, okCreated("NEW"))
 	st := newMemStore()
 	st.rows["yt_1"] = map[string]string{targetMsgKey(gone.URL()): "OLDMSG"}
 
-	m := editManager(t, live, st, nil)
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	installTargets(t, m, editTarget(gone, nil, ModeEdit), editTarget(live, nil, ModeEdit))
+	// The operator deletes the first webhook: a reload with only `live`.
+	installTargets(t, m, editTarget(live, nil, ModeEdit))
+
 	run(t, m, "yt_1", "downloading")
 
 	if got := methods(live.calls()); len(got) != 1 || got[0] != http.MethodPost {
@@ -281,12 +335,12 @@ func TestRemovedTargetIsIgnored(t *testing.T) {
 	if n := len(gone.calls()); n != 0 {
 		t.Errorf("the removed target received %d requests", n)
 	}
+	waitFor(t, "the live target's id to be stored", func() bool {
+		return st.NotificationMsgs("yt_1")[targetMsgKey(live.URL())] == "NEW"
+	})
 	row := st.NotificationMsgs("yt_1")
 	if row[targetMsgKey(gone.URL())] != "OLDMSG" {
 		t.Errorf("the orphaned id was disturbed: %v", row)
-	}
-	if row[targetMsgKey(live.URL())] != "NEW" {
-		t.Errorf("the live target's id = %v, want NEW", row)
 	}
 }
 
@@ -317,6 +371,13 @@ func TestTerminalEditsThenPostsSeparately(t *testing.T) {
 
 // TestNonLifecycleEventsNeverTouchTheMessage: auth, trim_* and System keep
 // posting as they always did, even on an edit-mode target.
+//
+// It waits with waitCalls rather than m.Wait(), because the per-job `auth` is
+// the one batchable key here (isBatchable: found/added, plus auth with a
+// JobID) and a terminal Wait would flush the window for the batcher. With the
+// non-flushing waiter, the edit-mode bypass at the head of batcher.Add has to
+// be the thing that delivers the auth embed inside the deadline — the window
+// is 5 s and nothing else opens it.
 func TestNonLifecycleEventsNeverTouchTheMessage(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("M5"))
 	m := editManager(t, f, newMemStore(), nil)
@@ -324,12 +385,64 @@ func TestNonLifecycleEventsNeverTouchTheMessage(t *testing.T) {
 	run(t, m, "yt_1", "downloading")
 	m.Send("Authentication Required", "d", TypeWarning, nil, SendOptions{Event: "auth", JobID: "yt_1"})
 	m.Send("Disk Space Warning", "d", TypeWarning, nil, SendOptions{Event: "disk_warning"})
-	m.Wait()
+	if !waitCalls(t, f, 3, 2*time.Second) {
+		t.Fatalf("only %v arrived — an edit-mode target must not coalesce its `auth`", methods(f.calls()))
+	}
 
 	got := methods(f.calls())
 	if len(got) != 3 || got[0] != http.MethodPost || got[1] != http.MethodPost || got[2] != http.MethodPost {
 		t.Fatalf("methods = %v, want three POSTs (one creating, two separate)", got)
 	}
+}
+
+// TestStaleIDReplacedThroughTheQueue (spec §4.5 "404 re-POSTs and re-stores",
+// Review Focus 2): a stored id Discord does not know must PATCH once, re-POST,
+// overwrite the id — and the job's NEXT event must edit the NEW message, not
+// the forgotten one and not a third.
+//
+// The unit twin (TestPatch404RePostsAndOverwrites) calls dispatchOne directly
+// and stops at the re-POST. This row drives the whole Manager and the
+// per-target FIFO, which is the only place the "next event uses the new id"
+// half can be observed.
+func TestStaleIDReplacedThroughTheQueue(t *testing.T) {
+	f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
+		if r.Method == http.MethodPatch && strings.HasSuffix(r.Path, "/messages/STALE111") {
+			// Discord's "this message no longer exists" (code 10008) — the one
+			// 4xx on the edit path that is recoverable.
+			rw.WriteHeader(http.StatusNotFound)
+			io.WriteString(rw, `{"message":"Unknown Message","code":10008}`)
+			return
+		}
+		okCreated("NEW777")(n, r, rw)
+	})
+	st := newMemStore()
+	key := targetMsgKey(f.URL())
+	st.rows["yt_1"] = map[string]string{key: "STALE111"}
+	m := editManager(t, f, st, nil)
+
+	run(t, m, "yt_1", "muxing", "finished")
+	if !waitCalls(t, f, 3, 2*time.Second) {
+		t.Fatalf("only %v arrived, want PATCH, POST, PATCH", methods(f.calls()))
+	}
+
+	calls := f.calls()
+	if got := methods(calls); len(got) != 3 || got[0] != http.MethodPatch ||
+		got[1] != http.MethodPost || got[2] != http.MethodPatch {
+		t.Fatalf("methods = %v, want PATCH (404), POST (re-create), PATCH (the new id)", got)
+	}
+	if !strings.HasSuffix(calls[0].Path, "/messages/STALE111") {
+		t.Errorf("the first edit targeted %q, want .../messages/STALE111", calls[0].Path)
+	}
+	if calls[1].Query != "wait=true" {
+		t.Errorf("the re-post did not ask for the message back: query %q", calls[1].Query)
+	}
+	if !strings.HasSuffix(calls[2].Path, "/messages/NEW777") {
+		t.Errorf("the next event edited %q, want .../messages/NEW777 — the re-posted id did not take",
+			calls[2].Path)
+	}
+	waitFor(t, "the replacement id to be stored", func() bool {
+		return st.NotificationMsgs("yt_1")[key] == "NEW777"
+	})
 }
 
 // TestEditsKeepFIFOOrderAcrossARetry: with a retried PATCH in the middle, the
@@ -392,27 +505,50 @@ func TestModeFlipMidJob(t *testing.T) {
 	if !strings.HasSuffix(f.calls()[2].Path, "/messages/M7") {
 		t.Errorf("the resumed edit targeted %q, want .../messages/M7", f.calls()[2].Path)
 	}
+	waitFor(t, "the create's silent write", func() bool { return st.writeCount() >= 1 })
 	if st.writeCount() != 1 {
 		t.Errorf("silent writes = %d, want 1 — the flip must not re-write the id", st.writeCount())
 	}
 
-	// A window opened under the OLD mode is delivered under the old rules:
-	// arm one with a `found` while the target is separate-mode and flip to
-	// edit WITHOUT draining first. setMode must flush it as its own message
-	// rather than let it be silently re-classified.
+	// A window opened under the OLD mode must be DELIVERED on the flip, never
+	// dropped and never folded into another job's message: arm one with a
+	// `found` while the target is separate-mode and flip to edit WITHOUT
+	// draining first. setMode is what flushes it.
+	//
+	// The wait is waitCalls, NOT drain: drain calls q.batch.Flush() on every
+	// poll, so with drain here the row passes even with setMode's flush
+	// deleted — the helper does the flush the row is trying to observe.
+	// batchWindow is 5 s, so anything arriving inside 500 ms cannot be the
+	// window's own timer either.
+	//
+	// Controller ruling (Task 7 review, recorded in global-constraints.md):
+	// because applyTargets rebinds `dispatch` inside targetsMu and flushes
+	// after the unlock, the flushed ONE-embed window goes out through the new
+	// edit-mode path and BECOMES that job's editable lifecycle message. That
+	// is the accepted outcome, so this row asserts it exactly — one embed,
+	// ?wait=true, and an id stored for yt_2.
 	before := len(f.calls())
 	installTargets(t, m, editTarget(f, nil, ModeSeparate))
 	m.Send("Found", "desc", TypeInfo, nil, SendOptions{Event: "found", JobID: "yt_2"})
 	installTargets(t, m, editTarget(f, nil, ModeEdit)) // setMode flushes the window
-	drain(t, m)
 
+	if !waitCalls(t, f, before+1, 500*time.Millisecond) {
+		t.Fatalf("the open window was not flushed by the mode change within 500ms (calls=%d)", len(f.calls()))
+	}
 	flushed := f.calls()[before:]
 	if len(flushed) != 1 {
-		t.Fatalf("the open window was not flushed on the mode change: %v", methods(flushed))
+		t.Fatalf("the flush produced %v, want exactly one message", methods(flushed))
 	}
 	if n := len(flushed[0].Body.Embeds); n != 1 {
 		t.Errorf("the flushed window carried %d embeds — it must be its own message, not folded in", n)
 	}
+	if flushed[0].Method != http.MethodPost || flushed[0].Query != "wait=true" {
+		t.Errorf("the flushed window went out as %s %q, want POST wait=true — a single-embed flush "+
+			"becomes that job's lifecycle message", flushed[0].Method, flushed[0].Query)
+	}
+	waitFor(t, "the flushed window's id to be stored for yt_2", func() bool {
+		return st.NotificationMsgs("yt_2")[targetMsgKey(f.URL())] == "M7"
+	})
 }
 
 // TestShutdownFlushIsSingleAttempt: the whole path, not just dispatchOne —
