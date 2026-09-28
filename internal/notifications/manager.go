@@ -17,7 +17,18 @@ import (
 // discordapp.com is Discord's legacy domain and still serves webhooks; a URL
 // pasted from an old bookmark was rejected outright before it was accepted here
 // (audit R6). parseTarget canonicalises it to discord.com.
-var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+`)
+//
+// ANCHORED at both ends: without the trailing `$` the pattern matched a
+// PREFIX, so anything glued after the token came along to the wire — a ")"
+// copied out of a Markdown link, a trailing space or newline from a paste, or
+// a "/../evil" that resolves onto another path entirely.
+//
+// The tail is deliberately not a bare `$`: an optional trailing slash is what
+// a browser's address bar hands back, and an optional query is the forum-
+// thread form "?thread_id=…" that Discord documents and that execWaitURL and
+// messageURL are both written around. A fragment is not admitted — it never
+// reaches the server, and both builders drop it.
+var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#]*)?$`)
 
 // redactURLForLog reduces an arbitrary notification URL to scheme://host for
 // log lines. Webhook URLs routinely embed secrets in their path or query
@@ -668,8 +679,10 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 
 	// Outside the lock, and BEFORE the retired targets are stopped: a batcher
 	// whose target just switched to edit mode delivers the window it is
-	// holding under the rules those embeds were coalesced under, rather than
-	// silently re-classifying them. A mode that did not change is a no-op.
+	// holding on the flip rather than dropping it — a one-embed window goes
+	// out through the already-rebound dispatch and becomes that job's
+	// lifecycle message; a multi-embed window posts plain (dispatchOne's
+	// single-embed guard). A mode that did not change is a no-op.
 	for _, mc := range modes {
 		mc.q.batch.setMode(mc.mode)
 	}

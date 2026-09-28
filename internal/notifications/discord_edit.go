@@ -71,13 +71,13 @@ func isUnknownMessage(err error) bool {
 // query the configured URL already carries.
 //
 // Built through net/url rather than by appending a literal "?wait=true":
-// discordWebhookRe (manager.go) is unanchored, so ValidateURL accepts a
-// webhook URL with a query — and ?thread_id= is Discord's documented way to
+// discordWebhookRe (manager.go) admits a query, so ValidateURL accepts a
+// webhook URL carrying one — and ?thread_id= is Discord's documented way to
 // post into a forum thread. Concatenating would fold wait into THAT
 // parameter's value ("thread_id=456?wait=true"), Discord would answer its
 // non-wait 204, and edit mode would silently post a duplicate per event that
-// can never be edited. A fragment is dropped for the same reason: it never
-// reaches the server, so it would swallow the suffix entirely.
+// can never be edited. A fragment is dropped whatever the regex admits: it
+// never reaches the server, so appending would swallow the suffix entirely.
 func (d *DiscordWebhook) execWaitURL() string {
 	u, err := url.Parse(d.URL)
 	if err != nil {

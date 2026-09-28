@@ -24,6 +24,13 @@ const (
 // is always its own post: those may carry a mention, and an edit does not
 // re-notify anyone (per the Discord API docs an edit returns the updated
 // message object and says nothing about re-notifying).
+//
+// TWO tests change when this set does: TestLifecycleEventSet
+// (lifecycle_test.go) pins the membership, and
+// TestEveryLifecycleSendCarriesItsJob (internal/worker,
+// notify_lifecycle_ids_test.go) holds a hand copy — it is an AST guard over
+// that package's producers, and widening this package's API for it would be
+// the tail wagging the dog.
 var lifecycleEvents = map[string]bool{
 	"found":               true,
 	"added":               true,
@@ -115,7 +122,9 @@ func targetMsgKey(resolvedURL string) string {
 //
 // Exact match, NOT case-insensitive: validateOrNormalize rejects "Edit" and
 // rewrites it to "separate", so accepting it here would make the manager
-// disagree with the value the config layer says is stored.
+// disagree with the value the config layer says is stored. Surrounding
+// whitespace is tolerated, and the loader trims too — so " edit " reads the
+// same on both sides.
 func normalizeTargetMode(mode string) string {
 	if strings.TrimSpace(mode) == ModeEdit {
 		return ModeEdit
@@ -165,6 +174,7 @@ type lifecycleJob struct {
 	loaded  bool
 	msgs    map[string]string   // target key -> message id
 	history map[string][]string // target key -> rendered history lines
+	closed  map[string]bool     // target keys whose story this process has finished telling
 }
 
 // maxTrackedJobs is the backstop for a job that never reaches a terminal
@@ -247,6 +257,10 @@ func (l *lifecycleTracker) remember(jobID, key, messageID string) {
 		return
 	}
 	j.msgs[key] = messageID
+	// A new message reopens this target's story, so a release recorded for an
+	// earlier one (a terminal event before a Retry) must not count this id as
+	// already closed — release reads closed against the ids in msgs.
+	delete(j.closed, key)
 	snapshot := make(map[string]string, len(j.msgs))
 	for k, v := range j.msgs {
 		snapshot[k] = v
@@ -258,9 +272,13 @@ func (l *lifecycleTracker) remember(jobID, key, messageID string) {
 	if store == nil {
 		return
 	}
-	// OUTSIDE l.mu — the store is a database and every other tracker call
-	// would block behind it — but INSIDE writeMu, which is what makes the
-	// snapshot above still current when it lands.
+	// OUTSIDE l.mu, but INSIDE writeMu — which is what makes the snapshot
+	// above still current when it lands.
+	//
+	// The lock ORDER is tracker.mu -> db.mu and nothing else: no DB callback
+	// re-enters the tracker, so jobLocked's one SELECT per job per boot is
+	// held under l.mu without a deadlock to construct. Dropping l.mu here is
+	// about the WRITE, which is the call that blocks long enough to matter.
 	if !store.UpdateNotificationMsgs(jobID, snapshot) && log != nil {
 		log.Debug("notification message id not persisted — job row is gone",
 			"jobID", jobID)
@@ -276,8 +294,15 @@ func (l *lifecycleTracker) forget(jobID, key string) {
 	delete(l.jobLocked(jobID).msgs, key)
 }
 
-// release drops a job's whole in-memory entry once its story is told — after a
-// delivered `finished`, `error` or `cancelled` edit.
+// release closes ONE target's story for a job — after a delivered `finished`,
+// `error` or `cancelled` edit: its History goes, and the job's whole entry goes
+// once no target that holds a message is still open.
+//
+// Per (job, TARGET), not per job. Two edit-mode targets fan out the same job,
+// each on its own FIFO; if the first one's terminal edit dropped the whole
+// entry, the second's later terminal edit would render a one-line History
+// instead of the story it saw — and, when the id's row write had failed, would
+// open a SECOND message for the job instead of editing its own.
 //
 // The PERSISTED id is untouched, so this is a cache eviction, not a close: a
 // Retry (or another target still mid-job) re-reads the row once and keeps
@@ -286,10 +311,26 @@ func (l *lifecycleTracker) forget(jobID, key string) {
 //
 // Without it the tracker is a map that only ever grows — one entry per job an
 // edit-mode target ever touched, each holding a msgs map and a ~1000-rune
-// History per target, for the life of a 24/7 process.
-func (l *lifecycleTracker) release(jobID string) {
+// History per target, for the life of a 24/7 process. A target that filters
+// `finished` out keeps the entry alive until evictLocked, which is the same
+// bound a job that never reaches a terminal event already has.
+func (l *lifecycleTracker) release(jobID, key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	j := l.jobs[jobID]
+	if j == nil {
+		return
+	}
+	delete(j.history, key)
+	if j.closed == nil {
+		j.closed = map[string]bool{}
+	}
+	j.closed[key] = true
+	for k := range j.msgs {
+		if !j.closed[k] {
+			return
+		}
+	}
 	delete(l.jobs, jobID)
 	delete(l.touched, jobID)
 }
@@ -377,15 +418,24 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 	if t.mode != ModeEdit || t.msgKey == "" || opts.JobID == "" || opts.Event == "" {
 		return lifecyclePlan{}
 	}
+	// The two cheap map lookups come BEFORE any tracker call: messageID creates
+	// the job's entry and does its one store read, so asking it about an event
+	// that can never manage a message would spend a SELECT and a tracker slot
+	// on nothing.
+	if !lifecycleEvents[opts.Event] && !terminalLifecycleEvents[opts.Event] {
+		return lifecyclePlan{}
+	}
 	if terminalLifecycleEvents[opts.Event] {
 		// Close an OPEN message; never open one. A job whose first word to
 		// this target is "failed" has no story to rewrite.
 		if id, ok := m.tracker().messageID(opts.JobID, t.msgKey); ok {
 			return lifecyclePlan{Manage: true, MessageID: id, AlsoSeparate: true}
 		}
-		return lifecyclePlan{}
-	}
-	if !lifecycleEvents[opts.Event] {
+		// The lookup just created the entry, and this event is the end of the
+		// story: release it again rather than leave a slot (and the store read
+		// behind it) held for a message that was never opened. On a target
+		// filtered to ["error","finished"] that is every failing job.
+		m.tracker().release(opts.JobID, t.msgKey)
 		return lifecyclePlan{}
 	}
 	id, _ := m.tracker().messageID(opts.JobID, t.msgKey)
@@ -412,11 +462,16 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 		return sendPlain(t.sender, msg, once)
 	}
 	opts := msg.Embeds[0].Opts
-	plan := m.planLifecycle(t, opts)
+	// The editability question comes FIRST: a transport that cannot edit falls
+	// back to a plain post rather than dropping the event, and planLifecycle's
+	// messageID would otherwise spend a store read and hold a tracker entry per
+	// job for messages this transport can never rewrite.
 	edit, editable := t.sender.(editableSender)
-	if !plan.Manage || !editable {
-		// A transport that cannot edit falls back to a plain post rather than
-		// dropping the event.
+	if !editable {
+		return sendPlain(t.sender, msg, once)
+	}
+	plan := m.planLifecycle(t, opts)
+	if !plan.Manage {
 		return sendPlain(t.sender, msg, once)
 	}
 
@@ -439,11 +494,12 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 			return errors.Join(lifecycleErr, sepErr)
 		}
 	}
-	// A delivered terminal edit ends this job's story for this target: drop the
-	// in-memory entry (the PERSISTED id stays, so a Retry reloads it once and
-	// keeps editing the same message).
+	// A delivered terminal edit ends this job's story for THIS target: drop its
+	// history (and the job's entry once every target holding a message is
+	// closed). The PERSISTED id stays, so a Retry reloads it once and keeps
+	// editing the same message.
 	if lifecycleErr == nil && (plan.AlsoSeparate || opts.Event == "finished") {
-		tr.release(opts.JobID)
+		tr.release(opts.JobID, t.msgKey)
 	}
 	return lifecycleErr
 }

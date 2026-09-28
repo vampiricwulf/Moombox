@@ -138,6 +138,11 @@ func newTargetQueue(t notificationTarget, logger interface {
 	// batcher hung on the latter would take every open window with it on each
 	// unrelated config save, silently.
 	q.batch = newBatcher(batchWindow, clock, q.enqueueBatch, logger)
+	// The mode is known here, so a queue is never briefly reachable in the
+	// wrong one: applyTargets can only call setMode AFTER targetsMu is
+	// released, and this queue is published — and draining — from the moment
+	// that lock drops. setMode is then a no-op for a fresh queue.
+	q.batch.mode = normalizeTargetMode(t.mode)
 	return q
 }
 

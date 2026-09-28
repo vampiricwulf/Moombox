@@ -359,6 +359,82 @@ func TestTrackerReleasesFinishedJobs(t *testing.T) {
 	}
 }
 
+// TestMessagelessTerminalLeavesNoTrackerEntry: a terminal event that opened
+// nothing posts plain — and must not leave the entry the lookup created behind
+// it. On an edit-mode target filtered to ["error","finished"] that is one
+// tracker slot, and the store read that filled it, per failing job.
+func TestMessagelessTerminalLeavesNoTrackerEntry(t *testing.T) {
+	f := newFakeDiscord(t, okCreated("UNUSED"))
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(newMemStore())
+	tgt := notificationTarget{
+		sender: &DiscordWebhook{URL: f.URL()},
+		mode:   ModeEdit,
+		msgKey: targetMsgKey(f.URL()),
+	}
+	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "error", JobID: "yt_1"}), false); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if calls := f.calls(); len(calls) != 1 || calls[0].Method != http.MethodPost || calls[0].Query != "" {
+		t.Fatalf("calls = %+v, want one plain POST", calls)
+	}
+	if n := m.tracker().trackedJobs(); n != 0 {
+		t.Errorf("tracked jobs after a message-less terminal = %d, want 0", n)
+	}
+}
+
+// TestSecondTargetKeepsHistoryAfterFirstTargetsRelease: release is per
+// (job, TARGET), not per job. Two edit-mode targets — two Discord servers —
+// both take a job's whole story; whichever one delivers its `finished` edit
+// first must not take the other's History and message id with it.
+//
+// MUTANT: `release(jobID)` deleting the whole job entry. Target A's finished
+// PATCH lands first, B's `finished` then recreates the entry from the row and
+// renders a one-line History ("Finished") instead of the four states it saw —
+// and with no persisted id to re-read it opens a SECOND message for the job.
+func TestSecondTargetKeepsHistoryAfterFirstTargetsRelease(t *testing.T) {
+	fa := newFakeDiscord(t, okCreated("MA"))
+	fb := newFakeDiscord(t, okCreated("MB"))
+	st := newMemStore()
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	tgtA := notificationTarget{sender: &DiscordWebhook{URL: fa.URL()}, mode: ModeEdit, msgKey: targetMsgKey(fa.URL())}
+	tgtB := notificationTarget{sender: &DiscordWebhook{URL: fb.URL()}, mode: ModeEdit, msgKey: targetMsgKey(fb.URL())}
+
+	send := func(tgt notificationTarget, event string) {
+		t.Helper()
+		if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: event, JobID: "yt_1"}), false); err != nil {
+			t.Fatalf("%s: %v", event, err)
+		}
+	}
+	// Both targets see the same three states, then A's terminal edit lands
+	// first — B's FIFO was behind a retry ladder or a rate-limit sleep.
+	for _, e := range []string{"found", "downloading", "muxing"} {
+		send(tgtA, e)
+		send(tgtB, e)
+	}
+	send(tgtA, "finished")
+	send(tgtB, "finished")
+
+	last := fb.calls()[len(fb.calls())-1]
+	if last.Method != http.MethodPatch || !strings.HasSuffix(last.Path, "/messages/MB") {
+		t.Fatalf("target B's finished = %s %s, want a PATCH of its own message MB", last.Method, last.Path)
+	}
+	var history string
+	for _, f := range last.Body.Embeds[0].Fields {
+		if f.Name == historyFieldName {
+			history = f.Value
+		}
+	}
+	if n := len(strings.Split(history, "\n")); n != 4 {
+		t.Errorf("target B's terminal History has %d lines (%q), want the 4 states it saw", n, history)
+	}
+	// A's own story is closed, and once both are closed the entry is gone.
+	if n := m.tracker().trackedJobs(); n != 0 {
+		t.Errorf("tracked jobs after BOTH targets finished = %d, want 0", n)
+	}
+}
+
 // TestTrackerCapsTrackedJobs: jobs that never reach a terminal event (cancelled
 // outside the notifier, deleted, filtered to mid-lifecycle keys) must not
 // retain an entry each, forever, in a process that runs for months.

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -109,6 +110,82 @@ func TestLifecycleSplitSendsCarryTheirJob(t *testing.T) {
 
 	assertCarriesItsJob(t, rec, "gap_split", job)
 	assertCarriesItsJob(t, rec, "quality_split", job)
+
+	// The unknown-channel arm of the same shape: a row with no channel name
+	// (a manual `moombox add` of a bare URL) must carry NO author object —
+	// Discord answers an author with an empty name with a 400, and
+	// DiscordWebhook.Send treats a non-429 4xx as permanent, so the embed
+	// would be lost rather than degraded. JobID and Platform still travel.
+	t.Run("a channel-less row carries no author but still names its job", func(t *testing.T) {
+		rec := notificationtest.New()
+		o := &DownloadOrchestrator{notifier: rec, logger: discardLogger{}}
+		anon := &database.Job{
+			ID: "tw_anon", VideoID: "anon", Platform: "twitch",
+			Title: "A Stream", URL: "https://twitch.tv/videos/anon",
+		}
+		o.sendGapSplitNotification(&JobContext{Job: anon}, 0, QualityInfo{Label: "1080p60"})
+
+		got := rec.ByEvent("gap_split")
+		if len(got) != 1 {
+			t.Fatalf("gap_split sends = %d, want 1", len(got))
+		}
+		if got[0].Opts.Author != nil {
+			t.Errorf("Author = %+v, want nil for a row with no channel name", got[0].Opts.Author)
+		}
+		if got[0].Opts.JobID != anon.ID || got[0].Opts.Platform != anon.Platform {
+			t.Errorf("JobID/Platform = %q/%q, want %q/%q — the author is the only field the unknown channel costs",
+				got[0].Opts.JobID, got[0].Opts.Platform, anon.ID, anon.Platform)
+		}
+	})
+}
+
+// TestTrimSendsCarryTheirJob covers the last two producers that built their
+// SendOptions by hand: `trim_error` (sendTrimFailed, orchestrator.go) and
+// `trim_deleted` (TrimService.DeleteTrim, trim.go).
+//
+// Neither is a lifecycle event — both stay separate posts, which is what lets
+// them ping an edit-mode target — but the footer's platform, the author line
+// and the dashboard deep link are the job's either way, and Manager.Send
+// applies the deep link only when publicURL, JobID and Author are all there.
+// This closes the last of the "bare SendOptions" sites (N2b review L2).
+func TestTrimSendsCarryTheirJob(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "trim.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	job := &database.Job{
+		ID: "yt_trim", VideoID: "trim", Platform: "youtube",
+		Title: "A Job", ChannelName: "A Channel",
+		Status: database.StatusFinished,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	t.Run("trim_error", func(t *testing.T) {
+		rec := notificationtest.New()
+		o := &DownloadOrchestrator{db: db, notifier: rec, logger: discardLogger{}}
+		o.sendTrimFailed(job, errors.New("ffmpeg: exit status 1"))
+		assertCarriesItsJob(t, rec, "trim_error", job)
+	})
+
+	t.Run("trim_deleted", func(t *testing.T) {
+		rec := notificationtest.New()
+		if err := db.AddTrim(&database.TrimRecord{
+			ID: "trim1", JobID: job.ID, StartTime: 10, EndTime: 40,
+			Filename: "clip.mp4", CreatedAt: "2026-09-27T00:00:00Z", Duration: 30,
+		}); err != nil {
+			t.Fatalf("AddTrim: %v", err)
+		}
+		ts := NewTrimService(db, "ffmpeg", discardLogger{})
+		ts.SetNotifier(rec)
+		if err := ts.DeleteTrim(job.ID, "trim1"); err != nil {
+			t.Fatalf("DeleteTrim: %v", err)
+		}
+		assertCarriesItsJob(t, rec, "trim_deleted", job)
+	})
 }
 
 // TestLifecycleMuxingSendCarriesItsJob covers `muxing`. sendMuxingStarting

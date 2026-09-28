@@ -296,8 +296,8 @@ func TestUnknownMessageStillCarriesTheHTTPError(t *testing.T) {
 	}
 }
 
-// TestEditURLsSurviveAThreadIDQuery: discordWebhookRe (manager.go) is
-// unanchored, so ValidateURL accepts a webhook URL carrying ?thread_id= —
+// TestEditURLsSurviveAThreadIDQuery: discordWebhookRe (manager.go) admits an
+// optional query, so ValidateURL accepts a webhook URL carrying ?thread_id= —
 // Discord's documented way to post into a forum thread, and a shape that
 // works today in separate mode.
 //
@@ -350,10 +350,12 @@ func TestEditURLsSurviveAThreadIDQuery(t *testing.T) {
 	}
 }
 
-// TestMessageURLNormalisesTheConfiguredURL pins the two remaining shapes
-// ValidateURL admits (a fragment, a trailing slash) and the escaping of an id
-// that came straight out of the jobs column — decodeNotificationMsgs does no
-// shape validation, so whatever is stored reaches this builder verbatim.
+// TestMessageURLNormalisesTheConfiguredURL pins the shapes the builder must
+// normalise anyway — a trailing slash, which ValidateURL admits, and a
+// fragment, which it no longer does but which a hand-written config or a
+// future caller could still hand over — plus the escaping of an id that came
+// straight out of the jobs column: decodeNotificationMsgs does no shape
+// validation, so whatever is stored reaches this builder verbatim.
 func TestMessageURLNormalisesTheConfiguredURL(t *testing.T) {
 	const base = "https://discord.com/api/webhooks/123/TOK"
 	for _, tc := range []struct{ name, webhookURL, id, want string }{

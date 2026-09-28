@@ -656,28 +656,49 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 				_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
 				if trimErr != nil {
 					o.logger.Error("post-download trim failed", "err", trimErr, "jobID", jobCtx.Job.ID)
-					if o.notifier != nil {
-						o.notifier.Send("Trim Failed",
-							fmt.Sprintf("Failed to create trim for \"%s\"", jobCtx.Job.Title),
-							notifications.TypeError,
-							[]notifications.Field{
-								{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
-								{Name: notifications.IDLabel(jobCtx.Job.Platform), Value: jobCtx.Job.VideoID, Inline: true},
-								{Name: "Error", Value: notifications.EscapeMarkdown(trimErr.Error())},
-							},
-							notifications.SendOptions{
-								URL:       jobCtx.Job.URL,
-								Thumbnail: jobCtx.Job.ThumbnailURL,
-								Event:     "trim_error",
-							},
-						)
-					}
+					o.sendTrimFailed(jobCtx.Job, trimErr)
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// sendTrimFailed is the "Trim Failed" embed for a post-download trim that did
+// not produce a file.
+//
+// A method rather than the inline block it was, for the same reason
+// sendMuxingStarting is one: the only caller sits at the end of
+// ExecuteWithChat, past the whole download, so nothing could assert on the
+// embed it built — and the options it built by hand named no job.
+//
+// `trim_error` is never a lifecycle event (it stays its own post, and it is
+// one of the events that can still ping an edit-mode target), but the
+// footer's platform, the author line and the dashboard deep link are the
+// job's either way, and the deep link needs JobID and Author together.
+func (o *DownloadOrchestrator) sendTrimFailed(job *database.Job, trimErr error) {
+	if o.notifier == nil || job == nil {
+		return
+	}
+	f := NotifyFacts(job)
+	o.notifier.Send("Trim Failed",
+		fmt.Sprintf("Failed to create trim for \"%s\"", job.Title),
+		notifications.TypeError,
+		[]notifications.Field{
+			{Name: "Channel", Value: job.ChannelName, Inline: true},
+			{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
+			{Name: "Error", Value: notifications.EscapeMarkdown(trimErr.Error())},
+		},
+		notifications.SendOptions{
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
+			Event:     "trim_error",
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
+		},
+	)
 }
 
 // attachTrackerAndProgress attaches the progress tracker to whatever

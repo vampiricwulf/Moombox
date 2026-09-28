@@ -70,12 +70,12 @@ type batcher struct {
 	mentionAllowed *AllowedMentions
 	// timer is armed by the first item of a window and disarmed by the flush.
 	timer batchTimer
-	// mode is the target's delivery mode (lifecycle.go), rebound by
-	// applyTargets through setMode on every config load. ModeEdit turns this
-	// whole stage off for the target: an edited message is ONE job's embed
-	// rewritten in place, so it can never share a POST with another job's.
-	// The zero value reads as ModeSeparate, which is what a batcher built
-	// before its first setMode gets.
+	// mode is the target's delivery mode (lifecycle.go), set at construction
+	// by newTargetQueue and rebound by applyTargets through setMode on every
+	// config load. ModeEdit turns this whole stage off for the target: an
+	// edited message is ONE job's embed rewritten in place, so it can never
+	// share a POST with another job's. The zero value reads as ModeSeparate,
+	// which is what a bare newBatcher gets.
 	mode string
 }
 
@@ -180,28 +180,45 @@ func (b *batcher) Stop() { b.Flush() }
 // setMode swaps the target's delivery mode, FLUSHING the open window first.
 //
 // A batcher holding pending `found` embeds when its target switches to edit
-// mode must deliver them under the rules they were coalesced under, not
-// silently re-classify them — the same reason applyTargets flushes a retired
-// target's window rather than letting it evaporate. Flushing on the way back
-// to separate mode costs nothing (the window is empty, because edit mode
-// never opened one) and keeps the rule one sentence long.
+// mode is delivered on the flip rather than dropped: a one-embed window goes
+// out through the already-rebound dispatch and becomes that job's lifecycle
+// message; a multi-embed window posts plain (dispatchOne's single-embed
+// guard) — the same reason applyTargets flushes a retired target's window
+// rather than letting it evaporate. Flushing on the way back to separate mode
+// costs nothing (the window is empty, because edit mode never opened one) and
+// keeps the rule one sentence long.
 //
-// Both sides are normalised, so the first bind of a fresh batcher ("" ->
-// "separate") is a no-op rather than a pointless flush.
+// The window and the mode move under ONE hold, and the emit happens after it:
+// an Add landing between a flush and a later swap would otherwise join a
+// window that had just been emptied, arm its timer under the mode the flip is
+// leaving, and make that embed wait out the full 5 s on a target that is now
+// in edit mode — where a later event emitting at once would overtake it and
+// append the job's History out of order.
+//
+// Both sides are normalised, so the first bind of a fresh batcher (already
+// born in its target's mode — see newTargetQueue) is a no-op.
 func (b *batcher) setMode(mode string) {
 	mode = normalizeTargetMode(mode)
 	b.mu.Lock()
-	unchanged := normalizeTargetMode(b.mode) == mode
-	b.mu.Unlock()
-	if unchanged {
+	if normalizeTargetMode(b.mode) == mode {
+		b.mu.Unlock()
 		return
 	}
-	// OUTSIDE b.mu — Flush takes it, and then reaches q.enqueue and the
-	// queue's own mutex.
-	b.Flush()
-	b.mu.Lock()
+	if b.timer != nil {
+		// Disarm before releasing the window, exactly as Flush does: a timer
+		// that has not fired yet must not emit these embeds a second time.
+		b.timer.Stop()
+		b.timer = nil
+	}
+	pending, mention, allowed := b.pending, b.mention, b.mentionAllowed
+	b.pending, b.mention, b.mentionAllowed = nil, "", nil
 	b.mode = mode
 	b.mu.Unlock()
+
+	// OUTSIDE b.mu — emit reaches q.enqueue and the queue's own mutex.
+	for _, embeds := range splitMessages(pending) {
+		b.emit(Message{Embeds: embeds, Mention: mention, MentionAllowed: allowed})
+	}
 }
 
 // isBatchable reports whether a send coalesces.

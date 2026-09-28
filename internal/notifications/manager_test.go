@@ -239,6 +239,52 @@ func TestDiscordWebhookRegex(t *testing.T) {
 	}
 }
 
+// TestDiscordWebhookURLIsAnchored: the pattern must match the WHOLE URL, and
+// the anchor must still admit the shapes the edit path is built around.
+//
+// MUTANT: drop the trailing `$`. The regex then matches a PREFIX, so a URL
+// with anything glued after the token is accepted and posted to verbatim —
+// "…/TOKEN/../evil" reaches another host's path, a trailing ")" copied out of
+// Markdown becomes part of the token, and a pasted URL with a trailing space
+// or newline is delivered to a path that is not the webhook's.
+//
+// The other half is the constraint the anchor must not break: "?thread_id="
+// is Discord's documented way to post into a forum thread (execWaitURL and
+// messageURL are both written around it) and a trailing slash is what a
+// browser's address bar hands back — a bare `$` after the token would reject
+// a config that works today.
+func TestDiscordWebhookURLIsAnchored(t *testing.T) {
+	const base = "https://discord.com/api/webhooks/123456789012345678/tok-en_ABC"
+	for _, tc := range []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"plain", base, true},
+		{"legacy discordapp.com host", strings.Replace(base, "discord.com", "discordapp.com", 1), true},
+		{"trailing slash", base + "/", true},
+		{"thread_id query", base + "?thread_id=123", true},
+		{"thread_id on a trailing slash", base + "/?thread_id=123", true},
+		{"trailing paren from a Markdown link", base + ")", false},
+		{"trailing space", base + " ", false},
+		{"trailing newline", base + "\n", false},
+		{"path traversal after the token", base + "/../evil", false},
+		{"fragment", base + "#frag", false},
+		{"another path segment", base + "/messages/999", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := discordWebhookRe.MatchString(tc.url); got != tc.want {
+				t.Errorf("discordWebhookRe.MatchString(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+			// ValidateURL is the seam both editors call, so the rows must
+			// hold through it too.
+			if got := ValidateURL(tc.url) == nil; got != tc.want {
+				t.Errorf("ValidateURL(%q) accepted = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- NewManager tests ---
 
 func TestNewManagerNoNotifications(t *testing.T) {
