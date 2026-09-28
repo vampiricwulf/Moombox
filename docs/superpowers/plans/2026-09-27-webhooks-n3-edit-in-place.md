@@ -15,15 +15,32 @@
 Every task's requirements implicitly include this section.
 
 **From the spec (§4 Constraints + §0 rulings):**
-- **Producers are unchanged.** They already pass `SendOptions.JobID` (Arc N2a). No file under `internal/worker/`, `cmd/moombox/monitor_callbacks.go`, `cmd/moombox/main.go` or `internal/web/routes/jobs.go` changes in this arc except the two one-line `SetMessageStore` wirings in Task 3.
+- **Eight producers must start passing `JobID`, `Platform` and `Author`.** Only `found`,
+  `added`, `finished`, `error` and `cancelled` go through `jobOpts`
+  (`internal/notifications/builders.go:159`). The other eight lifecycle events —
+  `scheduled` and `rescheduled` (`internal/worker/stream_processor.go:595`, `:618`),
+  `downloading` (`internal/worker/orchestrator.go:248`,
+  `internal/worker/orchestrator_twitch.go:154`), `gap_split` and `quality_split`
+  (`internal/worker/quality_split_common.go:178`, `:218`), `muxing`
+  (`sendMuxingStarting`, `internal/worker/orchestrator_mux.go:665`) and the two
+  `connectivity_*` keys (`sendTwitchSessionNotification`,
+  `internal/worker/orchestrator_twitch.go:1143`) — build `SendOptions` by hand with only
+  `URL` and `Thumbnail`. `planLifecycle` keys on `opts.JobID`, so without this edit an
+  edit-mode target manages three of eleven events and posts the rest separately: the
+  feature does not work. `docs/spec/operations.md:464` documents the gap; the N2b ledger
+  (`final-review.md` L2) flags it as N3's to close.
 - **The silent single-column write is the ONLY new database write.** `updateSingleColumnSilent` — no `updated_at` bump, no `OnJobUpdate`/`OnJobsChange` fan-out, no UI frame. One write per (job, target), on the first successful POST only. The DB layer's cadence ruling (2026-07-03: no database-layer perf/cadence changes) is otherwise untouched.
 - **Batching stays separate-mode only.** An edit-mode target's `found`/`added`/`auth` embeds are never coalesced — for an edit-mode target the `found` embed *is* the job's lifecycle message.
+- **A mode flip flushes the open window.** A batcher holding pending `found` embeds when
+  its target switches to edit mode must deliver them under the rules they were coalesced
+  under, not silently re-classify them — the same reason `applyTargets` flushes a retired
+  target's window rather than letting it evaporate. `setMode` does the flush.
 - **Every N1/N2a/N2b test stays green.** This arc adds behaviour behind a default-off per-target key; with `mode` absent or `"separate"`, byte-for-byte the same requests go out as before.
 - **Edits share the webhook's rate bucket** (per Discord API docs, `topics/rate-limits.mdx`: the bucket's top-level resource is `webhook_id + webhook_token`). PATCH gets the same rate-limit handling, retry schedule and FIFO position as POST. There is no separate budget.
 - **No progress edits, ever.** Only the lifecycle event set below triggers a PATCH.
 - **`error` / `cancelled` produce two messages**, by ruling: the lifecycle message is edited to its terminal look AND the separate embed is posted (it carries the mention).
 
-- **Shutdown degrades the edit path too.** A Manager told it is shutting down (N1's `BeginShutdown` → the queue's single-attempt `SendOnce` path) must not run the three-attempt loop for a lifecycle POST or PATCH either — the owner's 10 s force-exit cap is the whole point of that ruling, and one edit-mode job could otherwise burn it. **Adaptation point:** if N1 spells the seam differently (a different method name, or a flag on the queue rather than `BeginShutdown`), use N1's spelling; the requirement is one request per verb while shutting down, never a retry loop.
+- **Shutdown degrades the edit path too.** The seam is `(*targetQueue).deliver` reading `q.shuttingDown *atomic.Bool` (`internal/notifications/queue.go`), which `BeginShutdown` sets first (`internal/notifications/manager.go`); that flag is what selects `SendOnce` over `Send` today, and it must reach the lifecycle POST and PATCH the same way — through `dispatchFor`'s `once` argument. One request per verb while shutting down, never a retry loop: the owner's 10 s force-exit cap is the whole point of that ruling, and one edit-mode job could otherwise burn it.
 
 **Standing project rules:**
 - **Merge main before Task 1.** N1, N2a and N2b are on main by the time this arc runs, and `config.example.toml`, `internal/notifications/{manager.go,discord.go}`, `web/public/modules/settings.js`, `internal/tui/settings_notifications.go`, `docs/spec/operations.md`, `docs/spec/data-and-storage.md` and `README.md` all carry their edits. Resolve the merge first, then re-read every file this plan touches before editing it.
@@ -31,7 +48,7 @@ Every task's requirements implicitly include this section.
 - Three platforms build: windows/amd64, linux/amd64, linux/arm64. Nothing added here is platform-conditional.
 - `go mod tidy -diff` must stay clean (no new module dependencies — everything used here is stdlib).
 - **LF line endings.** `.gitattributes` pins them; never introduce CRLF into a tracked file.
-- **The citation gate** (`internal/docs/citations_test.go`): every symbol and path named in `docs/spec/{architecture,data-and-storage,operations,platform-services,security,user-interfaces}.md`, `SPEC.md`, `CLAUDE.md`, `README.md` and the seven `.claude/skills/*/SKILL.md` files must exist. Doc edits in Task 7 are checked by `go test ./internal/docs/`. Do not add allowlist entries to fix rot — fix the doc.
+- **The citation gate** (`internal/docs/citations_test.go`): every symbol and path named in `docs/spec/{architecture,data-and-storage,operations,platform-services,security,user-interfaces}.md`, `SPEC.md`, `CLAUDE.md`, `README.md` and the seven `.claude/skills/*/SKILL.md` files must exist. Doc edits in Task 8 are checked by `go test ./internal/docs/`. Do not add allowlist entries to fix rot — fix the doc.
 - **The TUI import fence:** `internal/tui` must not import `internal/web` or `internal/bgutils`. It may import `internal/config` and `internal/notifications` (it already does both).
 - **One commit per task, always with a pathspec**: `git commit -m "…" -- <exact files>`. A bare `git commit` has swept another worker's staged files before (fedf98c5).
 - **Every commit message ends with these two lines, verbatim:**
@@ -48,8 +65,8 @@ Every task's requirements implicitly include this section.
 Six conditions the spec implies that no task's happy path exercises. Each has a test added to the task that owns the code.
 
 1. **The job row is gone when the id is written** (job deleted mid-download). `UpdateNotificationMsgs` must return false and the send must complete anyway — never error, never retry the write. → Task 1 test `TestUpdateNotificationMsgsUnknownJob`, Task 3 test `TestRecordSurvivesMissingRow`.
-2. **A stored id that Discord does not know** (hand-edited DB, a message deleted in the channel, a truncated snowflake). The PATCH must 404 once, re-POST, overwrite the id, and not loop. → Task 3 test `TestPatch404RePostsAndOverwrites`, Task 6 e2e row.
-3. **A target flipped `edit` → `separate` (and back) by hot reload mid-job.** Later events must post separately without touching the stored id; flipping back must resume editing the same message. → Task 6 test `TestModeFlipMidJob`.
+2. **A stored id that Discord does not know** (hand-edited DB, a message deleted in the channel, a truncated snowflake). The PATCH must 404 once, re-POST, overwrite the id, and not loop. → Task 3 test `TestPatch404RePostsAndOverwrites`, Task 7 e2e row.
+3. **A target flipped `edit` → `separate` (and back) by hot reload mid-job.** Later events must post separately without touching the stored id; flipping back must resume editing the same message. → Task 7 test `TestModeFlipMidJob`.
 4. **Malformed or half-written JSON in the column.** `decodeNotificationMsgs` must answer nil and the job must post a new message — a corrupt value may never fail a job scan, because every job read in the program goes through it. → Task 1 test `TestDecodeNotificationMsgsGarbage`.
 5. **Two jobs editing through the same target concurrently, while `Reload` swaps targets.** The tracker map is reached from more than the one per-target goroutine. → Task 3 test `TestTrackerConcurrentAccess`, run with `-race`.
 6. **The tracker map growing for the life of a 24/7 process.** One entry per job an edit-mode target ever touched, each holding a msgs map and a ~1000-rune History per target. A job's entry must be released once its story is told, and capped for jobs that never reach a terminal event. → Task 3 tests `TestTrackerReleasesFinishedJobs`, `TestTrackerCapsTrackedJobs`.
@@ -64,7 +81,7 @@ Six conditions the spec implies that no task's happy path exercises. Each has a 
 - Modify: `internal/database/database.go:4-16` (imports), `:261` (the `stmtGetJob` SELECT list), `:434-437` (`silentColumns`), `:495-523` (`scanJobRow`), and append the two new methods after `UpdateChatOffset` (`:482-484`)
 - Modify: `internal/database/database_jobs.go:132` (the `getAllJobsUnlocked` SELECT list)
 - Create: `internal/database/migrations_v20_test.go`
-- Modify: `docs/spec/data-and-storage.md` — deferred to Task 7 (docs land together)
+- Modify: `docs/spec/data-and-storage.md` — deferred to Task 8 (docs land together)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -509,9 +526,9 @@ Expected: `ok github.com/vampiricwulf/Moombox/internal/database`. Three pre-exis
 ```bash
 grep -rn "park_identity" --include=*.go internal/ cmd/ | grep -v _test
 ```
-Expected: 14 lines. The ones that matter are the two full-row SELECTs (`database.go:261`, `database_jobs.go:132`), the `fieldToColumn` entry (`database.go:73`), the scan (`database.go`) and the `migrations.go` sites — every one of those must now also name `notification_msgs` (except `fieldToColumn`, which deliberately must not). The rest — `internal/worker/worker.go` ×5, `cmd/moombox/monitor_callbacks.go:148`, `internal/cookies/refresh.go:226` — are `UpdateJobFields` keys and comments, expected noise. **If a THIRD full-row SELECT has appeared, add `notification_msgs` there too.**
+Expected: 15 lines. The ones that matter are the two full-row SELECTs (`database.go:261`, `database_jobs.go:132`), the `fieldToColumn` entry (`database.go:73`), the scan (`database.go`) and the `migrations.go` sites — every one of those must now also name `notification_msgs` (except `fieldToColumn`, which deliberately must not). The rest — `internal/worker/worker.go` ×5, `cmd/moombox/monitor_callbacks.go:148`, `internal/cookies/refresh.go:226` — are `UpdateJobFields` keys and comments, expected noise. **If a THIRD full-row SELECT has appeared, add `notification_msgs` there too.**
 
-> The `moombox-database-migrations` skill's header still reads "Current schema version: **v16**" — stale since v17 and knowingly unmaintained. Its *idiom* (the `if version < N` block, the guarded ALTER, `writeUserVersion` last, the `createSchema` half, the `fieldToColumn` rule) is what this task follows and is current. Task 8 bumps the header line.
+> The `moombox-database-migrations` skill's header still reads "Current schema version: **v16**" — stale since v17 and knowingly unmaintained. Its *idiom* (the `if version < N` block, the guarded ALTER, `writeUserVersion` last, the `createSchema` half, the `fieldToColumn` rule) is what this task follows and is current. Task 9 bumps the header line.
 
 - [ ] **Step 8: Commit**
 
@@ -538,10 +555,10 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
 - Create: `internal/notifications/discord_edit.go`
 - Create: `internal/notifications/discord_edit_test.go`
 - Modify: `internal/notifications/discord.go` — five edits, located by symbol (Arc N1 rewrote this file; do not trust line numbers):
-  1. `post` → `do(method, endpoint string, body []byte, wantBody bool)`, keeping every return N1 left on it and adding `respBody []byte`
+  1. `post` → `do(method, endpoint string, body []byte, wantBody bool) (discordResponse, error)`, with `discordResponse` gaining a `body []byte` field
   2. the bounded delivery loop inside `Send` → extracted to `deliver(method, endpoint string, body []byte, wantBody bool) ([]byte, error)`; `Send` becomes a one-line call
   3. `discordStatusErr` returns `*discordHTTPError` (declared in the new file) instead of a bare `fmt.Errorf`
-  4. the other `d.post` call sites move to `d.do(...)` — `sendOnce` on main, plus N1's exported `SendOnce` (the shutdown single-attempt path the `sender` interface gained)
+  4. the other `d.post` call sites move to `d.do(...)` — exactly two, `Send` and the exported `SendOnce` (the shutdown single-attempt path on the `sender` interface)
   5. a new `discordMessageBodyBytes` constant beside `discordErrBodyBytes`
 
 **Interfaces:**
@@ -559,7 +576,7 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
 
 **Discord API facts this task encodes** (per the Discord API docs, quoted in the audit §3): `POST /webhooks/{id}/{token}?wait=true` "waits for server confirmation of message send before response, and returns the created message body"; without `?wait=true` the webhook answers `204` with no body. `PATCH /webhooks/{id}/{token}/messages/{message.id}` "edits a previously-sent webhook message from the same token, returns a message object". A missing message answers `404` with `{"message": "Unknown Message", "code": 10008}`. A revoked webhook answers `404` with `{"message": "Unknown Webhook", "code": 10015}` — which is **not** recoverable by re-posting. Rate limits are per-route with `webhook_id + webhook_token` as the top-level resource, so PATCH and POST share one bucket.
 
-**Shutdown:** both verbs also get a single-attempt variant (`postWaitOnce` / `patchMessageOnce`), for the same reason `SendOnce` exists — the owner's 10 s force-exit cap. A post-N1 re-evaluation must re-check that `BeginShutdown` reaches these two as well as `SendOnce`.
+**Shutdown:** both verbs also get a single-attempt variant (`postWaitOnce` / `patchMessageOnce`), for the same reason `SendOnce` exists — the owner's 10 s force-exit cap. The seam that reaches them is `(*targetQueue).deliver` reading `q.shuttingDown *atomic.Bool` (`internal/notifications/queue.go`), which `BeginShutdown` sets first (`manager.go`); `SendOnce` is already exported and already on the `sender` interface, so the flag reaches the edit path through the same `once` parameter. Both twins mirror `SendOnce` exactly: `waitForBucketWithin(shutdownBucketWaitCap)` before the request and `noteBucket` after. Skipping either would make the edit path the one send in the package that ignores a known-empty bucket.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -590,7 +607,7 @@ type recordedReq struct {
 
 // fakeDiscord is an httptest server that behaves like a webhook endpoint:
 // it records every request and answers from a per-call script. Shared by this
-// suite and lifecycle_state_test.go (Task 6).
+// suite and lifecycle_state_test.go (Task 7).
 type fakeDiscord struct {
 	mu   sync.Mutex
 	reqs []recordedReq
@@ -650,7 +667,7 @@ func TestPostWaitAsksForTheMessageAndReturnsItsID(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("1418889000000000001"))
 	d := &DiscordWebhook{URL: f.URL()}
 
-	body, err := buildPayload("t", "d", 0x1abc9c, nil, SendOptions{})
+	body, err := buildPayload(One("t", "d", 0x1abc9c, nil, SendOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +699,7 @@ func TestPostWaitRejectsAResponseWithNoID(t *testing.T) {
 		io.WriteString(rw, `{"type":0}`)
 	})
 	d := &DiscordWebhook{URL: f.URL()}
-	body, _ := buildPayload("t", "d", 0, nil, SendOptions{})
+	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 	if _, err := d.postWait(body); err == nil {
 		t.Fatal("postWait accepted a response with no id")
 	}
@@ -696,7 +713,7 @@ func TestPatchMessageTargetsTheMessageRoute(t *testing.T) {
 	// the full .../webhooks/ID/TOKEN/messages/ID shape Discord publishes.
 	d := &DiscordWebhook{URL: f.URL() + "/api/webhooks/123/tok"}
 
-	body, _ := buildPayload("t", "d", 0, nil, SendOptions{})
+	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 	if err := d.patchMessage("999", body); err != nil {
 		t.Fatalf("patchMessage: %v", err)
 	}
@@ -740,7 +757,7 @@ func TestPatchMessageUnknownMessageIsRecoverable(t *testing.T) {
 				io.WriteString(rw, tc.body)
 			})
 			d := &DiscordWebhook{URL: f.URL()}
-			body, _ := buildPayload("t", "d", 0, nil, SendOptions{})
+			body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 			err := d.patchMessage("999", body)
 			if err == nil {
 				t.Fatal("patchMessage accepted a refusal")
@@ -771,7 +788,7 @@ func TestEditPathSharesTheRetrySchedule(t *testing.T) {
 		okCreated("42")(n, r, rw)
 	})
 	d := &DiscordWebhook{URL: f.URL()}
-	body, _ := buildPayload("t", "d", 0, nil, SendOptions{})
+	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 	if err := d.patchMessage("999", body); err != nil {
 		t.Fatalf("patchMessage did not retry a 502: %v", err)
 	}
@@ -799,7 +816,7 @@ func TestEditOnceVariantsMakeExactlyOneRequest(t *testing.T) {
 				rw.WriteHeader(http.StatusBadGateway)
 			})
 			d := &DiscordWebhook{URL: f.URL()}
-			body, _ := buildPayload("t", "d", 0, nil, SendOptions{})
+			body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 			if err := tc.call(d, body); err == nil {
 				t.Fatal("a 502 was reported as success")
 			}
@@ -819,7 +836,7 @@ func TestPatchMessageOnceStillRecognisesUnknownMessage(t *testing.T) {
 		io.WriteString(rw, `{"message":"Unknown Message","code":10008}`)
 	})
 	d := &DiscordWebhook{URL: f.URL()}
-	body, _ := buildPayload("t", "d", 0, nil, SendOptions{})
+	body, _ := buildPayload(One("t", "d", 0, nil, SendOptions{}))
 	if err := d.patchMessageOnce("999", body); !errors.Is(err, ErrUnknownMessage) {
 		t.Errorf("err = %v, want ErrUnknownMessage", err)
 	}
@@ -832,7 +849,7 @@ func TestSeparateSendStillPostsPlain(t *testing.T) {
 		rw.WriteHeader(http.StatusNoContent)
 	})
 	d := &DiscordWebhook{URL: f.URL()}
-	if err := d.Send("t", "d", 0x3498db, nil, SendOptions{Event: "finished"}); err != nil {
+	if err := d.Send(One("t", "d", 0x3498db, nil, SendOptions{Event: "finished"})); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	calls := f.calls()
@@ -853,60 +870,41 @@ Expected: FAIL to compile — `d.postWait undefined`, `d.patchMessage undefined`
 
 - [ ] **Step 3: Generalise the request helper in `discord.go`**
 
-Locate `func (d *DiscordWebhook) post(body []byte)`. Rename it and widen its parameters, keeping **every return value Arc N1 left on it** (N1 added the `X-RateLimit-*` reads; those stay) and adding `respBody`:
+Locate `func (d *DiscordWebhook) post(body []byte) (discordResponse, error)`. Rename it and widen its parameters. The struct return **stays** — N1 grouped the five values on purpose and the loop above reads `retryAfter` / `rateRemain` / `rateReset` off it:
 
 ```go
-// do performs one webhook request attempt against method+endpoint, returning
-// the HTTP status (0 on transport error), the Retry-After header value, the
-// rate-limit headers, a sanitised prefix of a >=400 response body, and — when
-// wantBody is set — the 2xx response body itself.
+// do performs one webhook request attempt against method+endpoint. Same
+// returns post had, plus the 2xx response body when wantBody is set.
 //
-// The method and target are parameters rather than the fixed POST d.URL because
-// the edit path issues PATCH against the per-message route; per the Discord API
-// docs both share the webhook's rate-limit bucket, so they must share this one
-// request path and the loop above it.
+// The method and target are parameters rather than the fixed POST d.URL
+// because the edit path issues PATCH against the per-message route; per the
+// Discord API docs both share the webhook's rate-limit bucket, so they must
+// share this one request path and the loop above it.
 //
-// The parameter is named endpoint, not url: the body reaches for *url.Error to
-// redact the token out of a transport error, and a parameter named url would
-// shadow the net/url import.
-func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool) (status int, retryAfter, snippet string, respBody []byte, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), discordTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return 0, "", "", nil, fmt.Errorf("create discord request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := discordHTTPClient.Do(req)
-	if err != nil {
-		// Transport errors are *url.Error, whose Error() embeds the FULL
-		// request URL — i.e. the webhook token. Redact before the error
-		// reaches any log line or HTTP response body.
-		if uerr, ok := errors.AsType[*url.Error](err); ok {
-			return 0, "", "", nil, fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
-		}
-		return 0, "", "", nil, err
-	}
-	defer func() {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
-		snippet = discordErrSnippet(b)
-	} else if wantBody {
-		// Only the ?wait=true POST needs this; every other call leaves the
-		// body to the deferred drain.
-		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, discordMessageBodyBytes))
-	}
-	return resp.StatusCode, resp.Header.Get("Retry-After"), snippet, respBody, nil
-}
+// The parameter is named endpoint, not url: the body reaches for *url.Error
+// to redact the token out of a transport error, and a parameter named url
+// would shadow the net/url import.
+func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool) (discordResponse, error) {
 ```
-Keep whatever additional header returns N1 added in their existing positions; add `respBody` immediately before `err`, and update the call sites accordingly.
 
-> **Expected post-N1 shape.** N1 collapses these returns into a struct: `func (d *DiscordWebhook) post(body []byte) (discordResponse, error)`. If that is what you find, the edit is *simpler* than the snippet above — make it `do(method, endpoint string, body []byte, wantBody bool) (discordResponse, error)` and add a `Body []byte` field to `discordResponse`. Same parameter names, same reason for `endpoint`.
+The body is N1's `post` body unchanged apart from three points:
+
+1. the request is built with the parameters — `http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))` instead of `http.MethodPost, d.URL`;
+2. `discordResponse` gains a field beside `snippet`:
+   ```go
+   	body []byte // the 2xx response body, read only when wantBody is set
+   ```
+3. the `resp.StatusCode >= 400` arm keeps `out.snippet` and gains an `else`:
+   ```go
+   	if resp.StatusCode >= 400 {
+   		b, _ := io.ReadAll(io.LimitReader(resp.Body, discordErrBodyBytes))
+   		out.snippet = discordErrSnippet(b)
+   	} else if wantBody {
+   		// Only the ?wait=true POST needs this; every other call leaves the
+   		// body to the deferred drain.
+   		out.body, _ = io.ReadAll(io.LimitReader(resp.Body, discordMessageBodyBytes))
+   	}
+   ```
 
 Add the new constant beside `discordErrBodyBytes`:
 ```go
@@ -931,15 +929,15 @@ In `discord.go`, rename the bounded loop that `Send` runs today to `deliver`, gi
 // budget as a post and must obey the same schedule.
 func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) ([]byte, error) {
 	// ... the existing loop verbatim, with:
-	//   status, retryAfter, snippet, respBody, err := d.do(method, endpoint, body, wantBody)
-	//   case status < 400:  return respBody, nil
+	//   r, err := d.do(method, endpoint, body, wantBody)
+	//   case r.status < 400:  return r.body, nil
 	//   every `return err` becoming `return nil, err`
 }
 ```
 `Send` collapses to:
 ```go
-func (d *DiscordWebhook) Send(title, description string, color int, fields []Field, opts SendOptions) error {
-	body, err := buildPayload(title, description, color, fields, opts)
+func (d *DiscordWebhook) Send(msg Message) error {
+	body, err := buildPayload(msg)
 	if err != nil {
 		return err
 	}
@@ -947,7 +945,9 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	return err
 }
 ```
-Every other `d.post(body)` call becomes `d.do(http.MethodPost, d.URL, body, false)` (discard the new `respBody` return). On main that is `sendOnce`; after N1 it is also the exported `SendOnce` the queue calls while shutting down. Grep `d.post(` and `\.post(` before claiming this step is done.
+**The signature does not change** — `Send(msg Message) error` is what the `sender`
+interface requires (`manager.go`). Only the loop body moves out into `deliver`.
+Every other `d.post(body)` call becomes `d.do(http.MethodPost, d.URL, body, false)` (ignore the new `body` field on the result). There are exactly two on main and both are already exported methods: `SendOnce` — the shutdown single-attempt path on the `sender` interface — and `Send`. Grep `d.post(` and `\.post(` before claiming this step is done.
 
 The retry loop stays inside `DiscordWebhook` — that is where N1 leaves it, and it is why `deliver`, `postWait` and `patchMessage` have the shape they do.
 
@@ -1054,23 +1054,29 @@ func (d *DiscordWebhook) patchMessage(messageID string, body []byte) error {
 // three-attempt loop could spend all of it — the same reason SendOnce exists
 // beside Send. The queue selects these while it is shutting down.
 func (d *DiscordWebhook) postWaitOnce(body []byte) (string, error) {
-	status, _, snippet, respBody, err := d.do(http.MethodPost, d.URL+waitQuery, body, true)
+	// Mirrors SendOnce exactly: honour a known-empty bucket only if it
+	// refills inside the shutdown cap, then learn from the response.
+	d.waitForBucketWithin(shutdownBucketWaitCap)
+	r, err := d.do(http.MethodPost, d.URL+waitQuery, body, true)
+	d.noteBucket(r)
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("discord webhook request: %w", err)
-	case status >= 400:
-		return "", discordStatusErr(status, snippet)
+	case r.status >= 400:
+		return "", discordStatusErr(r.status, r.snippet)
 	}
-	return parseCreatedID(respBody)
+	return parseCreatedID(r.body)
 }
 
 func (d *DiscordWebhook) patchMessageOnce(messageID string, body []byte) error {
-	status, _, snippet, _, err := d.do(http.MethodPatch, d.messageURL(messageID), body, false)
+	d.waitForBucketWithin(shutdownBucketWaitCap)
+	r, err := d.do(http.MethodPatch, d.messageURL(messageID), body, false)
+	d.noteBucket(r)
 	switch {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
-	case status >= 400:
-		return asEditRefusal(messageID, discordStatusErr(status, snippet))
+	case r.status >= 400:
+		return asEditRefusal(messageID, discordStatusErr(r.status, r.snippet))
 	}
 	return nil
 }
@@ -1145,9 +1151,11 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
   1. `notificationTarget` gains `mode string` and `msgKey string`
   2. `buildTargets` sets both (the resolved-URL `key` it already computes feeds `msgKey`)
   3. `Manager` gains `lifecycle *lifecycleTracker` and `trackerOnce sync.Once`
-  4. N1's per-target queue gains a bound `dispatch` func and its single-embed send path calls it instead of `sender.Send`/`SendOnce` — **this is the one decision point** (see Step 5; the queue holds no `*Manager`, so it is a bound closure, not a reach upwards)
-- Modify: `internal/config/types.go:450-453` — `NotificationConfig` gains `Mode`. The field must land HERE, not in Task 4: `buildTargets` reads `nc.Mode` in Step 4, so without it this task's own `go build ./...` cannot pass and its commit would leave the tree broken. The validator, the API arms, both editors and the docs all stay in Task 4.
-- Modify: `cmd/moombox/services.go:826-827` (add `notifyMgr.SetMessageStore(db)`), `cmd/moombox/addvideo.go:59` (same, the CLI side process opens the same DB)
+  4. `applyTargets` binds the decision closure on every queue, in BOTH arms — **this is the one decision point** (see Step 5; the queue holds no `*Manager`, so it is a bound closure, not a reach upwards)
+- Modify: `internal/notifications/queue.go` — the `dispatch` field, `dispatchFor`, `setDispatch`, and the one changed line in `(*targetQueue).deliver` (Step 5)
+- Modify: `internal/notifications/batch.go` — the batcher's `mode` field and `setMode`, which Step 5's `bind` closure calls (the gate inside `Add` itself waits for the config task)
+- Modify: `internal/config/types.go:466-491` — `NotificationConfig` gains `Mode`. The field must land HERE, not in Task 5: `buildTargets` reads `nc.Mode` in Step 4, so without it this task's own `go build ./...` cannot pass and its commit would leave the tree broken. The validator, the API arms, both editors and the docs all stay in Task 5.
+- Modify: `cmd/moombox/services.go:827-828` (add `notifyMgr.SetMessageStore(db)`), `cmd/moombox/addvideo.go:59` (same, the CLI side process opens the same DB)
 
 **Interfaces:**
 - Consumes: Task 1's `(*database.Database).NotificationMsgs` / `.UpdateNotificationMsgs`; Task 2's `postWait` / `patchMessage` / `postWaitOnce` / `patchMessageOnce` / `ErrUnknownMessage`.
@@ -1159,7 +1167,11 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
       UpdateNotificationMsgs(jobID string, msgs map[string]string) bool
   }
   func (m *Manager) SetMessageStore(s MessageStore)
-  func (m *Manager) dispatchOne(t notificationTarget, title, description string, color int, fields []Field, opts SendOptions, once bool) error
+  func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) error
+  func sendPlain(s sender, msg Message, once bool) error
+  func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error)
+  func (q *targetQueue) dispatchFor(msg Message) error
+  func (b *batcher) setMode(mode string)
   func targetMsgKey(resolvedURL string) string
   func normalizeTargetMode(mode string) string   // "" | "separate" -> "separate"; "edit" -> "edit"
   const ModeSeparate = "separate"
@@ -1418,7 +1430,7 @@ func TestStatusAndHistorySurviveTheTotalClamp(t *testing.T) {
 		fat = append(fat, Field{Name: fmt.Sprintf("Stat %d", i), Value: strings.Repeat("x", 900)})
 	}
 	out := tr.rewriteFields("yt_1", "abc", "downloading", fat, time.Unix(1758960000, 0))
-	body, err := buildPayload("Downloading", "d", TypeDownload.Color(), out, SendOptions{Event: "downloading", JobID: "yt_1"})
+	body, err := buildPayload(One("Downloading", "d", TypeDownload.Color(), out, SendOptions{Event: "downloading", JobID: "yt_1"}))
 	if err != nil {
 		t.Fatalf("buildPayload: %v", err)
 	}
@@ -1509,7 +1521,7 @@ func TestTrackerReleasesFinishedJobs(t *testing.T) {
 	}
 
 	for _, e := range []string{"downloading", "finished"} {
-		if err := m.dispatchOne(tgt, "t", "d", 0, nil, SendOptions{Event: e, JobID: "yt_1"}, false); err != nil {
+		if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: e, JobID: "yt_1"}), false); err != nil {
 			t.Fatalf("%s: %v", e, err)
 		}
 	}
@@ -1520,7 +1532,7 @@ func TestTrackerReleasesFinishedJobs(t *testing.T) {
 	if got := st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())]; got != "M0" {
 		t.Fatalf("stored id = %q, want M0 — release must not clear the row", got)
 	}
-	if err := m.dispatchOne(tgt, "t", "d", 0, nil, SendOptions{Event: "downloading", JobID: "yt_1"}, false); err != nil {
+	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "downloading", JobID: "yt_1"}), false); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	last := f.calls()[len(f.calls())-1]
@@ -1555,14 +1567,14 @@ func TestTrackerCapsTrackedJobs(t *testing.T) {
 // branch needs a test rather than a reader's confidence.
 func TestNonEditableTransportFallsBack(t *testing.T) {
 	var got int
-	plain := senderFunc(func(string, string, int, []Field, SendOptions) error {
+	plain := senderFunc(func(Message) error {
 		got++
 		return nil
 	})
 	m := &Manager{logger: testLogger{}}
 	tgt := notificationTarget{sender: plain, mode: ModeEdit, msgKey: "abc"}
 
-	if err := m.dispatchOne(tgt, "t", "d", 0, nil, SendOptions{Event: "downloading", JobID: "yt_1"}, false); err != nil {
+	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "downloading", JobID: "yt_1"}), false); err != nil {
 		t.Fatalf("dispatchOne: %v", err)
 	}
 	if got != 1 {
@@ -1596,7 +1608,7 @@ func TestPatch404RePostFailureForgetsTheID(t *testing.T) {
 		msgKey: targetMsgKey(f.URL()),
 	}
 
-	if err := m.dispatchOne(tgt, "t", "d", 0, nil, SendOptions{Event: "muxing", JobID: "yt_1"}, false); err == nil {
+	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "muxing", JobID: "yt_1"}), false); err == nil {
 		t.Fatal("a refused re-POST was reported as success")
 	}
 	if id, ok := m.tracker().messageID("yt_1", targetMsgKey(f.URL())); ok {
@@ -1620,7 +1632,7 @@ func TestShutdownEditIsSingleAttempt(t *testing.T) {
 		mode:   ModeEdit,
 		msgKey: targetMsgKey(f.URL()),
 	}
-	if err := m.dispatchOne(tgt, "t", "d", 0, nil, SendOptions{Event: "finished", JobID: "yt_1"}, true); err == nil {
+	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "finished", JobID: "yt_1"}), true); err == nil {
 		t.Fatal("a 502 was reported as success")
 	}
 	if n := len(f.calls()); n != 1 {
@@ -1675,8 +1687,8 @@ func TestPatch404RePostsAndOverwrites(t *testing.T) {
 		msgKey: targetMsgKey(f.URL()),
 	}
 
-	if err := m.dispatchOne(tgt, "Muxing Starting", "d", TypeMuxing.Color(), nil,
-		SendOptions{Event: "muxing", JobID: "yt_1"}, false); err != nil {
+	if err := m.dispatchOne(tgt, One("Muxing Starting", "d", TypeMuxing.Color(), nil,
+		SendOptions{Event: "muxing", JobID: "yt_1"}), false); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 
@@ -1709,9 +1721,9 @@ func TestFirstAllowedEventPostsAndStores(t *testing.T) {
 		msgKey: targetMsgKey(f.URL()),
 	}
 
-	if err := m.dispatchOne(tgt, "Stream Found", "d", TypeInfo.Color(),
+	if err := m.dispatchOne(tgt, One("Stream Found", "d", TypeInfo.Color(),
 		[]Field{{Name: "Channel", Value: "c"}},
-		SendOptions{Event: "found", JobID: "yt_1"}, false); err != nil {
+		SendOptions{Event: "found", JobID: "yt_1"}), false); err != nil {
 		t.Fatalf("dispatchOne: %v", err)
 	}
 	calls := f.calls()
@@ -1724,6 +1736,44 @@ func TestFirstAllowedEventPostsAndStores(t *testing.T) {
 	}
 	if got := st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())]; got != "ID1" {
 		t.Errorf("stored id = %q, want ID1", got)
+	}
+}
+
+// TestLifecycleEditKeepsTheTargetMention: the ping is per MESSAGE, and an
+// operator can put a lifecycle event in mention_events. Rebuilding the body
+// from the embed alone would drop content/allowed_mentions and the ping would
+// vanish the moment a target switched to edit mode.
+func TestLifecycleEditKeepsTheTargetMention(t *testing.T) {
+	f := newFakeDiscord(t, okCreated("MM1"))
+	m := &Manager{logger: testLogger{}}
+	tgt := notificationTarget{
+		sender: &DiscordWebhook{URL: f.URL()},
+		mode:   ModeEdit,
+		msgKey: targetMsgKey(f.URL()),
+	}
+	pinged := func(event string) Message {
+		out := One("t", "d", 0, nil, SendOptions{Event: event, JobID: "yt_1"})
+		out.Mention = "<@&42>"
+		out.MentionAllowed = &AllowedMentions{Parse: []string{}, Roles: []string{"42"}}
+		return out
+	}
+	for _, e := range []string{"downloading", "finished"} {
+		if err := m.dispatchOne(tgt, pinged(e), false); err != nil {
+			t.Fatalf("%s: %v", e, err)
+		}
+	}
+	calls := f.calls()
+	if len(calls) != 2 || calls[0].Method != http.MethodPost || calls[1].Method != http.MethodPatch {
+		t.Fatalf("methods = %+v, want the creating POST then a PATCH", calls)
+	}
+	for i, c := range calls {
+		if c.Body.Content != "<@&42>" {
+			t.Errorf("call %d content = %q, want the target's mention — it is message-level, so the PATCH carries it too",
+				i, c.Body.Content)
+		}
+		if c.Body.AllowedMentions == nil {
+			t.Errorf("call %d dropped allowed_mentions — an unresolvable ping renders as literal text", i)
+		}
 	}
 }
 
@@ -1751,7 +1801,7 @@ func TestNoStoreStillEdits(t *testing.T) {
 		msgKey: targetMsgKey(f.URL()),
 	}
 	for _, e := range []string{"downloading", "muxing", "finished"} {
-		if err := m.dispatchOne(tgt, "t", "d", 0, nil, SendOptions{Event: e, JobID: "yt_1"}, false); err != nil {
+		if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: e, JobID: "yt_1"}), false); err != nil {
 			t.Fatalf("%s: %v", e, err)
 		}
 	}
@@ -1765,8 +1815,7 @@ func TestNoStoreStillEdits(t *testing.T) {
 }
 ```
 
-The import block of this file is exactly: `encoding/json`, `fmt`, `io`, `net/http`, `strings`, `sync`, `testing`, `time`. The tests here drive `m.dispatchOne` directly rather than `m.Send`, so no target sender goroutine has to be running — that is what Task 6 covers.
-```
+The import block of this file is exactly: `encoding/json`, `fmt`, `io`, `net/http`, `strings`, `sync`, `testing`, `time`. The tests here drive `m.dispatchOne` directly rather than `m.Send`, so no target sender goroutine has to be running — that is what Task 7 covers.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -2165,18 +2214,28 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 // once is the queue's shutting-down flag: when set, every request on this path
 // is single-attempt, because the owner's 10 s force-exit cap must not be spent
 // on one lifecycle edit's retry ladder.
-func (m *Manager) dispatchOne(t notificationTarget, title, description string, color int, fields []Field, opts SendOptions, once bool) error {
+func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) error {
+	// A batched message is several jobs' embeds in one POST and by ruling
+	// never belongs to an edit-mode target; guard anyway, because a body with
+	// ten embeds cannot be one job's lifecycle message.
+	if len(msg.Embeds) != 1 {
+		return sendPlain(t.sender, msg, once)
+	}
+	opts := msg.Embeds[0].Opts
 	plan := m.planLifecycle(t, opts)
 	edit, editable := t.sender.(editableSender)
 	if !plan.Manage || !editable {
 		// A transport that cannot edit falls back to a plain post rather than
 		// dropping the event.
-		return sendPlain(t.sender, title, description, color, fields, opts, once)
+		return sendPlain(t.sender, msg, once)
 	}
 
 	tr := m.tracker()
-	rewritten := tr.rewriteFields(opts.JobID, t.msgKey, opts.Event, fields, time.Now())
-	body, err := buildPayload(title, description, color, rewritten, opts)
+	e := msg.Embeds[0]
+	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, time.Now())
+	// The ping is per MESSAGE (content + allowed_mentions), so it is carried
+	// over from the queued Message, not rebuilt from the embed.
+	body, err := buildPayload(Message{Embeds: []Embed{e}, Mention: msg.Mention, MentionAllowed: msg.MentionAllowed})
 	if err != nil {
 		return err
 	}
@@ -2186,7 +2245,7 @@ func (m *Manager) dispatchOne(t notificationTarget, title, description string, c
 	if plan.AlsoSeparate {
 		// The separate embed carries the mention and must go out even if the
 		// closing edit failed (owner ruling: two messages on failure).
-		if sepErr := sendPlain(t.sender, title, description, color, fields, opts, once); sepErr != nil {
+		if sepErr := sendPlain(t.sender, msg, once); sepErr != nil {
 			return errors.Join(lifecycleErr, sepErr)
 		}
 	}
@@ -2199,14 +2258,13 @@ func (m *Manager) dispatchOne(t notificationTarget, title, description string, c
 	return lifecycleErr
 }
 
-// sendPlain posts an ordinary embed, honouring the shutdown single-attempt
-// rule. N1 put SendOnce on the sender interface for exactly this; if your
-// merged tree spells it differently, use its spelling.
-func sendPlain(s sender, title, description string, color int, fields []Field, opts SendOptions, once bool) error {
+// sendPlain posts a message unchanged, honouring the queue's shutting-down
+// flag exactly as (*targetQueue).deliver did before this arc existed.
+func sendPlain(s sender, msg Message, once bool) error {
 	if once {
-		return s.SendOnce(title, description, color, fields, opts)
+		return s.SendOnce(msg)
 	}
-	return s.Send(title, description, color, fields, opts)
+	return s.Send(msg)
 }
 
 // postOrPatch performs the wire half of dispatchOne, including the one
@@ -2262,7 +2320,7 @@ type editableSender interface {
 
 - [ ] **Step 4: Add the config field, then wire the tracker and the target fields into `manager.go`**
 
-First, `internal/config/types.go`, in `NotificationConfig` (after N2b's fields, keeping `url`/`events` first) — `buildTargets` below reads it, so it cannot wait for Task 4:
+First, `internal/config/types.go`, in `NotificationConfig` (after N2b's fields, keeping `url`/`events` first) — `buildTargets` below reads it, so it cannot wait for Task 5:
 ```go
 	// Mode is how this target delivers a job's lifecycle events: "separate"
 	// (the default — one message per event, never edited) or "edit" (one
@@ -2312,6 +2370,12 @@ Locate `type notificationTarget struct` and add:
 	// msgKey is targetMsgKey(resolved webhook URL): the stable key this
 	// target's lifecycle message ids are stored under. Empty for a transport
 	// with no resolved URL, which disables edit mode for it.
+	//
+	// Precomputed rather than derived from `key` at each send. `key` IS the
+	// resolved URL and targetMsgKey hashes it, so deriving lazily would run a
+	// SHA-256 per lifecycle embed on the sender goroutine and would keep
+	// handing the raw webhook URL — the credential — to the hot path the
+	// hashing exists to keep it out of.
 	msgKey string
 ```
 
@@ -2328,37 +2392,94 @@ N1's queue (`targetQueue`) holds `sender` / `logger` / `shuttingDown` — **not*
 
 1. `targetQueue` gains one field:
    ```go
-   	// dispatch is the ONE decision point for a single-embed item: an
-   	// edit-mode target's lifecycle event is created or rewritten here;
-   	// everything else posts exactly as it did before edit mode existed.
-   	// Bound per target in applyTargets so the queue needs no Manager.
-   	dispatch func(title, description string, color int, fields []Field, opts SendOptions, once bool) error
+   	// dispatch is the ONE decision point for a queued message: an edit-mode
+   	// target's single-embed lifecycle event is created or rewritten here;
+   	// everything else — including every multi-embed batch — posts exactly as
+   	// it did before edit mode existed. Guarded by mu like mention/events,
+   	// because applyTargets rebinds it on a surviving queue.
+   	dispatch func(msg Message, once bool) error
    ```
-2. Where `applyTargets` builds each queue, bind it to the target:
+2. `applyTargets` has TWO arms and the binding belongs in both. A surviving target keeps
+   its queue and the freshly built `notificationTarget` is discarded — which is why
+   `setEvents` and `setMention` exist. `mode`/`msgKey` need the same treatment, or a
+   `mode` flip is silently ignored until restart for every webhook that survived the diff.
+   Add the twin beside them in `queue.go`:
    ```go
-   	tgt := built[i]
-   	q.dispatch = func(title, description string, color int, fields []Field, opts SendOptions, once bool) error {
-   		return m.dispatchOne(tgt, title, description, color, fields, opts, once)
+   // setDispatch rebinds the decision function on a target that survived a
+   // Reload — the twin of setEvents and setMention, and required for the same
+   // reason: applyTargets keeps a survivor's queue and discards the freshly
+   // built notificationTarget, so a `mode` change would otherwise be accepted
+   // by both UIs, written to the file, and ignored until restart.
+   func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error) {
+   	q.mu.Lock()
+   	q.dispatch = fn
+   	q.mu.Unlock()
+   }
+   ```
+   and in `applyTargets`, in BOTH arms:
+   ```go
+   	tgt := t // captured per iteration
+   	bind := func(q *targetQueue) {
+   		q.setDispatch(func(msg Message, once bool) error {
+   			return m.dispatchOne(tgt, msg, once)
+   		})
+   		q.batch.setMode(normalizeTargetMode(tgt.mode))
    	}
    ```
-   (`tgt` is captured per iteration — Go 1.22+ loop semantics make the range variable safe, but the explicit copy documents it.)
-3. In the queue's single-embed send path, replace the direct `sender` call — both the ordinary and the shutting-down arm collapse into one:
+   called after `q.setMention(t)` in the survivor arm and after `newTargetQueue` in the
+   new-target arm.
+
+   `bind` names `q.batch.setMode`, so the batcher's `mode` field and `setMode` (the
+   snippet in the config task's "Exclude edit-mode targets from batching" step) land in
+   THIS commit, for exactly the reason `NotificationConfig.Mode` does: without them this
+   task's own `go build ./...` cannot pass. That step then only replaces the comment
+   block at the head of `(*batcher).Add` and wires `newTargetQueue`.
+3. In `(*targetQueue).deliver`, replace the direct `sender` call — both the ordinary and the shutting-down arm collapse into one:
    ```go
-   -	if q.shuttingDown {
-   -		err = q.sender.SendOnce(it.title, it.description, it.color, it.fields, it.opts)
+   -	var err error
+   -	if q.shuttingDown != nil && q.shuttingDown.Load() {
+   -		// Owner ruling: shutdown sends are single-attempt and the 10s
+   -		// force-exit stays. A 2s+5s retry ladder cannot finish inside a window
+   -		// the worker stop may already have spent.
+   -		err = q.sender.SendOnce(it.msg)
    -	} else {
-   -		err = q.sender.Send(it.title, it.description, it.color, it.fields, it.opts)
+   -		err = q.sender.Send(it.msg)
    -	}
-   +	err = q.dispatch(it.title, it.description, it.color, it.fields, it.opts, q.shuttingDown)
+   +	// Owner ruling: shutdown sends are single-attempt and the 10s force-exit
+   +	// stays — dispatch carries the flag through to the edit path too, because
+   +	// a 2s+5s retry ladder cannot finish inside a window the worker stop may
+   +	// already have spent.
+   +	err := q.dispatchFor(it.msg)
+   ```
+   and add beside `setEvents`/`setMention`:
+   ```go
+   // dispatchFor runs the bound decision function under mu (a Reload rebinds it
+   // on a surviving queue), falling back to the plain send when no Manager
+   // bound one — a bare targetQueue in a test must still deliver.
+   func (q *targetQueue) dispatchFor(msg Message) error {
+   	q.mu.Lock()
+   	d := q.dispatch
+   	q.mu.Unlock()
+   	once := q.shuttingDown != nil && q.shuttingDown.Load()
+   	if d == nil {
+   		return sendPlain(q.sender, msg, once)
+   	}
+   	return d(msg, once)
+   }
    ```
 
-Leave the **batch** path alone — a batched message is several embeds in one body and by ruling never belongs to an edit-mode target.
+There is no separate batch path to leave alone: a queued item is one whole `Message`
+whether it carries one embed or ten, so everything goes through `dispatchFor`. A batch is
+excluded by `dispatchOne`'s own `len(msg.Embeds) != 1` guard (Step 3), which falls back to
+`sendPlain` — and by ruling a batch never belongs to an edit-mode target anyway, because
+`(*batcher).Add` never opens a window for one.
 
-**Adaptation point:** the names `targetQueue`, `applyTargets`, `shuttingDown`, `SendOnce` and the item field names come from N1. Use whatever the merged tree calls them; what must hold is (a) exactly one place decides POST-or-PATCH, (b) it runs on the per-target goroutine, and (c) the shutting-down flag reaches it.
+What must hold after this step: (a) exactly one place decides POST-or-PATCH, (b) it runs
+on the per-target goroutine, and (c) the shutting-down flag reaches it.
 
 - [ ] **Step 6: Wire the store in `cmd/moombox`**
 
-`cmd/moombox/services.go:826-827`:
+`cmd/moombox/services.go:827-828`:
 ```go
 	notifyMgr := notifications.NewManager(cfg, log)
 	// Edit-mode targets keep one Discord message per job and need its id to
@@ -2385,7 +2506,7 @@ Expected: `ok` for both test runs, no build output.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add internal/notifications/lifecycle.go internal/notifications/lifecycle_test.go internal/notifications/manager.go internal/config/types.go cmd/moombox/services.go cmd/moombox/addvideo.go
+git add internal/notifications/lifecycle.go internal/notifications/lifecycle_test.go internal/notifications/manager.go internal/notifications/queue.go internal/notifications/batch.go internal/config/types.go cmd/moombox/services.go cmd/moombox/addvideo.go
 git commit -m "feat(notifications): edit-in-place lifecycle messages
 
 lifecycle.go holds the whole model: the eleven lifecycle events, the
@@ -2398,19 +2519,153 @@ overtake the POST that created its message. error/cancelled edit the
 message to its terminal look AND post the separate embed, per the ruling.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/notifications/lifecycle.go internal/notifications/lifecycle_test.go internal/notifications/manager.go internal/config/types.go cmd/moombox/services.go cmd/moombox/addvideo.go
+Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/notifications/lifecycle.go internal/notifications/lifecycle_test.go internal/notifications/manager.go internal/notifications/queue.go internal/notifications/batch.go internal/config/types.go cmd/moombox/services.go cmd/moombox/addvideo.go
 ```
 
 ---
 
-## Task 4: The per-target `mode` config key and the batching exclusion
+## Task 4: The eight lifecycle producers carry the job
+
+Only `found`, `added`, `finished`, `error` and `cancelled` reach `jobOpts`
+(`internal/notifications/builders.go:159`) today. The other eight lifecycle events build
+`SendOptions` by hand with `URL` and `Thumbnail` alone, and `planLifecycle` keys on
+`opts.JobID` — so without this task an edit-mode target manages three of eleven events
+and posts the rest separately. The feature does not work. This is the same change Arc N2a
+made to the per-job `auth` send and the Twitch chat downgrade, applied to the last eight.
 
 **Files:**
-- Verify only (the field landed in Task 3): `internal/config/types.go:450-453` (`NotificationConfig.Mode`)
+- Modify: `internal/worker/stream_processor.go` — the `scheduled` (`:595`) and `rescheduled` (`:618`) sends in `updateJobMetadata`
+- Modify: `internal/worker/orchestrator.go:248` — the `downloading` send
+- Modify: `internal/worker/orchestrator_twitch.go` — the `downloading` send (`:154`) and `sendTwitchSessionNotification` (`:1143`), which carries both `connectivity_*` keys
+- Modify: `internal/worker/quality_split_common.go` — `sendGapSplitNotification` (`:178`) and `sendQualitySplitNotification` (`:218`)
+- Modify: `internal/worker/orchestrator_mux.go` — `sendMuxingStarting` (`:665`)
+- Create: `internal/worker/notify_lifecycle_ids_test.go`
+
+**Interfaces:**
+- Consumes: nothing from Tasks 1-3. `NotifyFacts` and `notifyAuthor` (`internal/worker/notify_facts.go`) already exist.
+- Produces: no new Go API — eight embeds that now carry `JobID`, `Platform` and `Author`.
+
+> **This also turns on the deep link for these eight embeds.** `Manager.Send` rewrites the
+> title URL when `publicURL != "" && JobID != "" && Author != nil`, so adding the three
+> fields is a visible behaviour change beyond edit mode. `docs/spec/operations.md:464`
+> currently lists all eight as having no `Author` and therefore no rewrite — Task 8
+> corrects that sentence.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `internal/worker/notify_lifecycle_ids_test.go`. Six of the eight events are sent
+from a helper a unit test can call directly (`updateJobMetadata`,
+`sendGapSplitNotification`, `sendQualitySplitNotification`, `sendMuxingStarting`,
+`sendTwitchSessionNotification` ×2) — those get a `notificationtest.Recorder` row each,
+following `notifier_seam_test.go`'s existing drivers (`TestStreamProcessorNotifiesThroughTheSenderSeam`
+for the scheduled pair, `TestTwitchResumeEmbedCarriesThePause` for the connectivity pair).
+Each row asserts the same two things:
+
+```go
+	got := rec.ByEvent("muxing")
+	if len(got) != 1 {
+		t.Fatalf("muxing sends = %d, want 1", len(got))
+	}
+	if got[0].Opts.JobID != job.ID {
+		t.Errorf("JobID = %q, want %q — planLifecycle keys on it", got[0].Opts.JobID, job.ID)
+	}
+	if got[0].Opts.Platform != job.Platform {
+		t.Errorf("Platform = %q, want %q", got[0].Opts.Platform, job.Platform)
+	}
+	if got[0].Opts.Author == nil {
+		t.Error("no Author — the dashboard deep link needs JobID AND Author")
+	}
+```
+
+The two `downloading` sends sit inside `ExecuteWithChat` and `ExecuteTwitch`, which no
+unit test can drive (both do network work). Cover those — and every future producer — with
+one source-level guard over the package, so a ninth lifecycle send cannot quietly opt out:
+
+```go
+// TestEveryLifecycleSendCarriesItsJob parses internal/worker and fails any
+// notifications.SendOptions literal whose Event is a lifecycle key but which
+// sets no JobID. Two of the eight sends live inside Execute paths a unit test
+// cannot reach; this reads the source rather than pretending otherwise, and it
+// is the row that catches the ninth producer someone adds next year.
+func TestEveryLifecycleSendCarriesItsJob(t *testing.T) {
+	// go/parser over ".", then ast.Inspect for *ast.CompositeLit whose Type
+	// prints as "notifications.SendOptions": collect its keys, and when
+	// Event's value is one of the eleven lifecycle keys, require a JobID key.
+	// Skip _test.go files.
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test ./internal/worker/ -run 'TestLifecycle|TestEveryLifecycleSendCarriesItsJob' -count=1
+```
+Expected: FAIL — every row reports `JobID = ""`, and the source guard names all eight
+literals.
+
+- [ ] **Step 3: Route the six sites through `NotifyFacts`**
+
+At each site the `*database.Job` is already in hand (`job`, `stored`, or `jobCtx.Job`).
+Build the options from the shared mapper rather than hand-writing three more fields — the
+same shape the per-job "Authentication Required" send uses since N2b's close wave
+(`internal/worker/worker.go`, the `af := NotifyFacts(job)` block):
+
+```go
+	f := NotifyFacts(jobCtx.Job)
+	o.notifier.Send(title, desc, ntype, fields, notifications.SendOptions{
+		URL:       f.URL,
+		Thumbnail: f.ThumbnailURL,
+		Event:     "downloading",
+		Author:    notifyAuthor(f),
+		Platform:  f.Platform,
+		JobID:     f.ID,
+	})
+```
+
+`notifyAuthor` is `internal/worker/notify_facts.go`'s unexported helper. Each site keeps
+its own `Event` and its own title/description/fields; only the options literal changes.
+`NotifyFacts` also supplies the YouTube watch-URL fallback, so `URL` comes off `f.URL`
+rather than `job.URL` — that is the point of routing through the mapper instead of adding
+three fields beside the old reads. In `sendTwitchSessionNotification` the `event`
+parameter stays a parameter; only the three identity fields are added.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+```bash
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test ./internal/worker/ -count=1
+GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go build ./...
+```
+Expected: `ok`, no build output. `internal/worker`'s existing notification tests must stay
+green — several assert embed fields on these same sends.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/worker/stream_processor.go internal/worker/orchestrator.go internal/worker/orchestrator_twitch.go internal/worker/quality_split_common.go internal/worker/orchestrator_mux.go internal/worker/notify_lifecycle_ids_test.go
+git commit -m "fix(worker): the eight mid-lifecycle sends carry their job
+
+scheduled, rescheduled, downloading (both platforms), gap_split,
+quality_split, muxing and the two connectivity_* keys built SendOptions by
+hand with only URL and Thumbnail. planLifecycle keys on JobID, so an
+edit-mode target would have managed three of eleven events and posted the
+rest separately. All six sites now build their options from NotifyFacts,
+exactly as the per-job auth send does — which also turns on the dashboard
+deep link for these embeds, since it needs JobID and Author both.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/worker/stream_processor.go internal/worker/orchestrator.go internal/worker/orchestrator_twitch.go internal/worker/quality_split_common.go internal/worker/orchestrator_mux.go internal/worker/notify_lifecycle_ids_test.go
+```
+
+---
+
+## Task 5: The per-target `mode` config key and the batching exclusion
+
+**Files:**
+- Verify only (the field landed in Task 3): `internal/config/types.go:466-491` (`NotificationConfig.Mode`)
 - Modify: `internal/config/config.go` — `validateOrNormalize` (`:532`), a new arm after the existing `cfg.Network.*` arms
-- Modify: `internal/web/routes/config_routes.go:121` (`validateConfigUpdates` — a notifications arm) and `:750-768` (`applyConfigUpdates` — read `mode`)
-- Modify: `config.example.toml:319-322`
-- Modify: `internal/notifications/manager.go` — the batching coalescer Arc N2b added: one guard
+- Modify: `internal/web/routes/config_routes.go:124` (`validateConfigUpdates` — fold into its existing notifications arm, `:494-512`). `applyConfigUpdates` needs no edit: `decodeConfigEntries` (`:891`) already carries the key
+- Modify: `config.example.toml:321-329`
+- Modify: `internal/notifications/batch.go` — `(*batcher).Add`'s head (N2b left the gate as a comment), a `mode` field and `setMode`
 - Create: `internal/config/notification_mode_test.go`
 - Create: `internal/web/routes/config_notification_mode_test.go`
 - Create: `internal/notifications/lifecycle_batching_test.go`
@@ -2428,7 +2683,7 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
   }
   ```
 
-**`moombox-settings` checklist mapping** (the skill's 9 steps, applied to `mode`): 1 config struct → Step 3; 2 default → none needed, `""` *is* the default and `Defaults()` seeds no notification entries; 3 `validateOrNormalize` → Step 4; 4 `validateConfigUpdates` → Step 5; 5 `applyConfigUpdates` → Step 5; 6 Web UI → Task 5; 7 TUI → Task 5; 8 hot-reload → already covered, `OnNotificationsChange` → `Manager.Reload` rebuilds targets and therefore `mode`, so **`mode` is NOT a restart-required field** and must not appear in `RESTART_REQUIRED_FIELDS` or `restartRequiredKeys`; 8b config-file-only → not applicable, it is editable in both UIs; 9 migration → none, the key is new. The skill's own text lists no notification fields, so `.claude/skills/moombox-settings/SKILL.md` needs no edit (verified: `grep -n "notification" .claude/skills/moombox-settings/SKILL.md` matches only the `OnNotificationsChange` hot-reload row, which stays true).
+**`moombox-settings` checklist mapping** (the skill's 9 steps, applied to `mode`): 1 config struct → Step 3; 2 default → none needed, `""` *is* the default and `Defaults()` seeds no notification entries; 3 `validateOrNormalize` → Step 4; 4 `validateConfigUpdates` → Step 5; 5 `applyConfigUpdates` → Step 5; 6 Web UI → Task 6; 7 TUI → Task 6; 8 hot-reload → already covered, `OnNotificationsChange` → `Manager.Reload` rebuilds targets and therefore `mode`, so **`mode` is NOT a restart-required field** and must not appear in `RESTART_REQUIRED_FIELDS` or `restartRequiredKeys`; 8b config-file-only → not applicable, it is editable in both UIs; 9 migration → none, the key is new. `.claude/skills/moombox-settings/SKILL.md:59` DOES enumerate the per-target keys — *"the per-target `enabled`/`mention`/`mention_events` keys all hot-reload through it too (the restart list stays at 16)"* — so add `mode` to that list and leave the restart-list count at 16. (Task 9 already edits a skill file for the schema version; this one rides the same pass.)
 
 - [ ] **Step 1: Write the failing config test**
 
@@ -2503,38 +2758,37 @@ Expected: the `Mode string \`toml:"mode,omitempty" json:"mode,omitempty"\`` line
 
 - [ ] **Step 4: Validate and normalise it**
 
-`internal/config/config.go`, inside `validateOrNormalize`, after the `Connectivity` arms and before the final `return errs` (place it beside whatever notification arms N2b added):
+`internal/config/config.go` already has the loop this belongs in: `validateOrNormalize`'s
+notifications pass at `:995-1021` (`for i := range cfg.Notifications { n := &cfg.Notifications[i]; … }`,
+today the `Mention` and `MentionEvents` arms). Add a THIRD arm inside it, using `n` —
+do not open a second loop over the same slice:
 ```go
-	for i := range cfg.Notifications {
-		switch strings.TrimSpace(cfg.Notifications[i].Mode) {
+		switch strings.TrimSpace(n.Mode) {
 		case "", "separate", "edit":
 			// Canonicalise the empty spelling away so every reader sees one
 			// value for "the default".
-			if cfg.Notifications[i].Mode != "" {
-				cfg.Notifications[i].Mode = strings.TrimSpace(cfg.Notifications[i].Mode)
+			if !reportOnly {
+				n.Mode = strings.TrimSpace(n.Mode)
 			}
 		default:
-			fail("notifications[%d].mode %q must be \"separate\" or \"edit\"", i, cfg.Notifications[i].Mode)
+			fail("notifications[%d].mode %q must be \"separate\" or \"edit\"", i, n.Mode)
 			if !reportOnly {
-				cfg.Notifications[i].Mode = "separate"
+				n.Mode = "separate"
 			}
 		}
-	}
 ```
 
 - [ ] **Step 5: Validate and apply it on the API**
 
-`internal/web/routes/config_routes.go`, in `validateConfigUpdates`, after the connectivity arm:
+`internal/web/routes/config_routes.go`, in `validateConfigUpdates`'s **existing**
+notifications arm (`:494-512`) — it already asserts `updates["notifications"].([]any)` and
+already loops `for i, raw := range notifs { nm, ok := raw.(map[string]any) … }`. Fold the
+check in beside the `mention` one rather than re-opening the same assertion and the same
+loop:
 ```go
-	// Notifications: the per-target delivery mode. Matches the config-side
-	// constraint in validateOrNormalize — a value the file loader would refuse
-	// must not be reachable through a PUT either.
-	if notifs, ok := updates["notifications"].([]any); ok {
-		for i, n := range notifs {
-			nm, ok := n.(map[string]any)
-			if !ok {
-				continue
-			}
+			// The per-target delivery mode. Matches the config-side constraint
+			// in validateOrNormalize — a value the file loader would refuse
+			// must not be reachable through a PUT either.
 			if v, ok := nm["mode"].(string); ok {
 				switch v {
 				case "", "separate", "edit":
@@ -2542,18 +2796,22 @@ Expected: the `Mode string \`toml:"mode,omitempty" json:"mode,omitempty"\`` line
 					errs[fmt.Sprintf("notifications[%d].mode", i)] = `mode must be "separate" or "edit"`
 				}
 			}
-		}
-	}
 ```
 
-In `applyConfigUpdates`'s notifications arm (`:750-768`), beside the `url` and `events` reads:
-```go
-				if v, ok := nm["mode"].(string); ok {
-					nc.Mode = v
-				}
-```
+`applyConfigUpdates` needs **no edit**. N2b replaced the hand-rolled per-key reads with
+`decodeConfigEntries[config.NotificationConfig]` (`internal/web/routes/config_routes.go:891`),
+a JSON round trip into the typed struct — so `mode` arrives the moment the struct field
+and its `json:"mode,omitempty"` tag exist (Task 3 Step 4). Verify rather than edit:
 
-> **Why this read is mandatory, not merely tidy.** `applyConfigUpdates` REPLACES `cfg.Notifications` wholesale: it builds a fresh `config.NotificationConfig{}` per entry from the payload and then assigns the slice. The PUT merges per *section*, not per key inside a notification object — so any per-target key not read here is dropped on **every** settings save from the dashboard. (Same reason N2b must read its three keys.)
+```bash
+grep -n 'decodeConfigEntries\[config.NotificationConfig\]' internal/web/routes/config_routes.go
+```
+Expected: two hits (`validateConfigUpdates` and `applyConfigUpdates`).
+
+> **What still holds.** The decoded slice REPLACES `cfg.Notifications` wholesale, so a key
+> the payload omits reads back as its zero value. That is why both editors must send
+> `"separate"` explicitly rather than deleting the key — the reason the web card's JSDoc
+> gives, restated here for the TUI side.
 
 - [ ] **Step 6: Write the route test**
 
@@ -2582,7 +2840,10 @@ func TestNotificationModeValidator(t *testing.T) {
 		{"empty", "", false},
 		{"typo", "eidt", true},
 		{"capitalised", "Edit", true},
-		{"not a string", float64(1), false}, // ignored, not an error
+		// N2b's decode gate reports a type mismatch as notifications[i].<key>
+		// before this validator ever runs — the same 400 `enabled: "false"`
+		// gets (config_notifications_test.go:211).
+		{"not a string", float64(1), true},
 	} {
 		updates := map[string]any{"notifications": []any{
 			map[string]any{"url": "discord://1/a", "mode": tc.mode},
@@ -2597,6 +2858,8 @@ func TestNotificationModeValidator(t *testing.T) {
 
 // TestApplyConfigUpdatesWritesMode — without this the PUT would validate the
 // key and then drop it, which reads to the operator as a save that reverted.
+// It passes with no applyConfigUpdates edit — decodeConfigEntries carries the
+// key — which is exactly what it exists to keep true.
 func TestApplyConfigUpdatesWritesMode(t *testing.T) {
 	cfg := config.Defaults()
 	applyConfigUpdates(cfg, map[string]any{"notifications": []any{
@@ -2613,15 +2876,47 @@ func TestApplyConfigUpdatesWritesMode(t *testing.T) {
 
 - [ ] **Step 7: Exclude edit-mode targets from batching**
 
-Locate the coalescer Arc N2b added in `internal/notifications/manager.go` (the function that decides whether a send joins an open 5 s window). Add the guard at its head:
+Arc N2b left the gate written out as a comment at the head of `(*batcher).Add`
+(`internal/notifications/batch.go:92-105`). Replace that comment block with the code it
+describes. The `mode` field and `setMode` below already landed in Task 3 Step 5 (its
+`bind` closure calls them) — verify them against this snippet, do not re-add them:
+
 ```go
-	// Batching is separate-mode only (owner ruling 2026-09-27): for an
-	// edit-mode target the found/added embed IS the job's lifecycle message,
-	// and coalescing it would defeat one-message-per-job.
-	if t.mode == ModeEdit {
-		return false
+type batcher struct {
+	…
+	// mode is the target's delivery mode. An edit-mode target never
+	// coalesces (owner ruling 2026-09-27): its `found` embed IS the job's
+	// lifecycle message. Guarded by mu — applyTargets swaps it on a
+	// surviving queue through setMode.
+	mode string
+}
+
+func (b *batcher) setMode(mode string) {
+	b.mu.Lock()
+	changed := b.mode != mode
+	b.mode = mode
+	b.mu.Unlock()
+	if changed {
+		// A window open under the OLD mode is delivered under the old
+		// rules rather than silently re-classified — the same reason
+		// applyTargets flushes a retired target's window.
+		b.Flush()
+	}
+}
+```
+and at the head of `Add`:
+```go
+	b.mu.Lock()
+	editMode := b.mode == ModeEdit
+	b.mu.Unlock()
+	if editMode {
+		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
+		return
 	}
 ```
+`newTargetQueue` passes `normalizeTargetMode(t.mode)` into `newBatcher`; `applyTargets`
+calls `q.batch.setMode(...)` in the survivor arm beside `setEvents`/`setMention` (Task 3
+Step 5 item 2 binds it in both arms).
 
 Create `internal/notifications/lifecycle_batching_test.go`:
 
@@ -2636,28 +2931,29 @@ import "testing"
 // edit afterwards.
 func TestEditModeTargetNeverBatches(t *testing.T) {
 	for _, tc := range []struct {
-		mode string
-		want bool
+		mode          string
+		wantImmediate bool
 	}{
-		{ModeSeparate, true},
-		{"", true},
-		{ModeEdit, false},
+		{ModeSeparate, false},
+		{"", false},
+		{ModeEdit, true},
 	} {
-		tgt := notificationTarget{mode: normalizeTargetMode(tc.mode), msgKey: "abc"}
-		if got := batchableTarget(tgt, SendOptions{Event: "found", JobID: "yt_1"}); got != tc.want {
-			t.Errorf("mode %q: batchable = %v, want %v", tc.mode, got, tc.want)
+		var emitted []Message
+		b := newBatcher(batchWindow, &fakeBatchClock{}, func(m Message) { emitted = append(emitted, m) }, testLogger{})
+		b.setMode(normalizeTargetMode(tc.mode))
+		b.Add(Embed{Opts: SendOptions{Event: "found", JobID: "yt_1"}}, "", nil)
+		// An edit-mode target emits AT ONCE; a separate-mode one holds the
+		// embed until its window closes.
+		if got := len(emitted) == 1; got != tc.wantImmediate {
+			t.Errorf("mode %q: emitted immediately = %v, want %v", tc.mode, got, tc.wantImmediate)
 		}
 	}
 }
 ```
-Rename `batchableTarget` in the test to whatever N2b actually called the predicate; if N2b inlined the decision, extract it to a named predicate with this signature so it can be tested:
-```go
-func batchableTarget(t notificationTarget, opts SendOptions) bool
-```
 
 - [ ] **Step 8: Update `config.example.toml`**
 
-**Append**, do not replace. N2b rewrote this block to add its `enabled` / `mention` / `mention_events` lines; a wholesale replacement would delete them. Read `config.example.toml` (the `[[notifications]]` example, `:319-322` on main) and add only these two lines to whatever is there, plus drop the dead `tags = ["important"]` line if N2b has not already:
+**Append**, do not replace. N2b rewrote this block to add its `enabled` / `mention` / `mention_events` lines; a wholesale replacement would delete them. The dead `tags = ["important"]` line is already gone. Read `config.example.toml` (the `[[notifications]]` example, `:321-329`) and add only these three comment lines to whatever is there:
 ```toml
 # mode = "separate"                # "separate" (default: one message per event)
 #                                  # or "edit" (one message per job, rewritten
@@ -2674,7 +2970,7 @@ Expected: `ok` for all three.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add internal/config/config.go internal/config/notification_mode_test.go internal/web/routes/config_routes.go internal/web/routes/config_notification_mode_test.go internal/notifications/manager.go internal/notifications/lifecycle_batching_test.go config.example.toml
+git add internal/config/config.go internal/config/notification_mode_test.go internal/web/routes/config_routes.go internal/web/routes/config_notification_mode_test.go internal/notifications/batch.go internal/notifications/lifecycle_batching_test.go config.example.toml
 git commit -m "feat(config): per-target notification mode (separate | edit)
 
 Opt-in per target, default separate. Validated identically by the file
@@ -2684,27 +2980,27 @@ Edit-mode targets are excluded from the 5 s found/added batching window per
 the ruling: their found embed IS the job's lifecycle message.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/config/config.go internal/config/notification_mode_test.go internal/web/routes/config_routes.go internal/web/routes/config_notification_mode_test.go internal/notifications/manager.go internal/notifications/lifecycle_batching_test.go config.example.toml
+Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- internal/config/config.go internal/config/notification_mode_test.go internal/web/routes/config_routes.go internal/web/routes/config_notification_mode_test.go internal/notifications/batch.go internal/notifications/lifecycle_batching_test.go config.example.toml
 ```
 
 ---
 
-## Task 5: The `mode` control in both target editors
+## Task 6: The `mode` control in both target editors
 
 **Files:**
-- Modify: `web/public/modules/settings.js` — `renderNotificationsList` (the notification card, today at `:1771-1845`; N2b will have added an `enabled` toggle and a `mention` row to the same card) and the delegated click handler; add a `setNotificationMode(index, mode)` method beside `toggleNotificationEvent` (`:1940`)
+- Modify: `web/public/modules/settings.js` — `renderNotificationsList` (the notification card, today at `:1792-1877`; N2b will have added an `enabled` toggle and a `mention` row to the same card) and the delegated click handler; add a `setNotificationMode(index, mode)` method beside `toggleNotificationEvent` (`:2129`)
 - Modify: `internal/tui/settings_notifications.go` — the edit form's head rows and the `Enter` save; `internal/tui/settings_view.go` — `renderNotifList` (the per-target line) and `renderNotifEdit` (the head rows); `internal/tui/settings.go` — the `SettingsModel` field; `internal/tui/settings_mouse.go` — the head-row count and the click map
 - Modify: `internal/tui/settings_notif_click_test.go` — the two literal line expectations move by the number of head rows added
 - Create: `web/tests/settings-notification-mode.test.mjs`
 - Create: `internal/tui/settings_notif_mode_test.go`
 
 **Interfaces:**
-- Consumes: Task 4's `config.NotificationConfig.Mode` and the `notifications[i].mode` PUT key.
+- Consumes: Task 5's `config.NotificationConfig.Mode` and the `notifications[i].mode` PUT key.
 - Produces: no Go API. The web card exposes `data-notif-action="set-mode"` with `data-mode="separate|edit"`; the TUI `SettingsModel` gains `notifEditDelivery string`.
 
 **Two collisions to respect, both verified on main:**
-1. `SettingsModel.notifMode` (`internal/tui/settings.go:383`) already means the *sub-editor* mode, `"list"` or `"edit"` — the same word, a different axis. The new per-target field must **not** be called `notifEditMode`; use **`notifEditDelivery`** (values `"separate"` / `"edit"`).
-2. The TUI's `Enter` save (`internal/tui/settings_notifications.go:170` on main) used to rebuild the struct from scratch — `n := config.NotificationConfig{URL: …}` — silently dropping every per-target field the editor did not know about. **N2b owns that fix** (ledger ruling 8: copy the existing target, overwrite only the edited fields). N3 keeps the pin — `TestNotifEditSavePreservesMode` — and adds one assignment.
+1. `SettingsModel.notifMode` (`internal/tui/settings.go:407`) already means the *sub-editor* mode, `"list"` or `"edit"` — the same word, a different axis. The new per-target field must **not** be called `notifEditMode`; use **`notifEditDelivery`** (values `"separate"` / `"edit"`).
+2. The TUI's `Enter` save (`internal/tui/settings_notifications.go:228` on main) used to rebuild the struct from scratch — `n := config.NotificationConfig{URL: …}` — silently dropping every per-target field the editor did not know about. **N2b owns that fix** (ledger ruling 8: copy the existing target, overwrite only the edited fields). N3 keeps the pin — `TestNotifEditSavePreservesMode` — and adds one assignment.
 
 - [ ] **Step 1: Write the failing web test**
 
@@ -2926,7 +3222,7 @@ func TestNotifEditTogglesDeliveryMode(t *testing.T) {
 		textInput:         textinput.New(),
 		notifEditEvents:   map[string]bool{},
 		notifEditDelivery: "separate",
-		notifEditFocus:    notifDeliveryFocusRow,
+		notifEditFocus:    notifEditDeliveryRow,
 	}
 	m.handleNotifEditKey(" ")
 	if m.notifEditDelivery != "edit" {
@@ -2995,7 +3291,7 @@ func TestNotifEditSaveWritesSeparateExplicitly(t *testing.T) {
 ```bash
 GOTMPDIR=D:/Git/Moombox/.superpowers/gotmp go test ./internal/tui/ -run TestNotifEdit -count=1
 ```
-Expected: FAIL to compile — `m.notifEditDelivery undefined`, `undefined: notifDeliveryFocusRow`.
+Expected: FAIL to compile — `m.notifEditDelivery undefined`, `undefined: notifEditDeliveryRow`.
 
 - [ ] **Step 7: Add the TUI control**
 
@@ -3008,20 +3304,24 @@ Expected: FAIL to compile — `m.notifEditDelivery undefined`, `undefined: notif
 	notifEditDelivery string
 ```
 
-Beside the other notif constants in the same file, add the head-row map. Today the edit form's head is one row (URL) and `totalItems := 1 + len(allNotifEvents)`; Arc N2b adds its own head rows. Express the new row relative to whatever N2b left:
-```go
-// notifDeliveryFocusRow is the Delivery row's index in the edit form's focus
-// order. The head rows come first (URL, then whatever the per-target scalars
-// are), the event checkboxes after — notifEditHeadRows is the count both
-// handleNotifEditKey and handleMouseNotifClick derive their arithmetic from.
-const notifDeliveryFocusRow = notifEditHeadRows - 1
-```
-and define `notifEditHeadRows` as the head-row count **including** the new Delivery row (on today's main that is `2`; after N2b it is N2b's count + 1). Replace every literal `1 +` in `totalItems := 1 + len(allNotifEvents)` (`internal/tui/settings_notifications.go:129`) and `total := 1 + len(allNotifEvents)` (`internal/tui/settings_mouse.go:97`) with `notifEditHeadRows +`, and shift the event index accordingly (`eventIdx := m.notifEditFocus - notifEditHeadRows`).
+Arc N2b already generalised the whole head-row arithmetic behind the constant block at
+`internal/tui/settings.go:293-296` — `notifEditURLRow`/`notifEditEnabledRow`/
+`notifEditMentionRow`/`notifEditEventBase`. Every derived site
+(`settings_notifications.go:182`, `settings_mouse.go:97`, `:401`, `:450`,
+`settings_view.go:563`, `:640`) reads through it, so the ONLY arithmetic edit is the
+constant block itself:
 
-**Three MORE sites hard-code today's single head row and must move in the same edit — grep `flatIdx` and `origLine` before you claim this step is done:**
-- `internal/tui/settings_view.go:593` — `isFocused := m.notifEditFocus == flatIdx+1` → `flatIdx+notifEditHeadRows`. **No test covers this one**; get it right by reading it. Left stale, the view highlights event 0 while the Delivery row actually has focus.
-- `internal/tui/settings_mouse.go`, `clickNotifEvent` — `m.notifEditFocus = flatIdx + 1` → `flatIdx + notifEditHeadRows`.
-- `internal/tui/settings_mouse.go`, `handleMouseNotifClick` — the `origLine == 1` URL arm gains an `origLine == 2` Delivery arm (`m.notifEditFocus = notifDeliveryFocusRow`), and the event guard `if origLine >= 4 { m.clickNotifEvent(origLine - 4) }` shifts by the head rows added. Recount it from `renderNotifEdit`; do not assume +1.
+```go
+const (
+	notifEditURLRow      = 0
+	notifEditEnabledRow  = 1
+	notifEditMentionRow  = 2
+	notifEditDeliveryRow = 3
+	notifEditEventBase   = 4
+)
+```
+Run `grep -rn 'notifEditEventBase\|notifEditEnabledRow\|notifEditMentionRow\|notifEditURLRow' internal/tui/`
+and confirm every hit derives from the constants. If one does not, fix it there.
 
 `internal/tui/settings_notifications.go` — in the list-mode `Enter` and `"a"` arms, seed the field:
 ```go
@@ -3032,10 +3332,10 @@ and define `notifEditHeadRows` as the head-row count **including** the new Deliv
 ```
 (for `"a"`, the new-target arm, set `m.notifEditDelivery = "separate"`).
 
-In `handleNotifEditKey`'s `case " ":` arm, handle the Delivery row before the event rows:
+Add ONE arm to N2b's existing `case " ":` (`internal/tui/settings_notifications.go:299-312`),
+beside the `notifEditEnabledRow` arm, and leave the event arm exactly as it is:
 ```go
-	case " ":
-		if m.notifEditFocus == notifDeliveryFocusRow {
+		if m.notifEditFocus == notifEditDeliveryRow {
 			if m.notifEditDelivery == "edit" {
 				m.notifEditDelivery = "separate"
 			} else {
@@ -3043,14 +3343,19 @@ In `handleNotifEditKey`'s `case " ":` arm, handle the Delivery row before the ev
 			}
 			return ""
 		}
-		if m.notifEditFocus >= notifEditHeadRows {
-			eventIdx := m.notifEditFocus - notifEditHeadRows
-			if eventIdx < len(allNotifEvents) {
-				event := allNotifEvents[eventIdx]
-				m.notifEditEvents[event] = !m.notifEditEvents[event]
+```
+and the mouse arm beside `case notifEditEnabledRow + 1:` (`internal/tui/settings_mouse.go:390`):
+```go
+		case notifEditDeliveryRow + 1:
+			// Focus AND flip, like the Enabled row — the row is the control.
+			m.notifEditFocus = notifEditDeliveryRow
+			if m.notifEditDelivery == "edit" {
+				m.notifEditDelivery = "separate"
+			} else {
+				m.notifEditDelivery = "edit"
 			}
-		}
-		return ""
+			m.updateTextInputForField()
+			return
 ```
 
 In the `keyEnter` arm: **N2b has already changed this save to copy the existing target and overwrite only the edited fields** (ledger ruling 8). Do NOT reintroduce a from-scratch literal — that is the exact defect the ruling removed. Add one line to N2b's copy:
@@ -3076,11 +3381,19 @@ If (and only if) the save is still a from-scratch literal when you get here, N2b
 ```
 In `renderNotifEdit`, add the Delivery row directly below the URL row, styled like the other head rows, reading `m.notifEditDelivery` and labelled `Delivery` with the value rendered as `Separate messages` / `One message per job` and the hint `(Space to toggle)`.
 
-`internal/tui/settings_mouse.go` — `handleMouseNotifClick` maps a content line back to a focus index; add the Delivery row to that map beside the URL row using the same `notifEditHeadRows` arithmetic.
+`internal/tui/settings_mouse.go` — `handleMouseNotifClick` maps a content line back to a focus index. The event guard already reads `if eventsTop := notifEditEventBase + 3; origLine >= eventsTop { m.clickNotifEvent(origLine - eventsTop) }` (`:401`) and the head arm already reads `case notifEditURLRow + 1, notifEditMentionRow + 1:` (`:386`), so both move with the constant block; the only new code is the `notifEditDeliveryRow + 1` arm above.
 
 - [ ] **Step 8: Update the click test's line expectations**
 
-`internal/tui/settings_notif_click_test.go` pins the unscrolled/scrolled arithmetic with literal line numbers (`4` with `notifEditScrollStart: 2`, and `6` unscrolled) derived from `renderNotifEdit`'s layout: `0 title, 1 URL, 2 blank, 3 "Events:", 4 group0 blank, 5 group0 header, 6 group0 event0`. Each head row added pushes those down by one. Recount `renderNotifEdit`'s emitted lines after your edit and update **both** literals and the comment block that derives them. Do not delete the test.
+`internal/tui/settings_notif_click_test.go` pins the unscrolled/scrolled arithmetic with literal line numbers. Today they are `6` (with `notifEditScrollStart: 2`) and `8` (unscrolled), derived from the comment block N2b left:
+
+```go
+	// Original (unscrolled) line layout in renderNotifEdit:
+	//   0 title, 1 URL, 2 Enabled, 3 Mention, 4 blank, 5 "Events:",
+	//   6 group0 blank, 7 group0 header, 8 group0 event0, ...
+```
+
+The Delivery row adds one head line, so `group0 event0` moves to original line 9: the scrolled click becomes `7` and the unscrolled one `9`. Update **both** literals, the `contentY = 9 - 2 = 7` sentence and the comment block that derives them. Recount from `renderNotifEdit` rather than trusting this paragraph. Do not delete the test.
 
 - [ ] **Step 9: Run the TUI tests to verify they pass**
 
@@ -3107,13 +3420,13 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- web/
 
 ---
 
-## Task 6: The end-to-end state machine against a fake Discord
+## Task 7: The end-to-end state machine against a fake Discord
 
 **Files:**
 - Create: `internal/notifications/lifecycle_state_test.go`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1-4. Adds no production code — if a row here fails, the fix belongs in `lifecycle.go`.
+- Consumes: everything from Tasks 1-5. Adds no production code — if a row here fails, the fix belongs in `lifecycle.go`.
 
 This task is the spec's §4.5 list, one test per row: first allowed event POSTs; later ones PATCH; filters skip without creating; restart resumes from the stored id; a removed target is ignored; a fresh process with no id POSTs; edits keep FIFO order with a retried PATCH; the terminal edit plus separate post; a mode flip mid-job; a shutdown flush that stays single-attempt; the History clamp across a real run.
 
@@ -3139,6 +3452,11 @@ import (
 // through a config — the SAME shape buildTargets produces. Installing it goes
 // through N1's own seam (installTargets below wraps applyTargets), because a
 // bare `m.targets = …` leaves a queue nothing is draining.
+//
+// newTestManagerWithClockAndLogger / newTestManager(t, 5*time.Second,
+// targets...) (manager_test.go:37, :64) are the package's existing equivalents
+// for the FIRST install and do the same applyTargets + cleanup; installTargets
+// is what the later, mode-flipping installs need.
 func editManager(t *testing.T, f *fakeDiscord, st MessageStore, events []string) *Manager {
 	t.Helper()
 	m := &Manager{logger: testLogger{}}
@@ -3154,23 +3472,28 @@ func editTarget(f *fakeDiscord, events []string, mode string) notificationTarget
 	return notificationTarget{
 		sender: &DiscordWebhook{URL: f.URL()},
 		events: eventSet(events),
+		// key is what applyTargets diffs on. WITHOUT it every install builds a
+		// brand-new queue and never retires the old one (applyTargets' own doc
+		// comment says so), so a mode-flip test would silently exercise the
+		// new-target path instead of the survivor path the operator hits.
+		key:    f.URL(),
 		mode:   mode,
 		msgKey: targetMsgKey(f.URL()),
 	}
 }
 
-// installTargets replaces the manager's targets and starts their sender
-// goroutines, through N1's own seam — `applyTargets`, the inner half of
-// Reload that builds each targetQueue and binds its dispatch closure.
-//
-// It must NOT be a bare `m.targets = …`: after N1 a target with no running
-// sender goroutine swallows every Send. ADAPTATION POINT: if the merged tree
-// spells the seam differently, use its spelling; what matters is that the
-// queue and its bound dispatch exist afterwards.
+// installTargets replaces the manager's targets through applyTargets — the
+// inner half of Reload, which builds each targetQueue, starts its goroutine
+// and binds its dispatch closure. Calling it a second time with the same
+// `key` exercises the SURVIVOR arm, which is the path a hot reload takes.
 func installTargets(t *testing.T, m *Manager, targets ...notificationTarget) {
 	t.Helper()
 	m.applyTargets(targets)
-	t.Cleanup(m.Wait)
+	t.Cleanup(func() {
+		for _, q := range m.targets {
+			q.stopDiscard()
+		}
+	})
 }
 
 func eventSet(events []string) map[string]bool {
@@ -3184,18 +3507,55 @@ func eventSet(events []string) map[string]bool {
 	return m
 }
 
-// run pushes a sequence of lifecycle events through the manager and waits for
-// the FIFO to drain.
+// run pushes a sequence of lifecycle events through the manager and waits
+// for the FIFO to drain.
+//
+// It must NOT call m.Wait(): Wait is single-call — it closeDrain()s every
+// queue, and enqueue drops with a Warn once q.closing is set, so a second
+// phase of a test would deliver nothing and assert against a stale
+// recording. Poll the queue depth plus the fake's call count instead.
 func run(t *testing.T, m *Manager, jobID string, events ...string) {
 	t.Helper()
 	for _, e := range events {
 		m.Send(titleFor(e), "desc", typeFor(e), []Field{{Name: "Channel", Value: "c"}},
 			SendOptions{Event: e, JobID: jobID})
 	}
-	m.Wait()
+	drain(t, m)
 }
 
-func titleFor(e string) string { return strings.ToUpper(e[:1]) + e[1:] }
+// drain waits until every target's FIFO is empty and its goroutine is idle.
+func drain(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pending := 0
+		m.targetsMu.RLock()
+		for _, q := range m.targets {
+			q.batch.Flush()
+			pending += q.pending()
+		}
+		m.targetsMu.RUnlock()
+		if pending == 0 {
+			// One more scheduler turn so the item popped last finishes.
+			time.Sleep(5 * time.Millisecond)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queue did not drain: %d items pending", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// titleFor names the embed for a test send. lifecycleLabels is the same map
+// the Status field reads, so "quality_split" reads "Quality split" rather
+// than the "Quality_split" a naive upper-first would produce.
+func titleFor(e string) string {
+	if l := lifecycleLabels[e]; l != "" {
+		return l
+	}
+	return e
+}
 
 func typeFor(e string) NotificationType {
 	switch e {
@@ -3472,11 +3832,33 @@ func TestModeFlipMidJob(t *testing.T) {
 	if st.writeCount() != 1 {
 		t.Errorf("silent writes = %d, want 1 — the flip must not re-write the id", st.writeCount())
 	}
+
+	// A window opened under the OLD mode is delivered under the old rules:
+	// arm one with a `found` while the target is separate-mode and flip to
+	// edit WITHOUT draining first. setMode must flush it as its own message
+	// rather than let it be silently re-classified.
+	before := len(f.calls())
+	installTargets(t, m, editTarget(f, nil, ModeSeparate))
+	m.Send("Found", "desc", TypeInfo, nil, SendOptions{Event: "found", JobID: "yt_2"})
+	installTargets(t, m, editTarget(f, nil, ModeEdit)) // setMode flushes the window
+	drain(t, m)
+
+	flushed := f.calls()[before:]
+	if len(flushed) != 1 {
+		t.Fatalf("the open window was not flushed on the mode change: %v", methods(flushed))
+	}
+	if n := len(flushed[0].Body.Embeds); n != 1 {
+		t.Errorf("the flushed window carried %d embeds — it must be its own message, not folded in", n)
+	}
 }
 
 // TestShutdownFlushIsSingleAttempt: the whole path, not just dispatchOne —
 // after BeginShutdown a queued lifecycle edit against a wedged Discord makes
 // ONE request, so the owner's 10 s force-exit cap survives an edit-mode job.
+//
+// The one test that legitimately ends the manager, so the single trailing
+// m.Wait() stays — every other test here drains instead, because Wait is
+// terminal.
 func TestShutdownFlushIsSingleAttempt(t *testing.T) {
 	f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
 		if r.Method == http.MethodPost && n == 0 {
@@ -3557,13 +3939,13 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- inte
 
 ---
 
-## Task 7: Documentation
+## Task 8: Documentation
 
 **Files:**
-- Modify: `docs/spec/operations.md` — the `## Notifications (Discord Webhooks)` section (`:442`): a new `### Delivery Modes` subsection after `### Event Types`'s vocabulary paragraph (`:490-496`), a bullet in `### Dispatch Behavior` (`:519-527`), and two rows in the `### Source Files` table (`:637-638`)
-- Modify: `docs/spec/data-and-storage.md` — the `jobs` column table (after the `park_identity` row, `:249`), the schema-history table (after the `v19` row, `:382`), and the `#### [[notifications]]` table (`:613-619`)
+- Modify: `docs/spec/operations.md` — the `## Notifications (Discord Webhooks)` section (`:442`): a new `### Delivery Modes` subsection after `### Event Types`'s vocabulary paragraph (`:501`), a `mode` bullet in `### Target Options` (`:457-464`) plus the amended no-`Author` sentence (`:464`), a bullet in `### Dispatch Behavior` (`:545`), a sentence in `### Batching` (`:535-544`), and two rows in the `### Source Files` table (`:662`, after the `discord.go` row at `:671`)
+- Modify: `docs/spec/data-and-storage.md` — the `jobs` column table (after the `park_identity` row, `:249`), the schema-history table (after the `v19` row, `:382`), and the `#### [[notifications]]` table (`:614-622`)
 - Modify: `docs/spec/user-interfaces.md` — the `settings_notifications.go` row (`:229`)
-- Modify: `README.md` — the `## Webhook Notifications` section (`:673-684`)
+- Modify: `README.md` — the `## Webhook Notifications` section (`:673-706`), two surgical additions only
 
 **Interfaces:** none. The citation gate (`go test ./internal/docs/`) checks every symbol and path named here.
 
@@ -3595,7 +3977,11 @@ The lifecycle set is `found`, `added`, `scheduled`, `rescheduled`,
 `connectivity_split`, `muxing`, `finished` (`lifecycleEvents`,
 `internal/notifications/lifecycle.go`). Everything else — `error`, `cancelled`,
 `auth`, the `trim_*` family and all of System — is always its own post: those
-may carry a mention, and an edit notifies nobody.
+may carry a mention, and an edit notifies nobody. Every lifecycle event carries
+its job id; the eight that did not before this arc now do.
+
+A target's mention rides an edited message the same way it rides a separate one
+— it is message-level `content`, not an embed field, so a PATCH carries it too.
 
 `error` and `cancelled` do **both**: the lifecycle message is edited to its
 terminal look, and the separate embed is still posted. Two messages on failure,
@@ -3646,14 +4032,30 @@ separate-mode only: for an edit-mode target the `found` embed IS the job's
 lifecycle message, and coalescing it would defeat one-message-per-job.
 ```
 
-- [ ] **Step 2: operations.md — the dispatch bullet and the file table**
+- [ ] **Step 2: operations.md — the target-key bullet, the dispatch bullet, the batching sentence, the no-`Author` list and the file table**
 
-Add to `### Dispatch Behavior`:
+Add to `### Target Options` (`:457-464`), which is the one place a reader looks for the
+per-target keys and would otherwise omit this one:
+```markdown
+- `mode` — `"separate"` (default) or `"edit"`. See **Delivery Modes** below.
+```
+
+Amend the "Three live cases have none" sentence (`:464`). It currently lists all eight
+mid-lifecycle events among the sends that carry no `Author` and therefore get no deep
+link; after Task 4 only the System family and a channel-less `moombox add` row qualify.
+Rewrite the sentence to say that, and drop the eight from its list.
+
+Add to `### Dispatch Behavior` (`:545`):
 ```markdown
 - **Delivery mode:** per target, `separate` (default) or `edit` — see **Delivery Modes** above. Hot-reloads with the rest of the notifications array; no restart.
 ```
 
-Add to the `### Source Files` table, after the `internal/notifications/discord.go` row:
+Add to `### Batching` (`:535-544`), beside the 5 s window it describes:
+```markdown
+The window is separate-mode only: an edit-mode target's `found` embed IS the job's lifecycle message, so it is never coalesced. See **Delivery Modes**.
+```
+
+Add to the `### Source Files` table (`:662`), after the `internal/notifications/discord.go` row (`:671`):
 ```markdown
 | `internal/notifications/lifecycle.go` | Edit-in-place lifecycle messages: the event set, the per-(job, target) message-id store, the POST-or-PATCH decision, the Status/History rewrite |
 | `internal/notifications/discord_edit.go` | `?wait=true` create + `PATCH …/messages/{id}` edit, and the Unknown-Message refusal |
@@ -3671,54 +4073,45 @@ After the `v19` row in the schema-history table:
 | v20 | Added `notification_msgs TEXT` (nullable) to `jobs`: the per-target Discord message ids an edit-mode notification target rewrites in place. No backfill — an id exists only once a message has been posted, and there is nothing to reconstruct for jobs that predate the column |
 ```
 
-Add the `Mode` row to the `#### [[notifications]]` table. **N2b owns the removal of the stale `Tags` row** (a field deleted from `NotificationConfig` in 2026-07) and the `enabled` / `mention` / `mention_events` rows — after the merge they should already be there. Drop `Tags` yourself only if the merge shows it still present. The finished table:
-```markdown
-#### [[notifications]] (array of tables)
+Insert ONE row into the existing `#### [[notifications]]` table
+(`docs/spec/data-and-storage.md:614-622`), after `MentionEvents`. Do not retype the table —
+N2b added `Enabled`, `Mention` and `MentionEvents` and already removed the dead `Tags`
+row:
 
-| Field | Type | TOML Key | Notes |
-|-------|------|----------|-------|
-| URL | string | `url` | Discord webhook URL (`https://discord.com/api/webhooks/ID/TOKEN` or `discord://ID/TOKEN`) |
-| Events | []string | `events` | Event allowlist; absent or empty means all events |
+```markdown
 | Mode | string | `mode` | `"separate"` (default) or `"edit"` — one message per event, or one message per job rewritten in place. See [operations.md](operations.md) § Delivery Modes |
 ```
-(If N2b's three rows are already present, insert only the `Mode` row and leave the rest alone.)
 
 - [ ] **Step 4: user-interfaces.md**
 
 Replace the `settings_notifications.go` row:
 ```markdown
-| `settings_notifications.go` | Notification sub-editor: webhook list, delivery mode (Separate messages / One message per job), per-event toggles, test send. |
+| `settings_notifications.go` | Notification sub-editor: webhook list, per-event toggles, test send, the per-target `enabled` mute, the `mention` text field, the `m` key, which toggles a highlighted event row in the mention (`@`) column, and the Delivery row (Separate messages / One message per job, Space toggles). |
 ```
 
 - [ ] **Step 5: README.md**
 
-Replace the `## Webhook Notifications` body (keep Arc N1's corrections to the Discord-only wording and the event-list pointer):
+**Do not replace the section** — Arc N2b rewrote it (the `enabled` / `mention` /
+`mention_events` example lines and the whole `### Mentions and dashboard links`
+subsection). Make two surgical additions:
 
-```markdown
-## Webhook Notifications
+1. One line in the fenced TOML example, after `events = …`:
 
-Send Discord webhook notifications for stream events:
+   ```toml
+   mode = "separate"                         # or "edit" — one message per job, rewritten in place
+   ```
 
-```toml
-[[notifications]]
-url = "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN"
-events = ["finished", "error"]  # Optional filter (default: all events)
-mode = "separate"               # or "edit" — see below
-```
+2. A new `### One message per job` subsection after `### Mentions and dashboard links`:
 
-The full event vocabulary lives in the notifications table in
-[docs/spec/operations.md](docs/spec/operations.md).
-
-**One message per job.** Set `mode = "edit"` on a target and Moombox posts one
-Discord message per job and then rewrites it in place as the job progresses —
-found, scheduled, downloading, splits, muxing, finished all land on the same
-message, which grows a Status line and a short history instead of a new embed
-each time. Failures and credential alerts stay separate posts, because those are
-the ones that ping. The message id is remembered on the job, so a restart keeps
-editing the same message; if someone deletes it in Discord, the next event posts
-a fresh one. Default is `"separate"` — the classic one-embed-per-event
-behaviour.
-```
+   > **One message per job.** Set `mode = "edit"` on a target and Moombox posts one
+   > Discord message per job and then rewrites it in place as the job progresses —
+   > found, scheduled, downloading, splits, muxing, finished all land on the same
+   > message, which grows a Status line and a short history instead of a new embed
+   > each time. Failures and credential alerts stay separate posts, because those are
+   > the ones that ping. The message id is remembered on the job, so a restart keeps
+   > editing the same message; if someone deletes it in Discord, the next event posts
+   > a fresh one. Default is `"separate"` — the classic one-embed-per-event
+   > behaviour.
 
 - [ ] **Step 6: Run the citation gate**
 
@@ -3744,8 +4137,8 @@ operations.md gains a Delivery Modes section (the lifecycle set, the
 Status/History rewrite, the terminal double-send, what persists and what
 does not, the Unknown-Message fallback, and that edits share the webhook's
 rate bucket rather than buying budget). data-and-storage.md documents the
-notification_msgs column and schema 20, and its [[notifications]] table
-drops the Tags field removed in 2026-07. README gains a short paragraph.
+notification_msgs column and schema 20, and gains one [[notifications]]
+row. README gains a short subsection.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- docs/spec/operations.md docs/spec/data-and-storage.md docs/spec/user-interfaces.md README.md
@@ -3753,11 +4146,11 @@ Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- docs
 
 ---
 
-## Task 8: Gates, the node recount, and the plan's own deletion
+## Task 9: Gates, the node recount, and the plan's own deletion
 
 **Files:**
 - Modify: `web/tests/README.md` (seven places, recounted from a real run)
-- Modify: `.claude/skills/moombox-database-migrations/SKILL.md` (the schema-version header)
+- Modify: `.claude/skills/moombox-database-migrations/SKILL.md` (the schema-version header) and `.claude/skills/moombox-settings/SKILL.md` (the hot-reload key list)
 - Delete: `docs/superpowers/plans/2026-09-27-webhooks-n3-edit-in-place.md`
 
 **Interfaces:** none.
@@ -3815,30 +4208,35 @@ Record the second set. Expected: `fail 0` in both runs. The `timeout` wrapper is
 - [ ] **Step 6: Recount `web/tests/README.md`**
 
 Seven places carry counts that this arc's new suite changes. Update each from the numbers Step 5 reported:
-1. the opening paragraph's suite count word ("Sixteen suites drive their module inside a jsdom document") and its list — add `settings-notification-mode.test.mjs` in alphabetical position
-2. **line 37**, "The sixteen suites listed above are the ones that need a DOM" — the second occurrence of the count word, easy to miss
-3. the list in "### How the skip works" ("the 160 DOM tests (player 63, …)") — add `settings-notification-mode 4` in its descending-count position and raise the 160
+1. the opening paragraph's suite count word (**line 4**, "Eighteen suites drive their module inside a jsdom document") and its list — add `settings-notification-mode.test.mjs` in alphabetical position
+2. **line 38**, "The eighteen suites listed above are the ones that need a DOM" — the second occurrence of the count word, easy to miss
+3. the list in "### How the skip works" (**lines 55-60**, "the 182 DOM tests (player 63, …)") — add `settings-notification-mode 4` in its descending-count position and raise the 182
 4. the "leaving 131 tests that need no DOM" figure (unchanged if the new suite is fully jsdom-gated — verify against the run rather than assuming)
-5. the fenced block:
+5. the fenced block (**lines 68-71**):
    ```
-   ℹ tests 291
+   ℹ tests 313
    ℹ pass 131
    ℹ fail 0
-   ℹ skipped 160
+   ℹ skipped 182
    ```
-6. the sentence after it ("With jsdom installed the same command reports `tests 291` / `pass 291` / `skipped 0`")
+6. the sentence after it (**lines 74-75**, "With jsdom installed the same command reports `tests 313` / `pass 313` / `skipped 0`")
 7. the "Needs jsdom" table — add `settings-notification-mode.test.mjs` to the `yes` row
 
 (Arc N2b moved these numbers too and added its own suite; recount from the run, never by arithmetic on the committed figures.)
 
-- [ ] **Step 7: Bump the migrations skill's schema-version line**
+- [ ] **Step 7: Bump the migrations skill's schema-version line and add `mode` to the settings skill**
 
 `.claude/skills/moombox-database-migrations/SKILL.md`'s header still reads `Current schema version: **v16**` — stale since v17, and this arc is the one that moves it to 20.
 
 - old: `Schema changes use incremental version-based migrations in `internal/database/migrations.go`. Current schema version: **v16**.`
 - new: `Schema changes use incremental version-based migrations in `internal/database/migrations.go`. Current schema version: **v20**.`
 
-The skill is inside the citation gate's `specDocs` set, so re-run `go test ./internal/docs/ -count=1` after the edit.
+`.claude/skills/moombox-settings/SKILL.md:59` enumerates the per-target notification keys that hot-reload. Add `mode` to that list and leave the restart-list count at 16 — `mode` is not restart-required:
+
+- old: `the per-target `enabled`/`mention`/`mention_events` keys all hot-reload through it too (the restart list stays at 16)`
+- new: `the per-target `enabled`/`mention`/`mention_events`/`mode` keys all hot-reload through it too (the restart list stays at 16)`
+
+Both skills are inside the citation gate's `specDocs` set, so re-run `go test ./internal/docs/ -count=1` after the edits.
 
 - [ ] **Step 8: Verify the whole arc against the spec**
 
@@ -3857,7 +4255,7 @@ An implemented plan is deleted, not archived — git history is the archive.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add web/tests/README.md .claude/skills/moombox-database-migrations/SKILL.md
+git add web/tests/README.md .claude/skills/moombox-database-migrations/SKILL.md .claude/skills/moombox-settings/SKILL.md
 git commit -m "chore(n3): gates green, node counts recounted, plan removed
 
 gofmt / vet / tidy -diff / staticcheck / build clean; database,
@@ -3867,5 +4265,5 @@ migrations skill's schema-version header moves 16 -> 20 (stale since v17).
 The Arc N3 plan is deleted now that it is implemented.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- web/tests/README.md .claude/skills/moombox-database-migrations/SKILL.md docs/superpowers/plans/2026-09-27-webhooks-n3-edit-in-place.md
+Claude-Session: https://claude.ai/code/session_01GhTENJov1fPmZFgk43nPRq" -- web/tests/README.md .claude/skills/moombox-database-migrations/SKILL.md .claude/skills/moombox-settings/SKILL.md docs/superpowers/plans/2026-09-27-webhooks-n3-edit-in-place.md
 ```
