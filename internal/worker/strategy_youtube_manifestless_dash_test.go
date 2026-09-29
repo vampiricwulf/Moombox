@@ -177,19 +177,22 @@ func manifestlessPotInfo(videoSource, audioSource string) *youtube.VideoInfo {
 	}
 }
 
-// TestDownloadManifestlessDashAttachesWebPOPerStream is the manifest-free
-// half of the 2026-09-29 live-path fix. Here there is no manifest: each
-// chosen format carries its own client, and video and audio can come from
+// TestDownloadManifestlessDashAttachesTokenPerStream is the manifest-free
+// half of the live-path policy. Here there is no manifest: each chosen
+// format carries its own client, and video and audio can come from
 // different ones (dedup keeps one copy per itag, whichever client ranked
-// best). So the strategy mints once if EITHER stream is from a WebPO client
-// and hands the token only to the downloader whose own format is; a
-// visionos / android_vr stream rides bare and says so.
+// best). So the strategy mints once if EITHER stream's client requires the
+// GVS token (youtube.GvsTokenRequired) and hands the token only to the
+// downloader whose own format does; a tv, web_embedded, visionos or
+// android_vr stream rides bare and says so.
 //
 // Mutants: dropping the per-stream gate on the downloader options fails the
-// mixed row (the visionos audio carries tok123); minting without the
-// IsWebPOSource gate fails the visionos row's mint count; dropping the skip
-// log fails the visionos and mixed rows.
-func TestDownloadManifestlessDashAttachesWebPOPerStream(t *testing.T) {
+// mixed rows (the bare stream carries tok123); minting without the
+// GvsTokenRequired gate fails the tv_auth and visionos pair rows' mint
+// count; gating on the old WebPO-client list fails the tv_auth pair and the
+// tv_public/web_embedded rows; dropping the skip log fails every row with a
+// bare stream.
+func TestDownloadManifestlessDashAttachesTokenPerStream(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string
 		videoSource, audioSource string
@@ -197,9 +200,12 @@ func TestDownloadManifestlessDashAttachesWebPOPerStream(t *testing.T) {
 		wantVideo, wantAudio     string
 		wantSkips                []string // "stream=source" in log order
 	}{
-		{name: "tv_auth pair", videoSource: "tv_auth", audioSource: "tv_auth", wantMints: 1, wantVideo: "tok123", wantAudio: "tok123"},
+		{name: "web_creator pair", videoSource: "web_creator", audioSource: "web_creator", wantMints: 1, wantVideo: "tok123", wantAudio: "tok123"},
+		{name: "tv_auth pair", videoSource: "tv_auth", audioSource: "tv_auth", wantSkips: []string{"video=tv_auth", "audio=tv_auth"}},
 		{name: "visionos pair", videoSource: "visionos", audioSource: "visionos", wantSkips: []string{"video=visionos", "audio=visionos"}},
-		{name: "tv_auth video beside visionos audio", videoSource: "tv_auth", audioSource: "visionos", wantMints: 1, wantVideo: "tok123", wantSkips: []string{"audio=visionos"}},
+		{name: "web_creator video beside visionos audio", videoSource: "web_creator", audioSource: "visionos", wantMints: 1, wantVideo: "tok123", wantSkips: []string{"audio=visionos"}},
+		{name: "tv_public video beside web audio", videoSource: "tv_public", audioSource: "web", wantMints: 1, wantAudio: "tok123", wantSkips: []string{"video=tv_public"}},
+		{name: "web_safari video beside web_embedded audio", videoSource: "web_safari", audioSource: "web_embedded", wantMints: 1, wantVideo: "tok123", wantSkips: []string{"audio=web_embedded"}},
 		{name: "android_vr video beside web_safari audio", videoSource: "android_vr", audioSource: "web_safari", wantMints: 1, wantAudio: "tok123", wantSkips: []string{"video=android_vr"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -45,8 +45,8 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// and Moombox has no Premium detection), so a web_creator / web /
 	// web_safari / watch_page URL answers the 1-byte Range probe 206 and then
 	// 403s its first 5 MB chunk without one (the VOD 403 of 2026-09-29).
-	// tv and web_embedded carry no requirement and visionos / android_vr are
-	// not WebPO clients, so those ride bare — see youtube.GvsTokenRequired.
+	// tv, web_embedded, visionos and android_vr carry no requirement, so
+	// those ride bare — see youtube.GvsTokenRequired.
 	// Video and audio can come from different clients, so the token is
 	// minted at most once and passed per stream, only where that stream's
 	// own Source requires it. Bound the same way as the DASH mint (see

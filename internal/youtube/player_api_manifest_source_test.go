@@ -129,11 +129,12 @@ func stubWatchPageWithPlayerResponse(t *testing.T, body string) {
 // 2026-09-29 live-path fix that lives in the extraction cascade: every site
 // that puts a DASH or HLS manifest URL on the returned VideoInfo records
 // WHICH client served it, because the live strategies decide from that label
-// whether the manifest takes a WebPO GVS token (visionos / android_vr /
-// android_vr_dash_fallback ride bare, as upstream does). An unrecorded
-// source reads as non-WebPO downstream — safe, but it would silently strip
-// the token from a TV/WEB manifest — so each scenario below drives one
-// assignment site and asserts both the label and the URL⇔source invariant.
+// whether the manifest takes a GVS PO token (GvsTokenRequired: tv,
+// web_embedded, visionos and android_vr* ride bare, as upstream does). An
+// unrecorded source reads as bare downstream — safe, but it would silently
+// strip the token from a WEB-family manifest — so each scenario below
+// drives one assignment site and asserts both the label and the URL⇔source
+// invariant.
 //
 // Mutant: stamping any one site with "" (or the wrong label) fails the
 // scenario named after it.

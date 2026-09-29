@@ -97,23 +97,27 @@ const potTestMPD = `<?xml version="1.0"?>
   </Period>
 </MPD>`
 
-// TestDownloadDashAttachesWebPOOnlyToWebPOManifests pins the DASH half of
-// the 2026-09-29 live-path fix. The manifest's recorded client decides: a
-// TV/WEB manifest is minted for and carries the token on the manifest path
-// and both segment downloaders, exactly as before; a visionos or android_vr
-// manifest — clients upstream never attaches a WebPO to, and the pairing
-// types.go names as the 2026-08-15 403 cause — is not minted for at all,
-// and neither is a manifest whose client was never recorded.
+// TestDownloadDashAttachesTokenOnlyWhereRequired pins the DASH half of the
+// live-path policy: the manifest's recorded client decides, by the same rule
+// the VOD path uses (youtube.GvsTokenRequired). A WEB-family manifest is
+// minted for and carries the token on the manifest path and both segment
+// downloaders; a tv, web_embedded, visionos or android_vr manifest —
+// clients upstream fetches no GVS token for — is not minted for at all, and
+// neither is a manifest whose client was never recorded.
 //
-// Mutant: dropping the IsWebPOSource gate fails every non-WebPO row (a mint,
-// a /pot/ path, a token on both downloaders, no skip line).
-func TestDownloadDashAttachesWebPOOnlyToWebPOManifests(t *testing.T) {
+// Mutant: dropping the GvsTokenRequired gate fails every bare row (a mint,
+// a /pot/ path, a token on both downloaders, no skip line); gating on the
+// old WebPO-client list fails the tv_auth, tv_public and web_embedded rows.
+func TestDownloadDashAttachesTokenOnlyWhereRequired(t *testing.T) {
 	for _, tc := range []struct {
 		source  string
 		wantPot bool
 	}{
-		{source: "tv_auth", wantPot: true},
+		{source: "web_creator", wantPot: true},
 		{source: "web_safari", wantPot: true},
+		{source: "tv_auth"},
+		{source: "tv_public"},
+		{source: "web_embedded"},
 		{source: "visionos"},
 		{source: "android_vr_dash_fallback"},
 		{source: ""},
@@ -156,7 +160,7 @@ func TestDownloadDashAttachesWebPOOnlyToWebPOManifests(t *testing.T) {
 				return
 			}
 			if n := calls.Load(); n != 0 {
-				t.Errorf("mint ran %d times, want 0 — a %q manifest takes no WebPO token", n, tc.source)
+				t.Errorf("mint ran %d times, want 0 — a %q manifest takes no GVS token", n, tc.source)
 			}
 			if strings.Contains(path, "/pot/") {
 				t.Errorf("manifest path = %q, want no /pot/ segment", path)
@@ -174,7 +178,7 @@ func TestDownloadDashAttachesWebPOOnlyToWebPOManifests(t *testing.T) {
 // skipLine is the "[POT] GVS token skipped" line a URL from source must
 // produce: the source by name (or "unknown" when none was recorded) and why.
 func skipLine(job *JobContext, source string, extra ...any) map[string]any {
-	want := map[string]any{"jobID": job.Job.ID, "source": source, "reason": "non-WebPO client"}
+	want := map[string]any{"jobID": job.Job.ID, "source": source, "reason": "no GVS token required for this client"}
 	if source == "" {
 		want["source"], want["reason"] = "unknown", "source not recorded"
 	}

@@ -80,7 +80,7 @@ func TestRefreshGvsCredentialsBypassesTokenCache(t *testing.T) {
 		GvsBinding:     "vd-123",
 		GvsBindingKind: youtube.BindingVisitorData,
 		Formats: []youtube.Format{
-			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"},
+			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"},
 		},
 	}
 
@@ -140,7 +140,7 @@ func TestRefreshGvsCredentialsBindingStableAcrossRefreshes(t *testing.T) {
 	videoInfo := &youtube.VideoInfo{
 		GvsBinding:     "vd-123",
 		GvsBindingKind: youtube.BindingVisitorData,
-		Formats:        []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
+		Formats:        []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
 	}
 
 	binding, _ := gvsBinding(job, videoInfo)
@@ -190,7 +190,7 @@ func TestRefreshGvsCredentialsDegradesOnMintFailure(t *testing.T) {
 		Logger: &discardLogger{},
 	}
 	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
+		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
 	}
 
 	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, fake, "vd-123", "test")
@@ -221,7 +221,7 @@ func TestRefreshGvsCredentialsNilProviderSkipsMint(t *testing.T) {
 		Logger: &discardLogger{},
 	}
 	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
+		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
 	}
 
 	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, nil, "vd-123", "test")
@@ -287,7 +287,7 @@ func TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver(t *testing.T) {
 	}
 	videoInfo := &youtube.VideoInfo{
 		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
-		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
+		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator"}},
 	}
 
 	start := time.Now()
@@ -343,7 +343,7 @@ func TestRefreshGvsCredentialsSkipsWholeFileFormat(t *testing.T) {
 	videoInfo := &youtube.VideoInfo{
 		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
 		Formats: []youtube.Format{
-			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth", ContentLength: "123456789"},
+			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "web_creator", ContentLength: "123456789"},
 		},
 	}
 
@@ -410,7 +410,7 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 	}
 	videoInfo := &youtube.VideoInfo{
 		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
-		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1&n=abc123", Source: "tv_auth"}},
+		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1&n=abc123", Source: "web_creator"}},
 	}
 
 	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -429,27 +429,33 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 	}
 }
 
-// TestRefreshGvsCredentialsSkipsNonWebPOStream is the 403-recovery half of
-// the 2026-09-29 live-path fix. The manifest-free strategy leaves a visionos
-// or android_vr stream bare at setup; without this gate the first 403 on
-// that stream would re-mint a WebPO here and the engine would SetPoToken it
-// onto the very URL the setup gate kept clean. The refresh reads the
-// refreshed itag's own client from the setup formats — the same format the
-// strategy chose — so its policy cannot drift from the setup's. An itag the
-// pool does not name has no recorded client and is not minted for either.
+// TestRefreshGvsCredentialsSkipsTokenFreeStream is the 403-recovery half of
+// the live-path policy. The live strategies leave a stream bare at setup
+// when its client needs no GVS token upstream (youtube.GvsTokenRequired:
+// tv_auth, tv_public, web_embedded, visionos, android_vr*); without this
+// gate the first 403 on that stream would re-mint a token here and the
+// engine would SetPoToken it onto the very URL the setup gate kept clean.
+// The refresh reads the refreshed itag's own client from the setup formats
+// — the same format the strategy chose — so its policy cannot drift from
+// the setup's. An itag the pool does not name has no recorded client and is
+// not minted for either.
 //
 // Mutant: dropping the gate fails every row (the fake is called and the
-// token comes back).
-func TestRefreshGvsCredentialsSkipsNonWebPOStream(t *testing.T) {
+// token comes back); gating on the old WebPO-client list instead fails the
+// tv_auth, tv_public and web_embedded rows.
+func TestRefreshGvsCredentialsSkipsTokenFreeStream(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		source string
 		itag   int
 	}{
+		{name: "tv_auth", source: "tv_auth", itag: 140},
+		{name: "tv_public", source: "tv_public", itag: 140},
+		{name: "web_embedded", source: "web_embedded", itag: 140},
 		{name: "visionos", source: "visionos", itag: 140},
 		{name: "android_vr", source: "android_vr", itag: 140},
 		{name: "android_vr_dash_fallback", source: "android_vr_dash_fallback", itag: 140},
-		{name: "itag not in the pool", source: "tv_auth", itag: 251},
+		{name: "itag not in the pool", source: "web_creator", itag: 251},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var minted int
@@ -479,41 +485,55 @@ func TestRefreshGvsCredentialsSkipsNonWebPOStream(t *testing.T) {
 	}
 }
 
-// TestRefreshGvsCredentialsKeepsURLOnTokenClassChange pins the close-wave
-// guard (review T3-m1): the refresh decides its re-mint by the SETUP
-// format's client but re-runs the full cascade for the URL, and the itag's
-// dedup winner can change between the two. Installing that fresh URL would
-// break the (URL, token) pair in two directions, so the install is skipped
-// with a Warn:
+// TestRefreshGvsCredentialsKeepsURLOnTokenClassChange pins the refresh's
+// install guard (first added by review T3-m1): the refresh decides its
+// re-mint by the SETUP format's client but re-runs the full cascade for the
+// URL, and the itag's dedup winner can change between the two. When the
+// fresh client's GVS token requirement (youtube.GvsTokenRequired) differs
+// from the setup client's, installing the fresh URL would break the (URL,
+// token) pair the engine holds, so the install is skipped with a Warn whose
+// reason names which side requires the token. The rule is symmetric:
 //
-//   - A: a visionos/android_vr setup (no token) whose itag is now owned by a
-//     client that REQUIRES the GVS token — a bare WEB-family URL that 403s
-//     until forbiddenRefreshAttempts runs out.
-//   - B: a WebPO setup whose itag is now owned by visionos/android_vr — the
-//     engine would keep its WebPO on a URL upstream attaches nothing to (the
-//     callback cannot clear a token).
+//   - setup needs no token → fresh requires one (visionos or tv_auth →
+//     web_creator): the stream was left bare at setup and the refresh does
+//     not mint for it, so the fresh URL would 403 until
+//     forbiddenRefreshAttempts runs out.
+//   - setup requires one → fresh needs none (web_creator → visionos or
+//     tv_auth): the engine keeps the token it was given (the callback cannot
+//     clear one) on a URL upstream fetches bare. For a tv URL that is
+//     probably harmless, but the class changed, and the guard stays
+//     symmetric rather than betting on which bare clients tolerate a stray
+//     token — android_vr did not (the 2026-08-15 403s).
 //
-// Every other move installs as before — both WebPO (tv_auth → web_creator),
-// and a non-WebPO setup moving to a WebPO client that does not require the
-// token (visionos → tv_auth), which is upstream-correct bare. The latter is
-// why the rule is two predicates and not a plain class mismatch.
+// A move within one class installs as before: web_creator → web (both
+// require), visionos ↔ tv_auth (neither does).
 //
-// Mutants (each run): dropping predicate A fails the "A" row; dropping
-// predicate B fails the "B" row; a plain IsWebPOSource mismatch fails the
-// "visionos to tv_auth" row.
+// Mutants (each run): making the guard one-directional (skip only when the
+// fresh client requires a token the setup lacks) fails the "web_creator to
+// tv_auth" and "web_creator to visionos" rows; restoring the old
+// WebPO-client two-predicate rule fails "tv_auth to web_creator",
+// "web_creator to tv_auth" and "tv_auth to visionos".
 func TestRefreshGvsCredentialsKeepsURLOnTokenClassChange(t *testing.T) {
 	const warnMsg = "[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL"
+	const (
+		freshRequires = "fresh client requires the GVS token, setup client does not"
+		setupRequires = "setup client requires the GVS token, fresh client does not"
+	)
 	for _, tc := range []struct {
 		name        string
 		setup       string
 		fresh       string
 		wantInstall bool
 		wantToken   string
+		wantReason  string
 	}{
-		{name: "A visionos to web_creator", setup: "visionos", fresh: "web_creator", wantInstall: false, wantToken: ""},
-		{name: "B tv_auth to visionos", setup: "tv_auth", fresh: "visionos", wantInstall: false, wantToken: "fresh-token"},
-		{name: "tv_auth to web_creator", setup: "tv_auth", fresh: "web_creator", wantInstall: true, wantToken: "fresh-token"},
+		{name: "visionos to web_creator", setup: "visionos", fresh: "web_creator", wantToken: "", wantReason: freshRequires},
+		{name: "tv_auth to web_creator", setup: "tv_auth", fresh: "web_creator", wantToken: "", wantReason: freshRequires},
+		{name: "web_creator to visionos", setup: "web_creator", fresh: "visionos", wantToken: "fresh-token", wantReason: setupRequires},
+		{name: "web_creator to tv_auth", setup: "web_creator", fresh: "tv_auth", wantToken: "fresh-token", wantReason: setupRequires},
+		{name: "web_creator to web", setup: "web_creator", fresh: "web", wantInstall: true, wantToken: "fresh-token"},
 		{name: "visionos to tv_auth", setup: "visionos", fresh: "tv_auth", wantInstall: true, wantToken: ""},
+		{name: "tv_auth to visionos", setup: "tv_auth", fresh: "visionos", wantInstall: true, wantToken: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orig := refreshVideoInfo
@@ -575,7 +595,7 @@ func TestRefreshGvsCredentialsKeepsURLOnTokenClassChange(t *testing.T) {
 			if len(warns) != 1 {
 				t.Fatalf("token-class Warn lines = %v, want exactly one", warns)
 			}
-			want := map[string]any{"jobID": "test-job", "tag": "test", "itag": 140, "setupSource": tc.setup, "freshSource": tc.fresh}
+			want := map[string]any{"jobID": "test-job", "tag": "test", "itag": 140, "setupSource": tc.setup, "freshSource": tc.fresh, "reason": tc.wantReason}
 			for k, v := range want {
 				if warns[0][k] != v {
 					t.Errorf("Warn %s = %v, want %v (line %v)", k, warns[0][k], v, warns[0])

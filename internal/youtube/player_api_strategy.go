@@ -1496,10 +1496,11 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 // client has one label everywhere), so every later hand-off — a DASH
 // adoption into another result, the watch-page merge, the return itself —
 // moves a URL together with its client. The live strategies read the source
-// to decide whether a manifest takes a WebPO GVS token
-// (youtube.IsWebPOSource): a visionos or android_vr manifest must ride bare,
-// and an unrecorded one is treated the same way — safe, but it would strip
-// the token from a TV or WEB manifest, which is why no site may skip this.
+// to decide whether a manifest takes a GVS PO token (GvsTokenRequired): a
+// WEB-family manifest is tokenised, a tv, web_embedded, visionos or
+// android_vr manifest rides bare, and an unrecorded one is treated as bare
+// too — safe, but it would strip the token from a WEB-family manifest that
+// requires it, which is why no site may skip this.
 func stampManifestSources(info *VideoInfo, label string) {
 	if info == nil {
 		return

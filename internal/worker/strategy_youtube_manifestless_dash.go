@@ -113,7 +113,8 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //  4. Mint a GVS POT bound per yt-dlp's get_webpo_content_binding rule
 //     (gvsBinding, resolved at extraction and carried on videoInfo), via
 //     the cached /att/get minter — only for a stream whose format came
-//     from a WebPO client; a visionos / android_vr stream rides bare.
+//     from a client that requires the GVS token (youtube.GvsTokenRequired);
+//     a tv, web_embedded, visionos or android_vr stream rides bare.
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
@@ -212,32 +213,33 @@ func DownloadManifestlessDash(
 	// future-proof against a binding source that IS invalidated mid-job.
 	//
 	// No manifest here: each chosen format carries its own client, and video
-	// and audio can come from different ones. Mint once if EITHER stream is
-	// from a WebPO client (youtube.IsWebPOSource) and hand the token only to
-	// the downloader whose own format is; a visionos or android_vr stream
-	// rides bare, as upstream does. refreshGvsCredentials applies the same
-	// rule to the 403 re-mint, so a bare stream stays bare.
+	// and audio can come from different ones. Mint once if EITHER stream's
+	// client requires the GVS token (youtube.GvsTokenRequired) and hand the
+	// token only to the downloader whose own format does; a tv, web_embedded,
+	// visionos or android_vr stream rides bare, as upstream does.
+	// refreshGvsCredentials applies the same rule to the 403 re-mint, so a
+	// bare stream stays bare.
 	bindingValue, bindingKind := gvsBinding(job, videoInfo)
 	var videoSource, audioSource string
-	var videoWebPO, audioWebPO bool
+	var videoNeedsPot, audioNeedsPot bool
 	if videoStream != nil {
 		videoSource = formatSourceByItag(videoInfo.Formats, videoStream.Itag)
-		videoWebPO = youtube.IsWebPOSource(videoSource)
+		videoNeedsPot = youtube.GvsTokenRequired(videoSource)
 	}
 	if audioStream != nil {
 		audioSource = formatSourceByItag(videoInfo.Formats, audioStream.Itag)
-		audioWebPO = youtube.IsWebPOSource(audioSource)
+		audioNeedsPot = youtube.GvsTokenRequired(audioSource)
 	}
 	var pot string
 	if potProvider != nil {
-		if videoStream != nil && !videoWebPO {
+		if videoStream != nil && !videoNeedsPot {
 			logGvsTokenSkipped(job, videoSource, "stream", "video")
 		}
-		if audioStream != nil && !audioWebPO {
+		if audioStream != nil && !audioNeedsPot {
 			logGvsTokenSkipped(job, audioSource, "stream", "audio")
 		}
 	}
-	if potProvider != nil && (videoWebPO || audioWebPO) {
+	if potProvider != nil && (videoNeedsPot || audioNeedsPot) {
 		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
@@ -252,10 +254,10 @@ func DownloadManifestlessDash(
 		}
 	}
 	videoPot, audioPot := "", ""
-	if videoWebPO {
+	if videoNeedsPot {
 		videoPot = pot
 	}
-	if audioWebPO {
+	if audioNeedsPot {
 		audioPot = pot
 	}
 
