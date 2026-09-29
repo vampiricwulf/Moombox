@@ -137,8 +137,9 @@ func TestSetModeSwapsUnderOneHold(t *testing.T) {
 		// every run.
 		clock := &fakeBatchClock{}
 		emitted := 0
+		hooks := 0
 		b := newBatcher(batchWindow, clock, func(Message) { emitted++ }, testLogger{})
-		b.betweenModeCheckAndAppend = func() { b.setMode(ModeEdit) }
+		b.betweenModeCheckAndAppend = func() { hooks++; b.setMode(ModeEdit) }
 
 		b.Add(Embed{Opts: SendOptions{Event: "found", JobID: "yt_1"}}, "", nil)
 
@@ -150,6 +151,9 @@ func TestSetModeSwapsUnderOneHold(t *testing.T) {
 		}
 		if emitted != 1 {
 			t.Errorf("emitted %d messages, want the one embed out at once", emitted)
+		}
+		if hooks != 1 {
+			t.Errorf("hook ran %d times, want exactly once", hooks)
 		}
 	})
 

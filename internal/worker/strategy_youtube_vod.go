@@ -82,10 +82,10 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			// copy at all: fetch one, once, from visionos / android_vr, merge it
 			// into a copy of the extraction's pool (the re-dedup attaches it as
 			// the shadow) and degrade again. A failed fetch falls through to
-			// the degraded pool.
+			// the degraded pool. An already-cancelled job skips the fetch.
 			lostVideo := result.VideoFormat != nil && !poolHasStream(pool, result.VideoFormat)
 			lostAudio := result.AudioFormat != nil && !poolHasStream(pool, result.AudioFormat)
-			if (lostVideo || lostAudio) && job.YT != nil {
+			if (lostVideo || lostAudio) && job.YT != nil && ctx.Err() == nil {
 				job.Logger.Info("[POT] missing_pot: re-extracting with the cookieless clients",
 					"jobID", job.Job.ID, "lostVideo", lostVideo, "lostAudio", lostAudio)
 				rxCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(job.Config))
@@ -111,6 +111,15 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			}
 			// The degraded pool holds no token-requiring format.
 			videoNeedsPot, audioNeedsPot = false, false
+			videoSource, audioSource := "", ""
+			if result.VideoFormat != nil {
+				videoSource = result.VideoFormat.Source
+			}
+			if result.AudioFormat != nil {
+				audioSource = result.AudioFormat.Source
+			}
+			job.Logger.Info("[POT] missing_pot: serving token-free formats",
+				"jobID", job.Job.ID, "videoSource", videoSource, "audioSource", audioSource)
 		} else {
 			vodPoToken = tok
 			videoSource, audioSource := "", ""

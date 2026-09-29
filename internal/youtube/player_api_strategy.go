@@ -1524,13 +1524,17 @@ func stampManifestSources(info *VideoInfo, label string) {
 // The pool is what matters, not the chain's chosen result: an inadequate
 // client's formats are pooled before the adequacy check, and one stream is
 // all a degrade may need. Each client's own failure is Debug-logged inside
-// the chain; an empty pool is the one error.
+// the chain; an empty pool is the one error, wrapping the last client
+// failure (a timeout, a cancel, an HTTP status) when there was one.
 func (p *PlayerAPI) CookielessFormats(ctx context.Context, videoID, visitorData string) ([]Format, error) {
 	ctx = withExtractionState(ctx)
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 	p.tryCookielessFallbacks(ctx, videoID, visitorData, &formatPool, tally, nil)
 	if len(formatPool) == 0 {
+		if tally.lastErr != nil {
+			return nil, fmt.Errorf("cookieless clients returned no formats: %w", tally.lastErr)
+		}
 		return nil, errors.New("cookieless clients returned no formats")
 	}
 	return formatPool, nil

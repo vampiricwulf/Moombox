@@ -1707,4 +1707,12 @@ func TestCookielessFormats(t *testing.T) {
 			t.Errorf("CookielessFormats = %+v, %v — want the no-formats error", got, err)
 		}
 	})
+
+	t.Run("an empty pool wraps the last client failure", func(t *testing.T) {
+		swap(t, &clientKeyedTransport{})
+		_, err := NewPlayerAPI(nil, noopLogger{}).CookielessFormats(context.Background(), "test1234567", "vd")
+		if err == nil || !strings.Contains(err.Error(), "cookieless clients returned no formats: ") || !strings.Contains(err.Error(), "HTTP 404") {
+			t.Errorf("CookielessFormats err = %v — want the no-formats error wrapping the clients' HTTP 404", err)
+		}
+	})
 }

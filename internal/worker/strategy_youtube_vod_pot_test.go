@@ -451,6 +451,9 @@ func TestDownloadVodMissingPotSwapsToTheTokenFreeShadow(t *testing.T) {
 		if line["dropped"] != 2 || line["swapped"] != 2 {
 			t.Errorf("[POT] missing_pot dropped=%v swapped=%v, want 2 and 2 (line %v)", line["dropped"], line["swapped"], line)
 		}
+		if serving := logLine(logs, "[POT] missing_pot: serving token-free formats"); serving == nil || serving["videoSource"] != "visionos" || serving["audioSource"] != "visionos" {
+			t.Errorf("serving line = %v, want videoSource=visionos audioSource=visionos", serving)
+		}
 		if info.Formats[0].Source != "web_creator" || info.Formats[1].Source != "web_creator" {
 			t.Errorf("caller's formats changed: %+v — the swap must work on a copy", info.Formats)
 		}
@@ -523,14 +526,30 @@ func TestDownloadVodMissingPotSwapsToTheTokenFreeShadow(t *testing.T) {
 // ends.
 func fakeCookieless(t *testing.T, formats []youtube.Format, err error) *atomic.Int32 {
 	t.Helper()
+	calls, _ := fakeCookielessCtx(t, formats, err)
+	return calls
+}
+
+// fakeCookielessCtx is fakeCookieless that also records whether every call's
+// ctx carried a deadline — the re-extract must run under its own bound, never
+// on the bare job ctx.
+func fakeCookielessCtx(t *testing.T, formats []youtube.Format, err error) (*atomic.Int32, *atomic.Bool) {
+	t.Helper()
 	var calls atomic.Int32
+	var sawDeadline atomic.Bool
 	orig := fetchCookielessFormats
-	fetchCookielessFormats = func(_ *youtube.Service, _ context.Context, _ string) ([]youtube.Format, error) {
-		calls.Add(1)
+	fetchCookielessFormats = func(_ *youtube.Service, ctx context.Context, _ string) ([]youtube.Format, error) {
+		n := calls.Add(1)
+		_, ok := ctx.Deadline()
+		if n == 1 {
+			sawDeadline.Store(ok)
+		} else if !ok {
+			sawDeadline.Store(false)
+		}
 		return formats, err
 	}
 	t.Cleanup(func() { fetchCookielessFormats = orig })
-	return &calls
+	return &calls, &sawDeadline
 }
 
 // withLevel stamps f with the AuthLevel the cascade gives its source.
@@ -579,7 +598,9 @@ func reextractJob(t *testing.T) (*JobContext, *captureLogger) {
 // Mutants (each run): re-extracting without the lost check fails the
 // shadows-cover-both row (count 0); selecting from extra alone instead of the
 // merge fails the partial row (the tv_public 244 video is gone); dropping the
-// merged Info line fails the incident row.
+// merged Info line fails the incident row; passing the job ctx instead of the
+// timed one fails the incident row's deadline check; dropping the ctx.Err()
+// gate fails the cancelled-job row.
 func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 	mintErr := errors.New("sidecar down")
 
@@ -587,11 +608,14 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		fakeVodMint(t, "", mintErr)
 		info := incidentInfo()
 		before := append([]youtube.Format(nil), info.Formats...)
-		calls := fakeCookieless(t, []youtube.Format{cookielessCopy(info.Formats[0]), cookielessCopy(info.Formats[1])}, nil)
+		calls, sawDeadline := fakeCookielessCtx(t, []youtube.Format{cookielessCopy(info.Formats[0]), cookielessCopy(info.Formats[1])}, nil)
 		job, logs := reextractJob(t)
 		res := runVodPot(t, job, info, &bgutils.PotProvider{})
 		if n := calls.Load(); n != 1 {
 			t.Errorf("cookieless re-extract ran %d times, want exactly 1", n)
+		}
+		if !sawDeadline.Load() {
+			t.Errorf("the cookieless re-extract's ctx carries no deadline — it must run under credentialRefreshTimeoutFor, not the bare job ctx")
 		}
 		if v := res.VideoFormat; v == nil || v.Itag != 302 || v.Source != "visionos" || v.URL != "http://127.0.0.1:1/visionos/videoplayback?itag=302" {
 			t.Errorf("video format = %+v, want visionos itag 302", v)
@@ -609,6 +633,9 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		merged := logLine(logs, "[POT] missing_pot: cookieless re-extract merged")
 		if merged == nil || merged["added"] != 2 || merged["swapped"] != 2 || merged["dropped"] != 2 {
 			t.Errorf("merged line = %v, want added=2 dropped=2 swapped=2", merged)
+		}
+		if serving := logLine(logs, "[POT] missing_pot: serving token-free formats"); serving == nil || serving["videoSource"] != "visionos" || serving["audioSource"] != "visionos" {
+			t.Errorf("serving line = %v, want videoSource=visionos audioSource=visionos", serving)
 		}
 		if !reflect.DeepEqual(info.Formats, before) {
 			t.Errorf("caller's videoInfo.Formats changed: %+v — the merge must work on a copy", info.Formats)
@@ -633,6 +660,27 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		line := logLine(logs, "[POT] missing_pot: cookieless re-extract failed — continuing with the degraded pool")
 		if line == nil || line["err"] != rxErr {
 			t.Errorf("re-extract failure line = %v, want err=%v", line, rxErr)
+		}
+	})
+
+	t.Run("an already-cancelled job skips the re-extract", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		calls := fakeCookieless(t, nil, errors.New("must not be called"))
+		job, logs := reextractJob(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		res, err := DownloadVod(ctx, job, incidentInfo(), stubCipherSolver{}, nil, &bgutils.PotProvider{})
+		if err == nil {
+			t.Fatalf("DownloadVod = %+v, nil — want the terminal error", res)
+		}
+		if n := calls.Load(); n != 0 {
+			t.Errorf("cookieless re-extract ran %d times on a cancelled job, want 0", n)
+		}
+		if l := logLine(logs, "[POT] missing_pot: re-extracting"); l != nil {
+			t.Errorf("unexpected re-extract line on a cancelled job: %v", l)
+		}
+		if l := logLine(logs, "[POT] missing_pot: cookieless re-extract failed"); l != nil {
+			t.Errorf("unexpected re-extract failure line on a cancelled job: %v", l)
 		}
 	})
 
