@@ -212,6 +212,17 @@ func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoI
 	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
 }
 
+// CookielessFormats runs only the cookieless clients (visionos, then
+// android_vr) for videoID and returns the formats they pooled — the VOD
+// missing_pot re-extract; see PlayerAPI.CookielessFormats. Uses cached visitor
+// data the way ProbeVideoStatus does.
+func (s *Service) CookielessFormats(ctx context.Context, videoID string) ([]Format, error) {
+	s.vdMu.RLock()
+	vd := s.visitorData
+	s.vdMu.RUnlock()
+	return s.PlayerAPI.CookielessFormats(ctx, videoID, vd)
+}
+
 // ProbeVideoDate fetches only a video's publish date via one WEB-family player
 // call, carrying whatever credentials the jar holds — see
 // PlayerAPI.ProbeVideoDate. The date-completing half of the monitors'

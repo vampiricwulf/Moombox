@@ -127,6 +127,36 @@ func TestSetModeSwapsUnderOneHold(t *testing.T) {
 		}
 	})
 
+	t.Run("flip in the gap", func(t *testing.T) {
+		// Deterministic: the flip lands exactly between Add's mode check and
+		// its append, the interleaving the loose race row below only sometimes
+		// hits. Add must re-check the mode under the append lock and emit at
+		// once — an armed window on an edit-mode batcher is the failure.
+		//
+		// Mutant: removing the re-check leaves pending=1 armed=1 emitted=0 on
+		// every run.
+		clock := &fakeBatchClock{}
+		emitted := 0
+		hooks := 0
+		b := newBatcher(batchWindow, clock, func(Message) { emitted++ }, testLogger{})
+		b.betweenModeCheckAndAppend = func() { hooks++; b.setMode(ModeEdit) }
+
+		b.Add(Embed{Opts: SendOptions{Event: "found", JobID: "yt_1"}}, "", nil)
+
+		b.mu.Lock()
+		pending := len(b.pending)
+		b.mu.Unlock()
+		if pending != 0 || liveWindows(clock) != 0 {
+			t.Errorf("pending=%d armed=%d after a flip in the gap, want 0/0", pending, liveWindows(clock))
+		}
+		if emitted != 1 {
+			t.Errorf("emitted %d messages, want the one embed out at once", emitted)
+		}
+		if hooks != 1 {
+			t.Errorf("hook ran %d times, want exactly once", hooks)
+		}
+	})
+
 	t.Run("race", func(t *testing.T) {
 		clock := &fakeBatchClock{}
 		var mu sync.Mutex

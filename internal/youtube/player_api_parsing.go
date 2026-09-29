@@ -1034,6 +1034,29 @@ func deduplicateFormats(ctx context.Context, pool []Format) []Format {
 	return collapsed
 }
 
+// MergeFormatPool folds extra — formats fetched after the extraction, labelled
+// with their client and AuthLevel (the VOD missing_pot re-extract's
+// CookielessFormats) — into an already-deduplicated pool and deduplicates the
+// union, so a WEB-family winner keeps winning and a token-free copy in extra
+// becomes its TokenFreeAlternate. A shadow a pool entry already carries goes
+// back in as a candidate of its own: the shadow is part of the value, not of
+// the slice, and dedup recomputes every shadow from the slice it is handed.
+//
+// Always a fresh slice: neither input, nor the spare capacity behind pool, is
+// written. ctx may carry no extraction state (the worker's does not) — the
+// state's methods are nil-safe.
+func MergeFormatPool(ctx context.Context, pool, extra []Format) []Format {
+	union := make([]Format, 0, 2*len(pool)+len(extra))
+	union = append(union, pool...)
+	for i := range pool {
+		if alt := pool[i].TokenFreeAlternate; alt != nil {
+			union = append(union, *alt)
+		}
+	}
+	union = append(union, extra...)
+	return deduplicateFormats(ctx, union)
+}
+
 // collapseToPreferredRendition keeps one rendition per itag: the highest
 // audioTrackScore (which already ranks a clean rendition above its DRC twin),
 // then the existing lowest-auth-level tie-break. streams arrives sorted by the

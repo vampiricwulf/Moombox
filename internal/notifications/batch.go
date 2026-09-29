@@ -77,6 +77,12 @@ type batcher struct {
 	// share a POST with another job's. The zero value reads as ModeSeparate,
 	// which is what a bare newBatcher gets.
 	mode string
+
+	// betweenModeCheckAndAppend is a TEST-ONLY hook, nil in production: Add
+	// calls it (with mu NOT held) exactly between its edit-mode check and the
+	// append's lock section, so a test can land a setMode in that gap
+	// deterministically.
+	betweenModeCheckAndAppend func()
 }
 
 func newBatcher(window time.Duration, clock batchClock, emit emitFunc, logger interface {
@@ -100,7 +106,8 @@ func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
 	// Edit mode gates the whole stage, as the first thing Add does: an edited
 	// message is ONE job's embed rewritten in place, so it can never share a
 	// POST with another job's. Everything below is written as if the target is
-	// separate-mode, which past this point it is.
+	// separate-mode, which past this point it is — save for a flip landing in the
+	// gap before the append, which the append's own hold re-checks.
 	b.mu.Lock()
 	editMode := b.mode == ModeEdit
 	b.mu.Unlock()
@@ -119,7 +126,20 @@ func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
 		return
 	}
 
+	if b.betweenModeCheckAndAppend != nil {
+		b.betweenModeCheckAndAppend()
+	}
 	b.mu.Lock()
+	if b.mode == ModeEdit {
+		// Re-checked under the hold that appends: a setMode(ModeEdit) landing
+		// between the check above and this lock has already released the
+		// window, so appending here would arm a fresh one on an edit-mode
+		// target and hold this embed the full 5 s. Emit it at once instead,
+		// with mu released first (emit is never called under it).
+		b.mu.Unlock()
+		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
+		return
+	}
 	defer b.mu.Unlock()
 	b.pending = append(b.pending, e)
 	if b.mention == "" && mention != "" && allowed != nil {

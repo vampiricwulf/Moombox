@@ -58,7 +58,9 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// what is left (tv / web_embedded / visionos / android_vr — none of which
 	// needs a token). A dropped format that carries a TokenFreeAlternate (the
 	// dedup shadow) is replaced by it — same itag, bare URL — rather than
-	// lost. Nothing selectable left is an error naming the cause.
+	// lost. A chosen stream that WAS lost triggers one cookieless re-extract
+	// (see the block below). Nothing selectable left is an error naming the
+	// cause.
 	videoNeedsPot := result.VideoFormat != nil && youtube.GvsTokenRequired(result.VideoFormat.Source)
 	audioNeedsPot := result.AudioFormat != nil && youtube.GvsTokenRequired(result.AudioFormat.Source)
 	var vodPoToken string
@@ -74,6 +76,31 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			pool, dropped, swapped = withoutGvsRequiredFormats(pool)
 			job.Logger.Warn("[POT] missing_pot: no GVS token — dropping web-family formats",
 				"jobID", job.Job.ID, "binding", bindingKind, "err", mintErr, "dropped", len(dropped), "swapped", swapped)
+			// A chosen stream no shadow covered is gone from the degraded pool.
+			// The cascade runs the cookieless chain only when web_creator was
+			// inadequate, so an adequate web_creator pool holds no token-free
+			// copy at all: fetch one, once, from visionos / android_vr, merge it
+			// into a copy of the extraction's pool (the re-dedup attaches it as
+			// the shadow) and degrade again. A failed fetch falls through to
+			// the degraded pool. An already-cancelled job skips the fetch.
+			lostVideo := result.VideoFormat != nil && !poolHasStream(pool, result.VideoFormat)
+			lostAudio := result.AudioFormat != nil && !poolHasStream(pool, result.AudioFormat)
+			if (lostVideo || lostAudio) && job.YT != nil && ctx.Err() == nil {
+				job.Logger.Info("[POT] missing_pot: re-extracting with the cookieless clients",
+					"jobID", job.Job.ID, "lostVideo", lostVideo, "lostAudio", lostAudio)
+				rxCtx, cancel := context.WithTimeout(ctx, credentialRefreshTimeoutFor(job.Config))
+				extra, rxErr := fetchCookielessFormats(job.YT, rxCtx, job.Job.VideoID)
+				cancel()
+				if rxErr != nil {
+					job.Logger.Warn("[POT] missing_pot: cookieless re-extract failed — continuing with the degraded pool",
+						"jobID", job.Job.ID, "err", rxErr)
+				} else {
+					merged := youtube.MergeFormatPool(ctx, videoInfo.Formats, extra)
+					pool, dropped, swapped = withoutGvsRequiredFormats(merged)
+					job.Logger.Info("[POT] missing_pot: cookieless re-extract merged",
+						"jobID", job.Job.ID, "added", len(extra), "dropped", len(dropped), "swapped", swapped)
+				}
+			}
 			selected, result = selectVodFormats(job, pool, dropped)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
@@ -84,6 +111,15 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			}
 			// The degraded pool holds no token-requiring format.
 			videoNeedsPot, audioNeedsPot = false, false
+			videoSource, audioSource := "", ""
+			if result.VideoFormat != nil {
+				videoSource = result.VideoFormat.Source
+			}
+			if result.AudioFormat != nil {
+				audioSource = result.AudioFormat.Source
+			}
+			job.Logger.Info("[POT] missing_pot: serving token-free formats",
+				"jobID", job.Job.ID, "videoSource", videoSource, "audioSource", audioSource)
 		} else {
 			vodPoToken = tok
 			videoSource, audioSource := "", ""
@@ -355,6 +391,18 @@ func droppedHasItag(dropped []youtube.Format, itag int, kind string) bool {
 	for i := range dropped {
 		f := &dropped[i]
 		if f.Itag == itag && strings.Contains(f.MimeType, kind) && f.URL != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// poolHasStream reports whether pool still holds f's stream — same itag and
+// audio track, a URL to fetch — the test for a chosen format a missing_pot
+// degrade dropped without a shadow to swap in.
+func poolHasStream(pool []youtube.Format, f *youtube.Format) bool {
+	for i := range pool {
+		if pool[i].Itag == f.Itag && pool[i].AudioTrackID == f.AudioTrackID && pool[i].URL != "" {
 			return true
 		}
 	}

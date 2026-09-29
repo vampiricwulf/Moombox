@@ -1654,3 +1654,65 @@ func TestProbeVideoDateSendsTheJarsCredentials(t *testing.T) {
 		}
 	})
 }
+
+// TestCookielessFormats pins the missing_pot re-extract's youtube half: the
+// cookieless chain alone (visionos, then android_vr), returning every format it
+// pooled — labelled with its client and AuthLevel — and an error only when the
+// pool is empty.
+func TestCookielessFormats(t *testing.T) {
+	swap := func(t *testing.T, tr *clientKeyedTransport) {
+		t.Helper()
+		orig := apiClient
+		apiClient = &http.Client{Transport: tr}
+		t.Cleanup(func() { apiClient = orig })
+	}
+
+	t.Run("visionos formats come back labelled", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{"101": {http.StatusOK, adequateOKBody}}}
+		swap(t, tr)
+		got, err := NewPlayerAPI(nil, noopLogger{}).CookielessFormats(context.Background(), "test1234567", "vd")
+		if err != nil {
+			t.Fatalf("CookielessFormats = %v, want nil", err)
+		}
+		if len(got) != 2 || got[0].Source != "visionos" || got[0].AuthLevel == nil || *got[0].AuthLevel != AuthLevelVisionOS {
+			t.Errorf("formats = %+v, want 2 visionos formats at AuthLevelVisionOS", got)
+		}
+		if len(tr.calls) != 1 || tr.calls[0] != "101" {
+			t.Errorf("calls = %v, want [101] — an adequate visionos answer ends the chain", tr.calls)
+		}
+	})
+
+	t.Run("an inadequate pool is still returned", func(t *testing.T) {
+		tr := &clientKeyedTransport{responses: map[string]struct {
+			status int
+			body   string
+		}{"101": {http.StatusOK, audioOnlyOKBody}, "28": {http.StatusOK, audioOnlyOKBody}}}
+		swap(t, tr)
+		got, err := NewPlayerAPI(nil, noopLogger{}).CookielessFormats(context.Background(), "test1234567", "vd")
+		if err != nil {
+			t.Fatalf("CookielessFormats = %v, want nil", err)
+		}
+		if len(got) != 2 || got[0].Source != "visionos" || got[1].Source != "android_vr" {
+			t.Errorf("formats = %+v, want the audio from both clients", got)
+		}
+	})
+
+	t.Run("nothing from either client is an error", func(t *testing.T) {
+		swap(t, &clientKeyedTransport{})
+		got, err := NewPlayerAPI(nil, noopLogger{}).CookielessFormats(context.Background(), "test1234567", "vd")
+		if err == nil || !strings.Contains(err.Error(), "cookieless clients returned no formats") {
+			t.Errorf("CookielessFormats = %+v, %v — want the no-formats error", got, err)
+		}
+	})
+
+	t.Run("an empty pool wraps the last client failure", func(t *testing.T) {
+		swap(t, &clientKeyedTransport{})
+		_, err := NewPlayerAPI(nil, noopLogger{}).CookielessFormats(context.Background(), "test1234567", "vd")
+		if err == nil || !strings.Contains(err.Error(), "cookieless clients returned no formats: ") || !strings.Contains(err.Error(), "HTTP 404") {
+			t.Errorf("CookielessFormats err = %v — want the no-formats error wrapping the clients' HTTP 404", err)
+		}
+	})
+}

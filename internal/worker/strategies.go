@@ -602,6 +602,12 @@ func tokenClassChanged(setupSource, freshSource string) bool {
 // concrete *youtube.Service, with no other seam. Production never writes it.
 var refreshVideoInfo = (*youtube.Service).GetVideoInfo
 
+// fetchCookielessFormats is the VOD missing_pot re-extract's fetch
+// ((*youtube.Service).CookielessFormats) behind a package var for the same
+// reason as refreshVideoInfo: job.YT is the concrete *youtube.Service, with no
+// other seam. Production never writes it.
+var fetchCookielessFormats = (*youtube.Service).CookielessFormats
+
 // formatSourceByItag returns the Format.Source of the first format carrying
 // itag — the same first match resolveFormatURLByItag resolves the URL from —
 // or "" when the pool has none. It is how the manifest-free strategy and its
