@@ -612,7 +612,10 @@ that job's newly created lifecycle message; a window holding more than one is
 still several jobs sharing a POST, so the same function's single-embed guard
 sends it as an ordinary multi-embed post instead, and each job's next event
 opens its own lifecycle message under the new mode. A flip back to separate
-mode flushes an always-empty window, because edit mode never opens one.
+mode flushes an always-empty window, because edit mode never opens one. An
+`Add` racing the flip re-checks the mode under the same hold that appends, so a
+flip landing between its first check and the append emits that embed at once
+instead of arming a window on an edit-mode target.
 
 ### Credential Notifications
 
