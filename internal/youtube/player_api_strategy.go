@@ -217,7 +217,9 @@ func withAttestation(info *VideoInfo, wp *WatchPageResult, videoID string) *Vide
 // interrupt cadence, so its DRM report belongs at Debug (ANDROID_VR is
 // cookieless and mints no PLAYER token either way, so O-R does not bite here).
 func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visitorData string) (*VideoInfo, error) {
-	return p.fetchWithAndroidVR(withProbeOnlyCall(ctx), videoID, visitorData)
+	info, err := p.fetchWithAndroidVR(withProbeOnlyCall(ctx), videoID, visitorData)
+	stampManifestSources(info, "android_vr")
+	return info, err
 }
 
 // ProbeVideoDate fetches ONLY a video's publish date via one WEB-family player
@@ -276,7 +278,9 @@ func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, 
 	if visitorData != "" {
 		ytcfg.VisitorData = visitorData
 	}
-	return p.fetchWithClientProbe(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
+	info, err := p.fetchWithClientProbe(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
+	stampManifestSources(info, "tv_auth")
+	return info, err
 }
 
 // captureVisitorData forwards watch-page visitor data to the service cache
@@ -362,6 +366,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			wpParsed = nil
 		} else if wpParsed != nil {
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPageAuth)
+			stampManifestSources(wpParsed, "watch_page")
 		}
 	}
 
@@ -390,6 +395,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		result = &VideoInfo{}
 	} else {
 		collectFormats(&formatPool, result.Formats, "tv_auth", AuthLevelTVAuth)
+		stampManifestSources(result, "tv_auth")
 		// The TV client is the playability/status AUTHORITY on this path, so
 		// its verdict is the one every downstream error string is derived
 		// from — name the client AND the verdict together, or a log reader
@@ -440,7 +446,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		collectFormats(&formatPool, webResult.Formats, webLabel, webAuthLevel)
 		if webResult.DashManifestURL != "" && result.DashManifestURL == "" {
 			p.logger.Info("[PlayerApi] Got DASH manifest URL from web client", "videoID", videoID)
-			result.DashManifestURL = webResult.DashManifestURL
+			result.DashManifestURL, result.DashManifestSource = webResult.DashManifestURL, webLabel
 		}
 	}
 
@@ -455,7 +461,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	if result.DashManifestURL == "" && authEmbErr == nil &&
 		authEmb.PlayabilityError == PlayabilityOK && authEmb.DashManifestURL != "" {
 		p.logger.Info("[PlayerApi] Got DASH manifest URL from web_embedded", "videoID", videoID)
-		result.DashManifestURL = authEmb.DashManifestURL
+		result.DashManifestURL, result.DashManifestSource = authEmb.DashManifestURL, "web_embedded"
 	}
 
 	// ANDROID_VR DASH workaround for the YouTube account experiment that
@@ -505,7 +511,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		} else if vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
 			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback",
 				"videoID", videoID, "vrFormats", len(vrResult.Formats))
-			result.DashManifestURL = vrResult.DashManifestURL
+			result.DashManifestURL, result.DashManifestSource = vrResult.DashManifestURL, "android_vr_dash_fallback"
 			// Merge ANDROID_VR formats with auth-level dedup. TV/WEB formats
 			// win same-itag ties via deduplicateFormats — this comment
 			// claimed that from the start, but until 2026-08-15 the ranking
@@ -573,6 +579,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 
 		collectFormats(&formatPool, wcResult.Formats, "web_creator", AuthLevelWebCreator)
+		stampManifestSources(wcResult, "web_creator")
 		p.logger.Debug("[PlayerApi] WEB_CREATOR result",
 			"client", constants.WebCreatorClient.ClientName,
 			"formats", len(wcResult.Formats),
@@ -683,6 +690,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			wpParsed = nil
 		} else if wpParsed != nil {
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPagePublic)
+			stampManifestSources(wpParsed, "watch_page")
 		}
 	}
 
@@ -707,6 +715,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		result = &VideoInfo{}
 	} else {
 		collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
+		stampManifestSources(result, "tv_public")
 		p.logger.Debug("[PlayerApi] TV client result (public)",
 			"client", constants.TVDowngradedClient.ClientName,
 			"formats", len(result.Formats),
@@ -788,7 +797,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		} else if vrResult != nil && vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
 			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback (public)",
 				"videoID", videoID, "vrFormats", len(vrResult.Formats))
-			result.DashManifestURL = vrResult.DashManifestURL
+			result.DashManifestURL, result.DashManifestSource = vrResult.DashManifestURL, "android_vr_dash_fallback"
 			if !vrPooled {
 				collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
 			}
@@ -1087,6 +1096,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 			// and an empty prefetch is now fetched rather than skipped.
 			continue
 		}
+		stampManifestSources(fbResult, fb.label)
 		if !alreadyPooled {
 			collectFormats(formatPool, fbResult.Formats, fb.label, fb.level)
 			if slot != nil {
@@ -1110,7 +1120,7 @@ func (p *PlayerAPI) tryCookielessFallbacks(ctx context.Context, videoID, visitor
 			if fbResult.PlayabilityError == PlayabilityOK && fbResult.DashManifestURL != "" {
 				p.logger.Info("[PlayerApi] DASH manifest sourced from cookieless fallback",
 					"videoID", videoID, "client", fb.label)
-				chosen.DashManifestURL = fbResult.DashManifestURL
+				chosen.DashManifestURL, chosen.DashManifestSource = fbResult.DashManifestURL, fb.label
 				break
 			}
 			continue
@@ -1223,7 +1233,11 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
 
-	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED", videoID)
+	// Stamped here rather than at each of the three cascade sites that take a
+	// web_embedded result in: this client has one label wherever it is asked.
+	info, err := p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED", videoID)
+	stampManifestSources(info, "web_embedded")
+	return info, err
 }
 
 // innertubeErrorDetailMax bounds what a failure message may quote back from
@@ -1459,9 +1473,11 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	}
 	if target.DashManifestURL == "" {
 		target.DashManifestURL = source.DashManifestURL
+		target.DashManifestSource = source.DashManifestSource
 	}
 	if target.HlsManifestURL == "" {
 		target.HlsManifestURL = source.HlsManifestURL
+		target.HlsManifestSource = source.HlsManifestSource
 	}
 	if target.PlayerURL == "" {
 		target.PlayerURL = source.PlayerURL
@@ -1471,5 +1487,27 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	}
 	if target.EndTimestamp == "" {
 		target.EndTimestamp = source.EndTimestamp
+	}
+}
+
+// stampManifestSources records label — the client's Format.Source label — as
+// the source of each manifest URL info carries. The cascade calls it where
+// each client result enters it (fetchWithEmbedded stamps its own, since that
+// client has one label everywhere), so every later hand-off — a DASH
+// adoption into another result, the watch-page merge, the return itself —
+// moves a URL together with its client. The live strategies read the source
+// to decide whether a manifest takes a WebPO GVS token
+// (youtube.IsWebPOSource): a visionos or android_vr manifest must ride bare,
+// and an unrecorded one is treated the same way — safe, but it would strip
+// the token from a TV or WEB manifest, which is why no site may skip this.
+func stampManifestSources(info *VideoInfo, label string) {
+	if info == nil {
+		return
+	}
+	if info.DashManifestURL != "" {
+		info.DashManifestSource = label
+	}
+	if info.HlsManifestURL != "" {
+		info.HlsManifestSource = label
 	}
 }

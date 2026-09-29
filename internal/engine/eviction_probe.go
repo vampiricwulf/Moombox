@@ -127,7 +127,9 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq in
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return false, nil, err
+		// A transport error embeds the request URL, which carries the
+		// PO token; the orchestrator logs this error at Warn.
+		return false, nil, redactPoToken(err)
 	}
 	reportSuccess("engine/fetch")
 	defer resp.Body.Close()

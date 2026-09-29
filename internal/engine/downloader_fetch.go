@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -93,6 +95,86 @@ func applyPoTokenQuery(rawURL, token string) string {
 	}
 	return rawURL + sep + "pot=" + token
 }
+
+// potValueRe matches a pot query value in a URL or an error string. It is the
+// fallback for a URL net/url cannot parse, and the scrub for a wrapper's
+// precomputed message.
+var potValueRe = regexp.MustCompile(`pot=[^&"\s]+`)
+
+// redactedPotValue replaces the PO token wherever an error would print it.
+const redactedPotValue = "pot=<redacted>"
+
+// redactPoToken keeps the GVS PO token out of an error's text. A transport
+// failure from http.Client.Do is a *url.Error whose Error() embeds the full
+// request URL, and applyPoTokenQuery put the token in that URL — so the
+// string would reach `job error` and the job's stored error.
+//
+// Contract: when a *url.Error anywhere in err's chain carries a pot value,
+// its URL field is rewritten IN PLACE to pot=<redacted> (Op and Err are
+// untouched, so errors.Is / errors.As on the cause still hold). When err is
+// that *url.Error itself it is returned as is; when it sits under a wrapper
+// whose message was precomputed (fmt.Errorf), the result is a thin wrapper
+// with the scrubbed message whose Unwrap is err. Every other error — nil,
+// no *url.Error, no pot value — is returned unchanged, and a second call is
+// a no-op.
+func redactPoToken(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	redacted := redactPotInURL(ue.URL)
+	if redacted == ue.URL {
+		return err
+	}
+	msg := err.Error()
+	ue.URL = redacted
+	if err == error(ue) {
+		return err
+	}
+	return &potRedactedError{msg: potValueRe.ReplaceAllString(msg, redactedPotValue), err: err}
+}
+
+// redactPotInURL rewrites every pot query value in rawURL to <redacted>,
+// leaving every other parameter and their order byte-identical. A URL
+// net/url cannot parse falls back to the regexp.
+func redactPotInURL(rawURL string) string {
+	if _, err := url.Parse(rawURL); err != nil {
+		return potValueRe.ReplaceAllString(rawURL, redactedPotValue)
+	}
+	// Splice the raw string rather than re-serialise through url.URL, so
+	// nothing but the pot value can change.
+	head, rest, hasQuery := strings.Cut(rawURL, "?")
+	if !hasQuery {
+		return rawURL
+	}
+	query, frag, hasFrag := strings.Cut(rest, "#")
+	parts := strings.Split(query, "&")
+	changed := false
+	for i, p := range parts {
+		if key, _, _ := strings.Cut(p, "="); key == "pot" && p != redactedPotValue {
+			parts[i] = redactedPotValue
+			changed = true
+		}
+	}
+	if !changed {
+		return rawURL
+	}
+	out := head + "?" + strings.Join(parts, "&")
+	if hasFrag {
+		out += "#" + frag
+	}
+	return out
+}
+
+// potRedactedError carries a wrapper's message with the PO token scrubbed;
+// Unwrap keeps the original chain for errors.Is / errors.As.
+type potRedactedError struct {
+	msg string
+	err error
+}
+
+func (e *potRedactedError) Error() string { return e.msg }
+func (e *potRedactedError) Unwrap() error { return e.err }
 
 // ConnectivityReporter is the interface the engine uses to notify the
 // connectivity monitor about HTTP successes and failures. It's stored in an
@@ -312,8 +394,9 @@ func withFetchDeadlines(parent context.Context, idle, ceiling time.Duration) (co
 
 // idleFetchError re-labels a context error that the read-progress deadline
 // caused, so callers and logs see a stall rather than a bare cancellation.
-// Any other error passes through untouched. Shared with
-// runDirectDownloadFallback, which has no ceiling.
+// Any other error passes through with only its PO token redacted
+// (redactPoToken), so no caller can carry the token into a job error.
+// Shared with runDirectDownloadFallback, which has no ceiling.
 func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if err == nil {
 		return nil
@@ -321,13 +404,14 @@ func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if errors.Is(context.Cause(ctx), errFetchIdle) {
 		return fmt.Errorf("stalled: %w for %s", errFetchIdle, idle)
 	}
-	return err
+	return redactPoToken(err)
 }
 
 // fetchDeadlineError re-labels a context error that EITHER per-fetch deadline
 // caused. The ceiling branch names the bound and how far the transfer got;
 // everything else — an idle stall, a caller cancel, a transport failure —
-// falls through to idleFetchError unchanged. body is nil when the fetch died
+// falls through to idleFetchError, which redacts any PO token in a transport
+// error's URL and otherwise passes it through. body is nil when the fetch died
 // before there was one, which is why received() tolerates a nil receiver.
 func fetchDeadlineError(ctx context.Context, idle, ceiling time.Duration, body *idleBody, err error) error {
 	if err == nil {
@@ -732,7 +816,10 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
+	// The GVS PO token rides every direct-path request, the probe included:
+	// a WEB-family format URL answers this 1-byte probe 206 without it and
+	// then 403s the first real chunk (VOD 403 fix, 2026-09-29).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
 		return 0
 	}
@@ -843,7 +930,7 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	ctx, idleTimer, cancel := withFetchDeadlines(parent, idle, ceiling)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"context"
+	"strings"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -153,6 +156,82 @@ func TestManifestlessDiscardStagedOnlyForNonLiveRestart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := manifestlessDiscardStaged(tc.status, tc.forced); got != tc.want {
 				t.Errorf("manifestlessDiscardStaged(%v, %v) = %v, want %v", tc.status, tc.forced, got, tc.want)
+			}
+		})
+	}
+}
+
+// manifestlessPotInfo is a live VideoInfo with one open-ended (no
+// contentLength) video and audio adaptive format from the given clients —
+// the split shape the manifest-free path segments with &sq=N. Plain URLs
+// with no sig and no n, so the routed stub solver passes them through.
+func manifestlessPotInfo(videoSource, audioSource string) *youtube.VideoInfo {
+	w, h, fps := 1920, 1080, 30
+	return &youtube.VideoInfo{
+		StreamStatus: youtube.StreamLive,
+		PlayerURL:    "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js",
+		Formats: []youtube.Format{
+			{Itag: 299, URL: "http://127.0.0.1:1/videoplayback?itag=299", MimeType: `video/mp4; codecs="avc1.64002a"`, Bitrate: 9_000_000, Width: &w, Height: &h, Fps: &fps, Source: videoSource},
+			{Itag: 140, URL: "http://127.0.0.1:1/videoplayback?itag=140", MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 128_000, Source: audioSource},
+		},
+	}
+}
+
+// TestDownloadManifestlessDashAttachesWebPOPerStream is the manifest-free
+// half of the 2026-09-29 live-path fix. Here there is no manifest: each
+// chosen format carries its own client, and video and audio can come from
+// different ones (dedup keeps one copy per itag, whichever client ranked
+// best). So the strategy mints once if EITHER stream is from a WebPO client
+// and hands the token only to the downloader whose own format is; a
+// visionos / android_vr stream rides bare and says so.
+//
+// Mutants: dropping the per-stream gate on the downloader options fails the
+// mixed row (the visionos audio carries tok123); minting without the
+// IsWebPOSource gate fails the visionos row's mint count; dropping the skip
+// log fails the visionos and mixed rows.
+func TestDownloadManifestlessDashAttachesWebPOPerStream(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		videoSource, audioSource string
+		wantMints                int
+		wantVideo, wantAudio     string
+		wantSkips                []string // "stream=source" in log order
+	}{
+		{name: "tv_auth pair", videoSource: "tv_auth", audioSource: "tv_auth", wantMints: 1, wantVideo: "tok123", wantAudio: "tok123"},
+		{name: "visionos pair", videoSource: "visionos", audioSource: "visionos", wantSkips: []string{"video=visionos", "audio=visionos"}},
+		{name: "tv_auth video beside visionos audio", videoSource: "tv_auth", audioSource: "visionos", wantMints: 1, wantVideo: "tok123", wantSkips: []string{"audio=visionos"}},
+		{name: "android_vr video beside web_safari audio", videoSource: "android_vr", audioSource: "web_safari", wantMints: 1, wantAudio: "tok123", wantSkips: []string{"video=android_vr"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := fakeVodMint(t, "tok123", nil)
+			job, logs := vodPotJob(t)
+			res, err := DownloadManifestlessDash(context.Background(), job, manifestlessPotInfo(tc.videoSource, tc.audioSource), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
+			if err != nil {
+				t.Fatalf("DownloadManifestlessDash: %v", err)
+			}
+			if res.VideoDownloader == nil || res.AudioDownloader == nil {
+				t.Fatalf("want both downloaders, got video=%v audio=%v", res.VideoDownloader, res.AudioDownloader)
+			}
+			if n := int(calls.Load()); n != tc.wantMints {
+				t.Errorf("mint ran %d times, want %d", n, tc.wantMints)
+			}
+			if got := res.VideoDownloader.PoToken(); got != tc.wantVideo {
+				t.Errorf("video (%s) downloader token = %q, want %q", tc.videoSource, got, tc.wantVideo)
+			}
+			if got := res.AudioDownloader.PoToken(); got != tc.wantAudio {
+				t.Errorf("audio (%s) downloader token = %q, want %q", tc.audioSource, got, tc.wantAudio)
+			}
+			var want []map[string]any
+			for _, s := range tc.wantSkips {
+				stream, source, _ := strings.Cut(s, "=")
+				want = append(want, skipLine(job, source, "stream", stream))
+			}
+			assertSkipLines(t, logs, want...)
+			if tc.wantMints == 1 {
+				lines := potLines(logs, "[POT] GVS mint")
+				if len(lines) != 1 || lines[0]["videoSource"] != tc.videoSource || lines[0]["audioSource"] != tc.audioSource {
+					t.Errorf("[POT] GVS mint lines = %v, want one naming videoSource=%s audioSource=%s", lines, tc.videoSource, tc.audioSource)
+				}
 			}
 		})
 	}

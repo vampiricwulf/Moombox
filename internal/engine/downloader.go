@@ -622,6 +622,11 @@ func (d *SegmentDownloader) getPoToken() string {
 	return d.opts.PoToken
 }
 
+// PoToken reports the PO token this downloader attaches to its requests (see
+// getPoToken). Read-only; the worker tests use it to assert which streams a
+// strategy tokenised.
+func (d *SegmentDownloader) PoToken() string { return d.getPoToken() }
+
 // emitActivity reports the current wait reason to OnActivity. Nil-callback safe.
 func (d *SegmentDownloader) emitActivity(a DownloadActivity) {
 	if d.OnActivity != nil {

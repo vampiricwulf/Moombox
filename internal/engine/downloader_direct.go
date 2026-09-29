@@ -217,7 +217,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 	defer cancel()
 
 	offset := d.bytesWritten.Load()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -228,7 +228,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", err))
+		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", redactPoToken(err)))
 	}
 	resp.Body = &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
 	defer resp.Body.Close()
