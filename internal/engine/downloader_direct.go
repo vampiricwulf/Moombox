@@ -228,7 +228,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", err))
+		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", redactPoToken(err)))
 	}
 	resp.Body = &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
 	defer resp.Body.Close()

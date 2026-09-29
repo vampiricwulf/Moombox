@@ -2,9 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -206,6 +209,127 @@ func TestDirectPathPoTokenJoinsExistingQuery(t *testing.T) {
 				if r.rawQuery != "itag=302&expire=1&pot=tok123" {
 					t.Errorf("%s query = %q, want itag=302&expire=1&pot=tok123", r.kind(), r.rawQuery)
 				}
+			}
+		})
+	}
+}
+
+// fallbackTransportError drives runDirectDownloadFallback at rawURL with the
+// given token and returns the error the transport failure produced.
+func fallbackTransportError(t *testing.T, parent context.Context, rawURL, token string) error {
+	t.Helper()
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: rawURL, OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true, PoToken: token})
+	d.delays = fastDelays()
+	err := d.runDirectDownloadFallback(parent)
+	if err == nil {
+		t.Fatalf("runDirectDownloadFallback(%q) = nil, want a transport error", rawURL)
+	}
+	return err
+}
+
+// refusedURL returns a URL on a loopback port nothing listens on, so the
+// fallback's Do fails at dial.
+func refusedURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return "http://" + addr + "/videoplayback?itag=302&expire=1"
+}
+
+// TestFallbackTransportErrorRedactsPoToken pins the close-wave fix: the
+// streaming fallback's transport failure is a *url.Error whose Error() embeds
+// the full request URL — pot= included — and that string used to reach `job
+// error` and the job's stored error. The token is redacted in place while the
+// error chain stays intact for errors.Is / errors.As.
+//
+// Mutant (run): returning err unchanged from redactPoToken fails every
+// "contains SECRETTOKEN" row below.
+func TestFallbackTransportErrorRedactsPoToken(t *testing.T) {
+	t.Run("dial refused", func(t *testing.T) {
+		err := fallbackTransportError(t, context.Background(), refusedURL(t), "SECRETTOKEN")
+		msg := err.Error()
+		if strings.Contains(msg, "SECRETTOKEN") {
+			t.Fatalf("error carries the PO token: %q", msg)
+		}
+		if !strings.Contains(msg, "pot=<redacted>") {
+			t.Fatalf("error = %q, want it to show pot=<redacted>", msg)
+		}
+		if !strings.Contains(msg, "itag=302&expire=1&") {
+			t.Fatalf("error = %q, want the rest of the query kept", msg)
+		}
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			t.Fatalf("errors.As(*url.Error) = false on %q", msg)
+		}
+		if ue.Op != "Get" {
+			t.Fatalf("url.Error.Op = %q, want Get", ue.Op)
+		}
+		var oe *net.OpError
+		if !errors.As(err, &oe) || oe.Op != "dial" {
+			t.Fatalf("errors.As(*net.OpError) = %v (%+v), want the dial error kept as the cause", oe != nil, oe)
+		}
+	})
+
+	t.Run("cancelled parent", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := fallbackTransportError(t, ctx, refusedURL(t), "SECRETTOKEN")
+		if strings.Contains(err.Error(), "SECRETTOKEN") {
+			t.Fatalf("error carries the PO token: %q", err.Error())
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("errors.Is(context.Canceled) = false on %q", err.Error())
+		}
+	})
+
+	t.Run("no token leaves the URL as it was", func(t *testing.T) {
+		raw := refusedURL(t)
+		err := fallbackTransportError(t, context.Background(), raw, "")
+		if !strings.Contains(err.Error(), strconv.Quote(raw)) || strings.Contains(err.Error(), "redacted") {
+			t.Fatalf("error = %q, want the untouched URL %q", err.Error(), raw)
+		}
+	})
+}
+
+// TestRedactPoToken pins the helper's contract directly: a *url.Error found
+// anywhere in the chain loses its pot value; the chain and every other
+// error pass through untouched.
+func TestRedactPoToken(t *testing.T) {
+	cause := errors.New("boom")
+	cases := []struct {
+		name    string
+		err     error
+		want    string
+		samePtr bool
+	}{
+		{"nil", nil, "", true},
+		{"not a url.Error", cause, "boom", true},
+		{"no pot", &url.Error{Op: "Get", URL: "https://h/v?itag=1", Err: cause}, `Get "https://h/v?itag=1": boom`, true},
+		{"bare", &url.Error{Op: "Get", URL: "https://h/v?itag=1&pot=SECRET&x=2", Err: cause}, `Get "https://h/v?itag=1&pot=<redacted>&x=2": boom`, false},
+		{"wrapped", fmt.Errorf("download: %w", &url.Error{Op: "Get", URL: "https://h/v?pot=SECRET", Err: cause}), `download: Get "https://h/v?pot=<redacted>": boom`, false},
+		{"unparseable URL", &url.Error{Op: "Get", URL: "http://[::1%zz/v?pot=SECRET&a=b", Err: cause}, `Get "http://[::1%zz/v?pot=<redacted>&a=b": boom`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactPoToken(tc.err)
+			if tc.err == nil {
+				if got != nil {
+					t.Fatalf("redactPoToken(nil) = %v", got)
+				}
+				return
+			}
+			if got.Error() != tc.want {
+				t.Fatalf("Error() = %q, want %q", got.Error(), tc.want)
+			}
+			if tc.samePtr && got != tc.err {
+				t.Fatalf("redactPoToken returned a new error for %q, want it untouched", tc.name)
+			}
+			if !errors.Is(got, cause) && tc.err != nil && errors.Is(tc.err, cause) {
+				t.Fatalf("errors.Is(cause) lost")
 			}
 		})
 	}
