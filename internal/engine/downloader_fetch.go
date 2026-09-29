@@ -410,7 +410,8 @@ func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 // fetchDeadlineError re-labels a context error that EITHER per-fetch deadline
 // caused. The ceiling branch names the bound and how far the transfer got;
 // everything else — an idle stall, a caller cancel, a transport failure —
-// falls through to idleFetchError unchanged. body is nil when the fetch died
+// falls through to idleFetchError, which redacts any PO token in a transport
+// error's URL and otherwise passes it through. body is nil when the fetch died
 // before there was one, which is why received() tolerates a nil receiver.
 func fetchDeadlineError(ctx context.Context, idle, ceiling time.Duration, body *idleBody, err error) error {
 	if err == nil {
