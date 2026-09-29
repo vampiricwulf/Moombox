@@ -6,12 +6,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -649,6 +651,13 @@ func TestGetTwitchCredentialsReadsTheTwitchJar(t *testing.T) {
 // login always carry the same account suffix, so any observed pair whose halves
 // disagree can only have come from two different jar states. Run under -race,
 // this also fails on an unsynchronised read.
+//
+// The readers do not run for a fixed number of reads: they run until the writer
+// has swapped the jar at least minSwaps times AND each reader has made at least
+// minReadsPerReader reads, so a green result always means the race window was
+// open for a meaningful stretch — however the host schedules the goroutines. A
+// fixed budget let eight spinning readers finish before a starved writer on a
+// two-core CI runner had swapped enough to prove anything.
 func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
 	// Three complete account files, written once. The reload loop below then
 	// costs a small read plus a parse — no write — which is what makes the swap
@@ -694,13 +703,33 @@ func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
 		}
 	})
 
-	// Readers: every pair they observe must name ONE account. More goroutines
-	// than a typical core count, so the scheduler preempts between whatever
-	// lock acquisitions the accessor makes.
+	// Readers: every pair they observe must name ONE account. Each keeps reading
+	// until the writer has swapped the jar minSwaps times AND it has made
+	// minReadsPerReader reads of its own, so every reader straddles many swaps
+	// rather than exiting the moment the threshold is crossed. Eight of them —
+	// more than a typical core count — so the scheduler preempts between
+	// whatever lock acquisitions the accessor makes. Every 1,000 reads a reader
+	// yields, so a writer starved on a two-core host still gets scheduled, and
+	// checks the shared deadline: the safety net that ends the test if the
+	// writer never reaches minSwaps, which the swaps check below then fails.
+	const (
+		minSwaps          = 100
+		minReadsPerReader = 20_000
+	)
+	deadline := time.Now().Add(30 * time.Second)
 	var torn, observed atomic.Int64
 	for range 8 {
 		readers.Go(func() {
-			for range 200000 {
+			for reads := 0; swaps.Load() < minSwaps || reads < minReadsPerReader; reads++ {
+				if reads%1000 == 999 {
+					runtime.Gosched()
+					if time.Now().After(deadline) {
+						return
+					}
+					if loadErrs.Load() != 0 {
+						return // the writer has stopped; its Fatal below says why
+					}
+				}
 				token, login := jar.GetTwitchCredentials()
 				if token == "" || login == "" {
 					continue // never expected here; not what this test is about
@@ -724,7 +753,7 @@ func TestGetTwitchCredentialsIsAtomicAcrossReload(t *testing.T) {
 	if observed.Load() == 0 {
 		t.Fatal("no credential pair was ever observed; the test proved nothing")
 	}
-	if swaps.Load() < 100 {
+	if swaps.Load() < minSwaps {
 		t.Fatalf("only %d jar swaps happened during %d reads; the race window was too narrow for "+
 			"this test to prove anything", swaps.Load(), observed.Load())
 	}
