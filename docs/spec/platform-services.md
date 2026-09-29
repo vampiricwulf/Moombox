@@ -1011,7 +1011,7 @@ One predicate in `internal/youtube/types.go` (beside the `AuthLevel` block) enco
 
 | Predicate | True for | Meaning |
 |---|---|---|
-| `GvsTokenRequired` | `watch_page`, `web`, `web_safari`, `web_creator` | does a URL from this client 403 without a GVS token (yt-dlp's per-client GVS policy is `required=True`; Moombox has no Premium detection, so the not-required-for-premium carve-out never applies) |
+| `GvsTokenRequired` | `watch_page`, `web`, `web_safari`, `web_creator` | does a direct or DASH URL from this client 403 without a GVS token (yt-dlp's per-client GVS policy is `required=True` for HTTPS/DASH and `recommended` for HLS, where yt-dlp fetches and attaches one too, so the HLS gate asks the same question; Moombox has no Premium detection, so the not-required-for-premium carve-out never applies) |
 
 The rest ride bare, as upstream does: `tv_auth`, `tv_public`, `web_embedded` and `visionos` have no `GVS_PO_TOKEN_POLICY` entry in yt-dlp, so its default (`required=False`) applies and it fetches no GVS token for them; `android_vr` / `android_vr_dash_fallback` are required-unless-player-token upstream and never get a WebPO (a WebPO on an android_vr URL is the 2026-08-15 403 cause the `AuthLevel` block names).
 

@@ -207,6 +207,7 @@ func TestDownloadManifestlessDashAttachesTokenPerStream(t *testing.T) {
 		{name: "tv_public video beside web audio", videoSource: "tv_public", audioSource: "web", wantMints: 1, wantAudio: "tok123", wantSkips: []string{"video=tv_public"}},
 		{name: "web_safari video beside web_embedded audio", videoSource: "web_safari", audioSource: "web_embedded", wantMints: 1, wantVideo: "tok123", wantSkips: []string{"audio=web_embedded"}},
 		{name: "android_vr video beside web_safari audio", videoSource: "android_vr", audioSource: "web_safari", wantMints: 1, wantAudio: "tok123", wantSkips: []string{"video=android_vr"}},
+		{name: "web video beside unrecorded audio", videoSource: "web", audioSource: "", wantMints: 1, wantVideo: "tok123", wantSkips: []string{"audio="}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := fakeVodMint(t, "tok123", nil)

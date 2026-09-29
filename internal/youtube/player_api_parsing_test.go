@@ -1599,7 +1599,8 @@ func TestDeduplicateFormatsKeepsATokenFreeShadowOfAWebFamilyWinner(t *testing.T)
 // TestDeduplicateFormatsShadowRidesTheCollapsedRendition pins the collapse
 // half: the rendition collapseToPreferredRendition keeps carries its own
 // shadow, and the collapse count is the same as without shadows (a shadow is
-// not a rendition).
+// not a rendition), and the shadow is keyed by the full rendition identity,
+// not the itag.
 func TestDeduplicateFormatsShadowRidesTheCollapsedRendition(t *testing.T) {
 	wc, vo := AuthLevelWebCreator, AuthLevelVisionOS
 	const aac = "audio/mp4; codecs=\"mp4a.40.2\""
@@ -1610,8 +1611,10 @@ func TestDeduplicateFormatsShadowRidesTheCollapsedRendition(t *testing.T) {
 	pool := []Format{
 		mk("es.3", "Spanish", true, "web_creator", &wc),
 		mk("en.4", "English original", false, "web_creator", &wc),
-		mk("en.4", "English original", false, "visionos", &vo),
+		// visionos es.3 listed FIRST: a shadow keyed by itag alone would hand
+		// the kept en.4 rendition this es.3 copy.
 		mk("es.3", "Spanish", true, "visionos", &vo),
+		mk("en.4", "English original", false, "visionos", &vo),
 	}
 	ctx := withExtractionState(context.Background())
 	got := deduplicateFormats(ctx, pool)
@@ -1621,8 +1624,8 @@ func TestDeduplicateFormatsShadowRidesTheCollapsedRendition(t *testing.T) {
 	if got[0].URL != "https://web_creator/a140-en.4" {
 		t.Errorf("itag 140 = %q, want the web_creator English original", got[0].URL)
 	}
-	if alt := got[0].TokenFreeAlternate; alt == nil || alt.URL != "https://visionos/a140-en.4" {
-		t.Errorf("TokenFreeAlternate = %+v, want the visionos English original", alt)
+	if alt := got[0].TokenFreeAlternate; alt == nil || alt.URL != "https://visionos/a140-en.4" || alt.AudioTrackID != "en.4" {
+		t.Errorf("TokenFreeAlternate = %+v, want the visionos English original (same rendition key, not merely the same itag)", alt)
 	}
 	if _, collapsed := extractionStateFrom(ctx).poolCounts(); collapsed != 1 {
 		t.Errorf("collapsed renditions = %d, want 1 — a shadow is not a rendition", collapsed)

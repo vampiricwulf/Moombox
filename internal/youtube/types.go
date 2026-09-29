@@ -399,20 +399,28 @@ type YtcfgData struct {
 // That inversion is deliberate, and the reason is Moombox's architecture,
 // not upstream's ordering: yt-dlp PICKS one client's response, while Moombox
 // POOLS every client's formats and dedups by itag, so the ranking itself has
-// to say which copy of a stream is best. TV leads because upstream's own
-// priority ranks tv first (40) and its URLs need no GVS token at all
-// (GvsTokenRequired), so a tv copy downloads bare with nothing to mint. A
-// WEB-family copy beats the cookieless clients because Moombox mints the GVS
-// token its URLs require and attaches it — the WEB family is the client
-// upstream built its token policy around — whereas android_vr sits under
-// selective enforcement with no token that applies to it. Ranking by
-// upstream's tuple order would hand live segment downloads to exactly those
-// cookieless clients — the 2026-08-15 incident this comment block opens with.
+// to say which copy of a stream is best. TV leads because upstream ranks tv
+// first — priority 40, and, by the tuple-order measure the paragraph above
+// endorses, tv_downgraded precedes web in both the authed and the premium
+// default tuples (_video.py _DEFAULT_AUTHED_CLIENTS / _DEFAULT_PREMIUM_CLIENTS)
+// — and its URLs need no GVS token at all (GvsTokenRequired), so a tv copy
+// downloads bare with nothing to mint. A WEB-family copy beats the cookieless
+// clients because Moombox mints the GVS token its URLs require and attaches
+// it — the WEB family is the client upstream built its token policy around.
+// web_embedded needs no token either and sits above the cookieless tier
+// because it is an authenticated client and upstream's authed tuple leads
+// with it; android_vr sits under selective enforcement with no token that
+// applies to it. Ranking by upstream's tuple order instead would hand
+// same-itag ties to visionos (and to web_embedded / web_creator over the tv
+// and web copies) — a cookieless client winning a same-itag tie is the
+// 2026-08-15 incident this comment block opens with.
 //
 // Within the last-resort tier, VISIONOS sits above ANDROID_VR. That much IS
-// monotone with upstream, which deleted android_vr outright (all-formats 403
-// since 2026-08-17) while promoting visionos: under selective enforcement a
-// 403-dead android_vr URL must never displace a working visionos one.
+// monotone with upstream, which dropped android_vr from every default client
+// tuple (its _base.py entry remains, noting all formats 403 since 2026-08-17)
+// while promoting visionos to lead _DEFAULT_CLIENTS: under selective
+// enforcement a 403-dead android_vr URL must never displace a working
+// visionos one.
 //
 // Within a tier the previous relative order is preserved: public watch-page
 // formats still rank ahead of authenticated ones (audit I5).
@@ -456,9 +464,11 @@ const (
 // and the per-client entries), label by label:
 //
 //   - watch_page, web, web_safari, web_creator: true. The WEB family's
-//     policy is required=True, not_required_for_premium=True; Moombox has no
-//     Premium detection, so the token is always attached (the watch page IS
-//     the web client).
+//     HTTPS and DASH policy is required=True, not_required_for_premium=True;
+//     Moombox has no Premium detection, so the token is always attached (the
+//     watch page IS the web client). Its HLS policy is recommended rather
+//     than required, and yt-dlp fetches and attaches a token there too, so
+//     the HLS gate asks this same question.
 //   - tv_auth, tv_public, web_embedded: false. tv and web_embedded have no
 //     GVS_PO_TOKEN_POLICY entry upstream, so the default applies
 //     (required=False) and yt-dlp fetches no GVS token for them.

@@ -607,6 +607,12 @@ var refreshVideoInfo = (*youtube.Service).GetVideoInfo
 // or "" when the pool has none. It is how the manifest-free strategy and its
 // 403 refresh learn which client served a chosen stream: DashStreamInfo, the
 // shape selection works on, does not carry the source.
+//
+// It reads the SETUP pool: on the VOD path a missing_pot swap replaces an
+// itag's winner with its token-free shadow in a filtered copy only, so this
+// would still name the winner's client for a stream riding the shadow's URL.
+// DownloadVod wires no OnCredentialRefresh, so no caller reaches that shape;
+// a VOD refresh, if ever added, must be handed the served format's Source.
 func formatSourceByItag(formats []youtube.Format, itag int) string {
 	for i := range formats {
 		if formats[i].Itag == itag {
