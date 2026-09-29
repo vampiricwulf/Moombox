@@ -249,6 +249,13 @@ type Format struct {
 	Fps             *int   `json:"fps,omitempty"`
 	Source          string `json:"source,omitempty"`
 	AuthLevel       *int   `json:"authLevel,omitempty"`
+	// TokenFreeAlternate is the best copy of this same stream from a client
+	// whose URLs need no GVS token (youtube.GvsTokenRequired false), kept by
+	// deduplicateFormats only when THIS copy won the stream and its own client
+	// requires one. Consumed by the VOD missing_pot degrade, which swaps to it
+	// when no token can be minted. The alternate never carries one of its own.
+	// Never serialised: a resume re-extracts. See the AuthLevel block.
+	TokenFreeAlternate *Format `json:"-"`
 
 	// AudioTrackID is `audioTrack.id` — the per-language identity of a dubbed
 	// audio rendition ("en.4", "ja.3"). Two thirds of upstream's stream
@@ -404,6 +411,17 @@ type YtcfgData struct {
 //
 // Within a tier the previous relative order is preserved: public watch-page
 // formats still rank ahead of authenticated ones (audit I5).
+//
+// The token-free shadow (Format.TokenFreeAlternate). yt-dlp decides the GVS
+// token BEFORE it deduplicates: a format skipped for a missing token never
+// records its stream id, so the next client's copy of that stream is still
+// first-seen. Moombox dedups first, by this ranking, and only learns that no
+// token can be minted at download time — by which point the token-free copy
+// would be gone. So when a stream's winner here comes from a client that
+// requires the token (GvsTokenRequired), deduplicateFormats also keeps the
+// lowest-level token-free copy of that stream as the winner's shadow, and the
+// VOD missing_pot degrade swaps to it. The shadow never changes which copy
+// wins.
 const (
 	// TV tier — upstream priority 40. TVHTML5 is a WEBPO client, so its URLs
 	// and our WebPO tokens are the matched pair.
