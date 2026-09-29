@@ -389,14 +389,20 @@ func TestOpenPathCommandIsTheSameOnBothHosts(t *testing.T) {
 			t.Fatalf("%s: openPathCommandFor returned nil", tc.goos)
 		}
 		// Args is what the child is handed and is identical on both hosts;
-		// cmd.Path additionally resolves through LookPath, which only finds
-		// the program when the test host IS that platform.
+		// it is the assertion that pins the spawn.
 		want := []string{tc.program, target}
 		if len(cmd.Args) != 2 || cmd.Args[0] != want[0] || cmd.Args[1] != want[1] {
 			t.Errorf("goos=%s: args %v, want %v — the Windows spawn must stay exactly what it was "+
 				"while Linux gains its own", tc.goos, cmd.Args, want)
 		}
-		if got := filepath.Base(cmd.Path); !strings.EqualFold(got, tc.program) {
+		// cmd.Path additionally resolves through LookPath, and a host that
+		// happens to carry the program resolves it with the host's suffix:
+		// the GitHub Windows runner has an open.exe on PATH, so the darwin row
+		// comes back "open.exe". Compare case-folded with a trailing .exe
+		// trimmed so explorer.exe, xdg-open, open and a resolved open.exe all
+		// compare as intended.
+		norm := func(s string) string { return strings.TrimSuffix(strings.ToLower(s), ".exe") }
+		if got := filepath.Base(cmd.Path); norm(got) != norm(tc.program) {
 			t.Errorf("goos=%s: program %q, want %q", tc.goos, got, tc.program)
 		}
 	}

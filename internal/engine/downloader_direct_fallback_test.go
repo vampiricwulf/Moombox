@@ -239,7 +239,7 @@ func TestProbeFileSizeDrainIsBounded(t *testing.T) {
 		w.Header().Set("Content-Range", "bytes 0-0/4096")
 		w.WriteHeader(http.StatusPartialContent)
 		buf := make([]byte, 64<<10)
-		for range 256 { // 16 MiB, 256x maxDrainBytes
+		for range 4096 { // 256 MiB, 4096x maxDrainBytes
 			n, err := w.Write(buf)
 			served.Add(int64(n))
 			if err != nil {
@@ -256,16 +256,26 @@ func TestProbeFileSizeDrainIsBounded(t *testing.T) {
 	// Give the server goroutine a moment to notice the closed body.
 	//
 	// The margin below is MEASURED, not chosen: what the origin gets to push
-	// past the LimitReader is socket buffering, not the drain, and the
-	// implementer and the reviewer independently recorded 397,303–462,839
-	// bytes served on two machines (five runs each, two distinct values). The
-	// 2 MiB cap is therefore ~4.5x headroom, while the mutant — a bare
-	// io.Copy(io.Discard, resp.Body) — drains all 16 MiB, 8x above the cap.
-	// The brief's original 4*maxDrainBytes (256 KiB) sat BELOW the observed
-	// range and failed with the fix in place: do not tighten this back.
+	// past the LimitReader is socket buffering, not the drain. Observed with
+	// the fix in place:
+	//   - Windows, two machines (five runs each, two distinct values):
+	//     397,303–462,839 bytes served.
+	//   - ubuntu-latest (2026-09-29, CI run 36605795801): 2,166,775 bytes —
+	//     Linux loopback buffers ~2.07 MiB before the server's writes fail,
+	//     which broke the previous 32*maxDrainBytes (2 MiB) cap.
+	// The cap is therefore 1024*maxDrainBytes (64 MiB): ~31x the observed Linux
+	// slop and ~6x the most the default Linux sysctls can buffer at all
+	// (tcp_wmem[2] 4 MiB send + tcp_rmem[2] 6 MiB receive). The body is
+	// 256 MiB so the mutant — a bare io.Copy(io.Discard, resp.Body) — drains
+	// all of it, 4x above the cap (the cap is 1/4 of what the mutant drains);
+	// under the fix the server loop stops at its first failed write after the
+	// client closes, so the larger body costs the fixed path nothing. The
+	// brief's original 4*maxDrainBytes (256 KiB) sat BELOW the Windows range
+	// and 32*maxDrainBytes sat below the Linux one — both failed with the fix
+	// in place: do not tighten this back.
 	time.Sleep(50 * time.Millisecond)
-	if n := served.Load(); n > 32*maxDrainBytes {
-		t.Fatalf("drained %d bytes, want at most %d — the 206 drain is unbounded", n, 32*maxDrainBytes)
+	if n := served.Load(); n > 1024*maxDrainBytes {
+		t.Fatalf("drained %d bytes, want at most %d — the 206 drain is unbounded", n, 1024*maxDrainBytes)
 	}
 }
 
