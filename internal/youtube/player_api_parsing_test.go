@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1683,4 +1684,64 @@ func TestDeduplicateFormatsDropsAStaleShadowOnItsInput(t *testing.T) {
 			t.Errorf("dedup rewrote its input's shadow pointer")
 		}
 	})
+}
+
+// TestMergeFormatPoolAttachesTheCookielessCopyAsTheShadow pins the missing_pot
+// re-extract's merge (owner ruling 2026-09-29): the cookieless clients' formats
+// fold into a copy of an already-deduplicated pool, the WEB-family winner
+// stays the winner and the visionos copy becomes its TokenFreeAlternate, a
+// shadow the pool already carried survives the merge, and neither input is
+// touched — not its elements and not the spare capacity behind them.
+//
+// Mutants this kills:
+//   - appending into pool's own backing array → the spare-capacity check
+//   - dropping the incoming shadows → the android_vr shadow row
+//   - merging extra alone (no pool) → the winner row
+func TestMergeFormatPoolAttachesTheCookielessCopyAsTheShadow(t *testing.T) {
+	wc, vo, avr := AuthLevelWebCreator, AuthLevelVisionOS, AuthLevelAndroidVR
+	const vp9, opus = `video/webm; codecs="vp9"`, `audio/webm; codecs="opus"`
+	a251Shadow := &Format{Itag: 251, URL: "https://android_vr/a251", MimeType: opus, Source: "android_vr", AuthLevel: &avr}
+	pool := make([]Format, 2, 4)
+	pool[0] = Format{Itag: 251, URL: "https://web_creator/a251", MimeType: opus, Source: "web_creator", AuthLevel: &wc, TokenFreeAlternate: a251Shadow}
+	pool[1] = Format{Itag: 302, URL: "https://web_creator/v302", MimeType: vp9, Source: "web_creator", AuthLevel: &wc}
+	extra := []Format{{Itag: 302, URL: "https://visionos/v302", MimeType: vp9, Source: "visionos", AuthLevel: &vo}}
+	poolBefore := append([]Format(nil), pool...)
+	extraBefore := append([]Format(nil), extra...)
+
+	got := MergeFormatPool(context.Background(), pool, extra)
+
+	if len(got) != 2 {
+		t.Fatalf("merged pool has %d rows, want 2: %+v", len(got), got)
+	}
+	byItag := map[int]Format{}
+	for _, f := range got {
+		byItag[f.Itag] = f
+	}
+	v := byItag[302]
+	if v.Source != "web_creator" || v.URL != "https://web_creator/v302" {
+		t.Errorf("itag 302 winner = %s %q, want the web_creator copy", v.Source, v.URL)
+	}
+	if alt := v.TokenFreeAlternate; alt == nil || alt.Source != "visionos" || alt.URL != "https://visionos/v302" {
+		t.Errorf("itag 302 TokenFreeAlternate = %+v, want the visionos copy", alt)
+	}
+	a := byItag[251]
+	if a.Source != "web_creator" {
+		t.Errorf("itag 251 winner = %s, want web_creator", a.Source)
+	}
+	if alt := a.TokenFreeAlternate; alt == nil || alt.Source != "android_vr" || alt.URL != "https://android_vr/a251" {
+		t.Errorf("itag 251 TokenFreeAlternate = %+v, want the android_vr shadow the pool already carried", alt)
+	}
+
+	if !reflect.DeepEqual(pool, poolBefore) || pool[0].TokenFreeAlternate != a251Shadow {
+		t.Errorf("MergeFormatPool mutated pool: %+v, want %+v", pool, poolBefore)
+	}
+	if spare := pool[:4][2:]; !reflect.DeepEqual(spare, make([]Format, 2)) {
+		t.Errorf("MergeFormatPool wrote into pool's spare capacity: %+v — the merge must build a fresh slice", spare)
+	}
+	if !reflect.DeepEqual(extra, extraBefore) {
+		t.Errorf("MergeFormatPool mutated extra: %+v, want %+v", extra, extraBefore)
+	}
+	if got := MergeFormatPool(context.Background(), nil, nil); len(got) != 0 {
+		t.Errorf("MergeFormatPool(nil, nil) = %+v, want empty", got)
+	}
 }
