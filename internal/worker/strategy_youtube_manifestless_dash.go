@@ -212,7 +212,7 @@ func DownloadManifestlessDash(
 	bindingValue, bindingKind := gvsBinding(job, videoInfo)
 	var pot string
 	if potProvider != nil {
-		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
+		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
 				"binding", bindingKind, "err", err)

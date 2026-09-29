@@ -115,7 +115,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	var dashPoToken string
 	if potProvider != nil {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)
-		poToken, err := potProvider.GeneratePoTokenString(ctx, bindingValue, false)
+		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
 				"binding", bindingKind, "err", err)

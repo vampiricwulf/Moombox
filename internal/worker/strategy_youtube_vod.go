@@ -162,10 +162,49 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		audioResolved = resolvedURL
 	}
 
-	// NOTE: Do NOT apply PO token to VOD format URLs. The TS implementation's
-	// PoTokenGenerator.getPoToken() returns empty for VOD downloads (BotGuard
-	// token is not generated for direct format URL access). Adding a PO token
-	// to these URLs causes HTTP 403 from YouTube's CDN.
+	// GVS PO token for the direct format URLs. yt-dlp's GVS_PO_TOKEN_POLICY
+	// marks WEB-family HTTPS/DASH URLs required (not_required_for_premium,
+	// and Moombox has no Premium detection), so a web_creator / web /
+	// web_safari / watch_page URL answers the 1-byte Range probe 206 and then
+	// 403s its first 5 MB chunk without one (the VOD 403 of 2026-09-29).
+	// tv and web_embedded carry no requirement and visionos / android_vr are
+	// not WebPO clients, so those ride bare — see youtube.GvsTokenRequired.
+	// Video and audio can come from different clients, so the token is
+	// minted at most once and passed per stream, only where that stream's
+	// own Source requires it. Bound the same way as the DASH mint (see
+	// strategy_youtube_dash.go's mint block for the binding rationale).
+	videoNeedsPot := result.VideoFormat != nil && youtube.GvsTokenRequired(result.VideoFormat.Source)
+	audioNeedsPot := result.AudioFormat != nil && youtube.GvsTokenRequired(result.AudioFormat.Source)
+	var vodPoToken string
+	if potProvider != nil && (videoNeedsPot || audioNeedsPot) {
+		bindingValue, bindingKind := gvsBinding(job, videoInfo)
+		tok, err := mintGvsPoToken(ctx, potProvider, bindingValue)
+		if err != nil {
+			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
+				"binding", bindingKind, "err", err)
+		} else if tok != "" {
+			vodPoToken = tok
+			videoSource, audioSource := "", ""
+			if result.VideoFormat != nil {
+				videoSource = result.VideoFormat.Source
+			}
+			if result.AudioFormat != nil {
+				audioSource = result.AudioFormat.Source
+			}
+			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
+				"binding", bindingKind, "tokenLength", len(tok),
+				"videoSource", videoSource, "audioSource", audioSource)
+		} else {
+			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
+		}
+	}
+	videoPoToken, audioPoToken := "", ""
+	if videoNeedsPot {
+		videoPoToken = vodPoToken
+	}
+	if audioNeedsPot {
+		audioPoToken = vodPoToken
+	}
 
 	// Store video metadata on job (matching DASH strategy behavior)
 	if selected.Video != nil {
@@ -200,6 +239,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			EndSeq:         0, // Single file download
 			IsDirectURL:    true,
 			SegmentWorkers: job.Config.SegmentWorkers,
+			PoToken:        videoPoToken,
 			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		})
 	}
@@ -212,6 +252,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			EndSeq:         0,
 			IsDirectURL:    true,
 			SegmentWorkers: job.Config.SegmentWorkers,
+			PoToken:        audioPoToken,
 			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 		})
 	}

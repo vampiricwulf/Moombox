@@ -217,7 +217,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 	defer cancel()
 
 	offset := d.bytesWritten.Load()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

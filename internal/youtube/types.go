@@ -411,6 +411,44 @@ const (
 	AuthLevelAndroidVR = 9
 )
 
+// IsWebPOSource and GvsTokenRequired answer, for a Format.Source label (the
+// client label collectFormats stamps), the two questions yt-dlp's
+// GVS_PO_TOKEN_POLICY answers per client
+// (references/yt-dlp/yt_dlp/extractor/youtube/_base.py, WEB_PO_TOKEN_POLICIES
+// and the per-client GVS_PO_TOKEN_POLICY entries; the WebPO client list is
+// WEBPO_CLIENTS in yt_dlp/extractor/youtube/pot/utils.py):
+//
+//   - IsWebPOSource: may a WebPO GVS token apply to this client's URLs at
+//     all? True for the WEBPO_CLIENTS Moombox queries — the watch page and
+//     WEB, WEB Safari, WEB_EMBEDDED_PLAYER, WEB_CREATOR and TVHTML5. False
+//     for visionos and android_vr (android_vr_dash_fallback included): they
+//     are not WebPO clients, so upstream attaches nothing to them.
+//   - GvsTokenRequired: does a direct (HTTPS/DASH) URL from this client 403
+//     without one? True only for the WEB family, whose policy is
+//     required=True, not_required_for_premium=True — Moombox has no Premium
+//     detection, so the token is always attached. tv and web_embedded carry
+//     no GVS requirement upstream and stay bare on the VOD direct path.
+//
+// An empty or unrecognised label answers false to both: a URL nobody can
+// attribute to a WebPO client gets no token.
+func IsWebPOSource(source string) bool {
+	switch source {
+	case "watch_page", "web", "web_safari", "web_creator", "web_embedded", "tv_auth", "tv_public":
+		return true
+	}
+	return false
+}
+
+// GvsTokenRequired reports whether a direct format URL from source requires
+// the GVS PO token. See IsWebPOSource for the policy both follow.
+func GvsTokenRequired(source string) bool {
+	switch source {
+	case "watch_page", "web", "web_safari", "web_creator":
+		return true
+	}
+	return false
+}
+
 // HasSplitAdaptiveFormats reports whether formats contains the split
 // video + audio adaptive entries that make a manifest-free, &sq=N-segmented
 // download viable: at least one audio-only AND one video-only entry, both

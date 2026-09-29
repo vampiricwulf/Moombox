@@ -732,7 +732,10 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
+	// The GVS PO token rides every direct-path request, the probe included:
+	// a WEB-family format URL answers this 1-byte probe 206 without it and
+	// then 403s the first real chunk (VOD 403 fix, 2026-09-29).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
 		return 0
 	}
@@ -843,7 +846,7 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	ctx, idleTimer, cancel := withFetchDeadlines(parent, idle, ceiling)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
 		return nil, 0, err
 	}

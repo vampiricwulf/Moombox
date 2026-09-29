@@ -540,3 +540,12 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 	}
 	return job.Job.VideoID, youtube.BindingVideoID
 }
+
+// mintGvsPoToken is every strategy's first GVS PO token mint (VOD, DASH, HLS,
+// manifestless), behind a package var so the strategy tests can swap in a
+// fake without a real *bgutils.PotProvider. Production never writes it. The
+// 403-recovery re-mint (refreshGvsCredentials) goes through its own
+// gvsTokenMinter interface and is not routed here.
+var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding string) (string, error) {
+	return p.GeneratePoTokenString(ctx, binding, false)
+}
