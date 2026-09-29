@@ -237,10 +237,10 @@ func logLine(logs *captureLogger, prefix string) map[string]any {
 // Mutants (each run): skipping the re-selection after a failed mint fails
 // case 5 (the web_creator pair is still chosen); filtering the caller's
 // videoInfo.Formats in place (or reassigning it) fails case 5's copy
-// assertions; dropping the manual-itag fallback warning fails case 7;
-// handing the post-degrade resolve the caller's list instead of the filtered
-// pool fails the cipher re-selection case (the alternate becomes the dropped
-// web_creator 303).
+// assertions; dropping the manual-itag fallback warning fails case 7
+// (video) or the manual audio case (audio); handing the post-degrade
+// resolve the caller's list instead of the filtered pool fails the cipher
+// re-selection case (the alternate becomes the dropped web_creator 303).
 func TestDownloadVodMissingPotDegrades(t *testing.T) {
 	mintErr := errors.New("sidecar down")
 
@@ -349,6 +349,27 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 			t.Errorf("no manual-itag GVS fallback warning: %v", logs.msgs)
 		}
 		if l := logLine(logs, "[FormatSelector] Manual video itag 303 not found"); l != nil {
+			t.Errorf("the generic not-found warning fired instead of (or beside) the GVS one: %v", l)
+		}
+	})
+
+	t.Run("manual audio itag on a dropped format falls back to auto", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		job, logs := vodPotJob(t)
+		itag := 251
+		job.Job.SelectedAudioItag = &itag
+		res := runVodPot(t, job, vodMixedInfo(), &bgutils.PotProvider{})
+		if res.AudioFormat == nil || res.AudioFormat.Itag != 250 || res.AudioFormat.Source != "tv_public" {
+			t.Errorf("audio format = %+v, want the auto tv_public itag 250", res.AudioFormat)
+		}
+		if got := res.AudioDownloader.PoToken(); got != "" {
+			t.Errorf("audio downloader token = %q, want none after the degrade", got)
+		}
+		line := logLine(logs, "[FormatSelector] Manual audio itag 251 requires a GVS token none could be minted; falling back to auto")
+		if line == nil {
+			t.Errorf("no manual-audio-itag GVS fallback warning: %v", logs.msgs)
+		}
+		if l := logLine(logs, "[FormatSelector] Manual audio itag 251 not found"); l != nil {
 			t.Errorf("the generic not-found warning fired instead of (or beside) the GVS one: %v", l)
 		}
 	})

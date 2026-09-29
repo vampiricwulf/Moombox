@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -474,6 +475,112 @@ func TestRefreshGvsCredentialsSkipsNonWebPOStream(t *testing.T) {
 				wantSource = ""
 			}
 			assertSkipLines(t, logs, skipLine(job, wantSource, "tag", "manifestless DASH audio"))
+		})
+	}
+}
+
+// TestRefreshGvsCredentialsKeepsURLOnTokenClassChange pins the close-wave
+// guard (review T3-m1): the refresh decides its re-mint by the SETUP
+// format's client but re-runs the full cascade for the URL, and the itag's
+// dedup winner can change between the two. Installing that fresh URL would
+// break the (URL, token) pair in two directions, so the install is skipped
+// with a Warn:
+//
+//   - A: a visionos/android_vr setup (no token) whose itag is now owned by a
+//     client that REQUIRES the GVS token — a bare WEB-family URL that 403s
+//     until forbiddenRefreshAttempts runs out.
+//   - B: a WebPO setup whose itag is now owned by visionos/android_vr — the
+//     engine would keep its WebPO on a URL upstream attaches nothing to (the
+//     callback cannot clear a token).
+//
+// Every other move installs as before — both WebPO (tv_auth → web_creator),
+// and a non-WebPO setup moving to a WebPO client that does not require the
+// token (visionos → tv_auth), which is upstream-correct bare. The latter is
+// why the rule is two predicates and not a plain class mismatch.
+//
+// Mutants (each run): dropping predicate A fails the "A" row; dropping
+// predicate B fails the "B" row; a plain IsWebPOSource mismatch fails the
+// "visionos to tv_auth" row.
+func TestRefreshGvsCredentialsKeepsURLOnTokenClassChange(t *testing.T) {
+	const warnMsg = "[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL"
+	for _, tc := range []struct {
+		name        string
+		setup       string
+		fresh       string
+		wantInstall bool
+		wantToken   string
+	}{
+		{name: "A visionos to web_creator", setup: "visionos", fresh: "web_creator", wantInstall: false, wantToken: ""},
+		{name: "B tv_auth to visionos", setup: "tv_auth", fresh: "visionos", wantInstall: false, wantToken: "fresh-token"},
+		{name: "tv_auth to web_creator", setup: "tv_auth", fresh: "web_creator", wantInstall: true, wantToken: "fresh-token"},
+		{name: "visionos to tv_auth", setup: "visionos", fresh: "tv_auth", wantInstall: true, wantToken: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := refreshVideoInfo
+			refreshVideoInfo = func(*youtube.Service, context.Context, string) (*youtube.VideoInfo, error) {
+				return &youtube.VideoInfo{
+					PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
+					Formats:   []youtube.Format{{Itag: 140, URL: "https://fresh.invalid/videoplayback?id=2&n=abc123", Source: tc.fresh}},
+				}, nil
+			}
+			t.Cleanup(func() { refreshVideoInfo = orig })
+
+			var minted int
+			fake := &fakePotProvider{
+				generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
+					minted++
+					return "fresh-token", nil
+				},
+			}
+			solver := &orderedSolver{
+				onN: func(ctx context.Context, playerID, encryptedN string) (string, error) {
+					return "decrypted-n", nil
+				},
+			}
+			logs := &captureLogger{}
+			job := &JobContext{
+				Job:    &database.Job{ID: "test-job", VideoID: "vid1"},
+				YT:     youtube.NewService(nil, &discardLogger{}),
+				Logger: logs,
+			}
+			videoInfo := &youtube.VideoInfo{
+				PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
+				Formats:   []youtube.Format{{Itag: 140, URL: "https://setup.invalid/videoplayback?id=1&n=abc123", Source: tc.setup}},
+			}
+
+			baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, solver, nil, fake, "vd-123", "test")
+
+			// The token half is decided by the setup source alone, exactly as
+			// before the guard.
+			if token != tc.wantToken {
+				t.Errorf("token = %q, want %q — the token decision follows the setup source", token, tc.wantToken)
+			}
+			if wantMints := map[bool]int{true: 1, false: 0}[tc.wantToken != ""]; minted != wantMints {
+				t.Errorf("minted %d times, want %d", minted, wantMints)
+			}
+
+			warns := potLines(logs, warnMsg)
+			if tc.wantInstall {
+				if !strings.Contains(baseURL, "fresh.invalid") {
+					t.Errorf("baseURL = %q, want the fresh %s URL installed", baseURL, tc.fresh)
+				}
+				if len(warns) != 0 {
+					t.Errorf("token-class Warn logged %v, want none for %s → %s", warns, tc.setup, tc.fresh)
+				}
+				return
+			}
+			if baseURL != "" {
+				t.Errorf("baseURL = %q, want empty — a %s URL must not replace a %s one", baseURL, tc.fresh, tc.setup)
+			}
+			if len(warns) != 1 {
+				t.Fatalf("token-class Warn lines = %v, want exactly one", warns)
+			}
+			want := map[string]any{"jobID": "test-job", "tag": "test", "itag": 140, "setupSource": tc.setup, "freshSource": tc.fresh}
+			for k, v := range want {
+				if warns[0][k] != v {
+					t.Errorf("Warn %s = %v, want %v (line %v)", k, warns[0][k], v, warns[0])
+				}
+			}
 		})
 	}
 }

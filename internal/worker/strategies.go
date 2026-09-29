@@ -456,7 +456,7 @@ func refreshGvsCredentials(
 		formats := videoInfo.Formats
 		playerURL := videoInfo.PlayerURL
 		if job.YT != nil {
-			fresh, err := job.YT.GetVideoInfo(refreshCtx, job.Job.VideoID)
+			fresh, err := refreshVideoInfo(job.YT, refreshCtx, job.Job.VideoID)
 			if err != nil {
 				job.Logger.Warn("[POT] credential refresh: player response re-fetch failed; resolving against cached formats",
 					"jobID", job.Job.ID, "tag", tag, "err", err)
@@ -496,6 +496,14 @@ func refreshGvsCredentials(
 		} else if fresh, err := resolveFormatURLByItag(refreshCtx, formats, itag, routedSolver, cipherSolver, playerURL, job.Logger); err != nil {
 			job.Logger.Warn("[POT] credential refresh: URL re-resolve failed",
 				"jobID", job.Job.ID, "tag", tag, "err", err)
+		} else if freshSource := formatSourceByItag(formats, itag); tokenClassChanged(streamSource, freshSource) {
+			// The re-fetch ran the full cascade, and the itag's dedup winner
+			// changed since setup — the token half above followed the SETUP
+			// client, so installing this URL would break the (URL, token)
+			// pair. Keep the current URL, the same way the whole-file guard
+			// above does.
+			job.Logger.Warn("[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL",
+				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource)
 		} else {
 			baseURL = fresh
 		}
@@ -561,6 +569,34 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding string) (string, error) {
 	return p.GeneratePoTokenString(ctx, binding, false)
 }
+
+// tokenClassChanged reports whether a 403 refresh must NOT install the fresh
+// URL for a stream whose setup format came from setupSource and whose fresh
+// format now comes from freshSource. Two directions break the (URL, token)
+// pair the engine holds:
+//
+//   - WebPO setup → non-WebPO URL: the engine keeps the WebPO it was given
+//     (the refresh callback cannot clear a token) on a visionos/android_vr
+//     URL upstream attaches nothing to.
+//   - non-WebPO setup → a URL that REQUIRES the GVS token: the stream was
+//     left bare at setup and the refresh does not mint for it, so the URL
+//     403s until the refresh attempts run out.
+//
+// Deliberately not a plain IsWebPOSource mismatch: a non-WebPO setup moving
+// to a WebPO client that does not require the token (tv_auth, web_embedded)
+// fetches bare, which is upstream-correct, and installs as before.
+func tokenClassChanged(setupSource, freshSource string) bool {
+	if youtube.IsWebPOSource(setupSource) {
+		return !youtube.IsWebPOSource(freshSource)
+	}
+	return youtube.GvsTokenRequired(freshSource)
+}
+
+// refreshVideoInfo is the 403 refresh's player-response re-fetch
+// ((*youtube.Service).GetVideoInfo) behind a package var so the refresh
+// tests can hand refreshGvsCredentials a changed fresh pool — job.YT is the
+// concrete *youtube.Service, with no other seam. Production never writes it.
+var refreshVideoInfo = (*youtube.Service).GetVideoInfo
 
 // formatSourceByItag returns the Format.Source of the first format carrying
 // itag — the same first match resolveFormatURLByItag resolves the URL from —
