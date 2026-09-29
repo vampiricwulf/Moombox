@@ -88,10 +88,11 @@ type VideoInfo struct {
 	// the manifest URL of the same kind, in the Format.Source vocabulary
 	// ("tv_auth", "web_safari", "visionos", "android_vr_dash_fallback", …).
 	// Every extraction site that records a manifest URL records its client
-	// too, because the live strategies attach a WebPO GVS token only when
-	// IsWebPOSource says the manifest came from a WebPO client — visionos
-	// and android_vr manifests ride bare, as upstream does. An empty source
-	// reads as non-WebPO: no token, the safe default.
+	// too, because the live strategies attach a GVS PO token only when
+	// GvsTokenRequired says the manifest's client requires one — a tv,
+	// web_embedded, visionos or android_vr manifest rides bare, as upstream
+	// does. An empty source reads as not required: no token, the safe
+	// default.
 	DashManifestSource string `json:"dashManifestSource,omitempty"`
 	HlsManifestSource  string `json:"hlsManifestSource,omitempty"`
 
@@ -249,6 +250,13 @@ type Format struct {
 	Fps             *int   `json:"fps,omitempty"`
 	Source          string `json:"source,omitempty"`
 	AuthLevel       *int   `json:"authLevel,omitempty"`
+	// TokenFreeAlternate is the best copy of this same stream from a client
+	// whose URLs need no GVS token (youtube.GvsTokenRequired false), kept by
+	// deduplicateFormats only when THIS copy won the stream and its own client
+	// requires one. Consumed by the VOD missing_pot degrade, which swaps to it
+	// when no token can be minted. The alternate never carries one of its own.
+	// Never serialised: a resume re-extracts. See the AuthLevel block.
+	TokenFreeAlternate *Format `json:"-"`
 
 	// AudioTrackID is `audioTrack.id` — the per-language identity of a dubbed
 	// audio rendition ("en.4", "ja.3"). Two thirds of upstream's stream
@@ -390,23 +398,47 @@ type YtcfgData struct {
 //
 // That inversion is deliberate, and the reason is Moombox's architecture,
 // not upstream's ordering: yt-dlp PICKS one client's response, while Moombox
-// POOLS every client's formats and dedups by itag. Since Moombox attaches
-// WebPO tokens, and WEB/TV are the WEBPO clients whose URLs those tokens
-// match, a WEB/TV format must win a same-itag tie over a cookieless one that
-// carries no PO-token policy at all. Ranking by upstream's tuple order would
-// hand live segment downloads to exactly the clients whose URLs our tokens
-// do not apply to — the 2026-08-15 incident this comment block opens with.
+// POOLS every client's formats and dedups by itag, so the ranking itself has
+// to say which copy of a stream is best. TV leads because upstream ranks tv
+// first — priority 40, and, by the tuple-order measure the paragraph above
+// endorses, tv_downgraded precedes web in both the authed and the premium
+// default tuples (_video.py _DEFAULT_AUTHED_CLIENTS / _DEFAULT_PREMIUM_CLIENTS)
+// — and its URLs need no GVS token at all (GvsTokenRequired), so a tv copy
+// downloads bare with nothing to mint. A WEB-family copy beats the cookieless
+// clients because Moombox mints the GVS token its URLs require and attaches
+// it — the WEB family is the client upstream built its token policy around.
+// web_embedded needs no token either and sits above the cookieless tier
+// because it is an authenticated client and upstream's authed tuple leads
+// with it; android_vr sits under selective enforcement with no token that
+// applies to it. Ranking by upstream's tuple order instead would hand
+// same-itag ties to visionos (and to web_embedded / web_creator over the tv
+// and web copies) — a cookieless client winning a same-itag tie is the
+// 2026-08-15 incident this comment block opens with.
 //
 // Within the last-resort tier, VISIONOS sits above ANDROID_VR. That much IS
-// monotone with upstream, which deleted android_vr outright (all-formats 403
-// since 2026-08-17) while promoting visionos: under selective enforcement a
-// 403-dead android_vr URL must never displace a working visionos one.
+// monotone with upstream, which dropped android_vr from every default client
+// tuple (its _base.py entry remains, noting all formats 403 since 2026-08-17)
+// while promoting visionos to lead _DEFAULT_CLIENTS: under selective
+// enforcement a 403-dead android_vr URL must never displace a working
+// visionos one.
 //
 // Within a tier the previous relative order is preserved: public watch-page
 // formats still rank ahead of authenticated ones (audit I5).
+//
+// The token-free shadow (Format.TokenFreeAlternate). yt-dlp decides the GVS
+// token BEFORE it deduplicates: a format skipped for a missing token never
+// records its stream id, so the next client's copy of that stream is still
+// first-seen. Moombox dedups first, by this ranking, and only learns that no
+// token can be minted at download time — by which point the token-free copy
+// would be gone. So when a stream's winner here comes from a client that
+// requires the token (GvsTokenRequired), deduplicateFormats also keeps the
+// lowest-level token-free copy of that stream as the winner's shadow, and the
+// VOD missing_pot degrade swaps to it. The shadow never changes which copy
+// wins.
 const (
-	// TV tier — upstream priority 40. TVHTML5 is a WEBPO client, so its URLs
-	// and our WebPO tokens are the matched pair.
+	// TV tier — upstream priority 40. It leads because upstream ranks tv
+	// first; its URLs need no GVS token upstream (GvsTokenRequired is false),
+	// so a tv copy downloads bare.
 	AuthLevelTVPublic = 0
 	AuthLevelTVAuth   = 1
 	// WEB tier — upstream priority 30. The watch page IS the web client.
@@ -422,36 +454,32 @@ const (
 	AuthLevelAndroidVR = 9
 )
 
-// IsWebPOSource and GvsTokenRequired answer, for a Format.Source label (the
-// client label collectFormats stamps), the two questions yt-dlp's
-// GVS_PO_TOKEN_POLICY answers per client
+// GvsTokenRequired reports whether a URL from source — a Format.Source label
+// (the client label collectFormats stamps) or a VideoInfo manifest source —
+// requires the GVS PO token. It is Moombox's single GVS token policy: the
+// VOD direct path, the live DASH/HLS/manifest-free strategies and the 403
+// re-mint all attach a token iff it answers true. It mirrors the answer
+// yt-dlp's per-client GVS_PO_TOKEN_POLICY gives
 // (references/yt-dlp/yt_dlp/extractor/youtube/_base.py, WEB_PO_TOKEN_POLICIES
-// and the per-client GVS_PO_TOKEN_POLICY entries; the WebPO client list is
-// WEBPO_CLIENTS in yt_dlp/extractor/youtube/pot/utils.py):
+// and the per-client entries), label by label:
 //
-//   - IsWebPOSource: may a WebPO GVS token apply to this client's URLs at
-//     all? True for the WEBPO_CLIENTS Moombox queries — the watch page and
-//     WEB, WEB Safari, WEB_EMBEDDED_PLAYER, WEB_CREATOR and TVHTML5. False
-//     for visionos and android_vr (android_vr_dash_fallback included): they
-//     are not WebPO clients, so upstream attaches nothing to them.
-//   - GvsTokenRequired: does a direct (HTTPS/DASH) URL from this client 403
-//     without one? True only for the WEB family, whose policy is
-//     required=True, not_required_for_premium=True — Moombox has no Premium
-//     detection, so the token is always attached. tv and web_embedded carry
-//     no GVS requirement upstream and stay bare on the VOD direct path.
+//   - watch_page, web, web_safari, web_creator: true. The WEB family's
+//     HTTPS and DASH policy is required=True, not_required_for_premium=True;
+//     Moombox has no Premium detection, so the token is always attached (the
+//     watch page IS the web client). Its HLS policy is recommended rather
+//     than required, and yt-dlp fetches and attaches a token there too, so
+//     the HLS gate asks this same question.
+//   - tv_auth, tv_public, web_embedded: false. tv and web_embedded have no
+//     GVS_PO_TOKEN_POLICY entry upstream, so the default applies
+//     (required=False) and yt-dlp fetches no GVS token for them.
+//   - visionos: false, for the same reason — no policy entry.
+//   - android_vr, android_vr_dash_fallback: false. android_vr's policy is
+//     required-unless-player-token and upstream attaches no WebPO to it (it
+//     is not a WEBPO client); a WebPO on an android_vr URL is the 2026-08-15
+//     403 cause the AuthLevel block names.
 //
-// An empty or unrecognised label answers false to both: a URL nobody can
-// attribute to a WebPO client gets no token.
-func IsWebPOSource(source string) bool {
-	switch source {
-	case "watch_page", "web", "web_safari", "web_creator", "web_embedded", "tv_auth", "tv_public":
-		return true
-	}
-	return false
-}
-
-// GvsTokenRequired reports whether a direct format URL from source requires
-// the GVS PO token. See IsWebPOSource for the policy both follow.
+// An empty or unrecognised label answers false: a URL nobody can attribute
+// to a client that requires the token gets none.
 func GvsTokenRequired(source string) bool {
 	switch source {
 	case "watch_page", "web", "web_safari", "web_creator":

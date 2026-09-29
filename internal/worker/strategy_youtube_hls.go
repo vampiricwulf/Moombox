@@ -56,14 +56,15 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// parity). See strategy_youtube_dash.go's mint block for the full
 	// rationale and the 2026-08-16 activation note.
 	//
-	// Only a master playlist from a WebPO client takes the token
-	// (youtube.IsWebPOSource on the source the extraction recorded) — the
-	// same rule as the DASH mint block. VISIONOS serves live as HLS only, so
-	// its master is the common non-WebPO case here; it rides bare, as
-	// upstream does, and so do the variant URL and the downloader.
+	// Only a master playlist from a client whose URLs require the GVS token
+	// takes one (youtube.GvsTokenRequired on the source the extraction
+	// recorded) — the same rule as the DASH mint block. VISIONOS serves live
+	// as HLS only, so its master is the common bare case here; a tv or
+	// web_embedded master rides bare too, as upstream does, and so do the
+	// variant URL and the downloader.
 	var hlsPoToken string
 	hlsSource := videoInfo.HlsManifestSource
-	if potProvider != nil && !youtube.IsWebPOSource(hlsSource) {
+	if potProvider != nil && !youtube.GvsTokenRequired(hlsSource) {
 		logGvsTokenSkipped(job, hlsSource)
 	} else if potProvider != nil {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)

@@ -392,3 +392,127 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 		}
 	})
 }
+
+// withShadow returns f carrying a token-free copy of itself from source, the
+// shape deduplicateFormats leaves when a WEB-family copy won the stream over
+// a client whose URLs need no GVS token.
+func withShadow(f youtube.Format, source string) youtube.Format {
+	alt := f
+	alt.Source = source
+	alt.URL = strings.Replace(f.URL, "videoplayback", source+"/videoplayback", 1)
+	alt.TokenFreeAlternate = nil
+	f.TokenFreeAlternate = &alt
+	return f
+}
+
+// TestDownloadVodMissingPotSwapsToTheTokenFreeShadow pins the dedup shadow's
+// consumer (owner ruling 2026-09-29): a missing_pot drop of a format that
+// carries a TokenFreeAlternate puts the alternate — same itag, bare URL —
+// into the degraded pool instead of losing the stream.
+//
+// Mutants (each run): dropping the swap in withoutGvsRequiredFormats fails the
+// all-shadowed row (nothing selectable → error) and the video-only row; logging
+// no swapped count fails both count assertions; keeping the Warn for a
+// swapped manual itag fails the manual row.
+func TestDownloadVodMissingPotSwapsToTheTokenFreeShadow(t *testing.T) {
+	mintErr := errors.New("sidecar down")
+
+	t.Run("web_creator pair with visionos shadows, mint fails", func(t *testing.T) {
+		// A pool of web_creator 302/251, each of which won its stream over a
+		// visionos copy — the shape the cascade leaves when web_creator was
+		// inadequate on its own and the cookieless chain ran. (An adequate
+		// web_creator response skips that chain, so its itags carry no shadow.)
+		calls := fakeVodMint(t, "", mintErr)
+		job, logs := vodPotJob(t)
+		info := vodPotInfo("web_creator", "web_creator")
+		info.Formats[0] = withShadow(info.Formats[0], "visionos")
+		info.Formats[1] = withShadow(info.Formats[1], "visionos")
+		res := runVodPot(t, job, info, &bgutils.PotProvider{})
+		if v := res.VideoFormat; v == nil || v.Itag != 302 || v.Source != "visionos" || v.URL != "http://127.0.0.1:1/visionos/videoplayback?itag=302" {
+			t.Errorf("video format = %+v, want the visionos shadow of itag 302", v)
+		}
+		if a := res.AudioFormat; a == nil || a.Itag != 251 || a.Source != "visionos" || a.URL != "http://127.0.0.1:1/visionos/videoplayback?itag=251" {
+			t.Errorf("audio format = %+v, want the visionos shadow of itag 251", a)
+		}
+		if got := res.VideoDownloader.PoToken(); got != "" {
+			t.Errorf("video downloader token = %q, want none", got)
+		}
+		if got := res.AudioDownloader.PoToken(); got != "" {
+			t.Errorf("audio downloader token = %q, want none", got)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("mint ran %d times, want exactly 1", n)
+		}
+		line := logLine(logs, "[POT] missing_pot")
+		if line == nil {
+			t.Fatalf("no [POT] missing_pot line logged: %v", logs.msgs)
+		}
+		if line["dropped"] != 2 || line["swapped"] != 2 {
+			t.Errorf("[POT] missing_pot dropped=%v swapped=%v, want 2 and 2 (line %v)", line["dropped"], line["swapped"], line)
+		}
+		if info.Formats[0].Source != "web_creator" || info.Formats[1].Source != "web_creator" {
+			t.Errorf("caller's formats changed: %+v — the swap must work on a copy", info.Formats)
+		}
+	})
+
+	t.Run("only the video has a shadow: the audio re-selects", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		job, logs := vodPotJob(t)
+		info := vodPotInfo("web_creator", "web_creator")
+		info.Formats[0] = withShadow(info.Formats[0], "visionos")
+		info.Formats = append(info.Formats, youtube.Format{Itag: 250, URL: "http://127.0.0.1:1/videoplayback?itag=250", MimeType: `audio/webm; codecs="opus"`, Bitrate: 70_000, Source: "tv_public"})
+		res := runVodPot(t, job, info, &bgutils.PotProvider{})
+		if v := res.VideoFormat; v == nil || v.Itag != 302 || v.Source != "visionos" {
+			t.Errorf("video format = %+v, want the visionos shadow of itag 302", v)
+		}
+		if a := res.AudioFormat; a == nil || a.Itag != 250 || a.Source != "tv_public" {
+			t.Errorf("audio format = %+v, want the token-free tv_public 250", a)
+		}
+		if res.VideoDownloader.PoToken() != "" || res.AudioDownloader.PoToken() != "" {
+			t.Errorf("tokens = %q / %q, want none", res.VideoDownloader.PoToken(), res.AudioDownloader.PoToken())
+		}
+		line := logLine(logs, "[POT] missing_pot")
+		if line == nil || line["dropped"] != 2 || line["swapped"] != 1 {
+			t.Errorf("[POT] missing_pot line = %v, want dropped=2 swapped=1", line)
+		}
+	})
+
+	t.Run("a manual itag on a swapped format is served from the shadow", func(t *testing.T) {
+		fakeVodMint(t, "", mintErr)
+		job, logs := vodPotJob(t)
+		info := vodMixedInfo()
+		info.Formats[0] = withShadow(info.Formats[0], "visionos") // web_creator 303
+		info.Formats[2] = withShadow(info.Formats[2], "visionos") // web_creator 251
+		vItag, aItag := 303, 251
+		job.Job.SelectedVideoItag = &vItag
+		job.Job.SelectedAudioItag = &aItag
+		res := runVodPot(t, job, info, &bgutils.PotProvider{})
+		if v := res.VideoFormat; v == nil || v.Itag != 303 || v.Source != "visionos" {
+			t.Errorf("video format = %+v, want the manual itag 303 from its visionos shadow", v)
+		}
+		if a := res.AudioFormat; a == nil || a.Itag != 251 || a.Source != "visionos" {
+			t.Errorf("audio format = %+v, want the manual itag 251 from its visionos shadow", a)
+		}
+		if res.VideoDownloader.PoToken() != "" || res.AudioDownloader.PoToken() != "" {
+			t.Errorf("tokens = %q / %q, want none", res.VideoDownloader.PoToken(), res.AudioDownloader.PoToken())
+		}
+		for _, want := range []string{
+			"[FormatSelector] Manual video itag 303 served from visionos after missing_pot",
+			"[FormatSelector] Manual audio itag 251 served from visionos after missing_pot",
+		} {
+			if logLine(logs, want) == nil {
+				t.Errorf("no %q line: %v", want, logs.msgs)
+			}
+		}
+		for _, unwanted := range []string{
+			"[FormatSelector] Manual video itag 303 requires a GVS token",
+			"[FormatSelector] Manual audio itag 251 requires a GVS token",
+			"[FormatSelector] Manual video itag 303 not found",
+			"[FormatSelector] Manual audio itag 251 not found",
+		} {
+			if l := logLine(logs, unwanted); l != nil {
+				t.Errorf("unexpected fallback line for a swapped manual itag: %v", l)
+			}
+		}
+	})
+}

@@ -1516,3 +1516,171 @@ func TestParsePlayabilityStatusRecognisesEveryAgeGateShape(t *testing.T) {
 		})
 	}
 }
+
+// TestDeduplicateFormatsKeepsATokenFreeShadowOfAWebFamilyWinner pins the
+// shadow copy (owner ruling 2026-09-29). yt-dlp decides the GVS token BEFORE
+// it deduplicates, so a web_creator format skipped for a missing token never
+// shadows the next client's copy; Moombox dedups first and learns about the
+// missing token at download time. So dedup keeps the AuthLevel winner exactly
+// as before AND, when that winner's client requires a GVS token, the
+// lowest-AuthLevel token-free copy of the same stream on TokenFreeAlternate,
+// which the VOD missing_pot degrade swaps to.
+//
+// Mutants this kills:
+//   - keep the higher-level token-free loser → the web_embedded row gets visionos
+//   - keep an alternate on a token-free winner → the tv_public and token-free-winner rows
+//   - no alternate at all → the web_creator + visionos row
+func TestDeduplicateFormatsKeepsATokenFreeShadowOfAWebFamilyWinner(t *testing.T) {
+	lvl := map[string]int{
+		"web_creator":  AuthLevelWebCreator,
+		"web":          AuthLevelWeb,
+		"web_embedded": AuthLevelWebEmbedded,
+		"visionos":     AuthLevelVisionOS,
+		"tv_public":    AuthLevelTVPublic,
+		"android_vr":   AuthLevelAndroidVR,
+	}
+	mk := func(source string) Format {
+		l := lvl[source]
+		return Format{Itag: 302, URL: "https://" + source + "/v302", MimeType: `video/webm; codecs="vp9"`, Source: source, AuthLevel: &l}
+	}
+	for _, tc := range []struct {
+		name       string
+		sources    []string
+		wantWinner string
+		wantAlt    string // "" = no alternate
+	}{
+		{"web_creator winner, visionos loser", []string{"web_creator", "visionos"}, "web_creator", "visionos"},
+		{"visionos listed first still loses and shadows", []string{"visionos", "web_creator"}, "web_creator", "visionos"},
+		{"tv_public wins outright and carries no shadow", []string{"web_creator", "tv_public", "visionos"}, "tv_public", ""},
+		// web_embedded (6) outranks web_creator (7) outright, so the
+		// shadow-slot ranking between token-free losers is only reachable
+		// under a lower-level WEB-family winner: web (5).
+		{"web_embedded beats visionos for the shadow slot", []string{"web", "visionos", "web_embedded"}, "web", "web_embedded"},
+		{"web_embedded first, then visionos", []string{"web", "web_embedded", "visionos"}, "web", "web_embedded"},
+		{"displaced token-free winner is then outranked", []string{"visionos", "web", "web_embedded"}, "web", "web_embedded"},
+		{"web_creator loses to web_embedded outright", []string{"web_creator", "visionos", "web_embedded"}, "web_embedded", ""},
+		{"visionos beats android_vr for the shadow slot", []string{"android_vr", "web_creator", "visionos"}, "web_creator", "visionos"},
+		{"a lone web_creator has no shadow", []string{"web_creator"}, "web_creator", ""},
+		{"a token-free winner keeps no shadow of a web_creator loser", []string{"web_creator", "web_embedded"}, "web_embedded", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := make([]Format, 0, len(tc.sources))
+			for _, s := range tc.sources {
+				pool = append(pool, mk(s))
+			}
+			got := deduplicateFormats(context.Background(), pool)
+			if len(got) != 1 {
+				t.Fatalf("dedup returned %d rows, want 1: %+v", len(got), got)
+			}
+			w := got[0]
+			if w.Source != tc.wantWinner || w.URL != "https://"+tc.wantWinner+"/v302" {
+				t.Errorf("winner = %s %q, want %s — the shadow must never change which copy wins", w.Source, w.URL, tc.wantWinner)
+			}
+			if tc.wantAlt == "" {
+				if w.TokenFreeAlternate != nil {
+					t.Errorf("TokenFreeAlternate = %+v, want nil", *w.TokenFreeAlternate)
+				}
+				return
+			}
+			alt := w.TokenFreeAlternate
+			if alt == nil {
+				t.Fatalf("TokenFreeAlternate = nil, want the %s copy", tc.wantAlt)
+			}
+			if alt.Source != tc.wantAlt || alt.URL != "https://"+tc.wantAlt+"/v302" || alt.Itag != 302 {
+				t.Errorf("TokenFreeAlternate = %s %q itag %d, want %s https://%s/v302", alt.Source, alt.URL, alt.Itag, tc.wantAlt, tc.wantAlt)
+			}
+			if alt.TokenFreeAlternate != nil {
+				t.Errorf("the shadow carries a shadow of its own: %+v", *alt.TokenFreeAlternate)
+			}
+		})
+	}
+}
+
+// TestDeduplicateFormatsShadowRidesTheCollapsedRendition pins the collapse
+// half: the rendition collapseToPreferredRendition keeps carries its own
+// shadow, and the collapse count is the same as without shadows (a shadow is
+// not a rendition), and the shadow is keyed by the full rendition identity,
+// not the itag.
+func TestDeduplicateFormatsShadowRidesTheCollapsedRendition(t *testing.T) {
+	wc, vo := AuthLevelWebCreator, AuthLevelVisionOS
+	const aac = "audio/mp4; codecs=\"mp4a.40.2\""
+	mk := func(track, name string, def bool, source string, lvl *int) Format {
+		return Format{Itag: 140, URL: "https://" + source + "/a140-" + track, MimeType: aac,
+			AudioTrackID: track, AudioTrackName: name, AudioIsDefault: def, Source: source, AuthLevel: lvl}
+	}
+	pool := []Format{
+		mk("es.3", "Spanish", true, "web_creator", &wc),
+		mk("en.4", "English original", false, "web_creator", &wc),
+		// visionos es.3 listed FIRST: a shadow keyed by itag alone would hand
+		// the kept en.4 rendition this es.3 copy.
+		mk("es.3", "Spanish", true, "visionos", &vo),
+		mk("en.4", "English original", false, "visionos", &vo),
+	}
+	ctx := withExtractionState(context.Background())
+	got := deduplicateFormats(ctx, pool)
+	if len(got) != 1 {
+		t.Fatalf("dedup returned %d rows, want 1: %+v", len(got), got)
+	}
+	if got[0].URL != "https://web_creator/a140-en.4" {
+		t.Errorf("itag 140 = %q, want the web_creator English original", got[0].URL)
+	}
+	if alt := got[0].TokenFreeAlternate; alt == nil || alt.URL != "https://visionos/a140-en.4" || alt.AudioTrackID != "en.4" {
+		t.Errorf("TokenFreeAlternate = %+v, want the visionos English original (same rendition key, not merely the same itag)", alt)
+	}
+	if _, collapsed := extractionStateFrom(ctx).poolCounts(); collapsed != 1 {
+		t.Errorf("collapsed renditions = %d, want 1 — a shadow is not a rendition", collapsed)
+	}
+}
+
+// TestFormatJSONOmitsTheTokenFreeAlternate: the shadow is never serialised —
+// a resume re-extracts, and a persisted URL would be stale anyway.
+func TestFormatJSONOmitsTheTokenFreeAlternate(t *testing.T) {
+	alt := Format{Itag: 302, URL: "https://visionos/v302", Source: "visionos"}
+	f := Format{Itag: 302, URL: "https://web_creator/v302", Source: "web_creator", TokenFreeAlternate: &alt}
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if s := string(b); strings.Contains(s, "visionos") || strings.Contains(strings.ToLower(s), "alternate") {
+		t.Errorf("marshalled Format carries the shadow: %s", s)
+	}
+}
+
+// TestDeduplicateFormatsDropsAStaleShadowOnItsInput: a pool entry can already
+// carry a shadow (collectFormats re-labels a result's formats, and a result may
+// have been deduplicated once). Dedup recomputes every shadow from the pool it
+// is handed: a stale one on a token-free winner is cleared, and a shadow never
+// carries a shadow of its own.
+//
+// Mutants this kills:
+//   - not clearing the winner's incoming shadow → the tv_public row keeps it
+//   - not clearing the alternate's incoming shadow → the chain row
+func TestDeduplicateFormatsDropsAStaleShadowOnItsInput(t *testing.T) {
+	wc, vo, tv := AuthLevelWebCreator, AuthLevelVisionOS, AuthLevelTVPublic
+	stale := &Format{Itag: 302, URL: "https://stale/v302", Source: "visionos", AuthLevel: &vo}
+
+	t.Run("tv_public winner", func(t *testing.T) {
+		pool := []Format{{Itag: 302, URL: "https://tv_public/v302", Source: "tv_public", AuthLevel: &tv, TokenFreeAlternate: stale}}
+		got := deduplicateFormats(context.Background(), pool)
+		if len(got) != 1 || got[0].TokenFreeAlternate != nil {
+			t.Errorf("token-free winner kept a stale shadow: %+v", got)
+		}
+	})
+
+	t.Run("chain", func(t *testing.T) {
+		pool := []Format{
+			{Itag: 302, URL: "https://web_creator/v302", Source: "web_creator", AuthLevel: &wc},
+			{Itag: 302, URL: "https://visionos/v302", Source: "visionos", AuthLevel: &vo, TokenFreeAlternate: stale},
+		}
+		got := deduplicateFormats(context.Background(), pool)
+		if len(got) != 1 || got[0].TokenFreeAlternate == nil {
+			t.Fatalf("want the web_creator winner with a visionos shadow, got %+v", got)
+		}
+		if alt := got[0].TokenFreeAlternate; alt.URL != "https://visionos/v302" || alt.TokenFreeAlternate != nil {
+			t.Errorf("shadow = %q carrying %+v, want https://visionos/v302 with no shadow of its own", alt.URL, alt.TokenFreeAlternate)
+		}
+		if pool[1].TokenFreeAlternate != stale {
+			t.Errorf("dedup rewrote its input's shadow pointer")
+		}
+	})
+}

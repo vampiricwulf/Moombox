@@ -100,21 +100,27 @@ const potTestMaster = `#EXTM3U
 https://manifest.googlevideo.com/api/manifest/hls_playlist/id/abc/itag/95/index.m3u8
 `
 
-// TestDownloadHlsAttachesWebPOOnlyToWebPOManifests is the HLS half of the
-// 2026-09-29 live-path fix, in the same shape as the DASH test: the master
-// playlist's recorded client decides whether a GVS token is minted and
-// carried on the master path, the variant path and the downloader. VISIONOS
-// serves live as HLS only, so a visionos master is the case this exists for.
+// TestDownloadHlsAttachesTokenOnlyWhereRequired is the HLS half of the
+// live-path policy, in the same shape as the DASH test: the master
+// playlist's recorded client decides, by youtube.GvsTokenRequired, whether a
+// GVS token is minted and carried on the master path, the variant path and
+// the downloader. VISIONOS serves live as HLS only, so a visionos master is
+// the common bare case; tv and web_embedded masters ride bare too, as
+// upstream fetches no GVS token for them.
 //
-// Mutant: dropping the IsWebPOSource gate fails the visionos, android_vr and
-// unrecorded rows (a mint, a /pot/ master path, a token, no skip line).
-func TestDownloadHlsAttachesWebPOOnlyToWebPOManifests(t *testing.T) {
+// Mutant: dropping the GvsTokenRequired gate fails every bare row (a mint, a
+// /pot/ master path, a token, no skip line); gating on the old WebPO-client
+// list fails the tv_auth, tv_public and web_embedded rows.
+func TestDownloadHlsAttachesTokenOnlyWhereRequired(t *testing.T) {
 	for _, tc := range []struct {
 		source  string
 		wantPot bool
 	}{
-		{source: "tv_auth", wantPot: true},
+		{source: "web", wantPot: true},
 		{source: "watch_page", wantPot: true},
+		{source: "tv_auth"},
+		{source: "tv_public"},
+		{source: "web_embedded"},
 		{source: "visionos"},
 		{source: "android_vr"},
 		{source: ""},
@@ -156,7 +162,7 @@ func TestDownloadHlsAttachesWebPOOnlyToWebPOManifests(t *testing.T) {
 				return
 			}
 			if n := calls.Load(); n != 0 {
-				t.Errorf("mint ran %d times, want 0 — a %q master takes no WebPO token", n, tc.source)
+				t.Errorf("mint ran %d times, want 0 — a %q master takes no GVS token", n, tc.source)
 			}
 			if strings.Contains(path, "/pot/") {
 				t.Errorf("master path = %q, want no /pot/ segment", path)

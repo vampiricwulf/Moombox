@@ -432,9 +432,10 @@ func refreshGvsCredentials(
 	// the credential that actually went stale.
 	//
 	// Gated by the refreshed stream's own client, read from the same setup
-	// format the strategy chose (formatSourceByItag): a visionos or
-	// android_vr stream was left bare at setup and must stay bare here, or
-	// its first 403 would put a WebPO on exactly the URL the setup gate kept
+	// format the strategy chose (formatSourceByItag), by the rule every
+	// strategy uses (youtube.GvsTokenRequired): a tv, web_embedded, visionos
+	// or android_vr stream was left bare at setup and must stay bare here, or
+	// its first 403 would put a token on exactly the URL the setup gate kept
 	// clean. The URL half below still runs for it.
 	//
 	// bypassCache=true on the re-mint: the cached token is the credential
@@ -442,7 +443,7 @@ func refreshGvsCredentials(
 	// no-op.
 	streamSource := formatSourceByItag(videoInfo.Formats, itag)
 	if minterUsable(potProvider) {
-		if !youtube.IsWebPOSource(streamSource) {
+		if !youtube.GvsTokenRequired(streamSource) {
 			logGvsTokenSkipped(job, streamSource, "tag", tag)
 		} else if token, err := potProvider.GeneratePoTokenString(refreshCtx, binding, true); err != nil {
 			job.Logger.Warn("[POT] credential refresh: re-mint failed",
@@ -498,12 +499,16 @@ func refreshGvsCredentials(
 				"jobID", job.Job.ID, "tag", tag, "err", err)
 		} else if freshSource := formatSourceByItag(formats, itag); tokenClassChanged(streamSource, freshSource) {
 			// The re-fetch ran the full cascade, and the itag's dedup winner
-			// changed since setup — the token half above followed the SETUP
-			// client, so installing this URL would break the (URL, token)
-			// pair. Keep the current URL, the same way the whole-file guard
-			// above does.
+			// changed since setup to a client whose GVS token requirement
+			// differs — the token half above followed the SETUP client, so
+			// installing this URL would break the (URL, token) pair. Keep
+			// the current URL, the same way the whole-file guard above does.
+			reason := "fresh client requires the GVS token, setup client does not"
+			if youtube.GvsTokenRequired(streamSource) {
+				reason = "setup client requires the GVS token, fresh client does not"
+			}
 			job.Logger.Warn("[POT] credential refresh: itag now served by a client of a different token class — keeping the current URL",
-				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource)
+				"jobID", job.Job.ID, "tag", tag, "itag", itag, "setupSource", streamSource, "freshSource", freshSource, "reason", reason)
 		} else {
 			baseURL = fresh
 		}
@@ -565,31 +570,30 @@ func gvsBinding(job *JobContext, videoInfo *youtube.VideoInfo) (value, kind stri
 // fake without a real *bgutils.PotProvider. Production never writes it. The
 // 403-recovery re-mint (refreshGvsCredentials) goes through its own
 // gvsTokenMinter interface and is not routed here; it is gated by the same
-// IsWebPOSource policy as the live mints.
+// youtube.GvsTokenRequired policy as every other mint.
 var mintGvsPoToken = func(ctx context.Context, p *bgutils.PotProvider, binding string) (string, error) {
 	return p.GeneratePoTokenString(ctx, binding, false)
 }
 
 // tokenClassChanged reports whether a 403 refresh must NOT install the fresh
 // URL for a stream whose setup format came from setupSource and whose fresh
-// format now comes from freshSource. Two directions break the (URL, token)
-// pair the engine holds:
+// format now comes from freshSource: whenever the two clients' GVS token
+// requirements (youtube.GvsTokenRequired) differ. Both directions break the
+// (URL, token) pair the engine holds:
 //
-//   - WebPO setup → non-WebPO URL: the engine keeps the WebPO it was given
-//     (the refresh callback cannot clear a token) on a visionos/android_vr
-//     URL upstream attaches nothing to.
-//   - non-WebPO setup → a URL that REQUIRES the GVS token: the stream was
-//     left bare at setup and the refresh does not mint for it, so the URL
-//     403s until the refresh attempts run out.
+//   - a bare setup → a URL that REQUIRES the token (visionos or tv_auth →
+//     web_creator): the stream was left bare at setup and the refresh does
+//     not mint for it, so the URL 403s until the refresh attempts run out.
+//   - a tokenised setup → a URL that needs none (web_creator → tv_auth or
+//     visionos): the engine keeps the token it was given (the refresh
+//     callback cannot clear one) on a URL upstream fetches bare. For a tv
+//     URL that is probably harmless, but android_vr was not (the 2026-08-15
+//     403s), and the rule stays symmetric rather than betting on which bare
+//     clients tolerate a stray token.
 //
-// Deliberately not a plain IsWebPOSource mismatch: a non-WebPO setup moving
-// to a WebPO client that does not require the token (tv_auth, web_embedded)
-// fetches bare, which is upstream-correct, and installs as before.
+// A move within one class (web_creator → web, visionos ↔ tv_auth) installs.
 func tokenClassChanged(setupSource, freshSource string) bool {
-	if youtube.IsWebPOSource(setupSource) {
-		return !youtube.IsWebPOSource(freshSource)
-	}
-	return youtube.GvsTokenRequired(freshSource)
+	return youtube.GvsTokenRequired(setupSource) != youtube.GvsTokenRequired(freshSource)
 }
 
 // refreshVideoInfo is the 403 refresh's player-response re-fetch
@@ -603,6 +607,12 @@ var refreshVideoInfo = (*youtube.Service).GetVideoInfo
 // or "" when the pool has none. It is how the manifest-free strategy and its
 // 403 refresh learn which client served a chosen stream: DashStreamInfo, the
 // shape selection works on, does not carry the source.
+//
+// It reads the SETUP pool: on the VOD path a missing_pot swap replaces an
+// itag's winner with its token-free shadow in a filtered copy only, so this
+// would still name the winner's client for a stream riding the shadow's URL.
+// DownloadVod wires no OnCredentialRefresh, so no caller reaches that shape;
+// a VOD refresh, if ever added, must be handed the served format's Source.
 func formatSourceByItag(formats []youtube.Format, itag int) string {
 	for i := range formats {
 		if formats[i].Itag == itag {
@@ -614,13 +624,13 @@ func formatSourceByItag(formats []youtube.Format, itag int) string {
 
 // logGvsTokenSkipped records that a live strategy (or its 403 refresh)
 // deliberately minted and attached NO GVS PO token because the URL came from
-// a client youtube.IsWebPOSource rules out: visionos and android_vr are not
-// WebPO clients, and upstream attaches nothing to their URLs. A URL with no
-// recorded client is treated the same way and says so ("unknown"), because
-// every extraction site stamps one and a missing label is a bug to see in
-// the log rather than a token to guess at.
+// a client youtube.GvsTokenRequired answers false for: tv, web_embedded,
+// visionos and android_vr, whose URLs upstream fetches without a GVS token.
+// A URL with no recorded client is treated the same way and says so
+// ("unknown"), because every extraction site stamps one and a missing label
+// is a bug to see in the log rather than a token to guess at.
 func logGvsTokenSkipped(job *JobContext, source string, args ...any) {
-	label, reason := source, "non-WebPO client"
+	label, reason := source, "no GVS token required for this client"
 	if source == "" {
 		label, reason = "unknown", "source not recorded"
 	}

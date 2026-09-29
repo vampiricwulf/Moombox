@@ -45,8 +45,8 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// and Moombox has no Premium detection), so a web_creator / web /
 	// web_safari / watch_page URL answers the 1-byte Range probe 206 and then
 	// 403s its first 5 MB chunk without one (the VOD 403 of 2026-09-29).
-	// tv and web_embedded carry no requirement and visionos / android_vr are
-	// not WebPO clients, so those ride bare — see youtube.GvsTokenRequired.
+	// tv, web_embedded, visionos and android_vr carry no requirement, so
+	// those ride bare — see youtube.GvsTokenRequired.
 	// Video and audio can come from different clients, so the token is
 	// minted at most once and passed per stream, only where that stream's
 	// own Source requires it. Bound the same way as the DASH mint (see
@@ -56,7 +56,9 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// mint fails or comes back empty, sending the URL bare is a certain 403,
 	// so the WEB-family formats leave the pool and the selection re-runs on
 	// what is left (tv / web_embedded / visionos / android_vr — none of which
-	// needs a token). Nothing selectable left is an error naming the cause.
+	// needs a token). A dropped format that carries a TokenFreeAlternate (the
+	// dedup shadow) is replaced by it — same itag, bare URL — rather than
+	// lost. Nothing selectable left is an error naming the cause.
 	videoNeedsPot := result.VideoFormat != nil && youtube.GvsTokenRequired(result.VideoFormat.Source)
 	audioNeedsPot := result.AudioFormat != nil && youtube.GvsTokenRequired(result.AudioFormat.Source)
 	var vodPoToken string
@@ -68,9 +70,10 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		}
 		if mintErr != nil {
 			var dropped []youtube.Format
-			pool, dropped = withoutGvsRequiredFormats(pool)
+			var swapped int
+			pool, dropped, swapped = withoutGvsRequiredFormats(pool)
 			job.Logger.Warn("[POT] missing_pot: no GVS token — dropping web-family formats",
-				"jobID", job.Job.ID, "binding", bindingKind, "err", mintErr, "dropped", len(dropped))
+				"jobID", job.Job.ID, "binding", bindingKind, "err", mintErr, "dropped", len(dropped), "swapped", swapped)
 			selected, result = selectVodFormats(job, pool, dropped)
 			if !result.HasVideo && !result.HasAudio {
 				return nil, fmt.Errorf("VOD: no formats usable without a GVS PO token (mint failed: %w)", mintErr)
@@ -164,7 +167,9 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 //
 // dropped is nil on the first run. On a missing_pot re-run it holds the
 // WEB-family formats removed from the pool, so a manual itag that pointed at
-// one of them says why it is being ignored instead of "not found".
+// one of them says why it is being ignored instead of "not found" — or, when
+// the drop swapped that format for its token-free shadow (the itag is still
+// in formats), says which client now serves it.
 func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
 	selected := youtube.SelectBestFormatsWithLogger(formats, job.Config.MaxVideoResolution, job.Config.Prefer60fps, job.Logger)
 
@@ -196,6 +201,9 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 					fps = *selected.Video.Fps
 				}
 				job.Logger.Debug(fmt.Sprintf("[FormatSelector] Manual video selection: itag %d %dx%d@%dfps", itag, w, h, fps))
+				if droppedHasItag(dropped, itag, "video") {
+					job.Logger.Info(fmt.Sprintf("[FormatSelector] Manual video itag %d served from %s after missing_pot", itag, selected.Video.Source))
+				}
 			} else if droppedHasItag(dropped, itag, "video") {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d requires a GVS token none could be minted; falling back to auto", itag))
 			} else {
@@ -219,6 +227,9 @@ func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtu
 			}
 			if found {
 				job.Logger.Debug(fmt.Sprintf("[FormatSelector] Manual audio selection: itag %d %dbps", itag, selected.Audio.Bitrate))
+				if droppedHasItag(dropped, itag, "audio") {
+					job.Logger.Info(fmt.Sprintf("[FormatSelector] Manual audio itag %d served from %s after missing_pot", itag, selected.Audio.Source))
+				}
 			} else if droppedHasItag(dropped, itag, "audio") {
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d requires a GVS token none could be minted; falling back to auto", itag))
 			} else {
@@ -314,18 +325,27 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 }
 
 // withoutGvsRequiredFormats splits formats into the ones usable without a GVS
-// PO token and the WEB-family ones that require it. Both are fresh slices:
-// the caller's list is never filtered in place.
-func withoutGvsRequiredFormats(formats []youtube.Format) (kept, dropped []youtube.Format) {
+// PO token and the WEB-family ones that require it. A dropped format carrying
+// a TokenFreeAlternate (the dedup shadow) contributes that alternate to kept
+// instead — same itag, a URL that needs no token — and counts in swapped; it
+// is still reported in dropped. Both slices are fresh: the caller's list is
+// never filtered in place, and the alternate is copied out of its pointer.
+func withoutGvsRequiredFormats(formats []youtube.Format) (kept, dropped []youtube.Format, swapped int) {
 	kept = make([]youtube.Format, 0, len(formats))
 	for _, f := range formats {
-		if youtube.GvsTokenRequired(f.Source) {
-			dropped = append(dropped, f)
-		} else {
+		if !youtube.GvsTokenRequired(f.Source) {
 			kept = append(kept, f)
+			continue
+		}
+		dropped = append(dropped, f)
+		if alt := f.TokenFreeAlternate; alt != nil && !youtube.GvsTokenRequired(alt.Source) {
+			a := *alt
+			a.TokenFreeAlternate = nil
+			kept = append(kept, a)
+			swapped++
 		}
 	}
-	return kept, dropped
+	return kept, dropped, swapped
 }
 
 // droppedHasItag reports whether a missing_pot drop removed a format with
