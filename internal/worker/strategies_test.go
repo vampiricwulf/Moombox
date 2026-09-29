@@ -79,7 +79,7 @@ func TestRefreshGvsCredentialsBypassesTokenCache(t *testing.T) {
 		GvsBinding:     "vd-123",
 		GvsBindingKind: youtube.BindingVisitorData,
 		Formats: []youtube.Format{
-			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"},
+			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"},
 		},
 	}
 
@@ -139,7 +139,7 @@ func TestRefreshGvsCredentialsBindingStableAcrossRefreshes(t *testing.T) {
 	videoInfo := &youtube.VideoInfo{
 		GvsBinding:     "vd-123",
 		GvsBindingKind: youtube.BindingVisitorData,
-		Formats:        []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"}},
+		Formats:        []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
 	}
 
 	binding, _ := gvsBinding(job, videoInfo)
@@ -189,7 +189,7 @@ func TestRefreshGvsCredentialsDegradesOnMintFailure(t *testing.T) {
 		Logger: &discardLogger{},
 	}
 	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"}},
+		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
 	}
 
 	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, fake, "vd-123", "test")
@@ -220,7 +220,7 @@ func TestRefreshGvsCredentialsNilProviderSkipsMint(t *testing.T) {
 		Logger: &discardLogger{},
 	}
 	videoInfo := &youtube.VideoInfo{
-		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"}},
+		Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
 	}
 
 	baseURL, token := refreshGvsCredentials(context.Background(), job, videoInfo, 140, nil, nil, nil, "vd-123", "test")
@@ -286,7 +286,7 @@ func TestRefreshGvsCredentialsSkipsURLHalfWithoutSolver(t *testing.T) {
 	}
 	videoInfo := &youtube.VideoInfo{
 		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
-		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1"}},
+		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth"}},
 	}
 
 	start := time.Now()
@@ -342,7 +342,7 @@ func TestRefreshGvsCredentialsSkipsWholeFileFormat(t *testing.T) {
 	videoInfo := &youtube.VideoInfo{
 		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
 		Formats: []youtube.Format{
-			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", ContentLength: "123456789"},
+			{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: "tv_auth", ContentLength: "123456789"},
 		},
 	}
 
@@ -409,7 +409,7 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 	}
 	videoInfo := &youtube.VideoInfo{
 		PlayerURL: "https://www.youtube.com/s/player/deadbeef/player.js",
-		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1&n=abc123"}},
+		Formats:   []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1&n=abc123", Source: "tv_auth"}},
 	}
 
 	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -425,5 +425,55 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 	}
 	if len(trace) != 2 || trace[0] != "mint" || trace[1] != "urlresolve" {
 		t.Errorf("call order = %v, want [mint urlresolve] — the mint must run before the URL half", trace)
+	}
+}
+
+// TestRefreshGvsCredentialsSkipsNonWebPOStream is the 403-recovery half of
+// the 2026-09-29 live-path fix. The manifest-free strategy leaves a visionos
+// or android_vr stream bare at setup; without this gate the first 403 on
+// that stream would re-mint a WebPO here and the engine would SetPoToken it
+// onto the very URL the setup gate kept clean. The refresh reads the
+// refreshed itag's own client from the setup formats — the same format the
+// strategy chose — so its policy cannot drift from the setup's. An itag the
+// pool does not name has no recorded client and is not minted for either.
+//
+// Mutant: dropping the gate fails every row (the fake is called and the
+// token comes back).
+func TestRefreshGvsCredentialsSkipsNonWebPOStream(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		itag   int
+	}{
+		{name: "visionos", source: "visionos", itag: 140},
+		{name: "android_vr", source: "android_vr", itag: 140},
+		{name: "android_vr_dash_fallback", source: "android_vr_dash_fallback", itag: 140},
+		{name: "itag not in the pool", source: "tv_auth", itag: 251},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var minted int
+			fake := &fakePotProvider{
+				generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
+					minted++
+					return "fresh-token", nil
+				},
+			}
+			logs := &captureLogger{}
+			job := &JobContext{Job: &database.Job{ID: "test-job"}, Logger: logs}
+			videoInfo := &youtube.VideoInfo{
+				Formats: []youtube.Format{{Itag: 140, URL: "https://example.invalid/videoplayback?id=1", Source: tc.source}},
+			}
+
+			_, token := refreshGvsCredentials(context.Background(), job, videoInfo, tc.itag, nil, nil, fake, "vd-123", "manifestless DASH audio")
+
+			if minted != 0 || token != "" {
+				t.Errorf("re-mint ran %d times and returned %q, want no mint and no token for a %s stream", minted, token, tc.name)
+			}
+			wantSource := tc.source
+			if tc.itag != 140 {
+				wantSource = ""
+			}
+			assertSkipLines(t, logs, skipLine(job, wantSource, "tag", "manifestless DASH audio"))
+		})
 	}
 }

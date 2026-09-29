@@ -1,9 +1,13 @@
 package worker
 
 import (
+	"context"
+	"strings"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // hlsLadder is the shape a YouTube live master playlist has: one variant per
@@ -88,5 +92,82 @@ func TestSelectHlsVariantCap(t *testing.T) {
 func TestSelectHlsVariantEmpty(t *testing.T) {
 	if got := selectHlsVariant(nil, "best", 2160); got != nil {
 		t.Errorf("selectHlsVariant(nil, …) = %+v, want nil", got)
+	}
+}
+
+const potTestMaster = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,FRAME-RATE=30
+https://manifest.googlevideo.com/api/manifest/hls_playlist/id/abc/itag/95/index.m3u8
+`
+
+// TestDownloadHlsAttachesWebPOOnlyToWebPOManifests is the HLS half of the
+// 2026-09-29 live-path fix, in the same shape as the DASH test: the master
+// playlist's recorded client decides whether a GVS token is minted and
+// carried on the master path, the variant path and the downloader. VISIONOS
+// serves live as HLS only, so a visionos master is the case this exists for.
+//
+// Mutant: dropping the IsWebPOSource gate fails the visionos, android_vr and
+// unrecorded rows (a mint, a /pot/ master path, a token, no skip line).
+func TestDownloadHlsAttachesWebPOOnlyToWebPOManifests(t *testing.T) {
+	for _, tc := range []struct {
+		source  string
+		wantPot bool
+	}{
+		{source: "tv_auth", wantPot: true},
+		{source: "watch_page", wantPot: true},
+		{source: "visionos"},
+		{source: "android_vr"},
+		{source: ""},
+	} {
+		t.Run("source="+tc.source, func(t *testing.T) {
+			calls := fakeVodMint(t, "tok123", nil)
+			srv := newManifestServer(t, potTestMaster)
+			job, logs := vodPotJob(t)
+			info := &youtube.VideoInfo{
+				StreamStatus:      youtube.StreamLive,
+				HlsManifestURL:    srv.URL + "/api/manifest/hls_variant/id/abc/file/index.m3u8",
+				HlsManifestSource: tc.source,
+			}
+
+			res, err := DownloadHls(context.Background(), job, info, nil, nil, &bgutils.PotProvider{}, nil)
+			if err != nil {
+				t.Fatalf("DownloadHls: %v", err)
+			}
+			path := srv.onlyPath(t)
+			variantLines := potLines(logs, "[POT] added PO token to HLS variant URL")
+			if tc.wantPot {
+				if n := calls.Load(); n != 1 {
+					t.Errorf("mint ran %d times, want 1", n)
+				}
+				if !strings.HasSuffix(path, "/pot/tok123") {
+					t.Errorf("master path = %q, want the /pot/tok123 suffix", path)
+				}
+				if len(variantLines) != 1 {
+					t.Errorf("variant URL token lines = %v, want one", variantLines)
+				}
+				if got := res.VideoDownloader.PoToken(); got != "tok123" {
+					t.Errorf("downloader token = %q, want tok123", got)
+				}
+				lines := potLines(logs, "[POT] GVS mint")
+				if len(lines) != 1 || lines[0]["source"] != tc.source {
+					t.Errorf("[POT] GVS mint lines = %v, want one naming source=%s", lines, tc.source)
+				}
+				assertSkipLines(t, logs)
+				return
+			}
+			if n := calls.Load(); n != 0 {
+				t.Errorf("mint ran %d times, want 0 — a %q master takes no WebPO token", n, tc.source)
+			}
+			if strings.Contains(path, "/pot/") {
+				t.Errorf("master path = %q, want no /pot/ segment", path)
+			}
+			if len(variantLines) != 0 {
+				t.Errorf("variant URL was tokenised: %v", variantLines)
+			}
+			if got := res.VideoDownloader.PoToken(); got != "" {
+				t.Errorf("downloader token = %q, want none", got)
+			}
+			assertSkipLines(t, logs, skipLine(job, tc.source))
+		})
 	}
 }

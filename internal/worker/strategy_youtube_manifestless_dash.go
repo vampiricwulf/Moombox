@@ -112,7 +112,8 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //     same path.
 //  4. Mint a GVS POT bound per yt-dlp's get_webpo_content_binding rule
 //     (gvsBinding, resolved at extraction and carried on videoInfo), via
-//     the cached /att/get minter.
+//     the cached /att/get minter — only for a stream whose format came
+//     from a WebPO client; a visionos / android_vr stream rides bare.
 //  5. Build engine.SegmentDownloader instances. The downloader's
 //     buildSegmentURL auto-detects query-style adaptive URLs and appends
 //     `&sq=N`, while applyPoTokenQuery appends `&pot=POT` per fetch. No
@@ -209,9 +210,34 @@ func DownloadManifestlessDash(
 	// touches — but passing the resolved value keeps the refresh contract
 	// (refreshGvsCredentials takes the caller's stable binding) uniform and
 	// future-proof against a binding source that IS invalidated mid-job.
+	//
+	// No manifest here: each chosen format carries its own client, and video
+	// and audio can come from different ones. Mint once if EITHER stream is
+	// from a WebPO client (youtube.IsWebPOSource) and hand the token only to
+	// the downloader whose own format is; a visionos or android_vr stream
+	// rides bare, as upstream does. refreshGvsCredentials applies the same
+	// rule to the 403 re-mint, so a bare stream stays bare.
 	bindingValue, bindingKind := gvsBinding(job, videoInfo)
+	var videoSource, audioSource string
+	var videoWebPO, audioWebPO bool
+	if videoStream != nil {
+		videoSource = formatSourceByItag(videoInfo.Formats, videoStream.Itag)
+		videoWebPO = youtube.IsWebPOSource(videoSource)
+	}
+	if audioStream != nil {
+		audioSource = formatSourceByItag(videoInfo.Formats, audioStream.Itag)
+		audioWebPO = youtube.IsWebPOSource(audioSource)
+	}
 	var pot string
 	if potProvider != nil {
+		if videoStream != nil && !videoWebPO {
+			logGvsTokenSkipped(job, videoSource, "stream", "video")
+		}
+		if audioStream != nil && !audioWebPO {
+			logGvsTokenSkipped(job, audioSource, "stream", "audio")
+		}
+	}
+	if potProvider != nil && (videoWebPO || audioWebPO) {
 		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
 		if err != nil {
 			job.Logger.Warn("[POT] GVS mint failed", "jobID", job.Job.ID,
@@ -219,10 +245,18 @@ func DownloadManifestlessDash(
 		} else if poToken != "" {
 			pot = poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "tokenLength", len(poToken))
+				"binding", bindingKind, "tokenLength", len(poToken),
+				"videoSource", videoSource, "audioSource", audioSource)
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}
+	}
+	videoPot, audioPot := "", ""
+	if videoWebPO {
+		videoPot = pot
+	}
+	if audioWebPO {
+		audioPot = pot
 	}
 
 	result := &DownloadResult{}
@@ -287,7 +321,7 @@ func DownloadManifestlessDash(
 			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceVideoSeq),
 			InitURL:             videoInitURL,
 			InitFromSegment:     videoInitURL != "",
-			PoToken:             pot,
+			PoToken:             videoPot,
 			CookieHeader:        cookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
@@ -347,7 +381,7 @@ func DownloadManifestlessDash(
 			DiscardStaged:       manifestlessDiscardStaged(videoInfo.StreamStatus, forceAudioSeq),
 			InitURL:             audioInitURL,
 			InitFromSegment:     audioInitURL != "",
-			PoToken:             pot,
+			PoToken:             audioPot,
 			CookieHeader:        cookieHeader,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,

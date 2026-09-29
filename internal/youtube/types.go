@@ -84,6 +84,17 @@ type VideoInfo struct {
 	PlayabilityError   PlayabilityError `json:"playabilityError,omitempty"`
 	PlayabilityReason  string           `json:"playabilityReason,omitempty"`
 
+	// DashManifestSource / HlsManifestSource name the client that served
+	// the manifest URL of the same kind, in the Format.Source vocabulary
+	// ("tv_auth", "web_safari", "visionos", "android_vr_dash_fallback", …).
+	// Every extraction site that records a manifest URL records its client
+	// too, because the live strategies attach a WebPO GVS token only when
+	// IsWebPOSource says the manifest came from a WebPO client — visionos
+	// and android_vr manifests ride bare, as upstream does. An empty source
+	// reads as non-WebPO: no token, the safe default.
+	DashManifestSource string `json:"dashManifestSource,omitempty"`
+	HlsManifestSource  string `json:"hlsManifestSource,omitempty"`
+
 	// SessionAuth is the login state YouTube reported for the session that
 	// produced this info (see SessionAuthState). Diagnostic only — nothing
 	// downloads differently because of it — but it is what lets a

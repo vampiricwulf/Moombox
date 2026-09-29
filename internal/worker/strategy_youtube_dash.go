@@ -112,8 +112,17 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Activated 2026-08-16 after the 10c2efd revert's suspect — the bundled
 	// token-policy change — was exonerated (the stall reproduced on baseline;
 	// root cause was the ANDROID_VR client ranking, fixed in e9d1388).
+	//
+	// Only a manifest from a WebPO client takes the token
+	// (youtube.IsWebPOSource on the source the extraction recorded): a
+	// visionos or android_vr manifest rides bare, as upstream does — a WebPO
+	// on an android_vr URL is the 2026-08-15 403 cause the AuthLevel block
+	// in internal/youtube/types.go names. Both downloaders below follow.
 	var dashPoToken string
-	if potProvider != nil {
+	dashSource := videoInfo.DashManifestSource
+	if potProvider != nil && !youtube.IsWebPOSource(dashSource) {
+		logGvsTokenSkipped(job, dashSource)
+	} else if potProvider != nil {
 		bindingValue, bindingKind := gvsBinding(job, videoInfo)
 		poToken, err := mintGvsPoToken(ctx, potProvider, bindingValue)
 		if err != nil {
@@ -123,7 +132,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			dashPoToken = poToken
 			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "tokenLength", len(poToken))
+				"binding", bindingKind, "tokenLength", len(poToken), "source", dashSource)
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token", "jobID", job.Job.ID)
 		}
