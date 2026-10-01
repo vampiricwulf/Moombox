@@ -68,7 +68,14 @@ func buildCacheStamp() string {
 // NOT need a system tar binary -- that's only required at build time
 // (by bgutil-sidecar/build.mjs).
 func extractIfNeeded(cacheDir string) error {
-	wantStamp := buildCacheStamp()
+	return extractPayload(cacheDir, buildCacheStamp(), bgembed.EmbeddedNode, bgembed.SidecarTarGz)
+}
+
+// extractPayload is extractIfNeeded with the payload passed in: the stamp the
+// cache dir must carry, the gzipped Node binary and the gzipped sidecar
+// tarball. Split out so the extraction rules can be tested against a payload
+// built in the test, not only against the ~36 MB embedded one.
+func extractPayload(cacheDir, wantStamp string, nodeGz, sidecarTarGz []byte) error {
 	stampPath := filepath.Join(cacheDir, "version.txt")
 
 	// Always ensure the cache dir exists AND has a tightened DACL,
@@ -95,14 +102,24 @@ func extractIfNeeded(cacheDir string) error {
 		return nil
 	}
 
-	// 1. Gunzip-extract the Node binary into cacheDir.
+	// 0. Drop the previous stamp before the tree changes. Left in place, a
+	//    re-extract that dies part-way sits under a stamp the binary that wrote
+	//    it still matches — that binary would call the half-replaced tree good.
+	if err := os.Remove(stampPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale version.txt: %w", err)
+	}
+
+	// 1. Gunzip-extract the Node binary into cacheDir. First on purpose: a
+	//    sidecar still running from this dir holds the binary open, so this
+	//    write fails before step 2 removes anything from under it.
 	nodePath := filepath.Join(cacheDir, nodeBinaryName())
-	if err := writeGunzipped(nodePath, bgembed.EmbeddedNode, 0o755); err != nil {
+	if err := writeGunzipped(nodePath, nodeGz, 0o755); err != nil {
 		return fmt.Errorf("extract Node binary: %w", err)
 	}
 
-	// 2. Gunzip+tar-extract sidecar.tar.gz into cacheDir.
-	if err := extractTarGz(cacheDir, bgembed.SidecarTarGz); err != nil {
+	// 2. Gunzip+tar-extract sidecar.tar.gz into cacheDir, replacing whatever
+	//    an earlier payload left under the same top-level names.
+	if err := extractTarGz(cacheDir, sidecarTarGz); err != nil {
 		return fmt.Errorf("extract sidecar tarball: %w", err)
 	}
 
@@ -167,6 +184,14 @@ func writeGunzipped(outPath string, gzData []byte, mode os.FileMode) error {
 	return out.Sync()
 }
 
+// extractTarGz unpacks the tarball into destDir. It REPLACES rather than
+// merges: the first time an entry lands under a top-level name (src,
+// node_modules, package.json, ...), whatever destDir already holds under that
+// name is removed first. Writing over the old tree in place left every file a
+// newer payload had dropped — whole packages, and nested node_modules copies
+// that shadow the hoisted one — so an upgraded install resolved modules a
+// fresh install does not have. Only names the tarball itself writes are
+// cleared; anything else in destDir is not ours to delete.
 func extractTarGz(destDir string, gzData []byte) error {
 	gz, err := gzip.NewReader(bytes.NewReader(gzData))
 	if err != nil {
@@ -175,6 +200,7 @@ func extractTarGz(destDir string, gzData []byte) error {
 	defer gz.Close()
 
 	cleanDest := filepath.Clean(destDir)
+	cleared := make(map[string]bool)
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -193,6 +219,19 @@ func extractTarGz(destDir string, gzData []byte) error {
 		cleanTarget := filepath.Clean(target)
 		if cleanTarget != cleanDest && !strings.HasPrefix(cleanTarget, cleanDest+string(os.PathSeparator)) {
 			return fmt.Errorf("tar entry escapes destDir: %q", hdr.Name)
+		}
+
+		// After the slip check, so the name removed is always inside destDir;
+		// an entry for destDir itself ("./") names nothing to clear.
+		if cleanTarget != cleanDest {
+			rel := strings.TrimPrefix(cleanTarget, cleanDest+string(os.PathSeparator))
+			top, _, _ := strings.Cut(rel, string(os.PathSeparator))
+			if !cleared[top] {
+				if err := os.RemoveAll(filepath.Join(cleanDest, top)); err != nil {
+					return fmt.Errorf("clear previous %s: %w", top, err)
+				}
+				cleared[top] = true
+			}
 		}
 
 		switch hdr.Typeflag {
