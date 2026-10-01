@@ -192,31 +192,33 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 
 - **`test`** — calls `.github/workflows/ci.yml` (the full suite on ubuntu and windows) for the tagged commit. The other two jobs `needs` it, so nothing is published until it passes. v2.8.9 was published while CI on the same commit was red: the workflows used to run side by side. A flaky failure is cleared with "Re-run failed jobs" on the same tag.
 - **`release`** — the binaries; steps below.
-- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push.
+- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push. It `needs` both `test` and `release`, so a failed build or signature check cannot leave a pushed `latest` image for a version that has no release.
 
-**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would and skips only the two publishing steps. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run: the GitHub release is not created (a step prints the six files and the release body instead) and the image is built for both architectures but not pushed. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
+**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the six assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with six assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
 
 #### Release job steps
 
 1. **Checkout** — `actions/checkout@v7`
 2. **Set up Go** — `actions/setup-go@v7` with version from `go.mod`
-3. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so the Windows resource step and all per-binary steps reference the same values. `VERSION` is the tag without its `v`, or on a dry run the declared version plus `-dryrun`.
+3. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so the Windows resource step and all per-binary steps reference the same values, plus the release target (`RELEASE_TAG`, `RELEASE_DRAFT`). `VERSION` is the tag without its `v`, or on a dry run the declared version plus `-dryrun`. On a tag push the step fails unless the tag equals the version `cmd/moombox/main.go` declares at that commit: a mismatch means the tag is on the wrong commit or the bump was not committed, and `RELEASE_NOTES.md` there would be the previous release's.
 4. **Set up Node** — `actions/setup-node@v7`
 5. **Build BotGuard sidecar payload** — `npm ci --ignore-scripts && node build.mjs`
 6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files
 7. **Generate Windows resources** — Patches `winres.json` with the version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
 8. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
 9. **Build moombox-linux-amd64** — `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS"`
-10. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
-11. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`, verified against the updater's embedded public key before the step succeeds (see Signing Tool)
-12. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
-13. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
-14. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
-15. **Create GitHub Release** (tags only) — `softprops/action-gh-release@v3` with body from step 14 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
+10. **Smoke-test moombox-linux-amd64** — runs the one binary this runner can execute with `--version` and requires exactly `moombox <VERSION> (<COMMIT>)`: it starts, and the ldflags reached it.
+11. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
+12. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`, verified against the updater's embedded public key before the step succeeds (see Signing Tool)
+13. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
+14. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
+15. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
+16. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 15 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`, with `fail_on_unmatched_files` so a missing asset fails the step instead of publishing without it. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases. One step for both modes: a tag push publishes under its tag; a dry run uploads to the draft described above.
+17. **Check and delete the draft** (dry run only) — requires a draft with six assets, and deletes it first so a failed check leaves nothing behind.
 
 Steps 5 and 6 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. The job used to cache them, and that cache never hit — a cache saved by one tag's run is not readable from another tag's (v2.8.3 through v2.8.10 all missed) — while its key left out `bgutil-sidecar/src` and the vendored ejs, so a hit would have shipped the previous sidecar JS under a new version number.
 
-Steps 8–10 are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
+The three builds (steps 8, 9 and 11) are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
 
 ### Test Workflow
 
