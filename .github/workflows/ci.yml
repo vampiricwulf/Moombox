@@ -9,9 +9,11 @@ name: CI
 #   - matrix over ubuntu-latest + windows-latest (the Windows-only code —
 #     DPAPI cookie reading, Job Objects, cookie profile paths — has tests
 #     that skip everywhere else)
-#   - the same embed-blob cache as release.yml (plus runner.os, because the
-#     sidecar tarball is built per runner); on a miss the sidecar payload
-#     and the pinned Node binaries are rebuilt, ~1 min
+#   - a cache for the three pinned Node binaries only (~1 min of nodejs.org
+#     downloads on a miss). The sidecar tarball is rebuilt on every run and
+#     never cached: it is seconds of work, and a cached one made the Go
+#     tests embed the PREVIOUS sidecar JS whenever a commit touched only
+#     bgutil-sidecar/src or vendor/ejs, which the old key did not hash
 #   - FFmpeg installed so muxer_concatcopy_test.go and probe_params_test.go
 #     stop skipping
 #   - gofmt / `go mod tidy -diff` / vet / the modernc.org/libc pin check /
@@ -52,19 +54,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Restore embed blob cache
-        # Same inputs as release.yml's key, plus the runner OS: the three
-        # Node binaries are identical everywhere but the sidecar tarball is
-        # produced by the runner's own tar.
-        id: cache-embed
+      - name: Restore embedded Node binary cache
+        # The Node binaries ONLY — sidecar.tar.gz must never be added to this
+        # path list (see the header). Their whole input is the pin: version.txt
+        # plus the fetch tool that carries the SHA-256s and the download logic.
+        # runner.os is in the key because an archive saved on one runner OS is
+        # not restored on the other.
+        id: cache-node
         uses: actions/cache@v6
         with:
           path: |
-            internal/bgutils/embed/sidecar.tar.gz
             internal/bgutils/embed/node-windows-amd64.gz
             internal/bgutils/embed/node-linux-amd64.gz
             internal/bgutils/embed/node-linux-arm64.gz
-          key: embed-${{ runner.os }}-${{ hashFiles('internal/bgutils/embed/version.txt', 'bgutil-sidecar/package-lock.json', 'bgutil-sidecar/build.mjs', 'tools/fetch-node/main.go') }}
+          key: embed-node-${{ runner.os }}-${{ hashFiles('internal/bgutils/embed/version.txt', 'tools/fetch-node/main.go') }}
 
       - uses: actions/setup-go@v7
         with:
@@ -73,10 +76,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-          # Both npm projects in the repo: the sidecar payload built on a
-          # cache miss, and web/tests' node suite whose `npm ci` runs on
-          # EVERY Linux run and is covered by no other cache key (the
-          # embed-blob cache keys off bgutil-sidecar/package-lock.json).
+          # Both npm projects in the repo: the sidecar payload, whose `npm ci`
+          # runs on every run, and web/tests' node suite, whose `npm ci` runs
+          # on every Linux run.
           cache: npm
           cache-dependency-path: |
             bgutil-sidecar/package-lock.json
@@ -85,14 +87,15 @@ jobs:
       - name: Build BotGuard sidecar payload
         # --ignore-scripts: a compromised dep's postinstall could exfiltrate
         # GITHUB_TOKEN; jsdom + bgutils-js have no install scripts we need.
-        if: steps.cache-embed.outputs.cache-hit != 'true'
+        # Unconditional: every Go step below embeds this tarball, so it is
+        # built from the commit under test, never restored.
         working-directory: bgutil-sidecar
         run: |
           npm ci --no-audit --no-fund --ignore-scripts
           node build.mjs
 
       - name: Fetch embedded Node binaries (all platforms)
-        if: steps.cache-embed.outputs.cache-hit != 'true'
+        if: steps.cache-node.outputs.cache-hit != 'true'
         run: go run ./tools/fetch-node
 
       - name: Install FFmpeg (ubuntu)
@@ -172,20 +175,14 @@ jobs:
         # bgutil-sidecar's wired `npm test` covers the homepage-ytcfg
         # extraction and minter keying — the logic behind the open
         # premiere-attestation field gate — and until now no workflow ran it.
-        # The `npm ci` guard is required because the sidecar build step above
-        # is skipped on an embed-cache HIT, which leaves node_modules absent.
-        # On a cache HIT that build step is skipped too, so vendor/ejs.bundle.js
-        # (esbuild's output, imported by src/cipher.js, which the tests import
-        # transitively via src/server.js) is also absent — it's built here when
-        # missing. Every Go step has already consumed the embed blobs by this
-        # point, and actions/cache only saves on a miss, so this rebuilt
-        # tarball is never re-cached.
+        # It needs node_modules (devDependencies included) and
+        # vendor/ejs.bundle.js (esbuild's output, imported by src/cipher.js,
+        # which the tests import transitively via src/server.js). The sidecar
+        # build step above leaves both in place on every run: build.mjs writes
+        # the bundle and restores the devDependencies it pruned for the tarball.
         if: runner.os == 'Linux'
         working-directory: bgutil-sidecar
-        run: |
-          [ -d node_modules ] || npm ci --no-audit --no-fund --ignore-scripts
-          [ -f vendor/ejs.bundle.js ] || node build.mjs
-          npm test
+        run: npm test
 
       - name: Frontend test suite
         if: runner.os == 'Linux'
