@@ -1280,7 +1280,7 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 ├── node.exe                         (~83 MB extracted from embed's gzipped 33 MB)
 ├── package.json
 ├── package-lock.json
-├── version.txt                      ("node@vX.Y.Z sha256@<sha>" — cache-invalidation key)
+├── version.txt                      (the embedded Node manifest + "sidecar@<sha256 of sidecar.tar.gz>" — cache-invalidation key)
 ├── src/
 │   └── server.js                    (~250 lines, JSON-RPC server)
 └── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~17 MB)
@@ -1289,7 +1289,7 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 ### Lifecycle
 
 - **First launch:** `extractIfNeeded(cacheDir)` creates the dir, applies `utils.ApplyUserOnlyDACL` to tighten permissions to current-user-only (matches the config-dir hardening), gunzips `node.exe.gz`, gunzip+tar-extracts `sidecar.tar.gz` using stdlib `archive/tar` + `compress/gzip` (no system tar required), writes `version.txt` last.
-- **Subsequent launches:** Compares the on-disk `version.txt` against the embedded `bgembed.Version`. On match AND key files present, skips extraction. On mismatch (Node version bump, sidecar JS update), deletes the old `version.txt`, then re-extracts the whole payload, removing what the dir held under each top-level name the tarball writes (`src`, `node_modules`, `vendor`, the manifests) so nothing from the previous payload is left behind. Files the tarball does not name are left alone.
+- **Subsequent launches:** Compares the on-disk `version.txt` against the stamp `buildCacheStamp` computes: the embedded `bgembed.Version` (the Node pin) plus `sidecar@<sha256>` of the embedded tarball. The tarball hash is what makes a sidecar JS change a mismatch; `Version` alone does not move with it. On match AND key files present, skips extraction. On mismatch (Node version bump, sidecar JS update), deletes the old `version.txt`, then re-extracts the whole payload, removing what the dir held under each top-level name the tarball writes (`src`, `node_modules`, `vendor`, the manifests) so nothing from the previous payload is left behind. Files the tarball does not name are left alone.
 - **Tar-slip defense:** Rejects any tar entry whose target path escapes `cacheDir`.
 - **DACL hoist:** Runs even on cache-hit so users upgrading from v2.5.x (whose pre-existing dir was created with the looser inherited ACL) get the tightened DACL on the next launch.
 

@@ -192,9 +192,9 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 
 - **`test`** — calls `.github/workflows/ci.yml` (the full suite on ubuntu and windows) for the tagged commit. The other two jobs `needs` it, so nothing is published until it passes. v2.8.9 was published while CI on the same commit was red: the workflows used to run side by side. A flaky failure is cleared with "Re-run failed jobs" on the same tag.
 - **`release`** — the binaries; steps below.
-- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag.
+- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push.
 
-**Dry run.** "Run workflow" on a branch runs all three jobs exactly as a tag would and skips only the two publishing steps: the GitHub release is not created (a step prints the six files and the release body instead) and the image is built for both architectures but not pushed. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
+**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would and skips only the two publishing steps. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run: the GitHub release is not created (a step prints the six files and the release body instead) and the image is built for both architectures but not pushed. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
 
 #### Release job steps
 
