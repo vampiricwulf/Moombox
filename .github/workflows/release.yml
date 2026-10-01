@@ -116,11 +116,12 @@ jobs:
             echo "LDFLAGS=-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
           } >> "$GITHUB_ENV"
 
+      # No `cache: npm`: its key never matched the one ci.yml saves on main
+      # (that one hashes two lockfiles), so every release missed and then
+      # saved a copy under its own tag ref that nothing could read.
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: bgutil-sidecar/package-lock.json
 
       - name: Build BotGuard sidecar payload
         # --ignore-scripts: a compromised dep's postinstall could

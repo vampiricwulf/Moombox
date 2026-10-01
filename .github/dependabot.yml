@@ -29,7 +29,11 @@ updates:
       - dependency-name: meriyah
       - dependency-name: astring
 
+  # The workflows pin every action to a MAJOR tag (actions/checkout@v7), which
+  # already floats to the newest minor and patch on its own. The only thing
+  # left to move is a new major, so the check is daily: a PR opens within a
+  # day of one being released, and on every other day nothing happens.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: daily
