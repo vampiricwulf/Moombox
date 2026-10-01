@@ -85,5 +85,9 @@ jobs:
           build-args: |
             VERSION=${{ env.MOOMBOX_VERSION }}
             COMMIT=${{ env.MOOMBOX_COMMIT }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-from/cache-to. The type=gha layer cache this carried was
+          # saved under each tag's own ref, which no later tag can read: the
+          # v2.8.10 build reused zero layers and exported ~1.1 GB that then
+          # sat in the repo's cache quota beside the caches CI does use. A
+          # release image is also better built cold — a cached apt layer
+          # would keep shipping the Debian packages of the day it was saved.
