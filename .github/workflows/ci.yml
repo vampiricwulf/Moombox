@@ -17,10 +17,11 @@ name: CI
 #   - FFmpeg installed so muxer_concatcopy_test.go and probe_params_test.go
 #     stop skipping
 #   - gofmt / `go mod tidy -diff` / vet / the modernc.org/libc pin check /
-#     staticcheck / build / full `go test`; ubuntu also runs `go test -race`
-#     on logger + database + web, cross-builds linux/arm64, and runs both
-#     node suites (bgutil-sidecar's `npm test` and `node --test` in
-#     web/tests after its own `npm ci`, so jsdom is present)
+#     the Dockerfile Go-version check / staticcheck / build / full
+#     `go test`; ubuntu also runs `go test -race` on logger + database +
+#     web, cross-builds linux/arm64, and runs both node suites
+#     (bgutil-sidecar's `npm test` and `node --test` in web/tests after its
+#     own `npm ci`, so jsdom is present)
 #
 # staticcheck is a hard gate, pinned to a release rather than @latest:
 # staticcheck lags Go releases, and an unpinned install can refuse to build
@@ -146,6 +147,22 @@ jobs:
             exit 1
           fi
           echo "libc pin OK: $ours"
+
+      - name: Dockerfile builds with the Go version go.mod requires
+        # The image's build stage is `golang:<major.minor>-bookworm`, and Go
+        # inside that image does not download a newer toolchain. Moving
+        # go.mod's `go` line without moving the Dockerfile breaks only the
+        # image build — which no push or pull request runs, so it surfaced
+        # at release time. This is the gate that notices earlier.
+        run: |
+          want=$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' go.mod)
+          got=$(sed -n 's/^FROM .*golang:\([0-9][0-9]*\.[0-9][0-9]*\)[-.].*/\1/p' Dockerfile)
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "go.mod requires Go \"$want\" but the Dockerfile's build stage is golang:\"$got\""
+            echo "Move the Dockerfile's FROM golang:... line together with go.mod's go directive."
+            exit 1
+          fi
+          echo "Dockerfile Go version OK: $got"
 
       - name: staticcheck
         run: |

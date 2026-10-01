@@ -29,6 +29,15 @@ updates:
       - dependency-name: meriyah
       - dependency-name: astring
 
+  # The frontend test harness has its own lockfile and its own jsdom, which
+  # nothing was updating: on 2026-10-01 it sat at 30.0.1 while the sidecar's,
+  # covered by the entry above, had moved to 30.1.1.
+  - package-ecosystem: npm
+    directory: /web/tests
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
   # The workflows pin every action to a MAJOR tag (actions/checkout@v7), which
   # already floats to the newest minor and patch on its own. The only thing
   # left to move is a new major, so the check is daily: a PR opens within a
