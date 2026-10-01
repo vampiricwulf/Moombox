@@ -10,11 +10,17 @@ permissions:
 
 # Single ubuntu-latest job that does everything:
 #
-#   1. Checkout + setup Go + (conditional) setup Node
-#   2. actions/cache for the embed blobs (sidecar + 3 Node binaries),
-#      keyed by version.txt + sidecar manifest + fetch-node source.
-#      On cache hit: skip the sidecar build and fetch-node entirely
-#      (~55s saved). On miss: build them, cache stores for next run.
+#   1. Checkout + setup Go + setup Node
+#   2. Build the embed blobs from the tagged commit, every time: the
+#      sidecar payload (npm ci + build.mjs, ~3s) and the 3 pinned Node
+#      binaries (fetch-node, SHA-256 verified, ~35s). Deliberately NOT
+#      behind actions/cache. The cache this job used to carry never hit
+#      (a cache saved by one tag's run is not readable from another
+#      tag's — v2.8.3 through v2.8.10 all missed), and its key left out
+#      bgutil-sidecar/src and vendor/ejs, so the day it did hit, a
+#      release would have shipped the previous sidecar JS under a new
+#      version number. A signed artifact is built from what the tag
+#      contains, not from what an earlier run left behind.
 #   3. go-winres setup — generates Windows .syso resources from
 #      bash + jq + go-winres (which works on any host OS).
 #   4. Cross-compile all 3 binaries SEQUENTIALLY, each in its own
@@ -41,30 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Restore embed blob cache
-        # Cache key is the hash of: version.txt (encodes pinned Node
-        # SHAs), the sidecar package-lock.json + build.mjs (encode
-        # sidecar deps + build process), and tools/fetch-node/main.go
-        # (encodes the fetch logic). When all four are unchanged
-        # across runs the cached blobs are reused, skipping ~50s of
-        # nodejs.org downloads + ~5s of npm ci. Cache evicts after
-        # 7 days of disuse but releases run more frequently than that.
-        id: cache-embed
-        uses: actions/cache@v6
-        with:
-          path: |
-            internal/bgutils/embed/sidecar.tar.gz
-            internal/bgutils/embed/node-windows-amd64.gz
-            internal/bgutils/embed/node-linux-amd64.gz
-            internal/bgutils/embed/node-linux-arm64.gz
-          key: embed-${{ hashFiles('internal/bgutils/embed/version.txt', 'bgutil-sidecar/package-lock.json', 'bgutil-sidecar/build.mjs', 'tools/fetch-node/main.go') }}
-
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - uses: actions/setup-node@v7
-        if: steps.cache-embed.outputs.cache-hit != 'true'
         with:
           node-version: '24'
           cache: npm
@@ -74,7 +61,6 @@ jobs:
         # --ignore-scripts: a compromised dep's postinstall could
         # exfiltrate GITHUB_TOKEN; jsdom + bgutils-js have no install
         # scripts we depend on, so ignoring is safe.
-        if: steps.cache-embed.outputs.cache-hit != 'true'
         run: |
           cd bgutil-sidecar
           npm ci --no-audit --no-fund --ignore-scripts
@@ -86,7 +72,6 @@ jobs:
         # and Linux arm64; verifies SHA-256; gzips to per-platform embed
         # files. Idempotent: skips re-download when the stamp fetch-node writes
         # beside the blobs (node-blobs.stamp) matches and every blob is present.
-        if: steps.cache-embed.outputs.cache-hit != 'true'
         run: go run ./tools/fetch-node
 
       - name: Generate Windows resources

@@ -64,7 +64,7 @@ cd ..
 go build -o moombox.exe ./cmd/moombox
 ```
 
-CI runs steps 1+2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs until `version.txt` drifts (Node version bump or sidecar JS change).
+CI runs steps 1+2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs. Re-run step 1 when the Node pin in `version.txt` moves, and step 2 whenever anything under `bgutil-sidecar/` changes — `version.txt` records the Node pin only, so nothing flags a stale `sidecar.tar.gz`.
 
 To skip the sidecar entirely (smaller binary, falls back to goja-only PO tokens), set `[bgutils] use_sidecar = false` in `config.toml`. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
 

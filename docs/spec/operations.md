@@ -52,7 +52,7 @@ cd ..
 go build -o moombox.exe ./cmd/moombox
 ```
 
-CI runs steps 1 and 2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs until `version.txt` drifts (Node version bump or sidecar JS change).
+CI runs steps 1 and 2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs. Re-run step 1 when the Node pin in `version.txt` moves, and step 2 whenever anything under `bgutil-sidecar/` changes — `version.txt` records the Node pin only, so nothing flags a stale `sidecar.tar.gz`.
 
 The two embed sources are independent:
 - `tools/fetch-node/main.go` is a Go tool that downloads the pinned Node release from `nodejs.org/dist/` for all three platforms (Windows x64, Linux x64, Linux arm64), SHA-256 verifies each against hardcoded constants in the source, gzips them to `internal/bgutils/embed/node-windows-amd64.gz`, `node-linux-amd64.gz`, and `node-linux-arm64.gz`, and updates `internal/bgutils/embed/version.txt` (committed file used as the cache-invalidation key for first-launch extraction). 5-minute HTTP timeout + 200 MB body cap per file.
@@ -191,23 +191,24 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 #### Steps
 
 1. **Checkout** — `actions/checkout@v7`
-2. **Restore embed blob cache** — `actions/cache@v6` keyed by hash of `version.txt` + sidecar `package-lock.json` + `build.mjs` + `tools/fetch-node/main.go`. On cache hit, the sidecar build and Node fetch are skipped entirely (~55s saved). Cache evicts after 7 days of disuse.
-3. **Set up Go** — `actions/setup-go@v7` with version from `go.mod`
-4. **Set up Node** — `actions/setup-node@v7` (only when cache missed)
-5. **Build BotGuard sidecar payload** — `npm ci --omit=dev --ignore-scripts && node build.mjs` (only when cache missed)
-6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files (only when cache missed)
-7. **Generate Windows resources** — Patches `winres.json` with tag version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
-8. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so all per-binary steps reference the same values.
-9. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
-10. **Build moombox-linux-amd64** — `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS"`
-11. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
-12. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`
-13. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
-14. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
-15. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
-16. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 15 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
+2. **Set up Go** — `actions/setup-go@v7` with version from `go.mod`
+3. **Set up Node** — `actions/setup-node@v7`
+4. **Build BotGuard sidecar payload** — `npm ci --ignore-scripts && node build.mjs`
+5. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files
+6. **Generate Windows resources** — Patches `winres.json` with tag version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
+7. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so all per-binary steps reference the same values.
+8. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
+9. **Build moombox-linux-amd64** — `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS"`
+10. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
+11. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`
+12. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
+13. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
+14. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
+15. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 14 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
 
-Steps 9–11 are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
+Steps 4 and 5 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. The job used to cache them, and that cache never hit — a cache saved by one tag's run is not readable from another tag's (v2.8.3 through v2.8.10 all missed) — while its key left out `bgutil-sidecar/src` and the vendored ejs, so a hit would have shipped the previous sidecar JS under a new version number.
+
+Steps 8–10 are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
 
 ### Test Workflow
 
@@ -216,7 +217,7 @@ Steps 9–11 are sequential (not parallel). On a 4-vCPU runner each `go build` s
 **Runners:** `ubuntu-latest` and `windows-latest` (matrix, `fail-fast: false`) — the Windows-only code paths (DPAPI cookie reading, Job Objects, cookie profile paths) have tests that skip everywhere else
 **Permissions:** `contents: read`; one run per ref (`concurrency` with cancel-in-progress); 45-minute job timeout
 
-Steps, on both runners: checkout → the release workflow's embed-blob cache (key also carries `runner.os`, since the sidecar tarball is produced by the runner's own `tar`) → `setup-go` from `go.mod` → `setup-node` 24 → on a cache miss, the sidecar payload build and `go run ./tools/fetch-node` → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go mod tidy -diff` → `go vet ./...` → the `modernc.org/libc` pin check (the version `modernc.org/sqlite`'s own `go.mod` names must be the one this module pins) → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally runs `go test -race -count=1` on `internal/logger/...`, `internal/database/...` and `internal/web/...` (owner ruling O-P), cross-builds `linux/arm64`, runs `bgutil-sidecar`'s `npm test` (installing `node_modules` and rebuilding `vendor/ejs.bundle.js` first when the embed-blob cache hit skipped the sidecar build), and runs the frontend suite (`npm ci` in `web/tests`, `node --test ./*.test.mjs` — jsdom is that package's devDependency, so the DOM suites execute rather than skip).
+Steps, on both runners: checkout → a cache for the three pinned Node binaries (keyed by `runner.os` + the hash of `version.txt` and `tools/fetch-node/main.go`) → `setup-go` from `go.mod` → `setup-node` 24 → the sidecar payload build, on every run (the tarball is never cached, so the Go tests embed the sidecar JS of the commit under test) → `go run ./tools/fetch-node` on a cache miss → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go mod tidy -diff` → `go vet ./...` → the `modernc.org/libc` pin check (the version `modernc.org/sqlite`'s own `go.mod` names must be the one this module pins) → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally runs `go test -race -count=1` on `internal/logger/...`, `internal/database/...` and `internal/web/...` (owner ruling O-P), cross-builds `linux/arm64`, runs `bgutil-sidecar`'s `npm test` (against the `node_modules` and `vendor/ejs.bundle.js` the sidecar payload build left in place), and runs the frontend suite (`npm ci` in `web/tests`, `node --test ./*.test.mjs` — jsdom is that package's devDependency, so the DOM suites execute rather than skip).
 
 `staticcheck ./...` is a hard gate, installed at a pinned release (`2026.2.1` in `.github/workflows/ci.yml`) because staticcheck lags Go releases and `@latest` can refuse a new toolchain. The live gates (`MOOMBOX_LIVE_*`) never run in CI: they need YouTube and Twitch.
 
