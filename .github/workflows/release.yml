@@ -6,8 +6,9 @@ on:
       - 'v*'
   # Dry run. "Run workflow" on any ref runs every job below exactly as a
   # tag would — the test gate, the embed blobs, the three cross-builds, the
-  # signing with its self-check, the multi-arch image build — and skips only
-  # the two publishing steps (the GitHub release, the image push). This
+  # signing with its self-check, the multi-arch image build — and publishes
+  # nothing: the image is not pushed, and the release upload goes to a
+  # draft that the job deletes. This
   # workflow otherwise runs on tags alone, and a tag is never replaced, so
   # without this a break in it is found by the release it breaks and costs a
   # version number. The dry run's version is the one in cmd/moombox/main.go
@@ -32,8 +33,10 @@ permissions:
 #            neither waited for the other. A flaky failure here is cleared
 #            with "Re-run failed jobs" on the same tag.
 #   release  the binaries (below), after test.
-#   docker   docker-publish.yml, called after test: the multi-arch image,
-#            pushed only for a tag.
+#   docker   docker-publish.yml, called after test AND release: the
+#            multi-arch image, pushed only for a tag push. It waits for
+#            release so a failed build or signature check cannot leave a
+#            pushed `latest` image for a version that has no release.
 #
 # The release job is a single ubuntu-latest job that does everything:
 #
@@ -60,7 +63,8 @@ permissions:
 #      Actions UI and easier failure attribution.
 #   5. Sign all 3 binaries sequentially, each in its own named step.
 #   6. Single softprops/action-gh-release@v3 call publishes the
-#      release with body + all 6 assets in one shot (tags only).
+#      release with body + all 6 assets in one shot. In a dry run the
+#      same call uploads to a draft release that is then deleted.
 #
 # Single-job structure means no artifact upload/download cycle, no
 # duplicated checkout + setup-go between phases, and the release
@@ -75,7 +79,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   docker:
-    needs: test
+    needs: [test, release]
     permissions:
       contents: read
       packages: write
@@ -104,22 +108,42 @@ jobs:
         # resource metadata is. A dry run takes the version
         # cmd/moombox/main.go declares and marks it, even when it was
         # started on a tag ref.
+        #
+        # A tag must equal the declared version exactly (v2.6.0-test.1
+        # declared "2.6.0-test.1"; every tag checked back to v2.8.3 matched).
+        # A mismatch means the tag sits on the wrong commit or the bump
+        # commit is missing — and RELEASE_NOTES.md at that commit is then the
+        # PREVIOUS release's, which this job would publish under the new
+        # version. Failing here publishes nothing: docker waits for this job.
         run: |
           set -euo pipefail
+          DECLARED=$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' cmd/moombox/main.go | head -n 1)
+          if [ -z "$DECLARED" ]; then
+            echo "could not read the version from cmd/moombox/main.go"
+            exit 1
+          fi
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
-          else
-            DECLARED=$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' cmd/moombox/main.go | head -n 1)
-            if [ -z "$DECLARED" ]; then
-              echo "could not read the version from cmd/moombox/main.go"
+            if [ "$VERSION" != "$DECLARED" ]; then
+              echo "Tag $GITHUB_REF_NAME does not match the version cmd/moombox/main.go declares at this commit (\"$DECLARED\")."
+              echo "The tag is on the wrong commit, or the version bump was not committed. Nothing was published."
               exit 1
             fi
+            RELEASE_TAG="$GITHUB_REF_NAME"
+            RELEASE_DRAFT=false
+          else
             VERSION="${DECLARED}-dryrun"
+            # The upload step runs in a dry run too, against a draft release
+            # under a name no tag will ever have; the step after it deletes it.
+            RELEASE_TAG="dryrun-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            RELEASE_DRAFT=true
           fi
           COMMIT=$(git rev-parse --short HEAD)
           {
             echo "VERSION=$VERSION"
             echo "COMMIT=$COMMIT"
+            echo "RELEASE_TAG=$RELEASE_TAG"
+            echo "RELEASE_DRAFT=$RELEASE_DRAFT"
             echo "LDFLAGS=-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
           } >> "$GITHUB_ENV"
 
@@ -203,6 +227,22 @@ jobs:
           GOARCH: amd64
         run: go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox
 
+      - name: Smoke-test moombox-linux-amd64
+        # The one binary of the three this runner can execute. --version
+        # answers before the launcher and before any config is read, so this
+        # proves the binary starts at all and that the ldflags carried the
+        # version and commit into it.
+        run: |
+          set -euo pipefail
+          got=$(./moombox-linux-amd64 --version)
+          want="moombox ${VERSION} (${COMMIT})"
+          if [ "$got" != "$want" ]; then
+            echo "moombox-linux-amd64 --version printed: $got"
+            echo "expected:                              $want"
+            exit 1
+          fi
+          echo "$got"
+
       - name: Build moombox-linux-arm64
         env:
           CGO_ENABLED: 0
@@ -262,22 +302,33 @@ jobs:
       - name: Dry run — show what a tag would have published
         if: github.event_name != 'push'
         run: |
-          echo "Dry run of $VERSION ($COMMIT): built and signed, no release created."
+          echo "Dry run of $VERSION ($COMMIT): built and signed; the upload below goes to a draft that is then deleted."
           ls -l Moombox.exe Moombox.exe.sig moombox-linux-amd64 moombox-linux-amd64.sig moombox-linux-arm64 moombox-linux-arm64.sig
           echo "--- release body ---"
           cat release_body.md
 
       - name: Create GitHub Release with all 6 assets
-        if: github.event_name == 'push'
+        # ONE step for both modes, so a dry run executes the same action, the
+        # same token and the same file list a tag does. What differs comes
+        # from the version step: a tag push publishes under its own tag; a
+        # dry run uploads to a DRAFT named dryrun-<run>-<attempt> — never
+        # public, creates no git tag — which the next step checks and deletes.
+        id: publish
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          draft: ${{ env.RELEASE_DRAFT }}
           body_path: release_body.md
           generate_release_notes: ${{ env.use_github_notes == 'true' }}
           # Tags containing '-' (e.g. v2.6.0-test.1, v2.6.0-beta.2, v2.6.0-rc.1)
           # are treated as pre-releases: GitHub won't mark them "Latest" and the
           # /releases/latest endpoint continues to point at the last stable tag.
+          # A dry run's draft is never "Latest" either.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          make_latest: ${{ (github.event_name != 'push' || contains(github.ref_name, '-')) && 'false' || 'true' }}
+          # Off by default: a path below that matched no file would be a
+          # warning, and the release would publish without that asset.
+          fail_on_unmatched_files: true
           files: |
             Moombox.exe
             Moombox.exe.sig
@@ -285,3 +336,27 @@ jobs:
             moombox-linux-amd64.sig
             moombox-linux-arm64
             moombox-linux-arm64.sig
+
+      - name: Dry run — check the draft release, then delete it
+        # always(): a draft the upload step created and then failed on must
+        # still be removed. Deleted before it is judged, for the same reason.
+        if: always() && github.event_name != 'push' && steps.publish.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.publish.outputs.id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_ID" ]; then
+            # The upload step died before reporting an id. gh finds a draft by
+            # the name it was given, if one was created at all.
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+            echo "the upload step reported no release id"
+            exit 1
+          fi
+          found=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '"draft=\(.draft) assets=\(.assets | length)"')
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
+          echo "draft release $RELEASE_TAG: $found — deleted"
+          if [ "$found" != "draft=true assets=6" ]; then
+            echo "expected draft=true assets=6"
+            exit 1
+          fi
