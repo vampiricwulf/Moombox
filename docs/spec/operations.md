@@ -248,10 +248,18 @@ When `RELEASE_NOTES.md` is present, the release body is assembled as:
 ### Docker Publish Workflow
 
 **File:** `.github/workflows/docker-publish.yml`
-**Trigger:** `workflow_call` from release.yml's `docker` job (after the test gate, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag, and a manual run with it unticked builds both architectures without pushing.
+**Trigger:** `workflow_call` from release.yml's `docker` job (after the test gate and the release job, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag push, and a manual run with it unticked builds both architectures without pushing.
 **Permissions:** `contents: read`, `packages: write`
 
 Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to `ghcr.io/vampiricwulf/moombox`. Release tags produce `X.Y.Z`, `X.Y`, and `latest` (pre-release tags containing `-` skip `latest`, matching release.yml's pre-release handling); manual dispatch on `main` produces `edge`. `VERSION`/`COMMIT` build args mirror release.yml's ldflags. QEMU is only used for the small Debian runtime stage of the arm64 image — the Go compile cross-compiles natively.
+
+### Vulnerability Scan Workflow
+
+**File:** `.github/workflows/vuln-scan.yml`
+**Trigger:** weekly `schedule` (Mondays 06:17 UTC), plus `workflow_dispatch`
+**Permissions:** `contents: read`
+
+Runs `govulncheck ./...` (pinned, like staticcheck) and `npm audit` on the two npm projects — the sidecar's runtime dependencies and the frontend test harness, failing at moderate and above. govulncheck fails only when the code reaches the vulnerable symbol. It needs every package to load, so two empty files stand in for the embed blobs instead of building them. Deliberately not a step in ci.yml: an advisory is published on the database's schedule, not on a commit, and would turn an unrelated pull request red. A failed scheduled run is emailed by GitHub to whoever last changed the workflow's schedule.
 
 ---
 

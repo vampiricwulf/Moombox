@@ -1,0 +1,71 @@
+name: Vulnerability scan
+
+# Weekly, and on demand ("Run workflow"). Dependabot's version updates move
+# dependencies forward, but nothing said so when a dependency ALREADY in use
+# picked up an advisory: until 2026-10-01 the repo had Dependabot alerts off
+# and no scanner in any workflow.
+#
+# Not part of ci.yml on purpose. An advisory is published on the vulnerability
+# database's schedule, not on a commit, so as a CI step it would turn an
+# unrelated pull request red. Here a failure is its own signal: GitHub emails
+# a failed scheduled run to whoever last changed this file's schedule.
+#
+#   - govulncheck reports a Go module or standard-library vulnerability only
+#     when the code actually reaches the vulnerable symbol, so a failure is
+#     something to act on, not a list to triage.
+#   - npm audit covers the two npm projects: the sidecar's runtime
+#     dependencies (what ships inside the binary) and the frontend test
+#     harness. Moderate and above fail; low is reported and passes.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Stand in for the embed blobs
+        # govulncheck has to load every package, and internal/bgutils/embed
+        # does not load without the files its go:embed directives name. It
+        # analyses code, never the embedded bytes, so two empty files replace
+        # the sidecar build and ~150 MB of Node downloads.
+        run: |
+          : > internal/bgutils/embed/sidecar.tar.gz
+          : > internal/bgutils/embed/node-linux-amd64.gz
+
+      - name: govulncheck (Go modules and standard library)
+        # Pinned, like staticcheck in ci.yml. The vulnerability database it
+        # queries is live either way.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+      # The remaining steps run even when an earlier scan failed: one
+      # finding should not hide another.
+      - name: npm audit (sidecar runtime dependencies)
+        if: ${{ !cancelled() }}
+        working-directory: bgutil-sidecar
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: npm audit (frontend test harness)
+        if: ${{ !cancelled() }}
+        working-directory: web/tests
+        run: npm audit --audit-level=moderate

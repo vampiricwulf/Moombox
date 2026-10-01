@@ -108,6 +108,7 @@ go vet ./...                                        # static analysis
 
 - **`.github/workflows/release.yml`** — runs on tag push (`v*`). Runs the test suite on the tagged commit first, then builds and signs all three platforms, creates a GitHub release with the matching assets and a body listing all download links, and publishes the Docker image. Run it by hand ("Run workflow") for a dry run: every step runs and nothing is published (the image is not pushed; the release upload goes to a draft the job deletes). A tag must equal the version in `cmd/moombox/main.go` or the release fails.
 - **`.github/workflows/ci.yml`** — runs on every PR/push to `main`, on ubuntu and windows: gofmt, vet, staticcheck, build, the full test suite. Also the test gate release.yml calls.
+- **`.github/workflows/vuln-scan.yml`** — weekly, and on manual dispatch: `govulncheck` over the Go module and `npm audit` over both npm projects.
 - **`.github/workflows/docker-publish.yml`** — called by release.yml on a tag, or run by manual dispatch. Builds the multi-arch (linux/amd64 + linux/arm64) Docker image and pushes it to `ghcr.io/vampiricwulf/moombox` (release tags → `X.Y.Z`, `X.Y`, `latest`; manual dispatch on `main` → `edge`).
 
 ## Profiling
