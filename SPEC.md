@@ -794,7 +794,7 @@ Optional. When enabled (`https_enabled = true`), uses configured cert/key paths.
 
 Binary releases are signed with Ed25519. The public key is embedded in the binary at compile time. The private key is stored as a GitHub Actions secret and never leaves CI. During update: download new binary, download `.sig` file, verify Ed25519 signature of the binary against the embedded public key. If verification fails, the update is rejected and the downloaded file is deleted. The three-step binary swap: write new binary as `{exe}.new`, rename current `{exe}` to `{exe}.old`, rename `{exe}.new` to `{exe}`. The `.old` file is cleaned up on next startup by `CleanupOldBinary()`. This three-step approach is atomic on Windows (rename is atomic within the same volume) and allows rollback if something goes wrong.
 
-The `cmd/sign/main.go` tool is used in CI to sign the binary. It reads the Ed25519 private key from an environment variable, signs the binary, and writes the `.sig` file. The `POST /api/update/verify` endpoint allows users to verify the signature of the currently running binary at any time.
+The `cmd/sign/main.go` tool is used in CI to sign the binary. It reads the Ed25519 private key from an environment variable, signs the binary, writes the `.sig` file, and verifies it with `VerifySignature` against the embedded public key — a `SIGNING_KEY` that is not that key's private half fails the release instead of publishing signatures every install would reject. The `POST /api/update/verify` endpoint allows users to verify the signature of the currently running binary at any time.
 
 **Deep-dive:** [docs/spec/security.md](docs/spec/security.md)
 

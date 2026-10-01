@@ -200,7 +200,7 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 8. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
 9. **Build moombox-linux-amd64** — `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS"`
 10. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
-11. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`
+11. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`, verified against the updater's embedded public key before the step succeeds (see Signing Tool)
 12. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
 13. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
 14. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
@@ -435,6 +435,7 @@ go run ./cmd/sign -genkey
 - **Algorithm:** Ed25519 (deterministic, no randomness needed at sign time)
 - **Private key source:** `SIGNING_KEY` environment variable (hex-encoded, 128 hex chars / 64 bytes)
 - **Output:** `<input-path>.sig` containing the raw 64-byte signature
+- **Self-check:** after writing the `.sig`, the tool runs `VerifySignature` on it — the same call an installed Moombox makes, against the public key in the source tree being released. Ed25519 signs with any well-formed key, so a wrong or rotated `SIGNING_KEY` would otherwise produce a green release whose update every existing install refuses. On a mismatch the `.sig` is deleted and the tool exits non-zero, which fails the release before the publish step.
 - **Public key location:** Embedded in `internal/updater/signing.go` as `updatePublicKeyHex`
 - **Key management:** Private key stored as a GitHub Actions secret. Never committed, never logged. The `-genkey` subcommand generates a fresh key pair for initial setup or rotation.
 

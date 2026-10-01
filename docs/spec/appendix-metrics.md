@@ -27,7 +27,7 @@
 
 ## Test Baseline
 
-- **Packages:** 36 in `go list ./...`. `go test -count=1 ./...` reports **32 ok / 0 fail**; the other four have no test files (`cmd/sign`, `internal/bgutils/embed`, `tools/sidecar-sig-probe`, `web`).
+- **Packages:** 37 in `go list ./...`. `go test -count=1 ./...` reports **34 ok / 0 fail**; the other three have no test files (`internal/bgutils/embed`, `tools/sidecar-sig-probe`, `web`).
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
