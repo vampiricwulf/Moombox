@@ -1,9 +1,9 @@
 name: CI
 
 # Build, lint, and test on every push to main and every pull request, on
-# both desktop platforms Moombox ships for. release.yml only runs on tag
-# push and never runs the tests; before this workflow existed the suite
-# ran only on developer machines.
+# both desktop platforms Moombox ships for. Also callable: release.yml runs
+# this workflow as its required first job, so a tag publishes nothing until
+# the suite has passed on the tagged commit.
 #
 # Shape:
 #   - matrix over ubuntu-latest + windows-latest (the Windows-only code —
@@ -30,12 +30,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
+# github.workflow is the CALLER's name when release.yml calls this, which
+# keeps a release dry run started from main out of the group a push to main
+# uses — otherwise each would cancel the other.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 defaults:

@@ -106,9 +106,9 @@ go vet ./...                                        # static analysis
 
 ## CI Workflows
 
-- **`.github/workflows/release.yml`** — runs on tag push (`v*`). Builds and signs all three platforms, creates a GitHub release with the matching assets and a body listing all download links.
-- **`.github/workflows/linux-test.yml`** — runs on every PR/push to `main`. Builds for both Linux arches and runs tests for amd64. Catches Linux compilation regressions before they reach a release tag.
-- **`.github/workflows/docker-publish.yml`** — runs on tag push (`v*`) and manual dispatch. Builds the multi-arch (linux/amd64 + linux/arm64) Docker image and pushes it to `ghcr.io/vampiricwulf/moombox` (release tags → `X.Y.Z`, `X.Y`, `latest`; manual dispatch on `main` → `edge`).
+- **`.github/workflows/release.yml`** — runs on tag push (`v*`). Runs the test suite on the tagged commit first, then builds and signs all three platforms, creates a GitHub release with the matching assets and a body listing all download links, and publishes the Docker image. Run it by hand ("Run workflow") for a dry run: everything except the two publishing steps.
+- **`.github/workflows/ci.yml`** — runs on every PR/push to `main`, on ubuntu and windows: gofmt, vet, staticcheck, build, the full test suite. Also the test gate release.yml calls.
+- **`.github/workflows/docker-publish.yml`** — called by release.yml on a tag, or run by manual dispatch. Builds the multi-arch (linux/amd64 + linux/arm64) Docker image and pushes it to `ghcr.io/vampiricwulf/moombox` (release tags → `X.Y.Z`, `X.Y`, `latest`; manual dispatch on `main` → `edge`).
 
 ## Profiling
 

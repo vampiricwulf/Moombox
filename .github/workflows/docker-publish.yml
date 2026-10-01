@@ -1,19 +1,33 @@
 name: Build and Publish Docker Image
 
-# Publishes ghcr.io/vampiricwulf/moombox on every release tag, alongside
-# the binary release workflow (release.yml). Multi-arch: linux/amd64 +
+# Publishes ghcr.io/vampiricwulf/moombox. Multi-arch: linux/amd64 +
 # linux/arm64. The Dockerfile compiles both on the native runner
 # (CGO_ENABLED=0 cross-compile); QEMU is only used for the small Debian
 # runtime stage of the arm64 image.
 #
-# workflow_dispatch builds and pushes an `edge` tag from the selected
-# branch — useful for testing image changes without cutting a release.
+# Two ways in, and no tag trigger of its own:
+#
+#   workflow_call      release.yml runs this as a job after its test gate,
+#                      so a release tag publishes the image only once the
+#                      suite has passed on the tagged commit. A release dry
+#                      run calls it with push: false.
+#   workflow_dispatch  builds and pushes an `edge` tag from main — useful
+#                      for testing image changes without cutting a release.
+#                      Untick "push" to only build both architectures.
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_call:
+    inputs:
+      push:
+        description: Push the built image to ghcr.io
+        type: boolean
+        default: true
   workflow_dispatch:
+    inputs:
+      push:
+        description: Push the built image to ghcr.io (untick to only build)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -65,7 +79,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |

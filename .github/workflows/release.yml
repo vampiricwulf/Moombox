@@ -4,11 +4,32 @@ on:
   push:
     tags:
       - 'v*'
+  # Dry run. "Run workflow" on a branch runs every job below exactly as a
+  # tag would — the test gate, the embed blobs, the three cross-builds, the
+  # signing with its self-check, the multi-arch image build — and skips only
+  # the two publishing steps (the GitHub release, the image push). This
+  # workflow otherwise runs on tags alone, and a tag is never replaced, so
+  # without this a break in it is found by the release it breaks and costs a
+  # version number. The dry run's version is the one in cmd/moombox/main.go
+  # with "-dryrun" appended.
+  workflow_dispatch:
 
+# Each job states what it needs; nothing is granted workflow-wide beyond read.
 permissions:
-  contents: write
+  contents: read
 
-# Single ubuntu-latest job that does everything:
+# Three jobs:
+#
+#   test     ci.yml, called as a required job: the full suite on ubuntu and
+#            windows for the tagged commit. v2.8.9 was published while CI on
+#            the same commit was red — the two workflows ran side by side and
+#            neither waited for the other. A flaky failure here is cleared
+#            with "Re-run failed jobs" on the same tag.
+#   release  the binaries (below), after test.
+#   docker   docker-publish.yml, called after test: the multi-arch image,
+#            pushed only for a tag.
+#
+# The release job is a single ubuntu-latest job that does everything:
 #
 #   1. Checkout + setup Go + setup Node
 #   2. Build the embed blobs from the tagged commit, every time: the
@@ -33,7 +54,7 @@ permissions:
 #      Actions UI and easier failure attribution.
 #   5. Sign all 3 binaries sequentially, each in its own named step.
 #   6. Single softprops/action-gh-release@v3 call publishes the
-#      release with body + all 6 assets in one shot.
+#      release with body + all 6 assets in one shot (tags only).
 #
 # Single-job structure means no artifact upload/download cycle, no
 # duplicated checkout + setup-go between phases, and the release
@@ -42,14 +63,58 @@ permissions:
 # any build/sign failure fails the whole release.
 
 jobs:
+  test:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  docker:
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      push: ${{ github.ref_type == 'tag' }}
+
   release:
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      - name: Compute version + ldflags
+        # Computed once and exported via $GITHUB_ENV so the Windows resource
+        # step and each per-binary build step reference the same
+        # VERSION/COMMIT/LDFLAGS. Tag-derived; pre-release suffixes
+        # (-test.N, -rc.N) are preserved in main.version since Go's
+        # main.version isn't constrained to numeric like the Windows
+        # resource metadata is. A dry run has no tag to read, so it takes
+        # the version cmd/moombox/main.go declares and marks it.
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            DECLARED=$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' cmd/moombox/main.go | head -n 1)
+            if [ -z "$DECLARED" ]; then
+              echo "could not read the version from cmd/moombox/main.go"
+              exit 1
+            fi
+            VERSION="${DECLARED}-dryrun"
+          fi
+          COMMIT=$(git rev-parse --short HEAD)
+          {
+            echo "VERSION=$VERSION"
+            echo "COMMIT=$COMMIT"
+            echo "LDFLAGS=-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v7
         with:
@@ -84,10 +149,9 @@ jobs:
         # jq (always available on ubuntu runners). Pre-release suffixes
         # like "-test.1" are stripped from the numeric version because
         # Windows resource metadata only accepts major.minor.patch.build.
+        # VERSION and COMMIT come from the step above.
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          COMMIT=$(git rev-parse --short HEAD)
           VERSION_STRING="${VERSION} (${COMMIT})"
           NUMERIC_BASE="${VERSION%%-*}"
           NUMERIC_VERSION="${NUMERIC_BASE}.0"
@@ -110,23 +174,6 @@ jobs:
           cd cmd/moombox
           go-winres make --arch amd64
           cd ../..
-
-      - name: Compute version + ldflags
-        # Computed once and exported via $GITHUB_ENV so each per-binary
-        # build step references the same VERSION/COMMIT/LDFLAGS without
-        # re-running git rev-parse three times. Tag-derived; pre-release
-        # suffixes (-test.N, -rc.N) are preserved in main.version since
-        # Go's main.version isn't constrained to numeric like the
-        # Windows resource metadata is.
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          COMMIT=$(git rev-parse --short HEAD)
-          {
-            echo "VERSION=$VERSION"
-            echo "COMMIT=$COMMIT"
-            echo "LDFLAGS=-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
-          } >> "$GITHUB_ENV"
 
       # Sequential cross-compiles, each in its own step. Tried 3-way
       # parallel earlier — on ubuntu-latest (4 vCPUs) each go build was
@@ -204,7 +251,16 @@ jobs:
             echo "use_github_notes=true" >> "$GITHUB_ENV"
           fi
 
+      - name: Dry run — show what a tag would have published
+        if: github.ref_type != 'tag'
+        run: |
+          echo "Dry run of $VERSION ($COMMIT): built and signed, no release created."
+          ls -l Moombox.exe Moombox.exe.sig moombox-linux-amd64 moombox-linux-amd64.sig moombox-linux-arm64 moombox-linux-arm64.sig
+          echo "--- release body ---"
+          cat release_body.md
+
       - name: Create GitHub Release with all 6 assets
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
           body_path: release_body.md
