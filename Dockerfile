@@ -65,7 +65,7 @@ ARG COMMIT=
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -ldflags "-s -w${VERSION:+ -X main.version=$VERSION}${COMMIT:+ -X main.commit=$COMMIT}" \
+    go build -trimpath -ldflags "-s -w${VERSION:+ -X main.version=$VERSION}${COMMIT:+ -X main.commit=$COMMIT}" \
     -o /out/moombox ./cmd/moombox
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────────

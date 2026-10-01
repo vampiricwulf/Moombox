@@ -213,19 +213,24 @@ jobs:
       # for cores (~8s saved, not worth the complexity / latent
       # footguns). Sequential gives clean per-binary logs and the first
       # build naturally warms the module cache for the next two.
+      #
+      # -trimpath: without it the binary records the runner's own paths
+      # (/home/runner/work/Moombox/Moombox/..., /home/runner/go/pkg/mod/...)
+      # for every source file, and that is what a panic stack in a user's
+      # log shows. With it the stack names the module path instead.
       - name: Build Moombox.exe (windows/amd64)
         env:
           CGO_ENABLED: 0
           GOOS: windows
           GOARCH: amd64
-        run: go build -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox
+        run: go build -trimpath -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox
 
       - name: Build moombox-linux-amd64
         env:
           CGO_ENABLED: 0
           GOOS: linux
           GOARCH: amd64
-        run: go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox
+        run: go build -trimpath -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox
 
       - name: Smoke-test moombox-linux-amd64
         # The one binary of the three this runner can execute. --version
@@ -248,7 +253,7 @@ jobs:
           CGO_ENABLED: 0
           GOOS: linux
           GOARCH: arm64
-        run: go build -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox
+        run: go build -trimpath -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox
 
       # Sequential sign, each in its own step. Each go run ./cmd/sign
       # invocation is sub-second; the overhead of three steps is small
