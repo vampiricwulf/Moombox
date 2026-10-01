@@ -21,7 +21,8 @@
 //   1. Verify production deps are installed (node_modules/ must exist;
 //      run `npm ci --omit=dev` first if not).
 //   2. Run system `tar` to create dist/sidecar.tar.gz containing
-//      package.json, package-lock.json, src/, and node_modules/.
+//      package.json, package-lock.json, src/, node_modules/, the ejs
+//      bundle and vendor/ejs/VERSION.
 //      Excludes README, .gitignore, build.mjs, and other dev artifacts.
 //   3. Copy dist/sidecar.tar.gz to internal/bgutils/embed/ for go:embed.
 //   4. Print sizes.
@@ -55,7 +56,11 @@ try {
     process.exit(1);
 }
 
-const productionEntries = ["package.json", "package-lock.json", "src", "node_modules", "vendor/ejs.bundle.js"];
+// vendor/ejs/VERSION (the pinned upstream ejs commit) is not read at runtime.
+// It rides along so internal/bgutils/embed's test can tell a tarball built
+// before an ejs re-pin from one built after: the bundle itself is generated
+// and cannot be compared against the source tree.
+const productionEntries = ["package.json", "package-lock.json", "src", "node_modules", "vendor/ejs.bundle.js", "vendor/ejs/VERSION"];
 for (const entry of productionEntries) {
     if (entry === "vendor/ejs.bundle.js") continue; // freshly written by the esbuild step below (1b)
     try {
