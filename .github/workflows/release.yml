@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  # Dry run. "Run workflow" on a branch runs every job below exactly as a
+  # Dry run. "Run workflow" on any ref runs every job below exactly as a
   # tag would — the test gate, the embed blobs, the three cross-builds, the
   # signing with its self-check, the multi-arch image build — and skips only
   # the two publishing steps (the GitHub release, the image push). This
@@ -12,6 +12,12 @@ on:
   # without this a break in it is found by the release it breaks and costs a
   # version number. The dry run's version is the one in cmd/moombox/main.go
   # with "-dryrun" appended.
+  #
+  # What publishes is the tag PUSH, not the tag: every gate below tests
+  # github.event_name == 'push' (the only push this workflow listens for is
+  # a v* tag). A manual run started ON a tag ref is therefore still a dry
+  # run. Gating on ref_type alone would have let it rebuild and overwrite
+  # that release's six assets and move "Latest" back to it.
   workflow_dispatch:
 
 # Each job states what it needs; nothing is granted workflow-wide beyond read.
@@ -75,7 +81,7 @@ jobs:
       packages: write
     uses: ./.github/workflows/docker-publish.yml
     with:
-      push: ${{ github.ref_type == 'tag' }}
+      push: ${{ github.event_name == 'push' }}
 
   release:
     needs: test
@@ -95,11 +101,12 @@ jobs:
         # VERSION/COMMIT/LDFLAGS. Tag-derived; pre-release suffixes
         # (-test.N, -rc.N) are preserved in main.version since Go's
         # main.version isn't constrained to numeric like the Windows
-        # resource metadata is. A dry run has no tag to read, so it takes
-        # the version cmd/moombox/main.go declares and marks it.
+        # resource metadata is. A dry run takes the version
+        # cmd/moombox/main.go declares and marks it, even when it was
+        # started on a tag ref.
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
             DECLARED=$(sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' cmd/moombox/main.go | head -n 1)
@@ -253,7 +260,7 @@ jobs:
           fi
 
       - name: Dry run — show what a tag would have published
-        if: github.ref_type != 'tag'
+        if: github.event_name != 'push'
         run: |
           echo "Dry run of $VERSION ($COMMIT): built and signed, no release created."
           ls -l Moombox.exe Moombox.exe.sig moombox-linux-amd64 moombox-linux-amd64.sig moombox-linux-arm64 moombox-linux-arm64.sig
@@ -261,7 +268,7 @@ jobs:
           cat release_body.md
 
       - name: Create GitHub Release with all 6 assets
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v3
         with:
           body_path: release_body.md
