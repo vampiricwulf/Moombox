@@ -8,7 +8,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 
 - Build requires **Go 1.27**; `go.mod` carries `toolchain go1.27.1`, the floor local builds and CI auto-download; the Docker stage takes its patch from the floating `golang:1.27-bookworm` tag (`GOTOOLCHAIN=local` inside the image). Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
-- **CI builds on tag push only** (tags matching `v*`). The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
+- **CI publishes on tag push only** (tags matching `v*`), and only after the test suite has passed on the tagged commit. The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
 - **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
 - **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. On a fresh launch it fails fast and propagates like any other startup-time code; what makes it its own code is that the post-update window never rolls back on it — the environment failed, not the new binary.
@@ -184,19 +184,27 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 ### Release Workflow
 
 **File:** `.github/workflows/release.yml`
-**Trigger:** Tag push matching `v*` (e.g., `v2.6.3`)
-**Runner:** `ubuntu-latest` (single job; cross-compiles all platforms from Linux)
-**Permissions:** `contents: write` (to create releases and upload assets)
+**Trigger:** Tag push matching `v*` (e.g., `v2.6.3`), plus `workflow_dispatch` as a dry run
+**Runner:** `ubuntu-latest` for the release job (cross-compiles all platforms from Linux)
+**Permissions:** `contents: read` workflow-wide; each job states its own — `contents: write` on the release job (to create releases and upload assets), `packages: write` on the Docker job
 
-#### Steps
+#### Jobs
+
+- **`test`** — calls `.github/workflows/ci.yml` (the full suite on ubuntu and windows) for the tagged commit. The other two jobs `needs` it, so nothing is published until it passes. v2.8.9 was published while CI on the same commit was red: the workflows used to run side by side. A flaky failure is cleared with "Re-run failed jobs" on the same tag.
+- **`release`** — the binaries; steps below.
+- **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag.
+
+**Dry run.** "Run workflow" on a branch runs all three jobs exactly as a tag would and skips only the two publishing steps: the GitHub release is not created (a step prints the six files and the release body instead) and the image is built for both architectures but not pushed. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
+
+#### Release job steps
 
 1. **Checkout** — `actions/checkout@v7`
 2. **Set up Go** — `actions/setup-go@v7` with version from `go.mod`
-3. **Set up Node** — `actions/setup-node@v7`
-4. **Build BotGuard sidecar payload** — `npm ci --ignore-scripts && node build.mjs`
-5. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files
-6. **Generate Windows resources** — Patches `winres.json` with tag version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
-7. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so all per-binary steps reference the same values.
+3. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so the Windows resource step and all per-binary steps reference the same values. `VERSION` is the tag without its `v`, or on a dry run the declared version plus `-dryrun`.
+4. **Set up Node** — `actions/setup-node@v7`
+5. **Build BotGuard sidecar payload** — `npm ci --ignore-scripts && node build.mjs`
+6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v24 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files
+7. **Generate Windows resources** — Patches `winres.json` with the version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
 8. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
 9. **Build moombox-linux-amd64** — `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS"`
 10. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
@@ -204,18 +212,18 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 12. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
 13. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
 14. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
-15. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 14 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
+15. **Create GitHub Release** (tags only) — `softprops/action-gh-release@v3` with body from step 14 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
 
-Steps 4 and 5 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. The job used to cache them, and that cache never hit — a cache saved by one tag's run is not readable from another tag's (v2.8.3 through v2.8.10 all missed) — while its key left out `bgutil-sidecar/src` and the vendored ejs, so a hit would have shipped the previous sidecar JS under a new version number.
+Steps 5 and 6 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. The job used to cache them, and that cache never hit — a cache saved by one tag's run is not readable from another tag's (v2.8.3 through v2.8.10 all missed) — while its key left out `bgutil-sidecar/src` and the vendored ejs, so a hit would have shipped the previous sidecar JS under a new version number.
 
 Steps 8–10 are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
 
 ### Test Workflow
 
 **File:** `.github/workflows/ci.yml`
-**Trigger:** push to `main`, every pull request
+**Trigger:** push to `main`, every pull request, and `workflow_call` — release.yml runs it as its required `test` job
 **Runners:** `ubuntu-latest` and `windows-latest` (matrix, `fail-fast: false`) — the Windows-only code paths (DPAPI cookie reading, Job Objects, cookie profile paths) have tests that skip everywhere else
-**Permissions:** `contents: read`; one run per ref (`concurrency` with cancel-in-progress); 45-minute job timeout
+**Permissions:** `contents: read`; one run per calling workflow and ref (`concurrency` with cancel-in-progress — the group carries `github.workflow`, the caller's name under `workflow_call`, so a release dry run from `main` and a push to `main` do not cancel each other); 45-minute job timeout
 
 Steps, on both runners: checkout → a cache for the three pinned Node binaries (keyed by `runner.os` + the hash of `version.txt` and `tools/fetch-node/main.go`) → `setup-go` from `go.mod` → `setup-node` 24 → the sidecar payload build, on every run (the tarball is never cached, so the Go tests embed the sidecar JS of the commit under test) → `go run ./tools/fetch-node` on a cache miss → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go mod tidy -diff` → `go vet ./...` → the `modernc.org/libc` pin check (the version `modernc.org/sqlite`'s own `go.mod` names must be the one this module pins) → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally runs `go test -race -count=1` on `internal/logger/...`, `internal/database/...` and `internal/web/...` (owner ruling O-P), cross-builds `linux/arm64`, runs `bgutil-sidecar`'s `npm test` (against the `node_modules` and `vendor/ejs.bundle.js` the sidecar payload build left in place), and runs the frontend suite (`npm ci` in `web/tests`, `node --test ./*.test.mjs` — jsdom is that package's devDependency, so the DOM suites execute rather than skip).
 
@@ -238,7 +246,7 @@ When `RELEASE_NOTES.md` is present, the release body is assembled as:
 ### Docker Publish Workflow
 
 **File:** `.github/workflows/docker-publish.yml`
-**Trigger:** Same `v*` tag push as release.yml (runs in parallel with it), plus `workflow_dispatch` for testing image changes without cutting a release.
+**Trigger:** `workflow_call` from release.yml's `docker` job (after the test gate, so it has no tag trigger of its own), plus `workflow_dispatch` for testing image changes without cutting a release. Both take a boolean `push` input, default true: release.yml passes true only for a tag, and a manual run with it unticked builds both architectures without pushing.
 **Permissions:** `contents: read`, `packages: write`
 
 Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to `ghcr.io/vampiricwulf/moombox`. Release tags produce `X.Y.Z`, `X.Y`, and `latest` (pre-release tags containing `-` skip `latest`, matching release.yml's pre-release handling); manual dispatch on `main` produces `edge`. `VERSION`/`COMMIT` build args mirror release.yml's ldflags. QEMU is only used for the small Debian runtime stage of the arm64 image — the Go compile cross-compiles natively.
@@ -255,7 +263,7 @@ This is the manual process performed by the developer before CI takes over:
 4. **Tag** — `git tag vx.y.z`
 5. **Push** — `git push && git push origin vx.y.z`
 
-The tag push triggers CI, which builds, signs, and publishes the release.
+The tag push triggers release.yml, which runs the test suite on the tagged commit and then builds, signs, and publishes the binaries and the image. To exercise that pipeline before step 4, run release.yml by hand from the Actions tab ("Run workflow") — the dry run described under Release Workflow.
 
 ### Version Format
 

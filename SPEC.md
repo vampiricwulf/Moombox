@@ -814,7 +814,7 @@ Go 1.27 required (go.mod carries `toolchain go1.27.1` as the floor: an older loc
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/release.yml`) triggers on tag push. Builds Windows exe, generates `.syso` for icon/version, signs with Ed25519 (private key in GitHub secret), uploads binary + signature to GitHub Release. Release body is read from `RELEASE_NOTES.md` in the repo.
+GitHub Actions (`.github/workflows/release.yml`) triggers on tag push, and runs the test workflow on the tagged commit before anything is published (a manual run is a dry run that publishes nothing). Builds Windows exe, generates `.syso` for icon/version, signs with Ed25519 (private key in GitHub secret), uploads binary + signature to GitHub Release. Release body is read from `RELEASE_NOTES.md` in the repo.
 
 ### Release Process
 
