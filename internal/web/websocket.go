@@ -27,12 +27,14 @@ const (
 	// unaffected — this is a read limit.
 	wsMaxMessageSize = 4 << 10 // 4 KiB
 	// wsReadIdleTimeout bounds how long a single Conn.Read may block
-	// waiting for a frame. Longer than 2× wsPingInterval (30s) so that
-	// a normally-responsive client — which keeps the peer alive via
-	// automatic pong replies — is never closed mid-session. If the
-	// peer goes silent AND the ping loop somehow still succeeds (e.g.,
-	// kernel-level TCP keepalives ACKing past an app-level zombie),
-	// the Read will eventually error out and readPump will tear down.
+	// waiting for a DATA frame from the client. Control frames do not count:
+	// the library answers pings and consumes pongs inside the same Read,
+	// under the same deadline, and server→client traffic never returns a
+	// server-side Read at all. So the client must send a data frame at least
+	// this often — the dashboard sends {"type":"ping"} every 15 s
+	// (web/public/app.js) — or the connection is closed and the client
+	// reconnects. That is also what reaps a peer whose TCP stack still ACKs
+	// past an app-level zombie.
 	wsReadIdleTimeout = 90 * time.Second
 	// wsWriteQueueSize bounds the per-client outbound queue so a stalled
 	// client can't accumulate unbounded backpressure (memory blow-up plus
@@ -654,13 +656,11 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 		// Bound each Read with an idle timeout. The detached client.ctx
 		// has no expiry, so without this a stale peer (TCP still ACKing
 		// at the kernel but app-level silent) could park the goroutine
-		// here forever. The timeout is generous enough (>2× ping
-		// interval) that a healthy but chatty-less client is never
-		// reaped mid-session — library-internal pong handling refreshes
-		// nothing, but any message (including the browser's pong frame
-		// being processed) surfaces soon enough that Read returns well
-		// before wsReadIdleTimeout on a live connection that's actually
-		// exchanging traffic via BroadcastLog/job updates.
+		// here forever. Only a client DATA frame returns the Read and
+		// starts a fresh deadline (see wsReadIdleTimeout): pongs are
+		// handled inside the Read under this same deadline, and broadcasts
+		// flow the other way. The dashboard's 15 s {"type":"ping"} is what
+		// keeps a healthy browser connection under it.
 		readCtx, readCancel := context.WithTimeout(client.ctx, wsReadIdleTimeout)
 		msgType, data, err := client.conn.Read(readCtx)
 		readCancel()

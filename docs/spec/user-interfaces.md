@@ -617,6 +617,7 @@ The WebSocket hub throttles nothing. The only high-frequency caller is `OnJobCha
 | Parameter | Value |
 |-----------|-------|
 | Ping interval | 30 seconds (server-initiated) |
+| Client data frame | At least one within 90 s (`wsReadIdleTimeout`), or the server closes the socket — its own pings and the client's pongs do not reset this deadline. The dashboard sends `{"type":"ping"}` every 15 s; any other consumer of the stream must do the same |
 | Write timeout | 10 seconds per message |
 | Max message size (read limit) | 4 KiB — a client only ever sends `{"type":"ping"}`, and on a `lan` install the upgrade needs no credential |
 | Backpressure limit | 16 queued frames per client (`wsWriteQueueSize`); on overflow the oldest is dropped and a later frame is replaced by a full `initial_state` snapshot — at most one per second per client (`wsResyncMinInterval`), flushed by the ping tick if no broadcast comes (`flushResync`) |
