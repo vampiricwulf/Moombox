@@ -246,6 +246,11 @@ function defineShoelaceStubs(window) {
   class SlTabGroup extends HTMLElement {
     show(name) { (this._shown ??= []).push(name); }
   }
+  // sl-tab.panel is the reflected `panel` attribute; the unsaved-settings
+  // guard reads it off each nav tab to exempt the Settings tab itself.
+  class SlTab extends HTMLElement {
+    get panel() { return this.getAttribute("panel") ?? ""; }
+  }
   class Passive extends HTMLElement {}
 
   // customElements.define refuses a constructor it has already seen, so every
@@ -258,10 +263,10 @@ function defineShoelaceStubs(window) {
     "sl-button": SlDisableable, "sl-icon-button": SlDisableable,
     "sl-dialog": SlOverlay, "sl-drawer": SlOverlay, "sl-dropdown": SlOverlay,
     "sl-tooltip": SlOverlay, "sl-details": SlOverlay, "sl-alert": SlAlert,
-    "sl-tab-group": SlTabGroup,
+    "sl-tab-group": SlTabGroup, "sl-tab": SlTab,
     "sl-tag": Passive, "sl-badge": Passive, "sl-icon": Passive, "sl-spinner": Passive,
     "sl-progress-bar": Passive, "sl-progress-ring": Passive, "sl-divider": Passive,
-    "sl-menu": Passive, "sl-tab": Passive, "sl-tab-panel": Passive, "sl-card": Passive,
+    "sl-menu": Passive, "sl-tab-panel": Passive, "sl-card": Passive,
     "sl-format-bytes": Passive, "sl-relative-time": Passive, "sl-button-group": Passive,
     "sl-menu-label": Passive, "sl-avatar": Passive, "sl-animation": Passive,
     "sl-visually-hidden": Passive, "sl-copy-button": Passive, "sl-tree": Passive,

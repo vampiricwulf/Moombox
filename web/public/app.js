@@ -304,26 +304,19 @@ export class MoomboxApp {
       });
     }
 
-    // Intercept tab switches when settings has unsaved changes
+    // Intercept tab switches when settings has unsaved changes. The guard
+    // itself is _canLeaveSettings / _confirmLeaveSettings, so that the two
+    // programmatic switches — the 1–8 shortcuts (showTab) and Play from the
+    // details dialog (openInPlayer) — owe the same answer a click does; this
+    // listener is only the click's way in.
     document.querySelectorAll("sl-tab[slot='nav']").forEach(tab => {
       tab.addEventListener("click", (e) => {
-        if (tab.panel !== "settings" && this.settings?._dirty) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          this.showConfirm("You have unsaved settings changes. Discard and leave?", {
-            title: "Unsaved Changes",
-            okLabel: "Leave Without Saving",
-            okVariant: "warning"
-          }).then(confirmed => {
-            if (confirmed) {
-              this.settings._dirty = false;
-              this.settings._updateUnsavedIndicator();
-              document.getElementById("settings-unsaved-banner").style.display = "none";
-              this.settings.app.loadConfig();
-              tab.click();
-            }
-          });
-        }
+        if (this._canLeaveSettings(tab.panel)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        this._confirmLeaveSettings().then(confirmed => {
+          if (confirmed) tab.click();
+        });
       }, true); // capture phase — intercept before Shoelace switches the tab
     });
 
@@ -2703,6 +2696,15 @@ export class MoomboxApp {
    */
   openInPlayer() {
     if (!this.selectedJobId) return Promise.resolve();
+    // Play is a switch to the Player tab like any other, so it owes the
+    // unsaved-settings guard the answer a click on that tab would get — the
+    // details dialog can sit over a dirty Settings page through a #job= deep
+    // link. Asked BEFORE the dialog is closed, so "stay" leaves the operator
+    // exactly where they were; re-entered on "leave", by which point the
+    // guard has reset the dirty state and lets the switch below through.
+    if (!this._canLeaveSettings("player")) {
+      return this._confirmLeaveSettings().then(confirmed => (confirmed ? this.openInPlayer() : undefined));
+    }
     const jobId = this.selectedJobId;
 
     // Close the details dialog
@@ -2992,6 +2994,57 @@ export class MoomboxApp {
     return this.logPanel.addLog(...args);
   }
 
+  // ===== Tab switching =====
+
+  /**
+   * The unsaved-settings guard behind every tab switch. True when a switch to
+   * `panel` may go ahead right now: Settings itself is always reachable, and
+   * every other panel is while nothing on the Settings page is dirty.
+   */
+  _canLeaveSettings(panel) {
+    return panel === "settings" || !this.settings?._dirty;
+  }
+
+  /**
+   * Ask whether to discard the unsaved settings. Resolves true when the
+   * operator chose to leave — the dirty state is reset and the saved config
+   * reloaded here, so whichever caller then switches starts clean — and false
+   * when they stayed. Never rejects (showConfirm does not).
+   * @returns {Promise<boolean>}
+   */
+  _confirmLeaveSettings() {
+    return this.showConfirm("You have unsaved settings changes. Discard and leave?", {
+      title: "Unsaved Changes",
+      okLabel: "Leave Without Saving",
+      okVariant: "warning"
+    }).then(confirmed => {
+      if (!confirmed) return false;
+      this.settings._dirty = false;
+      this.settings._updateUnsavedIndicator();
+      document.getElementById("settings-unsaved-banner").style.display = "none";
+      this.loadConfig();
+      return true;
+    });
+  }
+
+  /**
+   * Switch to a tab the way a click on its sl-tab does — through the
+   * unsaved-settings guard. Synchronous when the guard lets it through, so a
+   * caller's ordering around the switch is what it always was; otherwise the
+   * switch waits on the confirm, and is dropped when the operator stays.
+   */
+  showTab(panel) {
+    const tabGroup = document.querySelector("sl-tab-group");
+    if (!tabGroup) return;
+    if (this._canLeaveSettings(panel)) {
+      tabGroup.show(panel);
+      return;
+    }
+    this._confirmLeaveSettings().then(confirmed => {
+      if (confirmed) tabGroup.show(panel);
+    });
+  }
+
   // ===== Keyboard Shortcuts =====
 
   setupKeyboardShortcuts() {
@@ -3014,7 +3067,6 @@ export class MoomboxApp {
         return;
       }
 
-      const tabGroup = document.querySelector("sl-tab-group");
       const panels = ["tasks", "archived", "player", "imports", "files", "stats", "logs", "settings"];
       const activePanel = document.querySelector("sl-tab-panel[active]");
       const isPlayerActive = activePanel?.getAttribute("name") === "player";
@@ -3047,7 +3099,10 @@ export class MoomboxApp {
           e.preventDefault();
           break;
         case "1": case "2": case "3": case "4": case "5": case "6": case "7": case "8":
-          if (tabGroup) tabGroup.show(panels[parseInt(e.key) - 1]);
+          // Through showTab, never tabGroup.show() directly: a dirty
+          // Settings page is a question a click on the tab asks, and the
+          // shortcut used to skip it.
+          this.showTab(panels[parseInt(e.key) - 1]);
           e.preventDefault();
           break;
         case "ArrowUp":
