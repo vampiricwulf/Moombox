@@ -292,3 +292,32 @@ func TestSecuritySaveFailureIsReportedAndRolledBack(t *testing.T) {
 		}
 	})
 }
+
+// TestRemovePasswordResetIsNotAnUnsavedEdit: removing the password while
+// external saves network_access = localhost in the same write, but the panel
+// marked the field dirty instead of recording it as saved — "Unsaved
+// changes", a "*" on Network access, and an Esc that offered to save what was
+// already on disk, with no restart prompt for a restart-required key.
+//
+// Mutants: leave originalValues alone (dirty stays true); drop the restart
+// prompt (no overlay, no OnRestartRequired).
+func TestRemovePasswordResetIsNotAnUnsavedEdit(t *testing.T) {
+	m, _ := newSecuritySettingsModel(t, "external", "scrypt:salt:hash")
+	m.OnVerifyPassword = func(string, string) bool { return true }
+	m.OnSave = func(*config.MoomboxConfig) error { return nil }
+	restart := 0
+	m.OnRestartRequired = func() { restart++ }
+	m.secRemovePw = "correct-horse"
+
+	m.handleRemovePassword()
+
+	if m.dirty {
+		t.Error("the saved reset is shown as an unsaved change")
+	}
+	if m.originalValues["network_access"] != "localhost" {
+		t.Errorf("originalValues[network_access] = %q, want the saved localhost", m.originalValues["network_access"])
+	}
+	if restart != 1 || !m.showRestartOverlay {
+		t.Errorf("restart prompt: OnRestartRequired=%d overlay=%v, want 1 and true", restart, m.showRestartOverlay)
+	}
+}
