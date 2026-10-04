@@ -68,3 +68,54 @@ test("a mid-session initial_state replaces the log buffer", { skip }, async () =
   assert.match(h.el("logs-viewer").textContent, /fresh line/);
   assert.doesNotMatch(h.el("logs-viewer").textContent, /stale line/);
 });
+
+// The snapshot rows are raw GetAllJobs rows; hasStaging/hasSegments/asides/
+// keptChatSidecar come only from GET /api/jobs/:id. jobs_update and job_update
+// carry them across a replace; initial_state did not, so an open details
+// dialog refreshed from the snapshot hid its Resume and Mux buttons — and the
+// hub sends this snapshot mid-session in place of a dropped frame.
+//
+// Mutant: drop the _preserveStagingFields call from initial_state.
+test("a mid-session initial_state keeps the details dialog's staging fields", { skip }, async () => {
+  const row = (id) => ({
+    id, title: "T " + id, videoId: id, channelName: "Chan", platform: "youtube",
+    status: "Error", createdAt: "2026-09-05T11:00:00Z", updatedAt: "2026-09-05T11:00:00Z",
+  });
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id": ({ params }) => ({ ...row(params.id), hasStaging: true, hasSegments: true, asides: [], keptChatSidecar: false }),
+      "GET /api/jobs/:id/logs": () => [],
+    },
+  });
+  const dlg = h.el("details-dialog");
+  Object.defineProperty(dlg, "open", { get() { return !!this._open; } });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [row("A")] } });
+  await h.flush();
+  h.app.details.showJobDetails(h.app.jobs[0]);
+  await h.flush(); await h.flush();
+  assert.equal(h.el("details-resume-btn").style.display, "", "premise: Resume shown after the enrich fetch");
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [row("A")] } });
+  await h.flush();
+  assert.equal(h.app.jobs[0].hasStaging, true, "the snapshot dropped hasStaging");
+  assert.equal(h.el("details-resume-btn").style.display, "", "Resume hidden after the snapshot");
+  assert.equal(h.el("details-mux-btn").style.display, "", "Mux hidden after the snapshot");
+});
+
+// The snapshot carries active rows only. With the Archived panel open, a
+// job_deleted missed while the socket was down (or evicted from the queue and
+// "replaced" by the snapshot) left a clickable ghost there until the operator
+// left the tab. An open Archived panel refetches on every snapshot now.
+//
+// Mutant: drop the fetchArchivedJobs call from initial_state.
+test("a snapshot with the Archived panel open refetches it", { skip }, async () => {
+  const h = await harness.makeApp({ routes: { "GET /api/jobs/archived": () => [] } });
+  h.app._activePanel = "archived";
+  h.app.archivedJobs = [{ id: "GHOST", title: "Ghost", videoId: "GHOST", channelName: "Chan", platform: "youtube", status: "Finished" }];
+  h.app.renderArchivedJobs();
+  const before = h.http.matching("/api/jobs/archived").length;
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  await h.flush(); await h.flush();
+  assert.equal(h.http.matching("/api/jobs/archived").length, before + 1, "no archived refetch on the snapshot");
+  assert.ok(!h.app.archivedJobs.some((j) => j.id === "GHOST"), "the deleted row is still in the archived list");
+});

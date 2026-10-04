@@ -1100,6 +1100,14 @@ export class MoomboxApp {
     switch (message.type) {
       case "initial_state": {
         if (!p) break;
+        // Carry the staging fields only GET /api/jobs/:id adds (hasStaging,
+        // hasSegments, asides, keptChatSidecar) across the replace, as
+        // jobs_update and job_update do: the snapshot rows are raw, and an
+        // open details dialog refreshed from one below lost its Resume and
+        // Mux buttons. Not only on reconnect — the hub sends this snapshot
+        // in place of a frame a lagging tab dropped. Archived rows too: a
+        // deep-linked dialog may hold the enriched copy there.
+        this.details._preserveStagingFields([...this.jobs, ...this.archivedJobs], p.jobs || []);
         this.jobs = p.jobs || [];
         this.logPanel.logs = p.logs || [];
         this.nextFeedCheck = p.nextFeedCheck || 0;
@@ -1125,6 +1133,12 @@ export class MoomboxApp {
         const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
         if (archivedMoved || archivedPruned) this.renderArchivedJobs();
+        // The snapshot carries active rows only, so it cannot say which
+        // archived rows were deleted (or which jobs aged into the archive)
+        // while frames were missed. A hidden Archived panel refetches when
+        // shown; an open one refetches now, or its ghosts stay until the
+        // operator leaves the tab and comes back.
+        if (this._activePanel === "archived") this.fetchArchivedJobs();
         this._syncParkedBadge();
         this.logPanel.renderLogs();
         this.updateCheckCountdown();
