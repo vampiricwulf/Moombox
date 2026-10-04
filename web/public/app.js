@@ -1748,7 +1748,7 @@ export class MoomboxApp {
       const msg = emptyState.querySelector("p");
       if (msg) msg.textContent = "No matching jobs";
       const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Search matches titles and channel names";
+      if (subtext) subtext.textContent = "Search matches titles, channel names and video IDs";
       const cta = emptyState.querySelector(".empty-state-cta");
       if (cta) cta.style.display = "none";
       return;
@@ -1998,7 +1998,7 @@ export class MoomboxApp {
       const msg = emptyState.querySelector("p");
       if (msg) msg.textContent = "No matching archived jobs";
       const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Search matches titles and channel names";
+      if (subtext) subtext.textContent = "Search matches titles, channel names and video IDs";
       if (filterCount) filterCount.style.display = "";
       return;
     }

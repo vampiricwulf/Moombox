@@ -1421,7 +1421,8 @@ export class SetupController {
         body: JSON.stringify({ path }),
         signal: controller.signal,
       });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      // A 400 carries the reason (an empty path, a ".." segment); say it.
+      if (!resp.ok) throw new Error(await serverErrorMessage(resp));
       const data = await resp.json();
 
       if (data.valid) {
