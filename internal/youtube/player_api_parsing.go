@@ -768,24 +768,36 @@ func hasDesktopLegacyAgeGate(status map[string]any) bool {
 	}
 }
 
-func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
-	if status == nil {
-		return PlayabilityUnknown, ""
-	}
-
-	statusCode := getStr(status, "status")
+// playabilityReason is the human-readable text a playabilityStatus carries:
+// `reason` when set, else the first entry of `messages`, where some clients
+// put it instead. parsePlayabilityStatus and classifyStream both read it
+// through here, so the two see the same string — a waiting room whose "live
+// event will begin" text sits only in messages[] is upcoming to both, not an
+// error to one and not_a_stream to the other.
+func playabilityReason(status map[string]any) string {
 	reason := getStr(status, "reason")
 	if reason == "" {
 		if msgs, ok := status["messages"].([]any); ok && len(msgs) > 0 {
 			reason, _ = msgs[0].(string)
 		}
 	}
+	return reason
+}
+
+func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
+	if status == nil {
+		return PlayabilityUnknown, ""
+	}
+
+	statusCode := getStr(status, "status")
+	reason := playabilityReason(status)
 
 	reasonLower := strings.ToLower(reason)
 
 	// Upcoming indicators are not errors. The same check is duplicated in
-	// classifyStream — keep both call sites going through the helper so a
-	// reason-string change only has to be edited in one place (audit D1).
+	// classifyStream — keep both call sites going through the helper, and
+	// both reading the reason through playabilityReason, so a reason-string
+	// change only has to be edited in one place (audit D1).
 	if isUpcomingFromPlayability(statusCode, reasonLower) {
 		return PlayabilityOK, ""
 	}
@@ -867,7 +879,7 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 
 	// Check playability for upcoming
 	status := getStr(playabilityStatus, "status")
-	reason := strings.ToLower(getStr(playabilityStatus, "reason"))
+	reason := strings.ToLower(playabilityReason(playabilityStatus))
 	isUpcomingPlayability := isUpcomingFromPlayability(status, reason)
 
 	// playabilityStatus.liveStreamability is the renderer YouTube attaches

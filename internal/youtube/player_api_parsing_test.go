@@ -104,6 +104,13 @@ func TestParsePlayabilityStatus_Upcoming(t *testing.T) {
 				"reason": "This live event will begin in a few moments",
 			},
 		},
+		{
+			"unplayable_live_event_in_messages_only",
+			map[string]any{
+				"status":   "UNPLAYABLE",
+				"messages": []any{"This live event will begin in a few moments"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -113,6 +120,28 @@ func TestParsePlayabilityStatus_Upcoming(t *testing.T) {
 				t.Errorf("expected PlayabilityOK (upcoming is not an error), got %q", errType)
 			}
 		})
+	}
+}
+
+// TestClassifyStream_UpcomingReasonInMessagesOnly pins that classifyStream
+// reads the reason the way parsePlayabilityStatus does — `reason`, else
+// messages[0]. It read only `reason`, so an UNPLAYABLE waiting room whose
+// "live event will begin" text sat only in messages[] was an upcoming
+// stream to parsePlayabilityStatus and not_a_stream to classifyStream. The
+// fixture gives classifyStream no other road to upcoming: no isLiveContent,
+// no isUpcoming, no microformat, no liveStreamability.
+func TestClassifyStream_UpcomingReasonInMessagesOnly(t *testing.T) {
+	vd := map[string]any{}
+	ps := map[string]any{
+		"status":   "UNPLAYABLE",
+		"messages": []any{"This live event will begin in a few moments"},
+	}
+	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
+	if status != StreamUpcoming {
+		t.Errorf("expected StreamUpcoming from messages[0], got %q", status)
+	}
+	if !isUpcoming {
+		t.Error("expected isUpcoming=true from messages[0]")
 	}
 }
 
