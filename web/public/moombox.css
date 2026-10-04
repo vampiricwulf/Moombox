@@ -2813,6 +2813,13 @@ html.sl-theme-light {
         left: 0;
         right: 0;
         top: auto;
+        /* A sheet spans the screen. Shoelace caps the panel at
+           calc(100% - 2x-large spacing) for its centred layout, and a
+           dialog's --width (24rem, 28rem) can be narrower than a phone;
+           pinned to the left edge, either left a strip of page showing
+           down the right side of the sheet. */
+        width: 100%;
+        max-width: 100%;
         max-height: 85vh;
         border-radius: var(--sl-border-radius-large) var(--sl-border-radius-large) 0 0;
         animation: slideUpSheet 0.2s ease-out;
@@ -3553,7 +3560,8 @@ html.sl-theme-light {
        sheet rule (set elsewhere in the 768px block) takes over and
        full-widths the panel — but explicitly clear the desktop width
        so the panel doesn't fight the sheet layout. */
-    #details-dialog::part(panel) {
+    #details-dialog::part(panel),
+    #trim-dialog::part(panel) {
         width: 100%;
     }
 
