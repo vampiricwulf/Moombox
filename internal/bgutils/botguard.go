@@ -185,15 +185,27 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 	return client, nil
 }
 
+// snapshotDrainInterval is how often Snapshot drains the timer queue while it
+// waits for BotGuard's callback. Fine enough that a result deferred through a
+// short setTimeout is picked up almost as it comes due; coarse enough that a
+// 30 s wait costs a few thousand mutex checks, not a spinning core.
+const snapshotDrainInterval = 10 * time.Millisecond
+
 // Snapshot calls the async snapshot function to generate a BotGuard response.
 // Returns the botguard response string and a JS array that BotGuard populates
 // with signal data (webPoSignalOutput[0] will be the getMinter callback).
 //
-// Honours ctx.Done(): on cancel, vm.Interrupt is fired so an in-flight snapshot
-// unblocks instead of burning the full timeout budget. Timeout=0 falls back to
-// SnapshotDefaultTimeout (30s) — the ambient BotGuard snapshot budget — not
-// the much shorter DefaultMintTimeout, which was too aggressive for a cold
-// snapshot.
+// The result arrives through the callback handed to the snapshot function,
+// which BotGuard may invoke synchronously or defer through setTimeout. goja
+// has no event loop: a deferred callback sits in the TimerManager's queue
+// until the goroutine that owns the VM — this one — drains it, so the wait
+// is a drain loop rather than a blocking receive. timeout (SnapshotDefaultTimeout,
+// 30 s, when 0 — the ambient BotGuard snapshot budget, not the much shorter
+// DefaultMintTimeout, which was too aggressive for a cold snapshot) and
+// ctx.Done() bound that WAIT only: JS already executing on this goroutine, in
+// the snapshot call itself or inside a drained callback, runs to completion.
+// Nothing here can interrupt it — vm.Interrupt fired from the goroutine that
+// is itself idle between calls would only trip the next one.
 func (c *BotGuardClient) Snapshot(ctx context.Context, timeout time.Duration) (string, *goja.Object, error) {
 	if c.asyncSnapshot == nil {
 		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: "async snapshot function not available"}
@@ -234,36 +246,31 @@ func (c *BotGuardClient) Snapshot(ctx context.Context, timeout time.Duration) (s
 		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: fmt.Sprintf("async snapshot call: %v", err)}
 	}
 
-	// Drain any timer callbacks enqueued during the snapshot call.
-	// BotGuard may set up monitoring/telemetry timers whose callbacks need
-	// to be executed on the VM thread before we read the result.
-	if c.timerMgr != nil {
-		if _, drainErr := c.timerMgr.DrainCallbacks(); drainErr != nil {
-			c.logWarn("bgutils: timer callback error during snapshot", "err", drainErr)
-		}
-	}
-
-	// Wait for result, timeout, or context cancellation.
+	// Wait for the result, draining timer callbacks as they come due: the
+	// monitoring/telemetry timers BotGuard sets up during the snapshot, and
+	// the deferred delivery of the result itself, all have to run here on
+	// the VM's goroutine. A single drain right after the call (the previous
+	// shape) caught only timers that had already fired; anything deferred
+	// by even a millisecond then sat in the queue for the whole budget.
 	snapshotTimer := time.NewTimer(timeout)
 	defer snapshotTimer.Stop()
-	select {
-	case result := <-resultCh:
-		return result, webPoSignalOutput, nil
-	case <-snapshotTimer.C:
-		c.vm.Interrupt("snapshot timeout")
-		// Pair Interrupt with ClearInterrupt so a subsequent Snapshot
-		// (or any other JS call) on the SAME client doesn't trip the
-		// stale interrupt and fail before doing real work. Today every
-		// caller follows a Snapshot timeout with Shutdown — which
-		// would clear the interrupt itself — but defending here keeps
-		// the client reusable across timeout boundaries. Audit
-		// reports/goja.md Q1.
-		c.vm.ClearInterrupt()
-		return "", nil, &BGError{Code: ErrTimeout, Message: "snapshot timed out"}
-	case <-ctx.Done():
-		c.vm.Interrupt("context cancelled during snapshot")
-		c.vm.ClearInterrupt()
-		return "", nil, ctx.Err()
+	drain := time.NewTicker(snapshotDrainInterval)
+	defer drain.Stop()
+	for {
+		if c.timerMgr != nil {
+			if _, drainErr := c.timerMgr.DrainCallbacks(); drainErr != nil {
+				c.logWarn("bgutils: timer callback error during snapshot", "err", drainErr)
+			}
+		}
+		select {
+		case result := <-resultCh:
+			return result, webPoSignalOutput, nil
+		case <-snapshotTimer.C:
+			return "", nil, &BGError{Code: ErrTimeout, Message: "snapshot timed out"}
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		case <-drain.C:
+		}
 	}
 }
 
