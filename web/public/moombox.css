@@ -235,6 +235,14 @@ sl-tab::part(base) {
         background-color: var(--sl-color-neutral-50);
         padding: var(--sl-spacing-small);
     }
+
+    /* Each column is centred (align-self below) and so sized to its
+       content; an error line is nowrap, so its content is the whole
+       message, and the progress column spilled out of both sides of the
+       card over its neighbours. Capped at the card, the ellipsis applies. */
+    .video-item > div {
+        max-width: 100%;
+    }
 }
 
 .video-item > div {
@@ -517,16 +525,20 @@ sl-badge.status.cookies::part(base) {
     }
 }
 
-#archived-table-header,
-.archived-table .video-item {
+/* Only the header needs these: an archived row is a .video-item, which the
+   #video-table rules above already lay out. Repeating ".archived-table
+   .video-item" here outranked every later ".video-item" rule — the 992px
+   flex column and the phone card grid — so archived rows kept the desktop
+   subgrid on small screens and collapsed into a single column, the
+   checkbox over the title and the menu button stretched across the card. */
+#archived-table-header {
     display: grid;
     grid-template-columns: subgrid;
     grid-column: 1 / 6;
 }
 
 @media only screen and (max-width: 992px) {
-    #archived-table-header,
-    .archived-table .video-item {
+    #archived-table-header {
         grid-column: initial;
     }
 }
