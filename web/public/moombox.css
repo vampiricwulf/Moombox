@@ -2111,6 +2111,18 @@ sl-progress-bar {
     color: var(--sl-color-neutral-600);
 }
 
+/* The advanced wizard's eight steps did not fit the setup card at the
+   default gap and label size: the strip overflowed both of the card's
+   edges by 30-35px, "Network" and "Integrations" drawn across its border.
+   Tighter spacing and x-small labels fit all eight inside it. */
+#setup-adv-steps {
+    gap: var(--sl-spacing-x-small);
+}
+
+#setup-adv-steps .step-label {
+    font-size: var(--sl-font-size-x-small);
+}
+
 /* Setup Pages */
 .setup-page {
     display: flex;
