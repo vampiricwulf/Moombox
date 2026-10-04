@@ -358,3 +358,50 @@ func TestWaitForTwitchLiveReturnsWhenTheRowIsGone(t *testing.T) {
 		t.Fatal("waitForTwitchLive kept waiting on a row that no longer exists")
 	}
 }
+
+// TestWaitForTwitchLiveClearsItsProgressOnCancel: the wait writes "Waiting
+// for stream..." on entry and used to clear it only when the channel went
+// live, so a cancelled manual Twitch job kept reading "Waiting for
+// stream..." on its Cancelled row until a Retry reset it.
+//
+// Mutant: drop the deferred clear — progress still holds the waiting line.
+func TestWaitForTwitchLiveClearsItsProgressOnCancel(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	const login = "cancelledstreamer"
+	job := &database.Job{ID: "tw_manual_" + login + "_1700000000", VideoID: "tw_manual_" + login + "_1700000000",
+		Platform: "twitch", ManuallyAdded: true, URL: "https://twitch.tv/" + login, Status: database.StatusUpcoming}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	sp := &StreamProcessor{db: db, logger: discardLogger{}, twitchHints: newTwitchHintCache()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sp.waitForTwitchLive(ctx, job, login)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if j, _ := db.GetJob(job.ID); j != nil && j.Progress == "Waiting for stream..." {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the wait never wrote its progress line")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wait did not return on cancel")
+	}
+	j, err := db.GetJob(job.ID)
+	if err != nil || j == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if j.Progress != "" {
+		t.Errorf("progress after cancel = %q, want it cleared", j.Progress)
+	}
+}

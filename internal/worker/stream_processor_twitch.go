@@ -670,6 +670,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		"progress":        "Waiting for stream...",
 		"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 	})
+	// Every exit clears the line, not only going live: a cancel or a give-up
+	// left "Waiting for stream..." on the Cancelled row until a Retry.
+	defer sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
 
 	consecutiveErrors := 0
 	var lastOfflineProbe time.Time
@@ -695,7 +698,6 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		// pay the GQL round trip anyway on the iteration that finally looks.
 		if hint := takeLiveHint(sp.twitchHints, sp.logger, login); hint != nil {
 			sp.logger.Info("twitch channel is now live (monitor hint)", "channel", login)
-			sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
 			return hint, nil
 		}
 
@@ -757,9 +759,6 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 
 		if streamInfo != nil && streamInfo.IsLive {
 			sp.logger.Info("twitch channel is now live", "channel", login)
-			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"progress": "",
-			})
 			return streamInfo, nil
 		}
 	}
