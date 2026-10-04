@@ -582,8 +582,9 @@ sl-badge.status.cookies::part(base) {
     margin-bottom: var(--sl-spacing-small);
 }
 
-.files-header h3 {
+.files-header h2 {
     margin: 0;
+    font-size: 1.17em;
 }
 
 .files-actions {
@@ -1147,10 +1148,18 @@ sl-progress-bar {
     gap: var(--sl-spacing-medium);
 }
 
-.settings-section h3 {
+.settings-section h2 {
     margin: 0 0 var(--sl-spacing-small) 0;
     font-size: var(--sl-font-size-large);
     font-weight: var(--sl-font-weight-semibold);
+}
+
+/* A section's sub-headings (Password, Active Platforms, ...). They were h4s
+   under an h3 section title with no h2 above it; the levels now step one at
+   a time from the page's h1, and this keeps their old h4 look. */
+.settings-section h3 {
+    font-size: 1em;
+    margin: 1.33em 0;
 }
 
 .settings-help {
@@ -1422,7 +1431,7 @@ sl-progress-bar {
     gap: var(--sl-spacing-medium);
 }
 
-#imports-container h3 {
+#imports-container h2 {
     margin: 0;
     font-size: var(--sl-font-size-large);
     font-weight: var(--sl-font-weight-semibold);
@@ -2906,7 +2915,7 @@ html.sl-theme-light {
     margin-bottom: var(--sl-spacing-large);
 }
 
-.stats-section h3 {
+.stats-section h2 {
     margin: 0 0 var(--sl-spacing-small) 0;
     font-size: var(--sl-font-size-medium);
     font-weight: 600;
@@ -3682,16 +3691,16 @@ html.sl-theme-light {
         font-size: 0.75rem;
     }
 
-    /* Section headers (Files / Imports / Stats) are h3 — desktop
+    /* Section headers (Files / Imports / Stats) are h2 — desktop
        reads them as primary, on mobile they crowd the layout. */
-    .files-header h3,
-    #imports-container h3,
-    .stats-section h3 {
+    .files-header h2,
+    #imports-container h2,
+    .stats-section h2 {
         font-size: 0.95rem;
         margin-bottom: var(--sl-spacing-x-small);
     }
 
-    /* Files header (h3 + actions) tends to wrap awkwardly when the
+    /* Files header (h2 + actions) tends to wrap awkwardly when the
        action buttons can't fit on the same line. Allow wrapping and
        align everything left so the second-line buttons line up with
        the heading. */

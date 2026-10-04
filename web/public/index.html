@@ -340,7 +340,7 @@
             <!-- Imports Panel -->
             <sl-tab-panel name="imports">
                 <div id="imports-container">
-                    <h3>Import Archive</h3>
+                    <h2>Import Archive</h2>
                     <p class="settings-help">Upload a .zip file containing a video (.mp4, .mkv, .webm, .ts) and optionally a chat JSON file.</p>
 
                     <div id="import-dropzone" role="button" tabindex="0" aria-label="Choose a .zip archive to import">
@@ -376,7 +376,7 @@
             <sl-tab-panel name="files">
                 <div id="files-container">
                     <div class="files-header">
-                        <h3>Orphaned Files</h3>
+                        <h2>Orphaned Files</h2>
                         <div class="files-actions">
                             <sl-button size="small" id="files-refresh-btn">
                                 <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -406,7 +406,7 @@
                     </div>
 
                     <div class="files-header history-section-header">
-                        <h3>Orphaned History Entries</h3>
+                        <h2>Orphaned History Entries</h2>
                         <div class="files-actions">
                             <sl-button size="small" id="history-refresh-btn">
                                 <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -438,12 +438,12 @@
             <sl-tab-panel name="stats">
                 <div id="stats-content">
                     <div class="stats-section">
-                        <h3>Storage</h3>
+                        <h2>Storage</h2>
                         <div id="stats-disk"></div>
                         <div class="stats-grid" id="stats-storage"></div>
                     </div>
                     <div class="stats-section">
-                        <h3>Activity</h3>
+                        <h2>Activity</h2>
                         <div class="stats-grid" id="stats-activity"></div>
                     </div>
                 </div>
@@ -567,7 +567,7 @@
                         <!-- General Settings -->
                         <!-- Network Settings -->
                         <div id="settings-network" class="settings-section">
-                            <h3>Network</h3>
+                            <h2>Network</h2>
                             <sl-input
                                 id="cfg-port"
                                 type="number"
@@ -639,7 +639,7 @@
                             ></sl-input>
 
                             <sl-divider></sl-divider>
-                            <h4>Password</h4>
+                            <h3>Password</h3>
                             <p class="settings-help">
                                 A password is required to enable external network access. Loopback and LAN connections are never challenged.
                             </p>
@@ -688,7 +688,7 @@
                             </div>
 
                             <sl-divider></sl-divider>
-                            <h4>Connected Clients</h4>
+                            <h3>Connected Clients</h3>
                             <p class="settings-help">
                                 Persistent tokens that allow remote clients to stay logged in across restarts. Revoking a token forces that client to re-enter the password.
                             </p>
@@ -703,7 +703,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Paths</h3>
+                            <h2>Paths</h2>
                             <sl-input
                                 id="cfg-database"
                                 label="Database Path"
@@ -748,7 +748,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Logs</h3>
+                            <h2>Logs</h2>
                             <sl-select
                                 id="cfg-log-level"
                                 label="Log Level"
@@ -793,7 +793,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Monitors</h3>
+                            <h2>Monitors</h2>
                             <sl-input
                                 id="cfg-archive-window-days"
                                 type="number"
@@ -876,7 +876,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Downloader</h3>
+                            <h2>Downloader</h2>
                             <sl-input
                                 id="cfg-output-template"
                                 label="Output Template"
@@ -988,7 +988,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Cookies</h3>
+                            <h2>Cookies</h2>
                             <sl-input
                                 id="cfg-cookie-file"
                                 label="Cookie File"
@@ -1006,7 +1006,7 @@
                             ></sl-input>
 
                             <sl-divider></sl-divider>
-                            <h4>Active Platforms</h4>
+                            <h3>Active Platforms</h3>
                             <div style="display: flex; gap: 1.5em; margin-bottom: 0.75em;">
                                 <sl-switch id="cfg-active-youtube">YouTube cookies</sl-switch>
                                 <sl-switch id="cfg-active-twitch">Twitch cookies</sl-switch>
@@ -1016,7 +1016,7 @@
                             </p>
 
                             <sl-divider></sl-divider>
-                            <h4>Automatic Cookie Login</h4>
+                            <h3>Automatic Cookie Login</h3>
                             <sl-select
                                 id="cfg-cookies-acquisition"
                                 label="How refreshes get cookies"
@@ -1124,7 +1124,7 @@
                                 </p>
                             </div>
                             <sl-divider></sl-divider>
-                            <h4>Paste or upload a cookies.txt</h4>
+                            <h3>Paste or upload a cookies.txt</h3>
                             <p class="settings-help" style="margin-top: 0;">
                                 Export cookies in Netscape format from a browser signed in to the
                                 account, then paste the text or choose the file. Moombox MERGES what
@@ -1179,7 +1179,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Disk</h3>
+                            <h2>Disk</h2>
                             <sl-input
                                 id="cfg-disk-warn-percent"
                                 type="number"
@@ -1206,7 +1206,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Updates</h3>
+                            <h2>Updates</h2>
                             <sl-switch id="cfg-auto-check-updates">
                                 Automatically check for updates
                                 <span slot="help-text"
@@ -1274,7 +1274,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>System</h3>
+                            <h2>System</h2>
                             <p class="settings-help">
                                 Restart the Moombox process. The launcher
                                 relaunches it automatically; in-progress
@@ -1310,7 +1310,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>BotGuard Sidecar</h3>
+                            <h2>BotGuard Sidecar</h2>
                             <p class="settings-help">
                                 The BotGuard sidecar is an embedded Node + JSDOM +
                                 bgutils-js subprocess that produces real PO tokens
@@ -1333,7 +1333,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Memory</h3>
+                            <h2>Memory</h2>
                             <p class="settings-help">
                                 Soft caps on steady-state memory. Defaults sit
                                 above normal operating ranges so GC fires only
@@ -1376,7 +1376,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Monitored Channels</h3>
+                            <h2>Monitored Channels</h2>
                             <p class="settings-help">
                                 Add YouTube or Twitch channels to automatically
                                 monitor for new streams.
@@ -1395,9 +1395,9 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Integrations</h3>
+                            <h2>Integrations</h2>
 
-                            <h4>Notifications</h4>
+                            <h3>Notifications</h3>
                             <p class="settings-help">
                                 Configure webhook notifications for stream
                                 events.
@@ -1413,7 +1413,7 @@
 
                             <sl-divider></sl-divider>
 
-                            <h4>yt-dlp PO Token Plugin</h4>
+                            <h3>yt-dlp PO Token Plugin</h3>
                             <div class="integration-card" id="ytdlp-plugin-card">
                                 <div class="integration-header">
                                     <div>
