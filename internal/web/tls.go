@@ -28,6 +28,11 @@ type certWatcher struct {
 	cert              atomic.Pointer[tls.Certificate]
 	mu                sync.Mutex
 	lastModTime       time.Time
+	// failedCertMod / failedKeyMod are the mtimes of a pair that failed to
+	// load, so it is tried — and warned about — once rather than on every
+	// handshake until the files change again. Both files: replacing the key
+	// alone (cert first, key second, as a deploy hook may) must still retry.
+	failedCertMod, failedKeyMod time.Time
 	// identityCache holds the (SANs, IdentitySANs) pair computed from the
 	// certificate CURRENTLY in `cert`, keyed by that certificate's pointer.
 	// Guarded by mu. Before this cache, SANs()/IdentitySANs() re-parsed the
@@ -72,8 +77,20 @@ func (w *certWatcher) reloadIfChanged() {
 	if !info.ModTime().After(w.lastModTime) {
 		return
 	}
+	var keyMod time.Time
+	if keyInfo, err := os.Stat(w.keyPath); err == nil {
+		keyMod = keyInfo.ModTime()
+	}
+	if info.ModTime().Equal(w.failedCertMod) && keyMod.Equal(w.failedKeyMod) {
+		// This exact pair already failed. Re-parsing it on every handshake
+		// wrote this Warn per connection — every tab, reconnect and plugin
+		// call — into the log, every log panel and the TUI, until the key
+		// was fixed.
+		return
+	}
 	cert, err := tls.LoadX509KeyPair(w.certPath, w.keyPath)
 	if err != nil {
+		w.failedCertMod, w.failedKeyMod = info.ModTime(), keyMod
 		w.logger.Warn("[TLS] reload skipped — cert/key pair invalid", "err", err)
 		return
 	}
