@@ -809,9 +809,10 @@ func (g *gzipResponseWriter) Flush() {
 	} else {
 		g.commitPlain()
 	}
-	if f, ok := g.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	// Through the controller, not a type assertion: the writer underneath is
+	// RecoveryMiddleware's, and an assertion only sees what that wrapper
+	// itself implements.
+	_ = http.NewResponseController(g.ResponseWriter).Flush()
 }
 
 // Unwrap allows http.ResponseController to access the underlying ResponseWriter.
@@ -850,6 +851,18 @@ func (rw *recoveryWriter) WriteHeader(code int) {
 func (rw *recoveryWriter) Write(b []byte) (int, error) {
 	rw.headersSent = true
 	return rw.ResponseWriter.Write(b)
+}
+
+// Flush passes a handler's Flush through to the connection. Without it the
+// whole chain swallowed every Flush: this wrapper sits outside the gzip one,
+// whose Flush asserted http.Flusher on it and found nothing, so the handlers
+// that answer before a blocking re-check (POST /api/cookies/import, the
+// setup wizard's finish) held their response until the re-check ended —
+// seconds, up to 45 — in production, while tests built on a bare router saw
+// it arrive at once.
+func (rw *recoveryWriter) Flush() {
+	rw.headersSent = true
+	_ = http.NewResponseController(rw.ResponseWriter).Flush()
 }
 
 func (rw *recoveryWriter) Unwrap() http.ResponseWriter {
