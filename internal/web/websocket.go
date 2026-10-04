@@ -147,6 +147,25 @@ func NewWebSocketHub(logger interface {
 
 // HandleUpgrade is the HTTP handler for WebSocket upgrade.
 func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
+	// The upgrade runs outside the router, so RecoveryMiddleware never sees a
+	// panic here — the DB-backed AuthCheck, or the snapshot built for the new
+	// client — and net/http's own recover writes to the discarded ErrorLog.
+	// Logged here instead, with a registered client removed rather than left
+	// in the hub with no reader or pinger.
+	var client *wsClient
+	accepted := false
+	defer func() {
+		if rvr := recover(); rvr != nil {
+			hub.logger.Error("panic in websocket upgrade", "panic", rvr, "remoteAddr", r.RemoteAddr)
+			if client != nil {
+				hub.removeClient(client, "upgrade panic")
+			}
+			if !accepted {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}
+	}()
+
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
 	if hub.AuthCheck != nil {
 		ip := ExtractIP(r)
@@ -196,6 +215,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		hub.logger.Error("websocket upgrade failed", "err", err)
 		return
 	}
+	accepted = true
 
 	// Set read limit to prevent oversized messages
 	conn.SetReadLimit(int64(wsMaxMessageSize))
@@ -205,7 +225,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// after ReadTimeout (30s), which would close the WebSocket prematurely.
 	// The connection lifetime is managed by pingPump/readPump instead.
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &wsClient{
+	client = &wsClient{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
@@ -227,17 +247,24 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	hub.logger.Debug("websocket connected", "clients", clientCount)
 
-	// Per-client write loop drains `writes`. sendInitialState below writes
-	// DIRECTLY to the conn (not through the queue) so the snapshot can't be
-	// displaced by queue-overflow drops; that's safe because coder/websocket
-	// serializes concurrent writers internally — a broadcast queued during
-	// the initial-state write waits its turn rather than interleaving.
-	go hub.writePump(client)
-
-	// Send initial state immediately. A tab that falls behind in its first
-	// second gets its next full snapshot one wsResyncMinInterval from the seed
-	// above, not stacked straight on top of this one.
+	// Send initial state immediately, DIRECTLY to the conn (not through the
+	// queue) so the snapshot can't be displaced by queue-overflow drops — and
+	// BEFORE the write loop starts. Broadcasts from the moment of registration
+	// wait in client.writes until then, so every one of them follows the
+	// snapshot. With the loop already running, one could overtake it: a
+	// job_deleted committed after the snapshot's GetAllJobs went out first (a
+	// no-op on an empty client), and the snapshot then restored the deleted
+	// row. Replaying them after it is correct — they are idempotent upserts
+	// and deletes. A tab that falls behind in its first second gets its next
+	// full snapshot one wsResyncMinInterval from the seed above, not stacked
+	// straight on top of this one.
 	hub.sendInitialState(client)
+	if client.ctx.Err() != nil {
+		return // the snapshot write failed and the client is already gone
+	}
+
+	// Per-client write loop drains `writes`.
+	go hub.writePump(client)
 
 	// Start server-initiated ping goroutine to keep connection alive
 	go hub.pingPump(client)

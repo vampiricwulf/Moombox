@@ -704,7 +704,7 @@ Panic recovery is a hard requirement across the entire application. A panic in o
 
 ### Recovery Layers
 
-**HTTP handlers:** `RecoveryMiddleware` (middleware layer 1) catches panics in any HTTP handler or downstream middleware. Returns 500 JSON if headers have not been sent.
+**HTTP handlers:** `RecoveryMiddleware` (middleware layer 1) catches panics in any HTTP handler or downstream middleware. Returns 500 JSON if headers have not been sent. The WebSocket upgrade is the exception: `Server.Start` intercepts it ahead of the router, so `HandleUpgrade` carries its own recover, which logs the panic, removes a client it had already registered, and answers 500 when the upgrade had not yet been accepted.
 
 **Database subscriber callbacks:** The database package wraps all subscriber notifications in `safeCallJobUpdate` and `safeCallJobsChange`. If a subscriber callback panics, the panic is logged and the remaining subscribers still receive their notifications. The database update pipeline continues uninterrupted.
 
