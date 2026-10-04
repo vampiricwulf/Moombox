@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -348,4 +351,91 @@ func TestStorePathForSavesWhereLoadHappened(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoadConfigWithNoFlagRunsTheSearch: main used to turn an absent -config
+// into <cwd>/config.toml, and config.Load treats any named path as the only
+// candidate, so a config kept in ./config/ or ~/.config/moombox/ was never
+// read — the daemon booted on defaults and its first save created a
+// ./config.toml that shadowed the real file from then on.
+//
+// Mutant: name <cwd>/config.toml before loading again (main.go's old
+// default) — the ./config/ row boots on defaults.
+func TestLoadConfigWithNoFlagRunsTheSearch(t *testing.T) {
+	writeConfig := func(t *testing.T, path string, port int) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, fmt.Appendf(nil, "[network]\nport = %d\n", port), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := func(t *testing.T) (cwd, home string) {
+		t.Helper()
+		cwd, home = t.TempDir(), t.TempDir()
+		t.Chdir(cwd)
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		// t.Chdir leaves cwd as given; Getwd may resolve a symlinked temp dir.
+		cwd, _ = os.Getwd()
+		return cwd, home
+	}
+
+	for _, tc := range []struct {
+		name string
+		path func(cwd, home string) string
+	}{
+		{"./config/config.toml", func(cwd, _ string) string { return filepath.Join(cwd, "config", "config.toml") }},
+		{"~/.config/moombox/config.toml", func(_, home string) string {
+			return filepath.Join(home, ".config", "moombox", "config.toml")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd, home := setup(t)
+			want := tc.path(cwd, home)
+			writeConfig(t, want, 4321)
+
+			cfg, storePath, err := loadConfig("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Network.Port != 4321 {
+				t.Errorf("port = %d, want 4321: %s was not read", cfg.Network.Port, want)
+			}
+			if storePath != want {
+				t.Errorf("save target = %q, want %q", storePath, want)
+			}
+		})
+	}
+
+	t.Run("nothing anywhere: save to <cwd>/config.toml", func(t *testing.T) {
+		cwd, _ := setup(t)
+		cfg, storePath, err := loadConfig("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ConfigLoaded {
+			t.Errorf("a config was loaded from %q with none on disk", cfg.LoadedFrom)
+		}
+		if want := filepath.Join(cwd, "config.toml"); storePath != want {
+			t.Errorf("save target = %q, want %q", storePath, want)
+		}
+	})
+
+	t.Run("a named path that does not exist is the only candidate", func(t *testing.T) {
+		cwd, _ := setup(t)
+		writeConfig(t, filepath.Join(cwd, "config", "config.toml"), 4321)
+		named := filepath.Join(cwd, "custom.toml")
+		cfg, storePath, err := loadConfig(named)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Network.Port == 4321 {
+			t.Error("a -config path that does not exist adopted ./config/config.toml")
+		}
+		if storePath != named {
+			t.Errorf("save target = %q, want %q", storePath, named)
+		}
+	})
 }

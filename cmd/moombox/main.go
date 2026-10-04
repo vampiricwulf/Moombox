@@ -180,19 +180,12 @@ func main() {
 		fmt.Println()
 	}
 
-	// Resolve config path
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to get working directory: %v\n", err)
-		}
-		cfgPath = filepath.Join(cwd, "config.toml")
-	}
-
 	// Run the application. If a restart is requested (config change or
-	// update), exit with exitCodeRestart so the launcher respawns us.
-	if run(cfgPath, *logLevel, useTUI) {
+	// update), exit with exitCodeRestart so the launcher respawns us. An
+	// empty -config is passed through as is: config.Load treats any named
+	// path as the only candidate, so naming <cwd>/config.toml here skipped
+	// the ./config/ and ~/.config/moombox/ search (see loadConfig).
+	if run(*configPath, *logLevel, useTUI) {
 		os.Exit(exitCodeRestart)
 	}
 }

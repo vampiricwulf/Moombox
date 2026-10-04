@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
@@ -96,17 +97,36 @@ func (n *nopLogger) Info(_ string, _ ...any)  {}
 func (n *nopLogger) Warn(_ string, _ ...any)  {}
 func (n *nopLogger) Error(_ string, _ ...any) {}
 
+// loadConfig loads the configuration for the -config flag's value and returns
+// it with the path every later save must target. An empty flagPath runs
+// config.Load's search (cwd, ./config/, ~/.config/moombox/); a named one is
+// the only file considered.
+func loadConfig(flagPath string) (*config.MoomboxConfig, string, error) {
+	cfg, err := config.Load(flagPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, storePathFor(flagPath, cfg), nil
+}
+
 // storePathFor is the file every later save must target: the one config.Load
 // actually read, and — only when nothing was found anywhere — the path that was
-// asked for (the -config flag, or the cwd default main.go computes). So a
-// config found in ./config/ is written back to ./config/ instead of being
-// forked into a fresh ./config.toml that shadows it on the next boot, while a
-// -config path that does not exist yet is still CREATED where it was named.
+// asked for (the -config flag), else <cwd>/config.toml. So a config found in
+// ./config/ is written back to ./config/ instead of being forked into a fresh
+// ./config.toml that shadows it on the next boot, while a -config path that
+// does not exist yet is still CREATED where it was named.
 func storePathFor(flagPath string, cfg *config.MoomboxConfig) string {
 	if cfg.LoadedFrom != "" {
 		return cfg.LoadedFrom
 	}
-	return flagPath
+	if flagPath != "" {
+		return flagPath
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to get working directory: %v\n", err)
+	}
+	return filepath.Join(cwd, "config.toml")
 }
 
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
