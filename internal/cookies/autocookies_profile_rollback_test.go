@@ -3,6 +3,7 @@ package cookies
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -624,6 +625,28 @@ func TestCorruptDBFailsFastWithoutRetrying(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("corrupt DB took %v — the retry loop should not retry a permanent error", elapsed)
+	}
+	// One attempt was made, so the message must not claim five.
+	// Mutant: restore the constant cookieDBReadRetries in the wrap.
+	if strings.Contains(err.Error(), "attempts") {
+		t.Errorf("a single attempt reported as several: %v", err)
+	}
+}
+
+// TestClassifyCookieDBErrorKeepsAnExistingVerdict: the snapshot reports an
+// unreadable -wal (a permission problem, with its own advice) as
+// ErrCookieDBUnreadable, and classifying it again appended "the file may be
+// truncated, corrupt, or not a Firefox cookie database" to it.
+//
+// Mutant: drop the already-classified pass-through.
+func TestClassifyCookieDBErrorKeepsAnExistingVerdict(t *testing.T) {
+	inner := fmt.Errorf("%w: cookies.sqlite-wal exists but cannot be read (permission denied)", ErrCookieDBUnreadable)
+	got := classifyCookieDBError(fmt.Errorf("after 2 attempts: %w", inner))
+	if strings.Contains(got.Error(), "corrupt") {
+		t.Errorf("a permission problem was called corruption: %v", got)
+	}
+	if !errors.Is(got, ErrCookieDBUnreadable) {
+		t.Errorf("the verdict was lost: %v", got)
 	}
 }
 

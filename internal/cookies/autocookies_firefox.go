@@ -489,11 +489,13 @@ func readFirefoxCookies(profileDir string) (string, firefoxReadStats, error) {
 	// anything that is not retryable.
 	var lines []string
 	var lastErr error
+	attempts := 0
 
 	for attempt := range cookieDBReadRetries {
 		if attempt > 0 {
 			time.Sleep(cookieDBReadRetryBackoff)
 		}
+		attempts++
 
 		lines, stats, lastErr = querySnapshotOrLive(profileDir, dbPath, attempt == cookieDBReadRetries-1)
 		if lastErr == nil || !isRetryableDBError(lastErr) {
@@ -502,7 +504,12 @@ func readFirefoxCookies(profileDir string) (string, firefoxReadStats, error) {
 	}
 
 	if lastErr != nil {
-		return "", stats, classifyCookieDBError(fmt.Errorf("after %d attempts: %w", cookieDBReadRetries, lastErr))
+		// The count is the one actually made: a permanent error breaks out
+		// on the first, and "after 5 attempts" there was simply untrue.
+		if attempts > 1 {
+			lastErr = fmt.Errorf("after %d attempts: %w", attempts, lastErr)
+		}
+		return "", stats, classifyCookieDBError(lastErr)
 	}
 
 	// Zero relevant cookies is NEVER a success. It is what a dropped -wal
