@@ -12,7 +12,7 @@ import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { JobDetailsController } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 export class MoomboxApp {
@@ -658,7 +658,7 @@ export class MoomboxApp {
         );
         this.showToast(recheck.message, recheck.variant);
       } else {
-        this.showToast("Failed to recheck cookies", "danger");
+        this.showToast("Failed to recheck cookies: " + await serverErrorMessage(response), "danger");
       }
     } catch (e) {
       this.showToast("Failed to recheck cookies: " + e.message, "danger");
@@ -1663,10 +1663,14 @@ export class MoomboxApp {
   async checkMonitorsNow() {
     try {
       const resp = await fetch("/api/monitors/check-now", { method: "POST" });
+      if (!resp.ok) {
+        this.showToast("Force check failed: " + await serverErrorMessage(resp), "danger");
+        return;
+      }
       const data = await resp.json().catch(() => ({}));
       if (data.debounced) {
         this.showToast(`Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`, "primary");
-      } else if (resp.ok && data.success) {
+      } else if (data.success) {
         this.showToast("Checking all monitors now…", "success");
       } else {
         this.showToast("Force check failed", "danger");
@@ -2559,12 +2563,14 @@ export class MoomboxApp {
 
     try {
       const response = await fetch(`/api/formats/${videoId}`);
-      if (!response.ok) {
-        throw new Error("Failed to fetch formats");
-      }
 
-      // Discard stale response if user changed the URL during fetch
+      // Discard a stale response, failed or not, if the user changed the URL
+      // during the fetch: the newer fetch owns the skeleton and the toast.
       if (this._lastFormatVideoId !== videoId) return;
+
+      if (!response.ok) {
+        throw new Error(await serverErrorMessage(response));
+      }
 
       const data = await response.json();
       await this.populateFormatSelects(data);
@@ -2994,7 +3000,7 @@ export class MoomboxApp {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to delete trim');
+        throw new Error('Failed to delete trim: ' + await serverErrorMessage(response));
       }
 
       this.showToast('Trim deleted', 'success');

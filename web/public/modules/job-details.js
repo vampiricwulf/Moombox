@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
 
 export class JobDetailsController {
   constructor(app) {
@@ -111,9 +111,16 @@ export class JobDetailsController {
    */
   async _setWatched(watched) {
     const jobId = this.app.selectedJobId;
-    const res = await fetch(`/api/jobs/${jobId}/watched`, { method: watched ? "POST" : "DELETE" });
+    const failed = `Failed to mark ${watched ? "watched" : "unwatched"}`;
+    let res;
+    try {
+      res = await fetch(`/api/jobs/${jobId}/watched`, { method: watched ? "POST" : "DELETE" });
+    } catch (e) {
+      this.app.showToast(`${failed}: ${e.message}`, "danger");
+      return;
+    }
     if (!res.ok) {
-      this.app.showToast(`Failed to mark ${watched ? "watched" : "unwatched"}`, "danger");
+      this.app.showToast(`${failed}: ${await serverErrorMessage(res)}`, "danger");
       return;
     }
     const updated = await res.json().catch(() => null);

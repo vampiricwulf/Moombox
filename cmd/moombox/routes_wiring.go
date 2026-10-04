@@ -27,8 +27,9 @@ func (s *runState) wireRoutes() func() {
 		s.notifyMgr,
 	)
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
-		DB: s.db,
-		YT: &ytFormatAdapter{svc: s.ytService, store: s.configStore},
+		DB:     s.db,
+		YT:     &ytFormatAdapter{svc: s.ytService, store: s.configStore},
+		Logger: s.log,
 	})
 	routes.StatusRoute(s.r, &routes.StatusRouteDeps{
 		Version:            version,

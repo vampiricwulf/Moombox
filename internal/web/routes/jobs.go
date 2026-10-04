@@ -1275,6 +1275,14 @@ type FormatRoutesDeps struct {
 	YT interface {
 		GetFormats(ctx context.Context, videoID string) (map[string]any, error)
 	}
+	// Logger records why an extraction failed; the response carries only
+	// a generic line. Optional.
+	Logger interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
 }
 
 // FormatRoutes registers format-related API routes.
@@ -1294,6 +1302,9 @@ func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 
 		result, err := deps.YT.GetFormats(req.Context(), videoID)
 		if err != nil {
+			if deps.Logger != nil {
+				deps.Logger.Warn("[Formats] Format lookup failed", "videoId", videoID, "err", err)
+			}
 			jsonError(rw, "failed to get formats", http.StatusInternalServerError)
 			return
 		}
