@@ -151,7 +151,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if existingChat != nil {
 			existingChat.Stop()
 		}
-		return nil
+		return ErrCancelled
 	}
 
 	// Subscribe to job status changes for cancellation. Job deletion is

@@ -73,10 +73,11 @@ var ErrNotAMember = errors.New("not a channel member")
 // pings about content that was never going to succeed.
 var ErrNonActionable = errors.New("non-actionable error")
 
-// ErrCancelled is the sentinel used by the StreamProcessor when a
-// download was cancelled mid-flight (ctx.Done before live, user-cancel
-// during upcoming wait). Lets the worker pick the cancelled-status
-// branch without comparing error strings.
+// ErrCancelled marks a run that was cancelled rather than failed: the
+// StreamProcessor's waits return it (cancelledResult — ctx done, or the row
+// cancelled or deleted while upcoming), and ExecuteWithChat returns it when
+// the row was already Cancelled as it started. processJob routes it to
+// handleCancellation instead of comparing error strings.
 var ErrCancelled = errors.New("cancelled")
 
 // The three ways the off-queue staging verbs refuse. All three are the
@@ -742,9 +743,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	}
 
 	if !result.ShouldDownload {
-		if result.Error == "cancelled" {
-			// "cancelled" comes from waitForLive on ctx.Done() or DB status change.
-			// Route through handleCancellation so shutdown preserves state.
+		if errors.Is(result.ErrSentinel, ErrCancelled) {
+			// A wait cancelled by ctx.Done() or the row's status (see
+			// cancelledResult). Route through handleCancellation so shutdown
+			// preserves state.
 			w.handleCancellation(job)
 			return
 		}
@@ -865,7 +867,12 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	}
 
 	if dlErr != nil {
-		if ctx.Err() != nil {
+		// ErrCancelled: the row was already Cancelled when ExecuteWithChat
+		// started. That early return used to be nil, which this read as a
+		// finished download — it deleted the staging of a job the operator
+		// had just cancelled and might Mux or Resume, and skipped the
+		// cancellation's own handling.
+		if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
 			w.handleCancellation(job)
 			return
 		}

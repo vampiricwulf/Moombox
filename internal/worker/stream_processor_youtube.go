@@ -179,7 +179,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		select {
 		case <-ctx.Done():
 			sp.stopEarlyChat(chatDl)
-			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			return cancelledResult(), nil
 		default:
 		}
 
@@ -189,7 +189,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		currentJob, err := sp.db.GetJob(job.ID)
 		if err == nil && (currentJob == nil || currentJob.Status == database.StatusCancelled) {
 			sp.stopEarlyChat(chatDl)
-			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			return cancelledResult(), nil
 		}
 
 		// A5: probe interval with PROPORTIONAL jitter (~10% of the interval)
@@ -207,7 +207,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		case <-ctx.Done():
 			probeTimer.Stop()
 			sp.stopEarlyChat(chatDl)
-			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			return cancelledResult(), nil
 		case <-probeTimer.C:
 			// Normal poll
 		case <-surgeCh:
@@ -250,7 +250,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			}
 			if cancelled {
 				sp.stopEarlyChat(chatDl)
-				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+				return cancelledResult(), nil
 			}
 			consecutiveErrors = newCount // unchanged for network-class failures
 			if report == reportFailure {

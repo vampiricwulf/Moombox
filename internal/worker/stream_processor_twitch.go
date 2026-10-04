@@ -494,7 +494,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				return nil, err
 			}
 			if waitInfo == nil {
-				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+				return cancelledResult(), nil
 			}
 			streamInfo = waitInfo
 			// Fall through to existing live handling below

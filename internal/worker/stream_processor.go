@@ -82,6 +82,13 @@ func (r *StreamProcessResult) AsError() error {
 	return errors.New(r.Error)
 }
 
+// cancelledResult is what a wait returns when it is cancelled — its ctx done,
+// or its row cancelled or deleted. processJob routes it to handleCancellation
+// on the ErrCancelled sentinel.
+func cancelledResult() *StreamProcessResult {
+	return &StreamProcessResult{ShouldDownload: false, Error: "cancelled", ErrSentinel: ErrCancelled}
+}
+
 // StreamProcessor handles stream status probing and waiting.
 type StreamProcessor struct {
 	yt          *youtube.Service
