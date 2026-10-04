@@ -103,3 +103,23 @@ test("negated namespaced filter", () => {
 test("unknown status value yields zero matches", () => {
   assert.deepEqual(filterWith("status:unknown"), []);
 });
+
+// A status: value is user text looked up in STATUS_FILTER_MAP. A plain
+// property read handed status:constructor / status:__proto__ an
+// Object.prototype member — not an array — so `allowed.includes` threw, and
+// because the filter bar stores the token before it renders, every later
+// render threw too and the list froze. The Go twin (internal/jobfilter)
+// returns no matches; so does this one now.
+test("status: an Object.prototype name matches nothing instead of throwing", () => {
+  for (const key of ["constructor", "__proto__", "hasOwnProperty", "toString"]) {
+    assert.deepEqual(filterWith(`status:${key}`), [], key);
+  }
+});
+
+test("status: a negated Object.prototype name keeps every job", () => {
+  assert.deepEqual(filterWith("-status:constructor"), ["1", "2", "3", "4", "5"]);
+});
+
+test("status: an Object.prototype name in an OR group leaves the other branch working", () => {
+  assert.deepEqual(filterWith("status:constructor|status:finished"), ["2"]);
+});

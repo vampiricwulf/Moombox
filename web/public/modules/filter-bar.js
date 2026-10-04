@@ -365,7 +365,9 @@ export class FilterBarController {
     if (token.type === "text") return token.value;
     if (token.type === "status") {
       const labels = { active: "Active", issues: "Issues", errors: "Issues", finished: "Finished" };
-      return labels[token.value] || token.value;
+      // Own properties only — the value is user text, and status:constructor
+      // would otherwise read Object's constructor into the chip.
+      return Object.hasOwn(labels, token.value) ? labels[token.value] : token.value;
     }
     if (token.type === "platform") {
       return token.value === "youtube" ? "YouTube" : token.value === "twitch" ? "Twitch" : token.value;

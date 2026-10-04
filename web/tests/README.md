@@ -63,7 +63,7 @@ log-panel 4,
 open-folder 4,
 resolution-picker 4, settings-reorder-budget 4,
 update-check-debounce 4, archive-boundary 3, sidecar-warning 3, app-resync 2,
-import-placeholder 2, release-notes-toast 1), leaving 132 tests
+import-placeholder 2, release-notes-toast 1), leaving 135 tests
 that need no DOM — the eight pure suites, the two stylesheet-text tests in
 `a11y-controls.test.mjs`, which read `moombox.css` and assert on its text, the
 five pure helper tests in `player.test.mjs` (task 3's two colour tests, task
@@ -72,13 +72,13 @@ five pure helper tests in `player.test.mjs` (task 3's two colour tests, task
 `resolution-picker.test.mjs`, whose other four tests do need one:
 
 ```
-ℹ tests 343
-ℹ pass 132
+ℹ tests 346
+ℹ pass 135
 ℹ fail 0
 ℹ skipped 211
 ```
 
-With jsdom installed the same command reports `tests 343` / `pass 343` /
+With jsdom installed the same command reports `tests 346` / `pass 346` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
