@@ -2414,10 +2414,11 @@ sl-progress-bar {
     }
 }
 
-/* Restart-required badge */
+/* Restart-required badge. Each is inserted after its field inside a
+   .settings-section, which is a flex column: without align-self the tag
+   stretched into a full-width orange bar under every restart-only field. */
 .restart-badge {
-    margin-left: var(--sl-spacing-x-small);
-    vertical-align: middle;
+    align-self: flex-start;
 }
 
 /* Unsaved settings warning */
