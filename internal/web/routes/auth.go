@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -393,26 +394,29 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 	})
 }
 
-// redactIP truncates an IPv4 to /24 ("a.b.c.0") and IPv6 to /64.
-// Empty input returns empty string. Malformed input returns "" rather
-// than leaking the unparseable original.
+// redactIP truncates an IPv4 to /24 ("a.b.c.0") and IPv6 to /64
+// ("2001:db8:1:2::"). An IPv4-mapped IPv6 address is treated as IPv4 and a
+// zone is dropped. Empty input returns empty string. Malformed input returns
+// "" rather than leaking the unparseable original.
+//
+// The address is parsed and masked rather than cut on its separators: a
+// compressed IPv6 literal has no fixed number of ":"-separated fields, so
+// "keep the first four" kept the whole of "2001:db8::1".
 func redactIP(ip string) string {
-	if ip == "" {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
 		return ""
 	}
-	if i := strings.LastIndex(ip, "."); i > 0 && strings.Count(ip, ".") == 3 {
-		// IPv4: keep a.b.c, replace last octet with 0.
-		return ip[:i] + ".0"
+	addr = addr.Unmap().WithZone("")
+	bits := 64
+	if addr.Is4() {
+		bits = 24
 	}
-	if strings.Contains(ip, ":") {
-		// IPv6: keep first 4 hextets (covers /64).
-		segs := strings.Split(ip, ":")
-		if len(segs) < 4 {
-			return ""
-		}
-		return strings.Join(segs[:4], ":") + "::"
+	prefix, err := addr.Prefix(bits)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return prefix.Addr().String()
 }
 
 func getSessionToken(r *http.Request) string {
