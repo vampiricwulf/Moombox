@@ -1,9 +1,7 @@
 package database
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -348,101 +346,6 @@ func TestAddToHistoryDeduplicates(t *testing.T) {
 	}
 	if proc, _ := db.HasProcessed("never-added"); proc {
 		t.Error("HasProcessed for never-added videoID: want false")
-	}
-}
-
-// --- ImportFromJSON ---
-
-func TestImportFromJSONLoadsJobsAndHistory(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	importPath := filepath.Join(dir, "import.json")
-	importJSON := map[string]any{
-		"jobs": []map[string]any{
-			{
-				"id":       "imp_a",
-				"videoId":  "imp_a",
-				"url":      "https://example.com/a",
-				"platform": "youtube",
-				"status":   "Finished",
-			},
-			{
-				"id":      "imp_b",
-				"videoId": "imp_b",
-				"url":     "https://example.com/b",
-				// platform omitted — should default to "youtube"
-				"status": "Finished",
-			},
-		},
-		"history":    []string{"hist_v1", "hist_v2"},
-		"lastVideos": map[string]string{"chan_a": "vid_a"},
-	}
-	data, _ := json.Marshal(importJSON)
-	if err := os.WriteFile(importPath, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.ImportFromJSON(importPath); err != nil {
-		t.Fatalf("ImportFromJSON: %v", err)
-	}
-
-	// Both jobs persisted
-	a, _ := db.GetJob("imp_a")
-	if a == nil {
-		t.Error("job imp_a should exist after import")
-	}
-	b, _ := db.GetJob("imp_b")
-	if b == nil {
-		t.Fatal("job imp_b should exist after import")
-	}
-	if b.Platform != "youtube" {
-		t.Errorf("missing-platform default: want youtube, got %q", b.Platform)
-	}
-
-	// History entries
-	for _, vid := range []string{"hist_v1", "hist_v2"} {
-		if proc, _ := db.HasProcessed(vid); !proc {
-			t.Errorf("history %s: not present after import", vid)
-		}
-	}
-}
-
-func TestImportFromJSONHandlesMissingFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if err := db.ImportFromJSON(filepath.Join(dir, "no-such-file.json")); err == nil {
-		t.Error("missing file: want error, got nil")
-	}
-}
-
-func TestImportFromJSONRejectsInvalidJSON(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	importPath := filepath.Join(dir, "bad.json")
-	if err := os.WriteFile(importPath, []byte("not-json{"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.ImportFromJSON(importPath); err == nil {
-		t.Error("invalid JSON: want error, got nil")
 	}
 }
 

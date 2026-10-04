@@ -300,8 +300,8 @@ func intToBool(i int) bool {
 }
 
 // insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
-// executor (either *sql.DB or *sql.Tx). Single implementation shared by
-// AddJob and ImportFromJSON so the 43-column INSERT only exists once.
+// executor (either *sql.DB or *sql.Tx), so the 43-column INSERT exists
+// once.
 //
 // channel_id and queue_priority are written on EVERY insert (spec §10):
 // a nil ChannelID stores NULL — never "" — and the Go zero QueuePriority

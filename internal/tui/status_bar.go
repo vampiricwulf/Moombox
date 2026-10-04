@@ -616,9 +616,8 @@ func cookieFileErrorLabel(code string, t barTier) string {
 //     test for "twitch" and treat everything else as YouTube), and a status
 //     bar that partitioned platforms differently from the rows above it would
 //     be its own defect;
-//   - the rows that actually carry an empty Platform are pre-Twitch ones, and
-//     ImportFromJSON (database_jobs.go:905) already backfills exactly this
-//     value when it meets them;
+//   - the rows that actually carry an empty Platform are pre-Twitch ones,
+//     which were YouTube by definition;
 //   - of the three candidate rules it is the only one that neither loses the
 //     alert (reddening neither) nor asserts a Twitch failure on no evidence
 //     (reddening both). Reddening "whichever platform is configured" was the

@@ -2,9 +2,7 @@ package database
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -874,73 +872,6 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	db.statsMu.Unlock()
 
 	return &s, nil
-}
-
-// ImportFromJSON imports data from a TypeScript-version moombox.json file.
-//
-// Deprecated: Migration helper from the abandoned Node.js codebase. New
-// installs do not need this; reachability is near-zero (see audit report
-// reports/database.md T3/DC2). Plan to delete after one more release.
-func (db *Database) ImportFromJSON(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read JSON: %w", err)
-	}
-
-	var jsonDB struct {
-		Jobs       []Job             `json:"jobs"`
-		History    []string          `json:"history"`
-		LastVideos map[string]string `json:"lastVideos"`
-	}
-
-	if err := json.Unmarshal(data, &jsonDB); err != nil {
-		return fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	tx, err := db.db.BeginTx(db.getCtx(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Import jobs
-	for i := range jsonDB.Jobs {
-		job := &jsonDB.Jobs[i]
-		if job.Platform == "" {
-			job.Platform = "youtube"
-		}
-		// Use the shared insert helper inside the transaction.
-		if _, err := insertJobExec(db.getCtx(), tx, job); err != nil {
-			if db.logger != nil {
-				db.logger.Warn("import: failed to insert job", "jobID", job.ID, "err", err)
-			}
-			continue
-		}
-
-		for _, gap := range job.Gaps {
-			if _, err := tx.ExecContext(db.getCtx(), "INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)",
-				job.ID, gap.From, gap.To, gap.Stream); err != nil && db.logger != nil {
-				db.logger.Warn("import: failed to insert gap", "jobID", job.ID, "err", err)
-			}
-		}
-	}
-
-	// Import history
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, videoID := range jsonDB.History {
-		if _, err := tx.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now); err != nil && db.logger != nil {
-			db.logger.Warn("import: failed to insert history", "videoID", videoID, "err", err)
-		}
-	}
-
-	// Import last videos (dropped in v16, kept for backward compat; silently ignored)
-	for range jsonDB.LastVideos {
-		if db.logger != nil {
-			db.logger.Debug("legacy lastVideos ignored (dropped in v16)")
-		}
-	}
-
-	return tx.Commit()
 }
 
 // --- Job logs ---
