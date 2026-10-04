@@ -288,7 +288,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// profile via CryptUnprotectData. Skipped for Firefox-based
 	// browsers — Firefox uses cookies.sqlite (no DPAPI involved) and
 	// already has its own SQLite-direct path. DECISIONS #6.
-	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
+	if err != nil && browser != nil && s.dpapiFallbackOn() && !isFirefoxBased(browser.Type) {
 		// Gated on isWindows(): off Windows the fallback below is a no-op —
 		// it says so once, at Debug, and always has since dpapiExtractAsNetscape
 		// short-circuits on it — so "attempting" is not true there and would be

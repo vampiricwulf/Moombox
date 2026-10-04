@@ -381,9 +381,9 @@ func dpapiExtractAsNetscape(logger interface {
 // and a directory nothing ever consults. That is exactly the silence the
 // off-Windows arm exists to break.
 //
-// CALL ORDER MATTERS: s.DpapiFallback is mirrored from the config by
-// cmd/moombox AFTER the service is built, so this must be called after that
-// assignment or the middle arm reads the zero value and warns on every boot.
+// CALL ORDER MATTERS: s.DpapiFallback is wired by cmd/moombox AFTER the
+// service is built, so this must be called after that assignment or the
+// middle arm reads an unwired (off) fallback and warns on every boot.
 // TestDpapiProfileDirVerdictIsLoggedAfterTheFallbackFlagIsMirrored pins it.
 //
 // Silent when the key is unset, and silent when the directory is usable.
@@ -406,7 +406,7 @@ func (s *AutoCookieService) LogDpapiProfileDirVerdict() {
 			"dir", dir)
 		return
 	}
-	if !s.DpapiFallback {
+	if !s.dpapiFallbackOn() {
 		s.logger.Warn("cookies.dpapi_profile_dir is set, but cookies.dpapi_fallback is off; "+
 			"the directory will never be read — set dpapi_fallback = true to use it",
 			"dir", dir)

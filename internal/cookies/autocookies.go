@@ -412,9 +412,14 @@ type AutoCookieService struct {
 	// path as a fallback when the CDP refresh launch fails. Off by
 	// default — the fallback reads the user's REAL Chromium-family
 	// browser profile, which is a privacy surface the user has to
-	// opt into. When true, RefreshCookies tries DPAPI as a backstop
-	// once the primary CDP launch returns an error. DECISIONS #6.
-	DpapiFallback bool
+	// opt into. When it answers true, RefreshCookies tries DPAPI as a
+	// backstop once the primary CDP launch returns an error. DECISIONS #6.
+	//
+	// The injected form of cookies.dpapi_fallback, read LIVE like
+	// AcquisitionMode and DpapiProfileDir: it was a bool mirrored once at
+	// boot, which made the setting restart-required with nothing in either
+	// UI saying so. nil reads as off (see dpapiFallbackOn).
+	DpapiFallback func() bool
 
 	// BrowserLaunchAllowed reports whether a REFRESH PASS may execute a
 	// headless browser. It is the injected form of cookies.auto_enabled, which
@@ -741,4 +746,10 @@ func (s *AutoCookieService) Stop() {
 	s.killSetupProcess()
 	s.killRefreshProcess()
 	s.cleanup()
+}
+
+// dpapiFallbackOn reports cookies.dpapi_fallback through the DpapiFallback
+// callback; an unwired service has the fallback off.
+func (s *AutoCookieService) dpapiFallbackOn() bool {
+	return s.DpapiFallback != nil && s.DpapiFallback()
 }

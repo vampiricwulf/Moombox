@@ -1011,7 +1011,7 @@ func TestLogDpapiProfileDirVerdict(t *testing.T) {
 		return &AutoCookieService{
 			logger:          log,
 			DpapiProfileDir: func() string { return dir },
-			DpapiFallback:   true,
+			DpapiFallback:   func() bool { return true },
 		}
 	}
 
@@ -1072,7 +1072,7 @@ func TestLogDpapiProfileDirVerdict(t *testing.T) {
 		(&AutoCookieService{
 			logger:          log,
 			DpapiProfileDir: func() string { return dir },
-			DpapiFallback:   false,
+			DpapiFallback:   func() bool { return false },
 		}).LogDpapiProfileDirVerdict()
 		if !dpapiLinesContain(log.warns, "dpapi_fallback", dir) {
 			t.Errorf("expected one Warn naming cookies.dpapi_fallback and the directory; warns=%v", log.warns)
@@ -1106,7 +1106,7 @@ func TestDpapiProfileDirIsReadLivePerConsultation(t *testing.T) {
 	reads := 0
 
 	log := &dpapiTestLogger{}
-	svc := &AutoCookieService{logger: log, DpapiFallback: true, DpapiProfileDir: func() string {
+	svc := &AutoCookieService{logger: log, DpapiFallback: func() bool { return true }, DpapiProfileDir: func() string {
 		d := dirs[min(reads, len(dirs)-1)]
 		reads++
 		return d

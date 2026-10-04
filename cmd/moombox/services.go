@@ -1256,13 +1256,16 @@ func (s *runState) initServices(logLevelOverride string) error {
 		recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "an automatic cookie refresh")
 	}, log)
 
-	// Mirror the cookies.dpapi_fallback config flag onto the service.
-	// Read once at startup — toggling at runtime would require a
-	// restart, which is consistent with how other AutoCookieService
-	// fields work (set at construction, never re-read). DECISIONS #6.
-	s.configStore.Read(func(c *config.MoomboxConfig) {
-		autoCookieSvc.DpapiFallback = c.Cookies.DpapiFallback
-	})
+	// cookies.dpapi_fallback, read LIVE like AcquisitionMode and
+	// DpapiProfileDir above: a value mirrored once here made the setting
+	// restart-required with nothing in either UI saying so. DECISIONS #6.
+	autoCookieSvc.DpapiFallback = func() bool {
+		var on bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			on = c.Cookies.DpapiFallback
+		})
+		return on
+	}
 
 	// The other configured-directory verdict, and the ORDER is the whole point:
 	// it must come after the DpapiFallback mirror directly above, because one
