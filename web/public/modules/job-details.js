@@ -450,7 +450,13 @@ export class JobDetailsController {
     } else if (isTwitch && twitchLogin) {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.app.escapeHtml(twitchLogin)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
     } else {
-      embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.app.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+      // No `allow` list: YouTube's share snippet requests accelerometer,
+      // autoplay, clipboard-write, encrypted-media, gyroscope and
+      // picture-in-picture, but the page's Permissions-Policy
+      // (internal/web/middleware.go) grants none of them to another origin,
+      // so the request granted nothing and cost six console errors per open
+      // dialog. The Twitch embeds above never asked.
+      embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.app.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
     }
 
     content.innerHTML = `
