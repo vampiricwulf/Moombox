@@ -45,16 +45,16 @@
         <link rel="stylesheet" href="/moombox.css" />
     </head>
     <body>
-        <div id="connectivity-banner" class="connectivity-banner">
+        <div id="connectivity-banner" class="connectivity-banner" role="status">
             <sl-icon name="wifi-off"></sl-icon>
             Internet connection lost
         </div>
-        <div id="security-banner" class="security-banner">
+        <div id="security-banner" class="security-banner" role="status">
             <sl-icon name="shield-exclamation"></sl-icon>
             External access is enabled without a dashboard password — anyone who can reach this port has full control. Set a password in Settings &rarr; Security, or lower Network Access.
         </div>
-        <h1 class="visually-hidden">Moombox Dashboard</h1>
         <main class="app-main">
+        <h1 class="visually-hidden">Moombox Dashboard</h1>
         <sl-tab-group>
             <sl-tab slot="nav" panel="tasks">Tasks</sl-tab>
             <sl-tab slot="nav" panel="archived">Archived</sl-tab>
@@ -1699,12 +1699,12 @@
                     <div class="setup-mode-cards">
                         <button class="setup-mode-card" id="setup-mode-quick" tabindex="0">
                             <sl-icon name="lightning-charge" style="font-size: 2rem; color: var(--sl-color-primary-600);"></sl-icon>
-                            <h3>Quick Setup <sl-badge variant="primary" pill>Recommended</sl-badge></h3>
+                            <h2>Quick Setup <sl-badge variant="primary" pill>Recommended</sl-badge></h2>
                             <p>Best for most users — takes ~2 minutes. Set up cookies and add channels.</p>
                         </button>
                         <button class="setup-mode-card" id="setup-mode-advanced" tabindex="0">
                             <sl-icon name="gear" style="font-size: 2rem; color: var(--sl-color-neutral-500);"></sl-icon>
-                            <h3>Advanced Setup</h3>
+                            <h2>Advanced Setup</h2>
                             <p>Full control over every setting — network, paths, downloads, and more.</p>
                         </button>
                     </div>
@@ -2121,7 +2121,7 @@
         </div>
 
         <!-- Status Bar -->
-        <div id="status-bar">
+        <footer id="status-bar">
             <div id="status-bar-left">
                 <span id="connection-status">
                     <sl-icon name="wifi-off"></sl-icon>
@@ -2150,7 +2150,7 @@
                 <sl-icon-button id="btn-logout" name="box-arrow-right" label="Log out" title="Log out" style="display:none"></sl-icon-button>
                 <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>
             </div>
-        </div>
+        </footer>
 
         <script type="module" src="/app.js"></script>
     </body>

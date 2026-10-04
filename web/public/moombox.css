@@ -2216,7 +2216,7 @@ sl-progress-bar {
     outline: none;
 }
 
-.setup-mode-card h3 {
+.setup-mode-card h2 {
     margin: 0;
     font-size: var(--sl-font-size-large);
     font-weight: var(--sl-font-weight-semibold);
