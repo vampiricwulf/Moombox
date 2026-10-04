@@ -190,6 +190,7 @@ type Gap struct {
 
 // JobStats holds aggregate statistics across all jobs.
 type JobStats struct {
+	TotalCount        int   `json:"totalCount"` // every job, whatever its status or platform
 	FinishedCount     int   `json:"finishedCount"`
 	ActiveCount       int   `json:"activeCount"`
 	MuxingCount       int   `json:"muxingCount"`

@@ -63,6 +63,8 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 		{"a1", "youtube", StatusDownloading, 0},
 		{"a2", "twitch", StatusLive, 0},
 		{"m1", "youtube", StatusMuxing, 0},
+		{"u1", "youtube", StatusUpcoming, 0},
+		{"q1", "youtube", StatusQueued, 0},
 	}
 	for _, s := range seeds {
 		if _, err := db.AddJob(&Job{
@@ -103,8 +105,11 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 	if stats.MuxingCount != 1 {
 		t.Errorf("MuxingCount: want 1, got %d", stats.MuxingCount)
 	}
-	if stats.YouTubeCount != 6 {
-		t.Errorf("YouTubeCount: want 6, got %d", stats.YouTubeCount)
+	if stats.YouTubeCount != 8 {
+		t.Errorf("YouTubeCount: want 8, got %d", stats.YouTubeCount)
+	}
+	if stats.TotalCount != 10 { // every row, upcoming and queued included
+		t.Errorf("TotalCount: want 10, got %d", stats.TotalCount)
 	}
 	if stats.TwitchCount != 2 {
 		t.Errorf("TwitchCount: want 2, got %d", stats.TwitchCount)

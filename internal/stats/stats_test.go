@@ -10,6 +10,7 @@ import (
 // the sums and groupings the /api/stats handler used to compute inline.
 func TestBuildMatchesTheRouteDerivations(t *testing.T) {
 	js := &database.JobStats{
+		TotalCount:    16,
 		FinishedCount: 3, ActiveCount: 1, MuxingCount: 1, ErrorCount: 2, CancelledCount: 1, QueuedCount: 4,
 		YouTubeCount: 5, TwitchCount: 3,
 		FinishedSize: 100, ErrorSize: 20, CancelledSize: 5, YouTubeSize: 90, TwitchSize: 35,
@@ -17,8 +18,8 @@ func TestBuildMatchesTheRouteDerivations(t *testing.T) {
 	}
 	d := &Disk{Free: 10, Total: 100, UsedPct: 90, WarnLevel: "warn"}
 	s := Build(js, d)
-	if s.TotalSize != 125 || s.JobCount != 8 {
-		t.Errorf("TotalSize/JobCount = %d/%d, want 125/8 (queued excluded)", s.TotalSize, s.JobCount)
+	if s.TotalSize != 125 || s.JobCount != 16 {
+		t.Errorf("TotalSize/JobCount = %d/%d, want 125/16 (every job)", s.TotalSize, s.JobCount)
 	}
 	if s.SizeByPlatform["youtube"] != 90 || s.SizeByPlatform["twitch"] != 35 {
 		t.Errorf("SizeByPlatform = %v", s.SizeByPlatform)

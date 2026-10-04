@@ -831,6 +831,7 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	// types.go so a status rename can't silently desync the stats query
 	// (audit reports/database.md Q6).
 	statsQuery := fmt.Sprintf(`SELECT
+		COUNT(*),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status IN ('%s', '%s') THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
@@ -854,6 +855,7 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 
 	var s JobStats
 	err := db.db.QueryRowContext(db.getCtx(), statsQuery).Scan(
+		&s.TotalCount,
 		&s.FinishedCount, &s.ActiveCount, &s.MuxingCount,
 		&s.ErrorCount, &s.CancelledCount, &s.QueuedCount,
 		&s.YouTubeCount, &s.TwitchCount,
