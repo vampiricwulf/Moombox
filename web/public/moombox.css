@@ -1521,13 +1521,17 @@ sl-progress-bar {
     max-width: 400px;
 }
 
-/* These sl-select/sl-input `label`s give the control an accessible name
-   (Shoelace wires aria-labelledby to the label slot); the placeholder alone
-   left the accessible name empty. Hidden visually — the placeholder text
-   already conveys the same thing sighted users need. Same technique as
+/* These sl-select/sl-input/sl-textarea `label`s give the control an
+   accessible name (Shoelace wires aria-labelledby to the label slot); the
+   placeholder alone left the accessible name empty. Hidden visually — the
+   placeholder, or the heading or sentence above the control, already
+   conveys the same thing sighted users need. Same technique as
    .visually-hidden, scoped to the label part instead of the whole control. */
 #player-job-select::part(form-control-label),
-#chat-search::part(form-control-label) {
+#chat-search::part(form-control-label),
+#log-search::part(form-control-label),
+#cookie-import-text::part(form-control-label),
+#ffmpeg-install-cmd::part(form-control-label) {
     position: absolute;
     width: 1px;
     height: 1px;

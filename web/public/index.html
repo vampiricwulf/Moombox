@@ -459,7 +459,7 @@
                         <sl-button size="small" class="log-filter" data-level="WARN">Warn</sl-button>
                         <sl-button size="small" class="log-filter" data-level="ERROR">Error</sl-button>
                     </div>
-                    <sl-input id="log-search" placeholder="Search logs..." clearable size="small" style="max-width:200px">
+                    <sl-input id="log-search" label="Search logs" placeholder="Search logs..." clearable size="small" style="max-width:200px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
                     <sl-button size="small" id="clear-logs-btn"
@@ -1138,6 +1138,7 @@
                             </p>
                             <sl-textarea
                                 id="cookie-import-text"
+                                label="cookies.txt contents"
                                 rows="4"
                                 resize="vertical"
                                 placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;…"
@@ -1147,6 +1148,7 @@
                                 type="file"
                                 id="cookie-import-file"
                                 accept=".txt,text/plain"
+                                aria-label="cookies.txt file"
                                 style="margin-top: 0.5em"
                             />
                             <div style="margin-top: 0.5em">

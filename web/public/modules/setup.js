@@ -1095,6 +1095,7 @@ export class SetupController {
 
         const cmdInput = document.createElement("sl-input");
         cmdInput.id = "ffmpeg-install-cmd";
+        cmdInput.label = "Install command";
         cmdInput.setAttribute("readonly", "");
         cmdInput.value = sug.suggestion;
         cmdInput.style.cssText = "width: 100%; font-family: monospace;";
