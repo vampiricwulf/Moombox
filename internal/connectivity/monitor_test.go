@@ -2,6 +2,7 @@ package connectivity
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -164,6 +165,60 @@ func TestMonitor_StartInitialOfflineProbe(t *testing.T) {
 	}
 	if m.IsOnline() {
 		t.Fatal("Start should have seeded offline state before the first tick")
+	}
+}
+
+// TestMonitor_OfflineBootProbesOnce: Start's seeding probe already knows the
+// network is down, but it went on to poll(), which probed AGAIN — and on a
+// dead network a probe only returns after probeRaceTimeout, on the daemon's
+// startup path. Mutant: call m.poll() again — two probes.
+func TestMonitor_OfflineBootProbesOnce(t *testing.T) {
+	var probes atomic.Int32
+	m := newTestMonitor(func() bool { probes.Add(1); return false })
+	m.pollInterval = time.Hour // keep the ticker out of the count
+	m.Start(t.Context())
+	defer m.Stop()
+	if got := probes.Load(); got != 1 {
+		t.Errorf("an offline boot probed %d times before Start returned, want 1", got)
+	}
+	if m.IsOnline() {
+		t.Error("Start did not seed offline")
+	}
+}
+
+// TestMonitor_TransitionsDeliverInOrder: the Swap ordered the flag but not the
+// fan-out, so an online transition on another goroutine could be delivered
+// before an earlier offline one that was still mid-fan-out; subscribers then
+// kept "offline" while IsOnline() said true. Transitions are serialised now.
+// Mutant: drop transitionMu — the slow "offline" lands last.
+func TestMonitor_TransitionsDeliverInOrder(t *testing.T) {
+	m := newTestMonitor(func() bool { return true })
+	var mu sync.Mutex
+	var got []bool
+	inOffline := make(chan struct{})
+	m.OnStateChange(func(online bool) {
+		if !online {
+			close(inOffline)
+			time.Sleep(50 * time.Millisecond) // a slow subscriber mid-fan-out
+		}
+		mu.Lock()
+		got = append(got, online)
+		mu.Unlock()
+	})
+
+	done := make(chan struct{})
+	go func() { defer close(done); m.transition(false) }()
+	<-inOffline
+	m.transition(true) // e.g. ReportSuccess on an HTTP goroutine
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0] != false || got[1] != true {
+		t.Errorf("deliveries = %v, want [false true]", got)
+	}
+	if !m.IsOnline() || got[len(got)-1] != m.IsOnline() {
+		t.Errorf("subscribers last heard %v while IsOnline() = %v", got[len(got)-1], m.IsOnline())
 	}
 }
 
