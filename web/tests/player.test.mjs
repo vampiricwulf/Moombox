@@ -2081,3 +2081,59 @@ test("a Ctrl, Cmd or Alt combination is the browser's, not a player shortcut", {
   h.key("C", { shiftKey: true });
   assert.equal(nicoToggle.checked, !before[0], "Shift+C no longer toggles the overlay");
 });
+
+// ── A list or job fetch that fails is not a deletion ────────────────────────
+
+// loadPlayerJobList substituted [] for a failed list and then treated the
+// playing recording as deleted, clearing the player; the toast fired only
+// when BOTH lists failed. A job_update can trigger that rebuild at any time.
+//
+// Mutant: clear on any absence again (drop the `complete` check) — the player
+// is cleared and the picker empties.
+test("a half-failed list rebuild keeps the playing recording", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: {} });
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  h.select().value = "j1";
+  const playing = h.video.src;
+  assert.ok(playing, "precondition: j1 is playing");
+
+  h.http.on("GET /api/jobs", () => harness.response({ status: 500, body: { error: "failed to get jobs" } }));
+  await h.player.loadPlayerJobList();
+  await h.flush();
+
+  assert.equal(h.player.playerJob?.id, "j1", "the player was cleared");
+  assert.equal(h.video.src, playing, "playback was stopped");
+  assert.equal(h.select().value, "j1", "the picker lost the playing recording");
+  assert.deepEqual([...h.select().querySelectorAll("sl-option")].map((o) => o.value), ["j1"],
+    "j1 is no longer pickable");
+  assert.match(h.app.toasts.map((t) => t.message).join(" | "), /Failed to load the video list: failed to get jobs/);
+
+  // Both lists answered and j1 is in neither: now it really is gone.
+  h.http.on("GET /api/jobs", () => []);
+  await h.player.loadPlayerJobList();
+  await h.flush();
+  assert.equal(h.player.playerJob, null, "a recording missing from a complete list is cleared");
+});
+
+// A pick whose GET /api/jobs/:id failed returned silently: the picker showed
+// the new job while the old one kept playing.
+//
+// Mutant: return without refuse() on a non-ok answer — no toast, and the
+// picker stays on j2.
+test("a pick that cannot be opened says why and keeps the picker on what plays", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], watchState: {} });
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  h.select().value = "j1";
+  h.http.on("GET /api/jobs/:id", ({ params }) => params.id === "j2"
+    ? harness.response({ status: 500, body: { error: "failed to get job" } })
+    : finished(params.id));
+
+  h.select().value = "j2";
+  await h.selectJob("j2");
+
+  assert.equal(h.player.playerJob?.id, "j1");
+  assert.equal(h.select().value, "j1", "the picker still shows the recording that failed to open");
+  assert.match(h.app.toasts.map((t) => t.message).join(" | "), /Could not open the recording: failed to get job/);
+});

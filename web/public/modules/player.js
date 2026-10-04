@@ -1,7 +1,7 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
+import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay, serverErrorMessage } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 import {
   normalizeOffsetMs,
@@ -1017,19 +1017,28 @@ export class PlayerController {
       const jobs = jobsRes.ok ? await jobsRes.json() : [];
       const archived = archivedRes.ok ? await archivedRes.json() : [];
       if (token !== this._rebuildToken) return;
-      if (!jobsRes.ok && !archivedRes.ok) {
-        this.app.showToast("Failed to load video list", "warning");
+      // Only a list built from BOTH answers can say a recording is gone.
+      const complete = jobsRes.ok && archivedRes.ok;
+      if (!complete) {
+        const failed = jobsRes.ok ? archivedRes : jobsRes;
+        this.app.showToast(`Failed to load the video list: ${await serverErrorMessage(failed)}`, "warning");
+        if (token !== this._rebuildToken) return;
       }
 
-      const all = [...jobs, ...archived]
-        .filter((j) => j.status === "Finished" && j.filename)
-        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-
-      // The currently loaded job disappeared (deleted, or its id changed via
-      // re-import) — clear the player instead of leaving a dangling selection.
+      const all = [...jobs, ...archived].filter((j) => j.status === "Finished" && j.filename);
       if (currentValue && !all.some((j) => j.id === currentValue)) {
-        this.clearPlayer();
+        if (complete) {
+          // The currently loaded job disappeared (deleted, or its id changed
+          // via re-import) — clear the player instead of leaving a dangling
+          // selection.
+          this.clearPlayer();
+        } else if (this.playerJob?.id === currentValue) {
+          // Missing from a list that half failed proves nothing: keep the
+          // playing recording, and keep it in the picker.
+          all.push(this.playerJob);
+        }
       }
+      all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
       // Rebuild the option list even while a video is playing: removing/adding
       // sl-options does not itself emit sl-change in Shoelace 2.16 (verified —
@@ -1087,9 +1096,21 @@ export class PlayerController {
     const selectionId = ++this._selectionSeq;
 
     // Fetch job details
+    // A pick that cannot be opened says why and puts the picker back on what
+    // is still playing, rather than showing one recording while another plays.
+    const refuse = (reason) => {
+      if (this._selectionSeq !== selectionId) return;
+      this.app.showToast(`Could not open the recording: ${reason}`, "danger");
+      const select = document.getElementById("player-job-select");
+      if (select) select.value = this.playerJob?.id ?? "";
+    };
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok || this._selectionSeq !== selectionId) return;
+      if (this._selectionSeq !== selectionId) return;
+      if (!res.ok) {
+        refuse(await serverErrorMessage(res));
+        return;
+      }
       const job = await res.json();
       // The body of an OLDER selection can resolve after a newer one completed —
       // re-check before anything observable (playerJob, video.src) is touched.
@@ -1097,6 +1118,7 @@ export class PlayerController {
       this.playerJob = job;
     } catch (e) {
       console.error("Failed to fetch job:", e);
+      refuse(e.message);
       return;
     }
 
