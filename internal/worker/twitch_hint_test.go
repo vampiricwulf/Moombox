@@ -405,3 +405,32 @@ func TestWaitForTwitchLiveClearsItsProgressOnCancel(t *testing.T) {
 		t.Errorf("progress after cancel = %q, want it cleared", j.Progress)
 	}
 }
+
+// TestSyncTwitchJobMetadataUpdatesTheInMemoryJob: processTwitchLive and
+// processTwitchVod wrote the stream's title, channel and art to the row only,
+// so the job processJob passes to buildJobContext — and every embed of the
+// capture — kept a manual add's "<login> — Manual Add" placeholder.
+//
+// Mutant: drop any one field's copy — that row of the comparison fails.
+func TestSyncTwitchJobMetadataUpdatesTheInMemoryJob(t *testing.T) {
+	job := &database.Job{Title: "shroud — Manual Add", ChannelName: "shroud"}
+	syncTwitchJobMetadata(job, map[string]any{
+		"title":              "shroud — Ranked grind",
+		"channel_name":       "Shroud",
+		"thumbnail_url":      "https://example.test/t.jpg",
+		"channel_avatar_url": "https://example.test/a.png",
+		"stream_start_time":  "2026-10-04T18:00:00Z",
+		"twitch_category":    "VALORANT",
+		"length_seconds":     3600,
+	})
+	got := []string{job.Title, job.ChannelName, job.ThumbnailURL, job.ChannelAvatarURL, job.StreamStartTime, job.TwitchCategory}
+	want := []string{"shroud — Ranked grind", "Shroud", "https://example.test/t.jpg", "https://example.test/a.png", "2026-10-04T18:00:00Z", "VALORANT"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("field %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if job.LengthSeconds == nil || *job.LengthSeconds != 3600 {
+		t.Errorf("LengthSeconds = %v, want 3600", job.LengthSeconds)
+	}
+}

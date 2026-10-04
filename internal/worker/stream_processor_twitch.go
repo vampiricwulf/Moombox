@@ -367,6 +367,7 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		vodUpdates["twitch_category"] = vodInfo.GameCategory
 	}
 	sp.db.UpdateJobFields(job.ID, vodUpdates)
+	syncTwitchJobMetadata(job, vodUpdates)
 
 	variants, err := sp.tw.GetVodHLSPlaylist(ctx, vodID)
 	if err != nil {
@@ -547,6 +548,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 	if len(updates) > 0 {
 		sp.db.UpdateJobFields(job.ID, updates)
+		syncTwitchJobMetadata(job, updates)
 	}
 
 	// Get HLS variants
@@ -660,6 +662,37 @@ func takeLiveHint(c *twitchHintCache, lg logger, login string) *twitch.TwitchStr
 		return nil
 	}
 	return info
+}
+
+// syncTwitchJobMetadata copies the metadata a Twitch path just wrote back onto
+// the in-memory job, the way the YouTube path syncs its own. processJob hands
+// this struct to buildJobContext, and every embed of the capture (Download
+// Starting, Quality Split, Gap Split, Finalizing, ...) reads it — so without
+// the sync a channel added manually while offline announced itself
+// throughout as its placeholder, "<login> — Manual Add", while the dashboard
+// already showed the real title.
+func syncTwitchJobMetadata(job *database.Job, updates map[string]any) {
+	if v, ok := updates["title"].(string); ok {
+		job.Title = v
+	}
+	if v, ok := updates["channel_name"].(string); ok {
+		job.ChannelName = v
+	}
+	if v, ok := updates["thumbnail_url"].(string); ok {
+		job.ThumbnailURL = v
+	}
+	if v, ok := updates["channel_avatar_url"].(string); ok {
+		job.ChannelAvatarURL = v
+	}
+	if v, ok := updates["stream_start_time"].(string); ok {
+		job.StreamStartTime = v
+	}
+	if v, ok := updates["twitch_category"].(string); ok {
+		job.TwitchCategory = v
+	}
+	if v, ok := updates["length_seconds"].(int); ok {
+		job.LengthSeconds = &v
+	}
 }
 
 // waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
