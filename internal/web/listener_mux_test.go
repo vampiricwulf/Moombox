@@ -45,6 +45,27 @@ func TestSchemeRedirectHandler(t *testing.T) {
 	}
 }
 
+// TestSchemeRedirectToHTTPClearsHSTS: with https on, every response pins
+// the host for a year, and a browser that trusted the certificate keeps the
+// pin after https is turned off — it upgrades http to https, the redirect
+// sends it back to http, and the two loop. The redirect down clears the pin
+// (it is served over TLS, so the browser honours it); the redirect up must
+// not set one of its own.
+//
+// Mutant: drop the max-age=0 header — the first check fails.
+func TestSchemeRedirectToHTTPClearsHSTS(t *testing.T) {
+	rec := httptest.NewRecorder()
+	schemeRedirectHandler("http", "774").ServeHTTP(rec, httptest.NewRequest("GET", "https://example.local:774/", nil))
+	if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=0" {
+		t.Errorf("https→http redirect HSTS = %q, want max-age=0", got)
+	}
+	rec = httptest.NewRecorder()
+	schemeRedirectHandler("https", "774").ServeHTTP(rec, httptest.NewRequest("GET", "http://example.local:774/", nil))
+	if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("http→https redirect set HSTS %q; a plain-http response cannot", got)
+	}
+}
+
 // TestSchemeRedirectHandlerDefaultPorts pins the port-80/443 deployment
 // behavior: browsers omit the source scheme's default port from Host, but
 // the same socket serves both schemes — the redirect must re-pin OUR port

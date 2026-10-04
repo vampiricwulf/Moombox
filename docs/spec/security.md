@@ -601,7 +601,7 @@ Both protocols share the single configured port. A protocol splitter (`internal/
 - `https_enabled = true`: plain `http://` requests redirect to `https://`.
 - `https_enabled = false`: `https://` requests redirect to `http://` — only when a certificate pair exists on disk (typically left from an earlier HTTPS run) so the TLS handshake can be terminated; the cert is load-only here, never generated. Without one, TLS connections close as before.
 
-`307` (temporary, method-preserving) is deliberate: browsers cache permanent redirects, and toggling `https_enabled` later would otherwise trap clients in a cached cross-scheme loop.
+`307` (temporary, method-preserving) is deliberate: browsers cache permanent redirects, and toggling `https_enabled` later would otherwise trap clients in a cached cross-scheme loop. The https→http redirect also carries `Strict-Transport-Security: max-age=0`: with HTTPS on, every response pins the host for a year, and a browser that trusted the certificate would otherwise keep upgrading `http://` to `https://` after HTTPS is turned off, looping against this very redirect. Served over TLS, the header clears the pin before the browser follows.
 
 ### Binding
 
