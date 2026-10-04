@@ -402,7 +402,8 @@ func TestApplyValuesRejectsBadTrustedProxy(t *testing.T) {
 
 // TestApplyValuesProbeTargets: comma-separated host:port list; one bad entry
 // blocks the save with a field error (config.Validate would refuse the whole
-// file), blank falls back to the defaults, valid entries land trimmed.
+// file), blank keeps the stored list (as the dashboard does), valid entries
+// land trimmed.
 func TestApplyValuesProbeTargets(t *testing.T) {
 	cfg := config.Defaults()
 	m := NewSettingsModel()
@@ -431,7 +432,7 @@ func TestApplyValuesProbeTargets(t *testing.T) {
 
 	m.values["probe_targets"] = "  "
 	m.applyValues()
-	if got := cfg.Connectivity.ProbeTargets; len(got) != 3 || got[0] != "1.1.1.1:443" {
-		t.Errorf("blank must restore the defaults, got %v", got)
+	if got := cfg.Connectivity.ProbeTargets; len(got) != 2 || got[0] != "1.0.0.1:443" {
+		t.Errorf("blank must keep the stored targets, got %v", got)
 	}
 }
