@@ -107,6 +107,14 @@ export class ImportController {
   }
 
   setImportFile(file) {
+    // Swapping the file mid-upload hid the progress bar and its Cancel button
+    // while the old file kept uploading.
+    if (this.importUploading) {
+      this.app.showToast("An import is uploading — cancel it before choosing another file", "warning");
+      const fileInput = document.getElementById("import-file-input");
+      if (fileInput) fileInput.value = "";
+      return;
+    }
     this.importFile = file;
 
     // Cancel any pending clear timeout from a previous completed upload
@@ -133,6 +141,10 @@ export class ImportController {
   }
 
   clearImportFile() {
+    // Clearing the file is giving up on it: an upload still running would
+    // otherwise go on with its progress and Cancel button hidden, then toast
+    // a result out of nowhere.
+    if (this._activeXhr) this.cancelUpload();
     this.importFile = null;
 
     // Cancel any pending auto-clear timeout (e.g. from completed upload)
