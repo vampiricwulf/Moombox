@@ -123,21 +123,27 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "bgutils.use_sidecar", id: "cfg-bgutils-use-sidecar" },
 ];
 
-/** Render a template preview string using sample data. */
+/**
+ * Render a template preview string using sample data, in the formats
+ * config.ResolveTemplate writes (${start_date} YYYYMMDD, ${start_time} HHMM,
+ * local time) and with the muxer's .mp4 — the TUI's preview calls the
+ * resolver itself, so this is the copy that has to keep pace with it.
+ */
 export function renderTemplatePreview(template) {
   const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
   const vars = {
     channel: "Miko Ch",
     title: "Singing Stream",
     id: "dQw4w9WgXcQ",
-    start_date: now.toISOString().split("T")[0],
-    start_time: "20-00-00",
+    start_date: `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`,
+    start_time: "2000",
   };
   let result = template || "";
   for (const [key, val] of Object.entries(vars)) {
     result = result.replaceAll("${" + key + "}", val);
   }
-  return result ? "Example: " + result + ".mkv" : "";
+  return result ? "Example: " + result + ".mp4" : "";
 }
 
 /**

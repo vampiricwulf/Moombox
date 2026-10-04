@@ -1709,20 +1709,22 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	return centerBox(box, m.width, m.height)
 }
 
-// templatePreview renders a sample output path from a template string.
+// templatePreview renders a sample output path from a template string,
+// through config.ResolveTemplate itself and with the muxer's .mp4, so the
+// example is a name a recording could actually get. (It used to format the
+// date and time its own way and append .mkv.)
 func templatePreview(value string) string {
 	if value == "" {
 		return ""
 	}
-	now := time.Now().Format("2006-01-02")
-	r := strings.NewReplacer(
-		"${channel}", "Miko Ch",
-		"${title}", "Singing Stream",
-		"${id}", "dQw4w9WgXcQ",
-		"${start_date}", now,
-		"${start_time}", "20-00-00",
-	)
-	return "Example: " + r.Replace(value) + ".mkv"
+	y, mo, d := time.Now().Date()
+	sample := time.Date(y, mo, d, 20, 0, 0, 0, time.Local).Format(time.RFC3339)
+	return "Example: " + config.ResolveTemplate(value, config.TemplateVariables{
+		Title:   "Singing Stream",
+		ID:      "dQw4w9WgXcQ",
+		Channel: "Miko Ch",
+		Date:    &sample,
+	}) + ".mp4"
 }
 
 // --- Advanced Setup View ---
