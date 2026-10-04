@@ -71,3 +71,60 @@ func TestTwitch_StaggerRunsAfterAWholeBatchFailure(t *testing.T) {
 		t.Fatalf("inter-chunk gap = %v, want >= 40ms — a failed batch must still stagger before the next chunk", gap)
 	}
 }
+
+// recordingHandler is a slog.Handler that keeps every record's level and
+// message.
+type recordingHandler struct {
+	records *[]slog.Record
+}
+
+func (h recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.records = append(*h.records, r)
+	return nil
+}
+func (h recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestTwitch_AWholeBatchFailureStreakIsWarnedOnce: a whole-batch GQL failure
+// (Twitch refusing the client, transport down) is kept off every channel's
+// health streak by design, and it was logged only at Debug — so a persistent
+// one left no Twitch channel checked and nothing above Debug saying so. The
+// first failure of a streak now Warns, repeats stay at Debug, and the recovery
+// is logged once.
+//
+// Mutant: log every failure at Debug again — no Warn.
+func TestTwitch_AWholeBatchFailureStreakIsWarnedOnce(t *testing.T) {
+	failing := true
+	tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+		if failing {
+			return nil, nil, fmt.Errorf("gql auth failure (401)")
+		}
+		return make([]*twitch.TwitchStreamInfo, len(logins)), make([]error, len(logins)), nil
+	}, twitchChans(2)...)
+	var records []slog.Record
+	tm.logger = slog.New(recordingHandler{records: &records})
+
+	chunk := twitchChans(2)
+	for range 3 {
+		tm.checkChunk(context.Background(), chunk)
+	}
+	failing = false
+	tm.checkChunk(context.Background(), chunk)
+
+	var warns, infos int
+	for _, r := range records {
+		switch {
+		case r.Level == slog.LevelWarn && r.Message != "":
+			warns++
+		case r.Level == slog.LevelInfo && r.Message == "Twitch batch checks recovered":
+			infos++
+		}
+	}
+	if warns != 1 {
+		t.Errorf("%d Warn lines for a three-failure streak, want exactly 1", warns)
+	}
+	if infos != 1 {
+		t.Errorf("%d recovery lines, want 1", infos)
+	}
+}

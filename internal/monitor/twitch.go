@@ -39,11 +39,16 @@ type TwitchMonitor struct {
 	pendingKick bool
 	// warnedSlow rate-limits the oversubscribed warning; atomic because
 	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow  atomic.Bool
-	timer       *time.Timer
-	ctx         context.Context
-	cancel      context.CancelFunc
-	NextCheckAt int64
+	warnedSlow atomic.Bool
+	// batchFailStreak counts consecutive whole-batch GQL failures. They are
+	// deliberately kept off every channel's health streak (see checkChunk),
+	// which left a persistent one — Twitch refusing the client — visible only
+	// at Debug while no Twitch channel was being checked at all.
+	batchFailStreak atomic.Int32
+	timer           *time.Timer
+	ctx             context.Context
+	cancel          context.CancelFunc
+	NextCheckAt     int64
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -399,8 +404,18 @@ func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelC
 
 	infos, errs, wholeErr := tm.streamInfoBatch(ctx, logins)
 	if wholeErr != nil {
-		tm.logger.Debug("twitch batch check failed", "channels", len(chunk), "err", wholeErr)
+		// Warn once per streak, at its start: every cycle repeats it, and a
+		// line every 15 s would bury the log.
+		if tm.batchFailStreak.Add(1) == 1 {
+			tm.logger.Warn("Twitch batch check failed; Twitch channels are not being checked until it recovers",
+				"channels", len(chunk), "err", wholeErr)
+		} else {
+			tm.logger.Debug("twitch batch check failed", "channels", len(chunk), "err", wholeErr)
+		}
 		return
+	}
+	if n := tm.batchFailStreak.Swap(0); n > 0 {
+		tm.logger.Info("Twitch batch checks recovered", "failedBatches", n)
 	}
 
 	for i := range chunk {
