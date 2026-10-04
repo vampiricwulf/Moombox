@@ -111,28 +111,97 @@ func (m *SettingsModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
+// Header layout, shared with handleMouseTabClick.
+const (
+	settingsHeaderPrefixW = 11 // "Settings" + " ─ "
+	settingsTabSepW       = 3  // " │ "
+	settingsTabMarkerW    = 2  // "‹ " before the window, " ›" after it
+)
+
+// renderHeader draws "Settings ─ <tabs>   N/M". All twelve section names
+// need about 140 cells, more than most terminals give, and the single
+// truncated line it used to be cut the later sections off — the active one
+// included — and the counter with them. The strip now shows the window of
+// tabs that fits, slid to keep the active one on screen, with ‹ / › where
+// tabs are hidden, and the counter is always drawn at the right edge.
 func (m *SettingsModel) renderHeader(w int) string {
 	left := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Settings") +
 		DimStyle.Render(" \u2500 ")
-
-	var tabParts []string
-	for i, sec := range sections {
-		if i > 0 {
-			tabParts = append(tabParts, DimStyle.Render(" \u2502 "))
-		}
-		if i == m.sectionIndex {
-			tabParts = append(tabParts, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(sec.name))
-		} else {
-			tabParts = append(tabParts, DimStyle.Render(sec.name))
-		}
-	}
-	tabs := strings.Join(tabParts, "")
-
 	right := DimStyle.Render(fmt.Sprintf("%d/%d", m.sectionIndex+1, len(sections)))
 
-	// Build full header, truncate to available width
-	header := left + tabs + " " + right
+	avail := w - settingsHeaderPrefixW - lipgloss.Width(right) - 1
+	start, end := settingsTabWindow(m.headerTabStart, m.sectionIndex, avail)
+	m.headerTabStart, m.headerTabEnd = start, end
+
+	var tabs strings.Builder
+	if start > 0 {
+		tabs.WriteString(DimStyle.Render("\u2039 "))
+	}
+	for i := start; i < end; i++ {
+		if i > start {
+			tabs.WriteString(DimStyle.Render(" \u2502 "))
+		}
+		if i == m.sectionIndex {
+			tabs.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(sections[i].name))
+		} else {
+			tabs.WriteString(DimStyle.Render(sections[i].name))
+		}
+	}
+	if end < len(sections) {
+		tabs.WriteString(DimStyle.Render(" \u203a"))
+	}
+
+	gap := max(w-lipgloss.Width(left)-lipgloss.Width(tabs.String())-lipgloss.Width(right), 1)
+	header := left + tabs.String() + strings.Repeat(" ", gap) + right
 	return lipgloss.NewStyle().MaxWidth(w).Render(header)
+}
+
+// settingsTabStripWidth is the cells sections[start:end] take in the header,
+// separators and ‹ / › markers included.
+func settingsTabStripWidth(start, end int) int {
+	n := 0
+	for i := start; i < end; i++ {
+		if i > start {
+			n += settingsTabSepW
+		}
+		n += runewidth.StringWidth(sections[i].name)
+	}
+	if start > 0 {
+		n += settingsTabMarkerW
+	}
+	if end < len(sections) {
+		n += settingsTabMarkerW
+	}
+	return n
+}
+
+// settingsTabWindow picks the sections [start, end) the header shows in
+// avail cells: all of them when they fit, otherwise a window holding the
+// active section. The window starts where it last did (prevStart), so moving
+// one section slides it by one instead of re-centring it, and it is filled
+// from both sides as far as it fits. A window too narrow for even the active
+// tab still returns it; renderHeader's MaxWidth cuts the line.
+func settingsTabWindow(prevStart, active, avail int) (start, end int) {
+	n := len(sections)
+	if settingsTabStripWidth(0, n) <= avail {
+		return 0, n
+	}
+	start = min(max(prevStart, 0), active)
+	end = start + 1
+	for end < n && settingsTabStripWidth(start, end+1) <= avail {
+		end++
+	}
+	if active >= end {
+		// Moved past the right edge: the active tab becomes the last one.
+		start, end = active, active+1
+	}
+	for start > 0 && settingsTabStripWidth(start-1, end) <= avail {
+		start--
+	}
+	for end < n && settingsTabStripWidth(start, end+1) <= avail {
+		end++
+	}
+	return start, end
 }
 
 func (m *SettingsModel) renderHintText() string {

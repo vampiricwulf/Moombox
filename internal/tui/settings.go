@@ -354,6 +354,8 @@ type SettingsModel struct {
 
 	// Layout state (set during View, read by mouse handler)
 	lastButtonContentY int // contentY where buttons were rendered (-1 = not rendered)
+	headerTabStart     int // first section tab the header shows
+	headerTabEnd       int // one past the last; 0 = header not rendered yet
 
 	// Save status
 	status   saveStatus

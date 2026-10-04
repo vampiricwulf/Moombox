@@ -147,29 +147,45 @@ func (m *SettingsModel) scrollFields(down bool, sec settingsSection) {
 	}
 }
 
-// handleMouseTabClick maps a click X position to a section tab.
+// handleMouseTabClick maps a click X position to a section tab, through the
+// window of tabs the last renderHeader drew (headerTabStart/End). A click on
+// the ‹ or › marker opens the hidden section next to it.
 func (m *SettingsModel) handleMouseTabClick(relX int) {
-	// The header is: "Settings ─ Section1 │ Section2 │ ..."
-	// Match renderHeader layout: "Settings" (8) + " ─ " (3) = 11 cells prefix.
-	pos := 11 // "Settings" + " \u2500 "
-
-	for i, sec := range sections {
-		if i > 0 {
-			sepLen := 3 // " │ " — 3 cells
-			if relX >= pos && relX < pos+sepLen {
+	start, end := m.headerTabStart, m.headerTabEnd
+	if end == 0 {
+		return // header not rendered yet
+	}
+	pos := settingsHeaderPrefixW
+	if start > 0 {
+		if relX >= pos && relX < pos+settingsTabMarkerW {
+			m.selectSectionByClick(start - 1)
+			return
+		}
+		pos += settingsTabMarkerW
+	}
+	for i := start; i < end; i++ {
+		if i > start {
+			if relX >= pos && relX < pos+settingsTabSepW {
 				return // Clicked on separator
 			}
-			pos += sepLen
+			pos += settingsTabSepW
 		}
-		nameLen := len(sec.name) // Section names are ASCII
+		nameLen := len(sections[i].name) // Section names are ASCII
 		if relX >= pos && relX < pos+nameLen {
-			if i != m.sectionIndex {
-				m.switchSection(i)
-				m.updateTextInputForField()
-			}
+			m.selectSectionByClick(i)
 			return
 		}
 		pos += nameLen
+	}
+	if end < len(sections) && relX >= pos && relX < pos+settingsTabMarkerW {
+		m.selectSectionByClick(end)
+	}
+}
+
+func (m *SettingsModel) selectSectionByClick(i int) {
+	if i != m.sectionIndex {
+		m.switchSection(i)
+		m.updateTextInputForField()
 	}
 }
 
