@@ -95,7 +95,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		}
 
 		// Read the uploaded file to a temp location
-		tmpFile, err := os.CreateTemp("", "moombox-import-*.zip")
+		tmpFile, err := os.CreateTemp("", importTempPrefix+"*.zip")
 		if err != nil {
 			jsonError(rw, "failed to create temp file", http.StatusInternalServerError)
 			return
@@ -411,4 +411,16 @@ func randomHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// importTempPrefix names the temp file an upload is spooled to before it is
+// opened as a zip (see the import route above).
+const importTempPrefix = "moombox-import-"
+
+// CleanupOldImportTemp removes import spool files older than 24h. The route
+// removes its own with a deferred os.Remove, but a hard abort mid-import (OS
+// kill, power loss) leaves up to 500 MB behind in the temp directory. No
+// import runs for a day, so the age floor never touches one in flight.
+func CleanupOldImportTemp() (removed int, err error) {
+	return utils.RemoveStaleTempEntries(24*time.Hour, importTempPrefix)
 }

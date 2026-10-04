@@ -8,10 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// CleanupOldTrimTempDirs removes leftover `moombox-trim-*` and
-// `moombox-2pass-*` directories from %TEMP% that are older than 24h.
+// CleanupOldTrimTempDirs removes leftover `moombox-trim-*`,
+// `moombox-2pass-*` and `moombox-concat-*` directories (ConcatCopy's, which
+// the worker's part merge uses) from %TEMP% that are older than 24h.
 // These are normally cleaned up by `defer os.RemoveAll(tempDir)` inside
 // the trim path, but a hard process abort (panic in a sibling
 // goroutine, OS kill, power loss) bypasses the defer and leaves the
@@ -23,32 +26,7 @@ import (
 // Errors are logged-and-continue at the caller; this is housekeeping,
 // not a critical path.
 func CleanupOldTrimTempDirs() (removed int, err error) {
-	entries, err := os.ReadDir(os.TempDir())
-	if err != nil {
-		return 0, err
-	}
-	cutoff := time.Now().Add(-24 * time.Hour)
-	for _, ent := range entries {
-		if !ent.IsDir() {
-			continue
-		}
-		name := ent.Name()
-		if !strings.HasPrefix(name, "moombox-trim-") && !strings.HasPrefix(name, "moombox-2pass-") {
-			continue
-		}
-		info, err := ent.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(cutoff) {
-			continue
-		}
-		full := filepath.Join(os.TempDir(), name)
-		if rmErr := os.RemoveAll(full); rmErr == nil {
-			removed++
-		}
-	}
-	return removed, nil
+	return utils.RemoveStaleTempEntries(24*time.Hour, "moombox-trim-", "moombox-2pass-", "moombox-concat-")
 }
 
 // TrimWithAudio creates a trimmed version with a specific audio bitrate.

@@ -29,6 +29,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
+	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -877,6 +878,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Debug("trim-tempdir cleanup", slog.String("error", err.Error()))
 		} else if removed > 0 {
 			log.Info("trim-tempdir cleanup", slog.Int("removed", removed))
+		}
+		if removed, err := routes.CleanupOldImportTemp(); err != nil {
+			log.Debug("import-temp cleanup", slog.String("error", err.Error()))
+		} else if removed > 0 {
+			log.Info("import-temp cleanup", slog.Int("removed", removed))
 		}
 	}()
 
