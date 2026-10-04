@@ -3088,6 +3088,11 @@ export class MoomboxApp {
       // Skip when typing in input fields (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
 
+      // Ctrl/Cmd/Alt combinations are the browser's: Ctrl+1..8 switched the
+      // dashboard's tab (and not the browser's), Ctrl+F focused the filter
+      // instead of opening Find, Ctrl+A opened the Add dialog.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
       // A control that already handled this key consumed it. The status bar's
       // role="button" elements (#check-countdown, the re-login warnings, the
       // warnings icon, the version indicator) preventDefault() on Enter/Space

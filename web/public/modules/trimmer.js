@@ -418,6 +418,9 @@ export class TrimController {
     // Ignore if focus is inside a text input (composedPath handles Shoelace shadow DOM)
     if (isTypingInInput(e)) return;
 
+    // Ctrl/Cmd/Alt combinations are the browser's (Ctrl+O is not a marker).
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
     // Don't intercept Space/Enter on buttons — let them activate normally
     if ((e.key === " " || e.key === "Enter") && e.composedPath().some(el =>
       el instanceof HTMLElement && (el.tagName === "SL-BUTTON" || el.tagName === "SL-ICON-BUTTON" || el.tagName === "BUTTON")

@@ -688,6 +688,11 @@ export class PlayerController {
       // Skip when typing in inputs (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
 
+      // Ctrl/Cmd/Alt combinations are the browser's: Ctrl+C copying selected
+      // chat used to toggle the overlay instead, and Ctrl+F to go fullscreen.
+      // Shift stays ours (Shift+Arrow is the 30 s seek).
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
       // Let a focused control handle its own Space (activate/toggle) instead
       // of the player also toggling playback on the same keypress.
       const target = e.composedPath()[0];

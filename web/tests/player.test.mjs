@@ -2054,3 +2054,30 @@ test("the jump moves the video and never touches the play state", { skip }, asyn
   assert.equal(h.video.paused, true, "still paused");
   assert.deepEqual(h.mediaCalls.slice(before), [], "no play()/pause()/load() from a timestamp click");
 });
+
+// ── Modified keys belong to the browser ─────────────────────────────────────
+
+// The handler read e.key alone, so Ctrl+C copying selected chat toggled the
+// overlay and was preventDefault()ed (no copy), and Ctrl+F went fullscreen
+// instead of opening Find.
+//
+// Mutant: drop the ctrl/meta/alt guard — every row is swallowed.
+test("a Ctrl, Cmd or Alt combination is the browser's, not a player shortcut", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [segmented("j1")], watchState: {}, chat: chatOf([msg(0, "hi")]) });
+  await h.selectJob("j1");
+  const nicoToggle = h.el("player-nico-toggle");
+  const sidebarToggle = h.el("player-sidebar-toggle");
+  const state = () => [nicoToggle.checked, sidebarToggle.checked, h.video.muted, h.video.paused, h.fullscreenCalls.length];
+  const before = state();
+
+  for (const [key, mod] of [["c", "ctrlKey"], ["f", "ctrlKey"], ["s", "metaKey"], ["m", "metaKey"], [" ", "altKey"], ["ArrowLeft", "altKey"]]) {
+    const ev = new h.window.KeyboardEvent("keydown", { key, [mod]: true, bubbles: true, cancelable: true, composed: true });
+    h.document.dispatchEvent(ev);
+    assert.equal(ev.defaultPrevented, false, `${mod}+${JSON.stringify(key)} was swallowed`);
+  }
+  assert.deepEqual(state(), before, "a modified key changed the player");
+
+  // Shift is still the player's: Shift+C is the overlay toggle.
+  h.key("C", { shiftKey: true });
+  assert.equal(nicoToggle.checked, !before[0], "Shift+C no longer toggles the overlay");
+});
