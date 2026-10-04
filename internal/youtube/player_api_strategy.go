@@ -1345,7 +1345,8 @@ var playerRetryBackoffBase = time.Second
 // guard reserves a full playerRetryBackoffBase beyond the sleep itself for
 // that attempt's HTTP round trip — a bare "does the sleep fit" check would
 // still let the *request* race the deadline in the narrow window right after
-// a sleep that just barely fit.
+// a sleep that just barely fit. The one window the guard cannot see — the
+// deadline lapsing during the attempt itself — is covered by retryExitErr.
 //
 // videoID is the video that was ASKED for; parsePlayerResponse rejects a
 // response about any other one (yt-dlp's _invalid_player_response).
@@ -1357,8 +1358,8 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 
 	var lastErr error
 	for attempt := range 4 {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, retryExitErr(err, lastErr)
 		}
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
@@ -1373,7 +1374,7 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 				return nil, lastErr
 			}
 			if err := utils.Sleep(ctx, delay); err != nil {
-				return nil, err
+				return nil, retryExitErr(err, lastErr)
 			}
 		}
 
@@ -1428,6 +1429,23 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg, videoID)
 	}
 	return nil, lastErr
+}
+
+// retryExitErr is what doRetryRequest reports when ctx ends between attempts.
+// A lapsed DEADLINE keeps the last attempt's own error: the "HTTP <code>"
+// text worker/probe_classify.go keys on is the actual reason the caller is
+// being told no, and the budget merely ran out while it was being retried —
+// the same rule the deadline guard applies, here for a deadline that lapsed
+// during the attempt itself. CANCELLATION still wins over any HTTP error: a
+// cancelled context is the user's or the shutdown's verdict (engine's
+// cancelErr reports it as context.Canceled, probe_classify's classCancelled
+// abandons on it), and a stale 503 must not turn that abort into a counted
+// failure. With no attempt made yet there is nothing to prefer.
+func retryExitErr(ctxErr, lastErr error) error {
+	if lastErr != nil && !errors.Is(ctxErr, context.Canceled) {
+		return lastErr
+	}
+	return ctxErr
 }
 
 func hasAdequateFormats(info *VideoInfo) bool {
