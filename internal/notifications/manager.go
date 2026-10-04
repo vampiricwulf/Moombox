@@ -363,8 +363,17 @@ func parseTarget(url string) (sender, error) {
 		if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
 			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN")
 		}
-		parts := strings.Join(segments[:2], "/")
-		return &DiscordWebhook{URL: "https://discord.com/api/webhooks/" + parts}, nil
+		resolved := "https://discord.com/api/webhooks/" + strings.Join(segments[:2], "/")
+		// The resolved URL passes the same anchored check as the https
+		// spelling. Without it this form took anything — a ")" from a
+		// Markdown link, a trailing space or newline from a paste, a
+		// non-numeric ID — so ValidateURL accepted a broken paste at save
+		// time and every send then failed (a 404 Unknown Webhook, dropped as
+		// permanent after one attempt, or a request http.NewRequest refused).
+		if !discordWebhookRe.MatchString(resolved) {
+			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN with a numeric ID")
+		}
+		return &DiscordWebhook{URL: resolved}, nil
 
 	case discordWebhookRe.MatchString(url):
 		// Canonicalise the legacy host. Two reasons, both load-bearing:
