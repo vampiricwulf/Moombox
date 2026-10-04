@@ -5,7 +5,7 @@
 // skipped (not failed) when jsdom is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor, CHAT_SEEK_LEAD_MS, chatSeekTargetSeconds } from "../public/modules/player.js";
+import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor, CHAT_SEEK_LEAD_MS, chatSeekTargetSeconds, focusPlayerSurface } from "../public/modules/player.js";
 
 let jsdomMissing = null;
 try {
@@ -2136,4 +2136,45 @@ test("a pick that cannot be opened says why and keeps the picker on what plays",
   assert.equal(h.player.playerJob?.id, "j1");
   assert.equal(h.select().value, "j1", "the picker still shows the recording that failed to open");
   assert.match(h.app.toasts.map((t) => t.message).join(" | "), /Could not open the recording: failed to get job/);
+});
+
+// ── The resume dialog hands the keyboard to the player ──────────────────────
+
+// The dialog captured document.activeElement when it opened and restored it on
+// dismiss. Opened from the picker, that is the picker: after Resume, Space
+// opened the listbox instead of pausing, the exact trap focusPlayerSurface
+// exists to avoid. (The harness's sl-select and sl-button stubs are not
+// focusable without a tabindex; the setAttribute calls are test-only.)
+//
+// Mutant: dismiss through _dismissResumeDialog alone again — focus returns to
+// the picker.
+test("answering the resume dialog leaves focus on the player, not the picker", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: { resumePosition: 42 } });
+  await h.player.loadPlayerJobList();
+  const select = h.select();
+  select.setAttribute("tabindex", "0");
+  select.focus();
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "precondition: the dialog is up");
+  h.el("resume-continue").click();
+
+  assert.equal(h.document.activeElement, h.el("player-video-wrapper"),
+    `focus went to ${h.document.activeElement?.id || h.document.activeElement?.tagName}`);
+});
+
+// The picker's sl-change handler calls focusPlayerSurface once
+// onPlayerJobSelect resolves — with a slow chat fetch, after the dialog had
+// focused its primary action — and moved focus out from under the dialog.
+//
+// Mutant: drop the resume-overlay branch in focusPlayerSurface.
+test("focusPlayerSurface leaves an open resume dialog its focus", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: { resumePosition: 42 } });
+  await h.selectJob("j1");
+  const resume = h.el("resume-continue");
+  resume.setAttribute("tabindex", "-1");
+  resume.focus();
+
+  focusPlayerSurface();
+  assert.equal(h.document.activeElement, resume);
 });

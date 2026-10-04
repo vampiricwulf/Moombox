@@ -221,6 +221,14 @@ function resolvedColor(archived, fallback) {
  * focus.
  */
 export function focusPlayerSurface() {
+  // An open resume dialog owns the keyboard. The picker's sl-change handler
+  // calls this after onPlayerJobSelect resolves, which with a slow chat fetch
+  // is after the dialog focused its primary action, and took that away.
+  const resume = document.querySelector("#player-video-wrapper .resume-overlay #resume-continue");
+  if (resume) {
+    resume.focus();
+    return;
+  }
   document.getElementById("player-job-select")?.blur();
   document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
 }
@@ -2362,7 +2370,15 @@ export class PlayerController {
     this._resumeDialogAbort = new AbortController();
     const sig = this._resumeDialogAbort.signal;
 
-    const dismiss = () => this._dismissResumeDialog();
+    // An ANSWER hands the keyboard to the player, not back to where focus was
+    // when the dialog opened: that is the picker, where Space opens the list
+    // instead of pausing (see focusPlayerSurface), or a details-dialog button
+    // that is gone. Teardown (job switch, clearPlayer) still restores.
+    const dismiss = () => {
+      this._resumeReturnFocus = null;
+      this._dismissResumeDialog();
+      focusPlayerSurface();
+    };
 
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
