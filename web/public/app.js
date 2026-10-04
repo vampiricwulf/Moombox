@@ -1753,6 +1753,13 @@ export class MoomboxApp {
       return;
     }
 
+    // Remove stale selected IDs (jobs that no longer exist) before any early
+    // return below, so a filter that hides every row still syncs the bar.
+    const taskJobIds = new Set(this.jobs.map(j => j.id));
+    this._selectedTaskJobs.forEach(id => {
+      if (!taskJobIds.has(id)) this._selectedTaskJobs.delete(id);
+    });
+
     const filtered = this.filterBar.getFilteredJobs();
     const isFiltered = this.filterBar.tokens("jobs").length > 0;
 
@@ -1777,6 +1784,7 @@ export class MoomboxApp {
       if (subtext) subtext.textContent = "Search matches titles, channel names and video IDs";
       const cta = emptyState.querySelector(".empty-state-cta");
       if (cta) cta.style.display = "none";
+      this.updateBatchActionBar();
       return;
     }
 
@@ -1803,12 +1811,6 @@ export class MoomboxApp {
     } else {
       this.focusedJobIndex = -1;
     }
-
-    // Remove stale selected IDs (jobs that no longer exist)
-    const taskJobIds = new Set(this.jobs.map(j => j.id));
-    this._selectedTaskJobs.forEach(id => {
-      if (!taskJobIds.has(id)) this._selectedTaskJobs.delete(id);
-    });
 
     // Re-apply selection state and sync the batch bar
     this._selectedTaskJobs.forEach(id => {
@@ -2002,6 +2004,12 @@ export class MoomboxApp {
       return;
     }
 
+    // Remove stale archived selected IDs before any early return below.
+    const archivedJobIds = new Set(this.archivedJobs.map(j => j.id));
+    this._selectedArchivedJobs.forEach(id => {
+      if (!archivedJobIds.has(id)) this._selectedArchivedJobs.delete(id);
+    });
+
     const filtered = this.filterBar.getFilteredArchivedJobs();
     const isFiltered = this.filterBar.tokens("archived").length > 0;
 
@@ -2026,6 +2034,7 @@ export class MoomboxApp {
       const subtext = emptyState.querySelector(".empty-state-subtext");
       if (subtext) subtext.textContent = "Search matches titles, channel names and video IDs";
       if (filterCount) filterCount.style.display = "";
+      this.updateBatchActionBar();
       return;
     }
 
@@ -2040,12 +2049,6 @@ export class MoomboxApp {
     container.innerHTML = sorted
       .map((job) => this.renderJobItem(job))
       .join("");
-
-    // Remove stale archived selected IDs
-    const archivedJobIds = new Set(this.archivedJobs.map(j => j.id));
-    this._selectedArchivedJobs.forEach(id => {
-      if (!archivedJobIds.has(id)) this._selectedArchivedJobs.delete(id);
-    });
 
     // Re-apply archived selection state
     this._selectedArchivedJobs.forEach(id => {

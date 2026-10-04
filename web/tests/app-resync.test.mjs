@@ -174,3 +174,24 @@ test("a batch action clears the ticks on rows it did not redraw", { skip }, asyn
     assert.ok(!h.el("jobs-container").querySelector(`.video-item.selected[data-job-id="${id}"]`), `${id} still highlighted`);
   }
 });
+
+// A filter that hides every row returned early, before the stale-selection
+// prune, so deleting a selected job left the bar counting it.
+//
+// Mutant: prune after the filtered-empty return again — the bar says
+// "2 selected" with one job left.
+test("a delete under a filter that hides every row drops the job from the selection", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [job("A", "Alpha"), job("B", "Beta")] } });
+  await h.flush();
+  h.app._selectedTaskJobs.add("A").add("B");
+  h.app.filterBar.tasksFilterTokens = [{ type: "text", value: "zzz-no-match" }];
+  h.app.renderJobs();
+  assert.equal(h.el("batch-count").textContent, "2 selected", "precondition");
+
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "B" } });
+  await h.flush();
+
+  assert.deepEqual([...h.app._selectedTaskJobs], ["A"]);
+  assert.equal(h.el("batch-count").textContent, "1 selected");
+});
