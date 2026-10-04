@@ -104,11 +104,34 @@ func TestStatusReportsInstallAndPortMismatch(t *testing.T) {
 	if !info.PortMismatch {
 		t.Error("an http plugin under an https server is not flagged")
 	}
+	// ...and the scheme is reported, or both UIs can only show two equal
+	// ports beside a "mismatch". Mutant: drop the InstalledScheme assignment.
+	if info.InstalledScheme != "http" {
+		t.Errorf("InstalledScheme = %q, want http", info.InstalledScheme)
+	}
+}
+
+// TestInstallReportsWhyItFailed: the web install route used to write the file
+// itself and answer "failed to write plugin", dropping the cause; it calls
+// Install now, whose errors name the step and keep the OS error.
+func TestInstallReportsWhyItFailed(t *testing.T) {
+	pluginDir := redirectPluginDir(t)
+	// A FILE where the plugin's directory tree must go.
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "moombox"), []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := Install(7740, false)
+	if err == nil || !strings.Contains(err.Error(), "create plugin directory") {
+		t.Errorf("Install over a blocking file = %v, want the create-directory cause", err)
+	}
 }
 
 // TestInfoJSONKeys holds the wire contract of GET /api/ytdlp-plugin/status.
 // The handler used to build the map inline; the struct's tags are now the only
-// thing keeping settings.js's eight reads (loadYtdlpPluginStatus) pointed at
+// thing keeping settings.js's reads (loadYtdlpPluginStatus) pointed at
 // real fields, and the un-omitempty pointer is what keeps "installedPort" a
 // null rather than a 0 when nothing is installed.
 func TestInfoJSONKeys(t *testing.T) {
@@ -125,7 +148,7 @@ func TestInfoJSONKeys(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch", "unparseable"}
+	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "installedScheme", "pluginDir", "portMismatch", "unparseable"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
 	}

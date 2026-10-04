@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -17,7 +18,7 @@ import (
 
 // TestYtdlpStatusRouteReportsNullPortWhenNotInstalled drives the eight-key
 // wire contract through the actual handler, not just the helper: settings.js's
-// loadYtdlpPluginStatus reads all eight, and `installedPort` must arrive as a
+// loadYtdlpPluginStatus reads every key, and `installedPort` must arrive as a
 // JSON null (never 0) when no plugin file parsed — a 0 would read as a real
 // port to anything stricter than a truthiness test.
 //
@@ -51,7 +52,7 @@ func TestYtdlpStatusRouteReportsNullPortWhenNotInstalled(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "pluginDir", "portMismatch", "unparseable"}
+	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "installedScheme", "pluginDir", "portMismatch", "unparseable"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
 	}
@@ -63,5 +64,41 @@ func TestYtdlpStatusRouteReportsNullPortWhenNotInstalled(t *testing.T) {
 	}
 	if m["currentPort"] != float64(7740) {
 		t.Errorf("currentPort = %v, want 7740 (the getter's value)", m["currentPort"])
+	}
+}
+
+// TestYtdlpInstallRouteReportsTheCause: the route wrote the plugin itself and
+// answered a failure with "failed to create plugin directory" / "failed to
+// write plugin", dropping the OS error the TUI's I key shows. It calls
+// ytdlpplugin.Install now and passes the cause through.
+//
+// Mutant: answer a fixed string again — the body check fails.
+func TestYtdlpInstallRouteReportsTheCause(t *testing.T) {
+	dir := filepath.Clean(t.TempDir())
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	pluginDir := ytdlpplugin.Dir()
+	if pluginDir == "" || !strings.HasPrefix(pluginDir, dir) {
+		t.Skipf("ytdlpplugin.Dir() is not redirectable on %s (got %q)", runtime.GOOS, pluginDir)
+	}
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A FILE where the plugin's directory tree must go.
+	if err := os.WriteFile(filepath.Join(pluginDir, "moombox"), []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	YtdlpRoutes(r, func() int { return 7740 }, false)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/ytdlp-plugin/install", strings.NewReader(`{"force":true}`)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &m)
+	if msg, _ := m["error"].(string); !strings.Contains(msg, "create plugin directory") {
+		t.Errorf("error = %q, want the create-directory cause", msg)
 	}
 }

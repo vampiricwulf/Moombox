@@ -183,7 +183,17 @@ func (m *YtdlpDialogModel) statusRows() string {
 	// about — a mismatch whose other half is not on screen is not an
 	// explanation. The nil case is also the wire's "installedPort": null.
 	if m.info.InstalledPort != nil {
-		b.WriteString(ytdlpRow("Plugin points:", fmt.Sprintf("%d", *m.info.InstalledPort)))
+		// With the scheme: a mismatch in the scheme alone (https toggled, the
+		// port unchanged) otherwise showed two equal port numbers.
+		points := fmt.Sprintf("%d", *m.info.InstalledPort)
+		if m.info.InstalledScheme != "" {
+			pluginHTTPS := "off"
+			if m.info.InstalledScheme == "https" {
+				pluginHTTPS = "on"
+			}
+			points = fmt.Sprintf("%d (https: %s)", *m.info.InstalledPort, pluginHTTPS)
+		}
+		b.WriteString(ytdlpRow("Plugin points:", points))
 	}
 	if m.info.Unparseable {
 		// Same shape as the mismatch row below — YellowStyle, label column, one
@@ -203,7 +213,9 @@ func (m *YtdlpDialogModel) statusRows() string {
 		// Short on purpose: the label column plus this value has to fit the
 		// 66-column content box, or the sentence wraps with a dangling second
 		// line at every width up to ~88.
-		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Port mismatch:", fmt.Sprintf("yes — I rewrites it for port %d", m.info.CurrentPort))))
+		// Not "Port mismatch": PortMismatch also covers the scheme, and the
+		// two rows above now show both halves of each.
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Mismatch:", "yes — I rewrites it to match")))
 		b.WriteString("\n")
 	}
 	if m.info.ExtractedPath != "" {

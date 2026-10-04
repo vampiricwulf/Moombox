@@ -2320,7 +2320,11 @@ export class SettingsController {
       // Show installed port if relevant
       if (status.installed && status.installedPort) {
         portRow.style.display = "";
-        portEl.textContent = `${status.installedPort}${status.portMismatch ? ` (current: ${status.currentPort})` : ""}`;
+        // With the scheme: a mismatch in the scheme alone (https toggled, the
+        // port unchanged) used to read "8080 (current: 8080)".
+        const scheme = (s) => (s ? ` (${s})` : "");
+        const current = `${status.currentPort}${scheme(status.httpsEnabled ? "https" : "http")}`;
+        portEl.textContent = `${status.installedPort}${scheme(status.installedScheme)}${status.portMismatch ? ` — current: ${current}` : ""}`;
       } else {
         portRow.style.display = "none";
       }
@@ -2382,7 +2386,7 @@ export class SettingsController {
 
       if (response.ok && data.success) {
         if (data.alreadyInstalled) {
-          this.app.showToast("yt-dlp plugin already installed with correct port", "primary");
+          this.app.showToast("yt-dlp plugin already installed and up to date", "primary");
         } else {
           this.app.showToast("yt-dlp plugin installed successfully", "success");
         }

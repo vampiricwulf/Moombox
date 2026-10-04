@@ -30,7 +30,7 @@ func ParseInstalled(content string) (scheme string, port int) {
 
 // Info is what GET /api/ytdlp-plugin/status reports and what the TUI's E Y
 // overlay shows. The JSON tags are the wire contract: settings.js's
-// loadYtdlpPluginStatus reads all eight keys, and they were an inline
+// loadYtdlpPluginStatus reads every key, and they were an inline
 // map[string]any until the TUI needed the same answer.
 //
 // InstalledPort is a POINTER, without omitempty, so the wire still says
@@ -44,6 +44,13 @@ type Info struct {
 	CurrentPort   int    `json:"currentPort"`
 	HTTPSEnabled  bool   `json:"httpsEnabled"`
 	InstalledPort *int   `json:"installedPort"`
+	// InstalledScheme is the installed file's "http" or "https", "" when no
+	// file parsed. Without it a mismatch in the scheme alone (https toggled,
+	// port unchanged) read in both UIs as a port mismatch between two equal
+	// ports.
+	InstalledScheme string `json:"installedScheme"`
+	// PortMismatch is true when the installed file's port OR scheme differs
+	// from what this process serves — the wire name predates the scheme.
 	PortMismatch  bool   `json:"portMismatch"`
 	ExtractedPath string `json:"extractedPath"`
 	// Unparseable is a plugin file that exists but whose base-URL line this
@@ -81,12 +88,12 @@ func Status(port int, httpsEnabled bool) (Info, error) {
 	}
 
 	if pluginDir != "" {
-		pluginPath := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor", "getpot_moombox.py")
-		if data, err := os.ReadFile(pluginPath); err == nil {
+		if data, err := os.ReadFile(File()); err == nil {
 			info.Installed = true
 			if scheme, p := ParseInstalled(string(data)); p > 0 {
 				parsed := p
 				info.InstalledPort = &parsed
+				info.InstalledScheme = scheme
 				info.PortMismatch = p != port || scheme != expectedScheme
 			} else {
 				// A file we cannot read the base URL out of. Reported rather
@@ -104,19 +111,30 @@ func Status(port int, httpsEnabled bool) (Info, error) {
 }
 
 // Install writes the yt-dlp PO token provider plugin to the standard yt-dlp
-// plugin directory. Called from the TUI setup wizard, the E Y overlay's I key
-// and the web install route.
+// plugin directory. Called from both setup wizards, the E Y overlay's I key
+// and POST /api/ytdlp-plugin/install.
 func Install(port int, httpsEnabled bool) error {
-	pluginDir := Dir()
-	if pluginDir == "" {
+	pluginPath := File()
+	if pluginPath == "" {
 		return fmt.Errorf("cannot determine yt-dlp plugin directory")
 	}
-	targetDir := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor")
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o755); err != nil {
 		return fmt.Errorf("create plugin directory: %w", err)
 	}
-	pluginPath := filepath.Join(targetDir, "getpot_moombox.py")
-	return os.WriteFile(pluginPath, []byte(Generate(port, httpsEnabled)), 0o644)
+	if err := os.WriteFile(pluginPath, []byte(Generate(port, httpsEnabled)), 0o644); err != nil {
+		return fmt.Errorf("write plugin file: %w", err)
+	}
+	return nil
+}
+
+// File is the plugin file Install writes and Status reads, or "" where Dir
+// has no answer.
+func File() string {
+	pluginDir := Dir()
+	if pluginDir == "" {
+		return ""
+	}
+	return filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor", "getpot_moombox.py")
 }
 
 // Dir is the standard yt-dlp plugin directory for this platform, or "" where
