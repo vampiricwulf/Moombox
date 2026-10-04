@@ -6,7 +6,9 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -200,5 +202,67 @@ func TestTrimValidationGuardsCoverInfNaN(t *testing.T) {
 		if !(math.IsNaN(v) || math.IsInf(v, 0)) {
 			t.Errorf("expected %v to be rejected by IsNaN/IsInf guards", v)
 		}
+	}
+}
+
+// TestTrimServiceAnswersCarryTheirReason: every TrimService failure used to be
+// a 400 "Failed to create trim" / "failed to delete trim". The dashboard toasts
+// the response's message, so an end time past the video, a duplicate range or
+// an unfinished job all read the same, a missing trim was a 400 rather than a
+// 404, and an ffmpeg or database fault was reported as the request's fault.
+// Refusals the user can act on now carry their reason (400, or 409 for a clash
+// with current state); a missing trim is a 404.
+func TestTrimServiceAnswersCarryTheirReason(t *testing.T) {
+	f := newTrimFixture(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(out, []byte("not really a video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	length := 60
+	if _, err := f.db.AddJob(&database.Job{
+		ID: "fin", VideoID: "fin", URL: "u", Status: database.StatusFinished,
+		OutputFile: out, LengthSeconds: &length,
+	}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if _, err := f.db.AddJob(&database.Job{ID: "live", VideoID: "live", URL: "u", Status: database.StatusLive}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if err := f.db.AddTrim(&database.TrimRecord{ID: "t1", JobID: "fin", StartTime: 10, EndTime: 20, Filename: "x.mp4"}); err != nil {
+		t.Fatalf("AddTrim: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		jobID    string
+		start    float64
+		end      float64
+		wantCode int
+		wantMsg  string
+	}{
+		{"unfinished job", "live", 0, 10, http.StatusBadRequest, "job must be finished to trim"},
+		{"end past the video", "fin", 0, 120, http.StatusBadRequest, "exceeds video duration"},
+		{"duplicate range", "fin", 10, 20, http.StatusConflict, "trim already exists"},
+	} {
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, trimRequest(t, tc.jobID, map[string]float64{"startTime": tc.start, "endTime": tc.end}))
+		if rec.Code != tc.wantCode {
+			t.Errorf("%s: want %d, got %d (body: %s)", tc.name, tc.wantCode, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), tc.wantMsg) {
+			t.Errorf("%s: body %s does not carry %q", tc.name, rec.Body.String(), tc.wantMsg)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/fin/trims/no-such", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("delete unknown trim: want 404, got %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/no-such-job/trims/t1", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("delete trim of unknown job: want 404, got %d", rec.Code)
 	}
 }

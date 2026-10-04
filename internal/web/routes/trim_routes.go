@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 
@@ -54,8 +55,22 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 
 		record, err := trimSvc.CreateTrim(req.Context(), job, *body.StartTime, *body.EndTime, nil)
 		if err != nil {
-			// Match TS: don't expose internal error details
-			jsonError(rw, "Failed to create trim", http.StatusBadRequest)
+			// A refusal the user can act on (the job's state, the range, a
+			// duplicate, a trim already running) is shown as written: the
+			// dashboard toasts this message, and "Failed to create trim" told
+			// someone whose end time ran past the video nothing. Anything
+			// else is an internal failure — its detail (paths, ffmpeg output)
+			// stays out of the response, as before, and it is a 500 now
+			// rather than a 400 that blamed the request.
+			var refused *worker.TrimRefusedError
+			switch {
+			case errors.As(err, &refused) && refused.Conflict:
+				jsonError(rw, refused.Reason, http.StatusConflict)
+			case errors.As(err, &refused):
+				jsonError(rw, refused.Reason, http.StatusBadRequest)
+			default:
+				jsonError(rw, "Failed to create trim", http.StatusInternalServerError)
+			}
 			return
 		}
 
@@ -68,7 +83,11 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 		trimID := chi.URLParam(req, "trimId")
 
 		if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {
-			jsonError(rw, "failed to delete trim", http.StatusBadRequest)
+			if errors.Is(err, worker.ErrTrimNotFound) {
+				jsonError(rw, "trim not found", http.StatusNotFound)
+				return
+			}
+			jsonError(rw, "failed to delete trim", http.StatusInternalServerError)
 			return
 		}
 

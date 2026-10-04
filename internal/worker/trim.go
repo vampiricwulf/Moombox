@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -18,6 +19,32 @@ import (
 )
 
 const defaultTrimCRF = 18
+
+// TrimRefusedError is a trim request refused for a reason the requester can
+// act on: the job's state, the time range, a duplicate, a trim already
+// running. Reason is written for the user and is shown as-is by the API;
+// every other error CreateTrim returns is an internal failure whose detail
+// stays in the log.
+type TrimRefusedError struct {
+	Reason string
+	// Conflict marks a request that clashes with current state (a duplicate,
+	// a trim already in progress) rather than one that is malformed.
+	Conflict bool
+}
+
+func (e *TrimRefusedError) Error() string { return e.Reason }
+
+func refuseTrim(format string, args ...any) error {
+	return &TrimRefusedError{Reason: fmt.Sprintf(format, args...)}
+}
+
+func conflictTrim(reason string) error {
+	return &TrimRefusedError{Reason: reason, Conflict: true}
+}
+
+// ErrTrimNotFound is returned (possibly wrapped) by DeleteTrim when the trim,
+// or the job it belongs to, does not exist.
+var ErrTrimNotFound = errors.New("trim not found")
 
 // TrimService handles creating and deleting trim records.
 type TrimService struct {
@@ -85,7 +112,7 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	ts.activeMu.Lock()
 	if ts.activeOps[job.ID] {
 		ts.activeMu.Unlock()
-		return nil, fmt.Errorf("another trim operation is already in progress for this job")
+		return nil, conflictTrim("another trim operation is already in progress for this job")
 	}
 	ts.activeOps[job.ID] = true
 	ts.activeMu.Unlock()
@@ -97,7 +124,7 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 
 	// Validate
 	if job.Status != database.StatusFinished {
-		return nil, fmt.Errorf("job must be finished to trim")
+		return nil, refuseTrim("job must be finished to trim")
 	}
 
 	// Multi-segment path: if the job has segments, dispatch to segment-aware trim
@@ -106,27 +133,28 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	}
 
 	if job.OutputFile == "" {
-		return nil, fmt.Errorf("no output file for job")
+		return nil, refuseTrim("no output file for job")
 	}
 	if _, err := os.Stat(job.OutputFile); err != nil {
-		return nil, fmt.Errorf("output file not found: %w", err)
+		ts.logger.Warn("trim: output file unreadable", "jobID", job.ID, "err", err)
+		return nil, refuseTrim("output file not found")
 	}
 	if startTime < 0 {
-		return nil, fmt.Errorf("start time cannot be negative")
+		return nil, refuseTrim("start time cannot be negative")
 	}
 	if startTime >= endTime {
-		return nil, fmt.Errorf("start time must be before end time")
+		return nil, refuseTrim("start time must be before end time")
 	}
 	// Validate end time doesn't exceed video duration
 	if job.LengthSeconds != nil && *job.LengthSeconds > 0 {
 		maxDuration := float64(*job.LengthSeconds)
 		if endTime > maxDuration {
-			return nil, fmt.Errorf("end time (%.0fs) exceeds video duration (%.0fs)", endTime, maxDuration)
+			return nil, refuseTrim("end time (%.0fs) exceeds video duration (%.0fs)", endTime, maxDuration)
 		}
 	}
 	duration := endTime - startTime
 	if duration < 1 {
-		return nil, fmt.Errorf("trim duration must be at least 1 second")
+		return nil, refuseTrim("trim duration must be at least 1 second")
 	}
 
 	// Generate output filename
@@ -147,7 +175,7 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	}
 	for _, t := range existing {
 		if t.StartTime == startTime && t.EndTime == endTime {
-			return nil, fmt.Errorf("trim already exists")
+			return nil, conflictTrim("trim already exists")
 		}
 	}
 
@@ -223,7 +251,7 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job not found: %s", jobID)
+		return fmt.Errorf("job not found: %s: %w", jobID, ErrTrimNotFound)
 	}
 
 	trims, err := ts.db.GetTrimsForJob(jobID)
@@ -239,7 +267,7 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("trim not found")
+		return ErrTrimNotFound
 	}
 
 	// Delete DB record only — file stays on disk for orphaned files cleanup
@@ -290,10 +318,10 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 // segment, and concatenates them (with quality normalization if needed).
 func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
 	if startTime < 0 {
-		return nil, fmt.Errorf("start time cannot be negative")
+		return nil, refuseTrim("start time cannot be negative")
 	}
 	if startTime >= endTime {
-		return nil, fmt.Errorf("start time must be before end time")
+		return nil, refuseTrim("start time must be before end time")
 	}
 
 	// Calculate cumulative time offsets for each segment
@@ -318,12 +346,12 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 
 	totalDuration := cumulative
 	if endTime > totalDuration {
-		return nil, fmt.Errorf("end time (%.0fs) exceeds total duration (%.0fs)", endTime, totalDuration)
+		return nil, refuseTrim("end time (%.0fs) exceeds total duration (%.0fs)", endTime, totalDuration)
 	}
 
 	trimDuration := endTime - startTime
 	if trimDuration < 1 {
-		return nil, fmt.Errorf("trim duration must be at least 1 second")
+		return nil, refuseTrim("trim duration must be at least 1 second")
 	}
 
 	// Check for duplicate trims. Same rule as CreateTrim: a read failure is
@@ -335,7 +363,7 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 	}
 	for _, t := range existing {
 		if t.StartTime == startTime && t.EndTime == endTime {
-			return nil, fmt.Errorf("trim already exists")
+			return nil, conflictTrim("trim already exists")
 		}
 	}
 
@@ -367,7 +395,7 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 	}
 
 	if len(involved) == 0 {
-		return nil, fmt.Errorf("no segments found for trim range")
+		return nil, refuseTrim("no segments found for trim range")
 	}
 
 	// Verify all segment files exist
