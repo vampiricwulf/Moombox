@@ -120,3 +120,42 @@ func TestHandleDashErrorGenericOfflineReconnects(t *testing.T) {
 		t.Errorf("consecutiveGoneErrors = %d, want 0 after reconnect", n)
 	}
 }
+
+// Behind the head the segment exists, so a failing fetch there is a retry,
+// not the live-edge wait: both sites emitted ActivityWaitingForSegment, which
+// the progress line renders as "Waiting for next segment" — a healthy live
+// edge — for as long as the burst lasted (up to MaxTimeout).
+//
+// Mutant: emit ActivityWaitingForSegment at either site again.
+func TestBehindHeadFetchFailuresEmitRetrying(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // the retry sleeps return immediately
+
+	t.Run("sustained gone below head", func(t *testing.T) {
+		d, got := newActivityDownloader(t)
+		d.headSeq.Store(10)
+		d.currentSeq.Store(5)
+		d.lastSegTime.StoreNow()
+		n := goneRetryDuringDownload + 1
+		if err := d.handleGoneError(ctx, 403, &n, true); err != nil {
+			t.Fatalf("handleGoneError returned %v, want nil (keep retrying the pending tail)", err)
+		}
+		if *got != ActivityRetrying {
+			t.Errorf("activity = %v, want ActivityRetrying", *got)
+		}
+	})
+
+	t.Run("transient failure below head", func(t *testing.T) {
+		d, got := newActivityDownloader(t)
+		d.headSeq.Store(10)
+		d.currentSeq.Store(5)
+		d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
+		sameSeg, lastSeq, sameHead, lastHead := 0, -1, 0, 0
+		if err := d.handleHTTPError(ctx, true, &sameSeg, &lastSeq, &sameHead, &lastHead, 60); err != nil {
+			t.Fatalf("handleHTTPError returned %v, want nil (continue)", err)
+		}
+		if *got != ActivityRetrying {
+			t.Errorf("activity = %v, want ActivityRetrying", *got)
+		}
+	})
+}

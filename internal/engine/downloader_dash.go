@@ -483,7 +483,10 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 		// OnCipherFailure has already had its shot at swapping in a fresh URL
 		// (it fires at postBytes403CipherThreshold, below the gone threshold).
 		if d.behindHeadTailPending() {
-			d.emitActivity(ActivityWaitingForSegment)
+			// Retrying, not waiting: the segment is below head, so it exists
+			// and the fetch is what keeps failing ("Waiting for next segment"
+			// read as a healthy live edge for up to MaxTimeout).
+			d.emitActivity(ActivityRetrying)
 			utils.Sleep(ctx, d.delays.singleGoneRetry)
 			return nil // Continue loop
 		}
@@ -647,8 +650,9 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	if behindHead && !stuckOnSegment {
 		// Transient failure while behind head -- retry with small delay. Surface
-		// the wait (2s grace suppresses it for a stream that recovers quickly).
-		d.emitActivity(ActivityWaitingForSegment)
+		// the retry (2s grace suppresses it for a stream that recovers quickly);
+		// the segment exists, so this is not a wait for the next one.
+		d.emitActivity(ActivityRetrying)
 		utils.Sleep(ctx, d.delays.transientFailureRetry)
 		return nil // Continue loop
 	}
