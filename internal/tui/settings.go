@@ -214,7 +214,7 @@ var sections = []settingsSection{
 	{
 		name: "BotGuard Sidecar",
 		fields: []fieldDef{
-			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off) (requires restart)", nil},
+			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens and signature solving (default: on; when off, no PO tokens are minted and signature-ciphered formats are unavailable) (requires restart)", nil},
 		},
 	},
 	{

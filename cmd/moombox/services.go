@@ -737,7 +737,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()
 		if startErr != nil {
-			log.Warn("BotGuard sidecar failed to start; using goja until the supervisor gets it up",
+			log.Warn("BotGuard sidecar failed to start; no PO tokens or signature solving until the supervisor gets it up",
 				slog.String("error", startErr.Error()))
 			sidecar.PublishHealth(sidecar.Health{Healthy: false, Reason: startErr.Error(), Since: time.Now()})
 			// A first start that never succeeded cannot reach markUnhealthy
@@ -751,7 +751,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
 		}
 	} else {
-		log.Info("BotGuard sidecar disabled in config; using goja fallback only")
+		log.Warn("BotGuard sidecar disabled in config; no PO tokens will be minted and signature-ciphered formats are unavailable")
 	}
 
 	// =========================================================================

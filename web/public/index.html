@@ -1315,13 +1315,15 @@
                             <h2>BotGuard Sidecar</h2>
                             <p class="settings-help">
                                 The BotGuard sidecar is an embedded Node + JSDOM +
-                                bgutils-js subprocess that produces real PO tokens
-                                Google's BotGuard challenge accepts. When disabled,
-                                Moombox falls back to an in-process goja-only path
-                                that produces only websafe-fallback tokens — most
-                                YouTube content still works, but PO-token-gated
-                                formats (some live streams, age-restricted, etc.)
-                                become unavailable. Toggle requires restart.
+                                bgutils-js subprocess that produces the PO tokens
+                                Google's BotGuard challenge accepts and solves
+                                YouTube's signature ciphers. When disabled, only an
+                                in-process goja path remains, which BotGuard
+                                rejects: no PO tokens are minted and current
+                                players' signatures cannot be solved, so
+                                PO-token-gated and signature-ciphered formats
+                                become unavailable. Formats that need neither keep
+                                working. Toggle requires restart.
                             </p>
                             <sl-switch id="cfg-bgutils-use-sidecar">
                                 Enable sidecar
