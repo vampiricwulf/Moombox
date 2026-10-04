@@ -12,6 +12,12 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Route mouse to settings when visible
 	if a.settings.IsVisible() {
 		a.settings.HandleMouse(msg)
+		// A click on [ Save & Return ] or [ Return ] closes the overlay
+		// without passing through handleKey's "close" action, and a save
+		// may have changed the archive threshold the task list applies.
+		if !a.settings.IsVisible() {
+			a.afterSettingsClose()
+		}
 		return a, nil
 	}
 
