@@ -28,12 +28,13 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		switch key {
 		case "y", "Y":
 			m.closeConfirm = false
-			return m.saveAndClose()
+			return m.thenAfterClose(m.saveAndClose())
 		case "n", "N":
 			m.closeConfirm = false
-			return m.discardAndClose()
+			return m.thenAfterClose(m.discardAndClose())
 		case keyEsc:
 			m.closeConfirm = false
+			m.afterClose = ""
 		}
 		return ""
 	}
@@ -92,6 +93,15 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 	// inline, and the old "i" binding made every path with an i in it —
 	// /usr/local/bin/ffmpeg, C:\ffmpeg\bin\ffmpeg.exe — impossible to type.
 	if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" && key == keyCtrlO {
+		// The installer replaces this panel, and closing it silently threw
+		// every unsaved edit away — the one close path without the Save
+		// changes? prompt. With edits pending it asks first, and opens the
+		// installer once the answer is Save or Discard.
+		if m.dirty {
+			m.closeConfirm = true
+			m.afterClose = "open_ffmpeg"
+			return ""
+		}
 		return "open_ffmpeg"
 	}
 
@@ -243,6 +253,18 @@ func (m *SettingsModel) handleButtonKey(key string) string {
 		return ""
 	}
 	return ""
+}
+
+// thenAfterClose swaps a completed prompted close for the action that asked
+// for the prompt (afterClose). A save that failed or needs a restart returns
+// "" and the pending action is dropped with it.
+func (m *SettingsModel) thenAfterClose(action string) string {
+	after := m.afterClose
+	m.afterClose = ""
+	if action == "close" && after != "" {
+		return after
+	}
+	return action
 }
 
 func (m *SettingsModel) handleClose() string {

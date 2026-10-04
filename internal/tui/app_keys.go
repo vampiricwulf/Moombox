@@ -13,6 +13,21 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+// afterSettingsClose re-applies hide_finished_age_days, which a save may
+// have changed. Read under the store lock — HTTP handlers mutate config via
+// configStore.Update concurrently (matches getPort/apiBaseURL).
+func (a *App) afterSettingsClose() {
+	if a.configStore == nil {
+		return
+	}
+	var days float64
+	a.configStore.Read(func(c *config.MoomboxConfig) {
+		days = c.Monitors.HideFinishedAgeDays.Days()
+	})
+	a.taskList.SetHideFinishedAgeDays(days)
+	a.updateSelectedJob() // the rebuild can move the cursor
+}
+
 func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -43,17 +58,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		action := a.settings.HandleKey(key)
 		switch action {
 		case "close":
-			// Re-apply hide_finished_age_days in case it changed. Read
-			// under the store lock — HTTP handlers mutate config via
-			// configStore.Update concurrently (matches getPort/apiBaseURL).
-			if a.configStore != nil {
-				var days float64
-				a.configStore.Read(func(c *config.MoomboxConfig) {
-					days = c.Monitors.HideFinishedAgeDays.Days()
-				})
-				a.taskList.SetHideFinishedAgeDays(days)
-				a.updateSelectedJob() // the rebuild can move the cursor
-			}
+			a.afterSettingsClose()
 		case "restart":
 			if a.OnRestart != nil {
 				onRestart := a.OnRestart
@@ -68,6 +73,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, a.testNotificationCmd(a.settings.SelectedNotificationURL())
 		case "open_ffmpeg":
 			a.settings.Close()
+			a.afterSettingsClose() // a prompted close may have just saved
 			a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs
 			a.ffmpegCheck.Open()
 			a.ffmpegCheck.SetSize(a.width, a.height)

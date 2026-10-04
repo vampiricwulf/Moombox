@@ -461,6 +461,10 @@ type SettingsModel struct {
 
 	// Close confirmation
 	closeConfirm bool
+	// afterClose is the action a prompted close hands back in place of
+	// "close" once the prompt is answered with Save or Discard — today only
+	// Ctrl+O's "open_ffmpeg", whose installer replaces the panel.
+	afterClose string
 
 	// Action buttons (bottom of settings panel when dirty)
 	// -1 = fields focused, 0 = Save button, 1 = Return button
@@ -494,6 +498,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.errorMsg = ""
 	m.showRestartOverlay = false
 	m.closeConfirm = false
+	m.afterClose = ""
 	m.buttonFocus = -1
 
 	// Snapshot config under read lock. Use the closure-scoped `c`
