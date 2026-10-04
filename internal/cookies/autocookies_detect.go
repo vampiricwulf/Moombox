@@ -52,7 +52,7 @@ var (
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
-	Type string `json:"type"` // "firefox", "waterfox", "chrome", "brave", "opera", "edge"
+	Type string `json:"type"` // one of knownBrowserTypes (browser_validate.go): "firefox", "chrome", "edge", …
 	Path string `json:"path"`
 	Name string `json:"name"`
 }

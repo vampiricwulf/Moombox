@@ -11,16 +11,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// shouldSkipPeriodicRefresh reports whether the next periodic-refresh tick
-// should be skipped because no active jobs exist. When HasActiveJobs is nil
-// the service refreshes on every tick (legacy behaviour). Audit
-// reports/cookies.md #23.
 // shouldSkipPeriodicRefresh decides whether the periodic ticker should fire.
 // Two skip conditions:
 //
 //  1. No active jobs (existing) — when nothing is downloading or live, an
 //     auth-token refresh isn't urgent. Headless Chrome launch is ~1-5s of
-//     CPU + ~150MB RAM; not worth it for an idle session.
+//     CPU + ~150MB RAM; not worth it for an idle session. With
+//     HasActiveJobs nil this condition never skips.
 //  2. Recent successful refresh (audit reports/cookies.md #23) — if we
 //     refreshed within `interval/2`, the next tick is too close to be
 //     useful. Trips when the user just-now used "refresh now" or a job-

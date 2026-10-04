@@ -124,7 +124,7 @@ var launcherWarnf = func(format string, args ...any) {
 // cleanupOrphans removes any stale `~` files left over from a prior
 // session. Runs once at launcher startup, before the supervised child
 // is spawned. The .exe~ may exist if a prior launcher exited before
-// the deferred ping/del fired (system shutdown during the 11s window,
+// the deferred ping/del fired (system shutdown during deferDeleteOldLauncher's ~4s wait,
 // antivirus blocked the cmd, etc.). Now-unlocked, removable.
 //
 // EXCEPT while a failed-update marker is present: then the ~ file is the

@@ -11,9 +11,11 @@ import (
 // is consumers-first so producers keep firing into live consumers until the
 // consumers drain: monitors → worker → notifications → cookie refresh →
 // PO-token provider → web server → log/DB unsubscribe → database. A
-// 10-second force-exit timer closes rate limiters + the logger and calls
-// os.Exit(1) as a backstop — every individual stop is isolated with panic
-// recovery so one failing service does not block the others.
+// 10-second force-exit timer closes rate limiters, the database and the
+// logger and exits as a backstop — with exitCodeRestart when a restart is
+// pending, else 0 (see the timer for why never 1). Every individual stop is
+// isolated with panic recovery so one failing service does not block the
+// others.
 //
 // Returns true when a restart was requested via s.triggerRestart, so the
 // caller (main) can re-invoke run() with the same configPath.
