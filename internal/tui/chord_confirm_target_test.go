@@ -82,8 +82,10 @@ func TestSelectionDropsJobsThatAreGone(t *testing.T) {
 // different jobs — and the next chord acts on the highlighted one. Paging and
 // arrows already refresh it (TestTaskPanelPagingRefreshesTheDetailsPanel).
 //
-// Mutant: drop the updateSelectedJob after UpdateSearchInput — the panel
-// still shows Alpha after "beta" is typed.
+// Mutant: drop the updateSelectedJob calls on both search paths — the panel
+// still shows Alpha after "beta" is typed. (A typed key reaches both
+// UpdateSearchInput and HandleSearchKey, so either alone masks the other; a
+// paste reaches only UpdateSearchInput.)
 func TestSearchMovesTheDetailsPanelWithTheCursor(t *testing.T) {
 	a := NewApp()
 	a.width, a.height = 120, 40
