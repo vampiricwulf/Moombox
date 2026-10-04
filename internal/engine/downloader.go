@@ -354,11 +354,12 @@ type DownloadProgress struct {
 	CatchingUp bool
 }
 
-// DownloadGap represents a detected gap in segments.
+// DownloadGap represents a detected gap in segments. Which stream it is in
+// is the caller's to record: each downloader carries one stream, and the
+// worker's OnGap closure knows which (database.Gap.Stream).
 type DownloadGap struct {
-	From   int
-	To     int
-	Stream string
+	From int
+	To   int
 }
 
 // DownloaderLogger is the interface for downloader logging.

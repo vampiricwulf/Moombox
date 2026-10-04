@@ -24,7 +24,8 @@ import (
 // non-negative number of days returns the ZERO time, which IsArchived reads
 // as "nothing is archived".
 //
-//   - A NEGATIVE threshold is the documented "never archive" knob. Scaling it
+//   - A NEGATIVE threshold means "never archive". No config produces one
+//     today (Normalize and both settings UIs reject it), but scaling it
 //     would put the cutoff in the FUTURE and archive every Finished job, so
 //     it returns the zero time here rather than relying on each caller to
 //     check first (every one of them does today; a fourth that forgot would

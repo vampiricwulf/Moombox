@@ -787,8 +787,6 @@ func (s *runState) initServices(logLevelOverride string) error {
 		sidecarCipher = cipher.NewSidecarSolver(s.bgSidecar, gojaSolver)
 	}
 	cipherSolver := cipher.NewCompositeSolver(sidecarCipher, gojaSolver)
-	s.cipherSolver = gojaSolver
-	s.routedCipher = cipherSolver
 
 	// Wire goja resolver for GetSts (signature timestamp lookup, not part of
 	// the cipher.Solver interface) and the composite Solver for sig/n decryption.

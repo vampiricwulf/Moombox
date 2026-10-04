@@ -51,7 +51,6 @@ var (
 	dirTighteningAllowed = utils.DirTighteningAllowed
 )
 
-// Defaults returns a new MoomboxConfig with all default values applied.
 // boolPtr returns a pointer to b. Used for *bool config fields whose default is
 // a concrete value (a feature that is on unless explicitly disabled), where a
 // plain bool couldn't distinguish "absent" from "explicitly false".
@@ -118,6 +117,7 @@ func mbToBytes(mb int) int {
 	return mb << 20
 }
 
+// Defaults returns a new MoomboxConfig with all default values applied.
 func Defaults() *MoomboxConfig {
 	// The two arm64-conditional downloader defaults; see platformDefaults.
 	reorderPerJobMB, reorderBudgetMB := platformDefaults(runtime.GOARCH)

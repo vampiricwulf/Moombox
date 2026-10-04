@@ -9,7 +9,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
-	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/connectivity"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -56,13 +55,11 @@ type runState struct {
 	connMon *connectivity.Monitor
 
 	// --- Platform services ---
-	jar          *cookies.CookieJar
-	ytService    *youtube.Service
-	twService    *twitch.Service
-	potProvider  *bgutils.PotProvider
-	bgSidecar    *sidecar.Sidecar
-	cipherSolver *cipher.GojaResolver
-	routedCipher cipher.Solver
+	jar         *cookies.CookieJar
+	ytService   *youtube.Service
+	twService   *twitch.Service
+	potProvider *bgutils.PotProvider
+	bgSidecar   *sidecar.Sidecar
 
 	// --- Worker + notifications ---
 	notifyMgr notifications.Notifier
