@@ -1602,3 +1602,26 @@ type discardResponseWriter struct{ h http.Header }
 func (w *discardResponseWriter) Header() http.Header         { return w.h }
 func (w *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (w *discardResponseWriter) WriteHeader(int)             {}
+
+// TestJobLookupFailureIsNot404: a failed job lookup answers 500, a missing job
+// 404. Every job route used to fold GetJob's error into "job not found", and
+// the dashboard's 404 branch means the job is gone — so a locked or failing
+// database told it every job had vanished.
+func TestJobLookupFailureIsNot404(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "present", nil)
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/absent", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("missing job: want 404, got %d", rec.Code)
+	}
+
+	// Closing the database makes every read fail without touching the row.
+	f.db.Close()
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/present", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("failed lookup: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}

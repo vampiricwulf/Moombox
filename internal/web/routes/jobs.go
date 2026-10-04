@@ -226,9 +226,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// GET /api/jobs/:id
 	r.Get("/api/jobs/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -251,9 +250,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// GET /api/jobs/:id/video — range-request video streaming
 	r.Get("/api/jobs/{id}/video", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -330,9 +328,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// i.ytimg.com / static-cdn.jtvnw.net for assets we already downloaded.
 	r.Get("/api/jobs/{id}/thumbnail", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 		if job.ThumbnailFile == "" {
@@ -398,9 +395,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// GET /api/jobs/:id/segments — returns segments for multi-segment jobs
 	r.Get("/api/jobs/{id}/segments", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		if _, ok := loadJob(rw, db, jobID); !ok {
 			return
 		}
 
@@ -432,9 +427,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -501,9 +495,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			jsonError(rw, "invalid segment index", http.StatusBadRequest)
 			return
 		}
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 		segments, err := db.GetSegments(jobID)
@@ -539,9 +532,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// GET /api/jobs/:id/chat
 	r.Get("/api/jobs/{id}/chat", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -587,9 +579,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		jobID := chi.URLParam(req, "id")
 
 		// Verify job exists (match TS: 404 if not found)
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		if _, ok := loadJob(rw, db, jobID); !ok {
 			return
 		}
 
@@ -608,9 +598,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	r.Get("/api/jobs/{id}/logs", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		// Verify job exists
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		if _, ok := loadJob(rw, db, jobID); !ok {
 			return
 		}
 		// Per-job logs will be populated by the worker during download.
@@ -892,9 +880,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// POST /api/jobs/:id/cancel
 	r.Post("/api/jobs/{id}/cancel", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -932,9 +919,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// POST /api/jobs/:id/retry — backward compat, delegates to ReinitializeJob
 	r.Post("/api/jobs/{id}/retry", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -964,9 +950,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// POST /api/jobs/:id/resume — resume a YouTube job preserving staging files
 	r.Post("/api/jobs/{id}/resume", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -1009,9 +994,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// POST /api/jobs/:id/reinitialize — reset job to fresh state and re-enqueue
 	r.Post("/api/jobs/{id}/reinitialize", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -1033,9 +1017,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// POST /api/jobs/:id/mux — force-mux from staging files
 	r.Post("/api/jobs/{id}/mux", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -1086,9 +1069,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// the Mux button means (spec §5).
 	r.Post("/api/jobs/{id}/recover-asides", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 		if worker.IsActiveJobStatus(job.Status) {
@@ -1127,9 +1109,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// POST /api/jobs/:id/open-folder — loopback only (match TS: resolve via outputDir + filename)
 	r.With(web.LoopbackOnly).Post("/api/jobs/{id}/open-folder", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "Job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -1198,9 +1179,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// DELETE /api/jobs/:id
 	r.Delete("/api/jobs/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -1347,6 +1327,25 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// loadJob fetches the job a handler acts on, and answers the request itself
+// when it cannot: 404 when no such job exists, 500 when the lookup failed.
+// GetJob returns (nil, nil) for a missing row and (nil, err) for a failed
+// read; folding both into 404 told the dashboard — whose 404 branch means
+// "the job is gone" — that every job had vanished whenever the database was
+// locked or failing.
+func loadJob(rw http.ResponseWriter, db *database.Database, jobID string) (*database.Job, bool) {
+	job, err := db.GetJob(jobID)
+	if err != nil {
+		jsonError(rw, "failed to load job", http.StatusInternalServerError)
+		return nil, false
+	}
+	if job == nil {
+		jsonError(rw, "job not found", http.StatusNotFound)
+		return nil, false
+	}
+	return job, true
 }
 
 // resolveOutputDir resolves the effective output directory for a job's

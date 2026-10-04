@@ -187,6 +187,54 @@ func TestWatchedPost404OnUnknown(t *testing.T) {
 	}
 }
 
+// TestWatchedSingleRefusesUnfinishedJobs: the single-job toggle holds the
+// batch route's rule. BatchSetWatched touches Finished jobs only, so the same
+// ID used to be a silent no-op through one endpoint and a write (clearing the
+// resume position) through the other.
+func TestWatchedSingleRefusesUnfinishedJobs(t *testing.T) {
+	f := newWatchFixture(t)
+	if _, err := f.db.AddJob(&database.Job{
+		ID: "yt_dl", VideoID: "yt_dl", URL: "https://example.com/yt_dl", Status: database.StatusDownloading,
+	}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	f.db.UpdateResumePosition("yt_dl", 42.0)
+
+	for _, method := range []string{"POST", "DELETE"} {
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, httptest.NewRequest(method, "/api/jobs/yt_dl/watched", nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s on a Downloading job: want 400, got %d", method, rec.Code)
+		}
+	}
+	got, _ := f.db.GetJob("yt_dl")
+	if got.Watched || got.ResumePosition == nil {
+		t.Errorf("job was modified: watched=%v resume=%v", got.Watched, got.ResumePosition)
+	}
+}
+
+// TestWatchedUnknownIDBroadcastsNoDelete: an unknown ID is answered 404
+// without reaching UpdateJobFields, whose read-back reports a missing row as a
+// delete — which went out to every dashboard as job_deleted for a job that
+// never existed.
+func TestWatchedUnknownIDBroadcastsNoDelete(t *testing.T) {
+	f := newWatchFixture(t)
+	var deletes int
+	unsub := f.db.OnJobDeleted(func(*database.JobDeleted) { deletes++ })
+	defer unsub()
+
+	for _, method := range []string{"POST", "DELETE"} {
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, httptest.NewRequest(method, "/api/jobs/no-such/watched", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s unknown job: want 404, got %d", method, rec.Code)
+		}
+	}
+	if deletes != 0 {
+		t.Errorf("OnJobDeleted fired %d time(s) for an ID that never existed", deletes)
+	}
+}
+
 // --- DELETE /api/jobs/{id}/watched ---
 
 func TestWatchedDeleteMarksAsUnwatched(t *testing.T) {

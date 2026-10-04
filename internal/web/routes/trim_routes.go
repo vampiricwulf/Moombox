@@ -16,9 +16,8 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 	// POST /api/jobs/:id/trims
 	r.Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
