@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
@@ -450,6 +452,15 @@ func TestViewTerminalTooSmallNamesTheSize(t *testing.T) {
 	for _, want := range []string{"50", "10", fmt.Sprintf("%d", minTermWidth), fmt.Sprintf("%d", minTermHeight)} {
 		if !strings.Contains(view, want) {
 			t.Errorf("terminal-too-small view lacks %q:\n%s", want, view)
+		}
+	}
+
+	// It must also FIT: shown only in terminals narrower than minTermWidth,
+	// the message is no use if the required size is past the right edge.
+	app.width = 40
+	for _, line := range strings.Split(app.View().Content, "\n") {
+		if w := runewidth.StringWidth(line); w > app.width {
+			t.Errorf("line %q is %d columns, wider than the %d-column terminal it is shown in", line, w, app.width)
 		}
 	}
 }

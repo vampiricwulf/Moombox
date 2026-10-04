@@ -105,7 +105,10 @@ func (a *App) View() tea.View {
 		return a.viewWithMode("Initializing...")
 	}
 	if a.width < minTermWidth || a.height < minTermHeight {
-		return a.viewWithMode(fmt.Sprintf("Terminal too small: %d×%d (Moombox needs at least %d×%d)",
+		// Two short lines, not one: the one-line form ran to 67 columns, so
+		// in the narrow terminals it is shown in the required size — the
+		// half that says what to do — was cut off the right edge.
+		return a.viewWithMode(fmt.Sprintf("Terminal too small: %d×%d\nMoombox needs at least %d×%d",
 			a.width, a.height, minTermWidth, minTermHeight))
 	}
 

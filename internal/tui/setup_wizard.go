@@ -1434,6 +1434,12 @@ func (m *SetupWizardModel) viewModeSelect() string {
 	boxW, contentW := dialogBox(60, m.width)
 
 	var lines []string
+	// desc renders a card's description indented under its title, the
+	// indent kept on every wrapped line: a description longer than the box
+	// used to wrap back to column 0.
+	desc := func(text string) string {
+		return DimStyle.PaddingLeft(3).Width(contentW).Render(text)
+	}
 
 	// Header
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Welcome to Moombox"))
@@ -1452,7 +1458,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		quickStyle = quickStyle.Bold(true)
 	}
 	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup (recommended)"))
-	lines = append(lines, DimStyle.Render("   Best for most users — takes ~2 minutes"))
+	lines = append(lines, desc("Best for most users — takes ~2 minutes"))
 	lines = append(lines, "")
 
 	// Advanced Setup card
@@ -1467,7 +1473,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		advStyle = advStyle.Bold(true)
 	}
 	lines = append(lines, advStyle.Render(advPrefix+"Advanced Setup"))
-	lines = append(lines, DimStyle.Render("   Full control over every setting"))
+	lines = append(lines, desc("Full control over every setting"))
 	lines = append(lines, "")
 
 	// Use Defaults card
@@ -1482,7 +1488,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		defStyle = defStyle.Bold(true)
 	}
 	lines = append(lines, defStyle.Render(defPrefix+"Use Defaults"))
-	lines = append(lines, DimStyle.Render("   Save default config and start. Configure later in settings."))
+	lines = append(lines, desc("Save default config and start. Configure later in settings."))
 	lines = append(lines, "")
 
 	// FFmpeg status
