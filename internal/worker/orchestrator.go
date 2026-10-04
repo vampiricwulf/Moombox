@@ -496,6 +496,12 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 					progressStr += fmt.Sprintf(" C: %d", chatCount)
 				}
 			}
+			// Close the tracker BEFORE this write, not at Finalize below: a
+			// replay-chat tick landing between the two would re-render the
+			// line (maybeUpdate stops at the closed flag, and only persists
+			// the chat count from then on). Finalize still runs after and
+			// flushes the gaps; Close is idempotent.
+			tracker.Close()
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 				"progress": progressStr,
 				"percent":  percent,

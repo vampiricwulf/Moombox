@@ -119,7 +119,7 @@ type ProgressTracker struct {
 	lastSegmentAt      time.Time // last time either stream delivered a segment
 	lastActivityWrite  time.Time // throttle for activity DB writes
 	activityTickerOn   bool      // refresh goroutine running (guarded by mu)
-	closed             bool      // Finalize ran — no further activity writes or tickers
+	closed             bool      // Finalize/Close ran — no further activity or progress-line writes, no tickers
 }
 
 // speedSample is one (time, cumulative-bytes) reading in the speed window.
@@ -514,6 +514,22 @@ func (pt *ProgressTracker) maybeUpdate() {
 		return
 	}
 	pt.lastUpdate = now
+
+	// Closed (Finalize/Close ran): the finalize-phase line — the
+	// orchestrator's "V:100% A:100% C: n" or its honest incomplete string,
+	// with its percent — is the row's now, and this path must not render
+	// over it. Only the chat count still moves: a VOD's replay chat keeps
+	// paging after the video finished (resolveVodChatOutcome), and each batch
+	// lands here through SetChatCount. That one column is persisted on its
+	// own, so the details panels keep ticking while the progress line,
+	// percent and speed stay as finalize left them. noteFetch and
+	// setActivity already stop at the same flag.
+	if pt.closed {
+		count := pt.chatCount
+		pt.mu.Unlock()
+		pt.db.UpdateJobFields(pt.jobID, map[string]any{"total_chat_messages": count})
+		return
+	}
 
 	// Sample the byte counter into the sliding window and average across it
 	// — see sampleSpeedLocked for the source choice and window mechanics.
