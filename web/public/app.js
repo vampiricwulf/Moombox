@@ -537,7 +537,7 @@ export class MoomboxApp {
     document.getElementById("batch-watched")?.addEventListener("click", () => this.batchAction("watched"));
     document.getElementById("batch-unwatched")?.addEventListener("click", () => this.batchAction("unwatched"));
     document.getElementById("batch-select-all")?.addEventListener("click", () => {
-      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      const panel = this._activePanel;
       const selectionSet = this._activeSelectionSet();
       let visibleJobs;
       if (panel === "archived") {
@@ -555,17 +555,7 @@ export class MoomboxApp {
       }
       this.updateBatchActionBar();
     });
-    document.getElementById("batch-clear")?.addEventListener("click", () => {
-      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
-      this._activeSelectionSet().clear();
-      const containerId = panel === "archived" ? "archived-container" : "jobs-container";
-      const container = document.getElementById(containerId);
-      if (container) {
-        container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
-        container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
-      }
-      this.updateBatchActionBar();
-    });
+    document.getElementById("batch-clear")?.addEventListener("click", () => this._clearSelectionUI());
   }
 
   async loadConfig() {
@@ -3105,23 +3095,17 @@ export class MoomboxApp {
       }
 
       const panels = ["tasks", "archived", "player", "imports", "files", "stats", "logs", "settings"];
-      const activePanel = document.querySelector("sl-tab-panel[active]");
-      const isPlayerActive = activePanel?.getAttribute("name") === "player";
+      // The tracked panel, not the DOM's [active] attribute, which lags
+      // Shoelace's tab switch (see _activePanel).
+      const activePanel = this._activePanel;
+      const isPlayerActive = activePanel === "player";
 
-      const isTasksActive = activePanel?.getAttribute("name") === "tasks";
+      const isTasksActive = activePanel === "tasks";
 
       switch (e.key) {
         case "Escape":
           if (this._activeSelectionSet().size > 0) {
-            const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
-            this._activeSelectionSet().clear();
-            const containerId = panel === "archived" ? "archived-container" : "jobs-container";
-            const container = document.getElementById(containerId);
-            if (container) {
-              container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
-              container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
-            }
-            this.updateBatchActionBar();
+            this._clearSelectionUI();
             return;
           }
           break;
@@ -3163,7 +3147,7 @@ export class MoomboxApp {
           // in a hidden sl-tab-panel), but skip it explicitly like "a" above
           // so only one handler ever reacts to the keypress.
           if (!isPlayerActive) {
-            const panel = activePanel?.getAttribute("name");
+            const panel = activePanel;
             const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
             const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
             if (filterInput) { filterInput.focus(); e.preventDefault(); }
@@ -3611,8 +3595,25 @@ export class MoomboxApp {
   }
 
   /** Return selected jobs for the currently active panel. */
+  /**
+   * Empty the active panel's selection and undo its marks in the DOM — the
+   * ticked boxes and the .selected highlight — then refresh the batch bar.
+   * One home for what the Clear button, Escape and a finished batch action
+   * all do.
+   */
+  _clearSelectionUI() {
+    this._activeSelectionSet().clear();
+    const containerId = this._activePanel === "archived" ? "archived-container" : "jobs-container";
+    const container = document.getElementById(containerId);
+    if (container) {
+      container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+      container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+    }
+    this.updateBatchActionBar();
+  }
+
   _getSelectedJobs() {
-    const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+    const panel = this._activePanel;
     if (panel === "archived") {
       return this.archivedJobs.filter(j => this._selectedArchivedJobs.has(j.id));
     }
@@ -3643,7 +3644,7 @@ export class MoomboxApp {
     // Update Select All label with count when filters are active
     const selectAllBtn = document.getElementById("batch-select-all");
     if (selectAllBtn) {
-      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      const panel = this._activePanel;
       const isFiltered = panel === "archived"
         ? this.filterBar.tokens("archived").length > 0
         : this.filterBar.tokens("jobs").length > 0;
@@ -3777,12 +3778,15 @@ export class MoomboxApp {
       }
     }
 
-    this._activeSelectionSet().clear();
-    this.updateBatchActionBar();
+    // The checkboxes too, not just the set: a target the server refused (a
+    // 400 from /resume or /cancel) provokes no job_update, and a selected row
+    // that was not a target of this verb at all is redrawn only if another
+    // row's status change re-renders the list — so both kept a ticked box
+    // and the .selected highlight with nothing behind them.
+    this._clearSelectionUI();
     // The per-job actions are redrawn by the job_update each one provokes;
     // the watched pair is redrawn here, from the rows patched above, on the
-    // panel the selection was made on — which also unchecks the boxes the
-    // cleared selection set no longer stands behind.
+    // panel the selection was made on.
     if (succeeded > 0 && (action === "watched" || action === "unwatched")) {
       if (this._activePanel === "archived") this.renderArchivedJobs();
       else this.renderJobs();

@@ -146,3 +146,31 @@ test("the Player picker follows recordings finishing and being deleted", { skip 
   h.app.handleMessage({ type: "job_deleted", payload: { id: "B" } });
   assert.equal(rebuilds, 2, "a deleted recording stayed in the picker");
 });
+
+// batchAction emptied the selection set but left the boxes ticked and the
+// .selected highlight on rows no job_update would redraw: a target the
+// server refused (a 400 from /cancel) provokes none, and a selected row that
+// was not a target of the verb at all is redrawn only by chance.
+//
+// Mutant: clear only the set again (the previous two lines of batchAction).
+test("a batch action clears the ticks on rows it did not redraw", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: { "POST /api/jobs/:id/cancel": () => harness.response({ status: 400, body: { error: "Job cannot be cancelled" } }) },
+  });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [job("A", "Alpha"), { ...job("B", "Beta"), status: "Finished" }] } });
+  await h.flush();
+  h.app._selectedTaskJobs.add("A").add("B");
+  h.app.renderJobs();
+  const box = (id) => h.el("jobs-container").querySelector(`.video-item[data-job-id="${id}"] .job-checkbox`);
+  assert.equal(box("A").checked, true, "precondition: A ticked");
+  h.app.showConfirm = async () => true;
+
+  await h.app.batchAction("cancel"); // A refused by the server; B is not a cancel target
+  await h.flush();
+
+  assert.equal(h.app._selectedTaskJobs.size, 0);
+  for (const id of ["A", "B"]) {
+    assert.equal(box(id).checked, false, `${id} still ticked after the batch`);
+    assert.ok(!h.el("jobs-container").querySelector(`.video-item.selected[data-job-id="${id}"]`), `${id} still highlighted`);
+  }
+});
