@@ -90,7 +90,6 @@ type executor interface {
 // Database provides SQLite-backed persistence for Moombox.
 type Database struct {
 	db        *sql.DB
-	ctx       context.Context // Optional context for query cancellation
 	mu        sync.RWMutex
 	closeOnce sync.Once
 	logger    dbLogger
@@ -141,11 +140,11 @@ type Database struct {
 	statsCachedAt time.Time
 }
 
-// getCtx returns the stored context or context.Background().
+// getCtx is the context every statement runs under: context.Background().
+// Open takes no context and nothing cancels a statement mid-flight — a
+// "query cancellation" field this used to read was never assigned. This is
+// the one place to change if shutdown should ever cancel in-flight queries.
 func (db *Database) getCtx() context.Context {
-	if db.ctx != nil {
-		return db.ctx
-	}
 	return context.Background()
 }
 

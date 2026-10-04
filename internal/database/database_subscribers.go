@@ -371,8 +371,9 @@ func (db *Database) notifyJobUpdate(job *Job, changes []string) {
 // the dispatch step entirely — also saves the SELECT cost when no one's
 // listening) and when the SELECT itself errors. An empty DB with
 // subscribers returns an explicit empty slice, NOT nil — subscribers
-// need to know "the list is now empty" (e.g. when DeleteJob removes the
-// last row) so they can update their views. dispatchJobsChange's
+// need to know "the list is now empty" (e.g. when
+// DeleteJobsAndHistoryForChannel removes the last rows) so they can update
+// their views. dispatchJobsChange's
 // nil-check then correctly distinguishes "skip" (nil) from "dispatch
 // the empty list" ([]*Job{}).
 // Audit reports/database.md C2.

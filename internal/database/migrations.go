@@ -419,7 +419,7 @@ func (db *Database) migrate() error {
 	}
 
 	if version < 4 {
-		// Add index for video_id (used by HasActiveJob, AddToHistory)
+		// Add index for video_id (used by HasActiveJob)
 		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_jobs_video_id ON jobs(video_id)`); err != nil {
 			return err
 		}
