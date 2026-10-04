@@ -518,3 +518,53 @@ func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
 		t.Errorf("park_identity = %q, want empty", got.ParkIdentity)
 	}
 }
+
+// TestCookieRefreshResumesBacklogThroughTheScheduler: a successful in-process
+// cookie refresh used to send every parked job back to Upcoming and straight
+// onto the queue, so a backlog VOD skipped the archive-slots pacing that the
+// cookie-parked sweep honours (and CountBacklogInFlight over-counted). Both
+// paths now share CookieResumeStatus: a backlog VOD with its feed_items row
+// goes to Queued and is left for the scheduler; anything else is Upcoming and
+// enqueued.
+//
+// Mutant: write Upcoming unconditionally again — the backlog row is Upcoming
+// and the queue holds it.
+func TestCookieRefreshResumesBacklogThroughTheScheduler(t *testing.T) {
+	cases := []struct {
+		name       string
+		prio       int
+		feedRow    bool
+		wantStatus database.JobStatus
+		wantQueued bool
+	}{
+		{"backlog VOD with its feed row waits for the scheduler", 1, true, database.StatusQueued, false},
+		{"backlog VOD whose feed row is gone is not stranded", 1, false, database.StatusUpcoming, true},
+		{"live/upcoming work is re-queued at once", 0, false, database.StatusUpcoming, true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			chID := "UCresume"
+			videoID := fmt.Sprintf("vid%d", i)
+			if _, err := db.AddJob(&database.Job{ID: videoID, VideoID: videoID, URL: "u", Platform: "youtube",
+				Status: database.StatusDownloading, ChannelID: &chID, QueuePriority: tc.prio}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.feedRow {
+				addFeedItemRow(t, db, chID, videoID, "2026-07-01T00:00:00Z")
+			}
+			job, _ := db.GetJob(videoID)
+			w.OnCookieRefreshNeeded = func(string) bool { return true }
+
+			w.setJobError(job, (&StreamProcessResult{Error: "cookies", ErrSentinel: ErrCookiesRequired}).AsError())
+
+			got, _ := db.GetJob(videoID)
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %s, want %s", got.Status, tc.wantStatus)
+			}
+			if queued := w.queue.PendingCount() > 0; queued != tc.wantQueued {
+				t.Errorf("queued = %v, want %v", queued, tc.wantQueued)
+			}
+		})
+	}
+}

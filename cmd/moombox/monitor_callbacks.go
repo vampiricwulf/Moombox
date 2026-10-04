@@ -81,33 +81,10 @@ func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool
 // how many were resumed. Split out of the callback closures so the decision
 // and the database loop it actually drives can both be tested directly.
 //
-// THE TARGET STATUS DEPENDS ON queue_priority, and getting it wrong breaks the
-// pacing in one direction or strands a job in the other:
-//
-//   - priority 1 (backlog) resumes to Queued and the scheduler is woken. It is
-//     the only path out of Queued, so it re-admits these archive_slots at a
-//     time. Sending them to Upcoming instead — what this did before — handed
-//     the whole of a channel's parked backlog to the worker's heartbeat poller
-//     at once, bypassed archive-slots entirely, and left CountBacklogInFlight
-//     over-counting until they drained.
-//   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
-//     scheduler never admits a priority-0 row, so Queued would strand it.
-//   - priority 1 with NO feed_items partner also resumes to Upcoming — the
-//     pre-MON-4 path — because Queued would strand it just as surely.
-//     CancelAndPrune (channel REMOVAL) deletes the channel's never-started
-//     jobs and then its feed_items rows, but deliberately leaves a RUNNING
-//     download alone; a backlog VOD that was Downloading at that moment
-//     therefore survives with no partner, and it is exactly the row that
-//     parks in COOKIES? later. NextQueuedJobs INNER-JOINs feed_items, so the
-//     scheduler would never return it on any sweep, /retry and /resume both
-//     refuse Queued, and ShouldProcess(Queued) is false — the row would be
-//     lost permanently and silently. Pacing is not a property worth having
-//     for a channel that no longer exists.
-//
-// The partner check is the EXISTING GetFeedItem read (nil, nil for no row) —
-// no new query, no schema change, no UpdateJobFields change. A read that
-// ERRORS resumes to Upcoming too: the cheap answer is the one that can still
-// finish the download.
+// THE TARGET STATUS DEPENDS ON queue_priority: worker.CookieResumeStatus
+// holds the rule and why, shared with the worker's own in-process refresh so
+// the two cannot drift. A backlog row resumed to Queued waits for the
+// scheduler, which is why the sweep wakes it.
 //
 // wake is the scheduler's Wake (production: runState.schedulerWake). Called
 // once, after the loop, and only when something was resumed: Wake coalesces
@@ -130,16 +107,10 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 		if !sweepShouldResume(job, platform, currentIdentity) {
 			continue
 		}
-		status := database.StatusUpcoming
-		if job.QueuePriority == 1 && job.ChannelID != nil {
-			it, err := db.GetFeedItem(*job.ChannelID, job.VideoID)
-			switch {
-			case err != nil:
-				log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
-					"job", job.ID, "platform", platform, "err", err)
-			case it != nil:
-				status = database.StatusQueued
-			}
+		status, err := worker.CookieResumeStatus(db, job)
+		if err != nil {
+			log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
+				"job", job.ID, "platform", platform, "err", err)
 		}
 		db.UpdateJobFields(job.ID, map[string]any{
 			"status":        status,

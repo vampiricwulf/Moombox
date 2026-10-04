@@ -401,6 +401,46 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 	}
 }
 
+// CookieResumeStatus is where a job parked in COOKIES? goes once its
+// credentials are repaired — by the cookie-parked sweep and by the worker's
+// own in-process refresh alike. The answer depends on queue_priority, and
+// getting it wrong breaks the pacing in one direction or strands a job in
+// the other:
+//
+//   - priority 1 (backlog) resumes to Queued, for the scheduler to re-admit
+//     archive_slots at a time; the caller wakes it. Upcoming instead handed
+//     a channel's whole parked backlog to the worker at once, bypassed
+//     archive-slots entirely, and left CountBacklogInFlight over-counting
+//     until they drained.
+//   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
+//     scheduler never admits a priority-0 row, so Queued would strand it.
+//   - priority 1 with NO feed_items partner also resumes to Upcoming, because
+//     Queued would strand it just as surely. CancelAndPrune (channel REMOVAL)
+//     deletes the channel's never-started jobs and then its feed_items rows,
+//     but deliberately leaves a RUNNING download alone; a backlog VOD that
+//     was Downloading at that moment survives with no partner, and it is
+//     exactly the row that parks in COOKIES? later. NextQueuedJobs
+//     INNER-JOINs feed_items, so the scheduler would never return it, /retry
+//     and /resume both refuse Queued, and ShouldProcess(Queued) is false —
+//     the row would be lost permanently and silently.
+//
+// The partner check is GetFeedItem (nil, nil for no row). A read that errors
+// returns that error with Upcoming: the cheap answer is the one that can
+// still finish the download.
+func CookieResumeStatus(db *database.Database, job *database.Job) (database.JobStatus, error) {
+	if job.QueuePriority != 1 || job.ChannelID == nil {
+		return database.StatusUpcoming, nil
+	}
+	it, err := db.GetFeedItem(*job.ChannelID, job.VideoID)
+	if err != nil {
+		return database.StatusUpcoming, err
+	}
+	if it != nil {
+		return database.StatusQueued, nil
+	}
+	return database.StatusUpcoming, nil
+}
+
 // Scheduler returns the worker's archive-slots scheduler. Creation sites
 // call Scheduler().Wake() after inserting a Queued backlog job instead of
 // EnqueueJob — the scheduler, not the queue, admits backlog work.
@@ -1493,17 +1533,28 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 	w.logger.Info("attempting automatic cookie refresh...", "platform", job.Platform)
 	if w.OnCookieRefreshNeeded(job.Platform) {
 		w.logger.Info("cookie refresh succeeded, retrying job", "platform", job.Platform)
-		// Set to Upcoming so StreamProcessor.Process re-probes and
-		// correctly classifies the stream (live/VOD/upcoming). Using
-		// Live was wrong when the stream had transitioned to post-live
-		// or had not yet started (per audit reports/worker.md Finding 21).
+		// Upcoming, not Live, so StreamProcessor.Process re-probes and
+		// classifies the stream afresh (per audit reports/worker.md
+		// Finding 21) — or Queued for a backlog VOD, which re-enters through
+		// the scheduler's pacing like the cookie-parked sweep's resumes.
+		status, err := CookieResumeStatus(w.db, job)
+		if err != nil {
+			w.logger.Debug("could not read the feed_items partner; resuming to Upcoming",
+				"jobID", job.ID, "err", err)
+		}
 		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status":        database.StatusUpcoming,
+			"status":        status,
 			"error":         "",
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
 		})
-		w.queue.Enqueue(job.ID, database.StatusUpcoming)
+		if status == database.StatusQueued {
+			if w.scheduler != nil {
+				w.scheduler.Wake()
+			}
+		} else {
+			w.queue.Enqueue(job.ID, database.StatusUpcoming)
+		}
 		return
 	}
 
