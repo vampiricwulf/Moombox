@@ -390,3 +390,31 @@ func TestSaveRejectsUnusablePublicURL(t *testing.T) {
 		t.Errorf("the error did not name the field: %q", m.errorMsg)
 	}
 }
+
+// TestSaveGatesTheMemoryLimits: the three memory rows had no pre-save check.
+// An emptied field parsed as 0 — "no limit" — and was applied at once, and an
+// inverted sidecar pair reached config.Save, whose refusal surfaced as a raw
+// "Save failed: invalid config" line.
+//
+// Mutants: drop the memory rows from the range table (the empty row saves);
+// drop the pair check (the inverted row's message is the raw one).
+func TestSaveGatesTheMemoryLimits(t *testing.T) {
+	for _, c := range []struct {
+		name, key, value, want string
+	}{
+		{"emptied Go limit", "go_soft_limit_mb", "", "Go soft memory limit"},
+		{"over the cap", "sidecar_soft_limit_mb", "70000", "Sidecar soft memory limit"},
+		{"hard not above soft", "sidecar_hard_limit_mb", "100", "must exceed the soft limit"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := newSettingsModelForSave(t)
+			m.values["sidecar_soft_limit_mb"] = "200"
+			m.values[c.key] = c.value
+			m.recheckDirty()
+			m.saveAndClose()
+			if m.status != saveError || !strings.Contains(m.errorMsg, c.want) {
+				t.Errorf("status %v, error %q; want a field error containing %q", m.status, m.errorMsg, c.want)
+			}
+		})
+	}
+}

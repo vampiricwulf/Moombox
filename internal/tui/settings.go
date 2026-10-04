@@ -765,6 +765,12 @@ func (m *SettingsModel) applyValues() {
 		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
 		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
 		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
+		// The memory limits: 0 means "no limit", so an emptied field (Atoi 0)
+		// switched the limit off and applied that at once. 65536 is the web
+		// route's cap.
+		{"go_soft_limit_mb", "Go soft memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
+		{"sidecar_soft_limit_mb", "Sidecar soft memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
+		{"sidecar_hard_limit_mb", "Sidecar hard memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
 	} {
 		n, err := strconv.Atoi(m.values[c.key])
 		if err != nil || n < c.min || n > c.max {
@@ -777,6 +783,15 @@ func (m *SettingsModel) applyValues() {
 	critPct, _ := strconv.Atoi(m.values["disk_critical_percent"])
 	if critPct <= warnPct {
 		m.errorMsg = "Disk critical threshold must exceed warning threshold"
+		m.status = saveError
+		return
+	}
+	// The same pair rule config.Validate applies (and Save refuses on), said
+	// as a field message instead of a raw "Save failed: invalid config".
+	sideSoft, _ := strconv.Atoi(m.values["sidecar_soft_limit_mb"])
+	sideHard, _ := strconv.Atoi(m.values["sidecar_hard_limit_mb"])
+	if sideSoft > 0 && sideHard > 0 && sideHard <= sideSoft {
+		m.errorMsg = "Sidecar hard memory limit must exceed the soft limit"
 		m.status = saveError
 		return
 	}
