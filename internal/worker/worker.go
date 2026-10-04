@@ -483,8 +483,7 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 	return w.streamProc.TwitchHintStats()
 }
 
-// CancelJob cancels a running job and updates its status.
-// CancelJob cancels a job. Returns true when an actively-processing run was
+// CancelJob cancels a job and writes its status Cancelled. Returns true when an actively-processing run was
 // flagged — that run's handleCancellation emits the "cancelled"
 // notification, so callers that notify should skip their own emission.
 func (w *DownloadWorker) CancelJob(jobID string) bool {
@@ -599,6 +598,9 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 
 				jobs, err := w.db.GetAllJobs()
 				if err != nil {
+					// Logged like every sibling read: a failing DB otherwise
+					// leaves this safety net dead with nothing in the log.
+					w.logger.Warn("heartbeat: GetAllJobs failed", "err", err)
 					continue
 				}
 				for _, job := range jobs {
@@ -1134,8 +1136,10 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 			w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
 		}
 	} else {
-		// Shutdown: preserve existing status so job resumes on restart
-		w.logger.Info("job interrupted by shutdown, preserving state", "jobID", job.ID)
+		// Shutdown: the existing status stays so the job resumes on restart.
+		// Or the row was deleted (processJob's OnJobDeleted listener cancels
+		// the same ctx), and there is nothing left to write.
+		w.logger.Info("job interrupted (shutdown or row deleted), leaving its state as is", "jobID", job.ID)
 	}
 }
 

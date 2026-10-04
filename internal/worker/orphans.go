@@ -89,7 +89,7 @@ func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] 
 // jobNeedsStaging reports whether a Finished job's staging directory was
 // deliberately preserved rather than cleaned up, and so must NOT be offered
 // (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
-// job-finish time (see (*DownloadWorker) finishDownload's cleanup block in
+// job-finish time (see (*DownloadWorker).cleanupStagingAfterMux in
 // worker.go): a Finished job's staging only survives cleanup for four
 // reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
 // capture ended incomplete (the chat resume sidecar in staging is what a
@@ -346,14 +346,6 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 		return nil, err
 	}
 
-	// Active statuses — staging is in use for these
-	activeStatuses := map[database.JobStatus]bool{
-		database.StatusDownloading: true,
-		database.StatusLive:        true,
-		database.StatusUpcoming:    true,
-		database.StatusMuxing:      true,
-	}
-
 	var entries []OrphanedEntry
 	absStagingDir, _ := filepath.Abs(stagingDir)
 
@@ -368,7 +360,7 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 		// Check if job exists and its status
 		job, err := db.GetJob(jobID)
 		if err == nil && job != nil {
-			if activeStatuses[job.Status] {
+			if IsActiveJobStatus(job.Status) {
 				// Active job — skip, staging is in use
 				continue
 			}
