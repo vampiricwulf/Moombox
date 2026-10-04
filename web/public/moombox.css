@@ -134,6 +134,14 @@ sl-tab-group {
     flex-direction: column;
 }
 
+/* Shoelace 2.16 sizes the tab strip's scroll buttons 28px wide but renders
+   their inner button at 32px, so once the tabs overflow (any phone) the end
+   button pokes 2px past the viewport and the whole page scrolls sideways.
+   Clipping the nav strip horizontally hides those 2px and nothing else. */
+sl-tab-group::part(nav) {
+    overflow-x: clip;
+}
+
 sl-tab-panel {
     --padding: var(--sl-spacing-medium);
     flex: 1;
