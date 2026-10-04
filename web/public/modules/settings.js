@@ -1824,6 +1824,13 @@ export class SettingsController {
       return;
     }
 
+    // The chips are <sl-tag>s, whose base is a plain span: without these
+    // they were click-only, unreachable from the keyboard and announced as
+    // text. pressed is the toggle state; null for a plain action chip. The
+    // delegate below answers Enter/Space on them.
+    const chip = (pressed) =>
+      `role="button" tabindex="0"${pressed === null ? "" : ` aria-pressed="${pressed}"`}`;
+
     container.innerHTML = notifications
       .map((notif, idx) => {
         const hasFilter = Array.isArray(notif.events) && notif.events.length > 0;
@@ -1835,7 +1842,7 @@ export class SettingsController {
               .map((evt) => {
                 const active = notif.events.includes(evt.id);
                 const variant = active ? 'variant="primary"' : "";
-                return `<sl-tag size="small" ${variant} data-notif-action="toggle-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
+                return `<sl-tag size="small" ${variant} ${chip(active)} data-notif-action="toggle-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
               })
               .join("");
             return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
@@ -1844,7 +1851,7 @@ export class SettingsController {
             <div class="notification-events">
               ${grouped}
               <div class="notification-event-group">
-                <sl-tag size="small" variant="neutral" data-notif-action="clear-filter" data-notif-index="${idx}">Clear filter</sl-tag>
+                <sl-tag size="small" variant="neutral" ${chip(null)} data-notif-action="clear-filter" data-notif-index="${idx}">Clear filter</sl-tag>
               </div>
             </div>`;
         } else {
@@ -1853,7 +1860,7 @@ export class SettingsController {
               <div class="notification-event-group">
                 <span class="notification-events-label">Events:</span>
                 <sl-tag size="small" variant="success">All events</sl-tag>
-                <sl-tag size="small" variant="neutral" data-notif-action="enable-filter" data-notif-index="${idx}">Filter...</sl-tag>
+                <sl-tag size="small" variant="neutral" ${chip(null)} data-notif-action="enable-filter" data-notif-index="${idx}">Filter...</sl-tag>
               </div>
             </div>`;
         }
@@ -1869,8 +1876,9 @@ export class SettingsController {
           const grouped = NOTIFICATION_EVENT_GROUPS.map((group) => {
             const chips = group.events
               .map((evt) => {
-                const variant = active.includes(evt.id) ? 'variant="primary"' : "";
-                return `<sl-tag size="small" ${variant} data-notif-action="toggle-mention-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
+                const on = active.includes(evt.id);
+                const variant = on ? 'variant="primary"' : "";
+                return `<sl-tag size="small" ${variant} ${chip(on)} data-notif-action="toggle-mention-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
               })
               .join("");
             return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
@@ -1889,7 +1897,7 @@ export class SettingsController {
         // than leaving "separate" to be inferred from a missing control.
         const mode = notif.mode === "edit" ? "edit" : "separate";
         const modeChip = (value, label) =>
-          `<sl-tag size="small" ${mode === value ? 'variant="primary"' : ""} ` +
+          `<sl-tag size="small" ${mode === value ? 'variant="primary"' : ""} ${chip(mode === value)} ` +
           `data-notif-action="set-mode" data-notif-index="${idx}" data-mode="${value}">${label}</sl-tag>`;
         const modeHtml = `
             <div class="notification-events">
@@ -1927,6 +1935,14 @@ export class SettingsController {
     // mention field would PUT every time it is focused.
     if (!container._notifDelegated) {
       container._notifDelegated = true;
+      // Enter/Space on a chip does what its click does (see chip() above).
+      container.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        const el = e.target.closest?.('sl-tag[role="button"][data-notif-action]');
+        if (!el) return;
+        e.preventDefault();
+        el.click();
+      });
       container.addEventListener("click", (e) => {
         const el = e.target.closest("[data-notif-action]");
         if (!el) return;

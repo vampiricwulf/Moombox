@@ -1302,6 +1302,15 @@ sl-progress-bar {
     opacity: 0.75;
 }
 
+.notification-events sl-tag[role="button"]:focus-visible {
+    outline: none;
+}
+
+.notification-events sl-tag[role="button"]:focus-visible::part(base) {
+    outline: var(--sl-focus-ring);
+    outline-offset: var(--sl-focus-ring-offset);
+}
+
 /* Integration Card */
 .integration-card {
     background-color: var(--sl-color-neutral-50);

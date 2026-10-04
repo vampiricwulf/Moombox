@@ -143,3 +143,26 @@ test("a mode switch preserves the target's other keys", { skip }, async () => {
   assert.deepEqual(put.body.notifications[0].events, ["finished", "error"]);
   assert.equal(put.body.notifications[0].url, "https://discord.com/api/webhooks/1/aaa");
 });
+
+// The chips are <sl-tag>s, whose base is a plain span: they were click-only,
+// out of the tab order and announced as text, so a keyboard user could not
+// set the mode, filter events or choose mention events at all.
+//
+// Mutants: drop chip()'s role/tabindex (the attribute rows fail); drop the
+// keydown delegate (Enter does nothing).
+test("the card's chips are buttons the keyboard can work", { skip }, async () => {
+  const h = await openSettings();
+  const edit = cards(h)[0].querySelector('[data-notif-action="set-mode"][data-mode="edit"]');
+  const separate = cards(h)[0].querySelector('[data-notif-action="set-mode"][data-mode="separate"]');
+  assert.equal(edit.getAttribute("role"), "button");
+  assert.equal(edit.getAttribute("tabindex"), "0");
+  assert.equal(edit.getAttribute("aria-pressed"), "false");
+  assert.equal(separate.getAttribute("aria-pressed"), "true");
+  const filter = cards(h)[0].querySelector('[data-notif-action="enable-filter"]');
+  assert.equal(filter.getAttribute("role"), "button");
+  assert.equal(filter.hasAttribute("aria-pressed"), false, "a plain action chip is not a toggle");
+
+  edit.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await h.flush();
+  assert.equal(h.app.config.notifications[0].mode, "edit", "Enter on the chip did not set the mode");
+});
