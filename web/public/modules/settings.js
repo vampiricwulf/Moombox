@@ -2665,7 +2665,7 @@ export class SettingsController {
   // flag was on — an install with the flag off is exactly the install that needs
   // the manual path, and it was the one with the buttons hidden.
   //
-  // The per-platform toggles below still apply: a "Setup Twitch" button for a
+  // The per-platform toggles below still apply: a "Set up Twitch" button for a
   // platform the operator has switched off is noise.
   updateAutoCookieUI() {
     const actionsDiv = document.getElementById("auto-cookie-actions");
