@@ -891,7 +891,17 @@ func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
 }
 
 // fetchChunkWithRetry downloads a byte range with exponential backoff retry.
+// MaxChunkRetries counts ATTEMPTS, not retries after the first. Every failure
+// it reports carries the last fetch's own error and status: a direct VOD that
+// dies on a flaky link ends with "HTTP 503" or the idle-stall text in its row,
+// not a bare attempt count. A 416 and a cancellation are handed back as they
+// came — the caller classifies the first by status and the second by
+// errors.Is.
 func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end int64) ([]byte, int, error) {
+	var (
+		lastErr    error
+		lastStatus int
+	)
 	for attempt := range MaxChunkRetries {
 		if d.isCancelled() || ctx.Err() != nil {
 			return nil, 0, d.cancelErr(ctx)
@@ -910,18 +920,19 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 		// 60s). Skip the backoff after the final attempt — no fetch follows,
 		// so it only delays the already-decided failure.
 		if status >= 500 || status == 0 {
+			lastErr, lastStatus = err, status
 			if attempt < MaxChunkRetries-1 {
-				delay := time.Duration(1<<uint(attempt)) * time.Second
-				delay = min(delay, 60*time.Second)
+				delay := time.Duration(1<<uint(attempt)) * d.delays.atEdgeBackoffUnit
+				delay = min(delay, 60*d.delays.atEdgeBackoffUnit)
 				utils.Sleep(ctx, delay)
 			}
 			continue
 		}
 
-		return nil, status, err
+		return nil, status, fmt.Errorf("chunk download failed: %w", err)
 	}
 
-	return nil, 0, fmt.Errorf("chunk download failed after %d retries", MaxChunkRetries)
+	return nil, lastStatus, fmt.Errorf("chunk download failed after %d attempts: %w", MaxChunkRetries, lastErr)
 }
 
 // fetchChunk downloads a single byte range from the direct URL.

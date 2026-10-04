@@ -106,7 +106,10 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 			if statusCode == http.StatusRequestedRangeNotSatisfiable {
 				break // Past end of file
 			}
-			return fmt.Errorf("chunk download failed: %w", err)
+			// Already phrased by fetchChunkWithRetry ("chunk download failed
+			// after N attempts: <cause>"); a second prefix here used to
+			// double it.
+			return err
 		}
 
 		// A 200 (not 206) means the server IGNORED the Range and sent the whole

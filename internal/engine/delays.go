@@ -25,7 +25,7 @@ type delays struct {
 	hlsPlaylistRetry       time.Duration // hlsPlaylistRetryDelay — playlist fetch or parse failed
 	hlsStuckRetry          time.Duration // hlsStuckRetryDelay — a segment or the init keeps failing
 	connectivityPoll       time.Duration // connectivityPollInterval — waitForConnectivity's ticker
-	atEdgeBackoffUnit      time.Duration // the second the 429 backoff and same-head retry count in
+	atEdgeBackoffUnit      time.Duration // the second the 429 backoff, same-head retry and per-chunk backoff count in
 	hlsReloadUnit          time.Duration // the second hlsReloadDelay scales playlist durations by
 	hlsResumeSave          time.Duration // hlsResumeSaveInterval — live-loop resume sidecar floor
 	fetchHardCeiling       time.Duration // segmentHardCeiling — one segment/chunk fetch's absolute lifetime

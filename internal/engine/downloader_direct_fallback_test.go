@@ -586,3 +586,45 @@ func seedDirectResume(t *testing.T, path, staged string) string {
 	}
 	return resumeFile
 }
+
+// TestFetchChunkWithRetryReportsTheLastCause pins that exhausting the
+// per-chunk retries keeps the cause: the error names the last fetch's own
+// failure and the status comes back with it. The caller
+// (runDirectDownload) hands the error up unwrapped, so this text is what the
+// job row shows — it used to read "chunk download failed: chunk download
+// failed after 3 retries", with the 503 and its status gone.
+//
+// Mutant: returning a fresh fmt.Errorf with no %w — the message has no
+// "HTTP 503" and the status is 0. Mutant: the caller re-adding its prefix —
+// the text carries "chunk download failed" twice.
+func TestFetchChunkWithRetryReportsTheLastCause(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
+	d.delays = fastDelays()
+	data, status, err := d.fetchChunkWithRetry(context.Background(), 0, 7)
+	if err == nil {
+		t.Fatalf("fetchChunkWithRetry = (%q, %d, nil), want an error after %d failed attempts", data, status, MaxChunkRetries)
+	}
+	if got := attempts.Load(); got != MaxChunkRetries {
+		t.Errorf("attempts = %d, want %d (MaxChunkRetries counts attempts)", got, MaxChunkRetries)
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 — the last attempt's status must survive the retry loop", status)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "HTTP 503") {
+		t.Errorf("error = %q, want it to carry the last cause (HTTP 503)", msg)
+	}
+	if want := fmt.Sprintf("after %d attempts", MaxChunkRetries); !strings.Contains(msg, want) {
+		t.Errorf("error = %q, want %q in it", msg, want)
+	}
+	if strings.Count(msg, "chunk download failed") != 1 {
+		t.Errorf("error = %q, want the prefix exactly once", msg)
+	}
+}
