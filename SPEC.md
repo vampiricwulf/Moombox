@@ -30,7 +30,7 @@ The application listens on port 774 by default. Configuration lives in `config.t
 | `charm.land/bubbletea/v2` + `bubbles/v2` + `huh/v2` + `lipgloss/v2` | TUI framework (Charm ecosystem) |
 | `dop251/goja` | Pure-Go JavaScript engine (cipher solving, BotGuard fallback) |
 | `modernc.org/sqlite` | Pure-Go SQLite driver (no CGo) |
-| `nhooyr.io/websocket` | WebSocket (RFC 6455 compliant) |
+| `github.com/coder/websocket` | WebSocket (RFC 6455 compliant; the library formerly published as `nhooyr.io/websocket`) |
 | `BurntSushi/toml` | TOML config parsing |
 | `golang.org/x/crypto/scrypt` | Password hashing |
 | `golang.org/x/sync/errgroup` | Concurrent download coordination |
@@ -53,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database has no background writer — `UpdateJobFields` runs synchronously under `db.mu` when a caller has something to write — so idle periods produce zero database I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (10-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's per-job gate caps progress writes at the configured progress interval — `downloader.progress_interval_ms`, 16 ms by default, so ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -79,7 +79,7 @@ Both the web dashboard and TUI are first-class citizens with full feature parity
 
 ### Error Philosophy
 
-Never crash. Degrade gracefully. Always inform the user. Silent failures are bugs. Every error path either retries with backoff, reports to the user via status updates, or both. The `Expected` field on `MoomboxError` distinguishes user-facing errors (auth expired, stream unavailable) from internal errors (nil pointer, parse failure).
+Never crash. Degrade gracefully. Always inform the user. Silent failures are bugs. Every error path either retries with backoff, reports to the user via status updates, or both. Errors are plain Go errors; the only classification is sentinel matching with `errors.Is` — `worker.ErrCookiesRequired`, `worker.ErrNotAMember`, `twitch.ErrTwitchAuthExpired` and `twitch.ErrSubscriberOnly` park a job at `COOKIES?` (something the user can act on), `worker.ErrNonActionable` marks a failure not worth a notification, and everything else lands in `Error` with the error text as the job's `error` column.
 
 ### TUI Design Rule
 
@@ -108,7 +108,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 1. **Config** — `config.Load()` reads TOML, applies defaults, runs legacy migrations
 2. **Logger** — slog wrapper with file rotation, ring buffer, pub/sub
 3. **Updater** — GitHub release checker, cleans up `.old` binary from previous update
-4. **Database** — SQLite WAL, 1 connection, migrations to the current schema version (`docs/spec/appendix-metrics.md`, where the volatile numbers live), batch update goroutine
+4. **Database** — SQLite WAL, 1 connection, migrations to the current schema version (`docs/spec/appendix-metrics.md`, where the volatile numbers live), synchronous `UpdateJobFields` writes, pub/sub
 5. **CookieJar** — Netscape cookie file parsing, in-memory cookie store
 6. **YouTube Service** — PlayerAPI + Auth + format selector, fetches homepage for visitor data and API key
 7. **Twitch Service** — GQL API + Auth + EmoteResolver
@@ -136,7 +136,7 @@ internal/
   config/          <- TOML config, FlexDuration, channel terms, migrations
   updater/         <- GitHub release checker, Ed25519 verification, self-update
   logger/          <- slog wrapper, file rotation, 200-line ring buffer, pub/sub
-  database/        <- SQLite/WAL, batch coalescing, pub/sub, schema migrations
+  database/        <- SQLite/WAL, synchronous writes, pub/sub, schema migrations
   cookies/         <- Netscape jar, refresh service, auto-cookie (Firefox/Chromium/DPAPI)
   youtube/         <- Service facade, PlayerAPI, Auth, watch page, format selector
   twitch/          <- Service facade, GQL API, Auth, HLS, IRC chat, VOD chat, emotes
@@ -154,10 +154,9 @@ internal/
   notifications/   <- Manager + Discord webhook sender
   web/             <- chi server, WebSocket hub, auth, middleware, rate limiter
   web/routes/      <- HTTP route handlers (jobs, auth, config, cookies, update, etc.)
-  tui/             <- 2-over-1 panel layout, 10 overlays, chord system, Charm ecosystem
+  tui/             <- 2-over-1 panel layout, 14 overlays, chord system, Charm ecosystem
   goja/            <- JS runtime shims (minimal DOM, TextEncoder, timers)
   disk/            <- Disk space queries: kernel32 GetDiskFreeSpaceExW on Windows, statfs on Linux
-  errors/          <- Typed error hierarchy with Expected/internal distinction
   constants/       <- Hardcoded values (API keys, URLs, client configs, user agents)
   utils/           <- HTTP helpers, formatters, YouTube/Twitch URL parsing, sanitization
 ```
@@ -224,11 +223,11 @@ All monitors share these patterns:
 
 ### Download Pipeline Detail
 
-**StreamProcessor** handles the pre-download phase. For YouTube: probes video status using `ProbeVideoStatus()` (ANDROID_VR client, no cookies needed), classifies the result as live/upcoming/VOD/not-a-stream/members-only. For upcoming streams, enters a `waitForLive` loop: polls at a dynamic interval based on time until scheduled start (10 minutes if >1h away, 5 minutes if ≤1h, 1 minute if ≤5min) plus random jitter (up to 30s), persists metadata from each probe (title, thumbnail, description, scheduled start time) with change detection so rescheduled streams and title changes are picked up automatically at zero extra network cost. Starts chat download during the wait phase (so chat messages from the "waiting room" are captured), and uses chat surge detection (30 messages within a 15-second window) to trigger early re-probing — a burst of chat messages often indicates the stream just went live. Sends a "Schedule Changed" notification if the scheduled start time shifts between probes. When authenticated, uses `TV_DOWNGRADED` client for members-only upcoming stream polling. The processor tracks consecutive probe errors and gives up after 10 failures. For Twitch: manual adds poll the channel via GQL every 15 seconds (plus 5s jitter) until the channel goes live or context is cancelled. Monitor-discovered Twitch streams skip this phase since the monitor already confirmed live status.
+**StreamProcessor** handles the pre-download phase. For YouTube: probes video status using `ProbeVideoStatus()` (ANDROID_VR client, no cookies needed), classifies the result as live/upcoming/VOD/not-a-stream/members-only. For upcoming streams, enters a `waitForLive` loop: polls at a dynamic interval based on time until scheduled start (10 minutes if >1h away, 5 minutes if ≤1h, 30 seconds if ≤5min — `probeIntervalDistant`/`Near`/`Imminent`; a stream with no scheduled start polls every 5 minutes, since it can go live at any moment) plus random jitter (up to 30s), persists metadata from each probe (title, thumbnail, description, scheduled start time) with change detection so rescheduled streams and title changes are picked up automatically at zero extra network cost. Starts chat download during the wait phase (so chat messages from the "waiting room" are captured), and uses chat surge detection (30 messages within a 15-second window) to trigger early re-probing — a burst of chat messages often indicates the stream just went live. Sends a "Schedule Changed" notification if the scheduled start time shifts between probes. When authenticated, uses `TV_DOWNGRADED` client for members-only upcoming stream polling. The processor tracks consecutive probe errors and gives up after 10 failures. For Twitch: manual adds poll the channel via GQL every 15 seconds (plus 5s jitter) until the channel goes live or context is cancelled. Monitor-discovered Twitch streams skip this phase since the monitor already confirmed live status.
 
 **DownloadOrchestrator** manages the full download lifecycle after the stream processor confirms it is ready. It selects a download strategy based on the stream type:
 - **YouTube live DASH** — Sequential segment polling with head-probing
-- **YouTube VOD** — Parallel chunked download (6 workers, 5MB chunks)
+- **YouTube VOD** — Sequential whole-file download in 5MB Range-request chunks (`runDirectDownload`; streams the body instead when the server ignores Range)
 - **YouTube VOD segmented** — Sequential segment download with known total
 - **Twitch live HLS** — Playlist re-fetching with variant selection
 - **Twitch VOD** — HLS segment download
@@ -244,7 +243,7 @@ SEGMENT muxes run on goroutines parented by the orchestrator's mux root rather t
 **SegmentDownloader** has three modes:
 - **DASH sequential** — Increments segment number, fetches `{base_url}/sq/{n}`, handles 404 with exponential backoff. Saves resume state every 50 sequential segments. Verification is time-based: once the gap since the last segment crosses 30s, calls `checkStreamStatus()` (re-checked at most once per 30s) to verify whether the stream is still live. If the stream ended, exits cleanly; if still live, keeps waiting. A configurable `maximum_timeout` (default 600s, YouTube only) force-finalizes the recording if no segment arrives for that long even while YouTube still reports the stream live (its status can lag or stick); the clock resets whenever a segment lands, and offline time pauses it.
 - **HLS polling** — Re-fetches the media playlist, identifies new segments by URL comparison, downloads them in order. YouTube HLS honors the same `maximum_timeout` backstop; Twitch HLS relies on its GQL end-detection instead. Saves resume state at the same interval as DASH.
-- **VOD parallel** — Knows the total size, downloads in 5MB chunks with up to 3 retries per chunk. Reports percentage progress throttled to 500ms intervals to avoid flooding the UI.
+- **VOD direct** — Knows the total size and downloads it sequentially in 5MB Range-request chunks, up to 3 attempts per chunk (`MaxChunkRetries`); there is no worker pool on this path. Reports percentage progress throttled to 500ms intervals (`ProgressThrottle`) to avoid flooding the UI.
 
 **Catch-up mode** activates when the downloader falls more than 10 segments behind the live head (`CatchupThreshold`), past a 30-segment (`stayBehindSegments`) buffer that avoids racing in-flight segments. It hands off to a rolling window of `segment_workers` parallel workers (default 12, configurable, no upper limit — distinct from `num_parallel_downloads`, which gates concurrent VOD jobs and never applies to a live broadcast) until caught up, then resumes sequential downloading. Workers claim sequences continuously and flush completed segments in strict ascending order as they arrive, rather than waiting on per-batch barriers. This prevents permanent drift during transient slowdowns. Both the catch-up path and the parallel VOD path hold out-of-order segments in a byte-bounded reorder buffer while the head-of-order segment works through its retry ladder, and two settings bound that memory: `reorder_buffer_mb` caps one download and `reorder_budget_mb` caps every live download between them (`0` = unbounded on either, and a per-job value above the budget is clamped to it at startup with a warning). The defaults are 1024 MB and 4096 MB, or 256 MB and 1024 MB on arm64 — the one place in the config where a default is platform-conditional, because the original 256 MB ceiling was chosen for an arm-class box. Both are re-applied on save from either UI, so neither needs a restart; the head-of-order segment is admitted regardless of either ceiling, since nothing frees them without a flush and nothing flushes without its head.
 
@@ -274,11 +273,11 @@ The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safet
 |-----------|---------|------------|
 | Worker | Dual semaphore | 100 lifecycle slots (downloading + muxing) + 10 download slots (VODs only, configurable) |
 | WebSocket | No hub throttle | Rate bounded upstream by ProgressTracker (one report per configured progress interval per job; ~60 Hz at the 16 ms default) |
-| Database | Signal-driven batch coalesce | 100ms window, zero idle I/O |
+| Database | Synchronous writes under `db.mu` | No background writer; the write rate is the callers' (ProgressTracker's per-job gate), zero idle I/O |
 | TUI | Non-blocking sends | Drop counters for diagnostics |
 | TUI logs | Batched flush | 250ms flush interval |
 | BotGuard | Sidecar + triple cache | Sidecar minter (internal, ~6h TTL); session cache (6h TTL); minter cache (dynamic TTL, goja-fallback only); inflight dedup |
-| Cipher | LRU with mutex | 3-VM cache, mutex-serialized compilation |
+| Cipher | LRU with mutex | 10-VM cache (`solverCacheSize`), mutex-serialized compilation |
 | Cookie refresh | Periodic | 30-minute interval with immediate-check capability |
 | Update check | Periodic | 5s initial delay, then 24-hour interval |
 | Disk check | Piggyback on memory ticker | Every 3rd tick of 2-minute memory diagnostic |
@@ -323,20 +322,19 @@ Upcoming -> Live -> Downloading -> Muxing -> Finished
 
 A YouTube post-live download that still finalizes behind head after the VOD-branch refresh loop exhausts its retries does not become `Error` — it completes as `Finished` with `Job.IncompleteTail` set. The flag is not a status: staging directory and resume sidecar are preserved instead of being cleaned up, and Resume (only — not Retry, which gates the flagged job out because it deletes staging via ReinitializeJob) is permitted on the flagged job (normally gated to `Error`/`Cancelled`/`COOKIES?`); a clean re-run appends the missing tail and self-clears the flag via the same unconditional write that set it.
 
-### Error Hierarchy
+### Error Classification
+
+There is no typed error hierarchy and no `internal/errors` package. Errors are plain Go errors built with `fmt.Errorf("...: %w", err)`, and the only classification is sentinel matching with `errors.Is`:
 
 ```go
-MoomboxError          // Base: Code, Message, Expected bool, Context map, Cause error
-  YouTubeError        // YouTube API errors
-  DownloadError       // Download failures (with HTTPStatus)
-  NetworkError        // Network-level failures (with HTTPStatus, URL)
-  ConfigError         // Configuration errors (Expected=true)
-  MuxingError         // FFmpeg muxing errors
-  CookieError         // Cookie-related errors
-  AuthError           // Authentication errors
+worker.ErrCookiesRequired   // player-API "login required" / "member-only": park at COOKIES?
+worker.ErrNotAMember        // members-only refused to a SIGNED-IN session: park at COOKIES?, but no auto cookie refresh
+twitch.ErrTwitchAuthExpired // Twitch token dead: park at COOKIES?
+twitch.ErrSubscriberOnly    // sub-only VOD/stream: park at COOKIES?
+worker.ErrNonActionable     // age-restricted, probe budget exhausted: Error, notification suppressed
 ```
 
-`Expected=true` means the error is a normal operational condition the user can act on (expired cookies, unavailable stream). `Expected=false` means an internal error that indicates a bug or unexpected state.
+`DownloadWorker.setJobError` picks `COOKIES?` when `cookiesStatusError(err)` matches one of the first four and `Error` otherwise; the error text becomes the job's `error` column. Cancellation is not an error class at all: `handleCancellation` asks the queue whether the user cancelled (`WasCancelled`) and writes `Cancelled`, or leaves the status untouched on a shutdown so the job resumes on restart. There is no "expected vs internal" flag — what the user can act on is expressed by the status the job lands in.
 
 **Deep-dive:** [docs/spec/architecture.md](docs/spec/architecture.md)
 
@@ -348,20 +346,21 @@ MoomboxError          // Base: Code, Message, Expected bool, Context map, Cause 
 
 YouTube integration reimplements yt-dlp's extraction logic in Go. The core is a multi-client Innertube strategy that fetches video info from multiple YouTube API clients and merges their format pools.
 
-**Client fallback chain for authenticated fetches** (`GetVideoInfoAuthenticated`):
+**Client fallback chain for authenticated fetches** (`GetVideoInfoAuthenticated`, `internal/youtube/player_api_strategy.go`):
 1. Fetch watch page (WEB client) — extracts `ytcfg` (visitor data, API key, player URL), inline player response
-2. **TV_DOWNGRADED** (TVHTML5, clientID 7) — primary authenticated client, sends cookies
-3. **WEB** (clientID 1) — for DASH manifest URL (TV client sometimes lacks it)
-4. **WEB_CREATOR** (clientID 62) — fallback for members-only content
-5. **ANDROID_VR** (clientID 28) — fallback for VOD without cookies, no cipher needed
+2. **WEB_EMBEDDED_PLAYER** — queried first, as a format-pool and DASH contributor only; it never drives playability classification
+3. **TV_DOWNGRADED** (TVHTML5, clientID 7) — primary authenticated client, sends cookies; the playability authority
+4. **WEB** (clientID 1) — for DASH manifest URL (TV client sometimes lacks it)
+5. **WEB_CREATOR** (clientID 62) — fallback for members-only content
+6. **VISIONOS**, then **ANDROID_VR** (clientID 28) — the cookieless chain, run when WEB_CREATOR is inadequate too; no cipher needed
 
-Each client's formats are tagged with an auth level: AuthLevelAndroidVR(0), AuthLevelWatchPage(1), AuthLevelTVPublic(2), AuthLevelTVAuth(3), AuthLevelWeb(4), AuthLevelWebCreator(5). Formats from different clients are pooled and deduplicated by itag. Format selection priority: resolution cap (`max_video_resolution` compares the SHORTER frame dimension, resolves to the largest size at or below the cap or the closest above it, and treats `0` as unbounded — `internal/utils/resolution.go`) > long edge within that size > FPS (if prefer60fps enabled) > video codec score (av01=6 > vp9.2=5 > vp9/vp09=4 > h265/hevc=3 > h264/avc=2 > vp8=1) > bitrate > auth level (lower = less likely to require cookies for playback). Audio codec priority: opus=4 > mp4a.40.5=3 > mp4a.40.2=2 > mp4a=1.
+Each client's formats are tagged with an auth level (`internal/youtube/types.go`, lowest first): `AuthLevelTVPublic` (0), `AuthLevelTVAuth` (1), `AuthLevelWatchPagePublic` (2), `AuthLevelWatchPageAuth` (3), `AuthLevelWebSafari` (4), `AuthLevelWeb` (5), `AuthLevelWebEmbedded` (6), `AuthLevelWebCreator` (7), `AuthLevelVisionOS` (8), `AuthLevelAndroidVR` (9). The order is yt-dlp's client priority — tv, then the web family, then the cookieless last resorts — not a measure of cookie-freeness; see the table in [docs/spec/platform-services.md](docs/spec/platform-services.md). Formats from different clients are pooled and deduplicated by itag. Format selection priority: resolution cap (`max_video_resolution` compares the SHORTER frame dimension, resolves to the largest size at or below the cap or the closest above it, and treats `0` as unbounded — `internal/utils/resolution.go`) > long edge within that size > FPS (if prefer60fps enabled) > video codec score (av01=6 > vp9.2=5 > vp9/vp09=4 > h265/hevc=3 > h264/avc=2 > vp8=1) > bitrate > auth level (lower = the higher-priority client in the order above). Audio codec priority: opus=4 > mp4a.40.5=3 > mp4a.40.2=2 > mp4a=1.
 
 **Probe vs. full fetch:** Two distinct code paths serve different needs. `ProbeVideoStatus()` uses ANDROID_VR (lightweight, no cookies, no cipher, no watch page fetch) to quickly classify a video as live/upcoming/VOD/offline/members-only. It is used by monitors for pre-filtering and by the stream processor for polling. `GetVideoInfoAuthenticated()` runs the full multi-client chain: fetches the watch page, extracts ytcfg, tries multiple Innertube clients, decrypts signatures and n-parameters, and returns the merged format pool. It is used when actual download URLs are needed.
 
 **Watch page parsing:** The watch page HTML is fetched with the WEB user agent and cookies. It yields: `ytcfg` (visitor data, API key, player.js URL, client versions), inline player response (can contain formats directly), and initial chat continuation tokens (for live chat download).
 
-**Cipher decryption:** YouTube obfuscates streaming URLs with a signature cipher and an n-parameter throttle. Without decryption, URLs return 403 or are throttled to unusable speeds. The cipher solver downloads `player.js` from YouTube's CDN, extracts the transformation function chain via AST parsing of the JavaScript (identifying the function by structural patterns in the obfuscated code). If AST parsing fails, it falls back to regex pattern matching against known obfuscation patterns. The extracted JavaScript is compiled into Goja VMs and cached. Two-tier cache: memory (10-VM LRU keyed by player URL) for instant reuse, and disk (14-day TTL) to avoid re-downloading player.js. The solver also extracts `signatureTimestamp` (STS) from player.js — this value must be sent in Innertube API requests or the returned formats will have invalid URLs.
+**Cipher decryption:** YouTube obfuscates streaming URLs with a signature cipher and an n-parameter throttle. Without decryption, URLs return 403 or are throttled to unusable speeds. The cipher solver downloads `player.js` from YouTube's CDN, extracts the transformation function chain via AST parsing of the JavaScript (identifying the function by structural patterns in the obfuscated code). If AST parsing fails, it falls back to regex pattern matching against known obfuscation patterns. The extracted JavaScript is compiled into Goja VMs and cached. Two-tier cache: memory (10-VM LRU keyed by player URL) for instant reuse, and disk (24-hour offline TTL, `playerCacheTTL`, with conditional-GET revalidation on every fetch) to avoid re-downloading player.js. The solver also extracts `signatureTimestamp` (STS) from player.js — this value must be sent in Innertube API requests or the returned formats will have invalid URLs.
 
 **N-parameter decryption:** Separate from signature cipher but using the same extraction infrastructure. The `n` parameter in YouTube URLs controls throttling — the obfuscated value triggers aggressive rate limiting. The n-parameter function is extracted from player.js, compiled to a Goja VM, and used to transform the parameter. Same caching as signature cipher.
 
@@ -375,7 +374,7 @@ Twitch integration uses the GQL API with persisted query hashes (SHA256). No RES
 
 **HLS variant selection:** The flow is: get stream/VOD access token via GQL, build Usher URL with the token, fetch the master playlist, parse `#EXT-X-STREAM-INF` lines into variant structs (resolution, frame rate, bandwidth, codecs, group ID). Selection uses the quality preference string (e.g., "1080p60", "best", "720p", "audio_only") matched against variant names, inside the size `max_video_resolution` resolves to. If the preferred quality is unavailable, the variants at the chosen size are ranked by codec (AV1 > HEVC > H.264), then source, then bandwidth.
 
-**IRC chat:** Connects to `wss://irc-ws.chat.twitch.tv:443` via WebSocket. PASS and NICK are a PAIR rendered from one decision per session: authenticated is `PASS oauth:{token}` **with** `NICK {login}` (the account's own name, from the `login` cookie), anonymous is `PASS SCHMOOPIIE` with `NICK justinfan{random}`. A token beside the `justinfan` nickname is the hybrid Twitch refuses, so anything short of a complete, sendable pair falls all the way back to anonymous. A credentialed session Twitch never welcomes falls back to anonymous once per credential pair — for the rest of the job unless the cookie file's Twitch pair changes or Twitch auth recovers, when every live chat session is told to reconnect with the current credentials (`DownloadWorker.ReauthenticateTwitchChats`) — and notifies once per pair. Joins with `JOIN #{channel}`; requests capabilities (`CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership`) for rich message metadata. Parses IRC messages into structured chat events, handling: PRIVMSG (chat messages with badges, emotes, color), USERNOTICE (subscriptions, raids, gifts), CLEARCHAT (bans/timeouts), CLEARMSG (single message deletions), ROOMSTATE (slow mode, emote-only, etc.). Maintains PING/PONG keepalive. See [docs/spec/platform-services.md](docs/spec/platform-services.md) § IRC Chat (Live).
+**IRC chat:** Connects to `wss://irc-ws.chat.twitch.tv:443` via WebSocket. PASS and NICK are a PAIR rendered from one decision per session: authenticated is `PASS oauth:{token}` **with** `NICK {login}` (the account's own name, from the `login` cookie), anonymous is `PASS SCHMOOPIIE` with `NICK justinfan{random}`. A token beside the `justinfan` nickname is the hybrid Twitch refuses, so anything short of a complete, sendable pair falls all the way back to anonymous. A credentialed session Twitch never welcomes falls back to anonymous once per credential pair — for the rest of the job unless the cookie file's Twitch pair changes or Twitch auth recovers, when every live chat session is told to reconnect with the current credentials (`DownloadWorker.ReauthenticateTwitchChats`) — and notifies once per pair. Joins with `JOIN #{channel}`; requests capabilities (`ircCapRequest`: `CAP REQ :twitch.tv/tags twitch.tv/commands` — `twitch.tv/membership` is deliberately not requested, owner decision O-S, because it only adds JOIN/PART bursts) for rich message metadata. Parses IRC messages into structured chat events, handling PRIVMSG (chat messages with badges, emotes, color) and USERNOTICE (subscriptions, raids, gifts); `parseLine` turns no other command into an event — CLEARCHAT, CLEARMSG and ROOMSTATE are not handled — while the read loop still answers PING, honours RECONNECT and classifies a login-failure NOTICE. Maintains PING/PONG keepalive. See [docs/spec/platform-services.md](docs/spec/platform-services.md) § IRC Chat (Live).
 
 **VOD chat:** Paginated GQL queries using `VideoCommentsByOffsetOrCursor`. Each page returns comments and a cursor for the next page. Comments are fetched in chronological order by content offset (seconds into the VOD). The pagination continues until no more comments are returned or the VOD end is reached.
 
@@ -421,7 +420,7 @@ Dual extraction approach for YouTube's obfuscated `player.js`:
 1. **AST parsing** (primary) — Parses the JavaScript, finds the signature transformation function chain and n-parameter function by structural patterns
 2. **Regex fallback** — Pattern-matches known obfuscation patterns when AST parsing fails
 
-Results are compiled into Goja VMs. Memory cache: 10-VM LRU keyed by player.js URL. Disk cache: raw extracted JavaScript with 14-day TTL. The compile mutex serializes compilation to prevent thundering herd when multiple goroutines need the same player.
+Results are compiled into Goja VMs. Memory cache: 10-VM LRU keyed by player.js URL. Disk cache: raw extracted JavaScript with a 24-hour TTL (`playerCacheTTL`) that only matters when revalidation cannot reach YouTube — every fetch revalidates with a conditional GET, so a rotated player is picked up regardless. The compile mutex serializes compilation to prevent thundering herd when multiple goroutines need the same player.
 
 ### YouTube Live Chat
 
@@ -433,8 +432,8 @@ Polls YouTube's `live_chat/get_live_chat` endpoint using continuation tokens. Th
 |----------|-----------|----------|-----|
 | PO token sessions | In-memory map | 6 hours | Content binding |
 | PO token minters | In-memory map | Dynamic (from VM) | Request key |
-| Cipher VMs | In-memory LRU | 3 VMs max | Player.js URL |
-| Cipher JS | Disk files | 14 days | Player.js URL hash |
+| Cipher VMs | In-memory LRU | 10 VMs max (`solverCacheSize`) | Player.js URL |
+| Cipher JS | Disk files | 24 hours (`playerCacheTTL`), revalidated by conditional GET | Player.js URL hash |
 | Twitch emotes | In-memory LRU | 200 channels | Channel ID |
 | YouTube visitor data | In-memory | Process lifetime | Singleton |
 | Chat dedup IDs | In-memory set | 5000 IDs max | Message ID |
@@ -490,7 +489,7 @@ The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bub
 - **JobDetails** (top right) — Selected job's metadata, progress, segment counts, file info.
 - **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
 
-**Overlays (10):** Action Menu, Help, Add Video, Import, Trim, Orphaned Files & History, Client Tokens, Settings, Setup Wizard, FFmpeg Check.
+**Overlays (14):** Action Menu, Help, Add Video, Import, Cookie Import, Trim, Orphaned Files & History, Client Tokens, yt-dlp Plugin, Statistics, Settings, Setup Wizard, FFmpeg Check, Release Notes.
 
 ### Chord System
 
@@ -614,11 +613,14 @@ The TUI communicates with the web server via HTTP to `localhost:{port}`. A custo
 For real-time updates, the TUI does NOT use WebSocket. Instead, it subscribes directly to database pub/sub callbacks since it runs in the same process. This is more efficient than serializing to JSON and deserializing — the TUI receives typed Go structs directly. Updates are forwarded via buffered channels with non-blocking sends:
 
 ```
-Database.OnJobUpdate()  -> jobUpdateCh (cap 100) -> tea.Cmd -> TUI model
-Database.OnJobsChange() -> jobsUpdateCh (cap 10) -> tea.Cmd -> TUI model
-Logger.Subscribe()      -> logCh (cap 200)        -> tea.Cmd -> TUI model (250ms batch)
-CookieRefresh.OnAuthChange -> cookieStatusCh      -> tea.Cmd -> TUI model
-Monitor.OnSchedule      -> checkTimersCh          -> tea.Cmd -> TUI model
+Database.OnJobChange()     -> jobUpdateCh (cap 100)      -> tea.Cmd -> TUI model
+Database.OnJobAdded()      -> jobAddedCh (cap 100)       -> tea.Cmd -> TUI model
+Database.OnJobDeleted()    -> jobDeletedCh (cap 100)     -> tea.Cmd -> TUI model
+Database.OnTrimsChanged()  -> jobTrimsChangedCh (cap 50) -> tea.Cmd -> TUI model
+Database.OnJobsChange()    -> jobsUpdateCh (cap 10)      -> tea.Cmd -> TUI model (bulk writes only)
+Logger.Subscribe()         -> logCh (cap 200)            -> tea.Cmd -> TUI model (250ms batch)
+CookieRefresh.OnAuthChange -> cookieStatusCh (cap 5)     -> tea.Cmd -> TUI model
+Monitor.OnSchedule         -> checkTimersCh (cap 10)     -> tea.Cmd -> TUI model
 ```
 
 When a channel is full, the send is dropped and a drop counter is incremented. On TUI exit, drop counts are logged to help diagnose missed updates. This non-blocking design prevents slow TUI rendering from back-pressuring database writes or monitor callbacks.
@@ -645,9 +647,9 @@ Both the web UI and TUI implement the same user-facing features:
 
 SQLite in WAL mode, single connection (`SetMaxOpenConns(1)`), 5-second busy timeout, foreign keys enabled. DSN: `file:{path}?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc/sqlite ONLY honors `_pragma=name(value)` parameters; the mattn-style `_journal_mode=`/`_busy_timeout=`/`_foreign_keys=` forms are silently ignored (that exact mistake once disabled WAL and FK enforcement; the v14 migration cleans up its fallout).
 
-**Schema version:** v15 (v5 added `segments` table, v6 added `client_tokens` table, v15 added per-part `segments.chat_file`; see `docs/spec/data-and-storage.md` for the full migration table). Migrations run automatically on startup via `db.migrate()`.
+**Schema version:** v20 at the time of writing — the authoritative number is `schemaVersion` in `internal/database/migrations.go`, mirrored in `docs/spec/appendix-metrics.md` (v5 added the `segments` table, v6 `client_tokens`, v15 per-part `segments.chat_file`, v16 the feed-history store, v17–v20 the `incomplete_tail`, `park_reason`, `park_identity` and `notification_msgs` job columns; see `docs/spec/data-and-storage.md` for the full migration table). Migrations run automatically on startup via `db.migrate()`.
 
-**Batch update coalescing:** `UpdateJobFields()` sends the job to a channel. A background goroutine collects updates in a 100ms signal-driven window, then writes them in a single transaction. This coalesces rapid segment progress updates (which fire every few hundred milliseconds during download) into batched writes, producing zero I/O during idle periods.
+**Write path:** `UpdateJobFields()` is synchronous. It takes `db.mu`, executes one `UPDATE jobs SET … WHERE id=?`, re-reads the row through the prepared `stmtGetJob` in the same critical section, releases the lock, and only then notifies subscribers (so a subscriber may call back into the database without deadlocking). There is no batching goroutine, update channel or coalescing window; the write rate during a download is bounded upstream by `ProgressTracker`'s per-job gate (`downloader.progress_interval_ms`), not by the database, and nothing in the package runs when nothing is being written.
 
 **`UpdateJobFields` pattern:**
 ```go
@@ -656,13 +658,13 @@ db.UpdateJobFields(jobID, map[string]any{
     "progress": "V:1234 A:1234 C:5678",
 })
 ```
-Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 48-entry whitelist over `jobs` columns). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write. Returns the updated `*Job`.
+Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 51-entry whitelist over `jobs` columns; `notification_msgs` is deliberately absent — `UpdateNotificationMsgs` is its only writer). Auto-updates `updated_at`. Triggers `OnJobUpdate` and `OnJobChange` subscribers after write. Returns the updated `*Job`.
 
-**Pub/sub:** `OnJobUpdate(func(*Job))` fires when any field of a single job changes. `OnJobsChange(func([]*Job))` fires when the job list changes (add/delete). Both return an unsubscribe function. Multiple subscribers are supported — the WebSocket hub, TUI, and notification manager all subscribe independently. Callback invocation uses `safeCallJobUpdate`/`safeCallJobsChange` wrappers with panic recovery so one misbehaving subscriber does not affect others. The subscriber list is protected by a separate `subMu` RWMutex to avoid contention with the main database mutex.
+**Pub/sub:** six subscriber kinds, each registered through an `On…` method that returns an unsubscribe function. `OnJobUpdate(func(*Job))` and `OnJobChange(func(*JobChange))` both fire synchronously after every `UpdateJobFields` write (the latter also carries the list of columns written). `OnJobAdded`, `OnJobDeleted` and `OnTrimsChanged` are the lifecycle events of `AddJob`, `DeleteJob` and `AddTrim`/`DeleteTrim`. `OnJobsChange(func([]*Job))` is the full-list refresh and is dispatched only by the two bulk writers, `BatchSetWatched` and `DeleteJobsAndHistoryForChannel`, on a fresh goroutine. Multiple subscribers are supported — the WebSocket hub, TUI, and notification manager all subscribe independently. Callback invocation uses `safeCallJobUpdate`/`safeCallJobsChange` (and their siblings for the other kinds) with panic recovery so one misbehaving subscriber does not affect others. The subscriber list is protected by a separate `subMu` RWMutex to avoid contention with the main database mutex.
 
 **Per-job log buffers:** The database maintains in-memory log buffers per job (max 200 lines, trimmed to 100 when exceeded). `RouteLogToJobs(line)` scans each log line for the job IDs currently ROUTED and appends matching lines to the corresponding buffer. `TrackJobForLogs(jobID)` registers a job ID for log routing, `UntrackJobForLogs(jobID)` deregisters it while keeping its buffer, and `SyncJobLogTracking(jobs)` applies both across a list so only non-terminal jobs are ever scanned — a job that leaves a terminal state (retry, resume, auto-retry) is registered again on the status write, so the per-line cost tracks the number of LIVE jobs rather than the size of the table. `PruneJobLogs(activeIDs)` removes buffers for jobs that no longer exist. These per-job logs are served via `GET /api/jobs/{id}/logs` and displayed in the TUI job details panel.
 
-**Job table columns (55 fields):** id, video_id, url, title, channel_name, platform, status, progress, percent, eta, speed, error, created_at, updated_at, last_video_seq, last_audio_seq, total_video_seq, total_audio_seq, is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time, length_seconds, download_started_at, thumbnail_url, description, output_file, filename, output_directory, video_width, video_height, video_fps, file_size, chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file, twitch_quality, twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at, quality_preference, watched, resume_position, chat_offset, auto_retry_count, channel_id, queue_priority.
+**Job table columns (59):** id, video_id, url, title, channel_name, platform, status, progress, percent, eta, speed, error, created_at, updated_at, last_video_seq, last_audio_seq, total_video_seq, total_audio_seq, is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time, length_seconds, download_started_at, thumbnail_url, description, output_file, filename, output_directory, video_width, video_height, video_fps, file_size, chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file, twitch_quality, twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at, quality_preference, watched, resume_position, chat_offset, auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity, notification_msgs.
 
 **Additional tables:** `history` (video IDs seen by monitors, prevents re-adding), `segments` (multi-segment recordings, schema v5), `client_tokens` (persistent auth tokens, schema v6), `trims` (clip extractions from finished recordings), `feed_items` (persistent per-channel discovery store, schema v16), `channel_state` (per-channel backfill/RSS bookkeeping, schema v16).
 

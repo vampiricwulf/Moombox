@@ -2,20 +2,20 @@
 
 ## Scope
 
-This document specifies every data persistence layer in Moombox: the SQLite database (schema, connection tuning, batch coalescing, pub/sub), the TOML configuration system (sections, types, migrations, validation), the cookie management subsystem (jar, refresh, auto-cookie), the logger (file rotation, ring buffer, pub/sub), and the on-disk file output conventions (staging, output templates, resume state, chat files). It is the authoritative reference for how Moombox reads, writes, and organizes persistent and transient data.
+This document specifies every data persistence layer in Moombox: the SQLite database (schema, connection tuning, the synchronous write path, pub/sub), the TOML configuration system (sections, types, migrations, validation), the cookie management subsystem (jar, refresh, auto-cookie), the logger (file rotation, ring buffer, pub/sub), and the on-disk file output conventions (staging, output templates, resume state, chat files). It is the authoritative reference for how Moombox reads, writes, and organizes persistent and transient data.
 
 ## Rules and Constraints
 
 These are hard rules. An AI assisting with Moombox development must follow them without exception:
 
 - **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc.org/sqlite only honors `_pragma=...` parameters (the mattn-style `_journal_mode=...` form is silently ignored). Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
-- **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (40 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object. Returns the updated `*Job`.
-- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 40 entries mapping Go field names to SQLite column names (identity mapping in all cases). Adding a new column to the jobs table requires adding a corresponding entry here.
+- **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (51 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object. Returns the updated `*Job`.
+- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 51 entries mapping Go field names to SQLite column names (identity mapping in all cases). `notification_msgs` is the one job column deliberately left out — `UpdateNotificationMsgs` is its only writer. Adding a new column that `UpdateJobFields` should be able to write requires adding a corresponding entry here.
 - **`JobStatus` is `type JobStatus string`.** Status values are string constants, not integers or enums. Timestamps are ISO 8601 / RFC3339 strings. Optional numeric fields (sequence counters, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`).
-- **Batch update coalescing: 100ms signal-driven window, zero IO when idle.** The `batchUpdateLoop` goroutine sleeps on a channel until the first update arrives, then waits 100ms to accumulate more updates, then flushes all pending updates in a single transaction. When no updates are pending, the goroutine consumes zero CPU and performs zero IO.
+- **Job writes are synchronous; there is no batching.** `UpdateJobFields` executes its `UPDATE` immediately under `db.mu`, re-reads the row in the same critical section, releases the lock and then notifies subscribers. There is no update channel, writer goroutine or coalescing window — the only goroutine the package starts is the `OnJobsChange` fan-out — so when nothing is being written, nothing runs and the database performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
 - **FlexDuration parses config values as minutes or days, context-dependent.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` it means days. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the context-appropriate unit.
-- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v15. Each migration checks the current version before applying. Migrations run at startup in `Database.Init()`. There is no rollback mechanism.
+- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v20 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `max_files` are deleted.
 - **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, and stream ID. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation is what used to truncate hours of recording on every daemon restart.
@@ -59,63 +59,51 @@ type Database struct {
     closeOnce sync.Once
     logger    dbLogger
 
-    // Batch update coalescing
-    updateCh  chan *Job     // buffer 100
-    batchDone chan struct{} // closed when batchUpdateLoop exits
+    // Per-instance snapshot of the package-level map, taken at Open()
+    fieldToColumn map[string]string
 
-    // Pub/sub
-    onJobUpdate  []func(*Job)
-    onJobsChange []func([]*Job)
-    subMu        sync.RWMutex
+    // Pub/sub — six subscriber kinds
+    onJobUpdate    []jobUpdateSub
+    onJobChange    []jobChangeSub
+    onJobAdded     []jobAddedSub
+    onJobDeleted   []jobDeletedSub
+    onTrimsChanged []trimsChangedSub
+    onJobsChange   []jobsChangeSub
+    nextSubID      uint64
+    subMu          sync.RWMutex
 
     // Prepared statements
-    stmtGetJob *sql.Stmt
+    stmtGetJob    *sql.Stmt
+    preparedStmts []*sql.Stmt // everything prepared via prepareStmt, released by Close
 
     // Per-job in-memory log buffers
     jobLogsMu sync.RWMutex
     jobLogs   map[string][]string
+    logRouted map[string]struct{} // the job IDs RouteLogToJobs scans
+
+    // GetJobStats cache
+    statsMu       sync.Mutex
+    statsCached   *JobStats
+    statsCachedAt time.Time
 }
 ```
 
 Key details:
 
 - `mu` (sync.RWMutex) guards all database operations. Read operations acquire `RLock`; write operations acquire `Lock`.
-- `updateCh` is a buffered channel (capacity 100) that feeds the batch update goroutine.
-- `batchDone` is closed when the batch loop exits, allowing `Close()` to wait for pending flushes.
-- `stmtGetJob` is the only prepared statement (hot-path SELECT for `GetJob`).
-- `jobLogs` is an in-memory map of per-job log buffers (not persisted to SQLite). Capped at 200 lines per job; when exceeded, trimmed to the last 100.
+- `fieldToColumn` is a per-instance copy of the package-level map, snapshotted at `Open()` so the map is read-only at runtime.
+- `stmtGetJob` is the prepared hot-path SELECT behind `GetJob` and the row read-back in `UpdateJobFields`. `preparedStmts` tracks every statement prepared through `prepareStmt` so `Close()` can release them.
+- Each subscriber slice holds `{id, fn}` entries; `nextSubID` hands out the ids that the unsubscribe closures remove by.
+- `jobLogs` is an in-memory map of per-job log buffers (not persisted to SQLite). Capped at 200 lines per job; when exceeded, trimmed to the last 100. `logRouted` is the separate set of job IDs that `RouteLogToJobs` scans — only non-terminal jobs — so a finished job's buffer outlives its tracking.
+- `statsCached` memoises `GetJobStats` (a full-table scan) for `jobStatsCacheTTL` (5 s); it is not invalidated on writes.
 
-### Batch Update Coalescing
+### Write Path (no batching)
 
-The `batchUpdateLoop()` goroutine implements signal-driven coalescing to reduce write amplification during rapid job progress updates.
+Every job write is synchronous. There is no update channel, no writer goroutine and no coalescing window: `UpdateJobFields` executes its `UPDATE` on the caller's goroutine under `db.mu`, re-reads the row through `stmtGetJob` in the same critical section, releases the lock, and then notifies subscribers (see Partial Updates below for the step list).
 
-**Algorithm:**
+**Where write amplification is bounded:** upstream, in `ProgressTracker` (`internal/worker/progress.go`), which writes one job row per report and reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms default), flushing gap rows at most once a second. Every other `UpdateJobFields` caller is event-driven.
 
-1. The goroutine blocks on `updateCh` until the first `*Job` arrives.
-2. It starts a 100ms coalesce timer.
-3. Any additional jobs arriving during the 100ms window are accumulated in a `map[string]*Job` (keyed by job ID, last-write-wins).
-4. When the timer fires, all pending jobs are flushed in a single SQL transaction via `flushUpdates()`.
-5. The goroutine returns to step 1.
-
-**Flush process (`flushUpdates`):**
-
-1. Begin transaction.
-2. For each pending job, execute a full-row UPDATE (all columns). Failures are logged but do not abort the transaction for other jobs.
-3. Commit transaction.
-4. Snapshot subscribers under `subMu.RLock`.
-5. For each successfully persisted job, call `safeCallJobUpdate(fn, job)` for all OnJobUpdate subscribers.
-
-**Edge cases:**
-
-- When `updateCh` is full (100 pending), `UpdateJob()` falls back to a synchronous direct write under `db.mu.Lock`.
-- When `Close()` is called, `updateCh` is closed. The batch loop drains remaining items, flushes them, then closes `batchDone`.
-- If the transaction commit fails, no subscribers are notified.
-
-**Performance characteristics:**
-
-- Zero IO when idle (goroutine blocks on empty channel).
-- During active downloads, typically 1 transaction per 100ms covering all active jobs.
-- Non-blocking send to `updateCh` means callers (download workers) never block on database writes.
+**Idle cost:** zero. Nothing in the package ticks, and the only goroutine it ever starts is the `OnJobsChange` fan-out (`dispatchJobsChange`, used by the two bulk writers).
 
 ### Partial Updates (UpdateJobFields)
 
@@ -126,10 +114,10 @@ The `batchUpdateLoop()` goroutine implements signal-driven coalescing to reduce 
 1. Iterate `fields` map; for each key, look up the column name in `fieldToColumn`. Unknown keys are silently skipped.
 2. Build dynamic `SET col1=?, col2=?, ..., updated_at=?` clause.
 3. Execute the UPDATE under `db.mu.Lock`.
-4. Re-read the full job row via SELECT (subscribers need all fields, not just the changed ones).
-5. Notify all `onJobUpdate` subscribers with the complete `*Job`.
+4. Re-read the full job row via the prepared `stmtGetJob` in the same critical section (subscribers need all fields, not just the changed ones), then release `db.mu` — BEFORE notifying, so a subscriber can call back into the database.
+5. Notify all `onJobUpdate` subscribers with the complete `*Job`, and all `onJobChange` subscribers with the job plus the list of columns written (`updated_at` excluded). If the read-back finds no row — deleted between the UPDATE and the SELECT — `notifyJobDeleted` fires instead.
 
-**fieldToColumn map (40 entries):**
+**fieldToColumn map (51 entries):**
 
 ```
 status, progress, percent, eta, speed, error, title, channel_name,
@@ -137,12 +125,14 @@ thumbnail_url, description, output_file, filename, output_directory,
 download_started_at, stream_start_time, stream_end_time, length_seconds,
 last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
 total_chat_messages, chat_status, chat_filename, chat_file, thumbnail_file,
-description_file, is_vod, video_width, video_height, video_fps, file_size,
-last_recheck_at, twitch_quality, twitch_category, channel_avatar_url,
-quality_preference, watched, resume_position, chat_offset
+description_file, is_vod, manually_added, allow_non_stream, video_width,
+video_height, video_fps, file_size, last_recheck_at, twitch_quality,
+twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag,
+start_time, end_time, quality_preference, watched, resume_position, chat_offset,
+auto_retry_count, queue_priority, incomplete_tail, park_reason, park_identity
 ```
 
-All entries use identity mapping (Go key name == SQLite column name).
+All entries use identity mapping (Go key name == SQLite column name). `notification_msgs` is absent on purpose: `UpdateNotificationMsgs` writes it.
 
 **Usage example:**
 
@@ -154,34 +144,37 @@ db.UpdateJobFields(jobID, map[string]any{
 })
 ```
 
-This differs from `UpdateJob()` which queues a full-row write through the batch coalescer. `UpdateJobFields` is synchronous, immediate, and triggers subscribers directly.
+There is no full-row `UpdateJob()` counterpart: `UpdateJobFields` is the only job writer, synchronous and immediate, and it triggers subscribers directly once `db.mu` is released.
 
 ### Pub/Sub System
 
-Two callback types:
+Six callback types (`internal/database/database_subscribers.go`):
 
 | Callback | Signature | Trigger |
 |----------|-----------|---------|
-| `OnJobUpdate` | `func(*Job)` | After each job is written (both batch flush and `UpdateJobFields`) |
-| `OnJobsChange` | `func([]*Job)` | After `AddJob`, `DeleteJob`, `AddTrim`, `DeleteTrim` (structural changes) |
+| `OnJobUpdate` | `func(*Job)` | After every `UpdateJobFields` write |
+| `OnJobChange` | `func(*JobChange)` | Same moment as `OnJobUpdate`; the event carries the full job plus the list of columns written |
+| `OnJobAdded` | `func(*JobAdded)` | After `AddJob` |
+| `OnJobDeleted` | `func(*JobDeleted)` | After `DeleteJob`, and from `UpdateJobFields` when the row is gone at read-back |
+| `OnTrimsChanged` | `func(*TrimsChanged)` | After `AddTrim`, `DeleteTrim` |
+| `OnJobsChange` | `func([]*Job)` | Full-list refresh — only the two bulk writers, `BatchSetWatched` and `DeleteJobsAndHistoryForChannel`, dispatch it; a single add, delete or trim change never does |
 
-Both registration methods return an unsubscribe function. Unsubscription nils out the callback slot (avoids slice reallocation).
+Every registration method returns an unsubscribe function. Each subscriber slice holds `{id, fn}` entries; unsubscribing removes the entry by id, and the `shrink*Subs` helpers reallocate the slice once its capacity exceeds four times its length so steady-state memory stays reasonable.
 
 **Panic safety:**
 
 - `safeCallJobUpdate(fn, job)` wraps each callback in `defer func() { if r := recover(); ... }()`.
-- `safeCallJobsChange(fn, jobs)` does the same.
+- `safeCallJobChange`, `safeCallJobAdded`, `safeCallJobDeleted`, `safeCallTrimsChanged` and `safeCallJobsChange` do the same for the other kinds.
 - A panicking subscriber cannot prevent other subscribers from being notified.
 
-**Notification flow for `notifyJobsChange()`:**
+**Notification flow:**
 
-1. Called while `db.mu` is already held.
-2. Uses `getAllJobsUnlocked()` (skips acquiring `db.mu`) to get the full job list.
-3. Fires callbacks in a separate goroutine to avoid blocking the caller.
+- The per-job kinds (`notifyJobUpdate`, `notifyJobAdded`, `notifyJobDeleted`, `notifyTrimsChanged`) snapshot the subscriber slice under `subMu.RLock` and call the callbacks synchronously on the writer's goroutine, after `db.mu` has been released.
+- `dispatchJobsChange(jobs)` is the one asynchronous path: the caller must NOT hold `db.mu`; it snapshots the subscribers and runs them sequentially in a fresh goroutine (with its own top-level `recover`) so the bulk writer returns immediately. A nil slice (no subscribers) is a no-op.
 
 ### Schema
 
-**Current version: 17**
+**Current version: 20** (`schemaVersion`, `internal/database/migrations.go`)
 
 #### Tables
 
@@ -1301,14 +1294,15 @@ Not currently auto-cleaned. The cache survives Moombox uninstall — operators w
 
 ## Cross-References
 
-- **[architecture.md](architecture.md)** -- Batch coalescing as a concurrency pattern; pub/sub as an inter-component communication mechanism; service initialization order (Config -> Logger -> Database -> ...).
+- **[architecture.md](architecture.md)** -- The synchronous write path and where write amplification is actually bounded; pub/sub as an inter-component communication mechanism; service initialization order (Config -> Logger -> Database -> ...).
 - **[security.md](security.md)** -- Password auto-hashing in config; client_tokens table and scrypt token hashing; cookie file permissions.
 - **[platform-services.md](platform-services.md)** -- How YouTube and Twitch services consume cookies from the jar; SAPISIDHASH generation; PO token dependency on cookies.
 - **[operations.md](operations.md)** -- Config file search paths; database file location; log file paths; staging vs output directories.
 
 ### Source Files
 
-- `internal/database/database.go` -- Database struct, Open(), batch coalescing, UpdateJobFields, pub/sub, CRUD operations
+- `internal/database/database.go` -- Database struct, Open(), UpdateJobFields, CRUD operations
+- `internal/database/database_subscribers.go` -- The six subscriber kinds, safeCall* wrappers, dispatchJobsChange
 - `internal/database/types.go` -- Job, Gap, Segment, TrimRecord, ClientToken, JobStatus, JobStats type definitions
 - `internal/database/migrations.go` -- Schema DDL, versioned migrations
 - `internal/config/config.go` -- Load(), Save(), migrateOldFormat(), validate(), ResolveTemplate()

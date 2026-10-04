@@ -10,11 +10,11 @@ These are hard requirements that must be followed in all code changes:
 
 - **Launcher/supervisor pattern via `_MOOMBOX_CHILD` env var.** The binary operates in two modes. Without the env var it acts as a launcher that spawns itself as a child. With `_MOOMBOX_CHILD=1` it runs the full application. Exit code 42 (`exitCodeRestart`) signals the launcher to respawn. This enables seamless restarts for config changes and binary updates.
 - **All goroutines MUST have panic recovery.** Every `go func()` must include an inline `defer func() { if r := recover(); ... }()`. No exceptions. HTTP handlers use `RecoveryMiddleware`. Database callbacks use `safeCallJobUpdate`/`safeCallJobsChange`. Monitor callbacks wrap `OnVideoFound`/`OnStreamFound` with deferred recovery.
-- **Logger interface is anonymous per-struct -- NEVER extract to a named interface.** Each struct that needs logging declares its own anonymous `logger interface { Debug/Info/Warn/Error }` field. This is intentional for loose coupling. Do not create a shared `Logger` type or named interface in a common package. The one exception is the `worker` package which declares a package-level `Logger` interface for internal reuse within that package only.
+- **Logger interface is anonymous per-struct -- NEVER extract to a named interface.** Each struct that needs logging declares its own anonymous `logger interface { Debug/Info/Warn/Error }` field. This is intentional for loose coupling. Do not create a shared `Logger` type or named interface in a common package. The one exception is `internal/bgutils/sidecar`, which declares a package-level `Logger` interface of the same four-method shape so the sidecar can be constructed without that package naming a logger type.
 - **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** Pass a `map[string]any` of field names to values. The method dynamically builds the SQL SET clause, auto-updates `updated_at`, and triggers `OnJobUpdate` subscribers. Never write raw UPDATE SQL for job fields outside this pattern.
 - **Callback closures for cross-cutting service wiring, NOT interfaces.** Services are wired together in `main.go` using function closures (`OnVideoFound`, `OnStreamFound`, `OnSchedule`, `OnCookieRefreshNeeded`, etc.) and struct-based dependency injection. There are no service registry patterns or interface-based DI containers.
 - **JobStatus is `type JobStatus string`.** Timestamps are ISO 8601 strings (RFC3339). Optional numeric fields (sequence numbers, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`) where nil means "not set." Boolean fields in the database use integer 0/1 but are exposed as Go `bool` in the `Job` struct.
-- **Cross-platform via build tags.** Windows x64, Linux x64, and Linux arm64 are supported. Platform-specific behavior is isolated in per-package `_windows.go` / `_unix.go` files: `createNoWindow = 0x08000000` (launcher, Windows only), kernel32 disk queries (`internal/disk/disk_windows.go` vs `disk_unix.go` via statfs), TCP-dial connectivity monitor (`monitor_unix.go`), flock-based single-instance locking (`single_instance_unix.go`), and the ping-based `.exe~` cleanup (`launcher_windows.go`). Linux stubs produce correct no-op or functional fallback behavior; Windows-only features degrade with clear UI messaging.
+- **Cross-platform via build tags.** Windows x64, Linux x64, and Linux arm64 are supported. Platform-specific behavior is isolated in per-package `_windows.go` / `_unix.go` files: `createNoWindow = 0x08000000` (launcher, Windows only), kernel32 disk queries (`internal/disk/disk_windows.go` vs `disk_unix.go` via statfs), flock-based single-instance locking (`single_instance_unix.go`), and the ping-based `.exe~` cleanup (`launcher_windows.go`). The connectivity monitor (`internal/connectivity`) needs no split: it dials TCP through a plain `net.Dialer`, so its three files carry no build tags. Linux stubs produce correct no-op or functional fallback behavior; Windows-only features degrade with clear UI messaging.
 
 ## Process Model
 
@@ -47,22 +47,25 @@ triggerRestart(source string) {
 ```
 Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoutes` (after applying update), `routes.RestartRoute` (manual API restart).
 
-**Shutdown sequence:**
-1. Context cancellation propagates to all services
-2. TUI quits (if running)
-3. Download worker stops (10-second timeout for in-flight jobs)
-4. Monitors stop
-5. Cookie refresh stops
-6. Web server shuts down
-7. Database closes (flushes pending batch updates)
-8. Logger closes (flushes file)
-9. Force-exit timer (10 seconds) kills the process if graceful shutdown stalls
+**Shutdown sequence** (`shutdown()` in `cmd/moombox/shutdown.go`; every stop is wrapped in `stopService` panic isolation, and SPEC.md § Shutdown Sequence carries the same list):
+1. Context cancellation propagates to all services; the TUI quits (if running)
+2. A 10-second force-exit timer is armed FIRST — if graceful shutdown stalls it closes the rate limiters, database and log itself and exits (code 42 when a restart was requested, else 0, so the launcher does not treat a slow quit as a crash)
+3. Notifications switch to single-attempt mode
+4. Monitors stop (Twitch, DECAPI, Feed)
+5. Download worker stops (waits up to 10 seconds for in-flight jobs to save state)
+6. In-flight notifications are flushed
+7. Cookie refresh and auto-cookie services stop
+8. PotProvider is cleaned up and the BotGuard sidecar is stopped (when running)
+9. Web server shuts down
+10. Log forwarder and DB event subscribers are unsubscribed
+11. Database closes (final WAL checkpoint)
+12. `shutdown()` returns the restart flag to `run()`, whose deferred `closeLog` flushes the log file
 
 ### Subcommands and Flags
 
 Before entering the main `run()` function, the child process checks for subcommands:
 
-- `moombox add <video_id_or_url>` -- CLI mode that adds a video to the database and exits. Connects to the running instance's web API.
+- `moombox add <video_id_or_url>` -- CLI mode that adds a video to the database and exits (`cmd/moombox/addvideo.go`). It does not talk to the web API: it opens the daemon's SQLite file directly with `database.Open` — after a `FileSchemaVersion` check that refuses a database whose schema does not match the binary, rather than migrating the live file from a second process — inserts the row with `AddJob`, and the running daemon's `pollForJobs` safety net (every 60 seconds) picks it up.
 - `-version` -- Prints version and commit hash, exits immediately.
 - `-headless` / `-no-tui` -- Runs web-only mode (no BubbleTea TUI). Also activated by `MOOMBOX_NO_TUI=1` env var.
 - `-log-level <LEVEL>` -- Overrides the log level for this run only (DEBUG, INFO, WARN, ERROR). It reaches the logger and nothing else: `effectiveLogLevel` in `cmd/moombox/helpers.go` picks it over the configured level when building the logger, and `cfg.Logs.LogLevel` is left as the file has it, so the boot auto-persist, the password auto-hash and every later settings save keep writing the CONFIGURED level. A settings save re-applies that configured level to the running logger and drops the override.
@@ -90,7 +93,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 `updater.New()` creates the GitHub release checker. Cleans up `.old` binary from previous update via `CleanupOldBinary()`. Performs Ed25519 signature verification before applying binary swaps.
 
 ### 4. Database
-`database.Open()` opens SQLite with WAL mode, 5-second busy timeout, foreign keys enabled, single-writer connection pool (`MaxOpenConns=1`). Runs schema migrations (currently at v6). Starts the batch update coalescing goroutine. Prepares hot-path statements.
+`database.Open()` opens SQLite with WAL mode, 5-second busy timeout, foreign keys enabled, single-writer connection pool (`MaxOpenConns=1`). Runs schema migrations (`migrate()`, up to `schemaVersion` in `internal/database/migrations.go` — 20 at the time of writing; `appendix-metrics.md` tracks it). Prepares the hot-path `GetJob` statement (`prepareStatements`). Starts no goroutine: every job write is a synchronous `UpdateJobFields` call.
 
 ### 5. Cookie Jar
 `cookies.NewCookieJar()` creates the cookie container. If `cfg.Cookies.CookieFile` is set, loads cookies from the Netscape-format file. Auto-detects platforms (YouTube/Twitch) from cookie domains if not explicitly configured.
@@ -138,7 +141,7 @@ A companion `monitor.NewBackfillWorker()` owns the full-catalog backfill (channe
 `monitor.NewTwitchMonitor()` polls Twitch GQL for live streams. Default 15-second interval. Channels are batched into GQL requests of up to 30 logins, with a 500 ms stagger between chunks — including after a chunk whose whole request failed (`checkChunk` in `internal/monitor/twitch.go`), since a 429 or 5xx is exactly when pacing matters. Uses the Twitch service's GQL client for stream info queries.
 
 ### 16. Cookie Refresh Service
-`cookies.NewRefreshService()` validates cookies and checks auth status periodically (6h default). Detects auth loss by comparing current status against expected platforms. Triggers `OnRecoveryNeeded` callback when auth is lost, which attempts auto-cookie recovery.
+`cookies.NewRefreshService()` validates cookies and checks auth status periodically — every 30 minutes (`defaultRefreshInterval`, `internal/cookies/refresh.go`); the `cookies.refresh_interval` setting (6h by default) drives only the separate browser-refresh timer in `AutoCookieService`. Detects auth loss by comparing current status against expected platforms. Triggers `OnRecoveryNeeded` callback when auth is lost, which attempts auto-cookie recovery.
 
 ### 17. Auto-Cookie Service
 `cookies.NewAutoCookieService()` extracts cookies directly from Firefox/Chromium browser profiles. Handles the full flow: find browser profile, decrypt cookies, verify auth via API callbacks (`VerifyYouTubeAuth`, `VerifyTwitchAuth`), write to cookie file, persist verified platforms to config.
@@ -165,8 +168,9 @@ After all services are created, `main.go` wires the event callbacks:
 - `feedMon.BackfillSweep` -> queues backfill scans for channels needing one; `s.backfillRescan` (TUI `R B` chord + `POST /api/backfill/rescan`) forces the same sweep for every channel
 - `twitchMon.OnStreamFound` -> creates Twitch job, enqueues, broadcasts
 - `feedMon.OnSchedule` / `decapiMon.OnSchedule` / `twitchMon.OnSchedule` -> broadcasts all three monitor timer values via WebSocket
-- `db.OnJobUpdate` -> `wsHub.BroadcastJobUpdate()` (per-job WebSocket messages)
-- `db.OnJobsChange` -> `wsHub.BroadcastJobsUpdate()` (full job list), prune job logs
+- `db.OnJobChange` -> `wsHub.BroadcastJobProgress()` for a progress-only write, otherwise `wsHub.BroadcastJobUpdate()` (per-job WebSocket messages); re-syncs per-job log routing on a status write
+- `db.OnJobAdded` / `db.OnTrimsChanged` -> `wsHub.BroadcastJobUpdate()` for the one job; `db.OnJobDeleted` -> `onJobDeleted` (clear the job's log buffer + `BroadcastJobDeleted`)
+- `db.OnJobsChange` (the two bulk writers only) -> `wsHub.BroadcastJobsUpdate()` (full job list), re-sync and prune job logs
 - `log.Subscribe()` -> `wsHub.BroadcastLog()` + `db.RouteLogToJobs()` (per-job log buffers)
 - `cookieRefresh.OnRecoveryNeeded` -> `runCookieRecovery()` in a background goroutine: `autoCookieSvc.RefreshCookiesDetailed()`, then notifies on the triggering platform's own verdict (OK / Failed / Unknown)
 
@@ -175,53 +179,63 @@ All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer fun
 ## Package Dependency Graph
 
 ```
-cmd/moombox/ (21 files)                -- launcher + orchestrator (~8,020 lines)
+cmd/moombox/ (24 files)                -- launcher + orchestrator (~8,550 lines)
 cmd/sign/main.go                       -- CI signing tool (Ed25519)
 
-internal/config     (6 files, ~2,110)  -- TOML config, FlexDuration, channel terms
+internal/config     (7 files, ~2,490)  -- TOML config, FlexDuration, channel terms
 internal/updater    (3 files, ~870)    -- GitHub release checker + self-updater + Ed25519
 internal/ytdlpplugin (1 file,  ~330)   -- yt-dlp plugin file: status, install, generator (shared by the web route and the TUI E Y overlay)
 internal/logger     (1 file,  ~760)    -- slog wrapper, file rotation, ring buffer, pub/sub
-internal/database   (8 files, ~3,920)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
+internal/database   (8 files, ~4,110)  -- SQLite/WAL, synchronous writes, pub/sub
 internal/stats      (1 file,  ~70)     -- the figures both dashboards show, derived from the job aggregate + disk reading (imports only database)
 internal/jobfilter  (2 files, ~470)    -- the dashboard's filter language (Parse/Match/Serialize), the TUI's / box
 internal/cookies    (35 files, ~15,870) -- jar, refresh, auto-cookie (Firefox/Chromium)
-internal/youtube    (13 files, ~6,430) -- Service, PlayerAPI, Auth, watch page, format selector
-internal/twitch    (14 files, ~6,400)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
+internal/youtube    (13 files, ~6,710) -- Service, PlayerAPI, Auth, watch page, format selector
+internal/twitch    (14 files, ~6,410)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
 internal/bgutils   (6 files, ~2,050)   -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
-internal/bgutils/sidecar (7 files,~1,840) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
+internal/bgutils/sidecar (7 files,~1,880) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
 internal/bgutils/embed   (4 files)      -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
 internal/cipher     (13 files, ~3,110) -- YouTube signature cipher: AST + regex, 10-VM LRU
-internal/engine    (19 files, ~7,690)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
-internal/chat       (3 files, ~2,910)  -- YouTube live chat downloader (polling + batching)
-internal/worker    (38 files, ~16,600) -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
-internal/monitor    (9 files, ~5,030)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
-internal/notif.     (3 files, ~820)    -- Manager + Discord webhook
-internal/web       (32 files, ~11,340) -- chi router, WebSocket hub, auth, middleware, routes
-internal/tui       (43 files, ~21,760) -- 2-over-1 panel layout, overlays, chord system
+internal/engine    (20 files, ~8,170)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
+internal/chat       (3 files, ~3,030)  -- YouTube live chat downloader (polling + batching)
+internal/worker    (39 files, ~18,070) -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
+internal/monitor    (9 files, ~5,090)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
+internal/notif.    (11 files, ~3,790)  -- Manager + Discord webhook, batching, edit-mode message ids
+internal/web       (34 files, ~11,750) -- chi router, WebSocket hub, auth, middleware (9 files) + routes/ (25 files)
+internal/tui       (43 files, ~22,710) -- 2-over-1 panel layout, overlays, chord system
 internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
+internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
+internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
 internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
-internal/utils     (25 files, ~2,510)  -- HTTP helpers, formatters, YouTube URL parsing
+internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing
 ```
 
-Total: approximately 116,660 lines of Go across 306 source files (excluding tests, web assets, and cmd/moombox).
+Total: approximately 124,200 lines of Go across 321 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
 
 ### Dependency Direction
 
 Dependencies flow strictly downward. Lower-level packages never import higher-level ones:
 
-- `cmd/moombox/main.go` imports everything (orchestrator)
-- `internal/worker` imports: `database`, `engine`, `chat`, `youtube`, `twitch`, `bgutils`, `cipher`, `config`, `constants`, `notifications`, `utils`
-- `internal/web` imports: `database`, `config`, `worker` (route handlers), `youtube`, `twitch`
-- `internal/tui` imports: `database`, `config`, `web` (HTTP client for API calls)
-- `internal/monitor` imports: `database`, `config`, `twitch`
-- `internal/engine` imports: nothing from internal (standalone download/mux logic)
-- `internal/database` imports: nothing from internal
-- `internal/utils` imports: nothing from internal
-- `internal/constants` imports: nothing from internal
+The lists below are the `internal/` imports of each package as `go list -f '{{join .Imports " "}}' ./internal/<pkg>` prints them (regenerate the same way):
 
-Cross-cutting concerns (logging, notifications, events) flow through callback closures wired in `main.go`, not through package imports.
+- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `web/routes`, `worker`, `youtube`
+- `internal/worker` imports: `bgutils`, `chat`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `twitch`, `utils`, `youtube`
+- `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `config`, `cookies`, `database`, `disk`, `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
+- `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `web/routes`
+- `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `notifications`, `stats`, `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
+- `internal/monitor` imports: `config`, `database`, `httpx`, `twitch`, `worker`
+- `internal/youtube` imports: `cipher`, `constants`, `cookies`, `httpx`, `utils`
+- `internal/twitch` imports: `constants`, `cookies`, `httpx`, `utils`
+- `internal/cipher` imports: `bgutils/sidecar`, `goja`, `httpx`, `utils`
+- `internal/bgutils` imports: `bgutils/sidecar`, `constants`, `goja`, `httpx`
+- `internal/cookies` imports: `constants`, `cookies/dpapi`, `httpx`, `utils`
+- `internal/engine` imports: `constants`, `httpx`, `utils` (e.g. `DownloadChunkSize` is `constants.DownloadChunkSize`)
+- `internal/chat` / `internal/notifications` import: `constants`/`config`, `httpx`, `utils`
+- `internal/utils` imports: `connectivity`, `constants`, `httpx`
+- `internal/database`, `internal/constants`, `internal/httpx`, `internal/connectivity` import nothing from internal
+
+Cross-cutting concerns (logging, notifications, events) flow through callback closures wired in `cmd/moombox` (`services.go`, `monitor_callbacks.go`, `tui_wiring.go`), not through package imports.
 
 ## Key Data Flow
 
@@ -229,7 +243,7 @@ Cross-cutting concerns (logging, notifications, events) flow through callback cl
 Monitors (RSS/DECAPI/Twitch)
     |
     v
-Database (AddJob)  -->  OnJobsChange subscribers
+Database (AddJob)  -->  OnJobAdded subscribers
     |                        |
     v                        v
 Worker.EnqueueJob      WebSocket broadcast
@@ -278,7 +292,7 @@ SegmentDownloader.OnProgress callback
 ProgressTracker (one job-row write per report, one report per progress_interval_ms — 16ms default; gap rows flushed at most once a second)
     |
     v
-Database.UpdateJobFields (batched via 100ms coalesce window)
+Database.UpdateJobFields (synchronous UPDATE + row read-back under db.mu)
     |
     v
 OnJobUpdate subscribers
@@ -312,9 +326,10 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
 1. Updates job status to `Upcoming`
 2. If chat download is enabled, attempts to start an early chat downloader (`tryStartEarlyChat()`) to capture pre-stream chat messages. Each probe re-evaluates the decision through `earlyChatNeedsRestart(chatDl, finished, lastRestart, now)` (`internal/worker/stream_processor_youtube.go`), which restarts when there is no downloader OR when the current one's run has ENDED and the previous start is at least `earlyChatMinRestartInterval` (5 min) behind — a run that dies immediately on dead cookies would otherwise cost one full watch-page fetch per probe for the rest of the wait, while the ~50-minute stale-exhaustion case the restart exists for is never delayed — YouTube resets a waiting-room chat after a period of inactivity, and the resulting downloader stays non-nil, so the old `chatDl == nil` gate left the waiting room uncaptured for the rest of the wait. `finished` is recorded by the run goroutine's own `defer` (`runEarlyChat`, called as the `go` statement in `tryStartEarlyChat`) once `Start` has returned by any route, never from `ChatDownloader.OnFinish` — `Start`'s recovery defer returns before `OnFinish` is reached, so a run that PANICKED would never be restarted — and never from `IsRunning()`, which is also false between `NewChatDownloader` and the goroutine reaching `Start`. The replaced downloader is untracked before the new one starts, and the new run picks up the chat file through the chat downloader's completion + adoption rules (platform-services.md) rather than overwriting it
 3. Calculates probe interval based on time until scheduled start:
-   - More than 1 hour away: 10-minute interval
-   - 5 minutes to 1 hour: 5-minute interval
-   - Less than 5 minutes: 1-minute interval
+   - More than 1 hour away: 10-minute interval (`probeIntervalDistant`)
+   - 5 minutes to 1 hour: 5-minute interval (`probeIntervalNear`)
+   - Less than 5 minutes: 30-second interval (`probeIntervalImminent`)
+   - No scheduled start time: the 5-minute "near" interval, since the stream can go live at any moment
    - Plus random jitter up to 30 seconds
 4. Polls via lightweight `ProbeVideoStatus()` (ANDROID_VR client for speed). Persists metadata from each probe (title, thumbnail, description, scheduled start time, etc.) using change detection — only writes to DB when values actually differ, at zero additional network cost since the probe already returns this data
 5. Chat surge detection: if 30+ new messages arrive within a 15-second window, triggers an immediate probe (the stream may have gone live early)
@@ -563,30 +578,15 @@ Each `processJob` goroutine:
 
 The `pollForJobs` goroutine runs a safety-net check every 60 seconds to catch any missed jobs. Normal job discovery is signal-driven via `EnqueueJob()` calls.
 
-### Database Batch Coalescing
+### Database Write Path
 
-Rapid job updates (progress, sequence numbers, etc.) are coalesced into batched writes:
+There is one job writer and it is synchronous. `UpdateJobFields()` (`internal/database/database.go`):
+1. Builds the dynamic SET clause from the `fieldToColumn` map and executes the `UPDATE` immediately under `db.mu` (no channel, no batching goroutine, no coalescing window)
+2. Re-reads the full job row through the prepared `stmtGetJob` in the same critical section (subscribers need all fields)
+3. Releases `db.mu` BEFORE notifying, so a subscriber may call back into the database without deadlocking
+4. Notifies `OnJobUpdate` and `OnJobChange` subscribers synchronously on the caller's goroutine; if the row vanished between the write and the read-back, fires `OnJobDeleted` instead
 
-Two update mechanisms serve different needs:
-
-**`UpdateJob()` — batched via channel (full job writes):**
-1. Writes the `Job` object to `updateCh` (buffered channel, capacity 100), non-blocking
-2. If channel is full, falls back to synchronous direct write
-3. `batchUpdateLoop()` goroutine:
-   - Blocks on `updateCh` until first item arrives (zero CPU when idle)
-   - Starts a 100ms coalesce timer
-   - Accumulates updates in a `map[string]*Job` (latest update per job wins)
-   - On timer fire: opens a transaction, writes all pending updates, commits
-   - Notifies `OnJobUpdate` subscribers for each successfully persisted job
-4. On database close: channel is closed, remaining items are flushed
-
-**`UpdateJobFields()` — synchronous direct writes (partial updates):**
-1. Executes SQL immediately under `db.mu` lock (no channel, no batching)
-2. Builds dynamic SET clause from `fieldToColumn` map
-3. Re-reads the full job row after write (subscribers need all fields)
-4. Notifies `OnJobUpdate` subscribers synchronously
-
-This pattern reduces SQLite write transactions from potentially hundreds per second (during active downloads) to approximately 10 per second.
+The only goroutine the package ever starts is the `OnJobsChange` fan-out (`dispatchJobsChange`), used by the two bulk writers. Write amplification during a download is bounded upstream, not here: `ProgressTracker` (`internal/worker/progress.go`) reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms default) and flushes gap rows at most once a second, and every other `UpdateJobFields` caller is event-driven. When nothing is being written, nothing runs.
 
 ### WebSocket Broadcast Rate
 
@@ -759,63 +759,33 @@ download (`IsDirectURL`) is outside the guard by design: its partial is
 re-fetchable from the same static URL, so a restart costs bandwidth, not
 footage.
 
-## Error Hierarchy
+## Error Classification
 
-All errors in Moombox extend `MoomboxError`, which provides:
+There is no typed error hierarchy and no `internal/errors` package. Errors are plain Go errors, wrapped with `fmt.Errorf("...: %w", err)` as they travel up, and the only classification anywhere is sentinel matching with `errors.Is`. The sentinels that matter to a job's fate:
 
-```go
-type MoomboxError struct {
-    Code     string                 // Machine-readable error code
-    Message  string                 // Human-readable description
-    Expected bool                   // true = user-facing, false = internal/developer
-    Context  map[string]interface{} // Additional structured data
-    Cause    error                  // Wrapped underlying error
-}
-```
-
-### Error Types
-
-| Type | Base | Extra Fields | Purpose |
-|------|------|--------------|---------|
-| `MoomboxError` | -- | Code, Message, Expected, Context, Cause | Base error |
-| `YouTubeError` | MoomboxError | -- | YouTube API errors |
-| `DownloadError` | MoomboxError | HTTPStatus | Segment/manifest/resume failures |
-| `NetworkError` | MoomboxError | HTTPStatus, URL | HTTP/DNS/TLS/connection errors |
-| `ConfigError` | MoomboxError | -- | Invalid configuration (always Expected=true) |
-| `MuxingError` | MoomboxError | ExitCode | FFmpeg failures |
-| `AuthError` | MoomboxError | -- | Cookie/token authentication errors (always Expected=true) |
-| `VideoPlayabilityError` | MoomboxError | PlayabilityStatus, Reason | Members-only, age-restricted, geo-blocked, copyright (always Expected=true) |
-
-### Error Codes
-
-**YouTube:** `LOGIN_REQUIRED`, `UNPLAYABLE`, `LIVE_NOT_STARTED`, `NOT_A_STREAM`, `MEMBERS_ONLY`, `AGE_RESTRICTED`, `PRIVATE`, `COPYRIGHT`, `GEO_RESTRICTED`, `STREAM_ENDED`
-
-**Download:** `SEGMENT_FAILED`, `MANIFEST_FAILED`, `FORMAT_NOT_FOUND`, `RESUME_CORRUPTED`, `DISK_FULL`, `TIMEOUT`
-
-**Network:** `HTTP_FAILED`, `DNS_FAILED`, `CONNECTION_RESET`, `TLS_FAILED`
-
-**Muxing:** `FFMPEG_NOT_FOUND`, `FFMPEG_FAILED`, `INVALID_INPUT`
-
-**Auth:** `COOKIES_EXPIRED`, `COOKIES_INVALID`, `TOKEN_EXPIRED`
-
-### Expected vs Unexpected
-
-- `Expected=true`: User-facing errors that the user can potentially act on (fix cookies, change config, wait for geo-restriction to lift). Displayed prominently in the UI.
-- `Expected=false`: Internal/developer errors (bugs, unexpected API changes). Logged at Error level with full context.
-
-Helper function `IsExpected(err)` checks all error types. `IsLoginRequired(err)` specifically detects auth-related errors for cookie refresh triggering.
+| Sentinel | Declared in | Meaning |
+|----------|-------------|---------|
+| `ErrCookiesRequired` | `internal/worker/worker.go` | Player-API "login required" / "member-only" failure, or any explicit cookies-needed signal |
+| `ErrNotAMember` | `internal/worker/worker.go` | Members-only content refused to a session YouTube confirmed was SIGNED IN — a membership problem, not a credential one |
+| `ErrNonActionable` | `internal/worker/worker.go` | Nothing the user can do: age-restricted content, exhausted probe budgets |
+| `ErrTwitchAuthExpired` | `internal/twitch/api.go` | Twitch auth token expired or invalid |
+| `ErrSubscriberOnly` | `internal/twitch/api.go` | Subscriber-only content the logged-in account cannot reach |
 
 ### Error-to-Status Mapping
 
-In `DownloadWorker.setJobError()`:
+In `DownloadWorker.setJobError()` (`internal/worker/worker.go`):
 ```
-"login required" or "member-only" or "members only" or "cookies?" -> StatusCookies
-all other errors -> StatusError
+cookiesStatusError(err)  ->  StatusCookies      // errors.Is against ErrCookiesRequired, ErrNotAMember,
+                                                //   twitch.ErrTwitchAuthExpired, twitch.ErrSubscriberOnly
+anything else            ->  StatusError
 ```
+Cancellation never reaches `setJobError`: `handleCancellation` asks the queue whether the user cancelled (`WasCancelled`) and writes `Cancelled`, or leaves the status untouched on a shutdown so the job resumes on restart. The error's text becomes the job's `error` column, and `park_reason`/`park_identity` are written on every error transition so the credential sweeps can tell a dead-cookie park from a membership one.
 
-Notification suppression for non-actionable errors:
-- `"age restricted"` -> suppressed (nothing user can do)
-- `"max probe errors"` -> suppressed (transient, stream may have ended naturally)
+### Notification and Recovery Suppression
+
+- `errors.Is(err, ErrNonActionable)` suppresses the failure notification (an age-restricted stream or an exhausted probe budget was never going to succeed) and skips the automatic cookie refresh — recovery would re-queue the job and reset its retry budget.
+- A Twitch flap still inside its auto-retry budget (`AutoRetryCount > 0` and the exact offline message with no delivered segments) is also silent, because the monitor will `AutoReinitializeJob` on its next poll; a terminal failure on a retried job does notify.
+- `ErrNotAMember` parks the job but skips the automatic cookie refresh (`cookieRefreshWorthAttempting`): the cookies are alive, they belong to the wrong account, and only a different account's credentials resume it.
 
 ## Key Types and Public API
 
@@ -842,14 +812,15 @@ The primary data model. See `internal/database/types.go` for the complete struct
 ### database.Database
 
 Key methods:
-- `Open(dbPath, logger) -> (*Database, error)`: Opens/creates database, runs migrations, starts batch loop.
+- `Open(dbPath, logger) -> (*Database, error)`: Opens/creates database, runs migrations, prepares the hot-path statement.
 - `AddJob(job) -> (bool, error)`: INSERT OR IGNORE. Returns false if duplicate.
 - `GetJob(id) -> (*Job, error)`: Single job with gaps, trims, segments loaded.
 - `GetAllJobs() -> ([]*Job, error)`: All jobs ordered by `updated_at DESC`.
 - `UpdateJobFields(jobID, map[string]any)`: Dynamic partial update with auto `updated_at`. Triggers subscribers.
 - `DeleteJob(id) -> error`: Hard delete with cascading gap/trim/segment cleanup.
-- `OnJobUpdate(fn) -> unsubscribe`: Subscribe to per-job update events.
-- `OnJobsChange(fn) -> unsubscribe`: Subscribe to job list change events (add/delete).
+- `OnJobUpdate(fn) -> unsubscribe` / `OnJobChange(fn) -> unsubscribe`: Subscribe to per-job update events; the latter also receives the list of columns written.
+- `OnJobAdded(fn)` / `OnJobDeleted(fn)` / `OnTrimsChanged(fn) -> unsubscribe`: Lifecycle events of `AddJob`, `DeleteJob` and `AddTrim`/`DeleteTrim`.
+- `OnJobsChange(fn) -> unsubscribe`: Subscribe to full-list refreshes. Fired only by the bulk writers `BatchSetWatched` and `DeleteJobsAndHistoryForChannel`, never by a single add or delete.
 - `AddToHistory(videoID)`: Records video ID to prevent re-downloading.
 - `IsInHistory(videoID) -> bool`: Checks if video was previously downloaded.
 - `JobExists(id) -> bool`: O(1) existence check.
@@ -931,7 +902,7 @@ Callback fields:
 
 - [design-philosophy.md](design-philosophy.md) -- Why these architectural patterns exist (loose coupling rationale, cross-platform build-tag approach, no-CGo constraint)
 - [platform-services.md](platform-services.md) -- YouTube multi-client auth, Twitch GQL, BotGuard/PO tokens, cipher solving details
-- [data-and-storage.md](data-and-storage.md) -- Database schema, migrations, config format, batch update internals
+- [data-and-storage.md](data-and-storage.md) -- Database schema, migrations, config format, write path and pub/sub internals
 - [security.md](security.md) -- Middleware stack, CSRF, auth flow, Ed25519 update verification
 - [user-interfaces.md](user-interfaces.md) -- Web UI SPA architecture, TUI chord system, WebSocket protocol
 - [operations.md](operations.md) -- Build process, release workflow, runtime requirements
@@ -939,7 +910,7 @@ Callback fields:
 
 ### Key Source Files
 
-- `cmd/moombox/main.go` -- Launcher, service initialization, event wiring (~2,074 lines)
+- `cmd/moombox/main.go` -- Launcher and `run()` (~800 lines); service initialization is `services.go`, event wiring `monitor_callbacks.go` / `tui_wiring.go` / `ws_wiring.go`, shutdown `shutdown.go`
 - `internal/worker/worker.go` -- DownloadWorker, processJob loop
 - `internal/worker/queue.go` -- JobQueue with two-tier concurrency
 - `internal/worker/stream_processor.go` -- StreamProcessor, waitForLive, Twitch processing
@@ -952,7 +923,8 @@ Callback fields:
 - `internal/worker/mux_finalize.go` -- Post-download file operations
 - `internal/engine/downloader.go` -- SegmentDownloader (DASH/HLS/VOD/Direct modes)
 - `internal/engine/muxer.go` -- FFmpeg muxer and ffprobe wrapper
-- `internal/database/database.go` -- Database open, batch coalesce, CRUD operations
+- `internal/database/database.go` -- Database open, `UpdateJobFields`, CRUD operations
+- `internal/database/database_subscribers.go` -- The six subscriber kinds, `safeCall*` wrappers, `dispatchJobsChange`
 - `internal/database/types.go` -- Job, Gap, Segment, TrimRecord, ClientToken types
 - `internal/monitor/feed.go` -- YouTube RSS feed monitor
 - `internal/monitor/decapi.go` -- DECAPI latest-video monitor
