@@ -10,6 +10,24 @@ import {
   serverErrorMessage,
 } from "./utils.js";
 
+// The two full-page screens: the first-run wizard and "FFmpeg Not Found".
+const FULL_PAGE_OVERLAYS = ["setup-overlay", "ffmpeg-overlay"];
+
+/**
+ * Show or hide one of the full-page overlays. They cover the dashboard but
+ * did not take it out of reach: Tab walked on past the overlay's last control
+ * into the hidden tabs, job list and status bar. While either is up, the
+ * dashboard's own regions are inert. The sl-dialogs a wizard step opens live
+ * outside those regions, so they still work.
+ */
+export function setOverlayShown(id, shown) {
+  document.getElementById(id).style.display = shown ? "flex" : "none";
+  const anyShown = FULL_PAGE_OVERLAYS.some((o) => document.getElementById(o)?.style.display === "flex");
+  for (const el of document.querySelectorAll("main.app-main, #status-bar, #batch-action-bar")) {
+    el.toggleAttribute("inert", anyShown);
+  }
+}
+
 export class SetupController {
   constructor(app) {
     this.app = app;
@@ -30,7 +48,7 @@ export class SetupController {
   }
 
   show() {
-    document.getElementById("setup-overlay").style.display = "flex";
+    setOverlayShown("setup-overlay", true);
     this.showPage("setup-mode-select");
     this._redirectUrl = null;
     this.setupListeners();
@@ -54,7 +72,7 @@ export class SetupController {
   }
 
   hide() {
-    document.getElementById("setup-overlay").style.display = "none";
+    setOverlayShown("setup-overlay", false);
   }
 
   showPage(id) {
@@ -278,7 +296,7 @@ export class SetupController {
       this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
     });
     document.getElementById("ffmpeg-skip-btn")?.addEventListener("click", () => {
-      document.getElementById("ffmpeg-overlay").style.display = "none";
+      setOverlayShown("ffmpeg-overlay", false);
       this.initializeApp();
     });
     // Closes the tab only; Moombox keeps running. It was labelled "Quit
@@ -894,8 +912,7 @@ export class SetupController {
     if (this._polling) return; // Prevent duplicate polling chains
     this._polling = true;
 
-    const overlay = document.getElementById("setup-overlay");
-    if (overlay) overlay.style.display = "none";
+    setOverlayShown("setup-overlay", false);
 
     // If port or HTTPS changed, the old URL is dead after restart.
     // Cross-origin restrictions prevent polling the new URL, so redirect directly.
@@ -1047,7 +1064,7 @@ export class SetupController {
     // setupListeners wasn't called — e.g. non-first-run with missing FFmpeg)
     this.setupFFmpegListeners();
 
-    document.getElementById("ffmpeg-overlay").style.display = "flex";
+    setOverlayShown("ffmpeg-overlay", true);
     document.getElementById("ffmpeg-main-view").style.display = "";
     document.getElementById("ffmpeg-install-view").style.display = "none";
     document.getElementById("ffmpeg-script-review").style.display = "none";
@@ -1124,7 +1141,7 @@ export class SetupController {
           try {
             const check = await fetch("/api/ffmpeg/check").then((r) => r.json());
             if (check.valid) {
-              document.getElementById("ffmpeg-overlay").style.display = "none";
+              setOverlayShown("ffmpeg-overlay", false);
               this.initializeApp();
             } else {
               cmdInput.setAttribute("help-text", "FFmpeg still not detected — check installation and PATH");
@@ -1267,12 +1284,12 @@ export class SetupController {
     }
     if (data.warning) {
       document.getElementById("ffmpeg-success-continue")?.addEventListener("click", () => {
-        document.getElementById("ffmpeg-overlay").style.display = "none";
+        setOverlayShown("ffmpeg-overlay", false);
         this.initializeApp();
       });
     } else {
       setTimeout(() => {
-        document.getElementById("ffmpeg-overlay").style.display = "none";
+        setOverlayShown("ffmpeg-overlay", false);
         this.initializeApp();
       }, 1500);
     }
@@ -1440,12 +1457,12 @@ export class SetupController {
         if (resultEl) resultEl.innerHTML = html;
         if (data.warning) {
           document.getElementById("ffmpeg-path-continue")?.addEventListener("click", () => {
-            document.getElementById("ffmpeg-overlay").style.display = "none";
+            setOverlayShown("ffmpeg-overlay", false);
             this.initializeApp();
           });
         } else {
           setTimeout(() => {
-            document.getElementById("ffmpeg-overlay").style.display = "none";
+            setOverlayShown("ffmpeg-overlay", false);
             this.initializeApp();
           }, 1500);
         }

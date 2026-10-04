@@ -664,3 +664,33 @@ test("the divider row dims a card's block children, not only its spans", () => {
   assert.ok(!css.includes(".chat-msg.divider-before.future > span"),
     "the span-only form must be gone, not merely joined by a wider one");
 });
+
+// The first-run wizard and the "FFmpeg Not Found" screen cover the whole
+// page, but the dashboard under them stayed reachable: Tab walked on past
+// the overlay's last control into the hidden tabs, job list and status bar.
+// While either overlay is up, the dashboard's regions are inert.
+//
+// MUTANT: drop the toggleAttribute from setOverlayShown — the first
+// assertion fails. Make it follow only the overlay being changed instead of
+// any overlay — the "FFmpeg screen still up" assertion fails.
+const DASHBOARD_REGIONS = ["main.app-main", "#status-bar", "#batch-action-bar"];
+const inertRegions = (h) => DASHBOARD_REGIONS.filter((s) => h.document.querySelector(s).hasAttribute("inert"));
+
+test("a full-page overlay takes the dashboard behind it out of reach", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { setup: { isFirstRun: true, ffmpegValid: true } } });
+  assert.equal(h.el("setup-overlay").style.display, "flex");
+  assert.deepEqual(inertRegions(h), DASHBOARD_REGIONS, "the wizard is up: the dashboard is inert");
+
+  h.app.setup.showFFmpegOverlay();
+  h.app.setup.hide();
+  assert.deepEqual(inertRegions(h), DASHBOARD_REGIONS, "the FFmpeg screen is still up: still inert");
+
+  h.el("ffmpeg-skip-btn").click();
+  assert.equal(h.el("ffmpeg-overlay").style.display, "none");
+  assert.deepEqual(inertRegions(h), [], "both down: the dashboard is reachable again");
+});
+
+test("the dashboard is reachable when no overlay is up", { skip }, async () => {
+  const h = await booted();
+  assert.deepEqual(inertRegions(h), []);
+});

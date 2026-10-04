@@ -1686,11 +1686,11 @@
         </sl-dialog>
 
         <!-- Setup Wizard (shown on first run) -->
-        <div id="setup-overlay" style="display: none">
+        <div id="setup-overlay" role="dialog" aria-modal="true" aria-labelledby="setup-title" style="display: none">
             <div class="setup-container">
                 <div class="setup-header">
                     <sl-icon name="box-seam" style="font-size: 3rem; color: var(--sl-color-primary-600);"></sl-icon>
-                    <h1>Welcome to Moombox</h1>
+                    <h1 id="setup-title">Welcome to Moombox</h1>
                     <p>Let's configure your live stream archiver</p>
                 </div>
 
@@ -1941,11 +1941,11 @@
         </div>
 
         <!-- FFmpeg Check Overlay -->
-        <div id="ffmpeg-overlay" style="display: none">
+        <div id="ffmpeg-overlay" role="dialog" aria-modal="true" aria-labelledby="ffmpeg-title" style="display: none">
             <div class="setup-container">
                 <div class="setup-header">
                     <sl-icon name="exclamation-triangle" style="font-size: 3rem; color: var(--sl-color-warning-600);"></sl-icon>
-                    <h1>FFmpeg Not Found</h1>
+                    <h1 id="ffmpeg-title">FFmpeg Not Found</h1>
                     <p>FFmpeg is required for muxing video and audio streams.</p>
                 </div>
                 <div id="ffmpeg-main-view">
