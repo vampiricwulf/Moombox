@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -121,5 +122,71 @@ func TestSearchMovesTheDetailsPanelWithTheCursor(t *testing.T) {
 	a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if sel := a.taskList.SelectedJob(); sel != nil && (a.details.job == nil || a.details.job.ID != sel.ID) {
 		t.Errorf("after clearing the search, the cursor is on %s but the details panel shows %v", sel.ID, a.details.job)
+	}
+}
+
+// TestBatchChordsCountWhatTheyWillActOn: the batch confirm prompt counted the
+// whole selection — "Press D to confirm delete 1 jobs" for one Downloading
+// job, whose confirm then found nothing deletable — and A R / A I reported
+// "Resumed 0 jobs" as a success. The Web's batch bar counts eligible targets
+// and hides a verb with none. The prefix hint also hid batch chords whenever
+// the CURSOR job was ineligible, though pressing them acted on the batch.
+//
+// Mutants: count SelectedCount() again (the mixed case says 2 jobs); drop the
+// A R zero arm (a green "Resumed 0 jobs"); drop the batch term in
+// chordFeedback (D is missing from the hint).
+func TestBatchChordsCountWhatTheyWillActOn(t *testing.T) {
+	press := func(app *App, r rune) {
+		app.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	newApp := func() *App {
+		app := NewApp()
+		app.OnDeleteJob = func(string) {}
+		app.OnResumeJob = func(string) {}
+		app.HasStagingFiles = func(string) bool { return true }
+		app.taskList.SetJobs([]*database.Job{
+			{ID: "live", Title: "Live one", Status: database.StatusDownloading, Platform: "youtube", CreatedAt: "2026-10-04T10:00:00Z"},
+			{ID: "done", Title: "Done one", Status: database.StatusFinished, Platform: "youtube", CreatedAt: "2026-10-04T09:00:00Z"},
+		})
+		return app
+	}
+
+	// Only the Downloading job selected: nothing to delete, so no prompt.
+	app := newApp()
+	app.taskList.ToggleSelection("live")
+	press(app, 'a')
+	press(app, 'd')
+	if app.chord.action != "" || app.feedback.sev != severityWarning {
+		t.Errorf("A D on a selection with nothing deletable armed %q / said %q", app.chord.action, app.feedback.msg)
+	}
+
+	// Mixed: one deletable of two selected → "1 job", singular.
+	app = newApp()
+	app.taskList.ToggleSelection("live")
+	app.taskList.ToggleSelection("done")
+	press(app, 'a')
+	press(app, 'd')
+	if want := "Press D to confirm delete 1 job (3s)"; app.feedback.msg != want {
+		t.Errorf("mixed selection prompt = %q, want %q", app.feedback.msg, want)
+	}
+
+	// A R over a selection with nothing resumable: a warning, not "Resumed 0".
+	app = newApp()
+	app.taskList.ToggleSelection("live")
+	press(app, 'a')
+	press(app, 'r')
+	if app.feedback.sev != severityWarning {
+		t.Errorf("A R with nothing resumable said %q (severity %v), want a warning", app.feedback.msg, app.feedback.sev)
+	}
+
+	// The hint: cursor on the Downloading job, the Finished one selected.
+	app = newApp()
+	if sel := app.taskList.SelectedJob(); sel == nil || sel.ID != "live" {
+		t.Fatalf("premise lost: cursor on %v, want live", sel)
+	}
+	app.taskList.ToggleSelection("done")
+	press(app, 'a')
+	if !strings.Contains(app.feedback.msg, "D Delete") {
+		t.Errorf("hint %q hides D, though A D would delete the selected job", app.feedback.msg)
 	}
 }

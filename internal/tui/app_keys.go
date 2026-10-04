@@ -670,10 +670,24 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		// single job — only for chords dispatchAction implements batch for;
 		// the rest fall through to the single-selected-job path.
 		if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
+			// Count what the batch will act on, as the Web's batch bar
+			// does, not the whole selection: the prompt used to offer
+			// "delete 1 jobs" for a selection of one Downloading job, whose
+			// confirm then found nothing deletable.
+			eligible := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				if j := a.taskList.GetJobByID(id); j != nil && (item.JobFilter == nil || item.JobFilter(j)) {
+					eligible++
+				}
+			}
+			if eligible == 0 {
+				a.rejectChordForJob(item)
+				return a, nil, true
+			}
 			a.chord.action = key
 			a.chord.actionTime = time.Now()
-			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %d jobs (3s)",
-				strings.ToUpper(key), strings.ToLower(item.HintLabel), a.taskList.SelectedCount()))
+			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %s (3s)",
+				strings.ToUpper(key), strings.ToLower(item.HintLabel), jobCount(eligible)))
 			return a, nil, true
 		}
 		job := a.taskList.SelectedJob()

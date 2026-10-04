@@ -174,7 +174,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				count++
 			}
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Resumed %d jobs", count))
+			if count == 0 {
+				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
+				return a, nil
+			}
+			a.setFeedback("Resumed " + jobCount(count))
 		} else if job != nil && a.OnResumeJob != nil {
 			a.OnResumeJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
@@ -194,7 +198,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				count++
 			}
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Reinitialized %d jobs", count))
+			if count == 0 {
+				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
+				return a, nil
+			}
+			a.setFeedback("Reinitialized " + jobCount(count))
 		} else if job != nil && a.OnReinitializeJob != nil {
 			a.OnReinitializeJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
@@ -238,7 +246,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			}
 			a.taskList.ClearSelection()
 			if count > 0 {
-				a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
+				a.setFeedback("Cancelled " + jobCount(count))
 			} else {
 				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
 			}
@@ -266,7 +274,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedbackWithSeverity("No deletable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setFeedback(fmt.Sprintf("Deleting %d jobs...", len(ids)))
+			a.setFeedback("Deleting " + jobCount(len(ids)) + "...")
 			deleteFn := a.OnDeleteJob
 			return a, safeCmd(func() tea.Msg {
 				for _, id := range ids {
@@ -586,8 +594,13 @@ func (a *App) chordFeedback(prefix string) string {
 		if !strings.HasPrefix(item.Chord, upperPrefix+" ") {
 			continue
 		}
-		// For NeedsJob items, check if selected job passes the filter
-		if item.NeedsJob && (job == nil || (item.JobFilter != nil && !item.JobFilter(job))) {
+		// For NeedsJob items, check if selected job passes the filter — unless
+		// the chord will act on the batch selection instead, which is what
+		// processSecondKey does for a batch-capable chord whenever jobs are
+		// selected (the hint used to hide those chords whenever the CURSOR
+		// job was ineligible, although pressing them dispatched the batch).
+		batch := item.SupportsBatch && a.taskList.SelectedCount() > 0
+		if item.NeedsJob && !batch && (job == nil || (item.JobFilter != nil && !item.JobFilter(job))) {
 			continue
 		}
 		// Extract the second key character from the chord (e.g. "A K" → "K")
@@ -777,6 +790,14 @@ func (a *App) invalidateAsides(jobID string) {
 		a.asidesUpdatedAt = ""
 		a.asidesCache = AsideSummary{}
 	}
+}
+
+// jobCount spells a job count for a feedback line: "1 job", "3 jobs".
+func jobCount(n int) string {
+	if n == 1 {
+		return "1 job"
+	}
+	return fmt.Sprintf("%d jobs", n)
 }
 
 // buildMenuItems builds context-sensitive action menu items.

@@ -614,7 +614,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Title != "" {
 			a.setFeedback("Deleted: " + msg.Title)
 		} else {
-			a.setFeedback(fmt.Sprintf("Deleted %d jobs", msg.Count))
+			a.setFeedback("Deleted " + jobCount(msg.Count))
 		}
 		return a, nil
 
