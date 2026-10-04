@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -228,6 +229,37 @@ func TestGetJobStatsConcurrent(t *testing.T) {
 }
 
 // --- attachTrimsAndGaps coverage ---
+
+// TestGetAllJobsFailsWhenAChildLoadFails: a child query that fails must fail
+// GetAllJobs rather than hand back jobs stripped of their segments. The orphan
+// scanner reads segment chat files through this loader, so "no segments" there
+// reads as "these chat files belong to nothing" and makes them deletable.
+//
+// Mutant: the pre-fix loader logged the query error and returned the jobs.
+func TestGetAllJobsFailsWhenAChildLoadFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{ID: "j1", VideoID: "j1", URL: "u", Status: StatusFinished}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if _, err := db.db.Exec(`DROP TABLE segments`); err != nil {
+		t.Fatalf("drop segments: %v", err)
+	}
+
+	jobs, err := db.GetAllJobs()
+	if err == nil {
+		t.Fatalf("GetAllJobs returned %d job(s) and no error with the segments load failing", len(jobs))
+	}
+	if !strings.Contains(err.Error(), "segments") {
+		t.Errorf("err = %v, want it to name the failed segments load", err)
+	}
+}
 
 func TestAttachTrimsAndGapsLoadsForMultipleJobs(t *testing.T) {
 	t.Parallel()

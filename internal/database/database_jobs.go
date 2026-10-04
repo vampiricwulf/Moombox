@@ -154,7 +154,9 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		return nil, err
 	}
 
-	db.attachTrimsAndGaps(jobs)
+	if err := db.attachTrimsAndGaps(jobs); err != nil {
+		return nil, err
+	}
 	return jobs, nil
 }
 
@@ -689,9 +691,15 @@ const idChunkSize = 500
 // requested job IDs via WHERE job_id IN (...) and chunked to respect
 // SQLITE_MAX_VARIABLE_NUMBER.
 // Caller must already hold db.mu (read or write).
-func (db *Database) attachTrimsAndGaps(jobs []*Job) {
+//
+// A failed query or an iteration that ends in error fails the whole load
+// rather than returning the jobs without their child rows: the orphan scanner
+// reads segment chat files through GetAllJobs, so a job silently missing its
+// segments makes those files look like orphans. A single row that fails to
+// scan is logged and skipped, as getGaps/getSegments and the jobs loop do.
+func (db *Database) attachTrimsAndGaps(jobs []*Job) error {
 	if len(jobs) == 0 {
-		return
+		return nil
 	}
 
 	// Collect the job IDs we actually care about so each sub-query is
@@ -706,6 +714,26 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	gapMap := make(map[string][]Gap, len(jobs))
 	segMap := make(map[string][]Segment, len(jobs))
 
+	// each runs one child query and hands every row to scan, which reports
+	// whether the row scanned. It owns the Close and the rows.Err check, so
+	// the three loads below cannot drift apart on either.
+	each := func(table, query string, args []any, scan func(*sql.Rows) error) error {
+		rows, err := db.db.QueryContext(db.getCtx(), query, args...)
+		if err != nil {
+			return fmt.Errorf("attachTrimsAndGaps: query %s: %w", table, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			if err := scan(rows); err != nil && db.logger != nil {
+				db.logger.Warn("attachTrimsAndGaps: scan error", "table", table, "err", err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("attachTrimsAndGaps: read %s: %w", table, err)
+		}
+		return nil
+	}
+
 	for start := 0; start < len(ids); start += idChunkSize {
 		end := min(start+idChunkSize, len(ids))
 		chunk := ids[start:end]
@@ -717,63 +745,54 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 		}
 
 		// Trims
-		trimRows, err := db.db.QueryContext(db.getCtx(),
+		if err := each("trims",
 			`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size
-			FROM trims WHERE job_id IN (`+placeholders+`)`, args...)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("attachTrimsAndGaps: failed to query trims", "err", err)
-			}
-		} else {
-			for trimRows.Next() {
+			FROM trims WHERE job_id IN (`+placeholders+`)`, args,
+			func(rows *sql.Rows) error {
 				var tr TrimRecord
-				if err := trimRows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
-					&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err == nil {
-					trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
+				if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
+					&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
+					return err
 				}
-			}
-			trimRows.Close()
+				trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
+				return nil
+			}); err != nil {
+			return err
 		}
 
 		// Gaps
-		gapRows, err := db.db.QueryContext(db.getCtx(),
+		if err := each("gaps",
 			`SELECT id, job_id, gap_from, gap_to, stream
-			FROM gaps WHERE job_id IN (`+placeholders+`)`, args...)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("attachTrimsAndGaps: failed to query gaps", "err", err)
-			}
-		} else {
-			for gapRows.Next() {
+			FROM gaps WHERE job_id IN (`+placeholders+`)`, args,
+			func(rows *sql.Rows) error {
 				var g Gap
-				if err := gapRows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err == nil {
-					gapMap[g.JobID] = append(gapMap[g.JobID], g)
+				if err := rows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err != nil {
+					return err
 				}
-			}
-			gapRows.Close()
+				gapMap[g.JobID] = append(gapMap[g.JobID], g)
+				return nil
+			}); err != nil {
+			return err
 		}
 
 		// Segments — keep this column list in lockstep with getSegments:
 		// the orphan scanner protects part chat files through THIS loader
 		// (GetAllJobs), so a column missed here reads as "no chat file" and
 		// the file becomes deletable as an orphan.
-		segRows, err := db.db.QueryContext(db.getCtx(),
+		if err := each("segments",
 			`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file
-			FROM segments WHERE job_id IN (`+placeholders+`) ORDER BY segment_index`, args...)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("attachTrimsAndGaps: failed to query segments", "err", err)
-			}
-		} else {
-			for segRows.Next() {
+			FROM segments WHERE job_id IN (`+placeholders+`) ORDER BY segment_index`, args,
+			func(rows *sql.Rows) error {
 				var s Segment
-				if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
+				if err := rows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
 					&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
-					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds, &s.ChatFile); err == nil {
-					segMap[s.JobID] = append(segMap[s.JobID], s)
+					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds, &s.ChatFile); err != nil {
+					return err
 				}
-			}
-			segRows.Close()
+				segMap[s.JobID] = append(segMap[s.JobID], s)
+				return nil
+			}); err != nil {
+			return err
 		}
 	}
 
@@ -788,6 +807,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 			job.Segments = segs
 		}
 	}
+	return nil
 }
 
 // GetJobStats returns aggregate statistics across all jobs. The result is a
