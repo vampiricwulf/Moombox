@@ -2101,35 +2101,37 @@ sl-progress-bar {
     margin-bottom: var(--sl-spacing-x-large);
 }
 
+/* A step's state shows in its circle: hollow while upcoming, green once
+   completed, blue while active (whose label is also bold). The steps used
+   to fade instead (40% upcoming, 70% completed), which took their labels
+   to 1.9:1; nothing fades now, and all of it clears 4.5:1. */
 .setup-step {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: var(--sl-spacing-x-small);
-    opacity: 0.4;
-    transition: opacity 0.2s ease;
-}
-
-.setup-step.active {
-    opacity: 1;
-}
-
-.setup-step.completed {
-    opacity: 0.7;
 }
 
 .step-number {
     width: 2.5rem;
     height: 2.5rem;
     border-radius: 50%;
-    background-color: var(--sl-color-neutral-300);
-    color: var(--sl-color-neutral-0);
+    /* An inset ring rather than a border, so the circle keeps its size when
+       a fill replaces it. */
+    box-shadow: inset 0 0 0 2px var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: var(--sl-font-weight-bold);
     font-size: var(--sl-font-size-medium);
     transition: background-color 0.2s ease;
+}
+
+.setup-step.active .step-number,
+.setup-step.completed .step-number {
+    box-shadow: none;
+    color: var(--sl-color-neutral-0);
 }
 
 .setup-step.active .step-number {
@@ -2143,6 +2145,11 @@ sl-progress-bar {
 .step-label {
     font-size: var(--sl-font-size-small);
     color: var(--sl-color-neutral-600);
+}
+
+.setup-step.active .step-label {
+    color: var(--sl-color-neutral-900);
+    font-weight: var(--sl-font-weight-semibold);
 }
 
 /* The advanced wizard's eight steps did not fit the setup card at the
