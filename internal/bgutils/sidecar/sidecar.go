@@ -70,11 +70,13 @@ type Config struct {
 	ExposeGC       bool
 	// OnUnhealthy, when non-nil, is called ONCE each time the sidecar goes
 	// from healthy to unhealthy for a reason other than Stop — stdout EOF
-	// after a crash or a V8 OOM-abort, or a readPump panic. It runs ON THE
-	// readPump GOROUTINE with the health flag already flipped and the pending
-	// requests already drained, so it MUST NOT block: the Supervisor wired to
-	// it does a non-blocking channel send and nothing else. A panic in the
-	// callback is recovered and logged rather than taking the pump down.
+	// after a crash or a V8 OOM-abort, a readPump panic, or a stdin write the
+	// child has not drained within RequestTimeout. It runs ON THE GOROUTINE
+	// THAT NOTICED (readPump, or the stall watchdog's timer) with the health
+	// flag already flipped and the pending requests already drained, so it
+	// MUST NOT block: the Supervisor wired to it does a non-blocking channel
+	// send and nothing else. A panic in the callback is recovered and logged
+	// rather than taking that goroutine down.
 	OnUnhealthy func(reason string)
 	Logger      Logger
 }
@@ -95,8 +97,18 @@ type Sidecar struct {
 	cacheDir string
 
 	// Stdin write serialization. Goroutines calling GeneratePoToken in
-	// parallel must not interleave their JSON lines on the wire.
-	writeMu sync.Mutex
+	// parallel must not interleave their JSON lines on the wire. A one-slot
+	// channel rather than a sync.Mutex so that waiting for it can be given
+	// up when the waiter's context ends: the holder may be a write the child
+	// has stopped draining (see writeRequest), and a mutex would queue every
+	// later call — Stop's own shutdown RPC included — behind it for as long
+	// as the kernel keeps that write blocked.
+	writeSem chan struct{}
+	// childGen counts the children startLocked has spawned. A write's stall
+	// watchdog records the generation it was armed against and condemns no
+	// other: a callback delayed across a restart must not mark the
+	// replacement child unhealthy for the old child's wedge.
+	childGen atomic.Uint64
 
 	// Request multiplexing.
 	nextReqID atomic.Uint64
@@ -176,8 +188,9 @@ func New(cfg Config) *Sidecar {
 		cfg.RequestTimeout = 90 * time.Second
 	}
 	s := &Sidecar{
-		cfg:     cfg,
-		pending: make(map[uint64]chan rpcResponse),
+		cfg:      cfg,
+		pending:  make(map[uint64]chan rpcResponse),
+		writeSem: make(chan struct{}, 1),
 	}
 	s.start = s.startLocked
 	return s
@@ -261,19 +274,23 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 		return fmt.Errorf("start node: %w", err)
 	}
 
-	// Under writeMu, mirroring Restart's own reset of the same fields:
+	// Under the write slot, mirroring Restart's own reset of the same fields:
 	// writeRequest reads s.stdin under that lock, and a caller stalled
 	// between its healthy.Load() and writeRequest can span the whole restart
 	// window. The race detector cannot see it (the stall has to cross the
 	// ladder's 5 s floor), which is exactly why the lock is the fix rather
-	// than an argument that it cannot happen.
-	s.writeMu.Lock()
+	// than an argument that it cannot happen. Uncancellable on purpose: the
+	// only holder that can keep us waiting is a write stranded on the child
+	// teardownLocked has just killed, and that returns the moment the kernel
+	// reports the broken pipe.
+	s.writeSem <- struct{}{}
 	s.cmd = cmd
 	s.stdin = stdin
 	s.stdout = stdout
 	s.stderr = stderr
 	s.readyCh = make(chan struct{})
-	s.writeMu.Unlock()
+	s.childGen.Add(1)
+	<-s.writeSem
 
 	// Pin the child to a Job Object so it dies when Moombox dies. On
 	// Linux processJob is a no-op — PR_SET_PDEATHSIG (configured before
@@ -288,9 +305,9 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 			job = nil
 		}
 	}
-	s.writeMu.Lock()
+	s.writeSem <- struct{}{}
 	s.job = job
-	s.writeMu.Unlock()
+	<-s.writeSem
 
 	s.pumpsDone.Add(2)
 	go s.readPump()
@@ -503,7 +520,9 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	// pumps — so afterwards nothing else touches the fields reset below.
 	_ = s.teardownLocked()
 
-	s.writeMu.Lock()
+	// Uncancellable, like startLocked's: teardownLocked killed the child, so
+	// a writer still holding the slot is about to get its broken pipe back.
+	s.writeSem <- struct{}{}
 	s.cmd = nil
 	s.stdin = nil
 	s.stdout = nil
@@ -514,7 +533,7 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	s.readyErr = nil
 	s.stopping.Store(false)
 	s.healthy.Store(false)
-	s.writeMu.Unlock()
+	<-s.writeSem
 
 	s.pendingMu.Lock()
 	s.pending = make(map[uint64]chan rpcResponse)
@@ -543,8 +562,9 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 }
 
 // IsHealthy reports whether the sidecar is currently usable. False after
-// Start fails, after Stop is called, or after the readPump observes
-// stdout EOF (parent crash recovery).
+// Start fails, after Stop is called, after readPump observes stdout EOF (the
+// child died), or after a stdin write stalled past RequestTimeout (the child
+// stopped reading — see writeRequest).
 func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
 
 // CacheDir returns the directory where the sidecar's Node binary and JS
@@ -837,7 +857,7 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 		s.pendingMu.Unlock()
 	}()
 
-	if err := s.writeRequest(rpcRequest{ID: id, Method: method, Params: params}); err != nil {
+	if err := s.writeRequest(ctx, rpcRequest{ID: id, Method: method, Params: params}); err != nil {
 		return err
 	}
 
@@ -862,25 +882,96 @@ func (s *Sidecar) callRaw(ctx context.Context, method string, params map[string]
 	return s.call(ctx, method, params, nil)
 }
 
-func (s *Sidecar) writeRequest(req rpcRequest) error {
+// lockWrite takes the stdin write slot, or gives up when ctx ends first. The
+// field resets in startLocked and Restart take the slot directly instead,
+// because waiting out a stranded write is their point: they run after
+// teardownLocked has killed the child that was holding it up.
+func (s *Sidecar) lockWrite(ctx context.Context) error {
+	select {
+	case s.writeSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// unlockWrite releases the slot lockWrite took.
+func (s *Sidecar) unlockWrite() { <-s.writeSem }
+
+// writeRequest serialises one request line onto the child's stdin. ctx bounds
+// BOTH the wait for the write slot and the write itself. A child that has
+// stopped reading stdin — V8 wedged, or a solveCipher preprocess running
+// synchronously on its event loop — lets the pipe fill, and a SolveCipher
+// line carrying the player JS is ~3 MB, so the Write blocks until the child
+// drains it or dies. The write therefore runs on its own goroutine, which
+// keeps the slot until the kernel lets the Write return, while the caller
+// is free to leave at ctx.Done(). Leaving does not cancel the line: it still
+// lands whole, and the next writer still waits behind it.
+//
+// A Write that outlasts RequestTimeout is the same failure as a request
+// wedged inside V8 and is handled the same way: the sidecar is marked
+// unhealthy so the supervisor replaces the child, and killing the child is
+// what frees the stranded writer. (Closing our end is not enough everywhere:
+// on Windows an anonymous pipe's WriteFile in progress outlives CloseHandle
+// on the parent's side and returns only once the child's end is gone.)
+func (s *Sidecar) writeRequest(ctx context.Context, req rpcRequest) error {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if s.stdin == nil {
+	if err := s.lockWrite(ctx); err != nil {
+		return err
+	}
+	stdin := s.stdin
+	if stdin == nil {
 		// Between a crash and the supervisor's Restart there is no pipe. A
 		// caller that passed the healthy check microseconds before
 		// markUnhealthy flipped it must get an error, not a nil dereference.
+		s.unlockWrite()
 		return errors.New("sidecar: not running")
 	}
-	if _, err := s.stdin.Write(data); err != nil {
-		return fmt.Errorf("stdin write: %w", err)
+	gen := s.childGen.Load()
+
+	done := make(chan error, 1)
+	go func() {
+		var werr error
+		defer func() {
+			if r := recover(); r != nil {
+				werr = fmt.Errorf("stdin write panic: %v", r)
+			}
+			s.unlockWrite()
+			done <- werr
+		}()
+		if s.cfg.RequestTimeout > 0 {
+			stall := time.AfterFunc(s.cfg.RequestTimeout, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.cfg.Logger.Error("sidecar: stall watchdog panic", "panic", fmt.Sprint(r))
+					}
+				}()
+				// Only the child this write was armed against, and not one
+				// a teardown is already taking down.
+				if s.childGen.Load() != gen || s.stopping.Load() {
+					return
+				}
+				s.markUnhealthy("stdin write stalled for " + s.cfg.RequestTimeout.String())
+			})
+			defer stall.Stop()
+		}
+		_, werr = stdin.Write(data)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("stdin write: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // readPump drains stdout line-by-line. Each line is either a notification
