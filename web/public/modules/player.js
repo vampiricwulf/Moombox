@@ -532,7 +532,8 @@ export class PlayerController {
     video.addEventListener("error", () => {
       if (video.error && video.src) {
         console.error("Video load error:", video.error.message);
-        this.app.showToast("Video failed to load — segment may be missing", "danger");
+        // The segment hint only means something for a multi-segment job.
+        this.app.showToast(this._seg.active ? "Video failed to load — segment may be missing" : "Video failed to load", "danger");
       }
     });
 

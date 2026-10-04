@@ -389,7 +389,7 @@ test("pre-show and after-the-end chat is counted, labelled and promoted", { skip
 
   assert.equal(rows[2].dataset.divider, "Waiting room — 2 messages before the stream");
   assert.ok(rows[2].classList.contains("divider-before"));
-  assert.equal(rows[4].dataset.divider, "Recording ended — 1 messages after it");
+  assert.equal(rows[4].dataset.divider, "Recording ended — 1 message after it");
   assert.ok(rows[4].classList.contains("divider-before"));
   assert.equal(rows[0].dataset.divider, undefined, "no divider on an interior row");
   assert.ok(rows[4].classList.contains("future"), "the tail starts out dimmed");
@@ -1511,7 +1511,7 @@ test("a card is still a timeline row: future, active, divider, measured", { skip
   const rows = h.sidebar().children;
   assert.ok(rows[1].classList.contains("divider-before"),
     "the card is the first in-video row, so it carries the region divider");
-  assert.equal(rows[1].dataset.divider, "Waiting room — 1 messages before the stream");
+  assert.equal(rows[1].dataset.divider, "Waiting room — 1 message before the stream");
   assert.ok(rows[1].classList.contains("future"));
   h.tick(2000);
   assert.ok(rows[1].classList.contains("active"), "a card is promoted like any row");

@@ -50,6 +50,14 @@ export class StatsController {
     const el = document.getElementById("stats-disk");
     if (!el) return;
 
+    // No reading (the server sends zeros before its first successful disk
+    // check, and for as long as the output directory's disk cannot be read):
+    // say so rather than "0B used of 0B".
+    if (!(disk.total > 0)) {
+      el.textContent = "No disk reading available";
+      return;
+    }
+
     const usedPct = isFinite(disk.usedPct) ? disk.usedPct : 0;
     const pct = usedPct.toFixed(1);
     const freeStr = formatBytes(disk.free || 0);

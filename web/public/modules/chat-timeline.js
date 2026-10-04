@@ -122,8 +122,11 @@ export function partitionChatByVideo(messages, totalDurationMs) {
  * @param {number} postCount
  * @returns {string}
  */
+/** "1 message", "2 messages". */
+const messageCount = (n) => `${n} message${n === 1 ? "" : "s"}`;
+
 export function formatChatHeader(total, preCount, postCount) {
-  let text = `${total} messages`;
+  let text = messageCount(total);
   if (preCount > 0) text += ` · ${preCount} pre-show`;
   if (postCount > 0) text += ` · ${postCount} after end`;
   return text;
@@ -141,10 +144,10 @@ export function formatChatHeader(total, preCount, postCount) {
 export function dividerLabelFor(parts, index) {
   if (!parts) return null;
   if (parts.preCount > 0 && index === parts.firstLiveIndex) {
-    return `Waiting room — ${parts.preCount} messages before the stream`;
+    return `Waiting room — ${messageCount(parts.preCount)} before the stream`;
   }
   if (parts.firstPostIndex >= 0 && index === parts.firstPostIndex) {
-    return `Recording ended — ${parts.postCount} messages after it`;
+    return `Recording ended — ${messageCount(parts.postCount)} after it`;
   }
   return null;
 }

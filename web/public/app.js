@@ -3279,27 +3279,28 @@ export class MoomboxApp {
     if (job.status === "COOKIES?" && job.error) return job.error;
 
     const p = job.progress || "";
+    const chatCount = (n) => { const c = parseInt(n); return `${c.toLocaleString()} message${c === 1 ? "" : "s"}`; };
     // DASH: (V: 789/1000 A: 123/456 C: 50) — video first since v2.7.8;
     // pre-flip "(A: ... V: ...)" strings on old rows fall through to the
     // lastVideoSeq fallback below, which renders the same information.
     const dashMatch = p.match(/\(V:\s*(\S+)\s+A:\s*(\S+)(?:\s+C:\s*(\d+))?\)/);
     if (dashMatch) {
       let tip = `Video: ${dashMatch[1]} segments, Audio: ${dashMatch[2]} segments`;
-      if (dashMatch[3]) tip += `, Chat: ${parseInt(dashMatch[3]).toLocaleString()} messages`;
+      if (dashMatch[3]) tip += `, Chat: ${chatCount(dashMatch[3])}`;
       return tip;
     }
     // VOD: V:95.3% C: 456
     const vodMatch = p.match(/^V:([\d.]+%)(?:\s+C:\s*(\d+))?$/);
     if (vodMatch) {
       let tip = `Video: ${vodMatch[1]} downloaded`;
-      if (vodMatch[2]) tip += `, Chat: ${parseInt(vodMatch[2]).toLocaleString()} messages`;
+      if (vodMatch[2]) tip += `, Chat: ${chatCount(vodMatch[2])}`;
       return tip;
     }
     // HLS: Seq: 123 C: 456
     const hlsMatch = p.match(/^Seq:\s*(\d+)(?:\s+C:\s*(\d+))?$/);
     if (hlsMatch) {
       let tip = `Segments: ${parseInt(hlsMatch[1]).toLocaleString()}`;
-      if (hlsMatch[2]) tip += `, Chat: ${parseInt(hlsMatch[2]).toLocaleString()} messages`;
+      if (hlsMatch[2]) tip += `, Chat: ${chatCount(hlsMatch[2])}`;
       return tip;
     }
     // Frontend fallback: V: 123 / A: 456
