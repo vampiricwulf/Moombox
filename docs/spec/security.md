@@ -181,14 +181,14 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Purpose:** Enforces authentication for external (non-local, non-LAN) clients when a password is configured. Applied last in the chain so that route-level middleware can execute first.
 
-**Note on registration:** AuthMiddleware is registered separately from the other middleware — it is added via `r.Use(webServer.AuthMiddleware)` in `main.go` after the server is constructed, because it requires the AuthService to be wired up first. Despite this, it is the last middleware in the chain.
+**Note on registration:** AuthMiddleware is registered separately from the other middleware — it is added via `s.r.Use(webServer.AuthMiddleware)` in `initServices` (`cmd/moombox/services.go`) after the server is constructed, because it requires the AuthService to be wired up first. Despite this, it is the last middleware in the chain.
 
 **Behavior — step by step:**
 1. Resolve the client IP via `EffectiveClientIP(s.configStore, r)`.
 2. If the IP is loopback or private: skip auth, serve the request.
 3. If `IsAuthRequired` returns false (network_access is neither `external` nor `public`, or no password hash is configured): skip auth.
-4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/minter_cache`, `/favicon.svg`, `/login.html`): skip auth.
-5. Check the `moombox_session` cookie. If valid (exists in the in-memory session map and not expired): serve the request.
+4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/minter_cache`, `/favicon.svg`, `/login.html`, and the two credential-free scripts the login page loads, `/boot-theme.js` and `/login.js`): skip auth.
+5. Check the `moombox_session` cookie. If valid (exists in the in-memory session map and not expired): serve the request — and when `ValidateSessionAndSlide` just renewed the session (see Session Management), re-issue the cookie with a fresh `Max-Age`.
 6. Fallback: check the `moombox_client` cookie. If the `ClientTokenCheck` callback validates the persistent client token: issue a fresh session cookie and serve the request.
 7. If unauthenticated:
    - API requests (`/api/*`): return `401 {"error":"Authentication required"}`.
@@ -275,7 +275,7 @@ The only ways a mutating request reaches a handler without an Origin/Referer hea
 
 **Storage:** In-memory `map[string]sessionEntry` protected by `sync.RWMutex`. Sessions are NOT persisted to the database — they are lost on restart, requiring re-authentication. This is intentional: session persistence would add complexity without meaningful benefit, since persistent client tokens (below) handle the "remember me" use case.
 
-**TTL:** 24 hours from creation. There is no sliding window — the session expires exactly 24 hours after it was created regardless of activity.
+**TTL:** 24 hours (`sessionTTL`), sliding. `ValidateSessionAndSlide` — the check the middleware runs on every request — resets the session's `createdAt` once it is more than half elapsed (`sessionSlideThreshold`, 12 hours), and the middleware then re-issues the cookie with a fresh `Max-Age` so the browser does not drop it before the server would. An active session therefore never expires; an idle one expires 24 hours after its last renewal. The plain `ValidateSession` (no renewal) remains for the `/api/auth/*` routes, which only need the answer.
 
 **Cleanup:** A background goroutine runs every hour (`sessionCleanup = 1 * time.Hour`) and evicts all sessions whose creation time is older than 24 hours.
 
@@ -287,7 +287,7 @@ The only ways a mutating request reaches a handler without an Origin/Referer hea
 - Secure: true only if TLS is active (`r.TLS != nil`)
 - SameSite: Lax
 
-**Source:** `CreateSession`, `ValidateSession`, `SetSessionCookie`, `evictExpired` in `internal/web/auth.go`.
+**Source:** `CreateSession`, `ValidateSession`, `ValidateSessionAndSlide`, `SetSessionCookie`, `evictExpired` in `internal/web/auth.go`; the slide-and-reissue call site is `AuthMiddleware` in `internal/web/server.go`.
 
 ### Client Token Persistence
 
@@ -318,7 +318,7 @@ For every incoming request:
 1. Resolve the client IP with `EffectiveClientIP` — `RemoteAddr` unless the peer is a declared trusted proxy.
 2. If IP is loopback (127.0.0.1, ::1) or private (LAN ranges): **skip auth entirely**.
 3. If `network_access` is neither `external` nor `public`, or no password hash is configured: **skip auth**.
-4. If the path is a public endpoint (login, status, ping, favicon): **skip auth**.
+4. If the path is a public endpoint (login, status, ping, minter cache, favicon, the login page and its two scripts): **skip auth**.
 5. Check `moombox_session` cookie → validate against in-memory session map → if valid: **authenticated**.
 6. Check `moombox_client` cookie → validate via `ClientTokenCheck` callback → if valid: issue fresh session, **authenticated**.
 7. Otherwise: **unauthenticated**. API paths get `401 JSON`. Browser paths get `login.html` served inline.
@@ -684,7 +684,7 @@ At server startup, 16 random bytes are generated from `crypto/rand` and hex-enco
 
 **Validation:** The CSRF middleware checks for this header on every mutating request. If present, it compares the value against the stored token using `crypto/subtle.ConstantTimeCompare`. A match bypasses all other CSRF checks.
 
-**WebSocket:** The same `X-Internal-Token` header is sent during WebSocket upgrade requests, allowing the TUI to establish WebSocket connections without browser-style Origin headers.
+**WebSocket:** Not involved. The TUI never opens a WebSocket — it receives its live updates over in-process Go channels fed by the database subscriptions (see user-interfaces.md) — and the upgrade path in `internal/web/websocket.go` does not consult the internal token; an upgrade with no `Origin` header is simply accepted by the origin check.
 
 **Auth bypass:** Because the TUI connects from loopback (127.0.0.1), it also skips the AuthMiddleware. The internal token is specifically for CSRF bypass, not authentication.
 
@@ -762,4 +762,5 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **Source: [`internal/web/rate_limiter.go`](../../internal/web/rate_limiter.go)** — RateLimiter struct, sliding window algorithm, cleanup goroutine.
 - **Source: [`internal/web/tls.go`](../../internal/web/tls.go)** — LoadOrGenerateTLSConfig, self-signed certificate generation.
 - **Source: [`internal/updater/signing.go`](../../internal/updater/signing.go)** — Ed25519 verification and signing functions, embedded public key.
-- **Source: [`cmd/moombox/main.go`](../../cmd/moombox/main.go)** — Rate limiter instantiation with per-route limits, auth service wiring, middleware registration order.
+- **Source: [`cmd/moombox/main.go`](../../cmd/moombox/main.go)** — The rate-limit constants only.
+- **Source: [`cmd/moombox/services.go`](../../cmd/moombox/services.go)** — `initServices`: rate limiter instantiation with per-route limits, auth service wiring, and the `AuthMiddleware` registration that closes the chain.
