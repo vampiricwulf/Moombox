@@ -363,7 +363,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dismissUpdateResultMsg:
 		if msg.Err != nil {
-			a.setFeedback("Could not skip " + msg.Tag + ": " + msg.Err.Error())
+			// Stated: nothing in this wording reaches the scan's red
+			// substrings, and a refused skip rendered in the success green.
+			a.setFeedbackWithSeverity("Could not skip "+msg.Tag+": "+msg.Err.Error(), severityError)
 			return a, nil
 		}
 		if a.updateAvailable != nil && a.updateAvailable.TagName == msg.Tag {

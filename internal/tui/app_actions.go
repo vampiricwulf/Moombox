@@ -240,7 +240,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			if count > 0 {
 				a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
 			} else {
-				a.setFeedback("No cancellable jobs in selection")
+				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
 			}
 		} else if job != nil && a.OnCancelJob != nil {
 			a.OnCancelJob(job.ID)
@@ -263,7 +263,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			}
 			a.taskList.ClearSelection()
 			if len(ids) == 0 {
-				a.setFeedback("No deletable jobs in selection")
+				a.setFeedbackWithSeverity("No deletable jobs in selection", severityWarning)
 				return a, nil
 			}
 			a.setFeedback(fmt.Sprintf("Deleting %d jobs...", len(ids)))
@@ -285,7 +285,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A W":
 		if a.OnSetWatched == nil {
-			a.setFeedback("Watched toggling is unavailable")
+			a.setFeedbackWithSeverity("Watched toggling is unavailable", severityWarning)
 			return a, nil
 		}
 		setFn := a.OnSetWatched
@@ -302,7 +302,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				}
 			}
 			if len(finished) == 0 {
-				a.setFeedback("No finished jobs in selection")
+				a.setFeedbackWithSeverity("No finished jobs in selection", severityWarning)
 				return a, nil
 			}
 			a.taskList.ClearSelection()
@@ -392,14 +392,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// same way: with no status callback the chord is not registered, so
 		// processSecondKey never reaches this case.
 		if a.OnYtdlpPluginStatus == nil {
-			a.setFeedback("yt-dlp plugin status is unavailable in this process")
+			a.setFeedbackWithSeverity("yt-dlp plugin status is unavailable in this process", severityWarning)
 			return a, nil
 		}
 		a.ytdlpDlg.SetSize(a.width, a.height)
 		return a, tea.Batch(a.ytdlpDlg.Open(), a.ytdlpStatusCmd())
 	case "E T":
 		if a.OnGetStats == nil {
-			a.setFeedback("Statistics are unavailable")
+			a.setFeedbackWithSeverity("Statistics are unavailable", severityWarning)
 			return a, nil
 		}
 		a.clearFeedback()
@@ -440,7 +440,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			return a, nil
 		}
 		if a.OnFetchReleaseNotes == nil || a.version == "" {
-			a.setFeedback("Cannot fetch release notes (offline build or unconfigured)")
+			a.setFeedbackWithSeverity("Cannot fetch release notes (offline build or unconfigured)", severityWarning)
 			return a, nil
 		}
 		// No pending update — fetch current version's notes asynchronously.
@@ -519,7 +519,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 					}),
 				)
 			}
-			a.setFeedback("No URL to copy")
+			a.setFeedbackWithSeverity("No URL to copy", severityWarning)
 		}
 	case "O W":
 		scheme := "http"
