@@ -2846,25 +2846,52 @@ sl-progress-bar {
 
 /* ===== Light Theme Overrides ===== */
 html.sl-theme-light {
+    /* The badges set white text on these; each clears 4.5:1 (Live, Finished
+       and Queued are the lightest shades of their hue that do). Muxing's
+       yellow cannot, so its badge takes dark text instead, below. */
     --status-upcoming: #7c3aed;
-    --status-live: #229954;
+    --status-live: #1e864a;
     --status-downloading: #2471a3;
     --status-muxing: #d4ac0d;
-    --status-finished: #16a085;
+    --status-finished: #12836d;
     --status-error: #c0392b;
     --status-cancelled: #6b7280;
-    --status-queued: #707b7c;
+    --status-queued: #6c7778;
     --status-cookies: #c026d3;
 
-    --text-success: var(--sl-color-success-800);
-    --text-warning: var(--sl-color-warning-800);
-    --text-danger: var(--sl-color-danger-700);
-    --text-primary: var(--sl-color-primary-700);
+    /* Named by palette step, not by role: the block below moves the role
+       steps. */
+    --text-success: var(--sl-color-green-800);
+    --text-warning: var(--sl-color-amber-800);
+    --text-danger: var(--sl-color-red-700);
+    --text-primary: var(--sl-color-sky-700);
+
+    /* Shoelace fills its primary, success and warning buttons (and colours
+       the active tab and outline buttons' text) with the -600 step, hovers
+       with the -500 and presses with the -700. The light palette's -600s
+       are pale: white on them read at 4.1:1 (sky), 3.3:1 (green) and 3.2:1
+       (amber). The -600 and -700 each move one palette step darker; the
+       -500, the hover, becomes the lightest shade of its hue that still
+       clears 4.5:1 under white, so a hover still lightens. The danger reds
+       already clear 4.5:1 and stay put. */
+    --sl-color-primary-500: #027cbb;
+    --sl-color-primary-600: var(--sl-color-sky-700);
+    --sl-color-primary-700: var(--sl-color-sky-800);
+    --sl-color-success-500: #12873d;
+    --sl-color-success-600: var(--sl-color-green-700);
+    --sl-color-success-700: var(--sl-color-green-800);
+    --sl-color-warning-500: #b16105;
+    --sl-color-warning-600: var(--sl-color-amber-700);
+    --sl-color-warning-700: var(--sl-color-amber-800);
 }
 
-/* Links rest on --text-primary, the -700 here, so hover goes one darker. */
+html.sl-theme-light sl-badge.status.muxing::part(base) {
+    color: var(--sl-color-neutral-900);
+}
+
+/* Links rest on --text-primary, sky-700 here, so hover goes one darker. */
 html.sl-theme-light a:hover {
-    color: var(--sl-color-primary-800);
+    color: var(--sl-color-sky-800);
 }
 
 /* The dark theme's pill steps are bright there but pale in the light
