@@ -266,7 +266,7 @@ The chord system is a three-state finite automaton:
 
 **Timeout:** All chord states expire after **3 seconds** of inactivity. If the user presses a prefix key and does nothing for 3 seconds, the chord resets to Idle. If a confirm prompt is pending and 3 seconds pass, it also resets.
 
-**Invalid keys:** If the user presses a key that does not match any valid action for the current prefix, the chord resets to Idle and the key is re-evaluated as a potential new prefix or single-key shortcut.
+**Invalid keys:** If the user presses a key that does not match any valid action for the current prefix, the chord resets to Idle, the feedback line shows `Invalid Chord: <prefix> <key>` for a second, and the key is consumed — it is not re-evaluated as a new prefix or single-key shortcut. A valid second key whose chord needs a job, pressed with no job selected or with a selected job that fails the item's `JobFilter`, resets the same way and shows the item's `DisabledReason` (the words the action menu uses beside a greyed entry) in the advisory colour.
 
 #### Single Source of Truth
 

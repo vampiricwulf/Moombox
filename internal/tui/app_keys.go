@@ -657,7 +657,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		}
 		job := a.taskList.SelectedJob()
 		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
-			return a, nil, true // no valid job — consume key but do nothing
+			a.rejectChordForJob(item)
+			return a, nil, true
 		}
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
@@ -686,7 +687,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		}
 		job := a.taskList.SelectedJob()
 		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
-			return a, nil, true // no valid job — consume key but do nothing
+			a.rejectChordForJob(item)
+			return a, nil, true
 		}
 		a.chord = chordState{}
 		m, cmd := a.dispatchAction(chord, job)
@@ -697,4 +699,24 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	a.chord = chordState{}
 	m, cmd := a.dispatchAction(chord, nil)
 	return m, cmd, true
+}
+
+// rejectChordForJob answers a registered NeedsJob chord whose selected job
+// fails the item's JobFilter, or that was pressed with no job selected. The
+// key is consumed, the chord resets to idle exactly as the invalid-chord path
+// does, and the line says why — with the item's DisabledReason, the same
+// words the action menu shows beside a greyed entry. Before this the key was
+// swallowed in silence and the prefix stayed armed, so the operator's next
+// press was read as a second key of a chord they thought had ended.
+//
+// The severity is stated: "no finished jobs in selection" has no word the
+// fallback scan reads as a warning, and it would otherwise render in the
+// success green.
+func (a *App) rejectChordForJob(item *ActionMenuItem) {
+	a.chord = chordState{}
+	reason := item.DisabledReason
+	if reason == "" {
+		reason = "no eligible jobs"
+	}
+	a.setFeedbackWithSeverity(item.Label+": "+reason+" in selection", severityWarning)
 }
