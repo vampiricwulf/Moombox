@@ -623,7 +623,7 @@ func (m *SetupWizardModel) updateTextInputForField() {
 				} else {
 					m.textInput.Validate = nil
 				}
-				m.textInput.SetValue(m.channelEditValues[field.key])
+				loadTextInput(&m.textInput, m.channelEditValues[field.key])
 				m.textInput.Focus()
 				m.updateTextInputWidth()
 				return

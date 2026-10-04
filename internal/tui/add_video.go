@@ -328,7 +328,7 @@ func (m *AddVideoModel) syncFromTextInput() {
 func (m *AddVideoModel) syncToTextInput() {
 	target := m.activeTextTarget()
 	if target != nil {
-		m.textInput.SetValue(*target)
+		loadTextInput(&m.textInput, *target)
 		if m.step == AddStepTimestamps {
 			m.textInput.Validate = validateTimeChars
 		} else {

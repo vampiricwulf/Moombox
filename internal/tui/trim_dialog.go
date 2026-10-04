@@ -244,9 +244,9 @@ func (m *TrimDialogModel) handleEscape() string {
 		m.createStep = 0
 		m.errorMsg = ""
 		if m.activeField == 0 {
-			m.textInput.SetValue(m.startTimeInput)
+			loadTextInput(&m.textInput, m.startTimeInput)
 		} else {
-			m.textInput.SetValue(m.endTimeInput)
+			loadTextInput(&m.textInput, m.endTimeInput)
 		}
 		m.textInput.Focus()
 		return ""
@@ -283,9 +283,9 @@ func (m *TrimDialogModel) handleCreateKey(key string) string {
 		case keyTab:
 			m.activeField = 1 - m.activeField
 			if m.activeField == 0 {
-				m.textInput.SetValue(m.startTimeInput)
+				loadTextInput(&m.textInput, m.startTimeInput)
 			} else {
-				m.textInput.SetValue(m.endTimeInput)
+				loadTextInput(&m.textInput, m.endTimeInput)
 			}
 		case keyEnter:
 			return m.validateAndAdvance()

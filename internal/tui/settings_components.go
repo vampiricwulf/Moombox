@@ -28,7 +28,7 @@ func (m *SettingsModel) updateTextInputForField() {
 		m.textInput.Validate = nil
 		target := m.secActiveField()
 		if target != nil {
-			m.textInput.SetValue(*target)
+			loadTextInput(&m.textInput, *target)
 		}
 		m.textInput.Focus()
 		return
@@ -36,7 +36,7 @@ func (m *SettingsModel) updateTextInputForField() {
 	if sec.name == "Network" && m.secMode == securityRemove {
 		m.textInput.EchoMode = textinput.EchoPassword
 		m.textInput.Validate = nil
-		m.textInput.SetValue(m.secRemovePw)
+		loadTextInput(&m.textInput, m.secRemovePw)
 		m.textInput.Focus()
 		return
 	}
@@ -53,7 +53,7 @@ func (m *SettingsModel) updateTextInputForField() {
 				} else {
 					m.textInput.Validate = nil
 				}
-				m.textInput.SetValue(m.channelEditValues[field.key])
+				loadTextInput(&m.textInput, m.channelEditValues[field.key])
 				m.textInput.Focus()
 				return
 			}
@@ -68,13 +68,13 @@ func (m *SettingsModel) updateTextInputForField() {
 		case notifEditURLRow:
 			m.textInput.EchoMode = textinput.EchoNormal
 			m.textInput.Validate = nil
-			m.textInput.SetValue(m.notifEditURL)
+			loadTextInput(&m.textInput, m.notifEditURL)
 			m.textInput.Focus()
 			return
 		case notifEditMentionRow:
 			m.textInput.EchoMode = textinput.EchoNormal
 			m.textInput.Validate = nil
-			m.textInput.SetValue(m.notifEditMention)
+			loadTextInput(&m.textInput, m.notifEditMention)
 			m.textInput.Focus()
 			return
 		}
@@ -93,7 +93,7 @@ func (m *SettingsModel) updateTextInputForField() {
 			default:
 				m.textInput.Validate = nil
 			}
-			m.textInput.SetValue(m.values[field.key])
+			loadTextInput(&m.textInput, m.values[field.key])
 			m.textInput.Focus()
 			return
 		}
