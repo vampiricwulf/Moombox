@@ -302,8 +302,9 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	}, nil
 }
 
-// ApplyUpdate downloads the new binary and replaces the running executable.
-// On Windows, the running exe is renamed to .old before the new one is placed.
+// ApplyUpdate downloads the new binary and replaces the running executable:
+// the running exe is renamed to .old (on every platform) before the new one is
+// placed.
 //
 // **Rename-window race**: between the os.Rename of the running exe to .old
 // and the os.Rename of .new into place (~milliseconds), the original exe
@@ -488,7 +489,7 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 		return fmt.Errorf("signature download failed: %w", err)
 	}
 
-	if err := VerifySignature(u.exePath, sigPath); err != nil {
+	if err := u.verifySignature(u.exePath, sigPath); err != nil {
 		return err
 	}
 

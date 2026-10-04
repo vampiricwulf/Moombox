@@ -29,7 +29,7 @@ const updateCheckDebounce = 30 * time.Second
 // ended the path and turned the rest into a query string. The host is fixed
 // and the method is GET, so this is hygiene rather than a hole, and this keeps
 // it that way. It admits every tag Moombox has published, with or without the
-// leading "v" (the Web sends the bare version, the TUI sends the tag) —
+// leading "v" (the Web sends the bare version; a pasted tag works too) —
 // including the pre-release suffixes release.yml preserves into main.version
 // (`-rc.N`, `-test.N`; the tag v2.6.0-test.1 exists). Without that suffix a
 // pre-release build's own "View Release Notes" 400d its own version, because
@@ -130,9 +130,9 @@ func DismissUpdate(store *config.Store, tag string) error {
 }
 
 // UpdateRoutes registers the update check/apply/dismiss API endpoints. The
-// Store carries the cfg + lock + savePath; /api/update/dismiss flips the
-// AutoCheckUpdates field and persists via store.SaveLocked, rolling back
-// the in-memory mutation if the save fails.
+// Store carries the cfg + lock + savePath; /api/update/dismiss records the
+// pending tag as Updates.SkippedVersion through DismissUpdate, which persists
+// via store.SaveLocked and rolls the in-memory value back if the save fails.
 func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 	updateCheckGate := newCallDebouncer(updateCheckDebounce)
 
