@@ -42,7 +42,7 @@ type VodChatDownloader struct {
 	channelName  string
 	channelID    string
 	// authToken returns the CURRENT Twitch OAuth token, re-read on every
-	// comment page. Same reason as ChatDownloader.authToken: the paging loop
+	// comment page. Same reason as ChatDownloader.credentials: the paging loop
 	// runs for the length of a VOD, and a token captured at construction goes
 	// stale underneath it. nil-safe via currentAuthToken.
 	authToken     func() string

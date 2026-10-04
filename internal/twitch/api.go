@@ -80,8 +80,8 @@ type API struct {
 	// rateLimiter throttles outbound GQL requests. Process-wide bucket;
 	// per-channel was considered but the existing flows already fan out
 	// concurrently across channels, so a single shared bucket is the
-	// right place to enforce the ceiling. nil disables rate limiting
-	// (used in tests).
+	// right place to enforce the ceiling. Started on first use
+	// (initRateLimiter).
 	rateLimiter *time.Ticker
 	rateTokens  chan struct{}
 	rateOnce    sync.Once

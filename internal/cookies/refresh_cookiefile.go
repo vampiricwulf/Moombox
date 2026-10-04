@@ -177,12 +177,12 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 // REFRESH — an unscoped header may rewrite an existing same-name row anywhere
 // inside the declared origin's PLATFORM. An unscoped `SID=fresh` from a
 // youtube.com reply DOES rewrite an existing `.google.com SID` row. Two rules
-// carry that between them: resolveRowUpdate's rule 2 (:2974) takes the rows the
-// origin's own site covers, and rule 3 (:2981-2993) takes the rest of the
-// platform through sameCookiePlatform (:3008-3014), whose Domain-less default is
+// carry that between them: resolveRowUpdate's rule 2 takes the rows the
+// origin's own site covers, and rule 3 takes the rest of the
+// platform through sameCookiePlatform, whose Domain-less default is
 // the DECLARED ORIGIN's platform. Rule 3 also DISAMBIGUATES rather than
 // guessing: it fires only when exactly one non-deleting candidate qualifies
-// (`refreshes == 1`, :2991), so two same-name updates inside the platform
+// (`refreshes == 1`), so two same-name updates inside the platform
 // decline rather than let map order pick. The fan-out is deliberate (Arc 2 built
 // it, Arc 8 preserved it): it is what stops one domain variant going stale while
 // the other moves on, the drift finding #4 was about. Pinned by
@@ -202,31 +202,31 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //
 //   - a SCOPED header creates on the domain it declared, whenever that domain is
 //     inside the origin's platform. It reaches the insertion loop like any other
-//     update that matched no row — that loop's own doc (:2743-2749) says
+//     update that matched no row — that loop's own doc says
 //     "everything the matching rules turned down arrives here" — keeps
-//     `domain = key.Domain` (:2759) and passes the platform guard
-//     (:2859-2864). So an admitted `SID=x; Domain=.google.com` from a
+//     `domain = key.Domain` and passes the platform guard.
+//     So an admitted `SID=x; Domain=.google.com` from a
 //     youtube.com reply DOES create a `.google.com` row against a file holding
 //     none, and that is CORRECT: it is the rule above, not a leak past it.
 //   - an UNSCOPED header creates only on the declared origin's own SITE. The
 //     loop derives that row's domain from the origin and nothing else
-//     (`domain = "." + string(origin)`, :2827). The branch that used to guess
+//     (`domain = "." + string(origin)`). The branch that used to guess
 //     it from the cookie NAME — writing `.google.com SID` out of an ordinary
 //     youtube.com reply — is the one Arc 8 Task 2 removed. The real .google.com
 //     SID is rotated by accounts.google.com with an explicit Domain=, which
 //     takes the scoped path and never reaches that branch at all. Same name,
 //     different cookie.
 //   - narrower still, for one batch shape: an unscoped key is not inserted
-//     beside a scoped NON-DELETING sibling of the same name (hasScopedSibling,
-//     :2786), because the scoped header has already claimed a row and the
+//     beside a scoped NON-DELETING sibling of the same name (hasScopedSibling),
+//     because the scoped header has already claimed a row and the
 //     unscoped twin would override it by name in the jar. A scoped DELETION is
 //     not such a sibling — delete-plus-insert is "replace" — see
 //     hasScopedSibling's own doc.
 //
 // DELETE — an unscoped header may delete only inside the declared origin's own
 // SITE, through rule 2 alone. Rule 1 needs a Domain=, rule 3 skips deletions
-// (`!updates[k].Delete`, :2987) and the insertion loop skips them as well
-// (:2751), so origin.covers is the only door a Domain-less deletion has. (A
+// (`!updates[k].Delete`) and the insertion loop skips them as well,
+// so origin.covers is the only door a Domain-less deletion has. (A
 // SCOPED deletion is rule 1's, and reaches only rows whose domain it exactly
 // scope-matches — the scope the server actually named.)
 //

@@ -1223,9 +1223,9 @@ func (cd *ChatDownloader) clearResumeState() {
 //
 // Start is safe to call once per ChatDownloader instance. Calling Start
 // concurrently (or after a previous Start returns) returns an error rather
-// than racing on the dedup/resume state — the struct retains seenIDs and
-// seenOrder across calls, and re-initialising them while a previous session
-// is still draining would drop messages.
+// than racing on the dedup/resume state — the struct retains its dedup set
+// across calls, and re-initialising it while a previous session is still
+// draining would drop messages.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
