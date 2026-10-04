@@ -396,11 +396,18 @@ func checkFFmpeg(path string) (valid bool, version string, warning string) {
 	if err != nil {
 		return false, "", ""
 	}
-	// Extract first line which contains version info
-	output := string(out)
-	output, _, _ = strings.Cut(output, "\n")
-	version = strings.TrimSpace(output)
+	version = ffmpegVersionLine(string(out))
 	return true, version, ffmpegVersionWarning(version)
+}
+
+// ffmpegVersionLine is the part of `ffmpeg -version` worth showing: the first
+// line, without the " Copyright (c) 2000-2023 the FFmpeg developers" every
+// build appends to it — the setup wizard and the FFmpeg overlay print this
+// value as the detected version.
+func ffmpegVersionLine(output string) string {
+	line, _, _ := strings.Cut(output, "\n")
+	line, _, _ = strings.Cut(line, " Copyright")
+	return strings.TrimSpace(line)
 }
 
 // truncateOutput keeps the last maxBytes of output, prepending a truncation
