@@ -681,9 +681,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		default:
 		}
 
-		// Check if job was cancelled by user
+		// Check if job was cancelled by user — or deleted (see waitForLive).
 		currentJob, err := sp.db.GetJob(job.ID)
-		if err == nil && currentJob.Status == database.StatusCancelled {
+		if err == nil && (currentJob == nil || currentJob.Status == database.StatusCancelled) {
 			return nil, nil
 		}
 

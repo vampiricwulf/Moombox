@@ -183,9 +183,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		default:
 		}
 
-		// Check if job was cancelled
+		// Check if job was cancelled — or deleted: a channel prune removes
+		// Upcoming rows in bulk without OnJobDeleted, and GetJob returns
+		// (nil, nil) for a missing row, which this used to dereference.
 		currentJob, err := sp.db.GetJob(job.ID)
-		if err == nil && currentJob.Status == database.StatusCancelled {
+		if err == nil && (currentJob == nil || currentJob.Status == database.StatusCancelled) {
 			sp.stopEarlyChat(chatDl)
 			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
 		}

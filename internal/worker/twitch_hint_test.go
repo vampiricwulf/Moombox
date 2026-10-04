@@ -315,3 +315,46 @@ func funcCallPositions(n ast.Node, name string) []token.Pos {
 	})
 	return out
 }
+
+// TestWaitForTwitchLiveReturnsWhenTheRowIsGone: a channel prune deletes
+// Upcoming rows in bulk without firing OnJobDeleted, and GetJob returns
+// (nil, nil) for a missing row, which the wait's cancel check dereferenced —
+// a panic that processJob's recover then turned into an Error write on a row
+// that no longer existed. A vanished row now ends the wait like a cancel.
+//
+// Mutant: drop the `currentJob == nil` arm — the goroutine panics.
+func TestWaitForTwitchLiveReturnsWhenTheRowIsGone(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	const login = "prunedstreamer"
+	job := &database.Job{ID: "tw_manual_" + login + "_1700000000", Platform: "twitch",
+		URL: "https://twitch.tv/" + login, Status: database.StatusUpcoming}
+	// Never added: the row is already gone when the wait looks.
+	sp := &StreamProcessor{db: db, logger: discardLogger{}, twitchHints: newTwitchHintCache()}
+
+	type outcome struct {
+		info  *twitch.TwitchStreamInfo
+		err   error
+		panic any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- outcome{panic: r}
+			}
+		}()
+		info, err := sp.waitForTwitchLive(context.Background(), job, login)
+		done <- outcome{info: info, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.panic != nil {
+			t.Fatalf("waitForTwitchLive panicked on a deleted row: %v", got.panic)
+		}
+		if got.info != nil || got.err != nil {
+			t.Errorf("waitForTwitchLive = (%v, %v), want (nil, nil) — a cancel", got.info, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForTwitchLive kept waiting on a row that no longer exists")
+	}
+}
