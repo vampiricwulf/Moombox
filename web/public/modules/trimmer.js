@@ -329,9 +329,9 @@ export class TrimController {
     track.setPointerCapture(e.pointerId);
 
     // Per-drag AbortController so pointermove/up/cancel are removed together.
-    // This nests inside the outer this._abort (set in open()) — if the dialog
-    // is destroyed mid-drag, the blur handler calls _dragCleanup, and
-    // destroy()'s outer abort also aborts this signal defensively.
+    // It is independent of the outer this._abort (set in open()): nothing
+    // links the two, so a dialog destroyed mid-drag relies on destroy()
+    // calling _dragCleanup() itself (the window blur handler does the same).
     const dragAbort = new AbortController();
     const sig = dragAbort.signal;
 

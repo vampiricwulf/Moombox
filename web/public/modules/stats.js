@@ -7,12 +7,10 @@ export class StatsController {
   constructor(app) {
     this.app = app;
     this._refreshInterval = null;
-    this._active = false;
   }
 
   /** Called when the Stats tab becomes visible. */
   activate() {
-    this._active = true;
     this.loadStats();
     // Clear any existing interval to prevent leaks on double-activate
     if (this._refreshInterval) clearInterval(this._refreshInterval);
@@ -22,7 +20,6 @@ export class StatsController {
 
   /** Called when the Stats tab is hidden. */
   deactivate() {
-    this._active = false;
     if (this._refreshInterval) {
       clearInterval(this._refreshInterval);
       this._refreshInterval = null;
