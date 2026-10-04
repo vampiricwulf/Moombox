@@ -502,7 +502,7 @@ func cdpEnsurePageTarget(ctx context.Context, port int, targetURL string) error 
 		return fmt.Errorf("CDP version response missing webSocketDebuggerUrl")
 	}
 
-	if _, err := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Target.createTarget", map[string]any{"url": targetURL}); err != nil {
+	if _, err := cdpSendCommandWithResult(ctx, version.WebSocketDebuggerURL, "Target.createTarget", map[string]any{"url": targetURL}); err != nil {
 		return fmt.Errorf("Target.createTarget: %w", err)
 	}
 	select {
@@ -789,7 +789,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 	// the fallbacks CANNOT run — the target listing fails — is reported as an
 	// incomplete read rather than as an empty profile, so #17's requirement is
 	// not quietly satisfied by declaring tier 1 definitive.
-	if result, queryErr := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Storage.getCookies", nil); queryErr != nil {
+	if result, queryErr := cdpSendCommandWithResult(ctx, version.WebSocketDebuggerURL, "Storage.getCookies", nil); queryErr != nil {
 		read.lastErr = fmt.Errorf("Storage.getCookies: %w", queryErr)
 	} else if parsed, parseErr := parseResult(result); parseErr != nil {
 		read.lastErr = fmt.Errorf("Storage.getCookies: %w", parseErr)
@@ -833,7 +833,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 			if t.Type != "page" || t.WebSocketDebuggerURL == "" {
 				continue
 			}
-			raw, queryErr := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getAllCookies", nil)
+			raw, queryErr := cdpSendCommandWithResult(ctx, t.WebSocketDebuggerURL, "Network.getAllCookies", nil)
 			if queryErr != nil {
 				read.lastErr = fmt.Errorf("Network.getAllCookies: %w", queryErr)
 				continue
@@ -872,7 +872,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 						"https://twitch.tv",
 					},
 				}
-				raw, queryErr := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getCookies", params)
+				raw, queryErr := cdpSendCommandWithResult(ctx, t.WebSocketDebuggerURL, "Network.getCookies", params)
 				if queryErr != nil {
 					read.lastErr = fmt.Errorf("Network.getCookies: %w", queryErr)
 					continue
@@ -923,13 +923,13 @@ func cdpCloseBrowser(ctx context.Context, port int) {
 	json.NewDecoder(resp.Body).Decode(&version)
 
 	if version.WebSocketDebuggerURL != "" {
-		cdpSendCommand(version.WebSocketDebuggerURL, "Browser.close", nil)
+		cdpSendCommand(ctx, version.WebSocketDebuggerURL, "Browser.close", nil)
 	}
 }
 
 // cdpSendCommand sends a CDP command via WebSocket (fire-and-forget).
-func cdpSendCommand(wsURL string, method string, params map[string]any) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func cdpSendCommand(ctx context.Context, wsURL string, method string, params map[string]any) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
@@ -959,8 +959,8 @@ func cdpSendCommand(wsURL string, method string, params map[string]any) error {
 }
 
 // cdpSendCommandWithResult sends a CDP command and returns the result.
-func cdpSendCommandWithResult(wsURL string, method string, params map[string]any) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func cdpSendCommandWithResult(ctx context.Context, wsURL string, method string, params map[string]any) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
