@@ -202,7 +202,7 @@ var sections = []settingsSection{
 		name: "Disk",
 		fields: []fieldDef{
 			{"disk_warn_percent", "Warning threshold", fieldNumber, nil, "% disk usage (default: 90)", nil},
-			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage, pauses downloads (default: 95)", nil},
+			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage for a critical alert; downloads are not paused (default: 95)", nil},
 		},
 	},
 	{

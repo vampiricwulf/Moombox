@@ -302,7 +302,7 @@ When something fails, the system finds the best available fallback rather than s
 - **Expired cookies:** The application continues with unauthenticated access. Membership-only or age-restricted content becomes unavailable, but public content still works. The status bar shows the cookie state so the user knows.
 - **Authentication failure on one client:** The multi-client fallback chain tries the next Innertube client. Only if all clients fail does the job enter an error state.
 - **Network interruption:** Downloads pause and retry. Monitors continue their polling cycle. The application does not assume that a temporary network failure is permanent.
-- **Disk full:** Downloads pause and the status bar shows a disk warning. They do not crash or corrupt partially-written files.
+- **Disk filling up:** The status bar shows a disk warning past `disk_warn_percent` and a critical one past `disk_critical_percent`, and each crossing sends a notification (`disk_warning`, `disk_critical`). Nothing pauses on its own — the alerts exist so the operator can free space before writes start failing.
 
 ### Always Inform the User
 
