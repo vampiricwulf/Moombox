@@ -2592,7 +2592,7 @@ export class SettingsController {
       const tokens = await response.json();
 
       if (!tokens || tokens.length === 0) {
-        container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">No connected clients</span>';
+        container.innerHTML = '<span style="color: var(--sl-color-neutral-600);">No connected clients</span>';
         return;
       }
 

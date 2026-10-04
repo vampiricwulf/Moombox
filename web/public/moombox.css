@@ -759,7 +759,7 @@ sl-badge.status.cookies::part(base) {
     align-items: center;
     justify-content: center;
     padding: var(--sl-spacing-3x-large);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-align: center;
 }
 
@@ -1013,7 +1013,7 @@ body.batch-bar-active {
 }
 
 #check-countdown {
-    color: var(--sl-color-neutral-400);
+    color: var(--sl-color-neutral-700);
     font-family: var(--sl-font-mono);
     font-size: 0.7rem;
     white-space: nowrap;
@@ -1452,7 +1452,7 @@ sl-progress-bar {
 
 #import-dropzone p {
     margin: 0;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 #import-dropzone:hover {
@@ -1997,7 +1997,7 @@ sl-progress-bar {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-align: center;
 }
 
@@ -2577,7 +2577,7 @@ sl-progress-bar {
 
 .empty-state-subtext {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin: var(--sl-spacing-x-small) 0;
 }
 
@@ -2827,6 +2827,24 @@ html.sl-theme-light {
     --status-cookies: #c026d3;
 }
 
+/* The status-bar pills colour their text with the -500 step, which the dark
+   palette makes bright but the light palette makes pale: on its own 15-18%
+   tint the light theme's disk warning read at 1.7:1. The -800 step clears
+   4.5:1, in the light theme only. */
+html.sl-theme-light .disk-indicator-warn,
+html.sl-theme-light .indicator-warn {
+    color: var(--sl-color-warning-800);
+}
+
+html.sl-theme-light .disk-indicator-critical,
+html.sl-theme-light .indicator-error {
+    color: var(--sl-color-danger-800);
+}
+
+html.sl-theme-light .indicator-ok {
+    color: var(--sl-color-success-800);
+}
+
 /* ===== Mobile Touch Polish ===== */
 @media (max-width: 768px) {
     sl-button::part(base),
@@ -2945,7 +2963,7 @@ html.sl-theme-light {
 
 .stat-label {
     font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-700);
     margin-top: 2px;
 }
 
@@ -2985,7 +3003,7 @@ html.sl-theme-light {
     display: flex;
     justify-content: space-between;
     font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin-top: 4px;
 }
 
@@ -3025,7 +3043,7 @@ html.sl-theme-light {
 /* Version indicator. user-select: none — clicking the version opens the GitHub
    page (click to arm, click again to open), and a quick second click would
    otherwise text-select the "v2.7.0" label. */
-.version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-400); letter-spacing: -0.02em; user-select: none; }
+.version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-700); letter-spacing: -0.02em; user-select: none; }
 .version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
 .version-indicator.has-update:hover { text-decoration: underline; }
 #theme-toggle, #btn-logout { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
