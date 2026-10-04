@@ -209,6 +209,7 @@ func settingsTabWindow(prevStart, active, avail int) (start, end int) {
 // the footer is too narrow, so the keys particular to the field or section
 // stay on screen.
 var settingsGenericHints = []string{
+	"Shift+\u2193: Buttons",
 	"Shift+\u2190/\u2192: Section",
 	"\u2191/\u2193: Navigate",
 	"\u2191/\u2193/Tab: Navigate",
@@ -248,7 +249,9 @@ func (m *SettingsModel) renderHintText() string {
 			return "\u2190/\u2192: Switch button  \u2191: Back to fields  Enter: Activate"
 		}
 		field := sec.fields[m.fieldIndex]
-		hint := "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate"
+		// Shift+↓ is the only key that reaches [ Save & Return ] without
+		// leaving through Esc's prompt; unlisted, nobody found it.
+		hint := "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  Shift+\u2193: Buttons"
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			hint = "\u2190/\u2192: Toggle  " + hint
 		}
@@ -837,43 +840,13 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderSecurity draws the open password sub-editor. View calls it only while
+// one is open; the status is renderSecurityCompact, under the Network fields.
 func (m *SettingsModel) renderSecurity(w int) string {
-	switch m.secMode {
-	case securitySet:
-		return m.renderSecuritySet(w)
-	case securityRemove:
+	if m.secMode == securityRemove {
 		return m.renderSecurityRemove(w)
-	default:
-		return m.renderSecurityStatus(w)
 	}
-}
-
-func (m *SettingsModel) renderSecurityStatus(_ int) string {
-	var lines []string
-
-	// Password status
-	lines = append(lines, "")
-	if m.hasPassword() {
-		lines = append(lines, "  Password: "+lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("Set"))
-	} else {
-		lines = append(lines, "  Password: "+DimStyle.Render("Not set"))
-	}
-
-	lines = append(lines, "")
-
-	// Actions
-	actionLine := DimStyle.Render("  `: Set password")
-	if m.hasPassword() {
-		actionLine = DimStyle.Render("  `: Change password  ~: Remove password")
-	}
-	lines = append(lines, actionLine)
-
-	if m.secMessage != "" {
-		lines = append(lines, "")
-		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.secMessageColor).Render(m.secMessage))
-	}
-
-	return strings.Join(lines, "\n")
+	return m.renderSecuritySet(w)
 }
 
 // renderSecurityCompact renders a compact password status below Network fields.

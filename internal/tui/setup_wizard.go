@@ -108,7 +108,7 @@ type setupStepDef struct {
 	fields   []setupFieldDef
 }
 
-// Advanced setup steps — 8 sections matching settings.go
+// Advanced setup steps — nine, drawn from settings.go's sections
 var advancedSetupSteps = []setupStepDef{
 	{
 		title:    "Network",
@@ -389,8 +389,9 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 						Accessor(&MapAccessor{M: m.values, Key: f.key}),
 				)
 			case setupFieldNumber, setupFieldDecimal:
-				// The keystroke filter is per field type: a FlexDuration-backed
-				// field takes one decimal point, an int field does not.
+				// The validator is per field type: a FlexDuration-backed field
+				// takes one decimal point, an int field does not. huh runs it
+				// on Next/Submit/blur, not per keystroke.
 				validate := validateDigitsOnly
 				if f.ftype == setupFieldDecimal {
 					validate = validateDecimal
@@ -1186,7 +1187,8 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		return n
 	}
 	// vFloat is vNum for the two FlexDuration-backed fields. Empty (and
-	// unparseable, which validateDecimal already refuses at the keystroke)
+	// unparseable, which validateDecimal already refuses before the step
+	// can advance)
 	// means "leave the default alone", the same contract vNum has.
 	vFloat := func(key string) float64 {
 		s := v(key)

@@ -180,3 +180,19 @@ func TestSettingsFooterIsOneLineAtEightyColumns(t *testing.T) {
 	}
 	t.Fatalf("no footer line in:\n%s", view)
 }
+
+// TestFieldHintNamesTheButtonsKey: Shift+↓ is the one key that reaches
+// [ Save & Return ] from a field, and no hint or help line named it, so the
+// only discoverable way to save was Esc and its prompt. It is the first entry
+// dropped when the footer is narrow.
+func TestFieldHintNamesTheButtonsKey(t *testing.T) {
+	m := newHeaderTestSettings()
+	m.switchSection(sectionIndexByName(t, "Logs"))
+	hint := m.renderHintText()
+	if !strings.Contains(hint, "Shift+↓: Buttons") {
+		t.Errorf("field hint %q does not name Shift+↓", hint)
+	}
+	if fitted := fitSettingsHint(hint, lipgloss.Width(hint)-5); strings.Contains(fitted, "Buttons") {
+		t.Errorf("a narrow footer kept the Buttons hint over the field's own keys: %q", fitted)
+	}
+}
