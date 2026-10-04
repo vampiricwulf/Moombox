@@ -613,7 +613,7 @@ Both are IPv4 literals, and in Go `net.Listen("tcp", "0.0.0.0:774")` creates an 
 
 ### Port
 
-Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially, reusing the same host, so the fallback is IPv4-only too. The first available port is used, and the actual port is logged.
+Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially, reusing the same host, so the fallback is IPv4-only too. The first available port is used, and the actual port is logged. It is this run's port only: the config keeps the configured one, and the TUI and the yt-dlp plugin writer read the bound port from the server (`currentWebPort` in `cmd/moombox/routes_wiring.go`).
 
 ### Security Warning
 

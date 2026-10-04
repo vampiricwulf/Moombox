@@ -412,23 +412,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}()
 	}
 
-	// Expose the port the listener actually bound. It is not always the
-	// configured one: Start probes the next ten ports when the preferred one is
-	// in use (internal/web/server.go), and the TUI, the yt-dlp plugin writer and
-	// the update notification all have to say the real number.
-	//
-	// In memory only. The auto-pick write-back that used to live here was
-	// unreachable: it fired on `configuredPort == 0`, and validateOrNormalize
-	// rewrites 0 to the 774 default before anything binds
-	// (internal/config/config.go, TestNormalizeRewritesPortZero). A probed port
-	// is this run's accident rather than the user's setting, so persisting it
-	// would silently rewrite their config file.
-	if actualPort := webServer.ActualPort(); actualPort > 0 {
-		mu := s.configStore.RWMutex()
-		mu.Lock()
-		cfg.Network.Port = actualPort
-		mu.Unlock()
-	}
+	// The port the listener actually bound is not always the configured one:
+	// Start probes the next ten ports when the preferred one is in use
+	// (internal/web/server.go). Readers that need the real number ask
+	// s.currentWebPort (the TUI through SetWebPort, the yt-dlp plugin writer)
+	// instead of finding it in the config: this used to write it into
+	// cfg.Network.Port, which is the struct every later save encodes, so the
+	// first save after a probed boot made the probed port the setting.
 
 	// First-successful-boot milestone: the database opened (initServices)
 	// and the web-server bind resolved above — this binary has proven it

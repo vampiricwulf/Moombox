@@ -544,6 +544,9 @@ type App struct {
 
 	// Internal token for CSRF bypass on local API calls
 	internalToken string
+	// webPort reports the port the web server bound (SetWebPort); nil in
+	// tests, which fall back to the configured port.
+	webPort func() int
 
 	// Cached HTTP client for local API calls (avoids re-creating per request).
 	// cachedClientHTTPS records which HTTPSEnabled value the cache was built
@@ -1271,8 +1274,20 @@ func (a *App) updateTerminalTitle() {
 	}
 }
 
-// getPort returns the configured port or default 774.
+// SetWebPort supplies the port the web server actually bound, which can differ
+// from the configured one when that was in use at boot.
+func (a *App) SetWebPort(fn func() int) {
+	a.webPort = fn
+}
+
+// getPort returns the port the web server is serving on, else the configured
+// port, else the default 774.
 func (a *App) getPort() int {
+	if a.webPort != nil {
+		if port := a.webPort(); port > 0 {
+			return port
+		}
+	}
 	if a.configStore != nil {
 		var port int
 		a.configStore.Read(func(c *config.MoomboxConfig) {

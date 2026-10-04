@@ -157,6 +157,7 @@ func (s *runState) runTUI() {
 	app.SetConfigStore(s.configStore)
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())
+	app.SetWebPort(s.currentWebPort)
 	app.IsFirstRun = !s.configLoaded()
 
 	// Wire TUI callbacks

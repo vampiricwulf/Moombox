@@ -39,18 +39,14 @@ func safeCmd(fn func() tea.Msg) tea.Cmd {
 // apiBaseURL returns the correct scheme + host for local API calls.
 func (a *App) apiBaseURL() string {
 	scheme := "http"
-	port := 774
 	if a.configStore != nil {
 		a.configStore.Read(func(c *config.MoomboxConfig) {
 			if c.Network.HTTPSEnabled {
 				scheme = "https"
 			}
-			if c.Network.Port > 0 {
-				port = c.Network.Port
-			}
 		})
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
+	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
 }
 
 // internalTokenTransport injects the X-Internal-Token header on every request
