@@ -293,7 +293,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		needsRestart := isChanged && restartRequiredKeys[fd.key]
 
 		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w-4)))
+		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w)))
 
 		var infoParts []string
 		if fd.help != "" {
@@ -777,7 +777,7 @@ func (m *SettingsModel) renderSecurityStatus(_ int) string {
 // renderSecurityCompact renders a compact password status below Network fields.
 func (m *SettingsModel) renderSecurityCompact(w int) string {
 	var lines []string
-	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w-4)))
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w)))
 
 	status := DimStyle.Render("Not set")
 	if m.hasPassword() {
