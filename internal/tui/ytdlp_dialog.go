@@ -149,7 +149,7 @@ func (m *YtdlpDialogModel) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("I: Install / reinstall   R: Refresh   Esc: Close"))
+	b.WriteString(DimStyle.Render("I: Install / reinstall   R: Refresh   Esc/Q: Close"))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
