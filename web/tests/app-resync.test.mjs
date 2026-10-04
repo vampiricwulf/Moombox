@@ -119,3 +119,30 @@ test("a snapshot with the Archived panel open refetches it", { skip }, async () 
   assert.equal(h.http.matching("/api/jobs/archived").length, before + 1, "no archived refetch on the snapshot");
   assert.ok(!h.app.archivedJobs.some((j) => j.id === "GHOST"), "the deleted row is still in the archived list");
 });
+
+// The Player's picker lists Finished recordings, but it was rebuilt only on
+// tab activation, Open in Player and a ZIP import: with the Player tab open,
+// a recording that finished was not offered and a deleted one stayed listed,
+// playing from a source that now 404s. A status change to/from Finished and a
+// job_deleted rebuild it while that tab is open — and only then.
+//
+// Mutants: drop either _refreshPlayerPicker call; drop its open-tab gate (a
+// hidden tab rebuilds too).
+test("the Player picker follows recordings finishing and being deleted", { skip }, async () => {
+  const h = await harness.makeApp();
+  let rebuilds = 0;
+  h.app.player.loadPlayerJobList = async () => { rebuilds++; };
+  h.app.player.playerInitialized = true;
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [job("A", "Alpha"), job("B", "Beta")] } });
+  await h.flush();
+
+  h.app._activePanel = "tasks";
+  h.app.handleMessage({ type: "job_update", payload: { ...job("A", "Alpha"), status: "Finished", filename: "a.mp4" } });
+  assert.equal(rebuilds, 0, "a hidden Player tab rebuilt its picker");
+
+  h.app._activePanel = "player";
+  h.app.handleMessage({ type: "job_update", payload: { ...job("B", "Beta"), status: "Finished", filename: "b.mp4" } });
+  assert.equal(rebuilds, 1, "a recording that finished was not offered");
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "B" } });
+  assert.equal(rebuilds, 2, "a deleted recording stayed in the picker");
+});

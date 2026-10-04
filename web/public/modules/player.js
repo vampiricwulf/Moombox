@@ -985,8 +985,10 @@ export class PlayerController {
   /**
    * Rebuild the video picker from the live and archived job lists.
    *
-   * Two calls overlapping is normal — a WebSocket job update lands while a
-   * manual refresh is still in flight — and each one awaits three times. A
+   * Two calls overlapping is normal — a WebSocket job update (a recording
+   * finishing, or a job deleted, while the Player tab is open:
+   * MoomboxApp._refreshPlayerPicker) lands while a manual refresh is still in
+   * flight — and each one awaits three times. A
    * generation token makes the NEWEST call the only one that writes: every
    * await is followed by a bail, so a superseded rebuild leaves the option list
    * and the selection alone instead of restoring a value its own stale list

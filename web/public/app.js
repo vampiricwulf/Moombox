@@ -1095,6 +1095,18 @@ export class MoomboxApp {
     statusEl.appendChild(label);
   }
 
+  /**
+   * Rebuild the Player tab's video picker when that tab is open. It used to
+   * refresh only on tab activation, Open in Player and a ZIP import, so with
+   * the tab open a recording that finished was not offered and a deleted one
+   * stayed listed. A hidden Player tab rebuilds on activation as before.
+   */
+  _refreshPlayerPicker() {
+    if (this._activePanel === "player" && this.player?.playerInitialized) {
+      this.player.loadPlayerJobList();
+    }
+  }
+
   handleMessage(message) {
     const p = message.payload;
     switch (message.type) {
@@ -1205,6 +1217,9 @@ export class MoomboxApp {
           // Status change affects sort order — do full re-render
           if (oldStatus !== updatedJob.status) {
             this.renderJobs();
+            // The picker lists Finished recordings: one that just finished
+            // muxing (or left Finished) changes what it should offer.
+            if (oldStatus === "Finished" || updatedJob.status === "Finished") this._refreshPlayerPicker();
             // A status change (esp. → Finished) can cross the archive
             // threshold immediately (hide_finished_age_days = 0). Progress
             // ticks can't — jobs age by TIME, which the 60s sweep interval
@@ -1336,6 +1351,10 @@ export class MoomboxApp {
         // handler no longer leaves a stale "Cancelled" row visible after delete.
         const deletedId = p?.id;
         if (!deletedId) break;
+        // A deleted recording must leave the Player's picker (and stop
+        // playing from a source that now 404s); loadPlayerJobList clears a
+        // selection that vanished.
+        this._refreshPlayerPicker();
         const deletedIdx = this.jobs.findIndex(j => j.id === deletedId);
         if (deletedIdx !== -1) {
           this.jobs.splice(deletedIdx, 1);
