@@ -92,7 +92,7 @@ SIGNING_KEY=<hex-encoded-private-key> go run ./cmd/sign Moombox.exe
 To generate a new key pair (for setting up a fresh signing chain):
 ```bash
 go run ./cmd/sign -genkey -out keys.txt
-# Reads keys.txt, prints the public key, reminds you to delete the file
+# Writes keys.txt (mode 0600), prints the public key and where the private key goes
 ```
 
 ## Tests

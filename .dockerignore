@@ -29,6 +29,10 @@ bgutil-sidecar/dist/
 bgutil-sidecar/node_modules/
 bgutil-sidecar/vendor/ejs.bundle.js
 
+# The frontend test harness's dependencies (`npm ci` in web/tests): nothing
+# in the image uses them, and copying them invalidated the source layer.
+web/tests/node_modules/
+
 # Embed blobs are regenerated inside the image (fetch-node + build.mjs);
 # excluding local copies keeps the build reproducible regardless of what a
 # dev checkout happens to contain. version.txt stays (committed).

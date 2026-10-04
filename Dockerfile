@@ -47,8 +47,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Fetch the pinned embedded Node binaries before copying the full source,
 # so the ~150 MB of nodejs.org downloads stay in a layer that only
-# invalidates when the pin (tools/fetch-node) or go.mod changes.
-COPY tools/ tools/
+# invalidates when the pin (tools/fetch-node) or go.mod changes. Only that
+# tool: copying all of tools/ re-ran the download on any edit to the others.
+COPY tools/fetch-node/ tools/fetch-node/
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go run ./tools/fetch-node

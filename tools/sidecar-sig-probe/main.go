@@ -115,7 +115,10 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	cacheDir, _ := os.MkdirTemp("", "moombox-sig-probe-*")
+	cacheDir, err := os.MkdirTemp("", "moombox-sig-probe-*")
+	if err != nil {
+		fail("create sidecar cache dir: %v", err)
+	}
 	defer os.RemoveAll(cacheDir)
 	sc := sidecar.New(sidecar.Config{
 		CacheDir:       cacheDir,
@@ -166,7 +169,16 @@ func fetchPlayerJS(playerURL string) string {
 		fail("fetch player JS: %v", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	// A 404 or a consent/throttle page handed to the sidecar as "player JS"
+	// would read as the ejs/player-shape mismatch this probe exists to tell
+	// apart from sidecar trouble.
+	if resp.StatusCode != http.StatusOK {
+		fail("fetch player JS: HTTP %d from %s", resp.StatusCode, playerURL)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fail("read player JS: %v", err)
+	}
 	return string(body)
 }
 
