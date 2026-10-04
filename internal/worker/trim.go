@@ -250,12 +250,16 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 		// it stays a separate post — but the footer's platform, the author
 		// line and the dashboard deep link are the job's either way, and the
 		// deep link needs JobID and Author together.
+		// The title is job-supplied text: escaped here as every builder and
+		// the worker's own hand-built sends escape it, so a "*" or "_" in a
+		// stream title cannot italicise the rest of the embed.
 		f := NotifyFacts(job)
+		title := notifications.EscapeMarkdown(job.Title)
 		ts.notifier.Send("Trim Deleted",
-			fmt.Sprintf("Trim deleted for: %s", job.Title),
+			fmt.Sprintf("Trim deleted for: %s", title),
 			notifications.TypeInfo,
 			[]notifications.Field{
-				{Name: "Source Video", Value: job.Title, Inline: false},
+				{Name: "Source Video", Value: title, Inline: false},
 				{Name: "Time Range", Value: timeRange, Inline: true},
 				{Name: "Duration", Value: durStr, Inline: true},
 			},

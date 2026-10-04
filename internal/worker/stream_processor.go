@@ -591,12 +591,15 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 		// Author both — would never apply. NotifyFacts also supplies the
 		// YouTube watch-URL fallback for a row whose url is still blank,
 		// which a freshly discovered upcoming stream's often is.
+		// Title and channel are job-supplied text, escaped as the builders
+		// escape them; Starts At carries <t:…> markup on purpose and must
+		// NOT be (see EscapeMarkdown's doc).
 		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Start Time Confirmed",
-			fmt.Sprintf("Scheduled: %s", job.Title),
+			fmt.Sprintf("Scheduled: %s", notifications.EscapeMarkdown(job.Title)),
 			notifications.TypeInfo,
 			[]notifications.Field{
-				{Name: "Channel", Value: job.ChannelName, Inline: true},
+				{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
 				{Name: "Starts At", Value: startsAt, Inline: true},
 			},
 			notifications.SendOptions{
@@ -622,10 +625,10 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 		// two are the same job's story.
 		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Schedule Changed",
-			fmt.Sprintf("Rescheduled: %s", job.Title),
+			fmt.Sprintf("Rescheduled: %s", notifications.EscapeMarkdown(job.Title)),
 			notifications.TypeInfo,
 			[]notifications.Field{
-				{Name: "Channel", Value: job.ChannelName, Inline: true},
+				{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
 				{Name: "Old Time", Value: fmtTime(oldStartTime), Inline: true},
 				{Name: "New Time", Value: fmtTime(info.ScheduledStartTime), Inline: true},
 			},

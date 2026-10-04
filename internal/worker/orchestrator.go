@@ -688,11 +688,14 @@ func (o *DownloadOrchestrator) sendTrimFailed(job *database.Job, trimErr error) 
 		return
 	}
 	f := NotifyFacts(job)
+	// Title and channel are job-supplied text, escaped as every builder in
+	// internal/notifications and the worker's own Job Failed send escape
+	// them; the Error field below already was.
 	o.notifier.Send("Trim Failed",
-		fmt.Sprintf("Failed to create trim for \"%s\"", job.Title),
+		fmt.Sprintf("Failed to create trim for \"%s\"", notifications.EscapeMarkdown(job.Title)),
 		notifications.TypeError,
 		[]notifications.Field{
-			{Name: "Channel", Value: job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
 			{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
 			{Name: "Error", Value: notifications.EscapeMarkdown(trimErr.Error())},
 		},
