@@ -120,6 +120,9 @@ globalThis.__makeApp = function (jobs, parkedBaseline) {
     // unconditionally, fire-and-forget, once the badge/render work above is
     // done. A no-op here is correct — this harness never sets location.hash.
     _consumeJobHash() {},
+    // job_update (to or from Finished) and job_deleted refresh the Player's
+    // recording picker; a no-op here.
+    _refreshPlayerPicker() {},
     settings: { refreshBackfillBadges() {} },
     stats: { updateActiveIndicator() {}, updateDiskIndicator() {} },
     // The Arc I controllers handleMessage reaches: the log panel, the details
