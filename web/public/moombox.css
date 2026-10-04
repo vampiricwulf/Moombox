@@ -2681,6 +2681,13 @@ sl-progress-bar {
 
 .keyboard-shortcut-grid kbd {
     display: inline-block;
+/* Under the dialog's h2 title. They were h4s, skipping a level; this keeps
+   the h4 size they had. */
+#keyboard-help-dialog h3 {
+    margin: 0 0 var(--sl-spacing-small);
+    font-size: 1em;
+}
+
     background-color: var(--sl-color-neutral-200);
     border: 1px solid var(--sl-color-neutral-300);
     border-radius: var(--sl-border-radius-small);
