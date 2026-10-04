@@ -567,10 +567,12 @@ type App struct {
 	// asidesJobID / asidesCache memoise ONE job's JobAsides answer — the
 	// selected one. updateSelectedJob runs on every cursor move and on every
 	// JobsUpdateMsg, so an unmemoised probe would read the disk once per
-	// database write. Invalidated by invalidateAsides when a recovery is
-	// dispatched for that job.
-	asidesJobID string
-	asidesCache AsideSummary
+	// database write. Keyed on the row's updated_at too (see asidesFor), and
+	// invalidated by invalidateAsides when a recovery is dispatched for that
+	// job or while it is active.
+	asidesJobID     string
+	asidesUpdatedAt string // the row version the memo was probed for
+	asidesCache     AsideSummary
 
 	// Callbacks for actions
 	OnAddVideo  func(url string)

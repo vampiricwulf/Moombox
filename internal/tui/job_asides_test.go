@@ -301,3 +301,45 @@ func TestOrphanOverlayCountsAsides(t *testing.T) {
 // errTestRefused stands in for any of the worker's typed refusals; the TUI
 // only ever renders the message.
 var errTestRefused = errors.New("refused by the worker")
+
+// TestAsidesMemoFollowsTheJobsOwnTransitions: the memo was keyed on the job ID
+// alone, and an active job answered empty WITHOUT touching it, so a job that
+// was resumed, set a recording aside and failed again still showed the "none"
+// probed before the resume — while A S, which probes afresh, offered the
+// recovery the panel said was not there.
+//
+// Mutants: key the memo on the ID only (the second terminal visit is served
+// from the memo); stop dropping it while the job is active (same).
+func TestAsidesMemoFollowsTheJobsOwnTransitions(t *testing.T) {
+	a := NewApp()
+	asides := 0
+	probes := 0
+	a.JobAsides = func(id string) AsideSummary {
+		probes++
+		s := AsideSummary{}
+		for range asides {
+			s.Asides = append(s.Asides, AsideEntry{Timestamp: id, Size: 1})
+		}
+		return s
+	}
+
+	job := &database.Job{ID: "x", Title: "t", Status: database.StatusError, Platform: "youtube", UpdatedAt: "2026-10-04T10:00:00Z"}
+	if got := a.asidesFor(job); len(got.Asides) != 0 {
+		t.Fatalf("premise lost: %+v", got)
+	}
+	// Resumed: the panel refreshes while it downloads.
+	job.Status, job.UpdatedAt = database.StatusDownloading, "2026-10-04T10:01:00Z"
+	a.asidesFor(job)
+	// The engine sets a recording aside; the job fails again.
+	asides = 1
+	job.Status, job.UpdatedAt = database.StatusError, "2026-10-04T10:05:00Z"
+	if got := a.asidesFor(job); len(got.Asides) != 1 {
+		t.Errorf("after resume → aside → Error the panel shows %d asides, want 1 (probes=%d)", len(got.Asides), probes)
+	}
+	// And an unchanged row is still served from the memo.
+	before := probes
+	a.asidesFor(job)
+	if probes != before {
+		t.Errorf("an unchanged row re-probed (%d → %d)", before, probes)
+	}
+}

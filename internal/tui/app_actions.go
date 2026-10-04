@@ -743,16 +743,27 @@ func JobIsActive(s database.JobStatus) bool {
 }
 
 // asidesFor returns the selected job's set-aside summary, probing the disk at
-// most once per job ID. An active job answers empty without a probe: its
-// staging dir is mid-write, and nothing in it is recoverable yet.
+// most once per version of the job's row. An active job answers empty without
+// a probe: its staging dir is mid-write, and nothing in it is recoverable yet.
+//
+// Keyed on updated_at as well as the ID, and dropped while the job is active:
+// on the ID alone the memo outlived the job's own transitions — a job
+// resumed, set a recording aside and failed again kept showing the "none"
+// probed before the resume, while A S (which probes afresh) offered the
+// recovery the panel said was not there.
 func (a *App) asidesFor(job *database.Job) AsideSummary {
-	if job == nil || a.JobAsides == nil || JobIsActive(job.Status) {
+	if job == nil || a.JobAsides == nil {
 		return AsideSummary{}
 	}
-	if a.asidesJobID == job.ID {
+	if JobIsActive(job.Status) {
+		a.invalidateAsides(job.ID)
+		return AsideSummary{}
+	}
+	if a.asidesJobID == job.ID && a.asidesUpdatedAt == job.UpdatedAt {
 		return a.asidesCache
 	}
 	a.asidesJobID = job.ID
+	a.asidesUpdatedAt = job.UpdatedAt
 	a.asidesCache = a.JobAsides(job.ID)
 	return a.asidesCache
 }
@@ -763,6 +774,7 @@ func (a *App) asidesFor(job *database.Job) AsideSummary {
 func (a *App) invalidateAsides(jobID string) {
 	if a.asidesJobID == jobID {
 		a.asidesJobID = ""
+		a.asidesUpdatedAt = ""
 		a.asidesCache = AsideSummary{}
 	}
 }
