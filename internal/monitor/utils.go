@@ -642,12 +642,16 @@ func matchTermNormalized(normText, rawText, pattern string) bool {
 	// Check for /pattern/flags syntax
 	if isRegexPattern(pattern) {
 		inner, flags := parseRegexPattern(pattern)
+		flags = goRegexFlags(flags)
 		if !strings.Contains(flags, "i") {
 			flags += "i"
 		}
 		re, err := getCachedRegex("(?" + flags + ")" + normalizePattern(inner))
 		if err != nil {
-			return fuzzyMatch(rawText, pattern)
+			// Substring-match the BODY of the term, not the raw "/.../flags"
+			// text: the delimiters and flags are syntax, not characters a
+			// title could contain, so the raw term could never match.
+			return fuzzyMatch(rawText, inner)
 		}
 		return re.MatchString(normText)
 	}
@@ -661,6 +665,25 @@ func matchTermNormalized(normText, rawText, pattern string) bool {
 		return fuzzyMatch(rawText, pattern)
 	}
 	return re.MatchString(normText)
+}
+
+// goRegexFlags maps a /pattern/flags suffix onto what Go's (?flags) group
+// accepts. The terms syntax is JavaScript's (inherited from the TypeScript
+// archiver), and four of its flags have no Go spelling but also no bearing on
+// a boolean "does the text match": g (every match) and y (sticky) only shape
+// iteration, d only adds match indices, and u (Unicode) is the only mode a Go
+// regexp has. Left in, "(?gi)karaoke" failed to compile and the term silently
+// never matched anything. Everything else — Go's own i/m/s, or a letter
+// neither engine knows — passes through, so a flag Go rejects still fails the
+// compile and takes the substring fallback rather than being reinterpreted.
+func goRegexFlags(flags string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case 'g', 'y', 'u', 'd':
+			return -1
+		}
+		return r
+	}, flags)
 }
 
 // isRegexPattern checks if a string looks like a regex pattern (/pattern/ or /pattern/flags).

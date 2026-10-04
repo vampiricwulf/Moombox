@@ -132,7 +132,7 @@ func TestMatchTerm(t *testing.T) {
 		{"regex anchored match", "stream", "/^stream$/", true},
 		{"(?i) prefix pattern", "HELLO WORLD", "(?i)hello", true},
 		{"invalid regex falls back to fuzzy", "hello [world", "[world", true},
-		{"invalid regex in /pattern/ falls back to fuzzy", "hello [world", "/[/", false},
+		{"invalid regex in /pattern/ falls back to fuzzy on the body", "hello [world", "/[/", true},
 		{"dot-star regex", "live stream 2024", "/live.*2024/", true},
 	}
 
@@ -143,6 +143,67 @@ func TestMatchTerm(t *testing.T) {
 				t.Errorf("matchTerm(%q, %q) = %v, expected %v", tt.text, tt.pattern, got, tt.expect)
 			}
 		})
+	}
+}
+
+// TestMatchTermJSOnlyFlags: the terms syntax is JavaScript's, and a term
+// written as /karaoke/g compiled to "(?gi)karaoke", which Go rejects — and the
+// fallback then substring-matched the RAW term, delimiters and flags included,
+// so the term silently never matched a title. The JS-only flags are dropped
+// before compiling; a body that still fails to compile falls back to a
+// substring match of the body alone.
+//
+// Mutants this kills:
+//   - flags passed through untouched   → the g/y/u/d rows all return false
+//   - every flag dropped               → the m and s rows return false
+//   - the fallback on the raw term     → the "falls back" rows return false
+func TestMatchTermJSOnlyFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		pattern string
+		expect  bool
+	}{
+		{"g flag is dropped", "Karaoke Night", "/karaoke/g", true},
+		{"gi flags", "Karaoke Night", "/karaoke/gi", true},
+		{"y flag is dropped", "Karaoke Night", "/karaoke/y", true},
+		{"u flag is dropped", "café stream", "/caf. stream/u", true},
+		{"d flag is dropped", "Karaoke Night", "/night$/d", true},
+		{"g flag does not loosen the match", "Minecraft", "/karaoke/g", false},
+		{"m flag passes through to Go", "line one\nkaraoke", "/^karaoke$/m", true},
+		{"s flag passes through to Go", "line one\nkaraoke", "/one.karaoke/s", true},
+		{"a flag Go rejects falls back to the body", "karaoke night", "/karaoke/x", true},
+		{"an invalid body falls back to the body, not the raw term", "set [a] stream", "/[a/", true},
+		{"the fallback still has to match", "hello world", "/[/", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchTerm(tt.text, tt.pattern)
+			if got != tt.expect {
+				t.Errorf("matchTerm(%q, %q) = %v, expected %v", tt.text, tt.pattern, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestGoRegexFlags(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"i", "i"},
+		{"gi", "i"},
+		{"g", ""},
+		{"gimsuyd", "ims"},
+		{"x", "x"},
+	}
+
+	for _, tt := range tests {
+		if got := goRegexFlags(tt.in); got != tt.want {
+			t.Errorf("goRegexFlags(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 
