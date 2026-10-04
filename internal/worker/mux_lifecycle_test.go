@@ -490,6 +490,44 @@ func TestRestartMuxCancelledByStopLeavesTheRowResumable(t *testing.T) {
 	}
 }
 
+// TestOffQueueMuxHonoursTheOperatorsCancel: both UIs offer Cancel on a
+// Muxing row and the route writes Cancelled, but queue.Cancel only reaches
+// jobs the queue dequeued — the off-queue mux (/mux, A M, the boot re-mux)
+// ran on regardless, wrote Finished over the Cancelled row and announced
+// "Download Finished" after "Job Cancelled". The mux now listens for the
+// row's Cancelled itself. Driven through the download-slot wait so the
+// cancel lands deterministically before FFmpeg starts.
+//
+// Mutant: drop the OnJobUpdate listener and the row check from MuxJob —
+// once the slot frees, the mux runs and the row reads Finished.
+func TestOffQueueMuxHonoursTheOperatorsCancel(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	w.SetParallelDownloads(1)
+
+	staging, _ := muxFixtureJob(t, w, db, "j-usercancel")
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 90)
+
+	if !w.queue.AcquireDownloadSlot(context.Background(), "holder") {
+		t.Fatal("could not take the only download slot")
+	}
+	if err := w.MuxJob("j-usercancel"); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	// What the cancel route writes for a Muxing row the queue does not know.
+	db.UpdateJobFields("j-usercancel", map[string]any{"status": database.StatusCancelled})
+	w.queue.ReleaseDownloadSlot("holder")
+	w.Stop()
+
+	fresh, _ := db.GetJob("j-usercancel")
+	if fresh == nil || fresh.Status != database.StatusCancelled {
+		t.Fatalf("job after a cancelled off-queue mux = %v, want Cancelled (error=%q)", statusOf(fresh), errorOf(fresh))
+	}
+	if _, err := os.Stat(filepath.Join(staging, "video.mp4")); err != nil {
+		t.Errorf("staging media was removed by a cancelled mux: %v", err)
+	}
+}
+
 // TestIsStagedRestartPath pins the engine predicate package worker keys on: a
 // recording the no-truncate guard set aside is <file>.restart-<unix ts>, and
 // its resume sidecar shares that stem.

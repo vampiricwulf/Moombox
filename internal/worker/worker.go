@@ -1939,6 +1939,34 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 			}
 		}()
 
+		// Owner decision O-E: the orchestrator's mux root, never
+		// context.Background() — a Stop reaches this FFmpeg instead of leaving
+		// it writing into a staging dir the restarted child re-muxes with -y.
+		root := w.orchestrator.muxRoot()
+
+		// The operator's Cancel reaches this FFmpeg too. Both UIs offer Cancel
+		// on a Muxing row and the route writes Cancelled, but queue.Cancel
+		// only knows the jobs it dequeued — this one it never saw — so the
+		// mux ran on, wrote Finished over the Cancelled row and sent a
+		// "Download Finished" embed after the "Job Cancelled" one. Listened
+		// for the way ExecuteWithChat listens, and a deleted row stops it the
+		// way processJob's listener does. Subscribed BEFORE the row is read,
+		// so a cancel that lands first is seen in the row instead.
+		ctx, cancelMux := context.WithCancel(root)
+		defer cancelMux()
+		unsubscribe := w.db.OnJobUpdate(func(updated *database.Job) {
+			if updated.ID == jobID && updated.Status == database.StatusCancelled {
+				cancelMux()
+			}
+		})
+		defer unsubscribe()
+		unsubscribeDel := w.db.OnJobDeleted(func(deleted *database.JobDeleted) {
+			if deleted.JobID == jobID {
+				cancelMux()
+			}
+		})
+		defer unsubscribeDel()
+
 		job, err := w.db.GetJob(jobID)
 		if err != nil {
 			w.logger.Error("MuxJob: get job failed", "jobID", jobID, "err", err)
@@ -1954,12 +1982,11 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 			w.logger.Debug("MuxJob: job vanished before muxing", "jobID", jobID)
 			return
 		}
+		if job.Status == database.StatusCancelled {
+			cancelMux()
+		}
 
 		jobCtx := w.buildJobContext(job)
-		// Owner decision O-E: the orchestrator's mux root, never
-		// context.Background() — a Stop reaches this FFmpeg instead of leaving
-		// it writing into a staging dir the restarted child re-muxes with -y.
-		ctx := w.orchestrator.muxRoot()
 
 		// This mux takes the same download slot a queued job takes: a boot
 		// that finds N interrupted Muxing rows would otherwise start N
@@ -1967,12 +1994,27 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		// The wait ends on the mux root's cancellation, so a shutdown does not
 		// sit here holding the process open.
 		if !w.queue.AcquireDownloadSlot(ctx, jobID) {
+			if root.Err() == nil {
+				w.logger.Info("MuxJob: cancelled while waiting for a mux slot; staging is kept", "jobID", jobID)
+				return
+			}
 			w.logger.Info("MuxJob: shutdown while waiting for a mux slot; the row stays Muxing for the next start", "jobID", jobID)
 			return
 		}
 		defer w.queue.ReleaseDownloadSlot(jobID)
 
 		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			if ctx.Err() != nil && root.Err() == nil {
+				// Cancelled (or deleted) by the operator; staging stays for a
+				// later Mux or Resume. The row says Cancelled unless the mux's
+				// own Muxing write landed just after the route's — re-assert
+				// it so the row cannot be left Muxing with nothing running.
+				w.logger.Info("MuxJob: cancelled; staging is kept", "jobID", jobID)
+				if fresh, _ := w.db.GetJob(jobID); fresh != nil && fresh.Status != database.StatusCancelled {
+					w.db.UpdateJobFields(jobID, map[string]any{"status": database.StatusCancelled})
+				}
+				return
+			}
 			if ctx.Err() != nil {
 				// Cancelled by Stop, not a failure: leave the row Muxing with
 				// its staging intact so the restarted child re-muxes it
