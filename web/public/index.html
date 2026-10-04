@@ -909,8 +909,8 @@
                                 type="number"
                                 min="1"
                                 label="Parallel Downloads"
-                                placeholder="2"
-                                help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."
+                                placeholder="10"
+                                help-text="Peak concurrent VOD downloads across all channels (default: 10). Live streams always start immediately and never wait on this. Higher values use more CPU and network."
                             ></sl-input>
                             <sl-input
                                 id="cfg-segment-workers"
@@ -1863,7 +1863,7 @@
                     </sl-select>
                     <sl-input id="setup-max-resolution" type="number" label="Custom Max Resolution" placeholder="2160" min="0" help-text="Shorter edge in pixels; 0 = unbounded." style="display: none"></sl-input>
                     <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
-                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1" help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."></sl-input>
+                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="10" min="1" help-text="Peak concurrent VOD downloads across all channels (default: 10). Live streams always start immediately and never wait on this. Higher values use more CPU and network."></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
                     <sl-details summary="Advanced retry settings">
                         <sl-input id="setup-maximum-timeout" type="number" label="YouTube Maximum Timeout (seconds)" placeholder="600" min="30" help-text="How long to keep retrying a stalled YouTube livestream before finalizing, even if YouTube still says live (min 30, no max). Very large values risk account consequences."></sl-input>

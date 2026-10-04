@@ -154,7 +154,7 @@ var sections = []settingsSection{
 			{"archive_slots", "Archive slots", fieldNumber, nil, "backlog downloads per channel at once; new content never waits (default: 3)", nil},
 			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes; fractions allowed, e.g. 0.5 (default: 10)", nil},
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic", nil},
-			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds, 5-3600 or empty for dynamic (default: 15)", nil},
+			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds, 5-3600; empty = default 15 (±10% jitter always applied)", nil},
 			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)", nil},
 			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle; fractions allowed (default: 0, no max)", nil},
 			{"membership_discovery", "Membership discovery", fieldToggle, nil, "scan each YouTube channel's members-only tab for members-only streams (+ their VODs for channels that archive uploads & premieres); needs YouTube cookies (default: on)", nil},
@@ -172,7 +172,7 @@ var sections = []settingsSection{
 				},
 			},
 			{"max_video_resolution", "Max resolution", fieldNumber, resolutionPresets, "shorter edge in pixels; 0 = unbounded (e.g. 1080, 2160); ←/→ step the presets", resolutionPreview},
-			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "2-4 recommended, higher uses more CPU/network", nil},
+			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "VOD downloads at once across all channels; live streams never wait on this (default: 10)", nil},
 			{"segment_workers", "Segment workers", fieldNumber, nil, "segments fetched at once within one download, not the number of concurrent downloads (default: 12, min 1, no max; above 16 raises bot-detection risk)", nil},
 			{"reorder_buffer_mb", "Reorder buffer per job", fieldNumber, nil, "MB of out-of-order segments one download may hold in RAM; 0 = unbounded (default: 1024; 256 on arm64)", nil},
 			{"reorder_budget_mb", "Reorder budget total", fieldNumber, nil, "MB every download's reorder buffer may hold between them; 0 = unbounded (default: 4096; 1024 on arm64)", nil},
@@ -811,7 +811,7 @@ func (m *SettingsModel) applyValues() {
 		min, max int
 	}{
 		{"decapi_check_interval", "DECAPI check interval must be 15-3600 seconds (or empty for dynamic)", 15, 3600},
-		{"twitch_check_interval", "Twitch check interval must be 5-3600 seconds (or empty for dynamic)", 5, 3600},
+		{"twitch_check_interval", "Twitch check interval must be 5-3600 seconds (or empty for the default 15)", 5, 3600},
 	} {
 		v := strings.TrimSpace(m.values[c.key])
 		if v == "" {

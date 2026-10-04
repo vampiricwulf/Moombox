@@ -157,7 +157,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"maxRes", "Max resolution", "2160", "Shorter edge in pixels; 0 = unbounded (always the largest)", setupFieldNumber, nil},
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
-			{"numParallel", "Parallel downloads", "2", "2-4 recommended, higher uses more CPU/network", setupFieldNumber, nil},
+			{"numParallel", "Parallel downloads", "10", "VOD downloads at once across all channels; live streams never wait on this (default: 10)", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
 			{"maximumTimeout", "YouTube max timeout (sec)", "600", "Seconds to keep retrying a stalled YouTube livestream before finalizing even if YouTube still says live", setupFieldNumber, nil},
 		},
