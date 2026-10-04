@@ -12,8 +12,8 @@ import (
 
 // FlexDuration represents a time value that can be specified as either a plain
 // number (in a unit determined by context) or as a duration string like "10m", "7d".
-// When used as feed_check_interval, the numeric value is in minutes.
-// When used as hide_finished_age_days, the numeric value is in days.
+// Each field's unit is listed in flexDurationFields: feed_check_interval is in
+// minutes, hide_finished_age_days in days, probe_cooldown in seconds.
 type FlexDuration struct {
 	Value float64
 }
@@ -31,7 +31,8 @@ var durationMultipliers = map[string]float64{
 }
 
 // ParseFlexDuration parses a value that can be a number or a duration string.
-// The unit parameter specifies what the numeric value represents ("minutes" or "days").
+// The unit parameter specifies what the numeric value represents ("seconds",
+// "minutes" or "days").
 // The result is always stored as the numeric value in its natural unit.
 // Negative values are rejected and the default is used instead.
 func ParseFlexDuration(value any, unit string, defaultValue float64) FlexDuration {
@@ -88,6 +89,8 @@ func parseStringDuration(s string, unit string, defaultValue float64) FlexDurati
 
 	// Convert from milliseconds to the target unit
 	switch unit {
+	case "seconds":
+		return FlexDuration{Value: ms / 1_000}
 	case "minutes":
 		return FlexDuration{Value: ms / 60_000}
 	case "days":
@@ -131,8 +134,11 @@ func (d FlexDuration) AsDuration(base time.Duration) time.Duration {
 
 // UnmarshalTOML implements the TOML unmarshaler interface.
 // For plain numbers, the value is stored as-is (caller knows the unit context).
-// For duration strings (e.g. "7d", "30m"), the value is stored in the string's unit
-// using a best-effort heuristic: if the suffix is d/w, store as days; else as minutes.
+// For duration strings (e.g. "7d", "30m") the unit is not known here, so the
+// value stored is provisional — days for a d/w suffix, else minutes — and
+// loadFromFile replaces it via resolveFlexDurationStrings, which re-reads the
+// string in its field's own unit. A config field decoded some other way keeps
+// the guess.
 // Also handles map input from TOML tables (e.g. when a previously-saved config wrote
 // FlexDuration as {Value = 5.0}).
 func (d *FlexDuration) UnmarshalTOML(data any) error {
@@ -178,6 +184,42 @@ func (d *FlexDuration) UnmarshalTOML(data any) error {
 		return fmt.Errorf("unsupported type for FlexDuration: %T", data)
 	}
 	return nil
+}
+
+// flexDurationFields lists every FlexDuration in a config file with the unit
+// its plain numbers are in. TestFlexDurationFieldsListsEveryField fails when a
+// FlexDuration field is added to the config without an entry here.
+var flexDurationFields = []struct {
+	section, key, unit string
+	field              func(*MoomboxConfig) *FlexDuration
+}{
+	{"monitors", "feed_check_interval", "minutes", func(c *MoomboxConfig) *FlexDuration { return &c.Monitors.FeedCheckInterval }},
+	{"monitors", "hide_finished_age_days", "days", func(c *MoomboxConfig) *FlexDuration { return &c.Monitors.HideFinishedAgeDays }},
+	{"monitors", "probe_cooldown", "seconds", func(c *MoomboxConfig) *FlexDuration { return &c.Monitors.ProbeCooldown }},
+	{"downloader", "interruption_timeout", "minutes", func(c *MoomboxConfig) *FlexDuration { return &c.Downloader.InterruptionTimeout }},
+	{"downloader", "incomplete_staging_expiry_days", "days", func(c *MoomboxConfig) *FlexDuration { return &c.Downloader.IncompleteStagingExpiryDays }},
+	{"cookies", "refresh_interval", "minutes", func(c *MoomboxConfig) *FlexDuration { return &c.Cookies.RefreshInterval }},
+}
+
+// resolveFlexDurationStrings re-reads every duration string in raw (the same
+// file decoded to a map) in its field's own unit. UnmarshalTOML had to guess,
+// and the guess was wrong whenever the suffix's unit differed from the field's:
+// probe_cooldown = "30s" decoded to half a SECOND (0.5, read as seconds), and
+// refresh_interval = "1d" to one minute.
+func resolveFlexDurationStrings(cfg *MoomboxConfig, raw map[string]any) {
+	for _, f := range flexDurationFields {
+		section, _ := raw[f.section].(map[string]any)
+		v := section[f.key]
+		if table, ok := v.(map[string]any); ok {
+			v = table["Value"]
+		}
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		fd := f.field(cfg)
+		*fd = ParseFlexDuration(s, f.unit, fd.Value)
+	}
 }
 
 // MarshalTOML serializes FlexDuration as a plain number in TOML output,

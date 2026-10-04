@@ -272,6 +272,7 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	if _, err := toml.Decode(string(data), &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse config %s for migration: %w", path, err)
 	}
+	resolveFlexDurationStrings(cfg, raw)
 	migrateOldFormat(cfg, raw)
 
 	// Auto-populate sections introduced after this config file was

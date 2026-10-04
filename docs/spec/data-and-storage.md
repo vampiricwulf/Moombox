@@ -14,7 +14,7 @@ These are hard rules. An AI assisting with Moombox development must follow them 
 - **`JobStatus` is `type JobStatus string`.** Status values are string constants, not integers or enums. Timestamps are ISO 8601 / RFC3339 strings. Optional numeric fields (sequence counters, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`).
 - **Job writes are synchronous; there is no batching.** `UpdateJobFields` executes its `UPDATE` immediately under `db.mu`, re-reads the row in the same critical section, releases the lock and then notifies subscribers. There is no update channel, writer goroutine or coalescing window — the only goroutine the package starts is the `OnJobsChange` fan-out — so when nothing is being written, nothing runs and the database performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
-- **FlexDuration parses config values as minutes or days, context-dependent.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` it means days. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the context-appropriate unit.
+- **FlexDuration parses config values in each field's own unit.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` days; in `probe_cooldown` seconds. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the field's unit.
 - **Schema migrations are versioned, idempotent, and forward-only.** Currently at v20 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `max_files` are deleted.
@@ -618,10 +618,11 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 ### FlexDuration
 
-`FlexDuration` is a custom type that stores a `float64` value whose unit is determined by context:
+`FlexDuration` is a custom type that stores a `float64` value whose unit is determined by the field (`flexDurationFields` in `internal/config/flex_duration.go`):
 
-- When used as `feed_check_interval`: the value represents **minutes**.
-- When used as `hide_finished_age_days`: the value represents **days**.
+- **seconds**: `probe_cooldown`
+- **minutes**: `feed_check_interval`, `interruption_timeout`, `refresh_interval`
+- **days**: `hide_finished_age_days`, `incomplete_staging_expiry_days`
 
 **Parsing rules:**
 
@@ -629,14 +630,14 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 |-------|------|--------|
 | `10` | int/float | Stored as-is (10.0) |
 | `"10"` | string (plain number) | Stored as 10.0 |
-| `"30m"` | string (duration) | Parsed as 30 minutes; stored as 30.0 when unit is "minutes", or 0.0208... when unit is "days" |
+| `"30m"` | string (duration) | Parsed as 30 minutes; stored as 1800.0 when unit is "seconds", 30.0 when "minutes", or 0.0208... when "days" |
 | `"7d"` | string (duration) | Parsed as 7 days; stored as 10080.0 when unit is "minutes", or 7.0 when unit is "days" |
 
 **Supported duration suffixes:** `ms`, `s`, `m`, `h`, `d`, `w`.
 
 **Serialization:** `MarshalTOML()` writes a plain number. `MarshalJSON()` writes a plain number. This prevents the encoder from producing a nested `{Value = 5.0}` table.
 
-**TOML deserialization:** `UnmarshalTOML()` handles int64, float64, string (plain number or duration string), and map (legacy `{Value = 5.0}` format from earlier serialization).
+**TOML deserialization:** `UnmarshalTOML()` handles int64, float64, string (plain number or duration string), and map (legacy `{Value = 5.0}` format from earlier serialization). It cannot see which field it is decoding, so a duration string's value there is provisional; `loadFromFile` then re-reads every duration string in its field's unit (`resolveFlexDurationStrings`). Before that step the guess (days for a `d`/`w` suffix, else minutes) was final, and `probe_cooldown = "2m"` loaded as 2 seconds.
 
 ### ChannelTerms
 

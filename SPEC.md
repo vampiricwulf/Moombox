@@ -674,7 +674,7 @@ TOML format parsed by `BurntSushi/toml`. An explicit `-config` path is authorita
 
 **Sections:** `[network]` (port, access level, TLS, password, trusted proxies), `[paths]` (database, log, output, staging, ffmpeg), `[logs]` (level, rotation), `[monitors]` (intervals, archive window/slots, hide threshold, probe cooldown, membership discovery), `[downloader]` (template, resolution, parallelism, chat, retry), `[cookies]` (file, auto, browser profile, platforms, refresh interval), `[disk]` (warn/critical percent), `[updates]` (auto-check), `[[channels]]` (array of monitored channels), `[[notifications]]` (array of webhook configs).
 
-**FlexDuration:** Custom type that accepts either a bare number (interpreted in the field's documented unit — minutes for `feed_check_interval`, seconds for `probe_cooldown`) or a structured duration in TOML. Used for `feed_check_interval`, `hide_finished_age_days`, `probe_cooldown`, `refresh_interval`.
+**FlexDuration:** Custom type that accepts either a bare number (interpreted in the field's documented unit — minutes for `feed_check_interval`, seconds for `probe_cooldown`) or a duration string such as `"30s"` or `"7d"`, converted to that unit. Used for `feed_check_interval`, `hide_finished_age_days`, `probe_cooldown`, `interruption_timeout`, `incomplete_staging_expiry_days`, `refresh_interval`.
 
 **Non-destructive migrations:** `migrateOldFormat()` handles backward compatibility — migrates flat fields into current sections, converts legacy flags (e.g., `allow_lan`/`allow_external` to `network_access`). Only applies when the new section does not already exist.
 
