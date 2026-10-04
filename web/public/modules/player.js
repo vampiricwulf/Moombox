@@ -1051,14 +1051,20 @@ export class PlayerController {
         this._rebuildsActive--;
       }
 
-      // Show/hide empty state
+      // Show/hide empty state. Both lines are set in both arms: the subtext
+      // ("Choose from the dropdown above…") used to stay put when the list
+      // was empty, pointing at a dropdown with nothing in it.
       const emptyState = document.getElementById("player-empty-state");
+      const msg = emptyState.querySelector("p");
+      const subtext = emptyState.querySelector(".empty-state-subtext");
       if (all.length === 0) {
         emptyState.style.display = "";
-        emptyState.querySelector("p").textContent = "No finished videos available.";
+        msg.textContent = "No finished videos available.";
+        if (subtext) subtext.textContent = "Finished recordings appear here to watch with synced chat";
       } else if (!select.value) {
         emptyState.style.display = "";
-        emptyState.querySelector("p").textContent = "Select a finished video to play.";
+        msg.textContent = "Select a finished video to play.";
+        if (subtext) subtext.textContent = "Choose from the dropdown above to watch with synced chat overlay";
       }
     } catch (e) {
       console.error("Failed to load player job list:", e);
