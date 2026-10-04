@@ -1006,7 +1006,8 @@ body.batch-bar-active {
 }
 
 /* Keyboard focus ring for the status bar's and log panel's role="button"
-   controls, and for the chat sidebar's timestamp buttons. The first five are
+   controls, the filter bars' clear-all and exclude controls, the import
+   dropzone, and the chat sidebar's timestamp buttons. All but the last are
    spans and divs, so without this the ring is whatever the UA picks;
    .chat-msg-time is a real button, but its own rule strips the UA chrome, so
    without this it would have no visible focus at all. Either way this matches
@@ -1019,6 +1020,9 @@ body.batch-bar-active {
 #version-indicator:focus-visible,
 #log-autoscroll-pill:focus-visible,
 .status-warning:focus-visible,
+.unified-filter-clear:focus-visible,
+.filter-item-exclude:focus-visible,
+#import-dropzone:focus-visible,
 .chat-msg-time:focus-visible {
     outline: 2px solid var(--sl-color-primary-500);
     outline-offset: 2px;
@@ -2698,6 +2702,10 @@ sl-progress-bar {
 }
 
 .unified-filter-clear {
+    /* A span around the icon (see index.html); inline-flex keeps its box as
+       tight as the bare icon's was, with no line-height below the glyph. */
+    display: inline-flex;
+    align-items: center;
     font-size: 0.85rem;
     color: var(--sl-input-icon-color);
     cursor: pointer;
@@ -2741,6 +2749,9 @@ sl-progress-bar {
 }
 
 .unified-filter-menu .filter-item-exclude {
+    /* A span around the icon, like .unified-filter-clear. */
+    display: inline-flex;
+    align-items: center;
     font-size: 0.7rem;
     color: var(--sl-color-neutral-400);
     cursor: pointer;

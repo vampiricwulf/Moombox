@@ -71,7 +71,11 @@
                     <div id="tasks-filter" class="unified-filter">
                         <div class="unified-filter-chips"></div>
                         <input class="unified-filter-input" placeholder="Filter..." autocomplete="off" aria-label="Filter jobs">
-                        <sl-icon class="unified-filter-clear" name="x-circle-fill" style="display:none" title="Clear all filters"></sl-icon>
+                        <!-- A span around the icon, not role/tabindex on the sl-icon itself: sl-icon
+                             re-asserts aria-hidden="true" and strips any role on its own host at first
+                             render (it has no label), which would leave a Tab stop screen readers cannot
+                             see. Same shape as #status-warnings-icon. -->
+                        <span class="unified-filter-clear" role="button" tabindex="0" title="Clear all filters" aria-label="Clear all filters" style="display:none"><sl-icon name="x-circle-fill"></sl-icon></span>
                         <sl-dropdown class="unified-filter-dropdown" hoist>
                             <button slot="trigger" class="unified-filter-dropdown-trigger" aria-hidden="true" tabindex="-1"></button>
                             <div class="unified-filter-panel">
@@ -258,7 +262,7 @@
                     <div id="archived-filter" class="unified-filter">
                         <div class="unified-filter-chips"></div>
                         <input class="unified-filter-input" placeholder="Filter..." autocomplete="off" aria-label="Filter archived jobs">
-                        <sl-icon class="unified-filter-clear" name="x-circle-fill" style="display:none" title="Clear all filters"></sl-icon>
+                        <span class="unified-filter-clear" role="button" tabindex="0" title="Clear all filters" aria-label="Clear all filters" style="display:none"><sl-icon name="x-circle-fill"></sl-icon></span>
                         <sl-dropdown class="unified-filter-dropdown" hoist>
                             <button slot="trigger" class="unified-filter-dropdown-trigger" aria-hidden="true" tabindex="-1"></button>
                             <div class="unified-filter-panel">
@@ -339,7 +343,7 @@
                     <h3>Import Archive</h3>
                     <p class="settings-help">Upload a .zip file containing a video (.mp4, .mkv, .webm, .ts) and optionally a chat JSON file.</p>
 
-                    <div id="import-dropzone">
+                    <div id="import-dropzone" role="button" tabindex="0" aria-label="Choose a .zip archive to import">
                         <sl-icon name="cloud-arrow-up" style="font-size: 3rem; color: var(--sl-color-neutral-400)"></sl-icon>
                         <p>Drag & drop a .zip file here, or click to browse</p>
                         <input type="file" id="import-file-input" accept=".zip" hidden>

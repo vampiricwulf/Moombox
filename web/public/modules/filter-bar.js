@@ -213,7 +213,10 @@ export class FilterBarController {
           const val = this.app.escapeHtml(JSON.stringify({ type: opt.type, value: opt.value }));
           html += `<sl-menu-item value='${val}'${cls}>`;
           html += this.app.escapeHtml(opt.label);
-          html += `<sl-icon slot="suffix" class="filter-item-exclude" name="dash-circle" data-exclude='${val}' title="Exclude"></sl-icon>`;
+          // A span around the icon, not role/tabindex on the sl-icon: sl-icon
+          // re-asserts aria-hidden and strips any role on its host at first
+          // render. The name says WHICH option, since every item carries one.
+          html += `<span slot="suffix" class="filter-item-exclude" role="button" tabindex="0" title="Exclude" aria-label="Exclude ${this.app.escapeHtml(opt.label)}" data-exclude='${val}'><sl-icon name="dash-circle"></sl-icon></span>`;
           html += `</sl-menu-item>`;
         }
       }
@@ -288,25 +291,57 @@ export class FilterBarController {
       input.focus();
     });
 
-    // Exclude icon clicked — add negated chip
-    menu.addEventListener("click", (e) => {
-      const excludeIcon = e.target.closest(".filter-item-exclude");
-      if (!excludeIcon) return;
-      e.stopPropagation(); // prevent sl-select from firing
+    // Exclude control — click or Enter/Space: add a negated chip. One
+    // `exclude` for both input paths (the rule the status bar's controls
+    // set): a keyboard copy would drift from the click.
+    const exclude = (target) => {
+      const excludeIcon = target.closest(".filter-item-exclude");
+      if (!excludeIcon) return false;
       try {
         const { type, value } = JSON.parse(excludeIcon.dataset.exclude);
         addChipToken({ type, value, negate: true });
       } catch {}
       input.focus();
+      return true;
+    };
+    menu.addEventListener("click", (e) => {
+      if (!e.target.closest(".filter-item-exclude")) return;
+      e.stopPropagation(); // prevent sl-select from firing
+      exclude(e.target);
     });
-
-    // Clear all
-    clearBtn.addEventListener("click", (e) => {
+    // Capture phase, and stopPropagation, on purpose. sl-menu's own keydown
+    // handler lives on the <slot> inside its shadow root — between the item
+    // and this host in the event path — and on Enter/Space it clicks the
+    // CURRENT item (the one with tabindex="0"), i.e. a select, then stops
+    // propagation. A bubbling listener here would run after it or not at
+    // all; only a capture listener on the host runs before it, and stopping
+    // the event there is what keeps the select from firing as well.
+    menu.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      if (!e.target.closest?.(".filter-item-exclude")) return;
+      e.preventDefault();
       e.stopPropagation();
+      exclude(e.target);
+    }, true);
+
+    // Clear all — click or Enter/Space, one `clearAll` for both. The control
+    // hides itself once there is nothing left to clear, so the keyboard path
+    // hands focus to the input rather than letting it fall to <body>.
+    const clearAll = () => {
       input.value = "";
       setTokens([]);
       renderChips();
       updateClearBtn();
+    };
+    clearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearAll();
+    });
+    clearBtn.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      clearAll();
+      input.focus();
     });
 
     // Close dropdown when focus leaves filter entirely

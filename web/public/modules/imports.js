@@ -21,8 +21,14 @@ export class ImportController {
     const submitBtn = document.getElementById("import-submit-btn");
     const clearBtn = document.getElementById("import-clear-btn");
 
-    // Click dropzone to browse
-    dropzone.addEventListener("click", () => fileInput.click());
+    // Click, Enter or Space on the dropzone browses — one `browse` for both
+    // input paths. The dropzone is a div (role="button" in the markup), so
+    // the key half is ours to provide.
+    const browse = () => fileInput.click();
+    dropzone.addEventListener("click", browse);
+    dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); browse(); }
+    });
 
     // File input change
     fileInput.addEventListener("change", () => {
