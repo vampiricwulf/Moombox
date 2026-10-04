@@ -247,15 +247,26 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 	// defaultMinterKey and serves every contentBinding. CRIT-2.
 	var minter *TokenMinter
 	var hasMinter bool
+	var expired *TokenMinter
 	if !bypassCache {
 		minter, hasMinter = pp.minterCache[defaultMinterKey]
 		if hasMinter && time.Now().After(minter.ExpiresAt) {
+			// Expired since cleanupExpired's own time.Now a moment ago. Drop
+			// it from the map here and tear it down below, once pp.mu is
+			// released — the two-step cleanupExpired uses, for the reason it
+			// gives. Deleting alone leaked the goja VM: the eviction
+			// AfterFunc cleans up only the minter it still finds cached.
 			delete(pp.minterCache, defaultMinterKey)
-			hasMinter = false
+			pp.mintersEvicted.Add(1)
+			expired = minter
+			minter, hasMinter = nil, false
 		}
 	}
 
 	pp.mu.Unlock()
+	if expired != nil {
+		pp.safeCleanup(expired, "expired")
+	}
 
 	// Recover panics from the Goja VM paths and convert them into errors.
 	// Without this a panic escapes before the inflight map is cleared or
