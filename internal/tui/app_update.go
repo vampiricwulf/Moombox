@@ -390,10 +390,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case releaseNotesFetchedMsg:
 		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+			// A failed fetch carries no tag (OnFetchReleaseNotes returns
+			// "", "", err), and reopening with it blanked the title to
+			// "Release Notes — ". Keep the tag R N opened the overlay with.
+			tag := msg.Tag
+			if tag == "" {
+				tag = a.releaseNotesPopup.tag
+			}
 			if msg.Err != "" {
-				a.releaseNotesPopup.open(msg.Tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
+				a.releaseNotesPopup.open(tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
 			} else {
-				a.releaseNotesPopup.open(msg.Tag, msg.Notes, a.width, a.height)
+				a.releaseNotesPopup.open(tag, msg.Notes, a.width, a.height)
 			}
 		}
 		return a, nil
