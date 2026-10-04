@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -94,7 +95,7 @@ func (m *SettingsModel) View() string {
 	// Hints
 	content.WriteString("\n")
 	hintLeft := DimStyle.Render("Esc: Close")
-	hintRight := m.renderHintText()
+	hintRight := fitSettingsHint(m.renderHintText(), innerW-runewidth.StringWidth("Esc: Close")-1)
 	hintGap := innerW - runewidth.StringWidth("Esc: Close") - runewidth.StringWidth(hintRight)
 	hintGap = max(hintGap, 1)
 	content.WriteString(hintLeft)
@@ -202,6 +203,38 @@ func settingsTabWindow(prevStart, active, avail int) (start, end int) {
 		end++
 	}
 	return start, end
+}
+
+// settingsGenericHints are the hints every section shows; they go first when
+// the footer is too narrow, so the keys particular to the field or section
+// stay on screen.
+var settingsGenericHints = []string{
+	"Shift+\u2190/\u2192: Section",
+	"\u2191/\u2193: Navigate",
+	"\u2191/\u2193/Tab: Navigate",
+}
+
+// fitSettingsHint fits a footer hint ("key: action" entries two spaces
+// apart) into room cells. A hint too long used to wrap inside the box,
+// splitting an entry across two lines ("D:" / "Delete"). The generic
+// entries are dropped first, then whole entries from the end; an entry is
+// never cut.
+func fitSettingsHint(hint string, room int) string {
+	const sep = "  "
+	parts := strings.Split(hint, sep)
+	fits := func() bool { return runewidth.StringWidth(strings.Join(parts, sep)) <= room }
+	for _, generic := range settingsGenericHints {
+		if fits() {
+			break
+		}
+		if i := slices.Index(parts, generic); i >= 0 && len(parts) > 1 {
+			parts = slices.Delete(parts, i, i+1)
+		}
+	}
+	for !fits() && len(parts) > 1 {
+		parts = parts[:len(parts)-1]
+	}
+	return strings.Join(parts, sep)
 }
 
 func (m *SettingsModel) renderHintText() string {

@@ -136,3 +136,47 @@ func TestSettingsHeaderClickFollowsTheWindow(t *testing.T) {
 		t.Errorf("click on ‹ opened %q, want %q", sections[m.sectionIndex].name, sections[hidden].name)
 	}
 }
+
+// TestFitSettingsHintDropsGenericEntriesFirst: a footer hint too long for
+// the box wrapped inside it, splitting "D: Delete" across two lines. It now
+// drops the generic Section/Navigate entries first, then whole trailing
+// entries, and never cuts one.
+//
+// Mutant: drop trailing entries only — the 61-cell Channels case loses
+// "D: Delete" instead of "Shift+←/→: Section".
+func TestFitSettingsHintDropsGenericEntriesFirst(t *testing.T) {
+	const channels = "Shift+←/→: Section  ↑/↓: Navigate  A: Add  Enter: Edit  D: Delete"
+	cases := []struct {
+		room int
+		want string
+	}{
+		{100, channels},
+		{61, "↑/↓: Navigate  A: Add  Enter: Edit  D: Delete"},
+		{41, "A: Add  Enter: Edit  D: Delete"},
+		{20, "A: Add  Enter: Edit"},
+		{3, "A: Add"},
+	}
+	for _, c := range cases {
+		if got := fitSettingsHint(channels, c.room); got != c.want {
+			t.Errorf("room %d: got %q, want %q", c.room, got, c.want)
+		}
+	}
+}
+
+// TestSettingsFooterIsOneLineAtEightyColumns renders the Channels section
+// at 80 columns and checks the whole hint sits on the "Esc: Close" line.
+func TestSettingsFooterIsOneLineAtEightyColumns(t *testing.T) {
+	m := newHeaderTestSettings()
+	m.width, m.height = 80, 30
+	m.switchSection(sectionIndexByName(t, "Channels"))
+	view := stripANSI(m.View())
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "Esc: Close") {
+			if !strings.Contains(line, "D: Delete") {
+				t.Errorf("the footer lost or wrapped \"D: Delete\":\n%s", view)
+			}
+			return
+		}
+	}
+	t.Fatalf("no footer line in:\n%s", view)
+}
