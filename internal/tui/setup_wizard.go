@@ -147,7 +147,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"archiveWindowDays", "Archive window (days)", "3", "How many days back to archive; upcoming/live always covered", setupFieldNumber, nil},
 			{"archiveSlots", "Archive slots", "3", "Backlog downloads per channel at once; new content never waits", setupFieldNumber, nil},
-			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks; fractions allowed, e.g. 0.5", setupFieldDecimal, nil},
+			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks, 1-1440; fractions allowed, e.g. 2.5", setupFieldDecimal, nil},
 			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived; fractions allowed, e.g. 0.5", setupFieldDecimal, nil},
 		},
 	},
@@ -1548,7 +1548,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	if m.cookieTimedOut {
 		lines = append(lines, "")
 		lines = append(lines, YellowStyle.Render(
-			"Cookie extraction timed out."))
+			"Timed out waiting for the browser sign-in."))
 		lines = append(lines, "")
 		lines = append(lines, "  R  Try Again")
 		lines = append(lines, "  S  Skip")
@@ -1628,10 +1628,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	if m.cookieOnly {
 		escLabel = "Esc: Close"
 	}
-	hintLeft := DimStyle.Render(escLabel)
-	hintRight := DimStyle.Render("Enter: Select")
-	gap := max(1, contentW-runewidth.StringWidth(escLabel)-runewidth.StringWidth("Enter: Select"))
-	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+	lines = append(lines, m.cookieStepFooter(escLabel, contentW))
 
 	content := strings.Join(lines, "\n")
 
@@ -1835,7 +1832,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 	if m.cookieTimedOut {
 		lines = append(lines, "")
 		lines = append(lines, YellowStyle.Render(
-			"Cookie extraction timed out."))
+			"Timed out waiting for the browser sign-in."))
 		lines = append(lines, "")
 		lines = append(lines, "  R  Try Again")
 		lines = append(lines, "  S  Skip")
@@ -1903,10 +1900,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
-	hintLeft := DimStyle.Render("Esc: Back")
-	hintRight := DimStyle.Render("Enter: Select")
-	gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("Enter: Select"))
-	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+	lines = append(lines, m.cookieStepFooter("Esc: Back", contentW))
 
 	content := strings.Join(lines, "\n")
 
@@ -2015,4 +2009,24 @@ func renderSetupOptionSelector(options []string, selected string, focused bool) 
 		}
 	}
 	return strings.Join(parts, DimStyle.Render(" / "))
+}
+
+// cookieStepFooter renders the cookie step's key-hint line for whichever
+// state the step is in, so the footer names the keys the handlers actually
+// take (handleSimpleCookieKey / handleAdvancedCookieKey). It used to show the
+// selection hints in every state: "Enter: Select" and the Back/Close Esc
+// while the timed-out prompt answered only R and S, and "Esc: Back" while the
+// body said Esc cancels the sign-in. escLabel is the selection state's Esc.
+func (m *SetupWizardModel) cookieStepFooter(escLabel string, contentW int) string {
+	left, right := escLabel, "Enter: Select"
+	switch {
+	case m.cookieTimedOut:
+		left, right = "R: Try again", "S: Skip"
+	case m.cookieActive && m.cookieFinishing:
+		return "" // extraction in progress: every key is ignored
+	case m.cookieActive:
+		left, right = "Esc: Cancel", "Enter: Extract cookies"
+	}
+	gap := max(1, contentW-runewidth.StringWidth(left)-runewidth.StringWidth(right))
+	return DimStyle.Render(left) + strings.Repeat(" ", gap) + DimStyle.Render(right)
 }
