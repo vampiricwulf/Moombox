@@ -57,10 +57,12 @@ func effectiveLogLevel(configured, override string) string {
 // the TS waitForKeypress() in index.ts — only blocks on a TTY so scripted
 // runs / CI aren't held up.
 func waitForKeypress() {
-	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
+	// The prompt comes after the TTY check: under Docker or systemd it would
+	// be a false line in the very log an operator reads after the crash.
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		return
 	}
+	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
 	reader := bufio.NewReader(os.Stdin)
 	reader.ReadByte()
 }

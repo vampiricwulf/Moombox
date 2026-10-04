@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -135,5 +136,34 @@ func TestDiskCompositeCloseSendsBothIncidents(t *testing.T) {
 	}
 	if got[0].Title != "Disk Monitoring Recovered" || got[1].Title != "Disk Space Recovered" {
 		t.Errorf("order = %q, %q — the monitoring close comes first", got[0].Title, got[1].Title)
+	}
+}
+
+// TestDiskAlertsNameTheAbsoluteOutputDirectory: every disk alert names the
+// directory the operator can act on. The failure alert alone carried the raw
+// config value, so one incident read "./output" when it opened and an
+// absolute path when it closed.
+func TestDiskAlertsNameTheAbsoluteOutputDirectory(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	now := time.Now()
+	want := absOutputDir("./output")
+	if !filepath.IsAbs(want) {
+		t.Fatalf("absOutputDir(%q) = %q, not absolute", "./output", want)
+	}
+
+	d.onReading(diskReading("warn", 91), "./output", now)
+	d.onReadFailure("./output")
+	d.onReadFailure("./output")
+	d.onReading(diskReading("ok", 40), "./output", now.Add(time.Minute))
+
+	calls := rec.Calls()
+	if len(calls) != 4 {
+		t.Fatalf("recorded %d calls, want 4 (warning, monitoring failed, monitoring recovered, space recovered)", len(calls))
+	}
+	for _, c := range calls {
+		if got, ok := c.Field("Output Directory"); !ok || got != want {
+			t.Errorf("%q: Output Directory = %q (present %v), want %q", c.Title, got, ok, want)
+		}
 	}
 }

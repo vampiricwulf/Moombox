@@ -150,7 +150,7 @@ func (d *diskAlerts) onReadFailure(outputDir string) {
 		d.notify.Send("Disk Monitoring Failed",
 			"Disk space checks are failing (volume offline or I/O error) — low-disk alerts are suspended until monitoring recovers",
 			notifications.TypeError,
-			[]notifications.Field{{Name: "Output Directory", Value: outputDir}},
+			[]notifications.Field{{Name: "Output Directory", Value: absOutputDir(outputDir)}},
 			notifications.SendOptions{Event: "disk_warning"},
 		)
 	}
