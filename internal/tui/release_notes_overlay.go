@@ -135,11 +135,14 @@ func (o *releaseNotesOverlay) View() string {
 	// (keeping Esc, the one binding a reader must not be stranded without)
 	// and the title truncates.
 	inner := o.vp.Width()
-	footerText := "U: Apply update  ↑/↓: Scroll  Esc/Q: Close"
+	// Viewer mode (R N with no pending update — the running version's own
+	// notes) offers no U: there is nothing to apply, and U used to close the
+	// notes being read to say so. The Web's viewer hides "Update Now" too.
+	footerText := "↑/↓: Scroll  Esc/Q: Close"
 	candidates := []string{
 		footerText,
-		"U update · ↑/↓ scroll · Esc close",
-		"U · ↑/↓ · Esc",
+		"↑/↓ scroll · Esc close",
+		"↑/↓ · Esc",
 		"Esc",
 	}
 	if o.pending {

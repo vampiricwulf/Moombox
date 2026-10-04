@@ -216,7 +216,7 @@ All 43 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `client_tokens_dialog.go` | Client token management overlay (`A K`). List and delete persistent auth tokens. |
 | `stats_dialog.go` | Statistics overlay (`E T`). Renders the `stats.Snapshot` the Web Stats tab reads, with a 60 s refresh tick while open. |
 | `ytdlp_dialog.go` | yt-dlp plugin overlay (`E Y`). Renders `ytdlpplugin.Info` verbatim; `I` installs for the live port. |
-| `release_notes_overlay.go` | Release notes overlay (`R N`). `glamour`-rendered Markdown in a `bubbles/viewport`; `U` applies the update, `S` skips a pending version. |
+| `release_notes_overlay.go` | Release notes overlay (`R N`). `glamour`-rendered Markdown in a `bubbles/viewport`; beside a pending update's own notes `U` applies it and `S` skips it. |
 | `ffmpeg_check.go` | FFmpeg validation/installation overlay. Built with `huh`. `Esc` quits Moombox here rather than dismissing, because FFmpeg is required for muxing. |
 | `setup_wizard.go` | First-run setup overlay, and — via `E L` — the standalone cookie-login step on a configured install. Built with `huh`. Config, FFmpeg, yt-dlp plugin, cookies. |
 
@@ -322,7 +322,7 @@ The chord system is a three-state finite automaton:
 | `R F` | Refresh Cookies from Browser | Cookie force-refresh callback is configured |
 | `R V` | Check for Updates | Update check callback is configured |
 | `R M` | Check Monitors Now | Force-check callback is configured. Forces an immediate poll of every configured monitor; debounced against rapid repeats. |
-| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. `S` inside the overlay skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses). |
+| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `Esc`/`Q` closes; beside a pending update's own notes `U` applies it and `S` skips it (`OnDismissUpdate` → `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses). |
 | `R U` | Apply Update | An update is available and apply callback is configured |
 | `R S` | Verify Signature | Signature verification callback is configured |
 | `R P` | Restart Program | Restart callback is configured. Requires confirmation. |
@@ -389,7 +389,7 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Setup Wizard | First run, `E L` | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. `E L` opens the same overlay in **cookie-only** mode: the cookie step with no stages around it, `Esc` and the third row close it instead of advancing, and leaving cancels any browser it opened. |
 | FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. On Linux, also shows the distro-appropriate package manager command (`apt`, `dnf`, `pacman`, etc.), computed in-process by `linuxFFmpegInstallSuggestion` (`internal/tui/ffmpeg_check.go`) from `/etc/os-release` — the same mapping `GET /api/ffmpeg/install-suggestion` serves the Web wizard; the TUI makes no HTTP call for it. |
 | yt-dlp Plugin | `E Y` | Async status overlay for the yt-dlp PO-token plugin (`YtdlpDialogModel`, `internal/tui/ytdlp_dialog.go`). Renders `ytdlpplugin.Info` verbatim rather than re-deriving it for the terminal. `I` installs/reinstalls for the live port and reloads, `R` refreshes, `Esc` closes. |
-| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. `S` skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`) and is offered only while the notes on screen are a pending update's. |
+| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. `U` applies and `S` skips the pending version (`OnDismissUpdate` → `routes.DismissUpdate`); both are offered, and act, only while the notes on screen are a pending update's. |
 
 ### Async Message Types
 

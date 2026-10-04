@@ -62,3 +62,44 @@ func TestReleaseNotesSkipKey(t *testing.T) {
 		t.Fatalf("S skipped %q while showing another version's notes with no S in the footer", skipped)
 	}
 }
+
+// TestReleaseNotesApplyKeyOnlyBesideAPendingUpdate: R N with no update
+// pending opens the running version's notes, whose footer still offered
+// "U: Apply update"; U then closed the notes being read to say "No update
+// available". And a periodic check landing while those notes were open let U
+// apply a release whose notes were not on screen. U is now offered and
+// handled only beside the pending update's own notes — the S gate.
+//
+// Mutants: put U back in the viewer footer (the first check fails); drop the
+// key's pending/tag gate (U closes the viewer and calls OnApplyUpdate).
+func TestReleaseNotesApplyKeyOnlyBesideAPendingUpdate(t *testing.T) {
+	app := NewApp()
+	applied := false
+	app.OnApplyUpdate = func(string) string { applied = true; return "" }
+
+	app.releaseNotesPopup.open("v1.0.0", "current notes", 80, 24)
+	app.releaseNotesPopup.setPending(false)
+	if strings.Contains(app.releaseNotesPopup.View(), "U") {
+		t.Fatalf("viewer footer offers U with nothing to apply:\n%s", app.releaseNotesPopup.View())
+	}
+	// A check lands while the current version's notes are open.
+	app.updateAvailable = &UpdateStatusMsg{Version: "2.0.0", TagName: "v2.0.0", ReleaseNotes: "unread"}
+	_, cmd := app.handleKey(tea.KeyPressMsg{Code: 'u', Text: "u"})
+	if cmd != nil {
+		cmd()
+	}
+	if applied || !app.releaseNotesPopup.isOpen() {
+		t.Fatalf("U in viewer mode: applied=%v open=%v; want neither applied nor closed", applied, app.releaseNotesPopup.isOpen())
+	}
+
+	// Beside the pending update's own notes U is offered and closes the overlay.
+	app.releaseNotesPopup.open("v2.0.0", "unread", 80, 24)
+	app.releaseNotesPopup.setPending(true)
+	if !strings.Contains(app.releaseNotesPopup.View(), "U: Apply update") {
+		t.Fatal("footer must offer U beside a pending update")
+	}
+	app.handleKey(tea.KeyPressMsg{Code: 'u', Text: "u"})
+	if app.releaseNotesPopup.isOpen() {
+		t.Error("U beside a pending update should hand over to the apply flow and close the notes")
+	}
+}

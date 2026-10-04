@@ -92,6 +92,15 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.releaseNotesPopup.close()
 			return a, nil
 		case "u", "U":
+			// Offered, and handled, only beside a pending update's own notes
+			// — the same gate as S below. In viewer mode U used to close the
+			// notes being read to print "No update available"; and an
+			// UpdateStatusMsg landing while some other version's notes were
+			// open let U apply a release whose notes were not on screen.
+			if !a.releaseNotesPopup.pending || a.updateAvailable == nil ||
+				a.updateAvailable.TagName != a.releaseNotesPopup.tag {
+				return a, nil
+			}
 			// Shared apply flow (active-downloads confirm included). Close
 			// the overlay first so the confirmation/`Updating...` feedback is
 			// visible on the main screen; a pending confirm re-arms via the
