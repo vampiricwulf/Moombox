@@ -1291,21 +1291,27 @@ func (cd *ChatDownloader) getOutputPaths() (outputFile, resumeFile string) {
 //     read only the last bytes to locate ']', truncate there, then append new
 //     messages + closing structure. Memory cost: O(new messages) not O(file size).
 //
-// On success, clears the in-memory buffer and marks flushedToDisk = true.
+// On success, clears the in-memory buffer and marks flushedToDisk = true. On
+// failure the batch stays buffered and the next flush retries it: clearing it
+// regardless (as this did) lost the batch while the header still counted it.
 func (cd *ChatDownloader) writeChatFile() {
 	outputFile, _ := cd.getOutputPaths()
 	if outputFile == "" {
 		return // No output file set yet (early chat), buffer in memory
 	}
 	if err := os.MkdirAll(filepath.Dir(outputFile), 0o755); err != nil {
+		// Reported like every other write failure: silently returning let a
+		// run whose staging dir vanished end "finished" with nothing on disk.
+		cd.reportIOError(fmt.Errorf("create chat dir: %w", err))
 		return
 	}
 
 	if !cd.flushedToDisk {
 		// All messages in memory — write complete file atomically
-		cd.writeFullChatFile()
-		cd.messages = nil // All written to disk, free memory
-		cd.flushedToDisk = true
+		if cd.writeFullChatFile() {
+			cd.messages = nil // All written to disk, free memory
+			cd.flushedToDisk = true
+		}
 		return
 	}
 
@@ -1314,11 +1320,21 @@ func (cd *ChatDownloader) writeChatFile() {
 	// messages — both paths clear the in-memory buffer on success.
 	if cd.incrementalAppend(outputFile) {
 		cd.messages = nil
-	} else {
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		cd.messages = nil
+		return
 	}
+	cd.mu.Lock()
+	pending, pendingCount := cd.messages, cd.messageCount
+	cd.mu.Unlock()
+	cd.prependExistingMessages(outputFile)
+	if cd.writeFullChatFile() {
+		cd.messages = nil
+		return
+	}
+	// Put the buffer back to just this batch: the on-disk history the
+	// prepend pulled in is still on disk, and the retry appends to it.
+	cd.mu.Lock()
+	cd.messages, cd.messageCount = pending, pendingCount
+	cd.mu.Unlock()
 }
 
 // incrementalAppend performs an in-place append of cd.messages to the existing
@@ -1360,7 +1376,7 @@ func (cd *ChatDownloader) epochRFC3339() string {
 	return cd.opts.StreamStartTime
 }
 
-func (cd *ChatDownloader) writeFullChatFile() {
+func (cd *ChatDownloader) writeFullChatFile() bool {
 	outputFile, _ := cd.getOutputPaths()
 
 	data := ChatData{
@@ -1375,7 +1391,9 @@ func (cd *ChatDownloader) writeFullChatFile() {
 
 	if err := utils.WriteChatFileAtomic(outputFile, &data); err != nil {
 		cd.reportIOError(fmt.Errorf("write chat file: %w", err))
+		return false
 	}
+	return true
 }
 
 // chatFileAdoptionSummary is everything adoptExistingChatFile needs out of a
