@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -69,9 +70,10 @@ func (s *Service) ProbeSessionLiveness(ctx context.Context, channelLogin string)
 			// Named, not classified. See the doc comment: this is inconclusive.
 			return false, false, fmt.Errorf("twitch liveness probe: twitch refused the credentials on the playback-token request: %w", ErrTwitchAuthExpired)
 		}
-		// The error TYPE only — never the upstream text, which may carry the
-		// response body.
-		return false, false, fmt.Errorf("twitch liveness probe: the playback-token request failed (error type %T)", err)
+		// The failure's KIND only — never the upstream text: a GraphQL error
+		// message is Twitch's own words. (This used to print the Go type,
+		// which for every wrapped error was *fmt.wrapError.)
+		return false, false, fmt.Errorf("twitch liveness probe: the playback-token request failed (%s)", requestFailureKind(err))
 	}
 
 	signedIn, conclusive = PlaybackTokenSession(token.Value)
@@ -82,4 +84,19 @@ func (s *Service) ProbeSessionLiveness(ctx context.Context, channelLogin string)
 		return false, false, errors.New("twitch liveness probe: the playback token did not say which session it was issued to")
 	}
 	return signedIn, true, nil
+}
+
+// requestFailureKind names what kind of failure a Twitch request hit, from
+// the error's chain alone and without any of its text.
+func requestFailureKind(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return "network error"
+	}
+	return "Twitch answered with an error"
 }
