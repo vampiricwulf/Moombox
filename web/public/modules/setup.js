@@ -281,6 +281,9 @@ export class SetupController {
       document.getElementById("ffmpeg-overlay").style.display = "none";
       this.initializeApp();
     });
+    // Closes the tab only; Moombox keeps running. It was labelled "Quit
+    // Moombox" after the TUI's twin, which does exit — a web page has no way
+    // to, and should not, stop the server.
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
       // window.close() only works if the page was opened by script.
@@ -1059,7 +1062,7 @@ export class SetupController {
     const quitBtn = document.getElementById("ffmpeg-quit-btn");
     if (quitBtn) {
       quitBtn.disabled = false;
-      quitBtn.textContent = "Quit Moombox";
+      quitBtn.textContent = "Close this tab";
     }
   }
 
