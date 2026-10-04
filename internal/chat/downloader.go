@@ -87,6 +87,13 @@ var errStaleRecoveryExhausted = errors.New("chat: gave up after repeated stale-c
 // return would show the truncated archive as "finished".
 var errChatFetchExhausted = errors.New("chat: gave up after too many consecutive chat API errors")
 
+// errChatAuthLost is the terminal error Start reports when the chat API
+// refused the credentials (ErrAuthRequired, which it wraps). Same rule again:
+// the run stopped polling for good while the broadcast may still be going —
+// members-only cookies expiring mid-stream is the realistic case — and a nil
+// return showed the capture as "finished".
+var errChatAuthLost = fmt.Errorf("chat: gave up after the chat API refused the credentials: %w", ErrAuthRequired)
+
 // ChatDownloaderOptions configures a ChatDownloader.
 type ChatDownloaderOptions struct {
 	VideoID             string
@@ -410,12 +417,13 @@ func staleRecoveryDelay(n int) time.Duration {
 // block's own comment below.
 //
 // THE OUTCOME. Start returns nil for every exit that is not a give-up. There
-// are two exceptions, and the worker turns either into chat_status
+// are three exceptions, and the worker turns any of them into chat_status
 // "incomplete" because messages can still be missing:
 //   - errStaleRecoveryExhausted — a stale-continuation cap firing on a
 //     still-live broadcast, either the consecutive-recovery one in runChatLoop
 //     or recoverStaleContinuation's own retry budget.
 //   - errChatFetchExhausted — handleFetchError's consecutive-error budget.
+//   - errChatAuthLost — the chat API refused the credentials (HTTP 401).
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
@@ -1006,6 +1014,8 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 	// a downloader that will never observe anything again.
 	if errors.Is(err, ErrAuthRequired) {
 		cd.setLiveContinuationOpen(false)
+		// A give-up, like the budget exhaustion below: see errChatAuthLost.
+		cd.setTerminalErr(errChatAuthLost)
 		if cd.OnError != nil {
 			cd.OnError(err)
 		}
