@@ -601,8 +601,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		if _, ok := loadJob(rw, db, jobID); !ok {
 			return
 		}
-		// Per-job logs will be populated by the worker during download.
-		// For now return empty array; the worker sets these via db.GetJobLogs().
+		// The job's in-memory log buffer (written by database.AddJobLog and
+		// RouteLogToJobs); [] when it has none.
 		logs := db.GetJobLogs(jobID)
 		if logs == nil {
 			logs = []string{}

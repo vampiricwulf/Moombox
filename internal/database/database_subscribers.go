@@ -8,12 +8,13 @@ package database
 // affected cells) can use Changes; those that only care about the
 // full job can ignore it.
 //
-// This is the foundation for the DECISIONS #21 event-based subscriber
-// migration. Today only UpdateJobFields emits JobChange events; future
-// work will extend AddJob/DeleteJob/AddTrim/DeleteTrim to emit
-// JobAdded/JobDeleted/TrimsChanged events through a similar API,
-// letting subscribers apply diffs locally instead of re-fetching the
-// full list every time.
+// This is the foundation of the DECISIONS #21 event-based subscriber
+// model: UpdateJobFields emits JobChange, and AddJob / DeleteJob /
+// AddTrim / DeleteTrim emit the targeted JobAdded / JobDeleted /
+// TrimsChanged events below, so subscribers apply diffs locally instead
+// of re-fetching the full list. Only the two bulk writers,
+// BatchSetWatched and DeleteJobsAndHistoryForChannel, still dispatch a
+// full-list OnJobsChange.
 type JobChange struct {
 	Job     *Job
 	Changes []string // schema column names from fieldToColumn that were written
@@ -24,10 +25,7 @@ type JobChange struct {
 // caller passed in (post-write — CreatedAt / UpdatedAt populated).
 //
 // Second event type in the DECISIONS #21 lifecycle-event set, paired with
-// AddJob. Coexists with OnJobsChange during migration: AddJob fires both
-// so consumers can move at their own pace. Once every consumer has
-// migrated, AddJob will stop firing OnJobsChange and the full-list
-// dispatch on insert goes away.
+// AddJob, which fires only this (no OnJobsChange).
 type JobAdded struct {
 	Job *Job
 }
@@ -41,8 +39,8 @@ type JobAdded struct {
 // payload variant if a future consumer needs it.
 //
 // Third event type in the DECISIONS #21 lifecycle-event set, paired with
-// DeleteJob. Coexists with OnJobsChange during migration on the same
-// terms as JobAdded.
+// DeleteJob, which fires only this (no OnJobsChange). UpdateJobFields also
+// fires it when its read-back finds the row gone.
 type JobDeleted struct {
 	JobID string
 }
@@ -55,10 +53,10 @@ type JobDeleted struct {
 // re-renders) just need the ID.
 //
 // Fourth event type in the DECISIONS #21 lifecycle-event set, paired
-// with AddTrim and DeleteTrim. Coexists with OnJobsChange during
-// migration. Unlike JobAdded/JobDeleted, the parent job's lifecycle is
-// untouched — only its trim list changed; subscribers maintaining a
-// jobs-only view can ignore TrimsChanged events.
+// with AddTrim and DeleteTrim, which fire only this (no OnJobsChange).
+// Unlike JobAdded/JobDeleted, the parent job's lifecycle is untouched —
+// only its trim list changed; subscribers maintaining a jobs-only view
+// can ignore TrimsChanged events.
 type TrimsChanged struct {
 	JobID string
 }
@@ -220,12 +218,7 @@ func (db *Database) OnJobChange(fn func(*JobChange)) func() {
 // existed). Returns an unsubscribe function that removes the
 // callback.
 //
-// Coexists with OnJobsChange during the DECISIONS #21 migration —
-// AddJob currently fires both so consumers can pick the granularity
-// that fits. Subscribers that only need to know "a new job exists"
-// should prefer OnJobAdded; those that maintain a sorted full-list
-// view stay on OnJobsChange until further lifecycle events
-// (JobDeleted, TrimsChanged) ship.
+// AddJob fires only this event; OnJobsChange does not see inserts.
 func (db *Database) OnJobAdded(fn func(*JobAdded)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -251,12 +244,9 @@ func (db *Database) OnJobAdded(fn func(*JobAdded)) func() {
 // notify about). Returns an unsubscribe function that removes the
 // callback.
 //
-// Coexists with OnJobsChange during the DECISIONS #21 migration —
-// DeleteJob currently fires both so consumers can pick the granularity
-// that fits. Subscribers that only need to remove an entry from a local
-// map by ID should prefer OnJobDeleted; those maintaining a sorted
-// full-list view stay on OnJobsChange until further lifecycle events
-// (TrimsChanged) ship.
+// DeleteJob fires only this event. A bulk channel prune
+// (DeleteJobsAndHistoryForChannel) does NOT fire it per job; it
+// dispatches one OnJobsChange instead.
 func (db *Database) OnJobDeleted(fn func(*JobDeleted)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -281,11 +271,8 @@ func (db *Database) OnJobDeleted(fn func(*JobDeleted)) func() {
 // (does NOT fire when DeleteTrim's lookup of the parent job_id finds
 // no matching trim row). Returns an unsubscribe function.
 //
-// Coexists with OnJobsChange during the DECISIONS #21 migration —
-// AddTrim/DeleteTrim currently fire both. Subscribers that only render
-// trim information for a known job (e.g. TUI detail panel) should
-// prefer OnTrimsChanged so they don't need to re-render unrelated
-// jobs on every trim mutation.
+// AddTrim/DeleteTrim fire only this event; OnJobsChange does not see
+// trim mutations.
 func (db *Database) OnTrimsChanged(fn func(*TrimsChanged)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -305,8 +292,12 @@ func (db *Database) OnTrimsChanged(fn func(*TrimsChanged)) func() {
 	}
 }
 
-// OnJobsChange registers a callback for job add/delete events.
-// Returns an unsubscribe function that removes the callback.
+// OnJobsChange registers a callback for full-list refreshes. Only the bulk
+// writers dispatch it — BatchSetWatched and DeleteJobsAndHistoryForChannel,
+// where a per-job event would fan out into hundreds of callbacks. Single-row
+// inserts, deletes and trim changes arrive through OnJobAdded, OnJobDeleted
+// and OnTrimsChanged instead. Returns an unsubscribe function that removes
+// the callback.
 func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()

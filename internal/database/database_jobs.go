@@ -45,10 +45,9 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 	db.mu.Unlock()
 	// AddJob fires ONLY OnJobAdded — the legacy OnJobsChange dispatch
 	// was dropped now that the WS broadcaster + TUI both consume the
-	// targeted lifecycle event (DECISIONS #21 consumer migration). The
-	// other OnJobsChange writers (DeleteJob, AddTrim, DeleteTrim,
-	// BatchSetWatched) still fire OnJobsChange for now; their consumer
-	// migrations will land separately.
+	// targeted lifecycle event (DECISIONS #21 consumer migration). Only
+	// the bulk writers (BatchSetWatched, DeleteJobsAndHistoryForChannel)
+	// still fire OnJobsChange.
 	db.notifyJobAdded(job)
 	return true, nil
 }
@@ -167,8 +166,9 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 // jobIDs is chunked to stay under SQLITE_MAX_VARIABLE_NUMBER and all chunks
 // run inside a single outer transaction so the update is atomic.
 //
-// BatchSetWatched is the lone holdout still firing OnJobsChange (a full
-// jobs+trims+gaps re-scan) rather than per-event notifications. Migration
+// BatchSetWatched is one of the two bulk writers still firing OnJobsChange
+// (a full jobs+trims+gaps re-scan) rather than per-event notifications; the
+// other is DeleteJobsAndHistoryForChannel, for the same reason. Migration
 // rationale: a batch can flip 100+ jobs at once and per-event dispatch
 // would amplify into 100+ subscriber callbacks, each running their own
 // re-render. The single full re-scan is cheaper for the consumer side
@@ -491,9 +491,9 @@ func (db *Database) AddTrim(trim *TrimRecord) error {
 	db.mu.Unlock()
 	// Fires ONLY OnTrimsChanged — the legacy OnJobsChange dispatch was
 	// dropped now that the WS broadcaster + TUI consume the targeted
-	// lifecycle event (DECISIONS #21 consumer migration). DeleteJob and
-	// BatchSetWatched still fire OnJobsChange; their migrations land
-	// separately.
+	// lifecycle event (DECISIONS #21 consumer migration). Only the bulk
+	// writers (BatchSetWatched, DeleteJobsAndHistoryForChannel) still fire
+	// OnJobsChange.
 	db.notifyTrimsChanged(trim.JobID)
 	return nil
 }

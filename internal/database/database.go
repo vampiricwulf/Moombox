@@ -105,8 +105,8 @@ type Database struct {
 	// so callers can opt into the richer JobChange shape (full Job +
 	// changed columns) without disturbing legacy OnJobUpdate
 	// subscribers. onJobAdded is the lifecycle counterpart on the
-	// AddJob writer path; like onJobChange it coexists with the
-	// legacy onJobsChange dispatch until consumers migrate.
+	// AddJob writer path; onJobsChange is left to the two bulk writers
+	// (BatchSetWatched, DeleteJobsAndHistoryForChannel).
 	onJobUpdate    []jobUpdateSub
 	onJobChange    []jobChangeSub
 	onJobAdded     []jobAddedSub
