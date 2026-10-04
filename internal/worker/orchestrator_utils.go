@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -105,6 +106,10 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 }
 
 // parseFpsString parses ffprobe's r_frame_rate format (e.g. "30/1" or "30000/1001").
+// NTSC rates round to the nominal figure — "60000/1001" is 60, not 59 — so
+// the label FormatQualityLabel builds from it reads "1080p60" for the same
+// content Twitch's own variant naming (internal/twitch/hls.go) and the DASH
+// manifest parser (internal/engine/manifest.go, math.Round) already call 60.
 func parseFpsString(fps string) int {
 	numStr, denStr, ok := strings.Cut(fps, "/")
 	if !ok {
@@ -116,7 +121,7 @@ func parseFpsString(fps string) int {
 	if den == 0 {
 		return 0
 	}
-	return int(num / den)
+	return int(math.Round(num / den))
 }
 
 // copyFile copies a file from src to dst using streaming I/O.

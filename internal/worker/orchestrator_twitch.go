@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,11 +195,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	segmentStartTime := time.Now().Unix()
 	var segmentMuxWg sync.WaitGroup // tracks background segment mux goroutines
 	defer segmentMuxWg.Wait()       // ensure all background muxes finish before returning
+	// Rounded, not truncated: a 59.94 variant is "1080p60" here as it is in
+	// the playlist's own naming (see qualityInfoFromVariant).
+	fps := int(math.Round(variant.FPS))
 	currentQuality := QualityInfo{
 		Width:  variant.Width,
 		Height: variant.Height,
-		FPS:    int(variant.FPS),
-		Label:  FormatQualityLabel(variant.Height, int(variant.FPS)),
+		FPS:    fps,
+		Label:  FormatQualityLabel(variant.Height, fps),
 	}
 	qualityChangeCh := make(chan QualityInfo, 1)
 
@@ -1108,11 +1112,15 @@ sessionLoop:
 // orchestrator's QualityInfo shape — the one place the label formatting and
 // FPS rounding for Twitch variants live.
 func qualityInfoFromVariant(v *twitch.TwitchHLSVariant) QualityInfo {
+	// math.Round, not a bare int conversion: Twitch advertises NTSC rates
+	// (59.94, 29.97), and truncating labelled that content "1080p59" while
+	// the playlist's own variant name (internal/twitch/hls.go) says 1080p60.
+	fps := int(math.Round(v.FPS))
 	return QualityInfo{
 		Width:  v.Width,
 		Height: v.Height,
-		FPS:    int(v.FPS),
-		Label:  FormatQualityLabel(v.Height, int(v.FPS)),
+		FPS:    fps,
+		Label:  FormatQualityLabel(v.Height, fps),
 	}
 }
 
