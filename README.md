@@ -78,7 +78,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - Docker (x64 or arm64 host) — FFmpeg is included in the image
 
 **Building from source:**
-- [Go](https://go.dev/dl/) 1.25 or later
+- [Go](https://go.dev/dl/) 1.27 or later
 - [FFmpeg](https://ffmpeg.org/download.html) in your PATH
 
 ## Quick Start
@@ -105,7 +105,7 @@ chmod +x moombox-linux-arm64
 ./moombox-linux-arm64
 ```
 
-A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **W** to open the web dashboard in your browser.
+A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **O** then **W** (`O W`) to open the web dashboard in your browser.
 
 ### Docker (x64 / arm64)
 
@@ -366,7 +366,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
 | `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
 | `twitch_check_interval` | `15` | Seconds between Twitch GQL live-status checks (with jitter) |
-| `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
+| `monitors.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
 | `memory.go_soft_limit_mb` | `256` | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
 | `memory.sidecar_soft_limit_mb` | `200` | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
 | `memory.sidecar_hard_limit_mb` | `512` | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
@@ -387,7 +387,7 @@ enabled = true                        # Toggle monitoring on/off (default: true)
 id = "channelname"                    # Twitch login name
 name = "Channel Name"
 platform = "twitch"                   # Required for Twitch channels
-quality_preference = "best"            # "best", "720p", "480p", or "audio_only"
+quality_preference = "best"            # Optional, any channel: "best", "1080p60", "720p", "audio_only", ...
 ```
 
 Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
@@ -746,7 +746,7 @@ Monitors (RSS/DECAPI/Twitch) -> Job Database (SQLite) -> Download Worker -> YouT
 Key components:
 - **YouTube engine** — Multi-client Innertube API strategy. Cipher (sig + n) and BotGuard PO Token solving primarily flow through an embedded Node + V8 sidecar that wraps [yt-dlp/ejs](https://github.com/yt-dlp/ejs) (vendored, public-domain) and [bgutils-js](https://github.com/LuanRT/BgUtils). An in-process [Goja](https://github.com/dop251/goja) implementation serves as a fallback when the sidecar is disabled or down.
 - **Twitch engine** — GQL-based stream metadata, HLS segment downloading, IRC live chat, and VOD chat replay
-- **Download pipeline** — SegmentDownloader with parallel catch-up mode (6 concurrent segments), head sequence tracking, resume state, and gap detection
+- **Download pipeline** — SegmentDownloader with parallel catch-up mode (a `segment_workers` pool, 12 by default), head sequence tracking, resume state, and gap detection
 - **Chat system** — YouTube live chat polling + Twitch IRC with memory bounding, stale continuation recovery, and replay support
 - **Database** — SQLite with WAL mode, batch updates, and pub/sub for real-time UI updates
 - **Web server** — [chi](https://github.com/go-chi/chi) router with WebSocket real-time updates, CORS, CSP, rate limiting, password auth, and IP-based access control

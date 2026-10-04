@@ -25,7 +25,7 @@ go run ./tools/fetch-node
 
 The `tools/fetch-node` step downloads ~150 MB total (Node binaries for Windows x64, Linux x64, and Linux arm64) and gzips them into the embed dir. Idempotent: re-runs are no-ops when the `node-blobs.stamp` it writes beside the blobs matches the pinned versions.
 
-CI runs both steps automatically (see `.github/workflows/release.yml`). For local builds, re-run the first when the Node pin changes and the second whenever anything under `bgutil-sidecar/` changes — `go test ./internal/bgutils/embed/` fails if the tarball no longer matches that directory.
+CI runs both steps automatically (see `.github/workflows/release.yml`). For local builds, re-run the `fetch-node` step when the Node pin changes and the sidecar build whenever anything under `bgutil-sidecar/` changes — `go test ./internal/bgutils/embed/` fails if the tarball no longer matches that directory.
 
 ## Build Commands
 

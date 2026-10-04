@@ -49,6 +49,14 @@
 # Applies immediately — no restart needed. Example:
 # trusted_proxies = ["172.18.0.0/16"]
 
+# Set the session cookie's Secure flag from the X-Forwarded-Proto header.
+# Enable ONLY when Moombox sits behind a TLS-terminating reverse proxy
+# (nginx, Caddy, Traefik) that strips any client-supplied X-Forwarded-Proto
+# before adding its own; otherwise a client can forge it. Without it, a
+# reverse-proxy deployment gets non-Secure session cookies, because Moombox
+# itself only ever sees plaintext HTTP from the proxy.
+# trust_forwarded_proto = false
+
 # Externally reachable base URL of this dashboard, e.g. "https://moombox.example.com"
 # or "http://192.168.1.10:774" on a LAN. Used only to link back to the dashboard
 # from notification embeds (a job's title links to "{public_url}/#job=<id>").
@@ -103,10 +111,12 @@
 # How often to check RSS feeds (in minutes, or duration string like "10m")
 # feed_check_interval = 10
 
-# DECAPI check interval in seconds (0 = dynamic rate-limit based). Optional.
-# decapi_check_interval = 0
+# DECAPI check interval in seconds, 15 to 3600. Leave unset (default) for
+# dynamic timing based on DECAPI's rate limit.
+# decapi_check_interval = 60
 
-# Twitch check interval in seconds (default: 15). Optional.
+# Twitch check interval in seconds, 5 to 3600 (default: 15). A ±10% jitter
+# is always applied.
 # twitch_check_interval = 15
 
 # Finished jobs older than this are moved to the Archived section in the
@@ -121,6 +131,12 @@
 # every listed video, and your check intervals become the only throttle. There
 # is no maximum. Default: 0.
 # probe_cooldown = 0
+
+# Scan each YouTube channel's members-only tab every cycle. RSS and DECAPI
+# never list members-only videos, so this is the only way Moombox finds
+# members-only streams (and their VODs/premieres, for channels with
+# include_non_live_content). Needs YouTube cookies to find anything.
+# membership_discovery = true
 
 # ─── Downloader ───────────────────────────────────────────────────────────────
 [downloader]
@@ -140,6 +156,12 @@
 # downloads can reach (live streams) + num_parallel_downloads. Per-channel
 # backlog pacing is governed by archive_slots; this is the global ceiling.
 # num_parallel_downloads = 10
+
+# Segments fetched at once WITHIN one download (not the number of concurrent
+# downloads). Higher values catch up faster on an in-progress stream, at the
+# cost of a wider fan-out to YouTube. Minimum 1, no maximum; values above 16
+# are logged as a bot-detection risk.
+# segment_workers = 12
 
 # Out-of-order segment bytes ONE download may hold in RAM while its
 # head-of-order segment works through its retry ladder. 0 = unbounded.
@@ -164,6 +186,18 @@
 # there is no maximum, but very large values keep polling YouTube for a long
 # time, which can risk negative consequences on your account.
 # maximum_timeout = 600
+
+# How long (minutes, or a duration string like "2h") finalize may stall
+# waiting for an interrupted broadcast to resume before finalizing with what
+# was captured so far. 0 disables the stall — finalize never waits. No
+# maximum.
+# interruption_timeout = 120
+
+# How long (days, or a duration string like "7d") a finished recording
+# flagged with an incomplete tail keeps its staging files preserved for
+# Resume. After that the staging becomes eligible for orphan cleanup; the
+# incomplete badge itself never expires. 0 = preserve forever. No maximum.
+# incomplete_staging_expiry_days = 7
 
 # Advanced: minimum gap (milliseconds) between one job's progress reports.
 # This is what caps the per-job update rate everywhere downstream — the
@@ -237,6 +271,23 @@
 # auto_enabled = false
 # browser_profile_dir = "./browser-profile"
 
+# How often the auto_enabled refresh timer above runs, in minutes (or a
+# duration string like "6h"). Range: 10 to 10080 (7 days). Takes effect on
+# restart.
+# refresh_interval = 360
+
+# Override the auto-detected browser with an exact executable. browser_type
+# is required when browser_path is set, and names the browser: one of
+# "firefox", "waterfox", "librewolf", "zen", "chrome", "brave", "edge",
+# "vivaldi", "thorium", "opera". Leave both unset to auto-detect.
+# browser_path = ""
+# browser_type = ""
+
+# Which platforms' cookie status the status bar shows. Unset (default) uses
+# the platforms whose cookies Moombox has verified, then the platforms of
+# your enabled channels.
+# active_platforms = ["youtube", "twitch"]
+
 # acquisition selects HOW a cookie REFRESH acquires credentials:
 #   "auto"    — a resolvable browser takes the headless launch path above; a
 #               host with none imports browser_profile_dir read-only.
@@ -283,7 +334,9 @@
 # Moombox bundles a Node.js + JSDOM + bgutils-js subprocess that produces
 # real PO tokens for YouTube. The sidecar binds locally only and runs
 # automatically when needed; first launch extracts ~36 MB of embedded
-# blobs to %LOCALAPPDATA%/Moombox/sidecar (one-time, ~3-5s).
+# blobs to the user cache directory (one-time, ~3-5s):
+# %LOCALAPPDATA%\Moombox\sidecar on Windows, ~/.cache/Moombox/sidecar on
+# Linux.
 #
 # Disable to fall back to the in-process goja-only path. The fallback
 # still works for most YouTube content but cannot pass BotGuard's timing
@@ -304,6 +357,15 @@
 # go_soft_limit_mb = 256                     # debug.SetMemoryLimit; soft, no OOM.
 # sidecar_soft_limit_mb = 200                # RSS threshold to fire sidecar GC.
 # sidecar_hard_limit_mb = 512                # V8 --max-old-space-size; OOMs on hit.
+
+# ─── Disk Space ─────────────────────────────────────────────────────────────
+# [disk]
+# disk_warn_percent = 90                     # Warning alert when the output disk is this full (1-99).
+# disk_critical_percent = 95                 # Critical alert at this usage; must be above the warning.
+
+# ─── Updates ────────────────────────────────────────────────────────────────
+# [updates]
+# auto_check_updates = true                  # Check GitHub for a new version on startup and every 24 hours.
 
 # ─── Connectivity ───────────────────────────────────────────────────────────
 # [connectivity]
@@ -347,10 +409,15 @@
 # archive_window_days = 3                    # Override global archive_window_days (optional)
 # archive_slots = 3                          # Override global archive_slots (optional)
 # output_directory = "./output/special"      # Override output directory (optional)
+# quality_preference = "1080p60"             # Quality cap for this channel (optional, see below)
 
 # Twitch channel:
 # [[channels]]
 # id = "channelname"                         # Twitch login name (required)
 # name = "Channel Name"                      # Display name (optional)
 # platform = "twitch"                        # Required for Twitch channels
-# quality_preference = "best"                # "best", "720p", "480p", or "audio_only"
+# quality_preference = "best"                # Quality cap for this channel (optional, see below)
+#
+# quality_preference works on YouTube and Twitch channels alike. Accepted
+# values: "best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p",
+# "900p60", "900p", "720p60", "720p", "480p", "360p", "160p", "audio_only".
