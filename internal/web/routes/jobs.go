@@ -665,6 +665,29 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			}
 		}
 
+		// The ID becomes the job's primary key and its staging directory
+		// name, so it gets the same shape check the URL branch above
+		// already implies (extractVideoIDFromURL only ever returns these
+		// shapes) and that the CLI and the import route apply. A raw
+		// `videoId` used to be taken verbatim: a typo was accepted with 201
+		// as a job that could never download, and one carrying "/" or ".."
+		// named a staging path outside the staging directory.
+		switch platform {
+		case "youtube":
+			if !utils.IsVideoID(videoID) {
+				jsonError(rw, "invalid YouTube video ID", http.StatusBadRequest)
+				return
+			}
+		case "twitch":
+			if !twitchIDRe.MatchString(videoID) {
+				jsonError(rw, "invalid Twitch channel name or VOD ID", http.StatusBadRequest)
+				return
+			}
+		default:
+			jsonError(rw, "platform must be youtube or twitch", http.StatusBadRequest)
+			return
+		}
+
 		now := time.Now().UTC().Format(time.RFC3339)
 
 		if platform == "twitch" && twitchFetcher != nil {
@@ -1156,7 +1179,14 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				jsonError(rw, "Staging folder not found", http.StatusNotFound)
 				return
 			}
-			dir = stagingDir
+			// The same containment check as the output branch: the job ID is
+			// a path segment here.
+			resolvedStaging, ok := validatePathTraversal(stagingDir, openCfgStagingDir)
+			if !ok {
+				jsonError(rw, "access denied", http.StatusForbidden)
+				return
+			}
+			dir = resolvedStaging
 		}
 
 		// One GOOS switch, shared with every other open-path site: this handler
@@ -1219,6 +1249,9 @@ var (
 	// videoId get an error instead of a wrong job type.
 	twitchURLRe = regexp.MustCompile(`(?:^|/)(?:www\.|m\.)?twitch\.tv/([a-zA-Z0-9_]+)(?:[/?#]|$)`)
 	bracketIDRe = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
+	// twitchIDRe is a Twitch login or a numeric VOD ID: the character class
+	// twitchURLRe captures, at Twitch's 25-character login limit.
+	twitchIDRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,25}$`)
 )
 
 func extractVideoIDFromURL(url string) string {

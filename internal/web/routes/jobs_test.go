@@ -1625,3 +1625,38 @@ func TestJobLookupFailureIsNot404(t *testing.T) {
 		t.Errorf("failed lookup: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 }
+
+// TestJobCreateRejectsMalformedIDs: a raw videoId is the job's primary key
+// and its staging directory name, so it gets the shape check the URL branch
+// implies. It used to be taken verbatim — a typo became a job that could never
+// download, and "/" or ".." named a staging path outside the staging dir.
+func TestJobCreateRejectsMalformedIDs(t *testing.T) {
+	f := newJobsFixture(t)
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"short YouTube ID", map[string]any{"videoId": "abc"}},
+		{"YouTube ID with a slash", map[string]any{"videoId": "../../etc/x"}},
+		{"Twitch login with a slash", map[string]any{"platform": "twitch", "videoId": "../evil"}},
+		{"Twitch login too long", map[string]any{"platform": "twitch", "videoId": strings.Repeat("a", 26)}},
+		{"unknown platform", map[string]any{"platform": "kick", "videoId": "abcd1234567"}},
+	} {
+		rec := doRequest(t, f.router, "POST", "/api/jobs", tc.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d (body: %s)", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	jobs, err := f.db.GetAllJobs()
+	if err != nil {
+		t.Fatalf("GetAllJobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("%d job(s) created from malformed input", len(jobs))
+	}
+
+	// The shapes the dashboard sends still pass.
+	if rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"videoId": "abcd1234567"}); rec.Code != http.StatusCreated {
+		t.Errorf("valid YouTube ID: want 201, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
