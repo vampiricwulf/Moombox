@@ -291,9 +291,9 @@ The self-updater lives in `internal/updater/`. It checks GitHub Releases, downlo
 
 1. **Check** (`updater.go: CheckForUpdate`) — Queries `https://api.github.com/repos/vampiricwulf/Moombox/releases/latest`. Compares the remote version against the current version using semver comparison. Returns `nil` if already up-to-date, or a `ReleaseInfo` struct if a newer version exists. HTTP timeout: 10 seconds.
 
-2. **Download binary** (`updater.go: ApplyUpdate`) — Downloads `Moombox.exe` from the release assets to `<exe-path>.new`. HTTP timeout: 5 minutes (separate client from the 10-second API client, since binaries are 10-30 MB).
+2. **Download binary** (`updater.go: ApplyUpdate`) — Downloads the running platform's binary asset from the release — `Moombox.exe`, `moombox-linux-amd64` or `moombox-linux-arm64`, chosen by GOOS/GOARCH through `releaseAssetMap` — to `<exe-path>.new`. HTTP timeout: 5 minutes (separate client from the 10-second API client, since binaries are 10-30 MB).
 
-3. **Download signature** — Downloads `Moombox.exe.sig` to `<exe-path>.new.sig`.
+3. **Download signature** — Downloads that asset's `.sig` (`Moombox.exe.sig`, `moombox-linux-amd64.sig`, …) to `<exe-path>.new.sig`.
 
 4. **Verify** (`signing.go: VerifySignature`) — Reads the `.new` binary and `.new.sig` file. Verifies using the **embedded Ed25519 public key** (`71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb`). Signature must be exactly 64 bytes. On failure: `.new` and `.new.sig` files are deleted, error is returned to the caller.
 
@@ -328,7 +328,8 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 | Scenario | Behavior |
 |----------|----------|
 | GitHub API unreachable | Error returned, no update attempted |
-| No `Moombox.exe` asset in release | Error returned ("no Moombox.exe asset found") |
+| Running on a platform `releaseAssetMap` does not list | Error returned ("auto-update unsupported on <os>/<arch>") |
+| No binary asset for this platform in the release | Error returned ("no <asset> asset found in release <tag>", e.g. "no moombox-linux-arm64 asset found in release v2.8.10") |
 | No `.sig` asset in release | Error returned ("no signature file found") |
 | Download fails | `.new` file cleaned up, error returned |
 | Signature verification fails | `.new` and `.new.sig` cleaned up, error returned |
