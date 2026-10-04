@@ -113,9 +113,9 @@ func (m *SettingsModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if m.closeConfirm || m.showRestartOverlay {
 		return nil
 	}
-	// Suppress "i" key on ffmpeg_path field — it opens the FFmpeg installer
-	// and must not be typed into the text input.
-	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "i" {
+	// Suppress Ctrl+O on the ffmpeg_path field — it opens the FFmpeg
+	// installer and must not reach the text input.
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == keyCtrlO {
 		sec := sections[m.sectionIndex]
 		if sec.name == "Paths" && sec.fields != nil && m.fieldIndex < len(sec.fields) &&
 			sec.fields[m.fieldIndex].key == "ffmpeg_path" {

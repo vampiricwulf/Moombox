@@ -87,9 +87,11 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		return m.handleFieldKey(key)
 	}
 
-	// Paths section: "I" shortcut to open FFmpeg installer (only on ffmpeg_path field).
-	// The "i" key is suppressed in UpdateComponents so it doesn't reach the text input.
-	if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" && key == "i" {
+	// Paths section: Ctrl+O opens the FFmpeg installer (only on the
+	// ffmpeg_path field). A control key, not a letter: the field is edited
+	// inline, and the old "i" binding made every path with an i in it —
+	// /usr/local/bin/ffmpeg, C:\ffmpeg\bin\ffmpeg.exe — impossible to type.
+	if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" && key == keyCtrlO {
 		return "open_ffmpeg"
 	}
 

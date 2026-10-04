@@ -14,4 +14,5 @@ const (
 	keyEnter  = "enter"
 	keyEsc    = "esc"
 	keyCtrlC  = "ctrl+c"
+	keyCtrlO  = "ctrl+o"
 )

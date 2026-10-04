@@ -158,7 +158,7 @@ func (m *SettingsModel) renderHintText() string {
 			}
 		}
 		if sec.name == "Paths" && field.key == "ffmpeg_path" {
-			hint += "  I: Install FFmpeg"
+			hint += "  Ctrl+O: Install FFmpeg"
 		}
 		return hint
 	}
