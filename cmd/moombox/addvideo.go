@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -11,16 +12,42 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// printUsage is flag.Usage: the daemon's flags and the add subcommand.
+func printUsage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  moombox [flags]                                run the archiver")
+	fmt.Fprintln(out, "  moombox [-config path] add <video_id_or_url>   queue a video and exit")
+	fmt.Fprintln(out, "\nFlags:")
+	flag.PrintDefaults()
+}
+
+// runAddCommand parses `add`'s own arguments (a -config may follow the
+// subcommand as well as precede it) and runs addVideo.
+func runAddCommand(configPath string, args []string) {
+	fs := flag.NewFlagSet("add", flag.ExitOnError)
+	fs.Usage = printUsage
+	cfgPath := fs.String("config", configPath, "Path to config file")
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits here
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "Usage: moombox [-config path] add <video_id_or_url>")
+		os.Exit(1)
+	}
+	addVideo(fs.Arg(0), *cfgPath)
+}
+
 // addVideo adds a video/stream to the queue from the command line.
 // Mirrors TypeScript's addVideo() from index.ts, including notification dispatch.
-func addVideo(input string) {
+// configPath is the -config flag: empty runs config.Load's search, the same
+// one the daemon runs.
+func addVideo(input, configPath string) {
 	target := utils.ExtractMediaID(input)
 	if target == nil {
 		fmt.Fprintf(os.Stderr, "Invalid video ID or URL: %s\n", input)
 		os.Exit(1)
 	}
 
-	cfg, err := config.Load("")
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -30,7 +57,11 @@ func addVideo(input string) {
 		// file exists — proceeding would silently create a fresh
 		// ./moombox.db in the CURRENT directory and report success while
 		// the daemon's real database never sees the job.
-		fmt.Fprintln(os.Stderr, "No config.toml found — run `moombox add` from the Moombox daemon's directory so the job lands in the daemon's database.")
+		if configPath != "" {
+			fmt.Fprintf(os.Stderr, "No config file at %s — pass the -config the daemon runs with so the job lands in the daemon's database.\n", configPath)
+		} else {
+			fmt.Fprintln(os.Stderr, "No config.toml found — run `moombox add` from the Moombox daemon's directory, or pass its -config, so the job lands in the daemon's database.")
+		}
 		os.Exit(1)
 	}
 

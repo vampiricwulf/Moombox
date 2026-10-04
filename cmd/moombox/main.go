@@ -117,24 +117,12 @@ const (
 )
 
 func main() {
-	// Subcommands (like `moombox add <url>`) do not need the launcher/child
-	// split — they run briefly in-process and exit. Checking for them before
-	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
-	// (saves ~100ms and prevents a silent ghost spawn on CLI add commands).
-	if len(os.Args) > 1 && os.Args[1] == "add" {
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: moombox add <video_id_or_url>")
-			os.Exit(1)
-		}
-		addVideo(os.Args[2])
-		return
-	}
-
 	configPath := flag.String("config", "", "Path to config file")
 	logLevel := flag.String("log-level", "", "Override log level (DEBUG, INFO, WARN, ERROR)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	headless := flag.Bool("headless", false, "Run without TUI (web-only mode)")
 	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode)")
+	flag.Usage = printUsage
 
 	// Read-only diagnostics must not pass through the launcher: they would
 	// trip the single-instance lock ("another instance is already running")
@@ -157,12 +145,28 @@ func main() {
 	// update applied). This keeps one stable parent holding the console so
 	// the child's TUI restores terminal state cleanly on exit, and avoids
 	// process chain buildup across multiple restarts.
+	flag.Parse()
+
+	// Subcommands (like `moombox add <url>`) do not need the launcher/child
+	// split — they run briefly in-process and exit. Dispatching them before
+	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
+	// (saves ~100ms and prevents a silent ghost spawn on CLI add commands).
+	// They are found after the flags, so `moombox -config X add URL` adds
+	// rather than booting the daemon with its arguments silently dropped.
+	if flag.NArg() > 0 {
+		if flag.Arg(0) != "add" {
+			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", flag.Arg(0))
+			printUsage()
+			os.Exit(2)
+		}
+		runAddCommand(*configPath, flag.Args()[1:])
+		return
+	}
+
 	if os.Getenv("_MOOMBOX_CHILD") != "1" {
 		launchAndSupervise()
 		return
 	}
-
-	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("moombox %s (%s)\n", version, commit)

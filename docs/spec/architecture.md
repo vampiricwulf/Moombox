@@ -63,9 +63,9 @@ Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoute
 
 ### Subcommands and Flags
 
-Before entering the main `run()` function, the child process checks for subcommands:
+Before the launcher/child split, `main` parses the flags and dispatches a subcommand:
 
-- `moombox add <video_id_or_url>` -- CLI mode that adds a video to the database and exits (`cmd/moombox/addvideo.go`). It does not talk to the web API: it opens the daemon's SQLite file directly with `database.Open` — after a `FileSchemaVersion` check that refuses a database whose schema does not match the binary, rather than migrating the live file from a second process — inserts the row with `AddJob`, and the running daemon's `pollForJobs` safety net (every 60 seconds) picks it up.
+- `moombox [-config path] add <video_id_or_url>` -- CLI mode that adds a video to the database and exits (`cmd/moombox/addvideo.go`). Flags are parsed first and the subcommand is the first argument after them, so `-config` may come before `add` or after it; without one, `add` runs the same config search as the daemon. Any other positional argument is refused with the usage text (which `-h` prints too). It does not talk to the web API: it opens the daemon's SQLite file directly with `database.Open` — after a `FileSchemaVersion` check that refuses a database whose schema does not match the binary, rather than migrating the live file from a second process — inserts the row with `AddJob`, and the running daemon's `pollForJobs` safety net (every 60 seconds) picks it up.
 - `-version` -- Prints version and commit hash, exits immediately.
 - `-headless` / `-no-tui` -- Runs web-only mode (no BubbleTea TUI). Also activated by `MOOMBOX_NO_TUI=1` env var.
 - `-log-level <LEVEL>` -- Overrides the log level for this run only (DEBUG, INFO, WARN, ERROR). It reaches the logger and nothing else: `effectiveLogLevel` in `cmd/moombox/helpers.go` picks it over the configured level when building the logger, and `cfg.Logs.LogLevel` is left as the file has it, so the boot auto-persist, the password auto-hash and every later settings save keep writing the CONFIGURED level. A settings save re-applies that configured level to the running logger and drops the override.
