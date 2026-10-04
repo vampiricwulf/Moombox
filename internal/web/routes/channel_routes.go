@@ -27,6 +27,7 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
 			return
 		}
 
+		channel.ID = strings.TrimSpace(channel.ID)
 		if channel.ID == "" {
 			jsonError(rw, "channel ID required", http.StatusBadRequest)
 			return
@@ -44,6 +45,14 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
 					channel.Platform = resolved.Platform
 				}
 			}
+		}
+		// PUT /api/config's rule for the same field. The monitors treat any
+		// platform that is not "twitch" as YouTube, so an unknown one was
+		// accepted here, polled as a YouTube channel, and then made every
+		// later full-form save 400 on a field the operator never touched.
+		if !validChannelPlatform(channel.Platform) {
+			jsonError(rw, "platform must be youtube or twitch", http.StatusBadRequest)
+			return
 		}
 
 		// Upsert — copy-on-write: mutate a CLONE and assign the whole slice.
@@ -227,4 +236,15 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
 			"resolved": true,
 		})
 	})
+}
+
+// validChannelPlatform reports whether p is a channel platform the monitors
+// know. Empty means YouTube. Shared by POST /api/config/channels and
+// PUT /api/config's channels[] check so the two writers cannot disagree.
+func validChannelPlatform(p string) bool {
+	switch p {
+	case "", "youtube", "twitch":
+		return true
+	}
+	return false
 }

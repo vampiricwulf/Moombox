@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -111,6 +112,51 @@ func TestChannelAddRejectsEmptyID(t *testing.T) {
 	}
 	if f.channelsLen() != 0 {
 		t.Error("config should not have been mutated for invalid input")
+	}
+}
+
+// TestChannelAddRejectsUnknownPlatform: POST accepted any platform string,
+// while PUT /api/config rejected the same entry. The monitors poll anything
+// that is not "twitch" as YouTube, and the next full-form save 400'd on it.
+func TestChannelAddRejectsUnknownPlatform(t *testing.T) {
+	f := newChannelRoutesFixture(t)
+
+	body, _ := json.Marshal(config.ChannelConfig{ID: "someone", Platform: "kick"})
+	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown platform: want 400, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if f.channelsLen() != 0 {
+		t.Error("config should not have been mutated for invalid input")
+	}
+}
+
+// TestChannelAddTrimsTheID: an ID padded with whitespace is the same channel
+// as the unpadded one (PUT /api/config compares trimmed IDs), not a second
+// entry that no monitor can resolve.
+func TestChannelAddTrimsTheID(t *testing.T) {
+	f := newChannelRoutesFixture(t)
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Channels = []config.ChannelConfig{{ID: "UCfoo", Name: "OldName", Platform: "youtube"}}
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	body, _ := json.Marshal(config.ChannelConfig{ID: "  UCfoo ", Name: "NewName", Platform: "youtube"})
+	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("padded ID: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var chans []config.ChannelConfig
+	f.store.Read(func(c *config.MoomboxConfig) { chans = slices.Clone(c.Channels) })
+	if len(chans) != 1 || chans[0].ID != "UCfoo" || chans[0].Name != "NewName" {
+		t.Errorf("channels = %+v, want the one UCfoo entry renamed", chans)
 	}
 }
 
