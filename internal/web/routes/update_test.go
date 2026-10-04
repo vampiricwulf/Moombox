@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -415,8 +416,12 @@ func TestUpdateDismissPersistsToDisk(t *testing.T) {
 // stamped on the ATTEMPT — the request that spent the quota — and refused the
 // second call.
 //
-// THE MUTANT: no debounce — the second call returns 500 (another attempted
+// THE MUTANT: no debounce — the second call returns 502 (another attempted
 // GitHub request) instead of a 200 debounced answer.
+//
+// The first call's body also carries the check's cause. It used to say only
+// "check failed", so the dashboard could not show why (rate limit, no
+// release, ...). Mutant: answer the fixed string again — the body test fails.
 func TestUpdateCheckIsDebounced(t *testing.T) {
 	upd, err := updater.New("2.6.0-test", silentLogger{})
 	if err != nil {
@@ -433,8 +438,14 @@ func TestUpdateCheckIsDebounced(t *testing.T) {
 		return rec
 	}
 
-	if got := call().Code; got != http.StatusInternalServerError {
-		t.Fatalf("first call: want 500 from the cancelled check, got %d", got)
+	first := call()
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first call: want 502 from the cancelled check, got %d", first.Code)
+	}
+	var firstBody map[string]any
+	json.NewDecoder(first.Body).Decode(&firstBody)
+	if msg, _ := firstBody["error"].(string); !strings.Contains(msg, "canceled") {
+		t.Errorf("first call's error = %q, want the check's cause (context canceled)", msg)
 	}
 
 	rec := call()

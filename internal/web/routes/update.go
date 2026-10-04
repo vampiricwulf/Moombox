@@ -87,6 +87,23 @@ type UpdateRouteDeps struct {
 	// but the TUI holds a separate copy of the pending release — this is
 	// how it learns to drop the badge. Optional.
 	OnDismissed func(tag string)
+	// Logger records why a check, apply or verify failed. Optional.
+	Logger interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
+}
+
+// logUpdateFailure is the log line the TUI's path already writes: the web
+// routes answered "check failed" / "update failed" and logged nothing, so a
+// dashboard update that failed at download or signature verification left
+// no trace anywhere.
+func (deps *UpdateRouteDeps) logUpdateFailure(what string, err error) {
+	if deps.Logger != nil {
+		deps.Logger.Error("[Updater] "+what+" failed", "err", err)
+	}
 }
 
 // DismissUpdate records tag as the skipped version and clears the shared
@@ -152,7 +169,13 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 
 		release, err := deps.Updater.CheckForUpdate(r.Context())
 		if err != nil {
-			jsonError(w, "check failed", http.StatusInternalServerError)
+			// The cause, not a bare "check failed": the updater's own
+			// wording ("GitHub API rate limit exceeded (HTTP 403) — try
+			// again later", ...) is what tells the operator what to do. It
+			// carries only api.github.com URLs and status codes. 502: the
+			// failure is GitHub's answer, as on /release-notes.
+			deps.logUpdateFailure("Update check", err)
+			jsonError(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 
@@ -207,7 +230,10 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 
 		if err := deps.Updater.ApplyUpdate(r.Context(), release); err != nil {
 			updateInProgress.Store(false)
-			jsonError(w, "update failed", http.StatusInternalServerError)
+			// The toast reads "Update failed: <this>"; it used to read
+			// "Update failed: update failed".
+			deps.logUpdateFailure("Update", err)
+			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -239,7 +265,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
-			jsonError(w, "signature verification failed", http.StatusUnprocessableEntity)
+			deps.logUpdateFailure("Signature verification", err)
+			jsonError(w, "signature verification failed: "+err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
 		jsonResponse(w, map[string]any{"verified": true})

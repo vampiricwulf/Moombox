@@ -153,6 +153,7 @@ func (s *runState) wireRoutes() func() {
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
 		Updater:   s.upd,
 		Version:   version,
+		Logger:    s.log,
 		OnRestart: func() { s.triggerRestart("update") },
 		OnFound: func(release *updater.ReleaseInfo) {
 			s.wsHub.Broadcast("update_available", release)

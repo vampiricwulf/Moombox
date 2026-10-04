@@ -337,7 +337,14 @@ export class SettingsController {
       result.textContent = "";
       try {
         const resp = await fetch("/api/update/check", { method: "POST" });
-        if (!resp.ok) throw new Error(resp.statusText);
+        if (!resp.ok) {
+          // The server's reason (rate limit, no release, ...), not a bare
+          // "Check failed".
+          result.textContent = `Check failed: ${await serverErrorMessage(resp)}`;
+          result.style.color = "var(--text-danger)";
+          btn.loading = false;
+          return;
+        }
         const data = await resp.json();
         if (data.debounced) {
           // The server spends one of GitHub's 60/h unauthenticated requests
