@@ -1208,10 +1208,6 @@ export class MoomboxApp {
             this.updateJobCard(updatedJob);
             this.stats.updateActiveIndicator(this.jobs);
           }
-          // Update details dialog if this job is selected
-          if (this.selectedJobId === updatedJob.id) {
-            this.details.updateJobDetails(updatedJob);
-          }
         } else {
           // Job not in the active array — either brand new, or one that had
           // aged into archivedJobs and just had a field change that bumped its
@@ -1219,6 +1215,12 @@ export class MoomboxApp {
           // updated_at on every change). Push it active, then drop any stale
           // archived copy so it isn't shown in both panels. If it's still aged,
           // the _evaluateArchiveBoundary() below re-archives it.
+          //
+          // The archived copy is the one that holds the enriched fields the
+          // details dialog fetched for it, and the dialog refresh below would
+          // otherwise rebuild on a row without them.
+          const archivedCopy = this.archivedJobs.find((j) => j.id === updatedJob.id);
+          if (archivedCopy) this.details._preserveStagingFields([archivedCopy], [updatedJob]);
           this.jobs.push(updatedJob);
           if (this._pruneArchivedAgainstActive()) this.renderArchivedJobs();
           // One discovered job costs one card, not a rebuild of every card in
@@ -1233,6 +1235,14 @@ export class MoomboxApp {
         // the badge owes the same answer to both. The change gate inside is
         // what keeps this off the DOM on a progress tick.
         this._syncParkedBadge();
+        // Likewise the open dialog: it can be showing a job this tab holds
+        // only in archivedJobs (a deep link, or an archived row the operator
+        // opened), and the update that reaches the upsert branch is exactly
+        // the one it is waiting on — a Mark Watched on an archived row lands
+        // here once its updated_at moves back inside the active window.
+        if (this.selectedJobId === updatedJob.id) {
+          this.details.updateJobDetails(updatedJob);
+        }
         break;
       }
 
@@ -3646,6 +3656,18 @@ export class MoomboxApp {
         const res = await apiCall();
         succeeded = res.ok ? targets.length : 0;
         failed = res.ok ? 0 : targets.length;
+        // The route answers {success}, not rows, and the jobs_update that
+        // follows it (BatchSetWatched still fires OnJobsChange) restates the
+        // active list only — an archived row is never restated, so the
+        // Archived panel kept its eyes and its checked boxes until the next
+        // fetchArchivedJobs. Write what the server wrote (watched, and the
+        // resume position it clears either way); the redraw below shows it.
+        if (res.ok) {
+          for (const j of targets) {
+            j.watched = action === "watched";
+            j.resumePosition = null;
+          }
+        }
       } catch {
         succeeded = 0;
         failed = targets.length;
@@ -3665,6 +3687,14 @@ export class MoomboxApp {
 
     this._activeSelectionSet().clear();
     this.updateBatchActionBar();
+    // The per-job actions are redrawn by the job_update each one provokes;
+    // the watched pair is redrawn here, from the rows patched above, on the
+    // panel the selection was made on — which also unchecks the boxes the
+    // cleared selection set no longer stands behind.
+    if (succeeded > 0 && (action === "watched" || action === "unwatched")) {
+      if (this._activePanel === "archived") this.renderArchivedJobs();
+      else this.renderJobs();
+    }
 
     if (failed === 0) {
       const verbs = { delete: "Deleted", cancel: "Cancelled", resume: "Resumed", reinitialize: "Reinitialized", watched: "Marked watched", unwatched: "Marked unwatched" };

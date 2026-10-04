@@ -77,13 +77,11 @@ export class JobDetailsController {
           return;
         }
         if (e.target.closest("#details-mark-watched")) {
-          const res = await fetch(`/api/jobs/${this.app.selectedJobId}/watched`, { method: "POST" });
-          if (!res.ok) this.app.showToast("Failed to mark watched", "danger");
+          await this._setWatched(true);
           return;
         }
         if (e.target.closest("#details-mark-unwatched")) {
-          const res = await fetch(`/api/jobs/${this.app.selectedJobId}/watched`, { method: "DELETE" });
-          if (!res.ok) this.app.showToast("Failed to mark unwatched", "danger");
+          await this._setWatched(false);
           return;
         }
         const recoverBtn = e.target.closest("#details-recover-asides-btn");
@@ -101,6 +99,43 @@ export class JobDetailsController {
         }
       });
     }
+  }
+
+  /**
+   * The dialog's Mark Watched / Mark Unwatched buttons. The route answers
+   * with the updated row, and that answer is the only refresh this tab is
+   * owed: the hub never broadcasts a job_update for an archived Finished row
+   * (cmd/moombox/monitor_callbacks.go gates on jobfilter.IsArchivedAt), so
+   * with hide_finished_age_days = 0 nothing arrived and the pill, the buttons
+   * and the card's eye stayed as they were until the dialog was reopened.
+   */
+  async _setWatched(watched) {
+    const jobId = this.app.selectedJobId;
+    const res = await fetch(`/api/jobs/${jobId}/watched`, { method: watched ? "POST" : "DELETE" });
+    if (!res.ok) {
+      this.app.showToast(`Failed to mark ${watched ? "watched" : "unwatched"}`, "danger");
+      return;
+    }
+    const updated = await res.json().catch(() => null);
+    if (updated?.id) this._applyUpdatedJob(updated);
+  }
+
+  /**
+   * Apply a row the server handed back from a write to whichever list holds
+   * it, to its card, and to the dialog when it is the selected job. A raw DB
+   * row, like every WS payload, so the client-computed staging fields are
+   * carried forward the way the job_update handler carries them.
+   */
+  _applyUpdatedJob(updated) {
+    const activeIndex = this.app.jobs.findIndex(j => j.id === updated.id);
+    const list = activeIndex !== -1 ? this.app.jobs : this.app.archivedJobs;
+    const index = activeIndex !== -1 ? activeIndex : this.app.archivedJobs.findIndex(j => j.id === updated.id);
+    if (index !== -1) {
+      this._preserveStagingFields([list[index]], [updated]);
+      list[index] = updated;
+      this.app.updateJobCard(updated);
+    }
+    if (this.app.selectedJobId === updated.id) this.updateJobDetails(updated);
   }
 
   showJobDetails(job) {
