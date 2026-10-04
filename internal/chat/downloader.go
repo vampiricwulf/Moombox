@@ -349,9 +349,11 @@ func (cd *ChatDownloader) adoptFreshContinuation(token string, isReplay bool) {
 }
 
 // staleRecoveryDelay is the floor under REPEATED stale-continuation recovery.
-// n is how many consecutive recoveries have happened, counting this one, so
-// n == 1 (the first, which is usually a genuinely expired mid-stream token)
-// waits one ordinary poll and each one after that doubles to the ceiling.
+// n is how many consecutive recoveries came BEFORE this one — the caller
+// passes staleRecoveries-1, and only once that is at least one — so the first
+// recovery (usually a genuinely expired mid-stream token) is not delayed at
+// all, the second (n == 1) waits one ordinary poll, and each one after that
+// doubles to the ceiling.
 func staleRecoveryDelay(n int) time.Duration {
 	d := liveChatPollDefaultForTesting
 	for range max(n-1, 0) {
@@ -984,8 +986,8 @@ func (cd *ChatDownloader) fetchOne(ctx context.Context) (*ChatApiResponse, error
 // handleFetchError reacts to an error returned by fetchOne. Returns true when
 // the loop should break — context cancelled, auth failure (ErrAuthRequired),
 // or consecutive-error budget exhausted. On a transient error it calls
-// OnError, sleeps with exponential backoff, and returns false so the caller
-// can `continue`.
+// OnError, sleeps with a linear backoff (5 s per consecutive error, capped),
+// and returns false so the caller can `continue`.
 func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, consecutiveErrors *int) bool {
 	if ctx.Err() != nil {
 		return true
@@ -1035,7 +1037,7 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 		return true
 	}
 
-	// Exponential backoff (cap at 30s for VOD, 60s for live)
+	// Linear backoff — 5 s per consecutive error (cap at 30s for VOD, 60s for live)
 	maxBackoff := 30000
 	if cd.isStreamActive() {
 		maxBackoff = 60000

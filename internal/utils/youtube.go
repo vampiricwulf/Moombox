@@ -196,9 +196,9 @@ type YouTubeChannelInfo struct {
 // ResolveYouTubeChannel fetches a YouTube channel page and extracts the channel ID and name.
 // urlPath should be like "/@Handle", "/c/Name", or "/user/Name".
 //
-// Retries up to 3 times with 1s/2s exponential backoff on transient
-// failures (network errors, HTTP 5xx surfaces as "HTTP 5xx" in the
-// FetchBody error string). HTTP 4xx errors and ctx cancellation
+// Makes up to 3 attempts — two retries, after 1 s and then 2 s — on
+// transient failures (network errors, HTTP 5xx surfaces as "HTTP 5xx" in
+// the FetchBody error string). HTTP 4xx errors and ctx cancellation
 // fast-fail. Audit reports/small-packages.md.
 func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannelInfo, error) {
 	pageURL := youtubeBaseURL + urlPath

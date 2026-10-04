@@ -84,8 +84,8 @@ func (h *healthTracker) recordSuccess(id string) {
 }
 
 // recordError bumps a channel's failure streak and fires onUnhealthy once
-// when it crosses the threshold. Returns whether the callback fired so the
-// caller can log it.
+// when it crosses the threshold; the streak then stays silent until
+// recordSuccess resets it.
 func (h *healthTracker) recordError(id string, err error) {
 	h.mu.Lock()
 	s := h.state(id)
