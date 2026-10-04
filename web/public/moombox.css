@@ -11,6 +11,15 @@
     --status-queued: #7f8c8d;
     --status-cookies: #d946ef;
 
+    /* Coloured text (errors, warnings, success notes, links). The -600 steps
+       read well on the dark palette; the light theme's block swaps in the
+       darker steps that clear 4.5:1 there, where its -600s are pale (amber
+       and green near 3.2:1). JS-set colours use these too. */
+    --text-success: var(--sl-color-success-600);
+    --text-warning: var(--sl-color-warning-600);
+    --text-danger: var(--sl-color-danger-600);
+    --text-primary: var(--sl-color-primary-600);
+
     /* Bottom-bar geometry — status bar is fixed at the viewport bottom and the
        batch-action bar slides up above it. Body padding and the batch bar's
        bottom offset reference these vars so the stack stays consistent if the
@@ -63,7 +72,7 @@ body {
 }
 
 a {
-    color: var(--sl-color-primary-600);
+    color: var(--text-primary);
     text-decoration: none;
 }
 
@@ -570,7 +579,7 @@ sl-badge.status.cookies::part(base) {
     align-items: center;
     justify-content: center;
     padding: var(--sl-spacing-3x-large);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-align: center;
 }
 
@@ -836,8 +845,12 @@ sl-badge.status.cookies::part(base) {
     flex-wrap: wrap;
 }
 
+/* Its own red fill, not the page, is the background here: the -600 red read
+   at 2.9:1 on the dark theme's -100. Shoelace's dark scale runs the other
+   way, so the -800 is pale there and deep in the light theme, and clears
+   4.5:1 in both. */
 .details-error {
-    color: var(--sl-color-danger-600);
+    color: var(--sl-color-danger-800);
     background-color: var(--sl-color-danger-100);
     padding: var(--sl-spacing-small);
     border-radius: var(--sl-border-radius-medium);
@@ -917,12 +930,12 @@ sl-badge.status.cookies::part(base) {
 }
 
 .log-error {
-    color: var(--sl-color-danger-600);
+    color: var(--text-danger);
     font-weight: 600;
 }
 
 .log-warn {
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
 }
 
 /* Dimmer than INFO, but the -500 grey read at 2.7:1 on the dark log
@@ -960,7 +973,7 @@ sl-badge.status.cookies::part(base) {
     background: var(--sl-color-neutral-100);
     border-top: 1px solid var(--sl-color-neutral-200);
     font-size: 0.75rem;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-700);
     z-index: 100;
     user-select: none;
 }
@@ -999,7 +1012,7 @@ body.batch-bar-active {
 }
 
 #connection-status.connected {
-    color: var(--sl-color-success-600);
+    color: var(--text-success);
 }
 
 #connection-status.connected .status-label {
@@ -1011,7 +1024,7 @@ body.batch-bar-active {
 }
 
 #connection-status.disconnected {
-    color: var(--sl-color-danger-600);
+    color: var(--text-danger);
 }
 
 #check-countdown {
@@ -1138,7 +1151,7 @@ sl-progress-bar {
 
 .template-preview {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     font-family: var(--sl-font-mono);
     padding: 0.25em 0;
     word-break: break-all;
@@ -1258,7 +1271,7 @@ sl-progress-bar {
 
 .notification-events-label {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin-right: var(--sl-spacing-2x-small);
 }
 
@@ -1271,7 +1284,7 @@ sl-progress-bar {
 
 .notification-group-label {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 .notification-events sl-tag {
@@ -1318,7 +1331,7 @@ sl-progress-bar {
 .status-warning {
     cursor: pointer;
     font-size: 0.75rem;
-    color: var(--sl-color-danger-600);
+    color: var(--text-danger);
 }
 .status-warning:hover { text-decoration: underline; }
 
@@ -1331,10 +1344,14 @@ sl-progress-bar {
     transition: color 0.2s, background-color 0.2s;
 }
 
-.indicator-ok    { color: var(--sl-color-success-500); background: color-mix(in srgb, var(--sl-color-success-600) 18%, transparent); }
-.indicator-warn  { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
-.indicator-error { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 18%, transparent); }
-.indicator-off   { color: var(--sl-color-neutral-500); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
+/* Each pill's text takes the first step that clears 4.5:1 on its own tint
+   in the dark theme (the -500s read at 2.8-3.9:1). Red text on a red tint
+   needs both a brighter red and a lighter tint, so the error pill's is 10%.
+   The light theme's darker steps are in its own block further down. */
+.indicator-ok    { color: var(--sl-color-success-600); background: color-mix(in srgb, var(--sl-color-success-600) 18%, transparent); }
+.indicator-warn  { color: var(--sl-color-warning-600); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
+.indicator-error { color: var(--sl-color-danger-700); background: color-mix(in srgb, var(--sl-color-danger-600) 10%, transparent); }
+.indicator-off   { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
 
 #btn-refresh-cookies { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #btn-refresh-cookies::part(base) { padding: 0; min-height: auto; min-width: auto; }
@@ -1797,7 +1814,7 @@ sl-progress-bar {
     font-size: var(--sl-font-size-x-small);
     vertical-align: baseline;
     cursor: pointer;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 .chat-msg-time:hover,
@@ -1811,15 +1828,15 @@ sl-progress-bar {
 }
 
 .chat-msg-author.owner {
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
 }
 
 .chat-msg-author.moderator {
-    color: var(--sl-color-primary-600);
+    color: var(--text-primary);
 }
 
 .chat-msg-author.member {
-    color: var(--sl-color-success-600);
+    color: var(--text-success);
 }
 
 .chat-msg.announcement {
@@ -1854,7 +1871,7 @@ sl-progress-bar {
 
 .chat-msg-superchat {
     font-weight: var(--sl-font-weight-bold);
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
     margin-right: var(--sl-spacing-2x-small);
 }
 
@@ -2462,7 +2479,7 @@ sl-progress-bar {
 
 /* Unsaved settings warning */
 .unsaved-warning {
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
     font-size: var(--sl-font-size-small);
     font-weight: var(--sl-font-weight-semibold);
 }
@@ -2484,7 +2501,7 @@ sl-progress-bar {
 /* Video duration display in add dialog */
 #video-duration-display {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin-top: var(--sl-spacing-x-small);
 }
 
@@ -2550,7 +2567,7 @@ sl-progress-bar {
 }
 
 .client-token-meta {
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     font-size: 0.75rem;
     white-space: nowrap;
 }
@@ -2664,6 +2681,13 @@ sl-progress-bar {
 }
 
 /* Keyboard help dialog */
+/* Under the dialog's h2 title. They were h4s, skipping a level; this keeps
+   the h4 size they had. */
+#keyboard-help-dialog h3 {
+    margin: 0 0 var(--sl-spacing-small);
+    font-size: 1em;
+}
+
 .keyboard-shortcut-grid {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -2681,13 +2705,6 @@ sl-progress-bar {
 
 .keyboard-shortcut-grid kbd {
     display: inline-block;
-/* Under the dialog's h2 title. They were h4s, skipping a level; this keeps
-   the h4 size they had. */
-#keyboard-help-dialog h3 {
-    margin: 0 0 var(--sl-spacing-small);
-    font-size: 1em;
-}
-
     background-color: var(--sl-color-neutral-200);
     border: 1px solid var(--sl-color-neutral-300);
     border-radius: var(--sl-border-radius-small);
@@ -2792,7 +2809,7 @@ sl-progress-bar {
 .unified-filter-menu sl-menu-item[data-group-header] {
     font-weight: var(--sl-font-weight-semibold);
     font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     pointer-events: none;
@@ -2824,7 +2841,7 @@ sl-progress-bar {
 
 #tasks-filter-count {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 /* ===== Light Theme Overrides ===== */
@@ -2838,12 +2855,21 @@ html.sl-theme-light {
     --status-cancelled: #6b7280;
     --status-queued: #707b7c;
     --status-cookies: #c026d3;
+
+    --text-success: var(--sl-color-success-800);
+    --text-warning: var(--sl-color-warning-800);
+    --text-danger: var(--sl-color-danger-700);
+    --text-primary: var(--sl-color-primary-700);
 }
 
-/* The status-bar pills colour their text with the -500 step, which the dark
-   palette makes bright but the light palette makes pale: on its own 15-18%
-   tint the light theme's disk warning read at 1.7:1. The -800 step clears
-   4.5:1, in the light theme only. */
+/* Links rest on --text-primary, the -700 here, so hover goes one darker. */
+html.sl-theme-light a:hover {
+    color: var(--sl-color-primary-800);
+}
+
+/* The dark theme's pill steps are bright there but pale in the light
+   palette: on its own tint the light theme's disk warning read at 1.7:1.
+   The -800 step clears 4.5:1, in the light theme only. */
 html.sl-theme-light .disk-indicator-warn,
 html.sl-theme-light .indicator-warn {
     color: var(--sl-color-warning-800);
@@ -2858,17 +2884,8 @@ html.sl-theme-light .indicator-ok {
     color: var(--sl-color-success-800);
 }
 
-/* The same pale light-palette steps on the log panel: WARN's -600 amber
-   read at 2.9:1 and ERROR's -600 red at 4.4:1. DEBUG's dark-theme -700
-   would sit too close to INFO here; the -600 clears 4.5:1 and stays dim. */
-html.sl-theme-light .log-warn {
-    color: var(--sl-color-warning-800);
-}
-
-html.sl-theme-light .log-error {
-    color: var(--sl-color-danger-700);
-}
-
+/* DEBUG's dark-theme -700 would sit too close to INFO on the light log
+   panel; the -600 clears 4.5:1 there and stays dim. */
 html.sl-theme-light .log-debug {
     color: var(--sl-color-neutral-600);
 }
@@ -2995,10 +3012,10 @@ html.sl-theme-light .log-debug {
     margin-top: 2px;
 }
 
-.stat-active .stat-value { color: var(--sl-color-success-600); }
-.stat-muxing .stat-value { color: var(--sl-color-warning-600); }
-.stat-error .stat-value  { color: var(--sl-color-danger-600); }
-.stat-finished .stat-value { color: var(--sl-color-primary-600); }
+.stat-active .stat-value { color: var(--text-success); }
+.stat-muxing .stat-value { color: var(--text-warning); }
+.stat-error .stat-value  { color: var(--text-danger); }
+.stat-finished .stat-value { color: var(--text-primary); }
 
 /* Disk bar */
 .disk-bar-container {
@@ -3049,11 +3066,12 @@ html.sl-theme-light .log-debug {
     letter-spacing: -0.01em;
 }
 
-.disk-indicator-warn     { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
-.disk-indicator-critical { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
+/* Same steps and the same lighter red tint as the YT/TW pills. */
+.disk-indicator-warn     { color: var(--sl-color-warning-600); background: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
+.disk-indicator-critical { color: var(--sl-color-danger-700); background: color-mix(in srgb, var(--sl-color-danger-600) 10%, transparent); }
 
 .active-indicator-on {
-    color: var(--sl-color-success-500);
+    color: var(--text-success);
 }
 
 /* Mobile responsive: stats single-column */
@@ -3072,7 +3090,7 @@ html.sl-theme-light .log-debug {
    page (click to arm, click again to open), and a quick second click would
    otherwise text-select the "v2.7.0" label. */
 .version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-700); letter-spacing: -0.02em; user-select: none; }
-.version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
+.version-indicator.has-update { cursor: pointer; color: var(--text-success); }
 .version-indicator.has-update:hover { text-decoration: underline; }
 #theme-toggle, #btn-logout { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #theme-toggle::part(base), #btn-logout::part(base) { padding: 0; min-height: auto; min-width: auto; }
@@ -3081,11 +3099,11 @@ html.sl-theme-light .log-debug {
 #update-release-notes h1, #update-release-notes h2, #update-release-notes h3 { margin: 1em 0 0.4em; font-weight: 600; }
 #update-release-notes h1 { font-size: 1.3em; }
 #update-release-notes h2 { font-size: 1.15em; }
-#update-release-notes h3 { font-size: 1em; color: var(--sl-color-primary-600); }
+#update-release-notes h3 { font-size: 1em; color: var(--text-primary); }
 #update-release-notes ul, #update-release-notes ol { margin: 0.4em 0 0.4em 1.5em; padding: 0; }
 #update-release-notes li { margin: 0.2em 0; }
 #update-release-notes code { background: var(--sl-color-neutral-100); padding: 0.1em 0.3em; border-radius: 3px; font-family: var(--sl-font-mono); font-size: 0.9em; }
-#update-release-notes a { color: var(--sl-color-primary-600); text-decoration: underline; }
+#update-release-notes a { color: var(--text-primary); text-decoration: underline; }
 #update-release-notes p { margin: 0.5em 0; }
 
 /* Respect reduced motion preferences */
@@ -3554,7 +3572,7 @@ html.sl-theme-light .log-debug {
     .files-table .files-row > .files-job-info {
         order: 5;
         font-size: 0.65rem;
-        color: var(--sl-color-neutral-500);
+        color: var(--sl-color-neutral-600);
         white-space: nowrap;
     }
 
@@ -3594,7 +3612,7 @@ html.sl-theme-light .log-debug {
         font-size: 0.65rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        color: var(--sl-color-neutral-500);
+        color: var(--sl-color-neutral-600);
         font-weight: 600;
     }
 
@@ -3659,7 +3677,7 @@ html.sl-theme-light .log-debug {
 
     #log-count {
         font-size: 0.7rem;
-        color: var(--sl-color-neutral-500);
+        color: var(--sl-color-neutral-600);
         order: 1;
     }
 

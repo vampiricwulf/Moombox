@@ -88,7 +88,7 @@ export class FilesController {
       let pathInner = this.app.escapeHtml(file.relPath);
       if (Array.isArray(file.asides) && file.asides.length > 0) {
         const n = file.asides.length;
-        pathInner += `<br><span class="files-asides" style="color: var(--sl-color-warning-600); font-size: 0.85em;">`
+        pathInner += `<br><span class="files-asides" style="color: var(--text-warning); font-size: 0.85em;">`
           + `${n} set-aside recording${n === 1 ? "" : "s"}: ${this.app.escapeHtml(file.asides.join(", "))}</span>`;
       }
       const pathStr = `<span class="files-path" title="${this.app.escapeHtml(file.path)}">${pathInner}</span>`;

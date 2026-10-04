@@ -347,19 +347,19 @@ export class SettingsController {
           // rendered in this button's own result span, where "Up to date" and
           // "Check failed" already go.
           result.textContent = `Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`;
-          result.style.color = "var(--sl-color-neutral-500)";
+          result.style.color = "var(--sl-color-neutral-600)";
         } else if (data.available) {
           result.textContent = `v${data.version} available!`;
-          result.style.color = "var(--sl-color-success-600)";
+          result.style.color = "var(--text-success)";
           this.app._updateAvailable = data;
           this.app.updateVersionIndicator();
         } else {
           result.textContent = "Up to date";
-          result.style.color = "var(--sl-color-neutral-500)";
+          result.style.color = "var(--sl-color-neutral-600)";
         }
       } catch {
         result.textContent = "Check failed";
-        result.style.color = "var(--sl-color-danger-500)";
+        result.style.color = "var(--text-danger)";
       }
       btn.loading = false;
     });
@@ -435,14 +435,14 @@ export class SettingsController {
           const data = await resp.json();
           if (resp.ok && data.verified) {
             result.textContent = "Signature valid";
-            result.style.color = "var(--sl-color-success-600)";
+            result.style.color = "var(--text-success)";
           } else {
             result.textContent = data.error || "Verification failed";
-            result.style.color = "var(--sl-color-danger-500)";
+            result.style.color = "var(--text-danger)";
           }
         } catch {
           result.textContent = "Verification failed";
-          result.style.color = "var(--sl-color-danger-500)";
+          result.style.color = "var(--text-danger)";
         }
         btn.loading = false;
       });
@@ -1261,7 +1261,7 @@ export class SettingsController {
     const resetButton = () => { if (btn) { btn.loading = false; btn.disabled = false; } };
 
     if (btn) { btn.loading = true; btn.disabled = true; }
-    setResult("Restarting…", "var(--sl-color-neutral-500)");
+    setResult("Restarting…", "var(--sl-color-neutral-600)");
     this.app.showToast("Restarting Moombox…", "primary");
 
     try {
@@ -1270,7 +1270,7 @@ export class SettingsController {
         const data = await resp.json().catch(() => ({ error: resp.statusText }));
         const msg = "Failed to restart: " + (data.error || resp.statusText);
         this.app.showToast(msg, "danger");
-        setResult(msg, "var(--sl-color-danger-500)");
+        setResult(msg, "var(--text-danger)");
         resetButton();
         return;
       }
@@ -1284,7 +1284,7 @@ export class SettingsController {
     // reconnect logic restores the UI once the new process is up. Reset the
     // button as a fallback in case the page outlives the restart (same
     // host:port — there is no navigation/reload).
-    setResult("Reconnecting once Moombox is back…", "var(--sl-color-neutral-500)");
+    setResult("Reconnecting once Moombox is back…", "var(--sl-color-neutral-600)");
     setTimeout(() => { resetButton(); setResult("", ""); }, 10000);
   }
 
@@ -2586,7 +2586,7 @@ export class SettingsController {
     try {
       const response = await fetch("/api/client-tokens");
       if (!response.ok) {
-        container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">Unable to load tokens</span>';
+        container.innerHTML = '<span style="color: var(--sl-color-neutral-600);">Unable to load tokens</span>';
         return;
       }
       const tokens = await response.json();
@@ -2624,7 +2624,7 @@ export class SettingsController {
       }
     } catch (e) {
       console.error("Failed to load client tokens:", e);
-      container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">Error loading tokens</span>';
+      container.innerHTML = '<span style="color: var(--sl-color-neutral-600);">Error loading tokens</span>';
     }
   }
 
@@ -2808,7 +2808,7 @@ export class SettingsController {
         if (lastErrorEl) {
           const lastError = status.lastError || "";
           lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
-          lastErrorEl.style.color = "var(--sl-color-warning-600)";
+          lastErrorEl.style.color = "var(--text-warning)";
           lastErrorEl.style.display = lastError ? "" : "none";
         }
 
@@ -2943,7 +2943,7 @@ export class SettingsController {
       if (countdownEl) {
         countdownEl.textContent = `${remaining}s remaining`;
         if (remaining <= 10) {
-          countdownEl.style.color = "var(--sl-color-warning-600)";
+          countdownEl.style.color = "var(--text-warning)";
         }
       }
       if (remaining <= 0) clearInterval(countdownInterval);
@@ -3005,7 +3005,7 @@ export class SettingsController {
           resultEl.textContent = cookieSetupRejectedMessage(
             platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
           );
-          resultEl.style.color = "var(--sl-color-danger-600)";
+          resultEl.style.color = "var(--text-danger)";
         }
       }
     } catch (e) {
@@ -3055,7 +3055,7 @@ export class SettingsController {
       }
       if (resultEl) {
         resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } finally {
       clearInterval(countdownInterval);
@@ -3110,7 +3110,7 @@ export class SettingsController {
     if (!pasted && !chosen) {
       if (resultEl) {
         resultEl.textContent = "Paste the contents of a cookies.txt, or choose a file to upload.";
-        resultEl.style.color = "var(--sl-color-warning-600)";
+        resultEl.style.color = "var(--text-warning)";
       }
       return;
     }
@@ -3191,12 +3191,12 @@ export class SettingsController {
             ? data.youtubeVerification
             : data.twitchVerification,
         );
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } catch (e) {
       if (resultEl) {
         resultEl.textContent = e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } finally {
       if (btn) { btn.loading = false; btn.disabled = false; }

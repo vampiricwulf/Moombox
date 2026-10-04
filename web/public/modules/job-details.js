@@ -765,7 +765,7 @@ export class JobDetailsController {
           const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
           rows += `<div class="details-row">
             <span class="details-label">Gaps:</span>
-            <span class="details-value" style="color: var(--sl-color-warning-600)">${this.app.escapeHtml(job.gaps.length)} segments${this.app.escapeHtml(detail)}</span>
+            <span class="details-value" style="color: var(--text-warning)">${this.app.escapeHtml(job.gaps.length)} segments${this.app.escapeHtml(detail)}</span>
           </div>`;
         }
         return `<div class="details-section"><strong>Media:</strong>${rows}</div>`;

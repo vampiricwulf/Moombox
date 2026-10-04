@@ -385,7 +385,7 @@ export class SetupController {
       if (countdownEl) {
         countdownEl.textContent = `${remaining}s remaining`;
         if (remaining <= 10) {
-          countdownEl.style.color = "var(--sl-color-warning-600)";
+          countdownEl.style.color = "var(--text-warning)";
         }
       }
       if (remaining <= 0) clearInterval(countdownInterval);
@@ -456,7 +456,7 @@ export class SetupController {
           resultEl.textContent = cookieSetupRejectedMessage(
             platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
           );
-          resultEl.style.color = "var(--sl-color-danger-600)";
+          resultEl.style.color = "var(--text-danger)";
         }
       }
     } catch (e) {
@@ -509,7 +509,7 @@ export class SetupController {
       }
       if (resultEl) {
         resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } finally {
       clearInterval(countdownInterval);
@@ -548,7 +548,7 @@ export class SetupController {
     if (!container) return;
     container.innerHTML = "";
     if (this.channels.length === 0) {
-      container.innerHTML = '<p style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">No channels added yet.</p>';
+      container.innerHTML = '<p style="color: var(--sl-color-neutral-600); font-size: var(--sl-font-size-small);">No channels added yet.</p>';
       return;
     }
     for (let i = 0; i < this.channels.length; i++) {
@@ -563,7 +563,7 @@ export class SetupController {
         <div style="display: flex; align-items: center; gap: 0.5em; flex: 1; min-width: 0;">
           <sl-icon name="${platformIcon}" style="color: ${platformColor};"></sl-icon>
           <strong style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayName}</strong>
-          <span style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayId}</span>
+          <span style="color: var(--sl-color-neutral-600); font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayId}</span>
         </div>
         <div style="display: flex; gap: 0.25em;">
           <sl-icon-button name="pencil" data-index="${i}" class="setup-ch-edit" label="Edit"></sl-icon-button>
@@ -915,7 +915,7 @@ export class SetupController {
       urlText.style.cssText = "margin-top: 0.25em; font-family: monospace; color: var(--sl-color-neutral-600); word-break: break-all;";
       urlText.textContent = this._redirectUrl;
       const note = document.createElement("p");
-      note.style.cssText = "margin-top: 0.5em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+      note.style.cssText = "margin-top: 0.5em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-600);";
       note.textContent = "Redirecting in a few seconds...";
       const btn = document.createElement("sl-button");
       btn.variant = "primary";
@@ -948,11 +948,11 @@ export class SetupController {
 
     const startTime = Date.now();
     const phaseEl = document.createElement("p");
-    phaseEl.style.cssText = "margin-top: 0.75em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+    phaseEl.style.cssText = "margin-top: 0.75em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-600);";
     phaseEl.textContent = "Saving configuration...";
 
     const elapsedEl = document.createElement("p");
-    elapsedEl.style.cssText = "font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-400); margin-top: 0.25em;";
+    elapsedEl.style.cssText = "font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-600); margin-top: 0.25em;";
 
     const elapsedInterval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
