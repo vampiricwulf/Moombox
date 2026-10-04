@@ -418,3 +418,27 @@ func TestSaveGatesTheMemoryLimits(t *testing.T) {
 		})
 	}
 }
+
+// TestBlankProbeTargetsKeepTheStoredList: the dashboard keeps the stored
+// targets when the field is left empty (PUT /api/config refuses an empty
+// list), while the TUI wrote the defaults, so the same gesture produced two
+// different configs. Both now keep the stored list, and the save is not a
+// restart-worthy change.
+//
+// Mutant: write config.DefaultProbeTargets on blank again.
+func TestBlankProbeTargetsKeepTheStoredList(t *testing.T) {
+	m := newSettingsModelForSave(t)
+	custom := []string{"10.0.0.1:443"}
+	m.cfg.Connectivity.ProbeTargets = custom
+	m.values["probe_targets"] = "10.0.0.1:443"
+	m.originalValues["probe_targets"] = "10.0.0.1:443"
+	m.values["probe_targets"] = ""
+	m.recheckDirty()
+	m.saveAndClose()
+	if got := m.cfg.Connectivity.ProbeTargets; len(got) != 1 || got[0] != "10.0.0.1:443" {
+		t.Errorf("ProbeTargets = %v after a blank save, want the stored %v", got, custom)
+	}
+	if m.showRestartOverlay {
+		t.Error("a blank probe-target field that kept the stored list prompted a restart")
+	}
+}

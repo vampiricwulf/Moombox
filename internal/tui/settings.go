@@ -126,7 +126,7 @@ var sections = []settingsSection{
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
 			{"public_url", "Public dashboard URL", fieldText, nil, "external address of this dashboard, used only in webhook embeds (e.g. https://moombox.example.com); blank = link to YouTube/Twitch", nil},
-			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = defaults (requires restart)", nil},
+			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = keep the current targets (requires restart)", nil},
 		},
 	},
 	{
@@ -907,10 +907,15 @@ func (m *SettingsModel) applyValues() {
 			targets = append(targets, p)
 		}
 	}
-	if len(targets) == 0 {
-		targets = append([]string(nil), config.DefaultProbeTargets...)
+	if len(targets) > 0 {
+		m.cfg.Connectivity.ProbeTargets = targets
+	} else {
+		// Blank keeps the stored targets, as the dashboard's field does (an
+		// empty list is refused there). The TUI used to write the defaults
+		// instead, so the same gesture gave two configs. The field shows
+		// what is kept, so the save is not seen as a restart-worthy change.
+		m.values["probe_targets"] = strings.Join(m.cfg.Connectivity.ProbeTargets, ", ")
 	}
-	m.cfg.Connectivity.ProbeTargets = targets
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]
