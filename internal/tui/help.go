@@ -66,7 +66,7 @@ var mouseKeys = helpSection{
 	title: "Mouse",
 	keys: []helpKey{
 		{"Click", "Select task / focus panel"},
-		{"Scroll", "Scroll focused panel"},
+		{"Scroll", "Scroll the panel under the cursor"},
 	},
 }
 

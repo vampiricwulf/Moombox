@@ -204,8 +204,9 @@ func restartBanner(width int) string {
 		Padding(0, 1).
 		Width(width)
 	// R P is the Restart Program chord (buildMenuItems); the settings overlay
-	// has no restart button, its buttons are Save & Return / Return.
-	return style.Render("⚠ Restart required — saved config differs from running process. Press R P to restart Moombox, or restart it yourself.")
+	// has no restart button, its buttons are Save & Return / Return. It is
+	// confirm-gated, so the full sequence is R P P — the form the help shows.
+	return style.Render("⚠ Restart required — saved config differs from running process. Press R P P to restart Moombox, or restart it yourself.")
 }
 
 // securityBannerText returns the persistent security warning shown above the
