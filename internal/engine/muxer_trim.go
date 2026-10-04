@@ -51,18 +51,6 @@ func CleanupOldTrimTempDirs() (removed int, err error) {
 	return removed, nil
 }
 
-// Trim creates a trimmed version of a file.
-func (m *Muxer) Trim(ctx context.Context, inputPath, outputPath string, startTime, endTime float64, crf int) error {
-	duration := endTime - startTime
-	opts := &TrimOptions{
-		TrimStartOffset: startTime,
-		TrimDuration:    duration,
-		CRF:             crf,
-		UsePreciseTrim:  true,
-	}
-	return m.Mux(ctx, inputPath, "", outputPath, opts)
-}
-
 // TrimWithAudio creates a trimmed version with a specific audio bitrate.
 // Caller probes the source audio bitrate first so the re-encode preserves
 // fidelity instead of dropping to FFmpeg's default 128 kbps.

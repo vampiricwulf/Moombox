@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -662,9 +661,4 @@ func EnrichWithEmotes(chatPath string, emoteData *TwitchEmoteData) error {
 
 	chatData.Emotes = emoteData
 	return utils.WriteChatFileAtomic(chatPath, &chatData)
-}
-
-// BuildChatFilename generates the chat output filename for a Twitch stream/VOD.
-func BuildChatFilename(channelLogin, streamOrVodID string) string {
-	return fmt.Sprintf("%s_%s_chat.json", strings.ToLower(channelLogin), streamOrVodID)
 }

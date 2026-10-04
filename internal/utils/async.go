@@ -26,8 +26,3 @@ func Jitter(maxJitter time.Duration) time.Duration {
 	}
 	return time.Duration(rand.Int63n(int64(maxJitter)))
 }
-
-// SleepWithJitter sleeps for duration + random jitter, respecting context.
-func SleepWithJitter(ctx context.Context, d time.Duration, maxJitter time.Duration) error {
-	return Sleep(ctx, d+Jitter(maxJitter))
-}

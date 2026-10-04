@@ -6,57 +6,16 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// workerHTTPClient downloads thumbnails / VODs / assets up to ~2GB,
-// backed by the shared httpx transport. The 10-minute timeout is
-// generous to accommodate slow connections on multi-GB VOD pulls.
+// workerHTTPClient downloads assets (DownloadFileMinSize), backed by the
+// shared httpx transport. VOD downloads go through internal/engine, not
+// here.
 var workerHTTPClient = httpx.Client(10 * time.Minute)
-
-// DownloadFile downloads a file from a URL to the output path. Its one caller
-// is DownloadThumbnail below; VOD direct downloads live in
-// internal/engine/downloader_direct.go and have never come through here.
-func DownloadFile(ctx context.Context, url, outputPath string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	resp, err := workerHTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return &httpError{StatusCode: resp.StatusCode}
-	}
-
-	tmpPath := outputPath + ".tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-
-	// Limit body to 2GB to prevent unbounded memory/disk usage
-	_, err = io.Copy(f, io.LimitReader(resp.Body, 2<<30))
-	f.Close()
-	if err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-
-	// utils.ReplaceFile, not os.Rename: the file was written a moment ago, and
-	// on Windows a scanner or indexer still holding it turns the last step of
-	// this atomic write into a spurious failure (sweep-2 TOOL-2).
-	return utils.ReplaceFile(tmpPath, outputPath)
-}
 
 // DownloadFileMinSize downloads a file but discards it if smaller than minSize bytes.
 // If lg is non-nil and the file is rejected for being too small, the rejection
@@ -99,25 +58,10 @@ func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize in
 		return fmt.Errorf("file too small: %d bytes (min %d)", n, minSize)
 	}
 
-	// Same as DownloadFile above: the freshly written temp file is exactly
-	// what a Windows scanner holds open (sweep-2 TOOL-2).
+	// utils.ReplaceFile, not os.Rename: the file was written a moment ago, and
+	// on Windows a scanner or indexer still holding it turns the last step of
+	// this atomic write into a spurious failure (sweep-2 TOOL-2).
 	return utils.ReplaceFile(tmpPath, outputPath)
-}
-
-// DownloadThumbnail downloads a thumbnail to the staging directory.
-func DownloadThumbnail(ctx context.Context, thumbnailURL, stagingDir string) (string, error) {
-	if thumbnailURL == "" {
-		return "", nil
-	}
-
-	outputPath := filepath.Join(stagingDir, "thumbnail.jpg")
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	if err := DownloadFile(ctx, thumbnailURL, outputPath); err != nil {
-		return "", err
-	}
-	return outputPath, nil
 }
 
 type httpError struct {

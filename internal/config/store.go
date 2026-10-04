@@ -22,12 +22,7 @@ import (
 // sites that still do manual cfgMu.RLock()/Lock(), and Config() returns
 // the raw *MoomboxConfig pointer for dep-injected APIs that take both.
 //
-// During gradual migration, construct the Store via NewStoreWithMutex so
-// it shares the same critical section as legacy cfgMu callers. Once all
-// legacy callers have moved to Read/Update, NewStore's embedded-mutex
-// variant becomes preferred.
-//
-// Zero-value Store is not usable — construct via NewStore / NewStoreWithMutex.
+// Zero-value Store is not usable — construct via NewStore.
 type Store struct {
 	mu  *sync.RWMutex
 	cfg *MoomboxConfig
@@ -43,17 +38,6 @@ type Store struct {
 // useful during startup before a final config path is negotiated.
 func NewStore(cfg *MoomboxConfig, savePath string) *Store {
 	s := &Store{mu: &sync.RWMutex{}, cfg: cfg}
-	s.savePath.Store(&savePath)
-	return s
-}
-
-// NewStoreWithMutex returns a Store sharing an external RWMutex. Use this
-// during the gradual migration so the Store's Read/Update and legacy
-// cfgMu.RLock()/Lock() sites share the same critical section — without
-// that, new-API and legacy callers would race. Once all legacy callers
-// have migrated, NewStore is preferred.
-func NewStoreWithMutex(cfg *MoomboxConfig, savePath string, mu *sync.RWMutex) *Store {
-	s := &Store{mu: mu, cfg: cfg}
 	s.savePath.Store(&savePath)
 	return s
 }
