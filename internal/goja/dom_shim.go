@@ -13,8 +13,10 @@ import (
 // domRealJS is the Option-2 hand-rolled real-class DOM (EventTarget,
 // Event, CustomEvent, etc.). Loaded after the legacy hand-stub block so
 // the constructs declared inside override the flat-object stubs while
-// keeping the same global names. See docs/investigations/botguard-
-// option-2-plan.md for the multi-day build-out plan.
+// keeping the same global names. "Why a Sidecar" in
+// docs/spec/platform-services.md records what this build-out reached
+// (API parity) and why it stopped there (the timing gap sits below the
+// API surface).
 //
 //go:embed js/dom-real.js
 var domRealJS string
@@ -701,10 +703,11 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 
 	// Option-2 real-class DOM overlay. Loaded AFTER the legacy hand-stub
 	// block so the classes declared inside (EventTarget, Event,
-	// CustomEvent, MessageEvent, ErrorEvent so far; Node/Element/
-	// Document/Window incoming) replace the flat-object stubs that have
-	// the same global names. See docs/investigations/botguard-option-2-
-	// plan.md for the build plan.
+	// CustomEvent, MessageEvent, ErrorEvent, Node/Element/Document/Window,
+	// CSSStyleDeclaration, URL, AbortController, DOMTokenList) replace the
+	// flat-object stubs that have the same global names. See "Why a
+	// Sidecar" in docs/spec/platform-services.md for where this overlay
+	// fits.
 	if _, err := vm.RunString(domRealJS); err != nil {
 		return fmt.Errorf("DOM real-class overlay failed: %w", err)
 	}

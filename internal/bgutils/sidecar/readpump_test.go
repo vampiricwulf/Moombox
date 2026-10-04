@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"strings"
 	"testing"
 	"time"
 )
@@ -74,8 +73,10 @@ func TestReadPumpNamesAScannerErrorAsTheReason(t *testing.T) {
 
 			select {
 			case err := <-callErr:
-				if err == nil || !strings.HasSuffix(err.Error(), tc.want) {
-					t.Errorf("drained call error = %v, want it to end with %q", err, tc.want)
+				// One "sidecar: " prefix — call()'s — not the doubled
+				// "sidecar: sidecar unhealthy: …" the drain used to produce.
+				if want := "sidecar: unhealthy: " + tc.want; err == nil || err.Error() != want {
+					t.Errorf("drained call error = %v, want %q", err, want)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("the pending call was never drained")

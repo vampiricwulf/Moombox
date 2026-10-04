@@ -2,10 +2,12 @@
 //
 // Reads JSON-RPC requests from stdin (one object per line), dispatches to
 // bgutils-js running under a JSDOM window, writes JSON-RPC responses to
-// stdout. Errors and trace go to stderr (Moombox routes them to the Debug
-// log).
+// stdout. Errors and trace go to stderr, where Moombox's stderrPump routes
+// [bgutil-sidecar:error] lines to its Warn log and [bgutil-sidecar:warn]
+// lines, like any unprefixed chatter, to Debug.
 //
-// Wire protocol matches docs/investigations/botguard-sidecar-design.md §3.4:
+// Wire protocol as documented under "IPC protocol" in
+// docs/spec/platform-services.md:
 //   Request:  {"id":<int>,"method":<str>,"params":<obj>}
 //   Response: {"id":<int>,"result":<any>}    | {"id":<int>,"error":<str>}
 //
@@ -57,11 +59,12 @@ const ATT_GET_URL =
 const HOMEPAGE_URL = "https://www.youtube.com/";
 // Per-fetch ceiling for the BotGuard network round-trips. Node's fetch (undici)
 // has no overall request timeout — a hung YouTube endpoint would otherwise wedge
-// minterPromise for ~300s (undici's headers timeout), and since every mint awaits
-// that one promise, all mints cascade into the parent's 90s RPC timeout while the
-// sidecar still reports healthy. 30s is well above the happy path (a few seconds)
-// and well under the parent's 90s budget, so a genuine hang aborts fast and the
-// next mint retries from scratch instead of piggybacking a doomed attempt.
+// the minter generation (minterInflight / serializeChain) for ~300s (undici's
+// headers timeout), and since every mint awaits it, all mints cascade into the
+// parent's 90s RPC timeout while the sidecar still reports healthy. 30s is well
+// above the happy path (a few seconds) and well under the parent's 90s budget,
+// so a genuine hang aborts fast and the next mint retries from scratch instead
+// of piggybacking a doomed attempt.
 const FETCH_TIMEOUT_MS = 30_000;
 // Whole-generation ceiling. The three fetches above each carry
 // FETCH_TIMEOUT_MS, and 3 × 30s meets or exceeds the parent's 90s RPC

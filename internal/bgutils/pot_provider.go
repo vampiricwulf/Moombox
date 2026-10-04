@@ -636,10 +636,11 @@ type GvsMint struct {
 // its fresh minter from its own homepage (ytcfg, ytAtN) pair when it can,
 // else the supplied watch-page challenge, else its /att/get fetch
 // (upstream 495a47f's preference order); the expensive BotGuard
-// regeneration is deduplicated
-// inside the sidecar (minterPromise), so no provider-side inflight entry is
-// needed. On the goja fallback (sidecar unavailable), gojaGenerateAndMint's
-// bypassCache=true routes to gojaGenerateEphemeralMint, which builds its
+// regeneration is deduplicated inside the sidecar (server.js's
+// minterInflight map, ordered by its serializeChain), so no provider-side
+// inflight entry is needed. On the goja fallback (sidecar unavailable),
+// gojaGenerateAndMint's bypassCache=true routes to
+// gojaGenerateEphemeralMint, which builds its
 // own fresh goja minter (challenge ignored — today's session-incoherent
 // goja-fallback limitation) and safeCleanups it before returning, so a
 // sidecar-down GVS mint can never evict or race the long-lived (~6h)
@@ -804,8 +805,8 @@ func (pp *PotProvider) proactiveRefreshMinter(original *TokenMinter) {
 // acquires WebPoMinter.mu and runs the goja shutdown function. Holding
 // pp.mu across that path can deadlock against a concurrent
 // pp.mintPoToken (which holds WebPoMinter.mu and may queue on pp.mu via
-// the inflight cleanup at line ~244). Same anti-pattern that CRIT-6
-// fixed in InvalidateCaches/InvalidateIntegrityTokens.
+// generatePoTokenChallenge's inflight cleanup). Same anti-pattern that
+// CRIT-6 fixed in InvalidateCaches/InvalidateIntegrityTokens.
 func (pp *PotProvider) cleanupExpired() []*TokenMinter {
 	now := time.Now()
 	for k, s := range pp.sessionCache {

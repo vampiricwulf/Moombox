@@ -7,7 +7,7 @@ Moombox `go:embed`'s it into `moombox.exe`. The Go-side `internal/bgutils/sideca
 package (Phase 3) extracts this tarball alongside a bundled `node.exe` (from
 `tools/fetch-node`, Phase 2) on first launch and pipes JSON-RPC requests to it.
 
-See `docs/investigations/botguard-sidecar-design.md` for the full architecture.
+See the "BotGuard / PO Token" section of `docs/spec/platform-services.md` for the full architecture.
 
 ## Local build
 

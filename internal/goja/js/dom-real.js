@@ -1,5 +1,6 @@
 // dom-real.js — real-class DOM shim built incrementally for the Option 2
-// path documented in docs/investigations/botguard-option-2-plan.md.
+// path; "Why a Sidecar" in docs/spec/platform-services.md records where
+// it got to and why the sidecar superseded it.
 //
 // Loaded by RegisterDOMShim AFTER the legacy test.49 hand-stub block, so
 // the constructs declared here OVERRIDE the flat-object stubs while

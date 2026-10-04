@@ -5,7 +5,7 @@
 // process, pipes JSON-RPC requests to it via stdin/stdout, and consumes
 // PO tokens that pass Google's BotGuard timing fingerprint check (which
 // our pure-goja path can't satisfy because the interpreter runs ~100x
-// faster than V8 -- see docs/investigations/botguard-option-2-results.md).
+// faster than V8 -- see "Why a Sidecar" in docs/spec/platform-services.md).
 //
 // Lifecycle:
 //
@@ -16,9 +16,10 @@
 //	token, err := s.GeneratePoToken(ctx, contentBinding)
 //
 // Crash safety: child is pinned to a Windows Job Object so it dies when
-// Moombox does. Internal readPump goroutine watches stdout for EOF and
-// marks the sidecar unhealthy on parent crash so callers can short-circuit
-// to the fallback path.
+// Moombox does. In the other direction, the readPump goroutine watches
+// stdout for EOF and marks the sidecar unhealthy when the CHILD dies (a
+// crash, a V8 OOM-abort) so callers short-circuit at once and the
+// supervisor brings it back.
 package sidecar
 
 import (
@@ -719,8 +720,10 @@ func (s *Sidecar) TriggerGC(ctx context.Context) (TriggerGCResult, error) {
 	return result, nil
 }
 
-// Stats holds the sidecar's internal counters. Useful for diagnostics
-// surfaced in /api/pot.
+// Stats holds the sidecar's internal counters as getStats reports them.
+// Nothing in production reads them today — the tests exercise the
+// round-trip — and CachedSessions is always 0: server.js keeps no session
+// cache (that layer lives in PotProvider) and only ever resets the counter.
 type Stats struct {
 	CachedMinters  int `json:"cachedMinters"`
 	CachedSessions int `json:"cachedSessions"`
@@ -1158,7 +1161,10 @@ func (s *Sidecar) drainPending(reason string) {
 	defer s.pendingMu.Unlock()
 	for id, ch := range s.pending {
 		select {
-		case ch <- rpcResponse{ID: id, Error: "sidecar unhealthy: " + reason}:
+		// call() prefixes every response error with "sidecar: ", as it does
+		// the child's own, so the caller reads "sidecar: unhealthy: stdout
+		// EOF" — one prefix, not the doubled "sidecar: sidecar unhealthy: …".
+		case ch <- rpcResponse{ID: id, Error: "unhealthy: " + reason}:
 		default:
 		}
 	}
