@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -124,7 +125,17 @@ func parseFpsString(fps string) int {
 	return int(math.Round(num / den))
 }
 
-// copyFile copies a file from src to dst using streaming I/O.
+// copyFile copies a file from src to dst using streaming I/O, through a
+// uniquely named temp file beside dst and utils.ReplaceFile — the shape
+// utils.WriteFileAtomic gives every other output write in this package.
+//
+// It used to os.Create(dst) and stream into it, which left a TRUNCATED dst
+// behind on any failure; copyKeptChatSidecar skips the copy when dst already
+// exists, so one failed copy left a corrupt chat file beside the archive for
+// good. Now dst either keeps what it had or holds the whole of src, and a
+// failure leaves no temp behind. The POSIX mode is exactly 0644 (the chmod
+// WriteFileAtomic applies) rather than 0666 masked by the process umask —
+// the same one deliberate difference writeDescriptionAtomic documents.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -132,17 +143,37 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmpPath := tmp.Name()
+	done := false
+	defer func() {
+		if !done {
+			os.Remove(tmpPath)
+		}
+	}()
 
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
 	}
-	return closeErr
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return err
+	}
+	if err := utils.ReplaceFile(tmpPath, dst); err != nil {
+		return err
+	}
+	done = true
+	return nil
 }
 
 // extractQualityFromResult derives QualityInfo from a DownloadResult.
