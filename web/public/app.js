@@ -2141,13 +2141,17 @@ export class MoomboxApp {
     // Compact-row overflow menu. Only the desktop inline icons render on
     // wide viewports; CSS swaps them for this single trigger on phones.
     const overflowHtml = overflowItems.length
-      ? `<sl-dropdown class="video-item-overflow"><sl-icon-button slot="trigger" name="three-dots-vertical" label="More actions"></sl-icon-button><sl-menu>${overflowItems.join("")}</sl-menu></sl-dropdown>`
+      ? `<sl-dropdown class="video-item-overflow" role="cell"><sl-icon-button slot="trigger" name="three-dots-vertical" label="More actions"></sl-icon-button><sl-menu>${overflowItems.join("")}</sl-menu></sl-dropdown>`
       : "";
 
     const isSelected = this._selectedTaskJobs.has(job.id) || this._selectedArchivedJobs.has(job.id);
+    // role="row"/"cell": the containers are role="table" with a
+    // columnheader row, and a table's rows must be rows — without them the
+    // checkbox, status and buttons sat directly inside the rowgroup, which
+    // assistive technology cannot read as a table.
     return `
-      <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
-        <div class="thumb">
+      <div class="video-item${isSelected ? " selected" : ""}" role="row" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
+        <div class="thumb" role="cell">
           <input type="checkbox" class="job-checkbox" data-job-id="${escId}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
@@ -2156,18 +2160,18 @@ export class MoomboxApp {
           ${this.watchIndicatorHtml(job)}
           ${this.incompleteIndicatorHtml(job)}
         </div>
-        <div class="stream-info">
+        <div class="stream-info" role="cell">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
           <div class="stream-author">${this.escapeHtml(job.channelName)}</div>
         </div>
-        <div class="job-status-cell">
+        <div class="job-status-cell" role="cell">
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
-        <div class="job-progress">
+        <div class="job-progress" role="cell">
           <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
-        <div class="job-quick-actions">${actionsHtml}</div>
+        <div class="job-quick-actions" role="cell">${actionsHtml}</div>
         ${overflowHtml}
       </div>
     `;
