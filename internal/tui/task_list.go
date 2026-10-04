@@ -618,6 +618,13 @@ func (m *TaskListModel) SelectAtOffset(y int) bool {
 	if perPage <= 0 {
 		return false
 	}
+	// The offset must be a row of THIS page. The panel's bottom border sits at
+	// offset perPage (and the search box, while open, takes that row instead),
+	// so without the bound a click on either resolved to the first row of the
+	// next page. Same bound the action menu applies to its clicks.
+	if y < 0 || y >= perPage {
+		return false
+	}
 	globalIdx := m.list.Paginator.Page*perPage + y
 	if globalIdx < 0 || globalIdx >= len(m.list.Items()) {
 		return false
