@@ -565,7 +565,9 @@ sl-badge.status.cookies::part(base) {
     }
 }
 
-.archived-table .video-item {
+/* Archived rows read as settled by their dimmed thumbnail alone. Dimming
+   the whole row took its text under 4.5:1 (a Finished badge to 3.6:1). */
+.archived-table .video-item .thumb img {
     opacity: 0.85;
 }
 
