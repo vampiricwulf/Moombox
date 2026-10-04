@@ -1447,7 +1447,14 @@ export class SetupController {
       const data = await resp.json();
 
       if (data.valid) {
-        // POST /api/ffmpeg/check already saves the path to config on the server side
+        // POST /api/ffmpeg/check already saves the path to config on the
+        // server side. The Settings form and the cached config have to hold
+        // it too: the form is loaded once, so its next Save — of anything —
+        // sent the old (usually empty) path back and undid this check.
+        if (data.path) {
+          this.app.setInputValue("cfg-ffmpeg-path", data.path);
+          if (this.app.config?.paths) this.app.config.paths.ffmpeg_path = data.path;
+        }
 
         let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
         if (data.warning) {
