@@ -78,8 +78,7 @@ type ChatApiResponse struct {
 
 // ChatAPI handles YouTube live chat API interactions.
 type ChatAPI struct {
-	apiKey      string
-	visitorData string
+	apiKey string
 	// cookieHeader returns the CURRENT Cookie header, re-read on every
 	// request. It is a getter and not a captured string because live chat
 	// polls this API every ~5 s for hours while the in-process cookie refresh
@@ -154,7 +153,6 @@ func NewChatAPI(apiKey, visitorData string, cookieHeader func() string) *ChatAPI
 	}
 	return &ChatAPI{
 		apiKey:        apiKey,
-		visitorData:   visitorData,
 		cookieHeader:  cookieHeader,
 		client:        httpx.Client(chatHTTPTimeout),
 		clientContext: map[string]any{"client": client},

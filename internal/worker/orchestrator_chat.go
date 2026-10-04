@@ -134,7 +134,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	// logger is assigned here (Arc J D6).
 	dl.Logger = o.logger
 	dl.OnError = func(err error) {
-		o.logger.Warn("[Chat] Chat API error", "jobID", jobCtx.Job.ID, "err", err)
+		// "downloader", not "API": the downloader routes its disk failures
+		// (write, append, header, resume state) through OnError as well.
+		o.logger.Warn("[Chat] Chat downloader error", "jobID", jobCtx.Job.ID, "err", err)
 	}
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"chat_status": "pending",

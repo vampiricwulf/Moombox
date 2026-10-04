@@ -480,8 +480,8 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 // onProgress is wired before Start so callers don't need a follow-up SetOnProgress
 // (per audit reports/worker.md F16 — keeps initial+retry paths in sync).
 //
-// Returns the downloader together with the flag its OnFinish sets when the run
-// ends — the input earlyChatNeedsRestart consults on each probe. Both are nil
+// Returns the downloader together with the flag runEarlyChat's defer sets when
+// the run ends — the input earlyChatNeedsRestart consults on each probe. Both are nil
 // when no downloader could be started. The flag belongs to THIS run: the
 // caller replaces it whenever it starts a new one. Once the stream goes live
 // and completeStreamTransition hands the downloader to the orchestrator the
@@ -560,7 +560,9 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		dl.SetOnProgress(onProgress)
 	}
 	dl.OnError = func(err error) {
-		sp.logger.Warn("[Chat] Early chat API error", "jobID", job.ID, "err", err)
+		// "downloader", not "API": disk failures (write, append, header,
+		// resume state) arrive here too.
+		sp.logger.Warn("[Chat] Early chat downloader error", "jobID", job.ID, "err", err)
 	}
 	// Transition chat_status from "pending" -> "downloading" only when chat
 	// actually starts receiving data (matches setupChatDownloader behavior).

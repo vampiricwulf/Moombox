@@ -194,7 +194,7 @@ type ChatDownloader struct {
 	// exactly like testRecoveryOverride above it; production leaves it nil.
 	testFetchOverride func(ctx context.Context) (*ChatApiResponse, error)
 
-	// testBackoffOverride, when > 0, replaces the computed exponential-backoff
+	// testBackoffOverride, when > 0, replaces the computed linear-backoff
 	// duration in handleFetchError so tests don't have to sleep for real
 	// (5s-60s) intervals. Only set in tests; zero (disabled) in production.
 	testBackoffOverride time.Duration
