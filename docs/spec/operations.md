@@ -58,7 +58,7 @@ The two embed sources are independent:
 - `tools/fetch-node/main.go` is a Go tool that downloads the pinned Node release from `nodejs.org/dist/` for all three platforms (Windows x64, Linux x64, Linux arm64), SHA-256 verifies each against hardcoded constants in the source, gzips them to `internal/bgutils/embed/node-windows-amd64.gz`, `node-linux-amd64.gz`, and `node-linux-arm64.gz`, and updates `internal/bgutils/embed/version.txt` (committed file used as the cache-invalidation key for first-launch extraction). 5-minute HTTP timeout + 200 MB body cap per file.
 - `bgutil-sidecar/build.mjs` is a Node.js script that `tar -czf` packages the production-only `node_modules/` + `src/server.js` + `package*.json` into `dist/sidecar.tar.gz` and copies the result to `internal/bgutils/embed/sidecar.tar.gz`. Build-time `tar` is required (system binary; available on Windows 10+, all Linux distros, and macOS) but the runtime extraction inside Moombox uses pure Go (`archive/tar` + `compress/gzip` from stdlib) — end users do NOT need a system tar.
 
-To skip the sidecar entirely (smaller binary, but PO tokens fall back to websafe-only), set `[bgutils] use_sidecar = false` in `config.toml`. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
+To run without the sidecar, set `[bgutils] use_sidecar = false` in `config.toml`; Moombox then mints no PO tokens and cannot solve signature ciphers, so formats that need either become unavailable. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
 
 ### Windows Resource Embedding
 

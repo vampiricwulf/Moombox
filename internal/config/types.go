@@ -420,9 +420,9 @@ type ConnectivityConfig struct {
 type BgutilsConfig struct {
 	// UseSidecar enables the embedded Node + JSDOM + bgutils-js
 	// subprocess that produces real PO tokens via BotGuard. Defaults to
-	// true on Windows. When false (or when the sidecar fails to start),
-	// PotProvider falls back to the goja-only path which produces only
-	// websafe-fallback tokens.
+	// true. When false (or when the sidecar fails to start), PotProvider
+	// runs only the goja path, which BotGuard's timing check rejects — it
+	// mints no PO tokens.
 	UseSidecar bool `toml:"use_sidecar" json:"use_sidecar"`
 }
 

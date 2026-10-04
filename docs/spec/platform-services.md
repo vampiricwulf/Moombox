@@ -789,11 +789,11 @@ The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v24 b
 
 **First-launch extraction:** `extractIfNeeded(cacheDir)` resolves `cacheDir = os.UserCacheDir() + "/Moombox/sidecar"` (Windows: `%LOCALAPPDATA%/Moombox/sidecar`), tightens the dir's ACL via `utils.ApplyUserOnlyDACL` (always — even on cache-hit, so users upgrading from v2.5.x get the security benefit), then compares on-disk `version.txt` against the stamp from `buildCacheStamp` (the embedded `Version` plus the tarball's SHA-256). On match + key files present, the function returns immediately. On mismatch, it deletes the old `version.txt` FIRST (so an interrupted re-extract is never left under a stamp the previous binary still matches), gunzip-extracts `node.exe`, gunzip+tar-extracts the sidecar payload using stdlib `archive/tar` + `compress/gzip` (end users do NOT need a system `tar` binary — that's a build-time-only requirement for `bgutil-sidecar/build.mjs`), and writes the new `version.txt` LAST so a partial extraction next time forces a redo. `extractTarGz` replaces rather than merges: the first time an entry lands under a top-level name (`src`, `node_modules`, `vendor`, the two manifests), whatever the dir held under that name is removed, so files a newer payload dropped — whole packages, nested `node_modules` copies that would shadow the hoisted one — do not survive an upgrade. Only names the tarball writes are cleared. Tar-slip defense rejects entries whose target escapes `cacheDir`. File modes are clamped to `0o644` minimum to defend against tar variants that emit zero-mode headers.
 
-**Subprocess:** `exec.Command(cacheDir+"/node.exe", cacheDir+"/src/server.js")` with `cmd.Dir = cacheDir`. Stdin/stdout are piped for JSON-RPC; stderr is piped to a goroutine that routes lines to Moombox's logger at Debug. The process is pinned to a Windows Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so the child + any grandchildren die when Moombox exits — even on a hard parent crash. (Same pattern as `internal/cookies/job_windows.go`.)
+**Subprocess:** `exec.Command(cacheDir+"/node.exe", cacheDir+"/src/server.js")` with `cmd.Dir = cacheDir`. Stdin/stdout are piped for JSON-RPC; stderr is piped to `stderrPump`, which logs `[bgutil-sidecar:error]` lines at Warn and everything else at Debug. The process is pinned to a Windows Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so the child + any grandchildren die when Moombox exits — even on a hard parent crash. (Same pattern as `internal/cookies/job_windows.go`.)
 
-**Handshake:** After `cmd.Start()`, the manager spawns `readPump` (consumes stdout JSON-RPC responses, routes to per-request channels via `reqID`) and `stderrPump` (logs at Debug). It then sends `{"id":1,"method":"ping"}` and waits up to `StartupTimeout` (default 5s on warm cache, 60s on first launch including extraction) for the `{"id":1,"result":"pong"}` reply. Failure here marks the sidecar unhealthy and falls back to goja.
+**Handshake:** After `cmd.Start()`, the manager spawns `readPump` (consumes stdout JSON-RPC responses, routes to per-request channels via `reqID`) and `stderrPump`, then waits for server.js to emit `{"event":"ready"}` once its synchronous init (module parse, JSDOM construction) is done; readPump closes `readyCh` on it. `StartupTimeout` (default 60 s) is only a backstop for a hung child — the earlier ping/pong with a 5 s deadline raced jsdom's cold start. A failed or timed-out handshake tears the child down and Start returns the error.
 
-**Per-request flow:** `Sidecar.GeneratePoToken(ctx, binding)` allocates a `reqID`, registers a buffered channel in `s.pending`, writes `{"id":N,"method":"generatePoToken","params":{"binding":"..."}}` to stdin under `s.writeMu`, then waits on either the channel or `ctx.Done()`. The readPump matches the response by `id` and forwards to the channel. Concurrent calls multiplex cleanly because each request has its own channel.
+**Per-request flow:** `Sidecar.GeneratePoToken(ctx, binding)` allocates a `reqID`, registers a buffered channel in `s.pending`, writes `{"id":N,"method":"generatePoToken","params":{"binding":"..."}}` to stdin while holding the one-slot write semaphore (`writeSem`, waited for under `ctx`), then waits on either the channel or `ctx.Done()`. The write itself runs on its own goroutine, so a child that has stopped draining stdin cannot hold the caller past its context; a write stalled longer than `RequestTimeout` marks the sidecar unhealthy. The readPump matches the response by `id` and forwards to the channel. Concurrent calls multiplex cleanly because each request has its own channel.
 
 **Crash recovery:** If `readPump` observes stdout EOF (parent's view of child death), it calls `markUnhealthy("stdout EOF")` which atomically flips `s.healthy` to false and drains every pending request channel with an error. `markUnhealthy` then hands the reason to `Config.OnUnhealthy`, which is how the supervisor learns the child is gone; `IsHealthy()` stays false until a restart succeeds. See **Supervision** below.
 
@@ -857,7 +857,7 @@ When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR 
 
 5. **Create Minter**:
    - **Path A (full)**: If `integrityToken` is present AND `webPoSignalOutput[0]` was populated by BotGuard, create a `WebPoMinter` that uses the callback to mint per-binding tokens. The Goja VM must stay alive for the minter's lifetime. Rare on the goja path.
-   - **Path B (fallback)**: If `integrityToken` is null but `websafeFallbackToken` is present, use the fallback token directly as a static PO token for all content bindings. The VM is shut down immediately. This is the typical outcome on the goja-only path; works for most YouTube content but PO-token-gated formats may be unavailable.
+   - **No integrity token**: If `integrityToken` is null — the typical outcome on the goja path — the VM is shut down and the mint fails with an `ErrIntegrity` `BGError`, even when a `websafeFallbackToken` came back. That token used to be cached as a static PO token for every binding ("Path B"); it was removed because YouTube does not accept it for authenticated player requests and it masked BotGuard VM failures (upstream bgutil-ytdlp-pot-provider errors the same way). The goja path therefore mints no PO token in practice.
    - Minter timeout for each mint operation: 3 seconds.
 
 ### Triple Cache (`pot_provider.go`)
@@ -894,10 +894,10 @@ When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR 
 
 ```toml
 [bgutils]
-use_sidecar = true   # default: true on Windows. Set to false to force goja-only.
+use_sidecar = true   # default: true. Set to false to force goja-only.
 ```
 
-Disabling the sidecar reverts to the websafe-fallback-only path. Most YouTube content keeps working but PO-token-gated formats become unavailable.
+Disabling the sidecar leaves only the goja path, which mints no PO token (see step 5 above) and has no signature solver for current players, so PO-token-gated and signature-ciphered formats become unavailable; formats that need neither keep working.
 
 #### Supervision
 

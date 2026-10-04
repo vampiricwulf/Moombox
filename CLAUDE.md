@@ -66,7 +66,7 @@ go build -o moombox.exe ./cmd/moombox
 
 CI runs steps 1+2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs. Re-run step 1 when the Node pin in `version.txt` moves, and step 2 whenever anything under `bgutil-sidecar/` changes — `version.txt` records the Node pin only. A stale `sidecar.tar.gz` is caught by `internal/bgutils/embed/embed_test.go`, which fails when the tarball's `src/`, manifests or ejs pin differ from the tree.
 
-To skip the sidecar entirely (smaller binary, falls back to goja-only PO tokens), set `[bgutils] use_sidecar = false` in `config.toml`. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
+To run without the sidecar, set `[bgutils] use_sidecar = false` in `config.toml`: only the goja path remains, which BotGuard's timing check rejects, so no PO tokens are minted and current players' signatures cannot be solved. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
 
 ### Windows resource embedding
 

@@ -396,7 +396,7 @@ The DOM shim is ~1500 lines of JavaScript (test.50–test.55 milestone work). It
 
 ### BotGuard / PO Tokens
 
-YouTube requires Proof of Origin (PO) tokens for certain requests, particularly for premium-quality formats and live streams. Moombox runs BotGuard via an **embedded Node.js sidecar** that produces real integrity tokens — the goja-only path is kept as a fallback for environments where the sidecar fails to start.
+YouTube requires Proof of Origin (PO) tokens for certain requests, particularly for premium-quality formats and live streams. Moombox runs BotGuard via an **embedded Node.js sidecar** that produces real integrity tokens. The in-process goja path still runs when the sidecar is off or down, but BotGuard's timing check rejects it, so it mints no PO token: without the sidecar, PO-token-gated formats are unavailable.
 
 **Architecture (sidecar primary, goja fallback):**
 
@@ -407,7 +407,7 @@ YouTube requires Proof of Origin (PO) tokens for certain requests, particularly 
    2. Load BotGuard interpreter JavaScript
    3. Execute the interpreter in a Goja VM with full DOM shims (real-class hierarchy: `EventTarget`, `Node`, `Element`, `Document`, `Window`, `CSSStyleDeclaration`, `URL`, `AbortController`, `DOMTokenList`)
    4. Take a snapshot, POST to `GenerateIT`
-   5. Mint per-binding tokens via the returned minter callback (Path A) or fall back to the websafe-fallback token (Path B). The websafe-fallback works for most YouTube content but PO-token-gated formats may be unavailable.
+   5. Mint per-binding tokens via the returned minter callback. When GenerateIT returns no integrity token — the usual outcome in goja, which fails BotGuard's timing check — the mint fails: the `websafeFallbackToken` it returns instead is not used as a PO token (YouTube does not accept it for player requests; `webpo_client.go`, "Path B removed"). So while the sidecar is off or down no PO token is minted, and PO-token-gated formats are unavailable.
 
 **Why the sidecar exists:** The goja interpreter runs ~100× faster than V8's JIT, and BotGuard uses snapshot wall-time as a "this isn't a real browser" signal. The hand-rolled real-class DOM shimming (test.50–test.55) raised goja's API fidelity to browser parity but couldn't bridge the timing gap. Real Node + V8 + JSDOM passes the timing fingerprint.
 

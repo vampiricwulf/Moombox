@@ -338,9 +338,10 @@
 # %LOCALAPPDATA%\Moombox\sidecar on Windows, ~/.cache/Moombox/sidecar on
 # Linux.
 #
-# Disable to fall back to the in-process goja-only path. The fallback
-# still works for most YouTube content but cannot pass BotGuard's timing
-# fingerprint check, so PO-token-gated formats become unavailable.
+# Disable to run the in-process goja path only. It cannot pass BotGuard's
+# timing check, so it mints no PO tokens, and it cannot solve signature
+# ciphers for current players: PO-token-gated and signature-ciphered
+# formats become unavailable.
 # [bgutils]
 # use_sidecar = true                         # Default: true. Set to false to disable.
 
