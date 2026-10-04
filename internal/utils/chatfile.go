@@ -121,9 +121,13 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 
 	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
 
+	// Does the array already hold a message? Look back past the whitespace
+	// before ']' for a '}'. Any amount of it: the window used to be 5 bytes,
+	// and a layout with more ("}\n  \n  ]") read as empty, so the next append
+	// left out its comma and the file stopped being JSON.
 	hasExisting := false
-	if bracketBytePos > 5 {
-		checkSize := min(int64(5), bracketBytePos)
+	if bracketBytePos > 0 {
+		checkSize := min(int64(256), bracketBytePos)
 		checkBuf := make([]byte, checkSize)
 		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
 			return fmt.Errorf("check existing: %w", err)
@@ -180,8 +184,10 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		// Partial/failed write: restore a valid closing bracket so the file
 		// stays parseable (dropping only this batch), then signal the sentinel
 		// so the caller advances instead of doing a history-dropping rewrite.
-		if _, rerr := f.WriteAt([]byte("\n  ]\n}"), bracketBytePos); rerr == nil {
-			f.Truncate(bracketBytePos + int64(len("\n  ]\n}")))
+		// The bytes before bracketBytePos are the old tail's "\n  ", so only
+		// "]\n}" goes back: the file is then byte-identical to before.
+		if _, rerr := f.WriteAt([]byte("]\n}"), bracketBytePos); rerr == nil {
+			f.Truncate(bracketBytePos + int64(len("]\n}")))
 			f.Sync()
 		}
 		return fmt.Errorf("%w: %v", ErrChatFilePartialWrite, err)
