@@ -253,3 +253,23 @@ test("an active-platform switch keeps an unsaved custom browser path", { skip },
   const put = h.http.matching("/api/config", "PUT").pop();
   assert.equal(put?.body?.cookies?.browser_path, "/opt/zen/zen", "the typed custom path did not reach the server");
 });
+
+// The password form and the cookie-import paste box sit inside the Settings
+// page but act through their own buttons; Save never sends them. Typing in
+// either raised the unsaved banner and armed the leave-page prompts, and the
+// dirty form then skipped the reload that follows a password change.
+//
+// Mutant: drop the closest() exemption in the delegate — the first two rows
+// mark the page dirty.
+test("typing a password or a cookie paste does not make Settings dirty", { skip }, async () => {
+  const h = await harness.makeApp();
+  await h.flush();
+  const type = (id) => h.el(id).dispatchEvent(new h.window.CustomEvent("sl-input", { bubbles: true, composed: true }));
+
+  type("security-new-password");
+  type("cookie-import-text");
+  assert.equal(h.app.settings._dirty, false, "a control Save does not send marked the page dirty");
+
+  type("cfg-ffmpeg-path"); // a real setting still does
+  assert.equal(h.app.settings._dirty, true);
+});

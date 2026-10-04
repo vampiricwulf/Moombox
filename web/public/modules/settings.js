@@ -794,8 +794,16 @@ export class SettingsController {
       this._dirtyListenersAdded = true;
       const settingsContent = document.querySelector(".settings-content");
       if (settingsContent) {
-        settingsContent.addEventListener("sl-change", () => this._markDirty());
-        settingsContent.addEventListener("sl-input", () => this._markDirty());
+        // Controls on the page that Save never sends — the password form and
+        // the cookie-import paste box act through their own buttons — raised
+        // the unsaved banner and the leave-page prompts over nothing, and a
+        // dirty form then skipped the reload that follows a password change.
+        const markDirty = (e) => {
+          if (e.target?.closest?.("#security-set-password-form, #cookie-import-text")) return;
+          this._markDirty();
+        };
+        settingsContent.addEventListener("sl-change", markDirty);
+        settingsContent.addEventListener("sl-input", markDirty);
       }
     }
 
