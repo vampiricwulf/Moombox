@@ -61,9 +61,9 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - **Process restart** — Restart Moombox from the TUI or web dashboard when settings require it
 
 ### Integration
-- **Native PO Token generation** — Built-in BotGuard solver using [Goja](https://github.com/dop251/goja) (pure-Go JavaScript engine, no CGo or V8)
+- **Built-in PO Token generation** — BotGuard runs in an embedded Node.js + JSDOM sidecar shipped inside the binary, so no Node install is needed
 - **yt-dlp compatibility** — Built-in PO Token HTTP endpoint and bundled yt-dlp plugin
-- **YouTube cipher decryption** — Native implementation of signature and n-parameter decryption via Goja
+- **YouTube cipher decryption** — Signature and n-parameter solving through [yt-dlp/ejs](https://github.com/yt-dlp/ejs) in the same sidecar, with an in-process [Goja](https://github.com/dop251/goja) fallback for the n-parameter
 - **Discord webhook notifications** — Rich embeds for every stream and system event, with a per-target event filter
 - **Single binary** — Compiles to a single executable with embedded web assets, no external runtime dependencies
 - **Built-in FFmpeg installer** — Install FFmpeg via Chocolatey or Winget directly from the setup flow, with UAC elevation support and script review for non-admin users
@@ -744,7 +744,7 @@ Monitors (RSS/DECAPI/Twitch) -> Job Database (SQLite) -> Download Worker -> YouT
 ```
 
 Key components:
-- **YouTube engine** — Multi-client Innertube API strategy. Cipher (sig + n) and BotGuard PO Token solving primarily flow through an embedded Node + V8 sidecar that wraps [yt-dlp/ejs](https://github.com/yt-dlp/ejs) (vendored, public-domain) and [bgutils-js](https://github.com/LuanRT/BgUtils). An in-process [Goja](https://github.com/dop251/goja) implementation serves as a fallback when the sidecar is disabled or down.
+- **YouTube engine** — Multi-client Innertube API strategy. Cipher (sig + n) and BotGuard PO Token solving primarily flow through an embedded Node + V8 sidecar that wraps [yt-dlp/ejs](https://github.com/yt-dlp/ejs) (vendored, public-domain) and [bgutils-js](https://github.com/LuanRT/BgUtils). An in-process [Goja](https://github.com/dop251/goja) implementation still solves the n-parameter when the sidecar is disabled or down; PO tokens and signature solving need the sidecar.
 - **Twitch engine** — GQL-based stream metadata, HLS segment downloading, IRC live chat, and VOD chat replay
 - **Download pipeline** — SegmentDownloader with parallel catch-up mode (a `segment_workers` pool, 12 by default), head sequence tracking, resume state, and gap detection
 - **Chat system** — YouTube live chat polling + Twitch IRC with memory bounding, stale continuation recovery, and replay support
