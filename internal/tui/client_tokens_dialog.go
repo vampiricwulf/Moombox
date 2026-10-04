@@ -259,9 +259,14 @@ func (m *ClientTokensDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cm
 		return "", nil
 	}
 
-	// Reset confirm on navigation
-	if key == keyUp || key == keyDown {
+	// Reset the revoke-confirm arming on ANY navigation key, timer included —
+	// the list also moves on paging and Home/End (newTokenList's key map), and
+	// an arming that survived those left a stale "Press D again" hint on a
+	// different row.
+	switch key {
+	case keyUp, keyDown, keyPgUp, keyPgDown, keyHome, keyEnd:
 		m.revokeConfirmID = ""
+		m.confirmTimer = time.Time{}
 		m.feedbackMsg = ""
 	}
 
