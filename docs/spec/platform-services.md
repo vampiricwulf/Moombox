@@ -272,9 +272,10 @@ For each audio format (identified by `mimeType` containing "audio") with a non-e
 | Pattern | Score |
 |---------|-------|
 | `^opus` | 4 |
-| `^mp4a\.40\.5` (HE-AAC) | 3 |
-| `^mp4a\.40\.2` (AAC-LC) | 2 |
+| `^mp4a\.40\.[25]` (AAC-LC or HE-AAC) | 2 |
 | `^mp4a` (generic AAC) | 1 |
+
+The two AAC profiles share a score, as they share yt-dlp's `mp4a` rank, so the bitrate tiebreaker below decides between them: with HE-AAC scored above AAC-LC, a pool with no Opus took itag 139 (48 kbps) over itag 140 (128 kbps).
 
 3. **Bitrate tiebreaker**: **Higher** bitrate wins (audio quality scales with bitrate).
 4. **Auth level tiebreaker**: Lower auth level wins.
