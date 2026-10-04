@@ -93,8 +93,8 @@ These boundaries are important for understanding what is in scope and what is no
 
 - **Not a general-purpose video downloader.** Moombox supports YouTube and Twitch only. It does not download from Niconico, Bilibili, Crunchyroll, or any other platform. Adding new platforms is not a goal.
 - **Not a yt-dlp wrapper or binding.** Moombox reimplements extraction and download logic in Go. It does not shell out to yt-dlp, import yt-dlp's Python code, or depend on yt-dlp being installed. It tracks yt-dlp upstream for awareness of protocol changes only.
-- **Not cross-platform by default.** Moombox targets Windows. It may work on Linux or macOS incidentally, but platform-specific code (disk space queries, process management, etc.) assumes Windows. Cross-platform support is added only when explicitly requested.
-- **Not a hosted or cloud service.** Moombox runs locally on the user's machine. There is no multi-user support, no cloud deployment model, no container image, no Kubernetes manifold. It is a desktop appliance.
+- **Not macOS software.** Moombox ships for Windows x64, Linux x64 and Linux arm64 (see Rules and Constraints above); macOS is deferred. Platform-specific code (disk space queries, process management, cookie decryption) has a Windows and a Linux implementation, not a macOS one.
+- **Not a hosted or cloud service.** Moombox runs on the user's own machine — a desktop, or a home server through the published Docker image. There is no multi-user support, no cloud deployment model, no Kubernetes manifest. It is a self-hosted appliance.
 - **Not a media server.** Moombox archives files to disk. The web UI includes basic video playback with chat overlay, but Moombox does not transcode, stream to external clients, integrate with Plex/Jellyfin, or serve as a media library. It is an archiver, not a server.
 - **Not a chat bot or stream interaction tool.** Moombox reads chat passively for archival. It does not post messages, moderate chat, or interact with streams in any way.
 
@@ -133,7 +133,7 @@ There is no ongoing relationship between the TypeScript codebase and the current
 
 ### Binary Distribution
 
-Moombox is distributed as a single Windows executable. There is no installer, no MSI, no setup wizard beyond what the application itself provides on first run. The user downloads the `.exe` and runs it.
+Moombox is distributed as a single executable per platform — Windows x64, Linux x64 and Linux arm64 — attached to each GitHub release, plus a Docker image (x64 and arm64) for headless hosts. There is no installer, no MSI, no setup wizard beyond what the application itself provides on first run. The user downloads the binary for their platform and runs it.
 
 ### Runtime Dependencies
 
