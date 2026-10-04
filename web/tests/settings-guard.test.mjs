@@ -217,3 +217,39 @@ test("Play from the details dialog switches straight through while nothing is di
   assert.equal(h.el("player-job-select").value, "j1");
   assert.equal(h.app._playerOpeningFromDetails, false);
 });
+
+// Flipping an active-platform switch ran the whole updateAutoCookieUI, whose
+// status reload rebuilds the browser selector from the SAVED config: an
+// unsaved "Custom path…" choice went back to the stored one, the typed path's
+// fields were hidden, and the save then cleared browser_path. The switches
+// now only show/hide their setup buttons.
+//
+// Mutant: wire the switches to updateAutoCookieUI again — the select reverts
+// and the PUT carries browser_path "".
+test("an active-platform switch keeps an unsaved custom browser path", { skip }, async () => {
+  const h = await harness.makeApp({
+    initialState: {
+      config: { cookies: { active_platforms: ["youtube"], browser_path: "", browser_type: "" } },
+      cookieAutoStatus: { availableBrowsers: [{ name: "Firefox", path: "/usr/bin/firefox", type: "firefox" }], configuredBrowserPath: "" },
+    },
+  });
+  await h.flush();
+  const select = h.el("cfg-cookies-browser-select");
+  select.value = "__custom__";
+  select.dispatchEvent(new h.window.Event("sl-change", { bubbles: true }));
+  h.el("cfg-cookies-browser-path").value = "/opt/zen/zen";
+  await h.flush();
+
+  const tw = h.el("cfg-active-twitch");
+  tw.checked = true;
+  tw.dispatchEvent(new h.window.Event("sl-change", { bubbles: true }));
+  await h.flush(); await h.flush();
+  assert.equal(select.value, "__custom__", "the switch put the browser choice back to the saved one");
+  assert.equal(h.el("btn-auto-cookie-setup-tw").style.display, "", "the Twitch setup button did not appear");
+
+  h.http.on("PUT /api/config", () => ({ success: true }));
+  await h.app.settings.saveConfig();
+  await h.flush();
+  const put = h.http.matching("/api/config", "PUT").pop();
+  assert.equal(put?.body?.cookies?.browser_path, "/opt/zen/zen", "the typed custom path did not reach the server");
+});

@@ -508,14 +508,18 @@ export class SettingsController {
       autoCookieCancelBtn.addEventListener("click", () => this.cancelAutoCookieSetup());
     }
 
-    // Active platform toggles
+    // Active platform toggles. They only show/hide their platform's setup
+    // button — not the full updateAutoCookieUI, whose status reload rebuilds
+    // the browser selector from the SAVED config: flipping a switch used to
+    // put an unsaved browser choice back to the stored one and hide a typed
+    // custom path, which the save then cleared.
     const activeYtSwitch = document.getElementById("cfg-active-youtube");
     if (activeYtSwitch) {
-      activeYtSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
+      activeYtSwitch.addEventListener("sl-change", () => this._syncAutoCookieSetupButtons());
     }
     const activeTwSwitch = document.getElementById("cfg-active-twitch");
     if (activeTwSwitch) {
-      activeTwSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
+      activeTwSwitch.addEventListener("sl-change", () => this._syncAutoCookieSetupButtons());
     }
 
     // Unsaved changes warning
@@ -2687,19 +2691,23 @@ export class SettingsController {
     if (selectorDiv) {
       selectorDiv.style.display = "";
     }
-    // Show/hide per-platform setup buttons based on active toggles
-    const ytActive = document.getElementById("cfg-active-youtube")?.checked;
-    const twActive = document.getElementById("cfg-active-twitch")?.checked;
-    const ytBtn = document.getElementById("btn-auto-cookie-setup-yt");
-    const twBtn = document.getElementById("btn-auto-cookie-setup-tw");
-    if (ytBtn) ytBtn.style.display = ytActive ? "" : "none";
-    if (twBtn) twBtn.style.display = twActive ? "" : "none";
+    this._syncAutoCookieSetupButtons();
     // Unconditional too, and it has to be: it is what fills the browser
     // selector we just showed and what writes "No supported browser detected"
     // into auto-cookie-browser-info. Showing an empty selector would be worse
     // than hiding it. It also flips _browserSelectLoaded, which is what lets a
     // save carry the browser choice — see saveConfig.
     this.loadAutoCookieStatus();
+  }
+
+  /** Show/hide the per-platform cookie setup buttons from the active toggles. */
+  _syncAutoCookieSetupButtons() {
+    const ytActive = document.getElementById("cfg-active-youtube")?.checked;
+    const twActive = document.getElementById("cfg-active-twitch")?.checked;
+    const ytBtn = document.getElementById("btn-auto-cookie-setup-yt");
+    const twBtn = document.getElementById("btn-auto-cookie-setup-tw");
+    if (ytBtn) ytBtn.style.display = ytActive ? "" : "none";
+    if (twBtn) twBtn.style.display = twActive ? "" : "none";
   }
 
   populateBrowserSelector(status) {
