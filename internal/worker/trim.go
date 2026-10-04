@@ -137,7 +137,14 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 
 	// Check for duplicates (exact same range) BEFORE building the filename —
 	// the name also needs the existing list for collision disambiguation.
-	existing, _ := ts.db.GetTrimsForJob(job.ID)
+	// A read failure is an error, not an empty list: with the list empty
+	// the duplicate check passes and uniqueTrimBasename picks the base name,
+	// so ffmpeg (-y) overwrites the trim already on disk and a second
+	// record is stored for the same path.
+	existing, err := ts.db.GetTrimsForJob(job.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list existing trims: %w", err)
+	}
 	for _, t := range existing {
 		if t.StartTime == startTime && t.EndTime == endTime {
 			return nil, fmt.Errorf("trim already exists")
@@ -319,8 +326,13 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 		return nil, fmt.Errorf("trim duration must be at least 1 second")
 	}
 
-	// Check for duplicate trims
-	existing, _ := ts.db.GetTrimsForJob(job.ID)
+	// Check for duplicate trims. Same rule as CreateTrim: a read failure is
+	// an error, since an empty list here would let the base name — and the
+	// overwrite — through.
+	existing, err := ts.db.GetTrimsForJob(job.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list existing trims: %w", err)
+	}
 	for _, t := range existing {
 		if t.StartTime == startTime && t.EndTime == endTime {
 			return nil, fmt.Errorf("trim already exists")
@@ -375,8 +387,10 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 		return nil, fmt.Errorf("create trim dir: %w", err)
 	}
 
-	existingTrims, _ := ts.db.GetTrimsForJob(job.ID)
-	trimBasename := uniqueTrimBasename(existingTrims, job.VideoID, startTime, endTime)
+	// The list read for the duplicate check above is the one the name
+	// needs; nothing has added a trim for this job in between (activeOps
+	// serialises trims per job).
+	trimBasename := uniqueTrimBasename(existing, job.VideoID, startTime, endTime)
 	trimPath := filepath.Join(trimDir, trimBasename)
 
 	// Relative path for DB storage
