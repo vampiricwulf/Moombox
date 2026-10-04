@@ -37,6 +37,11 @@ type MoomboxConfig struct {
 	// to flush them to disk so they show up in the user's config.toml.
 	// Excluded from TOML and JSON marshalling (in-memory signal only).
 	NeedsAutoPersist bool `toml:"-" json:"-"`
+	// NormalizedOnLoad lists what loadFromFile's Normalize replaced with a
+	// default — values the file held that Validate rejects. Boot logs each
+	// one: the next save writes the default over the operator's value, and
+	// without the log nothing said so.
+	NormalizedOnLoad []string `toml:"-" json:"-"`
 }
 
 // NetworkConfig holds server and network access settings.

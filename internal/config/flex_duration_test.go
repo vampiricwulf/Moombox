@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +96,42 @@ func TestFlexDurationFieldsListsEveryField(t *testing.T) {
 	walk(reflect.ValueOf(cfg).Elem(), "MoomboxConfig")
 	if len(listed) != len(flexDurationFields) {
 		t.Errorf("flexDurationFields has %d entries for %d distinct fields", len(flexDurationFields), len(listed))
+	}
+}
+
+// TestLoadRecordsWhatNormalizeReplaced: loadFromFile normalised silently, so a
+// hand-edited out-of-range value booted as its default with no log line and
+// the next save wrote the default over it. Load now records each replacement
+// (boot logs them); a file that validates records nothing.
+//
+// Mutant: drop the Validate pass before Normalize — nothing is recorded.
+func TestLoadRecordsWhatNormalizeReplaced(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.toml")
+	if err := os.WriteFile(bad, []byte("[network]\nport = 0\n\n[monitors]\nfeed_check_interval = 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.NormalizedOnLoad) != 2 {
+		t.Fatalf("NormalizedOnLoad = %q, want the port and the feed interval", cfg.NormalizedOnLoad)
+	}
+	for i, want := range []string{"network.port", "monitors.feed_check_interval"} {
+		if !strings.Contains(cfg.NormalizedOnLoad[i], want) {
+			t.Errorf("NormalizedOnLoad[%d] = %q, want it to name %s", i, cfg.NormalizedOnLoad[i], want)
+		}
+	}
+	if cfg.Network.Port != Defaults().Network.Port {
+		t.Errorf("port = %d, want the default after Normalize", cfg.Network.Port)
+	}
+
+	good := filepath.Join(dir, "good.toml")
+	if err := os.WriteFile(good, []byte("[network]\nport = 8080\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := Load(good); err != nil || len(cfg.NormalizedOnLoad) != 0 {
+		t.Errorf("a valid file recorded %q (err %v)", cfg.NormalizedOnLoad, err)
 	}
 }

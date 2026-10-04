@@ -465,7 +465,12 @@ building the store — so a config found in `./config/` is written back to `./co
 into a fresh `./config.toml` that would shadow it on the next boot (the first write is often the
 boot-time `NeedsAutoPersist` flush, so the fork used to happen without anyone touching a setting). When
 NOTHING is found, the path that was asked for stays the target and the file is created there —
-`storePathFor` in `cmd/moombox/helpers.go` is that rule.
+`storePathFor` in `cmd/moombox/helpers.go` is that rule (with no `-config`, `<cwd>/config.toml`).
+
+**Out-of-range values are replaced, and said so.** `loadFromFile` runs `Normalize`, which puts each
+value `Validate` rejects back to its default; the issues `Validate` found first are kept in
+`NormalizedOnLoad` (`internal/config/types.go`) and boot logs one Warn per issue. The default is what
+the next save writes, so without the line a hand-edited value disappeared from the file unexplained.
 
 ### Configuration Sections
 

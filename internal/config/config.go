@@ -295,6 +295,9 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 
 	cfg.ConfigLoaded = true
 	cfg.LoadedFrom = path
+	for _, issue := range Validate(cfg) {
+		cfg.NormalizedOnLoad = append(cfg.NormalizedOnLoad, issue.Error())
+	}
 	Normalize(cfg)
 	return cfg, nil
 }

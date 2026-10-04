@@ -492,6 +492,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
 	logConfigSource(log, cfg, s.configPath)
+	for _, issue := range cfg.NormalizedOnLoad {
+		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))
+	}
 
 	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
 	// no silent clamp — see config.SegmentWorkers doc). Past
