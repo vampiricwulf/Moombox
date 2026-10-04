@@ -597,6 +597,11 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
 		}
 	}
+	// A cancel that landed during the final attempt is still a cancel, not
+	// a segment that failed: the loop-top check above never runs again.
+	if err := d.cancelErr(ctx); err != nil {
+		return nil, err
+	}
 	return nil, ErrSegmentRetriesExhausted
 }
 

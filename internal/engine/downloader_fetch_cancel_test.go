@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -224,5 +225,50 @@ func TestFetchSegmentDerivedTimeoutIsAConnectivityFailure(t *testing.T) {
 	}
 	if got := rec.fails.Load(); got != 1 {
 		t.Errorf("connectivity failures = %d, want 1 — a derived-context timeout with a healthy caller IS network evidence", got)
+	}
+}
+
+// TestFetchSegmentWithRetryReportsACancelOnTheFinalAttempt: the loop checks
+// for cancellation only at the top of each attempt, so a cancel that landed
+// during the LAST one fell out of the loop as ErrSegmentRetriesExhausted. A
+// catch-up worker then logged "retries exhausted" and damped its window for a
+// segment that never failed.
+//
+// Mutant: drop the cancelErr check after the loop — the error is
+// ErrSegmentRetriesExhausted.
+func TestFetchSegmentWithRetryReportsACancelOnTheFinalAttempt(t *testing.T) {
+	started := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := deadlineTestContext(t)
+
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, MaxRetries: 1})
+	d.delays = fastDelays()
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := d.fetchSegmentWithRetry(ctx, srv.URL+"/seg0", nil)
+		errc <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch never reached the server")
+	}
+	cancel()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+		if errors.Is(err, ErrSegmentRetriesExhausted) {
+			t.Errorf("a cancelled fetch was reported as retries exhausted: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchSegmentWithRetry did not return within 5s of the cancel")
 	}
 }
