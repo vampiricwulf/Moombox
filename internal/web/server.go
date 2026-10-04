@@ -223,7 +223,7 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			if cookie, err := r.Cookie("moombox_client"); err == nil && cookie.Value != "" {
 				if valid, sessionToken := s.ClientTokenCheck(cookie.Value, ip); valid {
 					SetSessionCookie(w, r, sessionToken)
-					next.ServeHTTP(w, r)
+					next.ServeHTTP(w, withSessionCookie(r, sessionToken))
 					return
 				}
 			}
@@ -834,6 +834,26 @@ func (g *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return hj.Hijack()
 	}
 	return nil, nil, fmt.Errorf("hijack not supported")
+}
+
+// withSessionCookie returns r carrying token as its moombox_session cookie.
+// The client-token fallback mints a session and sets it on the RESPONSE, but
+// the handler reads the REQUEST's cookie: there the stale or missing session
+// still stood, so a logout invalidated the old token and left the new one
+// alive for its whole TTL, and set-password answered 401 to a remote client
+// the middleware had just authenticated. A copy, not an edit of r's headers.
+func withSessionCookie(r *http.Request, token string) *http.Request {
+	r2 := new(http.Request)
+	*r2 = *r
+	r2.Header = r.Header.Clone()
+	r2.Header.Del("Cookie")
+	for _, c := range r.Cookies() {
+		if c.Name != "moombox_session" {
+			r2.AddCookie(c)
+		}
+	}
+	r2.AddCookie(&http.Cookie{Name: "moombox_session", Value: token})
+	return r2
 }
 
 // recoveryWriter tracks whether headers have been sent so the recovery
