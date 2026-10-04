@@ -70,6 +70,12 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 	if err != nil {
 		return nil, &BGError{Code: ErrVMInit, Message: fmt.Sprintf("create runtime: %v", err)}
 	}
+	// The timer goroutines recover their own panics and report them through
+	// this logger; without it a panicking setTimeout/setInterval callback
+	// vanished without a trace.
+	if logger != nil {
+		tm.SetLogger(logger)
+	}
 
 	client := &BotGuardClient{
 		vm:         vm,

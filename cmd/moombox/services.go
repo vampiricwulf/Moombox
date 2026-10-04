@@ -1407,6 +1407,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	potRL.ClientIP = limiterClientIP
 	loginRL.ClientIP = limiterClientIP
 	passwordRL.ClientIP = limiterClientIP
+	// The limiters' cleanup goroutines recover their own panics and report
+	// them only to a logger set here; unset, a panic there left no trace.
+	for _, rl := range []*web.RateLimiter{apiRL, potRL, loginRL, passwordRL} {
+		rl.SetLogger(log)
+	}
 
 	s.apiRL = apiRL
 	s.potRL = potRL
