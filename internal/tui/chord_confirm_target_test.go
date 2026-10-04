@@ -50,3 +50,28 @@ func TestConfirmChordActsOnTheJobItNamed(t *testing.T) {
 		t.Errorf("the confirm deleted %v; the prompt named %q", deleted, first.ID)
 	}
 }
+
+// TestSelectionDropsJobsThatAreGone: nothing pruned the batch selection, so a
+// selected job deleted from the dashboard (or missing from a fresh snapshot)
+// kept "1 selected" in the status bar and armed batch confirms for a ghost.
+//
+// Mutant: drop the prune from rebuildJobIndex — both counts stay at 2/1.
+func TestSelectionDropsJobsThatAreGone(t *testing.T) {
+	m := NewTaskListModel()
+	m.SetJobs([]*database.Job{
+		{ID: "a", Title: "Alpha", Status: database.StatusFinished},
+		{ID: "b", Title: "Beta", Status: database.StatusFinished},
+		{ID: "c", Title: "Gamma", Status: database.StatusFinished},
+	})
+	m.ToggleSelection("a")
+	m.ToggleSelection("b")
+
+	m.RemoveJob("a")
+	if got := m.SelectedIDs(); len(got) != 1 || got[0] != "b" {
+		t.Errorf("after deleting a selected job: selection %v, want [b]", got)
+	}
+	m.SetJobs([]*database.Job{{ID: "c", Title: "Gamma", Status: database.StatusFinished}})
+	if n := m.SelectedCount(); n != 0 {
+		t.Errorf("after a snapshot without b: %d selected, want 0", n)
+	}
+}

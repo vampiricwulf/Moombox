@@ -462,6 +462,15 @@ func (m *TaskListModel) rebuildJobIndex() {
 	for i, j := range m.jobs {
 		m.jobIndex[j.ID] = i
 	}
+	// A selected job that is gone leaves the selection too. Nothing pruned it,
+	// so a job deleted from the dashboard kept "1 selected" in the status bar
+	// with no ✓ row to show for it, and armed batch confirms for a ghost. The
+	// Web prunes its own selection on every list refresh.
+	for id := range m.selected {
+		if _, ok := m.jobIndex[id]; !ok {
+			delete(m.selected, id)
+		}
+	}
 }
 
 // GetJobByID returns a job by ID, or nil if not found.
