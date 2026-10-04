@@ -889,7 +889,9 @@ export class SetupController {
         // Show specific field validation errors if available
         let msg = data.error || "Failed to save configuration";
         if (data.details && typeof data.details === "object") {
-          const fieldErrors = Object.values(data.details);
+          // Field names too, as the Settings save does: five path inputs can
+          // each fail with the same "cannot contain a .. segment".
+          const fieldErrors = Object.entries(data.details).map(([field, err]) => `${field}: ${err}`);
           if (fieldErrors.length > 0) msg = fieldErrors.join("; ");
         }
         this.app.showToast(msg, "danger");

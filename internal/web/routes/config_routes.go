@@ -1057,7 +1057,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			if v, ok := net["network_access"].(string); ok && v == "external" {
 				if cfg.Network.PasswordHash == "" {
 					mu.Unlock()
-					jsonError(rw, "A password must be set before enabling external access. Go to Settings \u2192 Security.", http.StatusBadRequest)
+					jsonError(rw, "A password must be set before enabling external access. Set one in Settings \u2192 Network \u2192 Password.", http.StatusBadRequest)
 					return
 				}
 			}

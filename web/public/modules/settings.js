@@ -391,7 +391,7 @@ export class SettingsController {
             // Every other failure in this dashboard toasts; a blocking
             // browser alert reads as a page fault rather than a Moombox
             // message, and it freezes the whole tab while it is up.
-            this.app.showToast("Failed to fetch release notes", "danger");
+            this.app.showToast("Failed to fetch release notes: " + await serverErrorMessage(resp), "danger");
             return;
           }
           const data = await resp.json();
@@ -1220,7 +1220,7 @@ export class SettingsController {
       // shown a list naming four things they did not touch reads this as a
       // prompt about something else and dismisses it — which is the failure the
       // cookie entries exist to prevent.
-      "Some settings require a restart to take effect (port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings).\n\nRestart Moombox now?",
+      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings).\n\nRestart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {
@@ -1805,7 +1805,7 @@ export class SettingsController {
       } else if (resp.ok && data.success) {
         this.app.showToast("Re-scanning feed history…", "success");
       } else {
-        this.app.showToast("Re-scan failed", "danger");
+        this.app.showToast(data.error ? `Re-scan failed: ${data.error}` : "Re-scan failed", "danger");
       }
     } catch {
       this.app.showToast("Re-scan failed: could not reach server", "danger");
