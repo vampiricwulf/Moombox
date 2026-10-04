@@ -925,8 +925,10 @@ sl-badge.status.cookies::part(base) {
     color: var(--sl-color-warning-600);
 }
 
+/* Dimmer than INFO, but the -500 grey read at 2.7:1 on the dark log
+   panel. The light theme's override is further down. */
 .log-debug {
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-700);
 }
 
 .log-info {
@@ -2843,6 +2845,21 @@ html.sl-theme-light .indicator-error {
 
 html.sl-theme-light .indicator-ok {
     color: var(--sl-color-success-800);
+}
+
+/* The same pale light-palette steps on the log panel: WARN's -600 amber
+   read at 2.9:1 and ERROR's -600 red at 4.4:1. DEBUG's dark-theme -700
+   would sit too close to INFO here; the -600 clears 4.5:1 and stays dim. */
+html.sl-theme-light .log-warn {
+    color: var(--sl-color-warning-800);
+}
+
+html.sl-theme-light .log-error {
+    color: var(--sl-color-danger-700);
+}
+
+html.sl-theme-light .log-debug {
+    color: var(--sl-color-neutral-600);
 }
 
 /* ===== Mobile Touch Polish ===== */
