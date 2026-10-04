@@ -685,11 +685,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 7b. BotGuard sidecar (Node + JSDOM + bgutils-js subprocess)
 	// =========================================================================
 	// The sidecar produces real PO tokens that pass BotGuard's timing
-	// fingerprint (which the goja-only path can't, see
-	// docs/investigations/botguard-option-2-results.md). On any failure
-	// we log a warning and PotProvider falls through to its goja path
-	// which still produces websafe-fallback tokens -- downloads keep
-	// working, but PO-token-gated formats may be unavailable.
+	// fingerprint, which the goja-only path can't (see "Why a Sidecar" in
+	// docs/spec/platform-services.md). On any failure we log a warning and
+	// PotProvider falls through to its goja path, which cannot mint a PO
+	// token at all: BotGuard answers the in-process run with the websafe
+	// fallback only, and webpo_client rejects that as a token. Downloads
+	// that need no PO token keep working; PO-token-gated formats, and every
+	// signature-ciphered format (sig solving is sidecar-only), wait for the
+	// supervisor below to bring the sidecar back.
 	//
 	// First launch extracts ~36 MB of embedded blobs to
 	// %LOCALAPPDATA%/Moombox/sidecar (one-time, ~3-5s); subsequent
