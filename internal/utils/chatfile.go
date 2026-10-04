@@ -70,7 +70,8 @@ func WriteChatFileAtomic[T any](path string, data T) error {
 // left by PadMessageCountJSON.
 //
 // Per-message json.Marshal failures are skipped after a logger.Warn (if logger
-// is non-nil). A truncate-then-write-failure returns ErrChatFilePartialWrite
+// is non-nil); a batch in which none marshal leaves the file untouched. A
+// truncate-then-write-failure returns ErrChatFilePartialWrite
 // so the chat-side caller can avoid the history-dropping fallback path; see
 // the sentinel's doc.
 //
@@ -137,10 +138,11 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		}
 	}
 
-	var sb strings.Builder
-	if hasExisting {
-		sb.WriteString(",\n")
-	}
+	// Marshal first, then join only what marshalled. The separator used to
+	// follow every index but the batch's last, so a skipped final message
+	// left "},\n\n  ]" — a trailing comma that made the whole file invalid
+	// JSON, durably, since the next append's bracket scan still succeeded.
+	encoded := make([][]byte, 0, len(msgs))
 	for i, msg := range msgs {
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
@@ -149,11 +151,19 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 			}
 			continue
 		}
-		sb.WriteString("    ")
-		sb.Write(msgBytes)
-		if i < len(msgs)-1 {
+		encoded = append(encoded, msgBytes)
+	}
+	if len(encoded) == 0 {
+		return nil // nothing to add; leave the file and its header as they are
+	}
+
+	var sb strings.Builder
+	for i, msgBytes := range encoded {
+		if i > 0 || hasExisting {
 			sb.WriteString(",\n")
 		}
+		sb.WriteString("    ")
+		sb.Write(msgBytes)
 	}
 	sb.WriteString("\n  ]\n}")
 	appendStr := sb.String()
