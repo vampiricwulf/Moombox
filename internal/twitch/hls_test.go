@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -634,5 +636,34 @@ func TestSelectBestVariantHonoursAnExplicitHeightOverTheEnhancedSource(t *testin
 	if got.Height != 1080 {
 		t.Errorf("selected %dx%d for quality pref 1080p60, want a 1080-high variant",
 			got.Width, got.Height)
+	}
+}
+
+// TestFetchHLSMasterPlaylistTransportErrorCarriesNoToken: http.Client.Do's
+// *url.Error quotes the whole request URL, and an usher URL's query is the
+// playback token and its signature, so a connection failure put both (and
+// the operator's IP, inside the token) into the job's error column.
+//
+// Mutant: return Do's error unredacted — the signature is in the message.
+func TestFetchHLSMasterPlaylistTransportErrorCarriesNoToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := srv.URL
+	srv.Close() // nothing listens: Do fails in the transport
+
+	_, err := FetchHLSMasterPlaylist(context.Background(),
+		base+"/api/channel/hls/somechannel.m3u8?sig=SIGSECRET&token=%7B%22user_ip%22%3A%22203.0.113.9%22%7D")
+	if err == nil {
+		t.Fatal("a fetch from a closed server succeeded")
+	}
+	for _, secret := range []string{"SIGSECRET", "user_ip", "203.0.113.9", "token="} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("the error carries %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "/api/channel/hls/somechannel.m3u8") {
+		t.Errorf("the error lost the playlist path: %v", err)
+	}
+	if _, ok := errors.AsType[*url.Error](err); !ok {
+		t.Errorf("the error is no longer a *url.Error, so transport classification breaks: %T", err)
 	}
 }

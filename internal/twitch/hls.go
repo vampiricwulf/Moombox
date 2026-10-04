@@ -3,9 +3,11 @@ package twitch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -383,18 +385,33 @@ func isRestrictedEntitlementBody(body []byte) bool {
 		entries[0].ErrorCode == "unauthorized_entitlements"
 }
 
+// withoutQuery strips the query string from the URL a *url.Error carries.
+// An usher URL's query is the playback token document (user ID, client IP,
+// entitlements) and its signature, and a transport failure's Error() quotes
+// the whole URL: the job's error column, the dashboard, the TUI and the log
+// all show it. The type survives, so a caller classifying transport errors
+// still can.
+func withoutQuery(err error) error {
+	uerr, ok := errors.AsType[*url.Error](err)
+	if !ok {
+		return err
+	}
+	u, _, _ := strings.Cut(uerr.URL, "?")
+	return &url.Error{Op: uerr.Op, URL: u, Err: uerr.Err}
+}
+
 // FetchHLSMasterPlaylist fetches and parses an HLS master playlist from a URL.
-func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func FetchHLSMasterPlaylist(ctx context.Context, playlistURL string) ([]TwitchHLSVariant, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, playlistURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, withoutQuery(err)
 	}
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	req.Header.Set("Client-ID", constants.TwitchGQLClientID)
 
 	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch hls playlist: %w", err)
+		return nil, fmt.Errorf("fetch hls playlist: %w", withoutQuery(err))
 	}
 	defer resp.Body.Close()
 
