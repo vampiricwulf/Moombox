@@ -278,6 +278,9 @@ func tightenCookieDirOnce(dir string) {
 	tightenedCookieDirs[dir] = dirTighteningInFlight
 	tightenedCookieDirsMu.Unlock()
 
+	// Read the seam here, on the caller's goroutine: a test swaps it without
+	// a lock, and a goroutine an earlier test left running would race it.
+	apply := applyUserOnlyDACL
 	go func() {
 		succeeded := false
 		defer func() {
@@ -301,7 +304,7 @@ func tightenCookieDirOnce(dir string) {
 		// Raise the log level to Debug to surface the miss. A failure here
 		// is retried on the NEXT cookie write, not memoised — see the
 		// doc comment above.
-		if err := applyUserOnlyDACL(dir); err != nil {
+		if err := apply(dir); err != nil {
 			slog.Debug("could not restrict cookie dir to current user", "dir", dir, "err", err)
 			return
 		}
