@@ -316,7 +316,7 @@ func TestNewMonitorWithIntervalClamps(t *testing.T) {
 // outage the passive tracker latches offline, then every subsystem gates off
 // its network I/O — so no ReportSuccess / ReportFailure ever fires again and
 // poll() is the only live path. Pre-fix, poll() read the non-pruning
-// IsTriggered() and stayed offline forever even after the active probe
+// isTriggered() and stayed offline forever even after the active probe
 // recovered. Post-fix, poll() uses IsTriggeredPruned(), so the aged-out latch
 // clears and the monitor returns online once the active probe agrees.
 func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
@@ -339,7 +339,7 @@ func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	if m.IsOnline() {
 		t.Fatal("expected offline after outage + cross-tag passive latch")
 	}
-	if !m.passive.IsTriggered() {
+	if !m.passive.isTriggered() {
 		t.Fatal("expected passive latch to be set during the outage")
 	}
 
@@ -356,7 +356,7 @@ func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	if !m.IsOnline() {
 		t.Fatal("monitor stuck offline after recovery — poll() never pruned the stale passive latch")
 	}
-	if m.passive.IsTriggered() {
+	if m.passive.isTriggered() {
 		t.Fatal("passive latch should have been cleared by the pruning poll")
 	}
 }

@@ -189,23 +189,6 @@ VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_rss_ok_at = excluded.la
 	return err
 }
 
-// GetChannelRSSOK returns channel_state.last_rss_ok_at for channelID, or "" if
-// unset or the channel_state row doesn't exist yet — mirrors SetChannelRSSOK.
-func (db *Database) GetChannelRSSOK(channelID string) (string, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	var ts sql.NullString
-	err := db.db.QueryRowContext(db.getCtx(),
-		`SELECT last_rss_ok_at FROM channel_state WHERE channel_id = ?`, channelID).Scan(&ts)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return ts.String, nil
-}
-
 // SaveBackfillCursor upserts channel_state.backfill_state — the backfill's
 // per-tab resume cursor JSON (spec §11), saved by the scanner after every
 // good page. Mirrors SetChannelRSSOK's upsert shape (§6: neither
@@ -221,7 +204,7 @@ VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET backfill_state = excluded.ba
 
 // LoadBackfillCursor returns channel_state.backfill_state for channelID, or
 // "" when unset or the channel_state row doesn't exist yet — either way a
-// fresh scan starts from page 1 of every tab. Mirrors GetChannelRSSOK.
+// fresh scan starts from page 1 of every tab.
 func (db *Database) LoadBackfillCursor(channelID string) (string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()

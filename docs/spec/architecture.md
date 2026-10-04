@@ -551,7 +551,7 @@ The `ProgressTracker` aggregates progress from video, audio, and chat downloader
 
 - Update throttling: one report per `downloader.progress_interval_ms` (16ms by default), with gap rows flushed to the database at most once a second (the job row is written on every report). The TUI's own progress tick is finer — 8ms, one per frame at its 120 fps renderer — so the engine's gate, not the tick, is what bounds the rate
 - Progress string format: `"V:1234 A:5678 C:900"` (video seq, audio seq, chat messages)
-- Speed calculation: smoothed exponential average (factor 0.7) of bytes/second
+- Speed calculation: bytes/second averaged over a 5 s sliding window (`speedAvgWindow`); the earlier EMA over report-cadence deltas jittered with each segment's arrival
 - ETA calculation: based on elapsed time and progress percentage
 - VOD progress: percentage-based (from chunked download byte position)
 - Gap tracking: accumulates `DownloadGap` events from segment downloaders

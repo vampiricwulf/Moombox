@@ -27,22 +27,3 @@ func TestSleepCancelled(t *testing.T) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }
-
-func TestJitter(t *testing.T) {
-	// Zero or negative max returns 0
-	if j := Jitter(0); j != 0 {
-		t.Errorf("Jitter(0) = %v, want 0", j)
-	}
-	if j := Jitter(-1); j != 0 {
-		t.Errorf("Jitter(-1) = %v, want 0", j)
-	}
-
-	// Positive max returns value in range [0, max)
-	maxJ := 100 * time.Millisecond
-	for range 100 {
-		j := Jitter(maxJ)
-		if j < 0 || j >= maxJ {
-			t.Errorf("Jitter(%v) = %v, out of range", maxJ, j)
-		}
-	}
-}

@@ -141,14 +141,6 @@ func TestOrderedDedupRestoreCollapsesDuplicates(t *testing.T) {
 	}
 }
 
-func TestOrderedDedupWithCapacityUsable(t *testing.T) {
-	d := NewOrderedDedupWithCapacity[string](100)
-	d.Add("x")
-	if d.Len() != 1 || !d.Seen("x") {
-		t.Error("NewOrderedDedupWithCapacity result unusable")
-	}
-}
-
 // TestOrderedDedupKeepReleasesBackingArray confirms Keep rebuilds the order
 // slice on a fresh backing array so the large one is eligible for GC. We
 // can't directly assert GC; instead we assert the new cap is far smaller

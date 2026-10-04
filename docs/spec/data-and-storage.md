@@ -429,7 +429,7 @@ The database maintains in-memory per-job log buffers (`jobLogs map[string][]stri
 ### Auxiliary Data Operations
 
 - **History:** `HasProcessed(videoID)` / `AddToHistory(videoID)` tracks previously seen video IDs (10,000 cap with LRU pruning).
-- **Feed-history store** (`database_feed_items.go`): `UpsertFeedItem` (insert-or-update, reports whether the row is new), `ApplyProbeToFeedItem` (probe writes status/title/date back), `FeedScope` (the window + always-covered upcoming/live read), `SetFeedItemSource`, `RenumberCatalog`/`ListFeedOrderRows` (backfill ordering pass), `SaveBackfillCursor`/`LoadBackfillCursor`, `SetChannelBackfilled`/`GetChannelBackfill`, `SetChannelRSSOK`/`GetChannelRSSOK`, `GetChannelEstablished`, `ListFeedChannelIDs`, `DeleteChannelFeedData` (channel-removal prune).
+- **Feed-history store** (`database_feed_items.go`): `UpsertFeedItem` (insert-or-update, reports whether the row is new), `ApplyProbeToFeedItem` (probe writes status/title/date back), `FeedScope` (the window + always-covered upcoming/live read), `SetFeedItemSource`, `RenumberCatalog`/`ListFeedOrderRows` (backfill ordering pass), `SaveBackfillCursor`/`LoadBackfillCursor`, `SetChannelBackfilled`/`GetChannelBackfill`, `SetChannelRSSOK`, `GetChannelEstablished`, `ListFeedChannelIDs`, `DeleteChannelFeedData` (channel-removal prune).
 - **Client tokens:** Full CRUD operations (`AddClientToken`, `GetClientTokenByPrefix`, `ListClientTokens`, `UpdateClientTokenUsage`, `DeleteClientToken`, `DeleteAllClientTokens`).
 - **Job stats:** `GetJobStats()` returns aggregate counts and sizes via a single SQL query with CASE expressions.
 

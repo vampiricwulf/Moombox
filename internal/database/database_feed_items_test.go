@@ -270,18 +270,21 @@ func TestGetFeedItem(t *testing.T) {
 	}
 }
 
-func TestGetChannelRSSOK(t *testing.T) {
+// TestSetChannelRSSOK reads the column back directly: production reads it
+// only through GetChannelEstablished (a getter for it alone had no caller).
+func TestSetChannelRSSOK(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
-	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "" {
-		t.Fatalf("no row yet: ts=%q err=%v", ts, err)
-	}
 	if err := db.SetChannelRSSOK("UC1", "2026-07-16T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "2026-07-16T00:00:00Z" {
+	var ts string
+	if err := db.db.QueryRow(`SELECT last_rss_ok_at FROM channel_state WHERE channel_id = ?`, "UC1").Scan(&ts); err != nil || ts != "2026-07-16T00:00:00Z" {
 		t.Fatalf("got ts=%q err=%v", ts, err)
+	}
+	if est, err := db.GetChannelEstablished("UC1"); err != nil || !est {
+		t.Errorf("GetChannelEstablished after an RSS ok = %v, %v; want true", est, err)
 	}
 }
 

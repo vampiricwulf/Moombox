@@ -271,15 +271,17 @@ func (fm *FeedMonitor) runCycleForTest(t *testing.T, channelID string) {
 	}
 }
 
-// establishedForTest reports whether channel_state.last_rss_ok_at has been
-// written for channelID — the FETCH step's success signal (spec §7/§11).
+// establishedForTest reports whether channelID passes the §11 established
+// gate. These tests run no backfill, so that is exactly whether
+// channel_state.last_rss_ok_at has been written — the FETCH step's success
+// signal (spec §7/§11).
 func establishedForTest(t *testing.T, db *database.Database, channelID string) bool {
 	t.Helper()
-	ts, err := db.GetChannelRSSOK(channelID)
+	est, err := db.GetChannelEstablished(channelID)
 	if err != nil {
-		t.Fatalf("GetChannelRSSOK(%s): %v", channelID, err)
+		t.Fatalf("GetChannelEstablished(%s): %v", channelID, err)
 	}
-	return ts != ""
+	return est
 }
 
 // mustGetFeedItem fetches a feed_items row via the database package's
