@@ -12,7 +12,11 @@
 
 import ejsMain from "../vendor/ejs.bundle.js";
 
-const MAX_PLAYERS = 2;
+// Matches solverCacheSize in internal/cipher/solver.go, and for the same
+// reason: multi-channel monitoring routinely has 4+ active players, and a
+// smaller cap thrashed — every eviction cost the Go side an ErrPlayerNotLoaded
+// round-trip, a ~3 MB player-JS re-send and a full ejs preprocess here.
+const MAX_PLAYERS = 10;
 const MAX_CHALLENGES_PER_PLAYER = 1000;
 
 // playerID -> { preprocessed, sigCache, nCache, lastUsed }
