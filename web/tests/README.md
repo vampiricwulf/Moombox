@@ -1,10 +1,11 @@
 # Frontend JS tests
 
 Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. Twenty
+dependencies, no DOM — and just import from `../public/modules/`. Twenty-one
 suites drive their module inside a jsdom document:
 `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`,
-`archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`,
+`archive-boundary.test.mjs`, `boot-and-login.test.mjs`,
+`import-placeholder.test.mjs`, `job-asides.test.mjs`,
 `job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`,
 `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`,
 `render-diff.test.mjs`, `resolution-picker.test.mjs`,
@@ -36,7 +37,7 @@ modules.
 
 ## The DOM suites (jsdom)
 
-The twenty suites listed above are the ones that need a DOM. Install jsdom
+The twenty-one suites listed above are the ones that need a DOM. Install jsdom
 **inside `web/tests/`** — never at the repo root:
 
 ```bash
@@ -53,28 +54,29 @@ node --test web/tests/*.test.mjs
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
 throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 195
+checkout without `npm ci` reports them as **skipped**, never failed — the 197
 DOM tests (player 63, render-diff 16, app 13, settings-notifications 13,
 a11y-controls 12, boot-and-login 12, job-deeplink 9, job-progress 8,
 job-asides 7, watched-state 7, settings-notification-mode 6, log-panel 4,
 open-folder 4,
 resolution-picker 4, settings-reorder-budget 4,
 update-check-debounce 4, archive-boundary 3, sidecar-warning 3, app-resync 2,
-release-notes-toast 1), leaving 131 tests
+import-placeholder 2, release-notes-toast 1), leaving 132 tests
 that need no DOM — the eight pure suites, the two stylesheet-text tests in
 `a11y-controls.test.mjs`, which read `moombox.css` and assert on its text, the
 five pure helper tests in `player.test.mjs` (task 3's two colour tests, task
-5's one, task 6's one and the chat-seek arithmetic), and the two mapping tests
-in `resolution-picker.test.mjs`, whose other four tests do need one:
+5's one, task 6's one and the chat-seek arithmetic), the one helper test in
+`import-placeholder.test.mjs`, and the two mapping tests in
+`resolution-picker.test.mjs`, whose other four tests do need one:
 
 ```
-ℹ tests 326
-ℹ pass 131
+ℹ tests 329
+ℹ pass 132
 ℹ fail 0
-ℹ skipped 195
+ℹ skipped 197
 ```
 
-With jsdom installed the same command reports `tests 326` / `pass 326` /
+With jsdom installed the same command reports `tests 329` / `pass 329` /
 `skipped 0`.
 
 The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
@@ -86,6 +88,7 @@ than a silent skip.
 | `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
 | `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`, `job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `settings-notification-mode.test.mjs`, `settings-notifications.test.mjs`, `settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs`, `watched-state.test.mjs` | yes |
 | `resolution-picker.test.mjs` | partly — 2 pure mapping tests, 4 jsdom picker tests |
+| `import-placeholder.test.mjs` | partly — 1 pure helper test, 2 jsdom dialog tests |
 
 ## The player harness
 

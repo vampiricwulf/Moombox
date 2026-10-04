@@ -755,6 +755,13 @@ sl-badge.status.cookies::part(base) {
     gap: var(--sl-spacing-medium);
 }
 
+/* An imported archive with no real video id has no embed to show (see
+   isImportPlaceholderId in modules/utils.js); the info column takes the
+   width the embed would have had instead of sitting beside a blank one. */
+.details-top.no-embed {
+    grid-template-columns: 1fr;
+}
+
 @media (max-width: 700px) {
     .details-top {
         grid-template-columns: 1fr;

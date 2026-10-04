@@ -911,6 +911,21 @@ export function streamUrl(job) {
   return "https://www.youtube.com/watch?v=" + job.videoId;
 }
 
+/**
+ * isImportPlaceholderId reports whether a videoId is the stand-in the ZIP
+ * import mints when the archive carries no YouTube id: "imp_" and the eight
+ * lowercase hex digits of randomHex(4) (internal/web/routes/import_routes.go).
+ * Such a job's url, thumbnail and embed all point at a video that does not
+ * exist, so the details dialog shows neither the embed nor the URL. Exactly
+ * eight digits on purpose: a real YouTube id is eleven characters, so
+ * "imp_" + 7 could be one and "imp_" + 8 never is.
+ * @param {string|undefined} videoId
+ * @returns {boolean}
+ */
+export function isImportPlaceholderId(videoId) {
+  return /^imp_[0-9a-f]{8}$/.test(videoId || "");
+}
+
 /** Read a dotted path ("network.port") from a config object; undefined when absent. */
 export function resolveConfigPath(config, path) {
   return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), config);

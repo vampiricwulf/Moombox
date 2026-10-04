@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
 
 export class JobDetailsController {
   constructor(app) {
@@ -395,6 +395,9 @@ export class JobDetailsController {
     );
     setDisplay("details-open-folder-btn", (hasFile || isActive) && isLocalhost);
     setDisplay("details-play-btn", hasFile);
+    // The import's placeholder url opens a YouTube page for a video that
+    // does not exist — see isImportPlaceholderId.
+    setDisplay("details-open-url-btn", !isImportPlaceholderId(job.videoId));
   }
 
   renderJobDetails(job) {
@@ -432,10 +435,17 @@ export class JobDetailsController {
       ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0] : job.channelName || "").toLowerCase()
       : "";
     const twitchVodId = isTwitch && job.videoId.startsWith("tw_v") ? job.videoId.slice(4) : "";
+    // An imported archive with no real YouTube id carries the import's
+    // placeholder, and its url points at a video that does not exist: no
+    // embed to show and no Stream URL worth copying (Open URL is hidden by
+    // updateDetailsButtons for the same reason).
+    const isImport = isImportPlaceholderId(job.videoId);
 
     // Build embed HTML
-    let embedHtml;
-    if (isTwitch && twitchVodId) {
+    let embedHtml = "";
+    if (isImport) {
+      // nothing to embed
+    } else if (isTwitch && twitchVodId) {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.app.escapeHtml(twitchVodId)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
     } else if (isTwitch && twitchLogin) {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.app.escapeHtml(twitchLogin)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
@@ -444,17 +454,17 @@ export class JobDetailsController {
     }
 
     content.innerHTML = `
-      <div class="details-top">
-        <div class="details-section">
+      <div class="details-top${embedHtml ? "" : " no-embed"}">
+        ${embedHtml ? `<div class="details-section">
           ${embedHtml}
-        </div>
+        </div>` : ""}
 
         <div class="details-section">
           <div class="details-row">
             <span class="details-label">${isTwitch ? "Stream ID:" : "Video ID:"}</span>
             <span class="details-value"><code>${this.app.escapeHtml(job.videoId)}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.app.escapeHtml(job.videoId)}"></sl-icon-button></span>
           </div>
-          ${streamUrl(job) ? `
+          ${streamUrl(job) && !isImport ? `
           <div class="details-row">
             <span class="details-label">Stream URL:</span>
             <span class="details-value"><code>${this.app.escapeHtml(streamUrl(job))}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy stream URL" data-copy="${this.app.escapeHtml(streamUrl(job))}"></sl-icon-button></span>
