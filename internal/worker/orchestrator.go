@@ -136,12 +136,8 @@ func (o *DownloadOrchestrator) ffmpegPathValue() string {
 	return o.ffmpegPath
 }
 
-// Execute runs the full download pipeline for a YouTube job.
-func (o *DownloadOrchestrator) Execute(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) error {
-	return o.ExecuteWithChat(ctx, jobCtx, videoInfo, isVod, nil)
-}
-
-// ExecuteWithChat runs the full download pipeline, optionally with a pre-started chat downloader.
+// ExecuteWithChat runs the full download pipeline for a YouTube job,
+// optionally with a pre-started chat downloader.
 func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool, existingChat *chat.ChatDownloader) error {
 	o.logger.Info("starting download", "videoID", jobCtx.Job.VideoID, "isVod", isVod)
 

@@ -2,8 +2,8 @@
 
 package dpapi
 
-// ReadChromeCookiesStats is unsupported on non-Windows platforms. Moombox
-// is Windows-only for this path; the stub exists so cross-platform builds
+// ReadChromeCookiesStats is unsupported on non-Windows platforms. DPAPI
+// cookie reading is Windows-only; the stub exists so cross-platform builds
 // (the Linux/arm64 release binaries, and devs running `go build` on macOS)
 // succeed without compiler errors. Returns ErrNotSupported.
 func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, ChromeReadStats, error) {

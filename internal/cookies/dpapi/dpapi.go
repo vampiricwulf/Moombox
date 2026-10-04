@@ -43,10 +43,10 @@ type ChromeCookie struct {
 	SameSite string // "None" | "Lax" | "Strict" | "Unspecified"
 }
 
-// ErrNotSupported is returned by ReadChromeCookies on non-Windows
-// platforms. Moombox is Windows-only at runtime, but the package
-// compiles cross-platform so unit tests for shared helpers stay
-// reachable on dev hosts.
+// ErrNotSupported is returned by ReadChromeCookiesStats on non-Windows
+// platforms. DPAPI is a Windows API, but the package compiles
+// cross-platform so the Linux builds link and unit tests for shared
+// helpers stay reachable on dev hosts.
 var ErrNotSupported = errors.New("DPAPI cookie extraction is Windows-only")
 
 // Why one cookie row failed to decrypt. The extraction is fail-soft per
@@ -78,7 +78,7 @@ var (
 	ErrUnusablePlaintext = errors.New("decrypted value is not a usable cookie value")
 )
 
-// ChromeReadStats accounts for what one ReadChromeCookies pass skipped.
+// ChromeReadStats accounts for what one ReadChromeCookiesStats pass skipped.
 //
 // The extraction is fail-soft per row by design, but before this existed the
 // reason was discarded entirely: an operator saw only a final "no relevant
@@ -166,19 +166,11 @@ func (s ChromeReadStats) hashPrefixHint() string {
 	return " (the Cookies meta.version could not be read, so the Chrome 130+ domain-hash prefix was left in place)"
 }
 
-// ReadChromeCookies returns the decrypted cookies for a profile, discarding
-// the per-row accounting. ReadChromeCookiesStats is the same call with the
-// accounting kept.
-func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error) {
-	cookies, _, err := ReadChromeCookiesStats(profilePath, originFilter)
-	return cookies, err
-}
-
 // chromeV10Prefix tags Chrome's modern AES-GCM-encrypted cookie values.
 // Pre-v10 cookies were raw DPAPI blobs; we don't support those — they
 // haven't shipped in any Chrome release since 2020 and the rare row
 // that still has the legacy form will fail the prefix check and get
-// skipped by ReadChromeCookies (the fail-soft "skip undecryptable
+// skipped by ReadChromeCookiesStats (the fail-soft "skip undecryptable
 // rows" path).
 const chromeV10Prefix = "v10"
 const chromeV11Prefix = "v11"
@@ -397,7 +389,7 @@ func decryptV10CookieWith(gcm cipher.AEAD, encrypted []byte, hashPrefix bool) (s
 	if hashPrefix {
 		// A plaintext shorter than the digest cannot be carrying one. Slicing
 		// anyway would report an empty value as a successful decrypt; erroring
-		// makes ReadChromeCookies skip the row instead.
+		// makes ReadChromeCookiesStats skip the row instead.
 		if len(plaintext) < chromeDomainHashLen {
 			return "", fmt.Errorf("%w: decrypted cookie is %d bytes, shorter than the %d-byte domain hash prefix Chrome writes at meta.version >= %d",
 				ErrUnusablePlaintext, len(plaintext), chromeDomainHashLen, chromeHashPrefixMetaVersion)
