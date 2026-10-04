@@ -231,6 +231,10 @@ type DownloadWorker struct {
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]string
 
+	// afterExitPending holds the jobs with an afterJobExit reset waiting on
+	// their previous run, so a second click does not queue a second reset.
+	afterExitPending sync.Map
+
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
 	//
@@ -1099,18 +1103,26 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	// (no DB write), so the free-slot-before-DB-writes ordering below holds.
 	userCancelled := w.queue.WasCancelled(job.ID)
 
-	// Free the queue slot before any DB writes — symmetric with setJobError
-	// (see I2 race comment there). Idempotent against the deferred Complete.
-	w.queue.Complete(job.ID)
-
 	if userCancelled {
-		// User-initiated cancel: update status, notify
-		w.logger.Info("job cancelled by user", "jobID", job.ID)
-
+		// Written BEFORE Complete, unlike setJobError's I2 order. Complete
+		// closes the job's Done channel, and a Retry/Resume/Reinitialize
+		// clicked while this run unwound waits on exactly that
+		// (afterJobExit): written after it, this Cancelled — CancelJob already
+		// wrote one — landed on top of the retry's fresh status. Nothing
+		// re-enqueues a user-cancelled job, so I2's reason for freeing the
+		// slot first does not apply here.
 		w.db.UpdateJobFields(job.ID, map[string]any{
 			"status": database.StatusCancelled,
 		})
+	}
 
+	// Free the queue slot — before the notification, symmetric with
+	// setJobError (see I2 race comment there). Idempotent against the
+	// deferred Complete.
+	w.queue.Complete(job.ID)
+
+	if userCancelled {
+		w.logger.Info("job cancelled by user", "jobID", job.ID)
 		if w.notifier != nil {
 			w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
 		}
@@ -1707,14 +1719,54 @@ func (w *DownloadWorker) ReauthenticateTwitchChats() int {
 // so any future error fires its notification — Resume is user-driven, so the
 // "suppress retry-failure notifications" guard in setJobError must not apply.
 func (w *DownloadWorker) ResumeJob(jobID string) {
-	w.db.UpdateJobFields(jobID, map[string]any{
-		"status":           database.StatusDownloading,
-		"error":            "",
-		"park_reason":      database.ParkReasonNone,
-		"park_identity":    "",
-		"auto_retry_count": 0,
+	w.afterJobExit(jobID, "resume", func() {
+		w.db.UpdateJobFields(jobID, map[string]any{
+			"status":           database.StatusDownloading,
+			"error":            "",
+			"park_reason":      database.ParkReasonNone,
+			"park_identity":    "",
+			"auto_retry_count": 0,
+		})
+		w.EnqueueJob(jobID)
 	})
-	w.EnqueueJob(jobID)
+}
+
+// afterJobExitTimeout bounds how long a deferred Resume/Reinitialize waits for
+// the job's previous run to unwind (a chat capture's shutdown grace is the
+// long pole) before giving up rather than racing it.
+const afterJobExitTimeout = 60 * time.Second
+
+// afterJobExit runs fn now when jobID has no run in flight, or once the run
+// that is still unwinding has exited. The cancel route writes Cancelled
+// before the run has stopped, so Retry and Resume appear at once — and one
+// clicked in that window used to race the run: Enqueue dropped the job as
+// still processing, handleCancellation then wrote Cancelled over the fresh
+// status, and Reinitialize deleted the staging the run was still writing its
+// chat resume sidecar into. Callers stay synchronous (the TUI calls these on
+// its update goroutine); the wait happens here, one per job.
+func (w *DownloadWorker) afterJobExit(jobID, what string, fn func()) {
+	if !w.queue.IsProcessing(jobID) {
+		fn()
+		return
+	}
+	if _, waiting := w.afterExitPending.LoadOrStore(jobID, struct{}{}); waiting {
+		return // a reset is already waiting on this run
+	}
+	w.logger.Info("waiting for the job's previous run to stop before "+what, "jobID", jobID)
+	w.wg.Go(func() {
+		defer w.afterExitPending.Delete(jobID)
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("panic in deferred "+what, "jobID", jobID, "panic", fmt.Sprint(r))
+			}
+		}()
+		if !w.WaitForJobExit(jobID, afterJobExitTimeout) {
+			w.logger.Warn(what+" skipped: the job's previous run did not stop", "jobID", jobID,
+				"waited", afterJobExitTimeout)
+			return
+		}
+		fn()
+	})
 }
 
 // clearJobParts removes a job's persisted parts for a fresh restart: the
@@ -1741,8 +1793,13 @@ func (w *DownloadWorker) clearJobParts(jobID string) {
 }
 
 // ReinitializeJob resets a job to a fresh state and re-enqueues it.
-// Clears all progress fields and deletes the staging directory.
+// Clears all progress fields and deletes the staging directory — after the
+// job's previous run has stopped, when one is still unwinding (afterJobExit).
 func (w *DownloadWorker) ReinitializeJob(jobID string) {
+	w.afterJobExit(jobID, "reinitialize", func() { w.reinitializeNow(jobID) })
+}
+
+func (w *DownloadWorker) reinitializeNow(jobID string) {
 	// Read config for staging path
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) {
