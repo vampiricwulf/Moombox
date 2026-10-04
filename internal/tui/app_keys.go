@@ -590,7 +590,8 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 					if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
 						break // batch mode — pass nil job so dispatchAction takes batch path
 					}
-					job = a.taskList.SelectedJob()
+					// The job the prompt named, not the cursor's (chordState.jobID).
+					job = a.taskList.GetJobByID(a.chord.jobID)
 					if job != nil && item.JobFilter != nil && !item.JobFilter(job) {
 						job = nil // job status changed during confirm window
 					}
@@ -671,6 +672,7 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		}
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
+		a.chord.jobID = job.ID
 		a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\" (3s)",
 			strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title))
 		return a, nil, true

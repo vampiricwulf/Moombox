@@ -387,6 +387,12 @@ type chordState struct {
 	prefixTime time.Time // when prefix was pressed
 	action     string    // second key (for confirm step), empty if waiting
 	actionTime time.Time // when confirm prompt shown
+	// jobID is the job the confirm prompt named, for a single-job confirm
+	// chord. The confirm step acts on THIS job, not on whatever the cursor
+	// is on at the third key: a mouse click or wheel tick, or a deletion
+	// from the dashboard handing the cursor to a neighbour, can move it
+	// inside the window, and the prompt named the original.
+	jobID string
 }
 
 // App is the root BubbleTea model.
