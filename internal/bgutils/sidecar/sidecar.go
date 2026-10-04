@@ -1049,8 +1049,16 @@ func (s *Sidecar) readPump() {
 		}
 	}
 
-	if err := scanner.Err(); err != nil && !s.stopping.Load() {
-		s.cfg.Logger.Warn("sidecar: stdout scanner error", "err", err)
+	// Scan stops on the child's exit (a real EOF) or on an error of its own —
+	// a line past the 1 MiB cap, a read failure — with the child possibly
+	// still alive. The reason is what the dashboard, the Discord embed and
+	// the supervisor log all show, so it says which.
+	reason := "stdout EOF"
+	if err := scanner.Err(); err != nil {
+		reason = "stdout read: " + err.Error()
+		if !s.stopping.Load() {
+			s.cfg.Logger.Warn("sidecar: stdout scanner error", "err", err)
+		}
 	}
 
 	// If stdout EOF'd before the sidecar emitted ready, unblock Start with
@@ -1062,7 +1070,7 @@ func (s *Sidecar) readPump() {
 	})
 
 	if !s.stopping.Load() {
-		s.markUnhealthy("stdout EOF")
+		s.markUnhealthy(reason)
 	}
 }
 
