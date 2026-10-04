@@ -343,6 +343,24 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 
 	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
 	*consecutiveGoneErrors = 0
+	if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+		// Same shape as the HTTP siblings above (handleGoneError,
+		// handleHTTPError): a transport error during an outage used to sit
+		// here sleeping genericRetry with nothing on the progress line, so a
+		// DASH job rode out a network outage showing a frozen counter while
+		// the HLS loop said "Connection lost - reconnecting...".
+		d.emitActivity(ActivityReconnecting)
+		d.logger.Warn("segment fetch failed — device offline, waiting for connectivity")
+		if err := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); err != nil {
+			return err
+		}
+		// Offline pauses the clock, as in the siblings: the outage must not
+		// count toward MaxTimeout or the interruption ceiling.
+		d.lastSegTime.StoreNow()
+		d.noteOfflineRecovery()
+		return nil
+	}
+	d.emitActivity(ActivityRetrying)
 	utils.Sleep(ctx, d.delays.genericRetry)
 	return nil
 }
