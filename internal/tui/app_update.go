@@ -90,7 +90,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if now := time.Now(); now.Sub(a.lastArchiveSweep) >= time.Minute {
 			a.lastArchiveSweep = now
 			a.syncHideFinishedAge()
-			a.taskList.ResweepArchive()
+			if a.taskList.ResweepArchive() {
+				a.updateSelectedJob() // a swept row can take the cursor with it
+			}
 		}
 		// Backstop for the demand-driven marquee and progress loops: if a
 		// selection/width/status change slipped past its immediate restart
@@ -1502,7 +1504,10 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	switch a.focusedPanel {
 	case PanelTasks:
 		if a.taskList.IsSearching() {
-			return a.taskList.UpdateSearchInput(msg)
+			// Live typing re-filters and moves the cursor to the first match.
+			cmd := a.taskList.UpdateSearchInput(msg)
+			a.updateSelectedJob()
+			return cmd
 		}
 	case PanelLogs:
 		if a.logs.IsSearching() {

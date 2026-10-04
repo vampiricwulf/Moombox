@@ -52,6 +52,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					days = c.Monitors.HideFinishedAgeDays.Days()
 				})
 				a.taskList.SetHideFinishedAgeDays(days)
+				a.updateSelectedJob() // the rebuild can move the cursor
 			}
 		case "restart":
 			if a.OnRestart != nil {
@@ -405,6 +406,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// with the Tasks panel focused means the main view owns the keyboard.
 	if a.focusedPanel == PanelTasks {
 		if cmd, consumed := a.taskList.HandleSearchKey(msg); consumed {
+			// Enter/Esc re-filter and put the cursor on the first match; the
+			// details panel follows it, as it does for every other move.
+			a.updateSelectedJob()
 			return a, cmd
 		}
 		if key == "/" && !a.taskList.IsSearching() {
@@ -432,6 +436,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Clear an active task-list search (box closed, query applied). The
 		// box-open case is already consumed by HandleSearchKey above.
 		if a.focusedPanel == PanelTasks && a.taskList.ClearSearch() {
+			a.updateSelectedJob()
 			return a, nil
 		}
 		// Also clear any active chord prefix on Esc

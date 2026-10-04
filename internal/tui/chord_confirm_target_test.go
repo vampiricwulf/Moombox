@@ -75,3 +75,49 @@ func TestSelectionDropsJobsThatAreGone(t *testing.T) {
 		t.Errorf("after a snapshot without b: %d selected, want 0", n)
 	}
 }
+
+// TestSearchMovesTheDetailsPanelWithTheCursor: every query change re-filters
+// and puts the cursor on the first match, but none of the search paths told
+// the details panel, so the highlighted row and the panel beside it showed
+// different jobs — and the next chord acts on the highlighted one. Paging and
+// arrows already refresh it (TestTaskPanelPagingRefreshesTheDetailsPanel).
+//
+// Mutant: drop the updateSelectedJob after UpdateSearchInput — the panel
+// still shows Alpha after "beta" is typed.
+func TestSearchMovesTheDetailsPanelWithTheCursor(t *testing.T) {
+	a := NewApp()
+	a.width, a.height = 120, 40
+	a.recalcLayout()
+	a.taskList.SetJobs([]*database.Job{
+		{ID: "a", Title: "Alpha", Status: database.StatusLive, Platform: "youtube"},
+		{ID: "b", Title: "Beta", Status: database.StatusLive, Platform: "youtube"},
+	})
+	a.focusedPanel = PanelTasks
+	a.updateSelectedJob()
+	if a.details.job == nil || a.details.job.ID != "a" {
+		t.Fatalf("premise lost: details show %v, want a", a.details.job)
+	}
+
+	a.handleKey(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if !a.taskList.IsSearching() {
+		t.Fatal("premise lost: / did not open the search box")
+	}
+	for _, r := range "beta" {
+		a.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	sel := a.taskList.SelectedJob()
+	if sel == nil || sel.ID != "b" {
+		t.Fatalf("premise lost: the filter did not select Beta (%v)", sel)
+	}
+	if a.details.job == nil || a.details.job.ID != "b" {
+		t.Errorf("after typing, the cursor is on b but the details panel shows %v", a.details.job)
+	}
+
+	// Esc closes the box, a second Esc clears the applied query; the cursor
+	// lands on the first row again and the panel must follow.
+	a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	a.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if sel := a.taskList.SelectedJob(); sel != nil && (a.details.job == nil || a.details.job.ID != sel.ID) {
+		t.Errorf("after clearing the search, the cursor is on %s but the details panel shows %v", sel.ID, a.details.job)
+	}
+}
