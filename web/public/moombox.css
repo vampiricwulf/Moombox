@@ -2826,6 +2826,13 @@ html.sl-theme-light {
         min-width: 44px;
     }
 
+    /* The taller touch target stretches a small button's label box, but
+       its line-height stays sized for the small button, so the text sat
+       at the top with the icon below it. Centre the button's parts. */
+    sl-button::part(base) {
+        align-items: center;
+    }
+
     .video-item {
         padding: var(--sl-spacing-small);
         min-height: 56px;
