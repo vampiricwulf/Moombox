@@ -47,7 +47,7 @@ triggerRestart(source string) {
 ```
 Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoutes` (after applying update), `routes.RestartRoute` (manual API restart).
 
-**Shutdown sequence** (`shutdown()` in `cmd/moombox/shutdown.go`; every stop is wrapped in `stopService` panic isolation, and SPEC.md § Shutdown Sequence carries the same list):
+**Shutdown sequence** (`shutdown()` in `cmd/moombox/shutdown.go`; every stop is wrapped in `stopService` panic isolation, and SPEC.md's Shutdown Sequence section carries the same list):
 1. Context cancellation propagates to all services; the TUI quits (if running)
 2. A 10-second force-exit timer is armed FIRST — if graceful shutdown stalls it closes the rate limiters, database and log itself and exits (code 42 when a restart was requested, else 0, so the launcher does not treat a slow quit as a crash)
 3. Notifications switch to single-attempt mode
@@ -219,10 +219,10 @@ Dependencies flow strictly downward. Lower-level packages never import higher-le
 
 The lists below are the `internal/` imports of each package as `go list -f '{{join .Imports " "}}' ./internal/<pkg>` prints them (regenerate the same way):
 
-- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `web/routes`, `worker`, `youtube`
+- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
 - `internal/worker` imports: `bgutils`, `chat`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `twitch`, `utils`, `youtube`
 - `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `config`, `cookies`, `database`, `disk`, `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
-- `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `web/routes`
+- `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `internal/web/routes`
 - `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `notifications`, `stats`, `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
 - `internal/monitor` imports: `config`, `database`, `httpx`, `twitch`, `worker`
 - `internal/youtube` imports: `cipher`, `constants`, `cookies`, `httpx`, `utils`
@@ -761,7 +761,7 @@ footage.
 
 ## Error Classification
 
-There is no typed error hierarchy and no `internal/errors` package. Errors are plain Go errors, wrapped with `fmt.Errorf("...: %w", err)` as they travel up, and the only classification anywhere is sentinel matching with `errors.Is`. The sentinels that matter to a job's fate:
+There is no typed error hierarchy and no errors package under `internal/`. Errors are plain Go errors, wrapped with `fmt.Errorf("...: %w", err)` as they travel up, and the only classification anywhere is sentinel matching with `errors.Is`. The sentinels that matter to a job's fate:
 
 | Sentinel | Declared in | Meaning |
 |----------|-------------|---------|

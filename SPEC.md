@@ -324,7 +324,7 @@ A YouTube post-live download that still finalizes behind head after the VOD-bran
 
 ### Error Classification
 
-There is no typed error hierarchy and no `internal/errors` package. Errors are plain Go errors built with `fmt.Errorf("...: %w", err)`, and the only classification is sentinel matching with `errors.Is`:
+There is no typed error hierarchy and no errors package under `internal/`. Errors are plain Go errors built with `fmt.Errorf("...: %w", err)`, and the only classification is sentinel matching with `errors.Is`:
 
 ```go
 worker.ErrCookiesRequired   // player-API "login required" / "member-only": park at COOKIES?
