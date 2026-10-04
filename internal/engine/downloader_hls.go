@@ -943,9 +943,18 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 					rb.markFailed(item.idx)
 					continue // drain channel
 				}
+				data := fetchItem(item)
+				if data == nil && (d.isCancelled() || ctx.Err() != nil) {
+					// A fetch cut short by cancellation is not a gap: a
+					// sentinel here would advance currentSeq past a segment
+					// nobody found missing, and the resume would skip it
+					// for good. Treat it like the teardown drain above.
+					rb.markFailed(item.idx)
+					continue
+				}
 				// admit blocks while the buffer is full and this is not the
 				// head segment; a false return means the consumer is gone.
-				if !rb.admit(item.idx, fetchItem(item)) {
+				if !rb.admit(item.idx, data) {
 					return
 				}
 				select {
@@ -1083,17 +1092,22 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// Close a gap still open at consumer exit. nextIdx-1 is the last flushed
 	// index — equal to totalSegs-1 after full consumption (every index emits a
 	// result, so the flush loop drains to totalSegs), but the honest bound on
-	// early exit via cancellation: drained workers emit nothing, and closing at
-	// totalSegs-1 would record the entire unflushed remainder as a gap even
-	// though those segments were never determined missing.
+	// early exit via cancellation: drained workers, and workers whose fetch
+	// the cancellation cut short, emit nothing, and closing at totalSegs-1
+	// would record the entire unflushed remainder as a gap even though those
+	// segments were never determined missing.
 	closeGap(nextIdx - 1)
+
+	// Cancelled: currentSeq is the first segment not written, and
+	// runHlsLoop's deferred save records it as the resume point.
+	if err := d.cancelErr(ctx); err != nil {
+		return err
+	}
 
 	// The whole VOD playlist has been consumed — natural end. Mark ended so
 	// runHlsLoop's deferred ClearResume removes the sidecar (see the ENDLIST
 	// path above).
-	if !d.isCancelled() && ctx.Err() == nil {
-		d.streamEnded.Store(true)
-	}
+	d.streamEnded.Store(true)
 	d.saveResume()
 	return nil
 }
