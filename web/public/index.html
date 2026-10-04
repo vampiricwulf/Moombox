@@ -1603,7 +1603,7 @@
                 id="channel-terms-input"
                 label="Filter Pattern (regex)"
                 placeholder="(?i)(karaoke|singing|歌枠)"
-                help-text="Only download streams matching this pattern. Matches title (all monitors), description (RSS), or game category (Twitch). Leave empty for all."
+                help-text="Only download streams matching this pattern: the title (YouTube), or the title or game category (Twitch). Leave empty for all."
             ></sl-input>
             <sl-details summary="Pattern examples">
                 <div class="pattern-examples">
@@ -1614,12 +1614,11 @@
                     English singing streams<br />
                     <code>(?i)minecraft.*hardcore</code> - Match "Minecraft"
                     followed by "hardcore"<br />
-                    <code>^(?!.*\b(shorts|clip)\b)</code> - Exclude titles
-                    containing "shorts" or "clip"
+                    Patterns are RE2 regular expressions, which have no
+                    lookahead, so a pattern cannot exclude a word: one that
+                    does not compile is matched as plain text instead.
                 </div>
             </sl-details>
-            <sl-input id="channel-lookbehind-input" type="number" min="0" max="1000" label="Description lookbehind"
-                help-text="Compare descriptions with N older feed items. Blank = default."></sl-input>
             <sl-input id="channel-output-dir-input" label="Output directory"
                 help-text="Per-channel override. Blank = the global output directory."></sl-input>
             <sl-input id="channel-archive-window-input" type="number" min="1" max="3650" label="Archive window (days)"

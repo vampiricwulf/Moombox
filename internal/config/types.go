@@ -435,14 +435,18 @@ type BgutilsConfig struct {
 
 // ChannelConfig holds channel-specific monitoring settings.
 type ChannelConfig struct {
-	ID                    string       `toml:"id" json:"id"`
-	Name                  string       `toml:"name,omitempty" json:"name,omitempty"`
-	Platform              string       `toml:"platform,omitempty" json:"platform,omitempty"`
-	Enabled               *bool        `toml:"enabled,omitempty" json:"enabled,omitempty"`
-	Terms                 ChannelTerms `toml:"terms,omitempty" json:"terms"`
-	NumDescLookbehind     *int         `toml:"num_desc_lookbehind,omitempty" json:"num_desc_lookbehind,omitempty"`
-	OutputDirectory       string       `toml:"output_directory,omitempty" json:"output_directory,omitempty"`
-	IncludeNonLiveContent bool         `toml:"include_non_live_content,omitempty" json:"include_non_live_content,omitempty"`
+	ID       string       `toml:"id" json:"id"`
+	Name     string       `toml:"name,omitempty" json:"name,omitempty"`
+	Platform string       `toml:"platform,omitempty" json:"platform,omitempty"`
+	Enabled  *bool        `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	Terms    ChannelTerms `toml:"terms,omitempty" json:"terms"`
+	// NumDescLookbehind is retired: terms match titles only (a feed_items row
+	// carries no description, and DECAPI and the browse sources never had
+	// one), so nothing reads it. Kept so an existing config loads and saves
+	// unchanged.
+	NumDescLookbehind     *int   `toml:"num_desc_lookbehind,omitempty" json:"num_desc_lookbehind,omitempty"`
+	OutputDirectory       string `toml:"output_directory,omitempty" json:"output_directory,omitempty"`
+	IncludeNonLiveContent bool   `toml:"include_non_live_content,omitempty" json:"include_non_live_content,omitempty"`
 	// ArchiveWindowDays/ArchiveSlots override the global monitors settings
 	// for this channel. Nil or <= 0 falls back to the global value.
 	ArchiveWindowDays *int   `toml:"archive_window_days,omitempty" json:"archive_window_days,omitempty"`

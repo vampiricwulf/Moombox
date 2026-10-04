@@ -397,16 +397,17 @@
 # Add channels to monitor. Each [[channels]] block defines one channel.
 # Channels can also be managed from the web dashboard Settings page.
 #
-# The "terms" field is a regex pattern matched against both the video title
-# and description. Use (?i) for case-insensitive matching.
+# The "terms" field is a regex pattern matched against the video title (on
+# Twitch, the title or the game category). Matching is always
+# case-insensitive. Patterns are RE2: no lookahead, so a pattern cannot
+# exclude a word.
 #
 # YouTube channel:
 # [[channels]]
 # id = "UCxxxxxxxxxx"                        # YouTube channel ID (required)
 # name = "Channel Name"                      # Display name (optional)
-# terms = "(?i)karaoke|singing"              # Regex filter for title + description (optional)
+# terms = "(?i)karaoke|singing"              # Regex filter on the title (optional)
 # include_non_live_content = false            # Also download regular uploads (default: false)
-# num_desc_lookbehind = 3                    # Compare descriptions with N older items (optional)
 # archive_window_days = 3                    # Override global archive_window_days (optional)
 # archive_slots = 3                          # Override global archive_slots (optional)
 # output_directory = "./output/special"      # Override output directory (optional)

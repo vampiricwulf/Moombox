@@ -327,7 +327,6 @@ var channelFields = []channelFieldDef{
 	{"terms", "Filter regex", fieldText, nil, "e.g. (?i)karaoke", ""},
 	{"include_non_live", "Archive uploads & premieres (YouTube only)", fieldToggle, []string{"No", "Yes"}, "also capture uploads and premieres, not just live streams", "youtube"},
 	{"quality_preference", "Quality preference", fieldCycle, []string{"best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p", "900p60", "900p", "720p60", "720p", "480p", "360p", "160p", "audio_only"}, "", ""},
-	{"num_desc_lookbehind", "Description lookbehind", fieldNumber, nil, "compare descriptions with N older feed items; blank = default", ""},
 	{"output_directory", "Output directory", fieldText, nil, "per-channel override; blank = the global output directory", ""},
 	{"archive_window_days", "Archive window (days)", fieldNumber, nil, "per-channel override, 1-3650; blank = global", ""},
 	{"archive_slots", "Archive slots", fieldNumber, nil, "per-channel override, 1-100; blank = global", ""},

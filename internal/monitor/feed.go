@@ -7,7 +7,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1043,20 +1042,15 @@ type atomFeed struct {
 }
 
 type atomEntry struct {
-	VideoID    string         `xml:"http://www.youtube.com/xml/schemas/2015 videoId"`
-	Title      string         `xml:"title"`
-	Published  string         `xml:"published"` // RFC3339, e.g. 2026-07-13T04:18:12+00:00
-	Links      []atomLink     `xml:"link"`
-	MediaGroup atomMediaGroup `xml:"http://search.yahoo.com/mrss/ group"`
+	VideoID   string     `xml:"http://www.youtube.com/xml/schemas/2015 videoId"`
+	Title     string     `xml:"title"`
+	Published string     `xml:"published"` // RFC3339, e.g. 2026-07-13T04:18:12+00:00
+	Links     []atomLink `xml:"link"`
 }
 
 type atomLink struct {
 	Rel  string `xml:"rel,attr"`
 	Href string `xml:"href,attr"`
-}
-
-type atomMediaGroup struct {
-	Description string `xml:"http://search.yahoo.com/mrss/ description"`
 }
 
 // resolveArchiveWindowDays is THE per-channel resolver for how many days back
@@ -1098,13 +1092,13 @@ func (fm *FeedMonitor) membershipDiscoveryEnabled() bool {
 }
 
 // discoveredVideo is one parsed RSS feed entry, as consumed by the STORE step
-// (spec §7): videoID/title/published feed the upsert. desc and url are parse
-// outputs the store does not persist — the store-driven passes term-match on
-// title only (§8) and synthesize canonical watch URLs (archive.go).
+// (spec §7): videoID/title/published feed the upsert. url is a parse output
+// the store does not persist — the store-driven passes synthesize canonical
+// watch URLs (archive.go). The description is not parsed at all: the passes
+// term-match on title only (§8), since a store row carries no description.
 type discoveredVideo struct {
 	videoID   string
 	title     string
-	desc      string    // RSS description (lookbehind-deduped); not stored
 	url       string    // RSS alternate link; not stored
 	published time.Time // RSS <published> — 'exact' in the store; zero ⇒ 'assumed'/cycle-now
 	source    string    // always "rss" (feed_items.source)
@@ -1113,9 +1107,8 @@ type discoveredVideo struct {
 // parseFeedCandidates parses an Atom feed into discovery candidates. It returns
 // ALL entries; the STORE step upserts every one, carrying its <published> date
 // as the row's 'exact'-precision published (zero time ⇒ 'assumed'/cycle-now —
-// see the STORE step). Description dedup
-// (NumDescLookbehind) is applied here because it depends on feed entry order. A
-// parse failure is returned so the caller can record it as channel-health.
+// see the STORE step). A parse failure is returned so the caller can record it
+// as channel-health.
 func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte) ([]discoveredVideo, error) {
 	var feed atomFeed
 	if err := xml.Unmarshal(data, &feed); err != nil {
@@ -1126,30 +1119,10 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 		return nil, nil
 	}
 
-	lookbehind := 0
-	if ch.NumDescLookbehind != nil {
-		lookbehind = *ch.NumDescLookbehind
-	}
-	// Precompute per-entry line sets once (avoids O(N*M*K) re-trimming).
-	var entryLineSets []map[string]struct{}
-	if lookbehind > 0 {
-		entryLineSets = make([]map[string]struct{}, len(entries))
-		for i := range entries {
-			entryLineSets[i] = descriptionLineSet(entries[i].MediaGroup.Description)
-		}
-	}
-
 	out := make([]discoveredVideo, 0, len(entries))
-	for i, entry := range entries {
+	for _, entry := range entries {
 		if entry.VideoID == "" {
 			continue
-		}
-
-		// Description dedup: filter lines that appear in older entries.
-		description := entry.MediaGroup.Description
-		if lookbehind > 0 && i+1 < len(entries) {
-			end := min(i+1+lookbehind, len(entries))
-			description = filterUniqueDescriptionLinesPrecomputed(description, entryLineSets[i+1:end])
 		}
 
 		videoURL := ""
@@ -1171,44 +1144,12 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 		out = append(out, discoveredVideo{
 			videoID:   entry.VideoID,
 			title:     entry.Title,
-			desc:      description,
 			url:       videoURL,
 			published: published,
 			source:    "rss",
 		})
 	}
 	return out, nil
-}
-
-// descriptionLineSet builds the trimmed-line lookup set for a description.
-// Sharing one set per entry across the outer loop keeps dedup work linear in
-// total lines rather than quadratic in entries.
-func descriptionLineSet(description string) map[string]struct{} {
-	set := make(map[string]struct{})
-	for line := range strings.SplitSeq(description, "\n") {
-		set[strings.TrimSpace(line)] = struct{}{}
-	}
-	return set
-}
-
-// filterUniqueDescriptionLinesPrecomputed removes lines that appear in any of
-// the precomputed older-entry line sets.
-func filterUniqueDescriptionLinesPrecomputed(description string, olderLineSets []map[string]struct{}) string {
-	var unique []string
-	for line := range strings.SplitSeq(description, "\n") {
-		trimmed := strings.TrimSpace(line)
-		found := false
-		for _, set := range olderLineSets {
-			if _, ok := set[trimmed]; ok {
-				found = true
-				break
-			}
-		}
-		if !found {
-			unique = append(unique, line)
-		}
-	}
-	return strings.Join(unique, "\n")
 }
 
 // getYouTubeChannels returns a copy of the YouTube channel list under

@@ -1551,7 +1551,6 @@ export class SettingsController {
     document.getElementById("channel-include-vods").checked =
       channel?.include_non_live_content || false;
 
-    this.app.setInputValue("channel-lookbehind-input", channel?.num_desc_lookbehind ?? "");
     this.app.setInputValue("channel-output-dir-input", channel?.output_directory ?? "");
     this.app.setInputValue("channel-archive-window-input", channel?.archive_window_days ?? "");
     this.app.setInputValue("channel-archive-slots-input", channel?.archive_slots ?? "");
@@ -1708,7 +1707,6 @@ export class SettingsController {
     }
 
     const overrides = applyChannelOverrides(channel, {
-      numDescLookbehind: this.app.getInputNumber("channel-lookbehind-input"),
       outputDirectory: document.getElementById("channel-output-dir-input")?.value ?? "",
       archiveWindowDays: this.app.getInputNumber("channel-archive-window-input"),
       archiveSlots: this.app.getInputNumber("channel-archive-slots-input"),

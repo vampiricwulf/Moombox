@@ -878,7 +878,7 @@ func (m *SetupWizardModel) handleChannelListKey(key string, onEsc func() string,
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
-			"num_desc_lookbehind": "", "output_directory": "",
+			"output_directory":    "",
 			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0

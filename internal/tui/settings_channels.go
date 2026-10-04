@@ -29,7 +29,6 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 		"terms":               terms,
 		"include_non_live":    boolToDisplay(ch.IncludeNonLiveContent),
 		"quality_preference":  cmp.Or(ch.QualityPreference, "best"),
-		"num_desc_lookbehind": optIntString(ch.NumDescLookbehind),
 		"output_directory":    ch.OutputDirectory,
 		"archive_window_days": optIntString(ch.ArchiveWindowDays),
 		"archive_slots":       optIntString(ch.ArchiveSlots),
@@ -61,8 +60,8 @@ func optIntFromString(s string) *int {
 
 // valuesToChannel turns the editor's form values into a ChannelConfig. For an
 // edit, existing is the channel being edited: every field is copied from it
-// first, so the fields this editor does not show (num_desc_lookbehind,
-// output_directory, archive_window_days, archive_slots, named terms) survive
+// first, so the fields this editor does not show (named terms, and the
+// retired num_desc_lookbehind) survive
 // the round trip — the bug this parameter exists to close. nil means a new
 // channel. Shown fields are assigned unconditionally so clearing one clears
 // it in the result too.
@@ -96,7 +95,6 @@ func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) con
 	if q := vals["quality_preference"]; q != "" && q != "best" {
 		ch.QualityPreference = q
 	}
-	ch.NumDescLookbehind = optIntFromString(vals["num_desc_lookbehind"])
 	ch.OutputDirectory = strings.TrimSpace(vals["output_directory"])
 	ch.ArchiveWindowDays = optIntFromString(vals["archive_window_days"])
 	ch.ArchiveSlots = optIntFromString(vals["archive_slots"])
@@ -117,9 +115,6 @@ func validateChannelValues(vals map[string]string) string {
 			return fmt.Sprintf("%s must be a whole number %d-%d (blank = use the global/default value)", label, min, max)
 		}
 		return ""
-	}
-	if msg := check("num_desc_lookbehind", "Description lookbehind", 0, 1000); msg != "" {
-		return msg
 	}
 	if msg := check("archive_window_days", "Archive window", 1, 3650); msg != "" {
 		return msg
@@ -173,7 +168,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
-			"num_desc_lookbehind": "", "output_directory": "",
+			"output_directory":    "",
 			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0

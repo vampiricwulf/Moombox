@@ -830,9 +830,10 @@ export function reloginPromptTarget(status, hostname) {
  * Apply the per-channel override inputs to a channel payload. A blank input
  * (undefined number / empty string) clears the key so the server falls back
  * to the global value; a present value is validated against the same bounds
- * config.Validate uses for the globals. Returns { channel, error }.
+ * config.Validate uses for the globals. Returns { channel, error }. Keys the
+ * dialog does not show (the retired num_desc_lookbehind) ride through as given.
  */
-export function applyChannelOverrides(channel, { numDescLookbehind, outputDirectory, archiveWindowDays, archiveSlots }) {
+export function applyChannelOverrides(channel, { outputDirectory, archiveWindowDays, archiveSlots }) {
   const out = { ...channel };
   const setInt = (key, value, label, min, max) => {
     if (value === undefined || value === null || value === "") {
@@ -846,7 +847,6 @@ export function applyChannelOverrides(channel, { numDescLookbehind, outputDirect
     return null;
   };
   const err =
-    setInt("num_desc_lookbehind", numDescLookbehind, "Description lookbehind", 0, 1000) ||
     setInt("archive_window_days", archiveWindowDays, "Archive window", 1, 3650) ||
     setInt("archive_slots", archiveSlots, "Archive slots", 1, 100);
   if (err) return { channel, error: err };

@@ -141,13 +141,14 @@ func TestSaveCurrentChannelPassesExisting(t *testing.T) {
 	}
 }
 
-// TestChannelValuesRoundTripOverrides: the four override fields render as
-// text ("" when unset) and parse back to pointers (nil when blank).
+// TestChannelValuesRoundTripOverrides: the three override fields render as
+// text ("" when unset) and parse back to pointers (nil when blank). The
+// retired num_desc_lookbehind is not on the form and rides through untouched.
 func TestChannelValuesRoundTripOverrides(t *testing.T) {
 	existing := fullChannel()
 	vals := channelToValues(existing)
 	for k, want := range map[string]string{
-		"num_desc_lookbehind": "5", "output_directory": "D:/special",
+		"output_directory":    "D:/special",
 		"archive_window_days": "7", "archive_slots": "2",
 	} {
 		if vals[k] != want {
@@ -155,13 +156,12 @@ func TestChannelValuesRoundTripOverrides(t *testing.T) {
 		}
 	}
 
-	vals["num_desc_lookbehind"] = ""
 	vals["output_directory"] = ""
 	vals["archive_window_days"] = "14"
 	vals["archive_slots"] = " 4 "
 	got := valuesToChannel(vals, &existing)
-	if got.NumDescLookbehind != nil {
-		t.Errorf("blank lookbehind must clear, got %v", *got.NumDescLookbehind)
+	if got.NumDescLookbehind == nil || *got.NumDescLookbehind != 5 {
+		t.Errorf("the retired lookbehind did not survive the edit: %v", got.NumDescLookbehind)
 	}
 	if got.OutputDirectory != "" {
 		t.Errorf("blank output dir must clear, got %q", got.OutputDirectory)
@@ -174,27 +174,25 @@ func TestChannelValuesRoundTripOverrides(t *testing.T) {
 	}
 
 	unset := config.ChannelConfig{ID: "UC1"}
-	if v := channelToValues(unset); v["num_desc_lookbehind"] != "" || v["archive_window_days"] != "" || v["archive_slots"] != "" || v["output_directory"] != "" {
+	if v := channelToValues(unset); v["archive_window_days"] != "" || v["archive_slots"] != "" || v["output_directory"] != "" {
 		t.Errorf("unset overrides must render blank: %v", v)
 	}
 }
 
 // TestValidateChannelValues: ranges mirror config.Validate's global bounds
-// (window 1-3650, slots 1-100) and lookbehind must be >= 0; blanks pass.
+// (window 1-3650, slots 1-100); blanks pass.
 func TestValidateChannelValues(t *testing.T) {
 	base := func() map[string]string {
-		return map[string]string{"id": "UC1", "num_desc_lookbehind": "", "archive_window_days": "", "archive_slots": ""}
+		return map[string]string{"id": "UC1", "archive_window_days": "", "archive_slots": ""}
 	}
 	if msg := validateChannelValues(base()); msg != "" {
 		t.Errorf("blanks rejected: %s", msg)
 	}
 	cases := map[string][2]string{
-		"lookbehind negative": {"num_desc_lookbehind", "-1"},
-		"lookbehind text":     {"num_desc_lookbehind", "three"},
-		"window zero":         {"archive_window_days", "0"},
-		"window too big":      {"archive_window_days", "3651"},
-		"slots zero":          {"archive_slots", "0"},
-		"slots too big":       {"archive_slots", "101"},
+		"window zero":    {"archive_window_days", "0"},
+		"window too big": {"archive_window_days", "3651"},
+		"slots zero":     {"archive_slots", "0"},
+		"slots too big":  {"archive_slots", "101"},
 	}
 	for name, c := range cases {
 		vals := base()
@@ -204,28 +202,32 @@ func TestValidateChannelValues(t *testing.T) {
 		}
 	}
 	ok := base()
-	ok["num_desc_lookbehind"], ok["archive_window_days"], ok["archive_slots"] = "0", "3650", "100"
+	ok["archive_window_days"], ok["archive_slots"] = "3650", "100"
 	if msg := validateChannelValues(ok); msg != "" {
 		t.Errorf("boundary values rejected: %s", msg)
 	}
 }
 
-// TestChannelFieldsIncludeOverrides: the form shows the four fields for both
-// platforms (they are platform-neutral).
+// TestChannelFieldsIncludeOverrides: the form shows the three override fields
+// for both platforms (they are platform-neutral), and not the retired
+// num_desc_lookbehind, which nothing reads (terms match titles only).
 func TestChannelFieldsIncludeOverrides(t *testing.T) {
 	keys := map[string]bool{}
 	for _, f := range channelFields {
 		keys[f.key] = true
-		if f.key == "num_desc_lookbehind" || f.key == "output_directory" || f.key == "archive_window_days" || f.key == "archive_slots" {
+		if f.key == "output_directory" || f.key == "archive_window_days" || f.key == "archive_slots" {
 			if f.platformFilter != "" {
 				t.Errorf("%s must not be platform-filtered", f.key)
 			}
 		}
 	}
-	for _, k := range []string{"num_desc_lookbehind", "output_directory", "archive_window_days", "archive_slots"} {
+	for _, k := range []string{"output_directory", "archive_window_days", "archive_slots"} {
 		if !keys[k] {
 			t.Errorf("channelFields lacks %s", k)
 		}
+	}
+	if keys["num_desc_lookbehind"] {
+		t.Error("channelFields offers the retired num_desc_lookbehind, a setting nothing reads")
 	}
 }
 

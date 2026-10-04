@@ -603,7 +603,7 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 | Platform | string | "youtube" | `platform` | "youtube" or "twitch" |
 | Enabled | *bool | nil (true) | `enabled` | nil defaults to true |
 | Terms | ChannelTerms | empty | `terms` | Regex filter (string or map of named patterns) |
-| NumDescLookbehind | *int | nil | `num_desc_lookbehind` | Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
+| NumDescLookbehind | *int | nil | `num_desc_lookbehind` | Retired: terms match titles only, so nothing reads it. Not on either channel editor; kept so an existing config loads and saves unchanged. |
 | OutputDirectory | string | "" | `output_directory` | Per-channel override. Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
 | IncludeNonLiveContent | bool | false | `include_non_live_content` | |
 | ArchiveWindowDays | *int | nil | `archive_window_days` | Per-channel override (1-3650). Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
