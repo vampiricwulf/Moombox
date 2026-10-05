@@ -441,6 +441,31 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 	m.advancedInitCmd = m.advancedForm.Init()
 }
 
+// advancedFormToLastGroup moves a freshly built advanced form onto its last
+// group, folding each move's Init into advancedInitCmd. The values it walks
+// past were already accepted when the form was completed, so no group's
+// validation stops the walk.
+func (m *SetupWizardModel) advancedFormToLastGroup() {
+	cmds := []tea.Cmd{m.advancedInitCmd}
+	for range len(advancedFormGroupTitles()) - 1 {
+		cmds = append(cmds, m.advancedForm.NextGroup())
+	}
+	m.advancedInitCmd = tea.Batch(cmds...)
+}
+
+// advancedFormGroupTitles lists the advanced form's groups in order — the
+// steps buildAdvancedForm turns into huh groups (the Cookie Login and
+// Channels steps are sub-editors, not groups).
+func advancedFormGroupTitles() []string {
+	var titles []string
+	for _, step := range advancedSetupSteps {
+		if step.fields != nil {
+			titles = append(titles, step.title)
+		}
+	}
+	return titles
+}
+
 // armCookieTick starts a countdown tick chain for the active cookie flow.
 // Returns nil when no flow is active or a chain is already in flight — the
 // caller (app_keys.go) runs on every keypress and must not stack chains.
@@ -1113,9 +1138,12 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 
 	switch key {
 	case keyEsc:
-		// Go back to the form (rebuild with current values preserved)
+		// Go back to the form (rebuild with current values preserved) — on
+		// its LAST group, the one the form was completed from. A fresh form
+		// starts on its first, so "Esc: Back" used to land on Network.
 		m.advancedFormDone = false
 		m.buildAdvancedForm()
+		m.advancedFormToLastGroup()
 		return ""
 	case keyUp:
 		if m.cookieFocus > 0 {
