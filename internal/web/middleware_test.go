@@ -1330,3 +1330,32 @@ func TestHostGateLetsAPublicPeerUseADNSName(t *testing.T) {
 		t.Errorf("public peer by DNS name: status %d, want 200", rr.Code)
 	}
 }
+
+// TestRefuseCrossSite: only a request the browser marks as started by another
+// site's page is refused. The dashboard's own fetch (same-origin), another
+// local dashboard (same-site), a typed URL (none) and a non-browser client (no
+// header) all pass.
+//
+// Mutant: compare against "same-site" too, or not at all.
+func TestRefuseCrossSite(t *testing.T) {
+	h := RefuseCrossSite(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for site, want := range map[string]int{
+		"":            http.StatusNoContent,
+		"same-origin": http.StatusNoContent,
+		"same-site":   http.StatusNoContent,
+		"none":        http.StatusNoContent,
+		"cross-site":  http.StatusForbidden,
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/formats/x", nil)
+		if site != "" {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Errorf("Sec-Fetch-Site %q: status %d, want %d", site, rec.Code, want)
+		}
+	}
+}

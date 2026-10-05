@@ -324,7 +324,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 	// GET /api/update/release-notes?version=X.Y.Z fetches release notes
 	// for a specific version. Defaults to the running version if no query
 	// param. Returns { tagName, releaseNotes (raw markdown), releaseNotesHtml }.
-	r.Get("/api/update/release-notes", func(w http.ResponseWriter, r *http.Request) {
+	r.With(web.RefuseCrossSite).Get("/api/update/release-notes", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not configured", http.StatusServiceUnavailable)
 			return

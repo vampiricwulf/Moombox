@@ -152,7 +152,7 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 	store := deps.Store
 
 	// GET /api/ffmpeg/check — check if ffmpeg is available on PATH or configured path
-	r.Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(web.RefuseCrossSite).Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
 		var path string
 		store.Read(func(c *config.MoomboxConfig) {
 			path = c.Paths.FfmpegPath

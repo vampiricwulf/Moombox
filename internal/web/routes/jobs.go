@@ -1321,7 +1321,7 @@ type FormatRoutesDeps struct {
 // FormatRoutes registers format-related API routes.
 func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 	// GET /api/formats/:videoId
-	r.With(limitedBy(deps.RateLimit)).Get("/api/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(web.RefuseCrossSite, limitedBy(deps.RateLimit)).Get("/api/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
 		videoID := chi.URLParam(req, "videoId")
 		if !utils.IsVideoID(videoID) {
 			jsonError(rw, "invalid video ID", http.StatusBadRequest)

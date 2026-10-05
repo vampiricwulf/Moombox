@@ -351,6 +351,31 @@ func LoopbackOnly(next http.Handler) http.Handler {
 	})
 }
 
+// RefuseCrossSite refuses a request the browser marks as started by another
+// site (Sec-Fetch-Site: cross-site). CSRFMiddleware passes every GET, which is
+// right for a read — no CORS is granted, so another site's page cannot see the
+// answer — but a few GET handlers DO something: look a video's formats up on
+// YouTube with the operator's cookies, spawn the configured ffmpeg, fetch
+// release notes from GitHub. An <img> or no-cors fetch on any page open in the
+// operator's browser could fire those at a loopback dashboard and spend the
+// budget the dashboard's own format picker shares. Only the browser sets the
+// header, and only on a request another site's page started, so the
+// dashboard's own fetches (same-origin), a second local dashboard (same-site:
+// ports do not split a site) and every non-browser client pass untouched.
+// Wrap only the routes that act: a site linking or embedding a read (a
+// thumbnail, a recording) stays free to.
+func RefuseCrossSite(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"Forbidden: cross-site request"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // originAllowed is the ONE Origin decision. CORSMiddleware, CSRFMiddleware and
 // the WebSocket upgrade all route through it, so the three can never again
 // disagree about which authority the request answers as (X-Forwarded-Host from
