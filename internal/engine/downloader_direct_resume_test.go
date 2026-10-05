@@ -228,3 +228,60 @@ func TestDirectResume_RangeContinuesFromOffset(t *testing.T) {
 		t.Errorf("resume sidecar should be cleared after completion, stat err = %v", err)
 	}
 }
+
+// TestDirectChunkedLoopShortOriginIsAnError pins that the chunked loop never
+// reads a short origin as completion. Its loop runs only while the offset is
+// below the probed total, so a 416 or an empty 206 there means the origin
+// stopped short of the size it declared. Both used to break out of the loop,
+// clear the resume sidecar and return nil over a truncated file — the job
+// finished, because validation reads the header alone.
+//
+// Mutant: restoring `break` in the 416 arm of runDirectDownload — the 416
+// case returns nil with the sidecar gone. Mutant: restoring `break` in the
+// empty-206 arm — the empty-206 case does the same.
+func TestDirectChunkedLoopShortOriginIsAnError(t *testing.T) {
+	body := make([]byte, 4*DownloadChunkSize)
+	copy(body, "\x00\x00\x00\x18ftypdash")
+	cutAt := int64(2 * DownloadChunkSize) // where the origin stops serving
+
+	for _, tc := range []struct {
+		name  string
+		short func(w http.ResponseWriter)
+	}{
+		{"416", func(w http.ResponseWriter) { w.WriteHeader(http.StatusRequestedRangeNotSatisfiable) }},
+		{"empty 206", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", cutAt, cutAt+DownloadChunkSize-1, len(body)))
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusPartialContent)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			full := serveRangeFile(body)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var start int64
+				fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+				if start == cutAt {
+					tc.short(w)
+					return
+				}
+				full(w, r)
+			}))
+			t.Cleanup(srv.Close)
+
+			out := filepath.Join(t.TempDir(), "video.mp4")
+			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
+			d.delays = fastDelays()
+			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
+			err := d.Start(t.Context())
+			if err == nil || !strings.Contains(err.Error(), "short of its probed size") {
+				t.Fatalf("Start = %v, want the short-origin error", err)
+			}
+			if _, statErr := os.Stat(out + ".resume.json"); statErr != nil {
+				t.Errorf("resume sidecar gone after a short origin (stat err = %v); it must survive for a Resume", statErr)
+			}
+			if fi, _ := os.Stat(out); fi == nil || fi.Size() != cutAt {
+				t.Errorf("staged file = %v, want the %d bytes served before the cut", fi, cutAt)
+			}
+		})
+	}
+}

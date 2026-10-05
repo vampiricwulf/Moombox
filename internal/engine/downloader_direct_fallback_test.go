@@ -529,9 +529,10 @@ func TestStreamingFallbackClearsResumeSidecarOnSuccess(t *testing.T) {
 
 // TestStreamingFallbackCompletesWhenOffsetIsAtEOF pins the review's ZZ4: a
 // staging file that already holds the whole VOD asks for bytes past the end
-// and gets a 416. The chunked loop reads 416 as "past end of file" and the
-// pre-arc fallback sent no Range at all, so this is a finished download, not
-// a failed job.
+// and gets a 416. This path knows no total size and the pre-arc fallback
+// sent no Range at all, so this is a finished download, not a failed job.
+// (The chunked loop, which knows the total, reads a 416 below it as an error
+// — TestDirectChunkedLoopShortOriginIsAnError.)
 //
 // Mutant: dropping the 416 special case — Start fails with
 // "HTTP 416 downloading direct URL" over a complete recording.

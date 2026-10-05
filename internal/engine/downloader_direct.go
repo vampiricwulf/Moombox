@@ -104,7 +104,14 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		data, statusCode, err := d.fetchChunkWithRetry(ctx, offset, end)
 		if err != nil {
 			if statusCode == http.StatusRequestedRangeNotSatisfiable {
-				break // Past end of file
+				// The loop runs only while offset < totalSize, so a 416 here
+				// is never "past end of file": the probe said there is more.
+				// It used to break as if it were, clear the sidecar and pass
+				// a truncated file to validation, which reads the header
+				// alone — the job finished over a short archive. An error
+				// keeps the sidecar for a Resume, whose fresh probe settles
+				// whether the origin's file really changed.
+				return directShortFileError("416 Range Not Satisfiable", offset, totalSize)
 			}
 			// Already phrased by fetchChunkWithRetry ("chunk download failed
 			// after N attempts: <cause>"); a second prefix here used to
@@ -128,7 +135,9 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		}
 
 		if len(data) == 0 {
-			break
+			// Same reading as the 416 above: below the probed total an empty
+			// 206 is a short origin, not the end of the file.
+			return directShortFileError("an empty 206", offset, totalSize)
 		}
 		d.noteFetch(len(data))
 
@@ -172,6 +181,15 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// directShortFileError reports an origin that stopped serving bytes before the
+// total its size probe declared. It is an error, never a completion: the
+// caller returns it without clearing the resume sidecar, so the staged bytes
+// stay resumable and the job does not finish over a truncated file.
+func directShortFileError(answer string, offset, totalSize int64) error {
+	return fmt.Errorf("origin answered %s at byte %d of %d — the file ends short of its probed size",
+		answer, offset, totalSize)
 }
 
 // discardStagedMedia is the ONLY place staged media is destroyed on purpose.
@@ -268,9 +286,11 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 	default:
 		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
 			// The resume offset is at or past EOF: the staged file already
-			// holds everything the origin has. The chunked loop reads 416 the
-			// same way (past end of file) and so did the pre-arc fallback,
-			// which sent no Range and simply re-fetched the whole file.
+			// holds everything the origin has. This path knows no total, so
+			// the origin's word is all there is — the pre-arc fallback, which
+			// sent no Range, simply re-fetched the whole file. The chunked
+			// loop, which does know the total, reads a 416 below it as a
+			// short origin instead (directShortFileError).
 			d.logger.Info("[Downloader] Resume offset is at or past EOF — staged file is already complete",
 				"offset", offset)
 			d.ClearResume()
