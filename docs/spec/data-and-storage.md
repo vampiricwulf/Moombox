@@ -554,7 +554,7 @@ Warn per key, and the next save leaves them out of the file.
 
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
-| CookieFile | string | "./cookies.txt" | `cookie_file` | **Restart-required.** `AutoCookieService` is constructed from this once, at startup (`initServices`, `cmd/moombox/services.go`). |
+| CookieFile | string | "./cookies.txt" | `cookie_file` | **Restart-required.** `AutoCookieService` is constructed from this once, at startup (`initServices`, `cmd/moombox/services.go`). Advice that names the file to replace — the auth alerts (`cookieFilePath`, `cmd/moombox/helpers.go`) and the worker's failed-refresh line (`CookieFileInUse`) — names the file the running services use (the jar's path), so a save without the restart cannot send the operator to a file nothing reads. |
 | AutoEnabled | bool | false | `auto_enabled` | **Restart-required.** Owns exactly three things: the headless-browser periodic timer, the one automatic recovery attempt, and the `SetExpectedPlatforms` seeding at `cmd/moombox/main.go:276-278`. See §Auto-Cookie Service for the full settled meaning. |
 | BrowserProfileDir | string | "./browser-profile" | `browser_profile_dir` | **Restart-required.** The directory's *existence* is not part of the start condition — `periodicRefreshHasSource` (`internal/cookies/autocookies_periodic.go`) asks per tick. |
 | BrowserPath | string | "" | `browser_path` | Explicit browser override. Only a real override when paired with `browser_type` (`browserOverrideConfigured`, `internal/cookies/autocookies_browser_resolve.go`). |

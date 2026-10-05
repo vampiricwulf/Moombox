@@ -1293,6 +1293,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// unless the key is set AND something makes it inert.
 	autoCookieSvc.LogDpapiProfileDirVerdict()
 
+	// The cookie file the services actually use, for the worker's
+	// replace-it-by-hand advice (see CookieFileInUse).
+	dlWorker.CookieFileInUse = jar.GetFilePath
+
 	// Wire the account fingerprint the worker records on a membership park, so
 	// the credential sweep can later tell whether the account actually changed.
 	// Reads the live jar, so it reflects whatever cookies are on disk at the

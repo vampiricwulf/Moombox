@@ -344,8 +344,9 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 		failureMarkerPresent
 }
 
-// cookieFilePath returns the configured Netscape cookie file path for use in
-// operator-facing messages, or a short prose stand-in when none is set.
+// cookieFilePath returns the Netscape cookie file the services use — the
+// jar's, falling back to the setting — for operator-facing messages, or a
+// short prose stand-in when none is set.
 //
 // Auth-failure guidance used to say only "re-run cookie setup from Settings",
 // which is a dead end wherever the interactive browser login cannot run — it
@@ -355,8 +356,15 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 // guess at the environment: a Docker operator reads "/data/cookies.txt" and
 // knows which host file to replace.
 func (s *runState) cookieFilePath() string {
+	// The jar's path first: the services read and write the file they loaded
+	// at boot, and cookies.cookie_file is restart-required — saved without
+	// the restart it names a file nothing touches, so advice to replace it
+	// sent the operator to the wrong file.
 	var path string
-	if s.configStore != nil {
+	if s.jar != nil {
+		path = s.jar.GetFilePath()
+	}
+	if path == "" && s.configStore != nil {
 		s.configStore.Read(func(c *config.MoomboxConfig) { path = c.Cookies.CookieFile })
 	}
 	if path == "" {

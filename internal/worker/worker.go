@@ -252,6 +252,13 @@ type DownloadWorker struct {
 	// account has actually changed. Optional: a nil slot simply records "",
 	// which the sweep resolves permissively.
 	CurrentCredentialIdentity func(platform string) string
+
+	// CookieFileInUse returns the cookie file the running services read and
+	// write (the jar's path). cookies.cookie_file is restart-required, so after
+	// a save without the restart the setting names a file nothing touches, and
+	// advice to replace it pointed the operator at the wrong one. Optional: nil
+	// or "" falls back to the setting.
+	CookieFileInUse func() string
 }
 
 // readConfig runs fn under configStore's read lock when the store has been
@@ -1626,7 +1633,12 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 	}
 
 	var cookieFile string
-	w.readConfig(func(c *config.MoomboxConfig) { cookieFile = c.Cookies.CookieFile })
+	if w.CookieFileInUse != nil {
+		cookieFile = w.CookieFileInUse()
+	}
+	if cookieFile == "" {
+		w.readConfig(func(c *config.MoomboxConfig) { cookieFile = c.Cookies.CookieFile })
+	}
 	if cookieFile == "" {
 		w.logger.Warn("auto cookie refresh failed — no cookie file is configured",
 			"fix", "set cookies.cookie_file to a Netscape cookies.txt exported from a browser signed in to the account")
