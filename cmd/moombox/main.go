@@ -119,10 +119,10 @@ const (
 
 func main() {
 	configPath := flag.String("config", "", "Path to config file")
-	logLevel := flag.String("log-level", "", "Override log level (DEBUG, INFO, WARN, ERROR)")
+	logLevel := flag.String("log-level", "", "Override the log level for this run only, without saving it (DEBUG, INFO, WARN, ERROR)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
-	headless := flag.Bool("headless", false, "Run without TUI (web-only mode)")
-	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode)")
+	headless := flag.Bool("headless", false, "Same as -no-tui")
+	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode; also MOOMBOX_NO_TUI=1)")
 	flag.Usage = printUsage
 
 	// Read-only diagnostics must not pass through the launcher: they would
