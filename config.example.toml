@@ -20,7 +20,9 @@
 #                including that authentication is still enforced once a
 #                password is set
 # Before exposing the dashboard beyond this machine, read the "Remote Access"
-# section of the README.
+# section of the README. Who is admitted follows a saved change at once;
+# moving off "localhost" also needs a restart, because the server starts
+# listening on the network only at startup.
 # network_access = "localhost"
 
 # Enable built-in HTTPS with a self-signed certificate.
@@ -234,7 +236,9 @@
 # one automatic browser attempt when authentication fails (with it off,
 # Moombox notifies you instead). The in-process refresh that keeps the
 # YouTube session alive runs either way — it is gated on cookie_file
-# alone — and so does the manual import below. Takes effect on restart.
+# alone — and so does the manual import below. The timer starts or stops
+# on restart; the automatic attempt on an authentication failure follows
+# this setting as soon as it is saved.
 #
 # HEADLESS HOSTS AND DOCKER: when no supported browser is installed,
 # Moombox imports cookies straight out of the profile directory below —
