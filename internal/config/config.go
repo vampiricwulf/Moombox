@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -293,6 +295,8 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 		cfg.NeedsAutoPersist = true
 	}
 
+	cfg.IgnoredOnLoad = retiredKeysIn(raw)
+
 	cfg.ConfigLoaded = true
 	cfg.LoadedFrom = path
 	for _, issue := range Validate(cfg) {
@@ -300,6 +304,33 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	}
 	Normalize(cfg)
 	return cfg, nil
+}
+
+// retiredKeys are keys an older config.toml may hold that nothing reads any
+// more, by section. downloader.po_token and downloader.visitor_data were
+// accepted and saved as a "manual PO token override" that no code path ever
+// consulted; PO tokens are minted per session by the BotGuard integration
+// ([bgutils]), and a pasted one would expire within hours anyway.
+var retiredKeys = map[string][]string{
+	"downloader": {"po_token", "visitor_data"},
+}
+
+// retiredKeysIn returns the retiredKeys present in raw as "section.key",
+// sorted by section then in retiredKeys order.
+func retiredKeysIn(raw map[string]any) []string {
+	var found []string
+	for _, section := range slices.Sorted(maps.Keys(retiredKeys)) {
+		table, ok := raw[section].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range retiredKeys[section] {
+			if _, ok := table[key]; ok {
+				found = append(found, section+"."+key)
+			}
+		}
+	}
+	return found
 }
 
 // migrateOldFormat handles migration from the old flat config format to the

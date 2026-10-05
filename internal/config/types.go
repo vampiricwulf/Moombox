@@ -42,6 +42,10 @@ type MoomboxConfig struct {
 	// one: the next save writes the default over the operator's value, and
 	// without the log nothing said so.
 	NormalizedOnLoad []string `toml:"-" json:"-"`
+	// IgnoredOnLoad lists the retired keys (retiredKeys) the file still
+	// carries. Nothing reads them; boot logs each one, and the next save
+	// leaves them out of the file.
+	IgnoredOnLoad []string `toml:"-" json:"-"`
 }
 
 // NetworkConfig holds server and network access settings.
@@ -241,12 +245,6 @@ type DownloaderConfig struct {
 	// gate then falls back to the silent drop and manual Reinitialize
 	// remains the recovery. 0 = never expire (preserve indefinitely).
 	IncompleteStagingExpiryDays FlexDuration `toml:"incomplete_staging_expiry_days" json:"incomplete_staging_expiry_days"`
-	// PoToken and VisitorData are session-scoped secrets. Like PasswordHash,
-	// they must never be returned by GET /api/config — use json:"-" to hide
-	// them from any encoder walking the Config struct. Operators who need to
-	// inspect them can read config.toml directly.
-	PoToken     string `toml:"po_token,omitempty" json:"-"`
-	VisitorData string `toml:"visitor_data,omitempty" json:"-"`
 }
 
 // CookiesConfig holds cookie file and auto-cookie acquisition settings.

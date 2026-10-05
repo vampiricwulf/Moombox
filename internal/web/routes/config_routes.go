@@ -811,12 +811,6 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		} else if vs, ok := dl["incomplete_staging_expiry_days"].(string); ok {
 			cfg.Downloader.IncompleteStagingExpiryDays = config.ParseFlexDuration(vs, "days", cfg.Downloader.IncompleteStagingExpiryDays.Value)
 		}
-		if v, ok := dl["po_token"].(string); ok {
-			cfg.Downloader.PoToken = v
-		}
-		if v, ok := dl["visitor_data"].(string); ok {
-			cfg.Downloader.VisitorData = v
-		}
 	}
 
 	// Cookies

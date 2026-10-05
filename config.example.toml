@@ -211,12 +211,6 @@
 # Default: 16.
 # progress_interval_ms = 16
 
-# Advanced: manual PO token override (bypasses built-in BotGuard generation)
-# po_token = ""
-
-# Advanced: manual visitor data override
-# visitor_data = ""
-
 # ─── Cookies ──────────────────────────────────────────────────────────────────
 [cookies]
 

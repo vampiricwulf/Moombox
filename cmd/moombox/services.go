@@ -496,6 +496,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	for _, issue := range cfg.NormalizedOnLoad {
 		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))
 	}
+	for _, key := range cfg.IgnoredOnLoad {
+		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))
+	}
 
 	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
 	// no silent clamp — see config.SegmentWorkers doc). Past
