@@ -524,6 +524,20 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 			continue
 		}
+		// ENGINE-9, aside edition — and the one copy whose source is deleted
+		// right after it: `-c copy` exits 0 after the first fragment it cannot
+		// demux, and an aside is exactly a recording the engine could not
+		// resume, its tail the likeliest to hold one. The main and part muxes
+		// check the copy's length against their inputs; this one deleted the
+		// only copy of the footage behind a sibling holding a fraction of it.
+		if probe := o.runFFprobe(ctx, out); probe != nil {
+			if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probe.DurationSec, g.video, g.audio); err != nil {
+				os.Remove(out)
+				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
+					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
+				continue
+			}
+		}
 		o.logger.Warn("a set-aside recording was muxed to its own file beside the archive; it overlaps the start of the main recording, so it is NOT one of the job's parts",
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
 		recovered = append(recovered, out)

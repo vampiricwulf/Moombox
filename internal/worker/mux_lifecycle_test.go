@@ -972,3 +972,38 @@ func errorOf(job *database.Job) string {
 	}
 	return job.Error
 }
+
+// TestTruncatedAsideStaysInStaging is ENGINE-9 on the set-aside recovery: an
+// aside whose container is cut mid-mdat still probes at its full length,
+// `-c copy` stops at the first bad fragment and exits 0 — and muxStagedAsides
+// then deleted the aside, the only copy of that footage, behind a sibling
+// holding a third of it. A short copy is now discarded and the aside kept.
+//
+// Mutant: dropping the verifyMuxedDuration check from muxStagedAsides — the
+// aside is gone and a short sibling is reported recovered.
+func TestTruncatedAsideStaysInStaging(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-aside-trunc")
+	full := filepath.Join(staging, "video.mp4")
+	writeMuxFixture(t, ffmpegPath, full, 90)
+	truncateFixture(t, full, 120000)
+	aside := full + engine.StagedRestartSuffix + "1700000000"
+	if err := os.Rename(full, aside); err != nil {
+		t.Fatal(err)
+	}
+
+	job, _ := db.GetJob("j-aside-trunc")
+	recovered := w.orchestrator.muxStagedAsides(context.Background(), w.buildJobContext(job), outputDir, "base")
+	if len(recovered) != 0 {
+		t.Errorf("a short copy was reported recovered: %v", recovered)
+	}
+	if _, err := os.Stat(aside); err != nil {
+		t.Errorf("the aside — the only copy of its footage — is gone after a short copy: %v", err)
+	}
+	if left := mp4sIn(t, outputDir); len(left) != 0 {
+		t.Errorf("the short sibling was left in the output dir: %v", left)
+	}
+}
