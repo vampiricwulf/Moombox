@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -15,23 +16,34 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // runDownloaders runs video and audio downloaders using errgroup (B7: fixes goroutine leak).
+//
+// Each downloader recovers its own panic into an error. The callers' recovers
+// cannot: a panic in one of these goroutines is not theirs to catch, and it
+// took the whole process down — every other job's capture with it — where
+// the live loop's "runDownloaders panic" error was meant to end this one.
 func (o *DownloadOrchestrator) runDownloaders(ctx context.Context, result *DownloadResult) error {
 	g, gctx := errgroup.WithContext(ctx)
 
-	if result.VideoDownloader != nil {
-		g.Go(func() error {
-			return result.VideoDownloader.Start(gctx)
+	start := func(name string, d *engine.SegmentDownloader) {
+		g.Go(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("%s downloader panic: %v", name, r)
+				}
+			}()
+			return d.Start(gctx)
 		})
 	}
-
+	if result.VideoDownloader != nil {
+		start("video", result.VideoDownloader)
+	}
 	if result.AudioDownloader != nil {
-		g.Go(func() error {
-			return result.AudioDownloader.Start(gctx)
-		})
+		start("audio", result.AudioDownloader)
 	}
 
 	return g.Wait()
