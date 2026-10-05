@@ -10,7 +10,7 @@ These are hard rules. An AI assisting with Moombox development must follow them 
 
 - **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc.org/sqlite only honors `_pragma=...` parameters (the mattn-style `_journal_mode=...` form is silently ignored). Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
 - **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (51 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object. Returns the updated `*Job`.
-- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 51 entries mapping Go field names to SQLite column names (identity mapping in all cases). `notification_msgs` is the one job column deliberately left out — `UpdateNotificationMsgs` is its only writer. Adding a new column that `UpdateJobFields` should be able to write requires adding a corresponding entry here.
+- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 51 entries mapping Go field names to SQLite column names (identity mapping in all cases). Deliberately left out: `notification_msgs` (`UpdateNotificationMsgs` is its only writer), `channel_id` (set at insert — feed affiliation never changes, and a partial write of `""` would fake-empty a NULL), and the identity and bookkeeping columns `id`, `video_id`, `url`, `platform`, `created_at`, `updated_at`. Adding a new column that `UpdateJobFields` should be able to write requires adding a corresponding entry here.
 - **`JobStatus` is `type JobStatus string`.** Status values are string constants, not integers or enums. Timestamps are ISO 8601 / RFC3339 strings. Optional numeric fields (sequence counters, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`).
 - **Job writes are synchronous; there is no batching.** `UpdateJobFields` executes its `UPDATE` immediately under `db.mu`, re-reads the row in the same critical section, releases the lock and then notifies subscribers. There is no update channel, writer goroutine or coalescing window — the only goroutine the package starts is the `OnJobsChange` fan-out — so when nothing is being written, nothing runs and the database performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
@@ -54,7 +54,6 @@ Source: `Open()` in `internal/database/database.go`.
 ```go
 type Database struct {
     db        *sql.DB
-    ctx       context.Context
     mu        sync.RWMutex
     closeOnce sync.Once
     logger    dbLogger
@@ -417,8 +416,7 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 The database maintains in-memory per-job log buffers (`jobLogs map[string][]string`) for real-time log viewing in the Web UI and TUI. These are not persisted to SQLite.
 
-- `AddJobLog(jobID, line)` appends a line. Capped at 200 lines; when exceeded, trimmed to last 100.
-- `RouteLogToJobs(line)` scans the ROUTED SET of job IDs (`logRouted`, a second map beside `jobLogs`) and routes the line to the first matching buffer (substring match on job ID in log line).
+- `RouteLogToJobs(line)` is the only writer: it scans the ROUTED SET of job IDs (`logRouted`, a second map beside `jobLogs`) and appends the line to the first matching buffer (substring match on job ID in log line). Each buffer is capped at 200 lines; when exceeded, it is trimmed to the last 100.
 - `TrackJobForLogs(jobID)` starts routing to a job and initializes its buffer (nil slice).
 - `UntrackJobForLogs(jobID)` stops routing to a job and KEEPS its buffer — the job that just failed is the one whose log an operator opens next.
 - `SyncJobLogTracking(jobs)` applies both rules to a whole list: non-terminal jobs tracked, terminal ones untracked. The boot seed and the `OnJobsChange` fan-out both call it (`cmd/moombox/monitor_callbacks.go`), while single-job transitions go through that file's `syncJobLogRouting` — from `OnJobAdded` (the ZIP import really does add a `Finished` job) and from `OnJobChange` whenever the `status` column was written, which is what re-routes a job that LEAVES a terminal state: `/retry`, `/resume` and auto-retry each resurrect a job with a plain `UpdateJobFields(status=…)`.

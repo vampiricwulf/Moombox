@@ -342,6 +342,11 @@ func (db *Database) migrate() error {
 					db.logger.Warn("migration v2: failed to backfill chat_file", "jobID", b.id, "err", err)
 				}
 			}
+		} else if db.logger != nil {
+			// The version still advances (the backfill is best-effort, as each
+			// row's failure above is), so this is the only trace that it never
+			// ran: say so rather than skip it in silence.
+			db.logger.Warn("migration v2: chat_file backfill skipped — could not read jobs", "err", err)
 		}
 
 		err = db.writeUserVersion(2)
@@ -410,6 +415,9 @@ func (db *Database) migrate() error {
 					}
 				}
 			}
+		} else if db.logger != nil {
+			// Best-effort like v2's: the version still advances, so log the skip.
+			db.logger.Warn("migration v3: asset backfill skipped — could not read jobs", "err", err)
 		}
 
 		err = db.writeUserVersion(3)

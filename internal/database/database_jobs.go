@@ -310,9 +310,12 @@ func (db *Database) CountBacklogInFlight(channelID string) (int, error) {
 	defer db.mu.RUnlock()
 
 	var n int
+	// Bound from the JobStatus constants, as HasActiveJob does, so a status
+	// rename cannot silently zero the scheduler's in-flight count.
 	err := db.db.QueryRowContext(db.getCtx(), `SELECT COUNT(*) FROM jobs
  WHERE channel_id = ? AND queue_priority = 1
-   AND status IN ('Upcoming','Live','Downloading','Muxing');`, channelID).Scan(&n)
+   AND status IN (?, ?, ?, ?);`, channelID,
+		StatusUpcoming, StatusLive, StatusDownloading, StatusMuxing).Scan(&n)
 	return n, err
 }
 
@@ -582,17 +585,26 @@ func (db *Database) UpdateSegmentFile(id int, filename, filePath, chatFile strin
 // re-download is then finalized as multi-part from the OLD part files while the
 // freshly-downloaded media is discarded. (The job-delete cascade is the only
 // other place these rows are removed.)
+//
+// One transaction, like ReplaceJobSegments: as two autocommit DELETEs a crash
+// between them left the previous attempt's gap rows on the fresh run.
 func (db *Database) ClearJobSegmentsAndGaps(jobID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM gaps WHERE job_id = ?", jobID); err != nil {
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
 		return err
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, "DELETE FROM gaps WHERE job_id = ?", jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReplaceJobSegments atomically replaces all segment rows for a job with segs:
@@ -884,13 +896,6 @@ func capLogLines(logs []string) []string {
 		return logs[len(logs)-100:]
 	}
 	return logs
-}
-
-// AddJobLog adds a log line to the per-job in-memory buffer.
-func (db *Database) AddJobLog(jobID, line string) {
-	db.jobLogsMu.Lock()
-	defer db.jobLogsMu.Unlock()
-	db.jobLogs[jobID] = capLogLines(append(db.jobLogs[jobID], line))
 }
 
 // GetJobLogs returns a copy of the in-memory log lines for a job.

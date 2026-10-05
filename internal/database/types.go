@@ -165,8 +165,9 @@ type Job struct {
 	NotificationMsgs map[string]string `json:"-"`
 	// IncompleteTail marks a Finished job whose recording is known to be missing
 	// tail segments (finalized behind head after refresh attempts). Staging +
-	// resume sidecar are preserved; Retry/Resume are allowed and clear the flag
-	// on a complete re-run.
+	// resume sidecar are preserved; Resume is allowed and clears the flag on a
+	// complete re-run. Retry is refused for such a job (it would delete the
+	// staging Resume needs — see the retry route in routes/jobs.go).
 	IncompleteTail bool `json:"incompleteTail,omitempty"`
 	// Trims (loaded via join)
 	Trims []TrimRecord `json:"trims,omitempty"`
