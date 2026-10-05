@@ -788,13 +788,26 @@ sessionLoop:
 						"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
 						"jobID", jobCtx.Job.ID)
 				}
+				// A kept part ends exactly where its data stops, so the
+				// successor is seeded from CurrentSeq like the gap and
+				// init-change splits — Twitch's variants share one sequence
+				// numbering. Seeding -1 replayed the playlist window, so the
+				// first seconds of the new part repeated the closed part's
+				// last ones. A discarded short part leaves nothing to
+				// repeat: the window replay keeps whatever it still holds of
+				// the dropped span, at the new quality.
+				nextSeq, forceSeq := -1, false
+				if !shortSegment {
+					nextSeq = videoDl.CurrentSeq()
+					forceSeq = nextSeq > 0
+				}
 				if err := advanceToNewPart(!shortSegment, segmentEndTime); err != nil {
 					latchPartFailure(err)
 					break
 				}
 				currentQuality = newQuality
 				currentVariantURL = newVariant.URL
-				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, -1, false)
+				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, forceSeq)
 				tracker.AttachVideoDownloader(videoDl)
 				drainQualityCh()
 				continue
