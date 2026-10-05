@@ -278,10 +278,12 @@ func readChromeMetaVersion(db *sql.DB) (int64, bool) {
 //
 //	"v10" || nonce(12) || ciphertext || tag(16)
 //
-// The version-prefix branch on v10 vs v11 is purely informational —
-// both use the same AES-GCM-with-12-byte-nonce-and-16-byte-tag layout.
-// Chrome on Windows produces v10; Chrome on Linux / desktop-keystore
-// configurations produces v11; Edge has been seen producing both.
+// On Windows — the only platform this reader runs on — v10 and v11 are the
+// same AES-GCM-with-12-byte-nonce-and-16-byte-tag layout under the
+// DPAPI-unwrapped master key, so the branch on them is informational; Edge
+// has been seen producing both. (Chrome on Linux uses the same prefixes for
+// a different scheme — AES-128-CBC under a PBKDF2-derived key — which this
+// code does not read.)
 //
 // hashPrefix must come from chromeUsesHashPrefix(readChromeMetaVersion(db))
 // for the profile the row was read from: at meta.version >= 24 the

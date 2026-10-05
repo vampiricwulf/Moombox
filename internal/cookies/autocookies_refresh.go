@@ -503,7 +503,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 
 	if previousCookies != "" {
 		fetchedCookies := netscapeCookies
-		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
+		netscapeCookies = mergeBrowserCookies(previousCookies, netscapeCookies)
 		// ONE line, for the one prune outcome that leaves a credential pair
 		// half alive with nothing else in the process able to see it. See
 		// twitchLoginPrunedFromMerge; it names no value and no account.

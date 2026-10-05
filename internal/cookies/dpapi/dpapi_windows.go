@@ -232,7 +232,7 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 	hashPrefix := chromeUsesHashPrefix(metaVersion)
 
 	rows, err := db.Query(`
-		SELECT host_key, name, encrypted_value, path,
+		SELECT host_key, name, value, encrypted_value, path,
 		       expires_utc, is_secure, is_httponly, samesite
 		FROM cookies
 	`)
@@ -247,6 +247,7 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 		var (
 			host     string
 			name     string
+			plainVal sql.NullString
 			encVal   []byte
 			path     string
 			expUTC   int64
@@ -254,7 +255,7 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 			httpOnly int
 			samesite int
 		)
-		if err := rows.Scan(&host, &name, &encVal, &path, &expUTC, &secure, &httpOnly, &samesite); err != nil {
+		if err := rows.Scan(&host, &name, &plainVal, &encVal, &path, &expUTC, &secure, &httpOnly, &samesite); err != nil {
 			// In scope by definition: without a host there is no way to
 			// know whether the filter would have excluded it.
 			stats.Rows++
@@ -269,15 +270,23 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 		// Summary()'s "N of M could not be decrypted" ratio understate
 		// itself for any caller that passes an origin filter.
 		stats.Rows++
-		value, decryptErr := decryptV10CookieWith(gcm, encVal, hashPrefix)
-		if decryptErr != nil {
-			// Skip the row but don't kill the whole extraction —
-			// legacy pre-v10 rows (rare today), master-key
-			// mismatches, App-Bound v20 values and non-UTF-8
-			// plaintexts all show up here, and they are counted by
-			// reason so the caller can say WHICH one happened.
-			stats.recordDecryptFailure(decryptErr)
-			continue
+		// A row Chrome stored unencrypted keeps its value in the plain
+		// `value` column and leaves encrypted_value empty, which decrypts
+		// to "": reading only the encrypted column turned such a row into an
+		// empty cookie (yt-dlp reads `value` first for the same reason).
+		value := plainVal.String
+		if value == "" {
+			decrypted, decryptErr := decryptV10CookieWith(gcm, encVal, hashPrefix)
+			if decryptErr != nil {
+				// Skip the row but don't kill the whole extraction —
+				// legacy pre-v10 rows (rare today), master-key
+				// mismatches, App-Bound v20 values and non-UTF-8
+				// plaintexts all show up here, and they are counted by
+				// reason so the caller can say WHICH one happened.
+				stats.recordDecryptFailure(decryptErr)
+				continue
+			}
+			value = decrypted
 		}
 		stats.Decrypted++
 		result = append(result, ChromeCookie{

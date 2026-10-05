@@ -137,6 +137,17 @@ func deduplicateAndFormat(cookies []extractedCookie) []string {
 	return lines
 }
 
+// mergeBrowserCookies folds cookies a browser read produced over the
+// cookies.txt already on disk — the browser refresh's and the setup finish's
+// merge. The browser's empty-valued rows stay out of it, as the import's do
+// (stripEmptyValuedRows): a row wins the merge by name+domain+path, so an
+// empty LOGIN_INFO the browser handed back (a Firefox NULL, a Chromium row
+// with no encrypted value) replaced a working one and signed the jar out.
+// The readers still report such rows; they are just not written.
+func mergeBrowserCookies(existing, fetched string) string {
+	return mergeCookieFiles(existing, stripEmptyValuedRows(fetched))
+}
+
 // mergeCookieFiles merges existing and new Netscape cookie strings.
 // New cookies take priority over existing ones with the same name+domain+path.
 func mergeCookieFiles(existing, newCookies string) string {

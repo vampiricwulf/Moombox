@@ -314,7 +314,7 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 	switch {
 	case readErr == nil:
 		if len(existingData) > 0 {
-			netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
+			netscapeCookies = mergeBrowserCookies(string(existingData), netscapeCookies)
 		}
 	case errors.Is(readErr, fs.ErrNotExist):
 		// No cookies.txt yet — the normal first-run case. Nothing to
