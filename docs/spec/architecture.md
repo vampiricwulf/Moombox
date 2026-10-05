@@ -397,7 +397,7 @@ else:
    - Continues download loop
 5. When download ends naturally (stream ended, quality lost, or error):
    - Verifies stream has actually ended via YouTube API (up to 6 checks, 5-minute intervals)
-   - If stream is still live, re-fetches formats and restarts download. The refresh is judged before it is adopted: a stream that comes back from the stall at a different quality (an encoder restart) takes the same split step 4 does (`splitPart`, `internal/worker/orchestrator_youtube.go`), because the refreshed downloaders carry no forced start and would otherwise resume the current part through its sidecar, appending the new rendition under the old init segment
+   - If stream is still live, re-fetches formats and restarts download. The refresh is judged before it is adopted: a stream that comes back from the stall at a different quality (an encoder restart) — or at the same size in a different rendition, a video or audio itag the DASH strategies record (`VideoItag`/`AudioItag`, compared by `streamIdentityChanged` in `internal/worker/orchestrator.go`, which the VOD refresh guard `refreshFormatMatches` applies too) — takes the same split step 4 does (`splitPart`, `internal/worker/orchestrator_youtube.go`), because the refreshed downloaders carry no forced start and would otherwise resume the current part through its sidecar, appending the new rendition under the old init segment
    - `ErrQualityLost` triggers format re-fetch and restart at available quality
 6. Stream-end verification prevents premature termination from transient network issues
 

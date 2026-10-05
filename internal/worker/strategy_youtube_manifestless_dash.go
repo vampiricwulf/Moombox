@@ -300,6 +300,7 @@ func DownloadManifestlessDash(
 		result.VideoWidth = videoStream.Width
 		result.VideoHeight = videoStream.Height
 		result.VideoFps = videoStream.FPS
+		result.VideoItag = videoStream.Itag
 		// A part that force-starts mid-stream (quality split / restart) begins
 		// at sq>0, but manifest-free DASH carries the ftyp+moov init only inline
 		// at sq=0. Point InitURL at sq=0 so the engine prepends the extracted
@@ -366,6 +367,7 @@ func DownloadManifestlessDash(
 
 	if audioStream != nil {
 		result.HasAudio = true
+		result.AudioItag = audioStream.Itag
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
 		audioInitURL := ""
 		if forceAudioSeq && audioStartSeq > 0 {

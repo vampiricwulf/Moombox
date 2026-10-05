@@ -177,6 +177,15 @@ type DownloadResult struct {
 	VideoWidth  int
 	VideoHeight int
 	VideoFps    int
+	// VideoItag / AudioItag name the renditions a DASH or manifest-free DASH
+	// capture writes (0 when unknown — HLS variants carry no itag). A
+	// refresh that would continue the same files must keep them: the
+	// engine's append path is codec-blind, and two itags can share a
+	// width/height/fps tuple (avc1 299 and vp9 303 are both 1080p60), so the
+	// dimensions alone cannot rule out new-codec fragments under the old init
+	// segment (streamIdentityChanged).
+	VideoItag int
+	AudioItag int
 }
 
 // decryptNParamInURL finds and decrypts the 'n' parameter in a URL.

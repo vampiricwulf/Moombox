@@ -267,7 +267,6 @@ func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHei
 type DashStreamInfo struct {
 	Itag           int
 	MimeType       string
-	Codecs         string
 	Width          int
 	Height         int
 	FPS            int // From DASH frameRate attribute (0 if not present)

@@ -509,7 +509,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			newQuality := o.extractQualityFromResult(refreshResult)
 
-			if !newQuality.Changed(currentQuality) {
+			if !newQuality.Changed(currentQuality) && !streamIdentityChanged(result, refreshResult) {
 				// Same quality — transient error, not a real quality change.
 				// Continue in the same staging directory with fresh downloaders.
 				o.logger.Info("quality unchanged after re-fetch, continuing download",
@@ -633,7 +633,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// the mixed tail would be muxed into this part before the
 			// monitor's next tick noticed. Split exactly as a quality change
 			// does instead; the refresh above was only the look.
-			if newQuality := o.extractQualityFromResult(refreshResult); newQuality.Changed(currentQuality) {
+			if newQuality := o.extractQualityFromResult(refreshResult); newQuality.Changed(currentQuality) || streamIdentityChanged(result, refreshResult) {
 				var oldVideoSeq, oldAudioSeq int
 				if result.VideoDownloader != nil {
 					oldVideoSeq = result.VideoDownloader.CurrentSeq()

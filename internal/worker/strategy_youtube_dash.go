@@ -195,7 +195,6 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		streamInfos = append(streamInfos, DashStreamInfo{
 			Itag:           s.Itag,
 			MimeType:       s.MimeType,
-			Codecs:         s.Codecs,
 			Width:          s.Width,
 			Height:         s.Height,
 			FPS:            s.FPS,
@@ -256,6 +255,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.VideoWidth = videoStream.Width
 		result.VideoHeight = videoStream.Height
 		result.VideoFps = videoStream.FPS
+		result.VideoItag = videoStream.Itag
 	}
 
 	// Get cookie header for authenticated downloads. Method value, not a
@@ -319,6 +319,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 
 	if audioStream != nil {
 		result.HasAudio = true
+		result.AudioItag = audioStream.Itag
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             audioStream.BaseURL,

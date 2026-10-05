@@ -955,17 +955,13 @@ func incompleteProgressString(vSeq, vHead, aSeq, aHead, chatCount int) (string, 
 // "discard fresh, keep the old incomplete result" fallback is the default,
 // not the exception.
 //
-// Identity comparison is necessarily conservative: DownloadResult carries
-// no itag/codec identity for the three strategies this loop actually
-// refreshes through — DownloadHls, DownloadDash, and DownloadManifestlessDash
-// all populate only VideoWidth/VideoHeight/VideoFps (VideoFormat/AudioFormat
-// are exclusively set by the whole-file VOD strategy, which never reaches
-// this loop — see each strategy's Download function). So video identity is
-// compared on the width/height/fps tuple, a workable proxy since a real
-// itag swap virtually always changes the encoded resolution or frame rate.
-// VideoFormat/AudioFormat.Itag are compared too whenever BOTH sides happen
-// to carry them (cheap struct-field reads, no new plumbing) so a future
-// strategy that does populate them gets the stronger check for free.
+// Video identity is the width/height/fps tuple AND, for the two DASH
+// strategies, the itags they record (VideoItag/AudioItag — HLS variants carry
+// none): the tuple alone let a same-size codec swap through (avc1 299 and vp9
+// 303 are both 1080p60), and audio was never compared at all, so a refresh
+// that lost the opus itag appended AAC fragments onto the opus/webm
+// audio_stream. VideoFormat/AudioFormat.Itag are compared too whenever BOTH
+// sides carry them.
 func refreshFormatMatches(old, fresh *DownloadResult) bool {
 	if old == nil || fresh == nil {
 		return false
@@ -984,5 +980,19 @@ func refreshFormatMatches(old, fresh *DownloadResult) bool {
 	if old.HasAudio && old.AudioFormat != nil && fresh.AudioFormat != nil && old.AudioFormat.Itag != fresh.AudioFormat.Itag {
 		return false
 	}
-	return true
+	return !streamIdentityChanged(old, fresh)
+}
+
+// streamIdentityChanged reports whether fresh would write a different
+// rendition into either stream than old does: a video or audio itag both
+// sides know and that differs. An unknown itag (0 — HLS, or a stream one side
+// does not have) decides nothing. The live loop splits on it exactly as on a
+// quality change, since a refreshed downloader continues the current part's
+// files and the engine's append path cannot tell codecs apart.
+func streamIdentityChanged(old, fresh *DownloadResult) bool {
+	if old == nil || fresh == nil {
+		return false
+	}
+	return (old.VideoItag != 0 && fresh.VideoItag != 0 && old.VideoItag != fresh.VideoItag) ||
+		(old.AudioItag != 0 && fresh.AudioItag != 0 && old.AudioItag != fresh.AudioItag)
 }
