@@ -395,7 +395,8 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
 		}
 
-		if _, err := db.AddJob(job); err != nil {
+		added, err := db.AddJob(job)
+		if err != nil {
 			// No row will ever name what was just extracted: take it back
 			// out rather than leave it for the Files tab to find as orphans.
 			os.Remove(videoOutPath)
@@ -404,6 +405,17 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			}
 			jsonError(rw, "failed to create job", http.StatusInternalServerError)
 			return
+		}
+		if !added {
+			// Another request inserted this id between JobExists and here.
+			// Its row may well name these very files, so they stay.
+			jsonError(rw, "job already exists for video ID: "+videoID, http.StatusConflict)
+			return
+		}
+		// Answer with the row as stored, not the struct built above: a field
+		// the insert does not write would otherwise be reported as saved.
+		if stored, err := db.GetJob(videoID); err == nil && stored != nil {
+			job = stored
 		}
 
 		// Content-Type must be set before the explicit WriteHeader — headers

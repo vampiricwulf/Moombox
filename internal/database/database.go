@@ -315,13 +315,17 @@ func intToBool(i int) bool {
 }
 
 // insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
-// executor (either *sql.DB or *sql.Tx), so the 43-column INSERT exists
+// executor (either *sql.DB or *sql.Tx), so the 44-column INSERT exists
 // once.
 //
 // channel_id and queue_priority are written on EVERY insert (spec §10):
 // a nil ChannelID stores NULL — never "" — and the Go zero QueuePriority
 // stores an explicit 0, so no creator ever inherits the schema's
 // fail-closed DEFAULT 1 (which exists only for pre-v16 legacy rows).
+//
+// A Job field this list leaves out takes the schema default whatever the
+// caller set, silently. TestAddJobStoresEveryCreationField pins the split:
+// every field is either written here or on its runtime-only list.
 func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, error) {
 	return exec.ExecContext(ctx, `INSERT OR IGNORE INTO jobs (id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
@@ -331,10 +335,10 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		thumbnail_file, description_file,
 		twitch_quality, twitch_category, channel_avatar_url,
 		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
-		quality_preference, channel_id, queue_priority)
+		quality_preference, channel_id, queue_priority, file_size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?)`,
+		?, ?, ?, ?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -347,7 +351,7 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
-		job.QualityPreference, job.ChannelID, job.QueuePriority)
+		job.QualityPreference, job.ChannelID, job.QueuePriority, job.FileSize)
 }
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
