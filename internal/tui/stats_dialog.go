@@ -27,6 +27,13 @@ const statsDialogMaxWidth = 76
 // its border and title rather than its footer.
 const statsDialogFullHeight = 27
 
+// statsDialogCompactHeight is the shortest terminal the spacer-less box fits:
+// 21 content lines + 2 border rows. Below it — down to the TUI's 20-row floor —
+// the key hint moves up onto the title line, and the blank line above it and
+// the Uptime row (the one figure the Web Stats tab does not show) go: 18
+// lines, a 20-row box.
+const statsDialogCompactHeight = 23
+
 // StatsDialogModel is the E T overlay: the Web Stats tab's disk bar, six
 // storage figures, seven activity figures and uptime, from the same
 // stats.Snapshot the /api/stats handler renders.
@@ -122,14 +129,18 @@ func (m *StatsDialogModel) View() string {
 	}
 
 	boxW, _ := dialogBox(statsDialogMaxWidth, m.width)
-	boxH := max(min(m.height-4, 34), 22)
-	// On a terminal too short for the full box, drop the two blank spacers
-	// (title, section gap) and keep the footer's — 21 content lines fit 24
-	// rows. See statsDialogFullHeight.
+	// Three layouts by terminal height (see statsDialogFullHeight and
+	// statsDialogCompactHeight): the blank spacers under the title and
+	// between the sections go first, then the footer's own line.
 	spaced := m.height >= statsDialogFullHeight
+	tight := m.height < statsDialogCompactHeight
+	hint := DimStyle.Render("R: Refresh   Esc/Q: Close")
 
 	var b strings.Builder
 	b.WriteString(TitleStyle.Render("Statistics"))
+	if tight {
+		b.WriteString("   " + hint)
+	}
 	b.WriteString("\n")
 	if spaced {
 		b.WriteString("\n")
@@ -144,17 +155,24 @@ func (m *StatsDialogModel) View() string {
 		if spaced {
 			b.WriteString("\n")
 		}
-		m.writeActivity(&b)
+		m.writeActivity(&b, !tight)
 	}
-	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("R: Refresh   Esc/Q: Close"))
+	body := b.String()
+	if tight {
+		body = strings.TrimSuffix(body, "\n")
+	} else {
+		body += "\n" + hint
+	}
+	// Never shorter than the content (Height only pads): the box is the
+	// content's own height where the terminal is too short for the usual one.
+	boxH := max(min(m.height-4, 34), lipgloss.Height(body)+2)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
 		Width(boxW).
 		Height(boxH).
-		Render(b.String())
+		Render(body)
 
 	return centerBox(box, m.width, m.height)
 }
@@ -197,7 +215,7 @@ func (m *StatsDialogModel) writeStorage(b *strings.Builder) {
 // (stats.Snapshot doc comment) that the TUI has for free from its own
 // process start time. It prints in the Web's duration format too, so the
 // two dashboards show the same string and not just the same number.
-func (m *StatsDialogModel) writeActivity(b *strings.Builder) {
+func (m *StatsDialogModel) writeActivity(b *strings.Builder, withUptime bool) {
 	fmt.Fprintf(b, "%s\n", HeaderStyle.Render("Activity"))
 
 	rows := [][2]string{
@@ -209,7 +227,7 @@ func (m *StatsDialogModel) writeActivity(b *strings.Builder) {
 		{"YouTube Jobs", groupThousands(int64(m.snap.CountByPlatform["youtube"]))},
 		{"Twitch Jobs", groupThousands(int64(m.snap.CountByPlatform["twitch"]))},
 	}
-	if m.snap.Uptime > 0 {
+	if withUptime && m.snap.Uptime > 0 {
 		rows = append(rows, [2]string{"Uptime", formatHMS(int64(m.snap.Uptime.Seconds()))})
 	}
 	writeStatRows(b, rows)

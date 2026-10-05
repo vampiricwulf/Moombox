@@ -164,3 +164,28 @@ func TestStatsDialogFitsAShortTerminal(t *testing.T) {
 		t.Error("at 40 rows the sections keep their blank line")
 	}
 }
+
+// TestStatsDialogFitsTheFloorTerminal: below the compact box's 23 rows — down
+// to the TUI's 60x20 floor — the box drew 23 lines anyway, and the renderer
+// dropped its top border, title and "Storage" header. There the hint joins the
+// title line and the blank above it and Uptime go, so every figure the Web
+// Stats tab shows still fits.
+//
+// Mutant: keeping the footer on its own line when tight — 20 rows overflow.
+func TestStatsDialogFitsTheFloorTerminal(t *testing.T) {
+	for _, size := range [][2]int{{60, 20}, {80, 21}, {80, 22}, {80, 23}} {
+		m := NewStatsDialogModel()
+		m.SetSize(size[0], size[1])
+		m.Open()
+		m.SetSnapshot(sampleSnapshot())
+		v := stripANSI(m.View())
+		if n := strings.Count(v, "\n") + 1; n > size[1] {
+			t.Errorf("%dx%d: rendered %d lines:\n%s", size[0], size[1], n, v)
+		}
+		for _, want := range []string{"Statistics", "Storage", "Activity", "Twitch Jobs", "R: Refresh"} {
+			if !strings.Contains(v, want) {
+				t.Errorf("%dx%d: %q is not on screen:\n%s", size[0], size[1], want, v)
+			}
+		}
+	}
+}
