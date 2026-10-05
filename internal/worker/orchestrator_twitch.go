@@ -1081,15 +1081,14 @@ sessionLoop:
 			}
 			return ctx.Err()
 		}
-		// The stream became unrecoverable while connectivity was down — the
-		// broadcast ended/changed (live) or the VOD download was cut off:
-		// finalize everything captured up to the outage.
+		// The broadcast ended or changed while connectivity was down: finalize
+		// everything captured up to the outage. Live only — outageFinalize is
+		// set by the session loop's outage branch, which a VOD never reaches
+		// (its offline cancel is not registered; the engine waits the outage
+		// out instead).
 		o.logger.Warn("Twitch download cut off by connectivity outage, finalizing captured data", "jobID", jobCtx.Job.ID)
 
-		desc := fmt.Sprintf("Connectivity lost during download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
-		if !isVod {
-			desc = fmt.Sprintf("Broadcast ended while connectivity was down: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
-		}
+		desc := fmt.Sprintf("Broadcast ended while connectivity was down: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Finalizing — Connectivity Lost",
 			desc, notifications.TypeDownload, "connectivity_split", currentQuality, segmentIndex+1)
 
