@@ -6,10 +6,10 @@ import (
 	"os"
 )
 
-// readChatFileMessages reads an existing Twitch chat file and returns its
-// Messages array. Used by the flush path's recovery fallback when an
-// incremental append fails — the caller can merge these with the current
-// batch and rewrite the full file without dropping prior data.
+// readChatFileMessages reads a Twitch chat file whole and returns its Messages
+// array — a test helper now. The write paths' fallback reads history through
+// utils.SalvageChatMessages instead, which keeps the intact messages of a
+// damaged file where this fails outright.
 func readChatFileMessages(path string) ([]TwitchChatMessage, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

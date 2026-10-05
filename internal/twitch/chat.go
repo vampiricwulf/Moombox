@@ -1135,6 +1135,10 @@ func (cd *ChatDownloader) repairDamagedPart() {
 type chatPartFileSummary struct {
 	messages  int
 	recentIDs []string
+	// maxOffsetMs / hasOffset: the furthest offsetMs in the file — for a VOD
+	// chat, how far into the VOD its committed messages reach.
+	maxOffsetMs int64
+	hasOffset   bool
 }
 
 // readChatPartFileSummary reads an existing part's chat file and reports its
@@ -1145,8 +1149,8 @@ type chatPartFileSummary struct {
 // the header's tokens to the "messages" key and then decodes one message at a
 // time into an id-only shape — peak memory is one message plus the decoder's
 // buffer, instead of the whole file twice (raw bytes plus the decoded slice),
-// which is what readChatFileMessages' os.ReadFile + json.Unmarshal costs the
-// append-failure fallback. Counting still means reading every byte of the
+// which is what the append-failure fallback's whole-file read
+// (utils.SalvageChatMessages) costs. Counting still means reading every byte of the
 // file; that is inherent to the format (the header's messageCount is exactly
 // the number this function refuses to trust) and it is one sequential pass at
 // startup, not per flush.
@@ -1289,12 +1293,16 @@ func decodeChatMessageIDs(dec *json.Decoder) (chatPartFileSummary, error) {
 		// id only: the decoder skips every other field without materialising
 		// it, so a 400-byte message costs nothing but the scan.
 		var msg struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			OffsetMs *int64 `json:"offsetMs"`
 		}
 		if err := dec.Decode(&msg); err != nil {
 			return chatPartFileSummary{}, fmt.Errorf("parse chat messages: %w", err)
 		}
 		summary.messages++
+		if msg.OffsetMs != nil && (!summary.hasOffset || *msg.OffsetMs > summary.maxOffsetMs) {
+			summary.maxOffsetMs, summary.hasOffset = *msg.OffsetMs, true
+		}
 		if msg.ID == "" {
 			continue
 		}
