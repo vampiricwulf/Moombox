@@ -90,7 +90,13 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		delete(updates, "install_ytdlp_plugin")
 
 		// Validate the field constraints before anything is applied.
-		if validationErrs := validateConfigUpdates(updates); len(validationErrs) > 0 {
+		validationErrs := validateConfigUpdates(updates)
+		var storedFFmpeg string
+		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
+		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
+			validationErrs["paths.ffmpeg_path"] = msg
+		}
+		if len(validationErrs) > 0 {
 			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(rw).Encode(map[string]any{

@@ -544,6 +544,13 @@ All rate limiters use a 60-second sliding window. The limit constants live in `c
 
 ---
 
+## Paths Moombox Executes
+
+Two configurable paths name a program Moombox runs: `paths.ffmpeg_path` (`-version` on `POST /api/ffmpeg/check`, then every mux) and `cookies.browser_path` (`--version` on `POST /api/auto-cookies/validate-browser-path`, then every browser refresh). Any client the IP gate admits can set them, and one of those clients can also PLANT bytes on the host: `POST /api/import` writes an upload under the output directory as `<title> [<id>].<ext>`, and Windows' `CreateProcess` runs a PE whatever its extension. So:
+
+- **FFmpeg:** the executable must be named `ffmpeg` or `ffmpeg.exe` (case-insensitive; `ffmpegPathError`, `internal/web/routes/config_routes.go`). Checked before the check route spawns anything, and on `PUT /api/config` / the setup wizard whenever the value CHANGES — the full-form save sends the stored path back every time, and a path stored before the rule must not make unrelated saves fail. An import can never carry that name.
+- **Browser:** on Windows the path must end in `.exe` (`ValidateBrowserPathQuick`, `internal/cookies/browser_validate.go`); on Unix it must have an executable bit, which an imported file never gets. A basename allowlist was rejected: browser executable names vary too much across distributions and packagings.
+
 ## Browser Profile Directory Guard
 
 `cookies.browser_profile_dir` is operator-supplied and reaches two very different kinds of code, so it has two verdicts.

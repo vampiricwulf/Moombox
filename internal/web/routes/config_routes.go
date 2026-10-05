@@ -10,6 +10,7 @@ import (
 	"math"
 	net2 "net" // aliased: "net" is shadowed by the network update map in this file
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -109,6 +110,42 @@ func pathFieldError(p string, required bool) string {
 		return "Path cannot contain a .. segment"
 	}
 	return ""
+}
+
+// ffmpegPathError refuses an FFmpeg path whose executable is not named
+// ffmpeg (or ffmpeg.exe). Moombox runs whatever this names — `-version` on
+// the check route, every mux after it is stored — and a LAN client could
+// point it at bytes it planted: POST /api/import writes an uploaded file
+// under the output directory, and Windows runs a PE whatever its extension.
+// An imported file is always named "<title> [<id>].<ext>", so it can never
+// carry this name. Empty means "ffmpeg from PATH" and passes.
+func ffmpegPathError(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	base := strings.ToLower(filepath.Base(strings.ReplaceAll(p, `\`, "/")))
+	if base != "ffmpeg" && base != "ffmpeg.exe" {
+		return "the executable must be named ffmpeg (or ffmpeg.exe)"
+	}
+	return ""
+}
+
+// newFFmpegPathError applies ffmpegPathError to a paths.ffmpeg_path update
+// only when it CHANGES the stored value: the dashboard's full-form save
+// sends the stored path back on every save, and a path stored before this
+// rule (or hand-edited into config.toml) must not make every unrelated save
+// fail on a field the operator never touched.
+func newFFmpegPathError(updates map[string]any, stored string) string {
+	paths, ok := updates["paths"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	v, ok := paths["ffmpeg_path"].(string)
+	if !ok || strings.TrimSpace(v) == strings.TrimSpace(stored) {
+		return ""
+	}
+	return ffmpegPathError(v)
 }
 
 // pathField names one path-shaped config field and whether config.Validate
@@ -1016,6 +1053,11 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 
 		// Validate the field constraints before anything is applied.
 		validationErrs := validateConfigUpdates(updates)
+		var storedFFmpeg string
+		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
+		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
+			validationErrs["paths.ffmpeg_path"] = msg
+		}
 
 		// Notification webhook URLs must parse at save time — previously a
 		// bad paste was accepted with a success toast, then silently

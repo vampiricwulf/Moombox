@@ -30,11 +30,22 @@ func TestValidateBrowserPathRejectsUnknownType(t *testing.T) {
 	}
 }
 
+// On Unix a file without the executable bit is refused. Windows has no such
+// bit and CreateProcess runs a PE whatever its extension, so there the rule
+// is the .exe extension — an imported upload ("<title> [<id>].mp4") a LAN
+// client planted must not be runnable as a "browser".
 func TestValidateBrowserPathRejectsNonExecutable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows treats all files as potentially executable")
-	}
 	tmp := t.TempDir()
+	if runtime.GOOS == "windows" {
+		planted := filepath.Join(tmp, "planted [abc].mp4")
+		if err := os.WriteFile(planted, []byte("MZ"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateBrowserPathQuick(planted, "chrome"); err == nil {
+			t.Error("a non-.exe file was accepted as a browser on Windows")
+		}
+		return
+	}
 	plain := filepath.Join(tmp, "plain.txt")
 	if err := os.WriteFile(plain, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)

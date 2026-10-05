@@ -211,6 +211,11 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 			jsonError(rw, msg, http.StatusBadRequest)
 			return
 		}
+		// And the name rule, always: this route RUNS the path.
+		if msg := ffmpegPathError(path); msg != "" {
+			jsonError(rw, msg, http.StatusBadRequest)
+			return
+		}
 
 		valid, version, warning := checkFFmpeg(path)
 		if valid {

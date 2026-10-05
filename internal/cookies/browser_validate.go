@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -60,9 +61,16 @@ func ValidateBrowserPathQuick(path, browserType string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%q is not a regular file", path)
 	}
-	// Executable-bit check skipped on Windows where mode bits don't work
-	// the same way (Windows uses the .exe extension and ACLs).
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+	// Windows has no executable bit, and CreateProcess runs a PE whatever its
+	// extension — so without a check a LAN client could have this run a file
+	// it planted (POST /api/import writes uploads as "<title> [<id>].mp4").
+	// Every browser on Windows is a .exe; on Unix the executable bit plays
+	// that part, and an imported file never has it.
+	if runtime.GOOS == "windows" {
+		if !strings.EqualFold(filepath.Ext(path), ".exe") {
+			return fmt.Errorf("%q is not a .exe", path)
+		}
+	} else if info.Mode().Perm()&0o111 == 0 {
 		return fmt.Errorf("%q is not executable (chmod +x)", path)
 	}
 	return nil
