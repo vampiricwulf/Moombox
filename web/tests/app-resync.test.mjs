@@ -175,23 +175,25 @@ test("a batch action clears the ticks on rows it did not redraw", { skip }, asyn
   }
 });
 
-// A filter that hides every row returned early, before the stale-selection
-// prune, so deleting a selected job left the bar counting it.
+// A filter that hides every row returned early, before the selection prunes,
+// so the bar kept counting jobs it could not show — and a deleted one with
+// them. A selection the filter hides is dropped now, every row included.
 //
 // Mutant: prune after the filtered-empty return again — the bar says
-// "2 selected" with one job left.
-test("a delete under a filter that hides every row drops the job from the selection", { skip }, async () => {
+// "2 selected" over an empty list.
+test("a filter that hides every row drops the whole selection", { skip }, async () => {
   const h = await harness.makeApp();
   h.app.handleMessage({ type: "initial_state", payload: { jobs: [job("A", "Alpha"), job("B", "Beta")] } });
   await h.flush();
   h.app._selectedTaskJobs.add("A").add("B");
-  h.app.filterBar.tasksFilterTokens = [{ type: "text", value: "zzz-no-match" }];
   h.app.renderJobs();
   assert.equal(h.el("batch-count").textContent, "2 selected", "precondition");
 
+  h.app.filterBar.tasksFilterTokens = [{ type: "text", value: "zzz-no-match" }];
+  h.app.renderJobs();
+  assert.deepEqual([...h.app._selectedTaskJobs], []);
+
   h.app.handleMessage({ type: "job_deleted", payload: { id: "B" } });
   await h.flush();
-
-  assert.deepEqual([...h.app._selectedTaskJobs], ["A"]);
-  assert.equal(h.el("batch-count").textContent, "1 selected");
+  assert.deepEqual([...h.app._selectedTaskJobs], []);
 });
