@@ -1171,6 +1171,31 @@ func (j *CookieJar) YouTubeIdentity() string {
 	if j == nil {
 		return ""
 	}
+	sapisid, loginInfo := j.youTubeSessionParts()
+	if sapisid == "" || loginInfo == "" {
+		return ""
+	}
+	return youTubeSessionFingerprint(sapisid, loginInfo)
+}
+
+// youTubeSessionKey fingerprints the session for the cookie-rotation guard
+// (updateCookieFile): YouTubeIdentity's inputs, but present whenever SAPISID
+// is. A session with no LOGIN_INFO is still a session whose rotations must
+// not land in another one's file, and YouTubeIdentity's "" for it switched
+// the guard off. "" only when there is no SAPISID, and so no session at all.
+func (j *CookieJar) youTubeSessionKey() string {
+	if j == nil {
+		return ""
+	}
+	sapisid, loginInfo := j.youTubeSessionParts()
+	if sapisid == "" {
+		return ""
+	}
+	return youTubeSessionFingerprint(sapisid, loginInfo)
+}
+
+// youTubeSessionParts reads the two cookies the session fingerprints hash.
+func (j *CookieJar) youTubeSessionParts() (sapisid, loginInfo string) {
 	// ONE RLock covering both reads. Load swaps the whole cookie map under
 	// Lock, so taking the lock twice (once inside GetSapisid, once for
 	// LOGIN_INFO) could pair a SAPISID from the pre-Reload jar with a
@@ -1181,18 +1206,18 @@ func (j *CookieJar) YouTubeIdentity() string {
 	// The SAPISID fallback is inlined rather than delegated for that reason —
 	// KEEP IN SYNC with GetSapisid.
 	j.mu.RLock()
-	sapisid := j.youtube["SAPISID"].value
+	defer j.mu.RUnlock()
+	sapisid = j.youtube["SAPISID"].value
 	if sapisid == "" {
 		sapisid = j.youtube["__Secure-3PAPISID"].value
 	}
-	loginInfo := j.youtube["LOGIN_INFO"].value
-	j.mu.RUnlock()
+	return sapisid, j.youtube["LOGIN_INFO"].value
+}
 
-	if sapisid == "" || loginInfo == "" {
-		return ""
-	}
-	// NUL separator: neither cookie may contain one, so no pair of distinct
-	// (sapisid, loginInfo) inputs can concatenate to the same string.
+// youTubeSessionFingerprint hashes a session's SAPISID and LOGIN_INFO. NUL
+// separator: neither cookie may contain one, so no pair of distinct
+// (sapisid, loginInfo) inputs can concatenate to the same string.
+func youTubeSessionFingerprint(sapisid, loginInfo string) string {
 	sum := sha256.Sum256([]byte(sapisid + "\x00" + loginInfo))
 	return hex.EncodeToString(sum[:])
 }

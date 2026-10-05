@@ -18,28 +18,39 @@ import (
 // rotation is now written only into a file still holding the session it is
 // for; without an import in between it lands as before.
 //
-// Mutant: skip the identity check in updateCookieFile — the imported file
-// carries sidts-rotated-for-A.
+// The same holds for a session with no LOGIN_INFO: the guard used to key on
+// YouTubeIdentity, which is "" without it, and an empty key switched the
+// check off.
+//
+// Mutants: skip the session check in updateCookieFile — the imported file
+// carries sidts-rotated-for-A; key it on YouTubeIdentity — the same, for the
+// sessions without LOGIN_INFO.
 func TestARotationIsWrittenOnlyIntoItsOwnSession(t *testing.T) {
-	seedA := "# Netscape HTTP Cookie File\n" +
-		".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsapisid-A\n" +
-		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin-A\n" +
-		".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSIDTS\tsidts-A-old\n"
-	pasteB := "# Netscape HTTP Cookie File\n" +
-		".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsapisid-B\n" +
-		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin-B\n" +
-		".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSIDTS\tsidts-B\n"
+	session := func(name string, loginInfo bool) string {
+		f := "# Netscape HTTP Cookie File\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsapisid-" + name + "\n"
+		if loginInfo {
+			f += ".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin-" + name + "\n"
+		}
+		return f
+	}
+	sidts := func(v string) string { return ".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSIDTS\t" + v + "\n" }
 
 	for _, tc := range []struct {
 		name       string
+		loginInfo  bool
 		importB    bool
 		wantInFile []string
 		notInFile  []string
 	}{
-		{"an import lands mid-request", true, []string{"sapisid-B", "sidts-B"}, []string{"sidts-rotated-for-A"}},
-		{"nothing changes mid-request", false, []string{"sapisid-A", "sidts-rotated-for-A"}, []string{"sidts-A-old"}},
+		{"an import lands mid-request", true, true, []string{"sapisid-B", "sidts-B"}, []string{"sidts-rotated-for-A"}},
+		{"nothing changes mid-request", true, false, []string{"sapisid-A", "sidts-rotated-for-A"}, []string{"sidts-A-old"}},
+		{"no LOGIN_INFO, an import lands mid-request", false, true, []string{"sapisid-B", "sidts-B"}, []string{"sidts-rotated-for-A"}},
+		{"no LOGIN_INFO, nothing changes mid-request", false, false, []string{"sapisid-A", "sidts-rotated-for-A"}, []string{"sidts-A-old"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			seedA := session("A", tc.loginInfo) + sidts("sidts-A-old")
+			pasteB := session("B", tc.loginInfo) + sidts("sidts-B")
 			s, path, jar := importService(t, seedA, true)
 			rs := NewRefreshService(jar, 0, nopLogger{})
 

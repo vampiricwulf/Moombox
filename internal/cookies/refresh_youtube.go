@@ -573,7 +573,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
 	// Whose session the request is about to carry. The reply's Set-Cookie
 	// rotations belong to it and to nothing else; see updateCookieFile.
-	sentAs := rs.jar.YouTubeIdentity()
+	sentAs := rs.jar.youTubeSessionKey()
 	authenticated, resp, err := rs.youtubeGuideExchange(ctx)
 	if err != nil || !authenticated {
 		// Anything short of an authenticated, readable reply stops here without
@@ -599,7 +599,7 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 // processYouTubeSetCookies parses Set-Cookie headers from a YouTube API response
 // and merges updated cookies into the cookie file.
 //
-// sentAs is the jar's YouTubeIdentity when the request was built: the
+// sentAs is the jar's youTubeSessionKey when the request was built: the
 // rotations are written only into a file that still holds that session.
 func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response, sentAs string) {
 	setCookies := resp.Header.Values("Set-Cookie")

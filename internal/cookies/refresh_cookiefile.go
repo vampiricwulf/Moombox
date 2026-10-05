@@ -465,7 +465,7 @@ var errCookieSessionReplaced = errors.New("cookies.txt holds a different session
 // domain-strict deletions keep .google.com auth out of reach of an unscoped
 // YouTube deletion.
 //
-// sentAs, when not empty, is the YouTubeIdentity of the session the response
+// sentAs, when not empty, is the youTubeSessionKey of the session the response
 // answered (see checkAndRefreshYouTube). The file is re-read here, at write
 // time, and an import — or anything else that writes cookies.txt — can have
 // replaced it while the request was in flight: the old session's rotated
@@ -485,7 +485,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	if sentAs != "" {
 		onDisk := NewCookieJar()
 		onDisk.loadFrom(data, filePath)
-		if onDisk.YouTubeIdentity() != sentAs {
+		if onDisk.youTubeSessionKey() != sentAs {
 			return errCookieSessionReplaced
 		}
 	}
