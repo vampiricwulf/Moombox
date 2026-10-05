@@ -1607,6 +1607,24 @@ func (o *DownloadOrchestrator) muxSegment(
 		return nil, fmt.Errorf("no media files to mux for segment %d", segIdx)
 	}
 
+	// The part's chat is checked before the mux, not after it: a chat file
+	// that cannot be read fails the part (see the copy below), and finding
+	// that out once ffmpeg had run threw the whole part's mux away — again on
+	// the finalize's retry while the file stayed locked. A directory in the
+	// file's place is no chat at all, as muxUnrecordedSegments' fileExists
+	// reads it; the part used to fail here and then be recorded without chat
+	// by that retry anyway, one wasted mux later.
+	chatPath := result.ChatPath
+	if chatPath != "" {
+		if !fileExists(chatPath) {
+			chatPath = ""
+		} else if f, err := os.Open(chatPath); err != nil {
+			return nil, fmt.Errorf("read part %d's chat: %w", segIdx, err)
+		} else {
+			f.Close()
+		}
+	}
+
 	// MuxCopy (no re-encoding)
 	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputPath); err != nil {
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
@@ -1676,10 +1694,10 @@ func (o *DownloadOrchestrator) muxSegment(
 
 	// Per-part chat (Twitch): the rolled chat file for this capture span is
 	// copied beside the part video and recorded on the segment row.
-	if result.ChatPath != "" {
-		if _, statErr := os.Stat(result.ChatPath); statErr == nil {
+	if chatPath != "" {
+		if _, statErr := os.Stat(chatPath); statErr == nil {
 			chatDst := filepath.Join(outputDir, partBase+".chat.json")
-			if copyErr := copyFile(result.ChatPath, chatDst); copyErr != nil {
+			if copyErr := copyFile(chatPath, chatDst); copyErr != nil {
 				// Fail the part rather than record it without its chat: a
 				// recorded part's seg_N dir is swept with the rest of staging,
 				// and it held the only copy of this span's chat. Unrecorded,
