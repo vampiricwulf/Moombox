@@ -203,13 +203,6 @@ func rollbackArtifactPath(exePath string) string {
 // denies, and only the move aside can be retried around that.
 func keepAsideByLink(exePath, failedPath string) bool { return false }
 
-// setSysProcAttr applies Windows-only CreationFlags so the spawned
-// process doesn't open a visible console window. Used for any
-// fire-and-forget background spawn.
-func setSysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
-}
-
 // deferDeleteOldLauncher schedules deletion of the .exe~ file via a
 // detached cmd /c invocation that uses ping as a sleep mechanism,
 // then runs del. The ~4s wait covers normal launcher exit-and-
@@ -217,16 +210,8 @@ func setSysProcAttr(cmd *exec.Cmd) {
 // 4s is generous headroom). The launcher's startup cleanupOrphans
 // is the safety net if this somehow doesn't fire.
 //
-// Args are passed variadically — NOT joined into a single string —
-// because Go's syscall.EscapeArg targets CRT-style parsing (compatible
-// with CommandLineToArgvW), which disagrees with cmd.exe on quotes.
-// Joining `... & del /f /q "%s" ...` into one arg makes Go wrap the
-// whole string in quotes and escape the inner literal " as \", which
-// cmd then mis-parses (cmd uses "" for embedded quotes, not \"). del
-// receives a mangled path and >nul 2>nul swallows the failure. With
-// variadic args, tokens like `>nul`, `&`, `2>nul` go through unquoted
-// as bare cmd operators, and oldPath only gets quoted by Go if it
-// actually contains spaces — both cases cmd parses correctly.
+// The command line is fixed text (deferDeleteCmdLine) and the path reaches
+// del through an environment variable — see deferDeleteCommand.
 //
 // History: tried timeout.exe earlier — it errors out unconditionally
 // when stdin is redirected (per Microsoft docs), which it always is
@@ -253,9 +238,40 @@ func deferDeleteOldLauncher(exePath string) {
 	if _, err := os.Stat(oldPath); err != nil {
 		return // no .exe~ file to clean up
 	}
+	cleanup := deferDeleteCommand(oldPath)
+	cleanup.Start() // fire-and-forget; we exit shortly anyway
+}
+
+// oldLauncherEnv names the environment variable that carries the old
+// launcher's path to the deferred del.
+const oldLauncherEnv = "MOOMBOX_OLD_LAUNCHER"
+
+// deferDeleteCmdLine is the whole command line the deferred cleanup runs.
+// The path is never part of it: cmd expands the variable inside the quotes,
+// does not expand the value a second time, and reads every character of it
+// literally there — a Windows path cannot contain '"'.
+const deferDeleteCmdLine = `cmd /C ping 127.0.0.1 -n 5 >nul & del /f /q "%` + oldLauncherEnv + `%" >nul 2>nul`
+
+// deferDeleteCommand builds the deferred cleanup for oldPath.
+//
+// The path used to be one of cmd's arguments, and Go quotes an argument only
+// when it contains a space, a tab or a quote. An install directory like
+// D:\Tools&Apps reached cmd bare, cmd split the line at its '&', and
+// `del /f /q D:\Tools` — del on a directory deletes every file in it, /q
+// suppresses the prompt and >nul 2>nul the output — emptied the parent
+// directory without a word. Quoting the path in the command line would still
+// leave a '%NAME%' inside it to cmd's expansion; the variable leaves nothing
+// of the path for cmd to parse. CmdLine is set because Go escapes an inner
+// '"' as \", which cmd does not read as a quote; Windows ignores Args once
+// CmdLine is set.
+func deferDeleteCommand(oldPath string) *exec.Cmd {
 	cleanup := exec.Command("cmd", "/C",
 		"ping", "127.0.0.1", "-n", "5", ">nul", "&",
-		"del", "/f", "/q", oldPath, ">nul", "2>nul")
-	setSysProcAttr(cleanup)
-	cleanup.Start() // fire-and-forget; we exit shortly anyway
+		"del", "/f", "/q", "%"+oldLauncherEnv+"%", ">nul", "2>nul")
+	cleanup.Env = append(os.Environ(), oldLauncherEnv+"="+oldPath)
+	cleanup.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: createNoWindow,
+		CmdLine:       deferDeleteCmdLine,
+	}
+	return cleanup
 }

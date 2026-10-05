@@ -141,3 +141,55 @@ func TestRollbackArtifactPathWithNoArtifacts(t *testing.T) {
 		t.Errorf("rollbackArtifactPath = %q, want %q", got, want)
 	}
 }
+
+// TestDeferDeleteCommandDeletesOnlyTheOldLauncher runs the real deferred
+// cleanup against install directories whose names cmd would otherwise parse.
+// With the path passed as a bare argument, `Tools&Apps` split the line and
+// `del /f /q <dir>\Tools` emptied the sibling directory; `pct%OS%dir` was
+// expanded to a path that does not exist, so the old launcher stayed.
+//
+// Mutant: go back to passing oldPath as del's argument (no CmdLine, no
+// environment variable) — the decoy is deleted and the %OS% file survives.
+func TestDeferDeleteCommandDeletesOnlyTheOldLauncher(t *testing.T) {
+	for _, dir := range []string{"Tools&Apps", "pct%OS%dir"} {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			// The directory the '&' split names, and a file in it del must
+			// never reach.
+			decoyDir := filepath.Join(root, "Tools")
+			if err := os.MkdirAll(decoyDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			decoy := filepath.Join(decoyDir, "keep.txt")
+			if err := os.WriteFile(decoy, []byte("keep"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			installDir := filepath.Join(root, dir)
+			if err := os.MkdirAll(installDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			oldPath := filepath.Join(installDir, "moombox.exe~")
+			if err := os.WriteFile(oldPath, []byte("old launcher"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := deferDeleteCommand(oldPath)
+			if cmd.SysProcAttr == nil || cmd.SysProcAttr.CmdLine != deferDeleteCmdLine {
+				t.Fatalf("CmdLine must be the fixed line %q", deferDeleteCmdLine)
+			}
+			if strings.Contains(cmd.SysProcAttr.CmdLine, oldPath) {
+				t.Fatalf("the path must not reach cmd's command line: %q", cmd.SysProcAttr.CmdLine)
+			}
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("cleanup command: %v", err)
+			}
+			if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+				t.Errorf("the old launcher must be deleted, stat err = %v", err)
+			}
+			if _, err := os.Stat(decoy); err != nil {
+				t.Errorf("a file outside the install directory was deleted: %v", err)
+			}
+		})
+	}
+}
