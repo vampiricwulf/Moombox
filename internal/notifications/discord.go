@@ -562,6 +562,11 @@ func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool)
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
+		// url.Parse's error is a *url.Error quoting the whole URL — the
+		// webhook token — exactly like a transport error below.
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
+			return discordResponse{}, fmt.Errorf("create discord request: %s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+		}
 		return discordResponse{}, fmt.Errorf("create discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")

@@ -27,8 +27,11 @@ import (
 // a browser's address bar hands back, and an optional query is the forum-
 // thread form "?thread_id=…" that Discord documents and that execWaitURL and
 // messageURL are both written around. A fragment is not admitted — it never
-// reaches the server, and both builders drop it.
-var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#]*)?$`)
+// reaches the server, and both builders drop it. Nor is whitespace or a
+// control character in the query: net/url refuses to build a request from
+// one, and its parse error quotes the whole URL, token and all — every send
+// logged it, and the test route answered it, while validation had passed.
+var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#\s\x00-\x1f\x7f]*)?$`)
 
 // redactURLForLog reduces an arbitrary notification URL to scheme://host for
 // log lines. Webhook URLs routinely embed secrets in their path or query
