@@ -18,7 +18,7 @@ func newFakeOpener() *fakeOpener {
 func (f *fakeOpener) Wait() error    { f.waited <- struct{}{}; return nil }
 func (f *fakeOpener) Release() error { f.released <- struct{}{}; return nil }
 
-// TestReleaseOpenerHandsTheChildBack pins both arms. The TUI's O B / O G
+// TestReleaseOpenerHandsTheChildBack pins both arms. The TUI's O S / O W / O G
 // opener was Started and forgotten: a process handle leaked per press on
 // Windows, and a zombie per press elsewhere, for the life of the process.
 //

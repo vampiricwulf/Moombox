@@ -683,8 +683,8 @@ func (p openerProcess) Release() error { return p.cmd.Process.Release() }
 // releaseOpener hands a started opener back to the OS — the rule
 // web.StartDetached applies to the dashboard's opens, which the import fence
 // keeps this package from calling. On Windows it releases the process handle:
-// there is nothing to reap, and each O B / O G press leaked one for the life
-// of the process. Elsewhere it reaps the child in a goroutine, since an
+// there is nothing to reap, and each O S / O W / O G press leaked one for the
+// life of the process. Elsewhere it reaps the child in a goroutine, since an
 // unwaited child stays a zombie until Moombox exits.
 func releaseOpener(goos string, p opener) {
 	if goos == "windows" {
