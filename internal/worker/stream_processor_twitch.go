@@ -532,18 +532,29 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		}
 	}
 
-	// A Downloading job resumed after a restart belongs to a specific
-	// broadcast. If the channel is now live with a DIFFERENT broadcast (the
-	// old one ended while Moombox was down), do not attach: the engine
-	// would discard the old broadcast's resume state and truncate its
-	// staging data, and the new broadcast would record under the old job's
-	// metadata. stream_start_time is the stable cross-restart identity —
-	// it is written once per job (guarded by `job.StreamStartTime == ""`
-	// below) for monitor-created and manually-added jobs alike. The minute
-	// of tolerance absorbs any API formatting jitter; distinct broadcasts
-	// differ by far more. The captured data stays recoverable via the Mux
-	// action, and the monitor picks the new broadcast up as its own job.
-	if job.Status == database.StatusDownloading && !sameBroadcastStart(job.StreamStartTime, streamInfo.StartedAt) {
+	// A job that already holds a capture belongs to a specific broadcast. If
+	// the channel is now live with a DIFFERENT broadcast (the old one ended
+	// while Moombox was down), do not attach: the engine would discard the
+	// old broadcast's resume state and truncate its staging data, and the new
+	// broadcast would record under the old job's metadata. stream_start_time
+	// is the stable cross-restart identity — it is written once per job
+	// (guarded by `job.StreamStartTime == ""` below) for monitor-created and
+	// manually-added jobs alike. The minute of tolerance absorbs any API
+	// formatting jitter; distinct broadcasts differ by far more. The captured
+	// data stays recoverable via the Mux action, and the monitor picks the new
+	// broadcast up as its own job.
+	//
+	// "Holds a capture" is not the same as Downloading. A manually-added job
+	// interrupted mid-broadcast and restarted while the channel was offline
+	// waits as Upcoming (waitForTwitchLive), and a monitor-created row reads
+	// Live until ExecuteTwitch starts — a second restart in either state
+	// skipped a Downloading-only guard and appended the next broadcast to the
+	// old one's footage, under the old stream_start_time.
+	var guardStaging string
+	sp.readConfig(func(c *config.MoomboxConfig) { guardStaging = c.Paths.EffectiveStagingDir() })
+	holdsCapture := job.Status == database.StatusDownloading || job.LastVideoSeq != nil ||
+		len(job.Segments) > 0 || HasSegmentFiles(guardStaging, job.ID)
+	if holdsCapture && !sameBroadcastStart(job.StreamStartTime, streamInfo.StartedAt) {
 		sp.logger.Warn("twitch broadcast changed while job was interrupted; not attaching to the new broadcast",
 			"jobID", job.ID, "channel", login,
 			"oldStart", job.StreamStartTime, "newStart", streamInfo.StartedAt)
