@@ -379,7 +379,7 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Overlay | Trigger | Description |
 |---------|---------|-------------|
 | Help | `?` | Displays all chords grouped by category with descriptions. Read-only. |
-| Action Menu | `M` | Command palette. A categorised list of every available action; selecting an entry executes it. Filtering is disabled (`SetFilteringEnabled(false)`) — the list is short enough to scroll, and `PgUp`/`PgDn`/`Home`/`End` page it. |
+| Action Menu | `M` | Command palette. A categorised list of every available action; selecting an entry executes it. Filtering is disabled (`SetFilteringEnabled(false)`) — the list is short enough to scroll, and `PgUp`/`PgDn`/`Home`/`End` page it (and the job picker a job-bound entry opens), landing on an entry rather than a category heading. Both lists page instead of scrolling, so when one spans more than a page its footer carries `‹page›/‹pages› PgUp/PgDn`. |
 | Add Video | `A A` | Multi-step form: (1) enter URL, (2) fetch and select format, (3) set timestamps, (4) confirm. Format fetch is async with a spinner. On error, auto-advances past format selection after a timeout. |
 | Import | `A Z` | Zip import form with title and channel override fields. |
 | Trim | `A T` | Clip creation. Enter start/end seconds. Encoding runs asynchronously with a progress callback that updates the UI. |
