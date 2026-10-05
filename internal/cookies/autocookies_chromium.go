@@ -540,6 +540,7 @@ func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) err
 		return fmt.Errorf("CDP connect: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
+	conn.SetReadLimit(cdpReadLimit)
 
 	// Enable Page events
 	enableMsg, _ := json.Marshal(map[string]any{"id": 1, "method": "Page.enable"})
@@ -927,6 +928,14 @@ func cdpCloseBrowser(ctx context.Context, port int) {
 	}
 }
 
+// cdpReadLimit bounds one CDP message. coder/websocket's default is 32 KiB,
+// and the cookie answers are far larger: Storage.getCookies and
+// Network.getAllCookies return every cookie in the profile (over the limit at
+// about a hundred, ad cookies included), and a signed-in Google, YouTube and
+// Twitch set pushes even the scoped Network.getCookies past it — so a read
+// failed with "message too big" although the browser had answered.
+const cdpReadLimit = 16 << 20
+
 // cdpSendCommand sends a CDP command via WebSocket (fire-and-forget).
 func cdpSendCommand(ctx context.Context, wsURL string, method string, params map[string]any) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -937,6 +946,7 @@ func cdpSendCommand(ctx context.Context, wsURL string, method string, params map
 		return fmt.Errorf("CDP connect: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
+	conn.SetReadLimit(cdpReadLimit)
 
 	msg := map[string]any{"id": 1, "method": method}
 	if params != nil {
@@ -968,6 +978,7 @@ func cdpSendCommandWithResult(ctx context.Context, wsURL string, method string, 
 		return nil, fmt.Errorf("CDP connect: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
+	conn.SetReadLimit(cdpReadLimit)
 
 	msg := map[string]any{"id": 1, "method": method}
 	if params != nil {
