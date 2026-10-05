@@ -109,23 +109,22 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-func (a *App) cycleFocus() {
-	prevPanel := a.focusedPanel
-	a.focusedPanel = (a.focusedPanel + 1) % 3
-	a.taskList.SetFocused(a.focusedPanel == PanelTasks)
-	a.details.SetFocused(a.focusedPanel == PanelDetails)
-	a.logs.SetFocused(a.focusedPanel == PanelLogs)
-	// Re-enable log auto-scroll when tabbing away from logs (match TS)
-	if prevPanel == PanelLogs && a.focusedPanel != PanelLogs {
-		a.logs.ReEnableAutoScroll()
-	}
-	a.recalcLayout()
+// cycleFocus moves focus to the next panel (Tab) or, with delta -1, the
+// previous one (Shift-Tab).
+func (a *App) cycleFocus(delta int) {
+	a.setFocus(FocusPanel((int(a.focusedPanel) + delta + 3) % 3))
 }
 
 func (a *App) setFocus(panel FocusPanel) {
+	prevPanel := a.focusedPanel
 	a.focusedPanel = panel
 	a.taskList.SetFocused(panel == PanelTasks)
 	a.details.SetFocused(panel == PanelDetails)
 	a.logs.SetFocused(panel == PanelLogs)
+	// Re-enable log auto-scroll when focus leaves the logs (match TS) — by
+	// Tab, Shift-Tab or a click alike.
+	if prevPanel == PanelLogs && panel != PanelLogs {
+		a.logs.ReEnableAutoScroll()
+	}
 	a.recalcLayout()
 }

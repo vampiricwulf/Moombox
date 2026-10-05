@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
@@ -510,5 +511,21 @@ func TestFeedbackLineIsCutToTheWidth(t *testing.T) {
 	if !strings.Contains(stripANSI(app.View().Content), "Deleted: a very long stream title") ||
 		!strings.Contains(stripANSI(app.View().Content), "…") {
 		t.Error("the long feedback line is not shown cut with an ellipsis")
+	}
+}
+
+// TestShiftTabCyclesFocusBackwards: the spec has always listed Shift-Tab
+// beside Tab, and the key was a silent no-op.
+//
+// Mutant: dropping the keyShiftTab case — focus stays put.
+func TestShiftTabCyclesFocusBackwards(t *testing.T) {
+	app := NewApp()
+	app.width, app.height = 100, 30
+	app.recalcLayout()
+	for _, want := range []FocusPanel{PanelLogs, PanelDetails, PanelTasks} {
+		app.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+		if app.focusedPanel != want {
+			t.Fatalf("Shift-Tab focused %v, want %v", app.focusedPanel, want)
+		}
 	}
 }

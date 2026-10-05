@@ -476,7 +476,10 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.seenChordHint = true
 		return a.dispatchAction("`", nil)
 	case keyTab:
-		a.cycleFocus()
+		a.cycleFocus(1)
+		return a, nil
+	case keyShiftTab:
+		a.cycleFocus(-1)
 		return a, nil
 	case " ":
 		// Space: toggle batch selection on focused task (only when task panel focused)

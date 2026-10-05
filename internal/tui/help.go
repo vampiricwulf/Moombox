@@ -37,7 +37,7 @@ var quickKeys = helpSection{
 		{"M", "Action menu"},
 		{"Q Q", "Quit program"},
 		{"Ctrl+C", "Quit immediately"},
-		{"Tab", "Cycle panel focus"},
+		{"Tab/Shift+Tab", "Cycle panel focus (forward / back)"},
 		{"`", "Open settings"},
 		{"?", "Toggle help"},
 	},
