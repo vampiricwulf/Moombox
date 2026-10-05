@@ -8,7 +8,7 @@ This document defines the security architecture of Moombox's HTTP server, authen
 
 These are hard rules. They are not guidelines, suggestions, or aspirations. An AI assisting with Moombox development must follow these without exception:
 
-- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: RequestID, Drain, Recovery, CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, Compression, Auth. (`chimiddleware.RequestID` runs first so recovery/log lines can be correlated to a request; `DrainMiddleware` sits ahead of `RecoveryMiddleware` so its shutdown 503 cannot be disturbed by a panic in a later middleware. The eight security-relevant middlewares from Recovery onward are documented individually below.) Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
+- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: RequestID, Drain, Recovery, IPGate, HostGate, CORS, SecurityHeaders, CSRF, MaxBodySize, Compression, Auth. (`chimiddleware.RequestID` runs first so recovery/log lines can be correlated to a request; `DrainMiddleware` sits ahead of `RecoveryMiddleware` so its shutdown 503 cannot be disturbed by a panic in a later middleware. The nine security-relevant middlewares from Recovery onward are documented individually below. IPGate and HostGate run ahead of CSRF because CSRF logs every refused origin: a peer the IP gate refuses must not be able to fill the log, and every dashboard it is broadcast to, with lines it chose.) Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
 - **CSRF uses Origin/Referer validation, NOT CSRF tokens.** Moombox does not generate or validate CSRF tokens. It validates the Origin or Referer header on mutating requests (POST, PUT, DELETE) against the configured network_access level. This is sufficient because the server controls CORS preflight responses and does not grant cross-origin access to untrusted origins.
 - **TUI bypasses CSRF via the X-Internal-Token header.** The TUI is a same-process client that cannot send Origin/Referer headers. It sends a 16-byte random hex token (generated at server startup) in the `X-Internal-Token` header. The comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing side-channels.
 - **Loopback and private IPs skip authentication.** Requests from 127.0.0.1, ::1, and private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local addresses) bypass the AuthMiddleware entirely. Authentication is only enforced for external (non-local, non-LAN) clients when a password is configured.
@@ -40,7 +40,34 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `RecoveryMiddleware` in `internal/web/server.go`.
 
-### 2. CORSMiddleware
+### 2. IPGateMiddleware
+
+**Purpose:** Restricts HTTP access based on the `network_access` configuration level and the client's IP address.
+
+**Behavior by network_access level:**
+- `external` / `public`: All IPs allowed.
+- `lan`: Only loopback (127.0.0.1, ::1) and private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local unicast). External IPs receive `403 Forbidden`.
+- `localhost` (or unset default): Only loopback IPs. Everything else receives `403 Forbidden`.
+
+**IP extraction:** Uses `EffectiveClientIP(store, r)` — the direct peer address unless that peer is listed in `network.trusted_proxies`, in which case the rightmost-untrusted `X-Forwarded-For` hop. With the default empty `trusted_proxies` this is exactly `ExtractIP(r)`. The shared helper `ipAllowedByNetworkAccess` applies the policy for every branch, so the routed chain and the WebSocket upgrade path (which bypasses the router entirely — see `Server.Start` in `internal/web/server.go`) cannot drift apart.
+
+**Private IP detection:** The `isPrivateIP` function checks against pre-parsed CIDR blocks (parsed once at package init to avoid per-request overhead) and also treats `IsLinkLocalUnicast()` addresses (fe80::/10 IPv6, 169.254.0.0/16 IPv4) as private, since phones on LAN often connect via IPv6 link-local.
+
+**Additional route-level gating:** The `LoopbackOnly` middleware is applied to specific routes (`/get_pot`, `/invalidate_caches`, `/invalidate_it`) that must only be accessible from the local machine regardless of `network_access` config. Four more routes are gated INLINE in their handlers, in the first-run wizard's shape rather than through the middleware: `POST /api/cookies/auto-setup/start`, `/finish`, `/cancel` and `/abandon` (`requireLoopbackForBrowserSetup`, `internal/web/routes/cookies.go`). The first three open, finish and close a headed browser window on the host's screen, and under `network_access = "lan"` nothing else would stop a LAN device from putting one on a screen it cannot see. They answer **403** rather than the wizard's 401 because `app.js` reloads the page on any 401 outside `/api/auth/`, and the refusal names `POST /api/cookies/import` — which stays open to any authenticated client by owner ruling — as the remedy that works from anywhere. `/abandon` opens nothing and is gated for the opposite reason: it RELEASES. Where `setupBrowserGone` cannot answer (a failed job creation or assign, an unadopted Linux process group, an unreadable `/proc`, darwin, the fallback build) it clears the setup slot, so one unauthenticated LAN POST destroyed a sign-in the host operator was in the middle of. It is free to gate because the beacon only ever fires from a tab that completed a `/start`, which is itself loopback-only.
+
+**Source:** `IPGateMiddleware`, `ipAllowedByNetworkAccess`, `LoopbackOnly`, `ExtractIP`, `EffectiveClientIP`, `isPrivateIP`, `isLoopback` in `internal/web/middleware.go`.
+
+### 3. HostGateMiddleware
+
+**Purpose:** On `localhost` and `lan` (and the unset default), refuses a request whose `Host` names something the origin policy would not admit — the DNS-rebinding read path.
+
+**Why it exists:** CSRF and the WebSocket upgrade refuse a mutating request or an upgrade whose `Origin` is a DNS name on these modes, but a GET carries no Origin check. A page on `attacker.example` whose name was rebound to `127.0.0.1` (or a LAN address) could `fetch("/api/config")` same-origin, and the server — seeing a loopback or private peer, which skips authentication — answered it: notification webhook URLs, channels, job lists, logs and recordings. The browser cannot hide the `Host` it was told to use, so the `Host` (the effective one: `X-Forwarded-Host` from a trusted proxy, else `r.Host`) is held to the same rule `isAllowedOrigin` applies to an `Origin`: a loopback literal or `localhost` (plus, on `lan`, a private literal), or a LITERAL certificate SAN. That is exactly the set these modes already require for the dashboard's own POSTs and socket (see CORSMiddleware above), so no working access path is lost; an install reached by a DNS name needs a certificate naming it, or access by IP / `localhost`. A refusal is `403 {"error":"Forbidden: unrecognized host — …"}`.
+
+**Not applied on `external` / `public`:** those modes are meant to be reached by DNS names, and their rebinding defence is the certificate attestation on `Origin` (CORSMiddleware). A request with no `Host` at all (HTTP/1.0) passes; a browser always sends one.
+
+**Source:** `HostGateMiddleware` in `internal/web/middleware.go`; `TestHostGateRefusesARebindingHost` and the chain-level `TestChainGatesRunBeforeCSRF`.
+
+### 4. CORSMiddleware
 
 **Purpose:** Validates `Origin` headers on cross-origin requests and sets appropriate CORS response headers based on the `network_access` configuration.
 
@@ -92,7 +119,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   name to the certificate's SANs; a certless or placeholder-only install is unaffected, because the
   self-signed placeholder never narrows this check. On `localhost`/`lan`, an install reached by a DNS
   name needs an operator certificate whose SANs name it, or access by IP / `localhost`; since the
-  upgrade shares the decision, that applies to the WebSocket as well as to POSTs.
+  upgrade shares the decision, that applies to the WebSocket as well as to POSTs — and, through HostGateMiddleware, to every request.
   **Not covered:** a rebinding attacker who also controls DNS for a name the certificate attests.
   **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
   `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
@@ -104,7 +131,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `CORSMiddleware` and `isAllowedOrigin` in `internal/web/middleware.go`.
 
-### 3. SecurityHeaders
+### 5. SecurityHeaders
 
 **Purpose:** Sets hardened HTTP response headers on every response to mitigate common web attacks.
 
@@ -117,7 +144,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `SecurityHeaders` in `internal/web/middleware.go`.
 
-### 4. CSRFMiddleware
+### 6. CSRFMiddleware
 
 **Purpose:** Prevents cross-site request forgery on mutating requests (POST, PUT, DELETE).
 
@@ -130,24 +157,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
 
-### 5. IPGateMiddleware
-
-**Purpose:** Restricts HTTP access based on the `network_access` configuration level and the client's IP address.
-
-**Behavior by network_access level:**
-- `external` / `public`: All IPs allowed.
-- `lan`: Only loopback (127.0.0.1, ::1) and private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local unicast). External IPs receive `403 Forbidden`.
-- `localhost` (or unset default): Only loopback IPs. Everything else receives `403 Forbidden`.
-
-**IP extraction:** Uses `EffectiveClientIP(store, r)` — the direct peer address unless that peer is listed in `network.trusted_proxies`, in which case the rightmost-untrusted `X-Forwarded-For` hop. With the default empty `trusted_proxies` this is exactly `ExtractIP(r)`. The shared helper `ipAllowedByNetworkAccess` applies the policy for every branch, so the routed chain and the WebSocket upgrade path (which bypasses the router entirely — see `Server.Start` in `internal/web/server.go`) cannot drift apart.
-
-**Private IP detection:** The `isPrivateIP` function checks against pre-parsed CIDR blocks (parsed once at package init to avoid per-request overhead) and also treats `IsLinkLocalUnicast()` addresses (fe80::/10 IPv6, 169.254.0.0/16 IPv4) as private, since phones on LAN often connect via IPv6 link-local.
-
-**Additional route-level gating:** The `LoopbackOnly` middleware is applied to specific routes (`/get_pot`, `/invalidate_caches`, `/invalidate_it`) that must only be accessible from the local machine regardless of `network_access` config. Four more routes are gated INLINE in their handlers, in the first-run wizard's shape rather than through the middleware: `POST /api/cookies/auto-setup/start`, `/finish`, `/cancel` and `/abandon` (`requireLoopbackForBrowserSetup`, `internal/web/routes/cookies.go`). The first three open, finish and close a headed browser window on the host's screen, and under `network_access = "lan"` nothing else would stop a LAN device from putting one on a screen it cannot see. They answer **403** rather than the wizard's 401 because `app.js` reloads the page on any 401 outside `/api/auth/`, and the refusal names `POST /api/cookies/import` — which stays open to any authenticated client by owner ruling — as the remedy that works from anywhere. `/abandon` opens nothing and is gated for the opposite reason: it RELEASES. Where `setupBrowserGone` cannot answer (a failed job creation or assign, an unadopted Linux process group, an unreadable `/proc`, darwin, the fallback build) it clears the setup slot, so one unauthenticated LAN POST destroyed a sign-in the host operator was in the middle of. It is free to gate because the beacon only ever fires from a tab that completed a `/start`, which is itself loopback-only.
-
-**Source:** `IPGateMiddleware`, `ipAllowedByNetworkAccess`, `LoopbackOnly`, `ExtractIP`, `EffectiveClientIP`, `isPrivateIP`, `isLoopback` in `internal/web/middleware.go`.
-
-### 6. MaxBodySize
+### 7. MaxBodySize
 
 **Purpose:** Limits the request body size on mutating requests (POST, PUT, DELETE) to prevent abuse and resource exhaustion.
 
@@ -159,7 +169,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `MaxBodySize` in `internal/web/middleware.go`.
 
-### 7. CompressionMiddleware
+### 8. CompressionMiddleware
 
 **Purpose:** Applies gzip compression to responses larger than 1 KB to reduce bandwidth usage.
 
@@ -177,7 +187,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `CompressionMiddleware` and `gzipResponseWriter` in `internal/web/server.go`.
 
-### 8. AuthMiddleware
+### 9. AuthMiddleware
 
 **Purpose:** Enforces authentication for external (non-local, non-LAN) clients when a password is configured. Applied last in the chain so that route-level middleware can execute first.
 

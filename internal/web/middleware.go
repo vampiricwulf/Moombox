@@ -230,6 +230,47 @@ func IPGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 	}
 }
 
+// HostGateMiddleware refuses a request on a localhost/lan install whose Host
+// is a name the origin policy would not admit — the DNS-rebinding read path.
+//
+// CSRF and the WebSocket already refuse a mutating request or upgrade whose
+// Origin is a DNS name on these modes, but a GET carries no check: a page on
+// attacker.example whose name was rebound to 127.0.0.1 (or a LAN address)
+// fetched /api/config, /api/jobs and /api/logs same-origin, and the server,
+// seeing a loopback or private peer, served them without auth — notification
+// webhook URLs included. The browser cannot hide the Host it was told to use,
+// so the Host is held to the same rule the Origin is (isAllowedOrigin: a
+// loopback or, on lan, private literal, `localhost`, or a literal
+// certificate SAN). That admits exactly the addresses these modes already
+// require for the dashboard's own POSTs and socket, so no working access path
+// is lost; one reached by a DNS name needs a certificate naming it, as the
+// spec already says.
+//
+// external/public are untouched: they are meant to be reached by DNS names,
+// and their rebinding defence is the certificate attestation on Origin. A
+// request with no Host at all (HTTP/1.0) passes — a browser always sends one.
+func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var networkAccess string
+			store.Read(func(c *config.MoomboxConfig) {
+				networkAccess = c.Network.NetworkAccess
+			})
+			host := effectiveRequestHost(store, r)
+			if networkAccess != "external" && networkAccess != "public" && host != "" {
+				scheme := effectiveRequestScheme(r)
+				if !isAllowedOrigin(scheme+"://"+host, networkAccess, host, scheme, identityHosts()) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte(`{"error":"Forbidden: unrecognized host — open the dashboard by IP address or localhost"}`))
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // LoopbackOnly is a middleware that restricts to loopback addresses only.
 func LoopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

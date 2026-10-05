@@ -199,6 +199,12 @@ bridge network and never look like loopback. In both cases the dashboard
 has no password and needs none — the IP filter is the boundary, and
 loopback/private clients always skip authentication.
 
+On `localhost` and `lan`, open the dashboard by **IP address or
+`localhost`**, not by a hostname: a name the server cannot vouch for is
+refused, which is what stops a malicious web page from reaching the
+dashboard through DNS rebinding. (A TLS certificate whose names include
+the hostname lifts this for that name.)
+
 To reach the dashboard from outside that boundary, pick one of these —
 strongest first.
 
@@ -335,9 +341,7 @@ authenticating proxy keeps working.
   *private IPv4* address, making an internet IPv6 client look like a LAN
   client to the `lan` filter. The practical effect is that IPv6
   connections are refused at the container rather than misclassified:
-  **reach the dashboard over the host's IPv4 address.** A hostname with
-  an AAAA record generally still works, since browsers fall back to IPv4
-  after the refusal. This relies on Docker Engine 27+, where ip6tables is
+  **reach the dashboard over the host's IPv4 address.** This relies on Docker Engine 27+, where ip6tables is
   enabled by default; on older engines the misclassification remains and
   nothing in Moombox can detect it. Publishing as `0.0.0.0:774:774` stops
   the port accepting IPv6 in the first place. See the comments in

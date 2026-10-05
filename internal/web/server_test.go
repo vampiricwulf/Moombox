@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -49,6 +50,7 @@ func getStatic(t *testing.T, s *Server, target string, hdr map[string]string) *h
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = "localhost:774" // httptest's example.com is a name the Host gate refuses
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
@@ -563,5 +565,50 @@ func TestDetachStartedReapsOnUnixAndReleasesOnWindows(t *testing.T) {
 				goos)
 		default:
 		}
+	}
+}
+
+// warnCountingLogger counts Warn calls, for the chain-order test below.
+type warnCountingLogger struct {
+	testWSLogger
+	warns atomic.Int32
+}
+
+func (l *warnCountingLogger) Warn(string, ...any) { l.warns.Add(1) }
+
+// TestChainGatesRunBeforeCSRF pins two things about the real middleware
+// chain. The Host gate is in it (a rebinding Host is refused even on a GET
+// from loopback), and the IP gate runs BEFORE CSRF: CSRF logs every refused
+// origin, so a peer the IP gate refuses could otherwise fill the log, and
+// every dashboard it is broadcast to, with lines it chose.
+//
+// Mutants: drop HostGateMiddleware from NewServer (the GET passes); put
+// IPGateMiddleware back after CSRF (the refused peer's POST logs a Warn).
+func TestChainGatesRunBeforeCSRF(t *testing.T) {
+	log := &warnCountingLogger{}
+	s := NewServer(config.NewStore(config.Defaults(), ""), log)
+	s.Router().Get("/ping", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	s.Router().Post("/ping", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	req.RemoteAddr = "127.0.0.1:50000"
+	req.Host = "attacker.example:774"
+	rr := httptest.NewRecorder()
+	s.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("GET with a rebinding Host from loopback: status %d, want 403", rr.Code)
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/ping", nil)
+	post.RemoteAddr = "203.0.113.9:50000" // refused by the localhost IP gate
+	post.Host = "localhost:774"           // a Host the Host gate admits, so only the IP gate decides
+	post.Header.Set("Origin", "http://attacker.example")
+	rr = httptest.NewRecorder()
+	s.Router().ServeHTTP(rr, post)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("POST from a refused peer: status %d, want 403", rr.Code)
+	}
+	if n := log.warns.Load(); n != 0 {
+		t.Errorf("a peer the IP gate refuses produced %d Warn line(s) — CSRF ran before the gate", n)
 	}
 }

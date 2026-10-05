@@ -727,13 +727,14 @@ slog-based wrapper with dual output (file + stdout). File rotation by size (defa
 Applied in `NewServer()` in this exact order (order matters). `chimiddleware.RequestID` and `DrainMiddleware` run first — non-security, so unnumbered here; Drain sits ahead of Recovery so its shutdown 503 cannot be disturbed by a later panic:
 
 1. **RecoveryMiddleware** — Catches panics, logs stack trace, returns 500
-2. **CORSMiddleware** — Validates Origin based on `network_access` config
-3. **SecurityHeaders** — X-Frame-Options: DENY, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer, Permissions-Policy, CSP
-4. **CSRFMiddleware** — Origin/Referer validation on mutating requests
-5. **IPGateMiddleware** — Enforces `network_access` level (localhost/lan/external/public)
-6. **MaxBodySize** — Default 1MB body limit (import endpoint overrides to 500MB)
-7. **CompressionMiddleware** — Gzip response compression
-8. **AuthMiddleware** — Session/token validation for external connections (registered separately on the router)
+2. **IPGateMiddleware** — Enforces `network_access` level (localhost/lan/external/public); ahead of CSRF so a refused peer cannot fill the log
+3. **HostGateMiddleware** — On localhost/lan, refuses a `Host` the origin policy would not admit (the DNS-rebinding read path)
+4. **CORSMiddleware** — Validates Origin based on `network_access` config
+5. **SecurityHeaders** — X-Frame-Options: DENY, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer, Permissions-Policy, CSP
+6. **CSRFMiddleware** — Origin/Referer validation on mutating requests
+7. **MaxBodySize** — Default 1MB body limit (import endpoint overrides to 500MB)
+8. **CompressionMiddleware** — Gzip response compression
+9. **AuthMiddleware** — Session/token validation for external connections (registered separately on the router)
 
 ### CSRF Protection
 

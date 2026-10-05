@@ -1231,3 +1231,43 @@ func TestCSRFOriginComparison(t *testing.T) {
 		}
 	})
 }
+
+// TestHostGateRefusesARebindingHost: on localhost/lan a GET carries no Origin
+// check, so a page on attacker.example rebound to 127.0.0.1 read the whole
+// API same-origin — the peer is loopback, so no auth applied. The Host it was
+// addressed by is held to the Origin rule instead. external/public are meant
+// to be reached by DNS names and stay open here.
+//
+// Mutant: drop HostGateMiddleware from the chain (or let a DNS name through on
+// lan) — the attacker.example rows pass.
+func TestHostGateRefusesARebindingHost(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	for _, tc := range []struct {
+		access, host string
+		want         int
+	}{
+		{"localhost", "localhost:774", http.StatusOK},
+		{"localhost", "127.0.0.1:774", http.StatusOK},
+		{"localhost", "[::1]:774", http.StatusOK},
+		{"localhost", "attacker.example:774", http.StatusForbidden},
+		{"localhost", "192.168.1.10:774", http.StatusForbidden},
+		{"", "attacker.example", http.StatusForbidden},
+		{"lan", "192.168.1.10:774", http.StatusOK},
+		{"lan", "localhost:774", http.StatusOK},
+		{"lan", "attacker.example:774", http.StatusForbidden},
+		{"external", "attacker.example:774", http.StatusOK},
+		{"public", "moombox.example.com", http.StatusOK},
+	} {
+		cfg := config.Defaults()
+		cfg.Network.NetworkAccess = tc.access
+		h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
+		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+		req.RemoteAddr = "127.0.0.1:50000"
+		req.Host = tc.host
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != tc.want {
+			t.Errorf("access=%q Host=%q: status %d, want %d", tc.access, tc.host, rr.Code, tc.want)
+		}
+	}
+}

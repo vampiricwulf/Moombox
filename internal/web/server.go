@@ -119,10 +119,14 @@ func NewServer(store *config.Store, logger interface {
 	// reports/cmd-moombox.md C-main:165-166.
 	r.Use(s.DrainMiddleware)
 	r.Use(RecoveryMiddleware(logger))
+	// The IP and Host gates come before CSRF: CSRF logs every refused origin,
+	// and a peer the IP gate refuses must not be able to fill the log (and
+	// every dashboard it is broadcast to) with lines it chose.
+	r.Use(IPGateMiddleware(store))
+	r.Use(HostGateMiddleware(store))
 	r.Use(CORSMiddleware(store))
 	r.Use(SecurityHeaders)
 	r.Use(CSRFMiddleware(store, token, logger))
-	r.Use(IPGateMiddleware(store))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
