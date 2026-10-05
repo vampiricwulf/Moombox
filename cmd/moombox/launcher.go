@@ -424,10 +424,13 @@ const failedBinarySuffix = ".failed"
 // Returns false without touching anything when no rollback artifact
 // exists (the boot survived long enough to reach the milestone sweep
 // before dying) and on the move-aside failure path; the caller then
-// falls back to preserveUpdateRollback's manual instructions. A restore
-// failure AFTER the move aside succeeded is the one unrecoverable shape
-// (the plain name is empty) — the preserve fallback's instructions still
-// point at the intact artifact, so recovery stays one manual rename.
+// falls back to preserveUpdateRollback's manual instructions. On Windows a
+// restore failure AFTER the move aside succeeded is the one unrecoverable
+// shape (the plain name is empty) — the preserve fallback's instructions
+// still point at the intact artifact, so recovery stays one manual rename.
+// Elsewhere the broken binary is kept by a hard link instead
+// (keepAsideByLink), so the restore replaces the plain name in one rename
+// and a failed restore leaves the broken binary where it was.
 //
 // Windows note: the artifact (the ~ file) is this launcher's own mapped
 // image — renaming a mapped image is legal (it is how the update swap
@@ -452,9 +455,18 @@ func attemptAutoRollback(exePath string, exitCode int) bool {
 	// .failed from an earlier failed update is replaced, not an obstacle:
 	// MOVEFILE_REPLACE_EXISTING on Windows, replace semantics on POSIX.
 	failedPath := exePath + failedBinarySuffix
+	if keepAsideByLink(exePath, failedPath) {
+		if err := rollbackRename(backup, exePath); err != nil {
+			os.Remove(failedPath) // the broken binary never left the plain name
+			fmt.Fprintf(os.Stderr, "auto-rollback: could not restore previous binary: %v\n", err)
+			return false
+		}
+		writeAutoRollbackMarker(exePath, exitCode, true)
+		return true
+	}
 	var mvErr error
 	for range 3 {
-		if mvErr = os.Rename(exePath, failedPath); mvErr == nil {
+		if mvErr = rollbackRename(exePath, failedPath); mvErr == nil {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -476,13 +488,16 @@ func attemptAutoRollback(exePath string, exitCode int) bool {
 		fmt.Fprintf(os.Stderr,
 			"auto-rollback: could not keep the failed binary aside (%v); removed it instead\n", mvErr)
 	}
-	if err := os.Rename(backup, exePath); err != nil {
+	if err := rollbackRename(backup, exePath); err != nil {
 		fmt.Fprintf(os.Stderr, "auto-rollback: could not restore previous binary: %v\n", err)
 		return false
 	}
 	writeAutoRollbackMarker(exePath, exitCode, kept)
 	return true
 }
+
+// rollbackRename is os.Rename, a seam for the test that watches the restore.
+var rollbackRename = os.Rename
 
 // writeAutoRollbackMarker records a completed automatic rollback in the
 // same .update-failed marker file the manual-recovery path uses — existing

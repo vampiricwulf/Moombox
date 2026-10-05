@@ -35,3 +35,14 @@ func rollbackArtifactPath(exePath string) string {
 // deferDeleteOldLauncher is a no-op on Linux. No deferred cleanup
 // needed because Linux has no orphan files to clean.
 func deferDeleteOldLauncher(exePath string) {}
+
+// keepAsideByLink keeps the failed binary at failedPath as a second hard link,
+// replacing any stale one, so attemptAutoRollback's restore is a single rename
+// over exePath and the plain name is never empty — a kill between the old
+// move-aside and the restore left no binary there and nothing that could
+// start to repair it. False (a filesystem without hard links, a failedPath
+// that cannot be cleared) sends the rollback down the move-aside path.
+func keepAsideByLink(exePath, failedPath string) bool {
+	os.Remove(failedPath)
+	return os.Link(exePath, failedPath) == nil
+}

@@ -353,8 +353,8 @@ func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
 // --- ApplyUpdate: end-to-end happy + rollback ---
 
 // TestApplyUpdateEndToEnd covers the full success path: the updater
-// downloads .new + .new.sig, verifies the (stub) signature, swaps the
-// running exe via .old → exe, .new → exe, and removes the .sig.
+// downloads .new + .new.sig, verifies the (stub) signature, keeps the running
+// exe at .old, places .new at the exe path, and removes the .sig.
 func TestApplyUpdateEndToEnd(t *testing.T) {
 	const newBody = "fresh moombox binary"
 

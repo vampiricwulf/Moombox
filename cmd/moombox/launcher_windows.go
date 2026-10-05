@@ -197,6 +197,12 @@ func rollbackArtifactPath(exePath string) string {
 	return exePath + "~"
 }
 
+// keepAsideByLink always declines on Windows, where attemptAutoRollback moves
+// the broken binary aside instead: renaming the previous one over it needs
+// delete access to it, which a scanner still holding the fresh download
+// denies, and only the move aside can be retried around that.
+func keepAsideByLink(exePath, failedPath string) bool { return false }
+
 // setSysProcAttr applies Windows-only CreationFlags so the spawned
 // process doesn't open a visible console window. Used for any
 // fire-and-forget background spawn.

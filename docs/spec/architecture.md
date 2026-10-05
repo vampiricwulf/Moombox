@@ -27,7 +27,7 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 - Ignores SIGINT (the child handles Ctrl+C)
 - Spawns itself as a child with `_MOOMBOX_CHILD=1` added to the environment
 - Passes through stdin/stdout/stderr so the child's TUI renders in the launcher's console
-- When the child exits with code 42 (`exitCodeRestart`), the launcher respawns. This picks up any new binary (for self-updates via the three-step rename dance: `.new` -> current -> `.old`)
+- When the child exits with code 42 (`exitCodeRestart`), the launcher respawns. This picks up any new binary (for self-updates via the swap: current kept at `.old`, `.new` -> current)
 - When the child exits with code 0 or any other code, the launcher exits with the same code
 - On respawn, cleans up `.old` binary by renaming to `.exe~` (freeing the `.old` name for future updates)
 - On final exit, spawns a detached `cmd /C ping ... & del` process to delete the `.exe~` file after the launcher releases its lock

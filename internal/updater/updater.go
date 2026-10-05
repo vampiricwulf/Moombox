@@ -302,16 +302,18 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	}, nil
 }
 
-// ApplyUpdate downloads the new binary and replaces the running executable:
-// the running exe is renamed to .old (on every platform) before the new one is
-// placed.
+// ApplyUpdate downloads the new binary and replaces the running executable,
+// keeping the running one at .old (on every platform).
 //
-// **Rename-window race**: between the os.Rename of the running exe to .old
-// and the os.Rename of .new into place (~milliseconds), the original exe
-// path does not exist. A concurrent process trying to launch Moombox during
-// this window will fail. The caller MUST trigger a restart immediately after
-// this returns nil — the launcher will pick up the freshly-renamed .exe and
-// the running process exits cleanly. Audit reports/small-packages.md.
+// **Rename window (Windows only)**: a running image cannot be renamed over,
+// so there the running exe is renamed to .old before .new is renamed into
+// place, and for those milliseconds the exe path does not exist — a launch
+// in that window fails, and a kill or power loss in it leaves no binary at
+// the plain name. Elsewhere .old is a hard link and .new replaces the exe in
+// one rename, so the path always holds the old binary or the new one (see
+// keepBackupByLink). The caller MUST trigger a restart immediately after this
+// returns nil — the launcher will pick up the new binary and the running
+// process exits cleanly. Audit reports/small-packages.md.
 func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	if !u.applying.CompareAndSwap(false, true) {
 		return fmt.Errorf("update already in progress")
@@ -350,21 +352,34 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	os.Remove(sigPath)
 	u.logger.Info("[Updater] Signature verified", "version", release.Version)
 
-	// Rename current exe to .old
 	oldPath := u.exePath + ".old"
 	os.Remove(oldPath) // remove stale .old if exists
-	if err := os.Rename(u.exePath, oldPath); err != nil {
+	if keepBackupByLink(u.exePath, oldPath) {
+		// .old is a second name for the running binary, so placing .new is
+		// one rename over the exe path — never empty, and nothing to roll
+		// back when it fails.
+		if err := renameFile(newPath, u.exePath); err != nil {
+			os.Remove(oldPath)
+			os.Remove(newPath)
+			return fmt.Errorf("failed to place new binary: %w", err)
+		}
+		u.updateApplied(release)
+		return nil
+	}
+
+	// Rename current exe to .old
+	if err := renameFile(u.exePath, oldPath); err != nil {
 		os.Remove(newPath)
 		return fmt.Errorf("failed to rename current binary: %w", err)
 	}
 
 	// Rename .new to current
-	if err := os.Rename(newPath, u.exePath); err != nil {
+	if err := renameFile(newPath, u.exePath); err != nil {
 		// Attempt rollback
 		u.logger.Error("[Updater] Failed to place new binary, rolling back",
 			"error", err.Error(),
 		)
-		if rbErr := os.Rename(oldPath, u.exePath); rbErr != nil {
+		if rbErr := renameFile(oldPath, u.exePath); rbErr != nil {
 			// Both steps failed: the running binary no longer exists on disk
 			// at its original path. Log very loudly so the user notices even
 			// if the logger's file target is gone, and drop a marker file
@@ -397,11 +412,16 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("failed to place new binary: %w", err)
 	}
 
-	// Record the tag this install is updating TO (see PendingVersionSuffix):
-	// the post-restart boot resolves it — a successful boot deletes it, and a
-	// boot that finds it alongside a failed-update marker (the launcher
-	// auto-rolled back) marks the version skipped. Best-effort: without it
-	// the skip feature degrades, nothing else.
+	u.updateApplied(release)
+	return nil
+}
+
+// updateApplied finishes a placed update by recording the tag this install
+// is updating TO (see PendingVersionSuffix). The post-restart boot resolves
+// it: a successful boot deletes it, and a boot that finds it alongside a
+// failed-update marker (the launcher auto-rolled back) marks the version
+// skipped. Best-effort: without it the skip feature degrades, nothing else.
+func (u *Updater) updateApplied(release *ReleaseInfo) {
 	pendingPath := u.exePath + PendingVersionSuffix
 	if err := os.WriteFile(pendingPath, []byte(release.TagName), 0o644); err != nil {
 		u.logger.Warn("[Updater] Failed to write pending-version breadcrumb",
@@ -411,7 +431,20 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	u.logger.Info("[Updater] Update applied successfully",
 		"version", release.Version,
 	)
-	return nil
+}
+
+// renameFile is os.Rename, a seam for the test that watches the swap.
+var renameFile = os.Rename
+
+// keepBackupByLink keeps the file at path also at backup, as a hard link,
+// where a rename can then replace path in one step. Windows refuses to
+// rename over a running image, so it reports false there and the swap takes
+// the two-rename path; so does a filesystem without hard links.
+func keepBackupByLink(path, backup string) bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	return os.Link(path, backup) == nil
 }
 
 // PendingVersionSuffix is appended to the executable path to form the

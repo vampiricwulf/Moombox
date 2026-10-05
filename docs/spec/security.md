@@ -675,13 +675,13 @@ Moombox self-updates are cryptographically signed to prevent binary tampering. T
 
 ### Binary Swap
 
-The update process uses a three-step rename to handle Windows's restriction on overwriting a running executable:
+The update process keeps the running binary at `<path>.old` and places the new one at `<path>`:
 
 1. Write the new binary to `<path>.new`.
-2. Rename the current binary from `<path>` to `<path>.old`.
-3. Rename `<path>.new` to `<path>`.
+2. Keep the current binary at `<path>.old` — a hard link on Linux; on Windows, which cannot overwrite a running executable, a rename of `<path>` itself.
+3. Rename `<path>.new` to `<path>`. On Linux this replaces `<path>` in one step, so the path is never empty; on Windows it fills the name step 2 freed.
 
-If the rename fails at step 3, the `.old` file can be renamed back to restore the original binary. After a successful swap, the application exits with code 42, and the launcher/supervisor respawns using the new binary.
+If the rename fails at step 3, the running binary is still at `<path>` on Linux (the link is removed); on Windows the `.old` file is renamed back to restore the original binary. After a successful swap, the application exits with code 42, and the launcher/supervisor respawns using the new binary.
 
 **Source:** `VerifySignature`, `SignBinary` in `internal/updater/signing.go`. Binary swap logic in `internal/updater/`.
 

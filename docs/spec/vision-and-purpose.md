@@ -162,7 +162,7 @@ Moombox checks GitHub releases for new versions. When an update is available:
 
 1. Downloads the new binary.
 2. Verifies its Ed25519 signature against a known public key.
-3. Performs a three-step rename: new binary -> `.new`, current binary -> `.old`, `.new` -> current path.
+3. Swaps it in: new binary -> `.new`, current binary kept at `.old` (a hard link on Linux, a rename on Windows), `.new` -> current path.
 4. Triggers a restart (exit code 42), and the launcher respawns with the new binary.
 
 ### Network and Storage
