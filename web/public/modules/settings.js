@@ -739,6 +739,17 @@ export class SettingsController {
         activeTwSwitch.checked = this.app.activePlatforms?.twitch === true;
       }
     }
+    // What the toggles showed at load. Without an explicit override they
+    // show the server's INFERRED answer, and saving that back unedited would
+    // freeze it (a channel added later would never light its platform), so
+    // a save sends active_platforms only once there is an override already
+    // or a toggle has been changed. An empty list is that override too —
+    // both platforms off.
+    this._activePlatformsShown = {
+      explicit: Array.isArray(activePlats),
+      youtube: !!activeYtSwitch?.checked,
+      twitch: !!activeTwSwitch?.checked,
+    };
 
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {
@@ -932,6 +943,10 @@ export class SettingsController {
     const activePlatforms = [];
     if (activeYtSwitch?.checked) activePlatforms.push("youtube");
     if (activeTwSwitch?.checked) activePlatforms.push("twitch");
+    const shown = this._activePlatformsShown;
+    const sendActivePlatforms = !shown || shown.explicit ||
+      shown.youtube !== !!activeYtSwitch?.checked ||
+      shown.twitch !== !!activeTwSwitch?.checked;
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     const autoEnabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
     const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
@@ -1049,7 +1064,7 @@ export class SettingsController {
       },
       cookies: {
         cookie_file: cookieFile,
-        active_platforms: activePlatforms,
+        active_platforms: sendActivePlatforms ? activePlatforms : undefined,
         auto_enabled: autoEnabled,
         acquisition,
         browser_profile_dir: autoCookiesProfileDir,
@@ -1175,6 +1190,13 @@ export class SettingsController {
           } else {
             config[key] = val;
           }
+        }
+        if (sendActivePlatforms) {
+          this._activePlatformsShown = {
+            explicit: true,
+            youtube: activePlatforms.includes("youtube"),
+            twitch: activePlatforms.includes("twitch"),
+          };
         }
         this._dirty = false;
         this._updateUnsavedIndicator();

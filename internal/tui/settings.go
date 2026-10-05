@@ -965,14 +965,22 @@ func (m *SettingsModel) applyValues() {
 
 	// Cookies
 	m.cfg.Cookies.CookieFile = m.values["cookie_file"]
-	var activePlats []string
-	if m.values["active_youtube"] == "Yes" {
-		activePlats = append(activePlats, "youtube")
+	// The toggles display GetActivePlatforms' answer, which may be inferred.
+	// Only an edited toggle records the explicit override: writing an
+	// unedited inferred answer back would freeze it, so a channel added
+	// later would never light its platform. Non-nil even when empty — []
+	// is the explicit "both off" override.
+	if m.values["active_youtube"] != m.originalValues["active_youtube"] ||
+		m.values["active_twitch"] != m.originalValues["active_twitch"] {
+		activePlats := []string{}
+		if m.values["active_youtube"] == "Yes" {
+			activePlats = append(activePlats, "youtube")
+		}
+		if m.values["active_twitch"] == "Yes" {
+			activePlats = append(activePlats, "twitch")
+		}
+		m.cfg.Cookies.ActivePlatforms = activePlats
 	}
-	if m.values["active_twitch"] == "Yes" {
-		activePlats = append(activePlats, "twitch")
-	}
-	m.cfg.Cookies.ActivePlatforms = activePlats
 	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
 	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
 	// TrimSpace matches what validateConfigUpdates does for the web path

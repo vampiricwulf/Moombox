@@ -797,7 +797,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			cfg.Cookies.Platforms = platforms
 		}
 		if v, ok := ck["active_platforms"].([]any); ok {
-			var activePlatforms []string
+			// Non-nil even when empty: [] is the explicit "both off"
+			// override, distinct from no override at all.
+			activePlatforms := []string{}
 			for _, p := range v {
 				if s, ok := p.(string); ok {
 					activePlatforms = append(activePlatforms, s)

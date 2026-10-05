@@ -289,8 +289,12 @@ type CookiesConfig struct {
 
 	// ActivePlatforms is the user's explicit override. Takes precedence
 	// over Platforms when set. Read via GetActivePlatforms() which
-	// falls back to Platforms then to channel inference.
-	ActivePlatforms []string `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
+	// falls back to Platforms then to channel inference. nil means no
+	// override; an EMPTY list is an override too — the operator turned
+	// both platform indicators off — so neither tag carries omitempty:
+	// the TOML encoder already skips a nil slice, and omitempty would also
+	// drop the empty list that records "both off" (JSON sends nil as null).
+	ActivePlatforms []string `toml:"active_platforms" json:"active_platforms"`
 
 	RefreshInterval FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
 

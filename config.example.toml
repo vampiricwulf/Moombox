@@ -285,7 +285,7 @@
 
 # Which platforms' cookie status the status bar shows. Unset (default) uses
 # the platforms whose cookies Moombox has verified, then the platforms of
-# your enabled channels.
+# your enabled channels. An empty list (active_platforms = []) shows neither.
 # active_platforms = ["youtube", "twitch"]
 
 # acquisition selects HOW a cookie REFRESH acquires credentials:

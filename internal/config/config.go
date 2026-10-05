@@ -1172,11 +1172,12 @@ func Save(cfg *MoomboxConfig, path string) error {
 }
 
 // GetActivePlatforms determines which platforms are active for cookie status
-// display. If ActivePlatforms is explicitly set, it is used as-is. Otherwise,
-// the function infers active platforms from the enabled channels list.
+// display. If ActivePlatforms is explicitly set (non-nil — an empty list means
+// both off), it is used as-is. Otherwise it falls back to the verified
+// Platforms list, then infers active platforms from the enabled channels.
 func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
-	// 1. Explicit override (user set via settings)
-	if len(cfg.Cookies.ActivePlatforms) > 0 {
+	// 1. Explicit override (user set via settings), including "neither"
+	if cfg.Cookies.ActivePlatforms != nil {
 		for _, p := range cfg.Cookies.ActivePlatforms {
 			switch strings.ToLower(p) {
 			case "youtube":
