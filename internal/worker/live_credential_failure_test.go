@@ -113,8 +113,14 @@ func TestRefreshWhileLiveStopsAtACredentialWall(t *testing.T) {
 // a walled failure, cleared on a successful refresh, and parking only on the
 // second wall in a row.
 //
+// verifyWalled is cleared at EVERY successful refresh — the verify branch's
+// own, the same-quality continue and the split — since each is a healthy read
+// between two walls: cleared only at the first, a wall the verify branch read
+// before a quality change's healthy refresh made the next wall park at once.
+//
 // Mutants: any one of the three returning nil again; the verify branch
-// parking on its first wall; verifyWalled never cleared.
+// parking on its first wall; verifyWalled never cleared, or not cleared at
+// one of the successful refreshes.
 func TestLiveLoopReturnsACredentialWall(t *testing.T) {
 	src, err := os.ReadFile("orchestrator_youtube.go")
 	if err != nil {
@@ -146,5 +152,21 @@ func TestLiveLoopReturnsACredentialWall(t *testing.T) {
 		if !found {
 			t.Errorf("no %q followed by %q", site.check, site.ret)
 		}
+	}
+
+	const reset = "waitEpisode.reset() // this stall episode is over"
+	if n := strings.Count(body, reset); n < 3 {
+		t.Fatalf("found %d successful-refresh resets, want the three", n)
+	}
+	for off := 0; ; {
+		i := strings.Index(body[off:], reset)
+		if i < 0 {
+			break
+		}
+		i += off
+		if j := strings.Index(body[i:], "verifyWalled = false"); j < 0 || j > 200 {
+			t.Errorf("the successful refresh at byte %d does not clear verifyWalled", i)
+		}
+		off = i + len(reset)
 	}
 }

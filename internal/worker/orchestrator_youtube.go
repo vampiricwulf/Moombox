@@ -330,6 +330,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// wait-for-resume.
 		waitedForResume.resolved()
 		waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+		// A healthy read: the verify branch's next wall is the first again.
+		verifyWalled = false
 		segmentStartTime = time.Now().Unix()
 		partResumed = false // the next span is watched from birth
 
@@ -573,6 +575,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// stall finalize, so clearing this here doesn't affect that.
 				waitedForResume.resolved()
 				waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+				// A healthy read: the verify branch's next wall is the first again.
+				verifyWalled = false
 
 				if monitor != nil {
 					select {
