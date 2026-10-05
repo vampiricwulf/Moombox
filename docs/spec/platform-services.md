@@ -755,7 +755,7 @@ The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v24 b
                   │ internal/bgutils/PotProvider            │
                   │  ├── sessionCache (Go map)              │
                   │  ├── minterCache (Go map; goja-only)    │
-                  │  ├── inflightDedup (Go sync.Map)        │
+                  │  ├── inflight (Go map, under pp.mu)     │
                   │  └── sidecar *Sidecar                   │
                   └────────────────┬───────────────────────┘
                                    ↓ (when sidecar healthy)
@@ -884,8 +884,9 @@ When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR 
 
 #### Inflight Dedup
 - **Type**: `map[string]*inflightEntry`
-- **Key**: `contentBinding`
+- **Key**: `contentBinding`, with `bypassInflightSuffix` appended for a `bypassCache` mint. A bypass caller (the 403 credential refresh) joins only another bypass mint — an ordinary one in flight is minting with the cached minter, whose token is exactly what the bypass exists to replace, and joining it made the refresh a no-op. An ordinary caller joins a bypass mint in flight first (its token is fresher), else an ordinary one.
 - **Mechanism**: When a generation starts, an `inflightEntry` with a `done chan struct{}` is placed in the map. Concurrent requests for the same key block on `<-entry.done`. When generation completes, the result is stored on the entry, then `close(entry.done)` unblocks all waiters. Context cancellation is respected via `select`. Prevents thundering herd when many goroutines request the same binding simultaneously.
+- **Cache generation** (`cacheGen`, under `pp.mu`): bumped by `InvalidateCaches`, `InvalidateIntegrityTokens` and the start of every bypass mint, and recorded on each entry. A mint that began before one of those still answers its own waiters but does not write its session to the cache, where it would have outlived the refresh that replaced it.
 
 #### Cleanup fan-out
 

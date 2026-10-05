@@ -17,7 +17,16 @@ type inflightEntry struct {
 	done    chan struct{}
 	session *SessionData
 	err     error
+	// gen is PotProvider.cacheGen when this mint began; its session is
+	// cached only if nothing has invalidated the caches or begun a bypass
+	// mint since (see cacheGen).
+	gen uint64
 }
+
+// bypassInflightSuffix keys a bypassCache mint apart from an ordinary one
+// for the same binding: a caller that must not get the cached minter's token
+// cannot be handed the result of a mint that used it.
+const bypassInflightSuffix = "\x00bypass"
 
 // defaultMinterKey is the single key under which the PotProvider stores
 // its (one) cached minter. The cache map shape is preserved (to keep the
@@ -42,6 +51,12 @@ type PotProvider struct {
 	// proxy/IP-keyed expansion is a one-line change. CRIT-2.
 	minterCache map[string]*TokenMinter
 	inflight    map[string]*inflightEntry
+	// cacheGen counts the moments a cached session became stale: every
+	// InvalidateCaches / InvalidateIntegrityTokens, and the start of every
+	// bypassCache mint. A mint that began before one of them finishes with
+	// a token of the old minter; it is still returned to the callers that
+	// joined it, but not cached over what came after. Guarded by mu.
+	cacheGen uint64
 	// minterCreatingMu serialises minter creation across goroutines
 	// that all see "no minter". Without it, two goroutines requesting
 	// different bindings on a fresh process would each start a
@@ -225,22 +240,39 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 		}
 	}
 
-	// Check for inflight request (dedup) — all waiters read from the same entry
-	if entry, ok := pp.inflight[contentBinding]; ok {
-		pp.mu.Unlock()
-		pp.inflightWaits.Add(1)
-		pp.logger.Debug("[PotProvider] waiting for inflight request", "binding", bindingPrefix)
-		select {
-		case <-entry.done:
-			return entry.session, entry.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	// Check for inflight request (dedup) — all waiters read from the same
+	// entry. A bypassCache caller joins only another bypass mint: an ordinary
+	// one in flight is minting with the cached minter, whose token is exactly
+	// what the bypass (the 403 credential refresh) exists to replace. An
+	// ordinary caller prefers a bypass mint in flight, whose token is fresher.
+	inflightKey := contentBinding
+	if bypassCache {
+		inflightKey += bypassInflightSuffix
+	}
+	joinable := []string{inflightKey}
+	if !bypassCache {
+		joinable = []string{contentBinding + bypassInflightSuffix, contentBinding}
+	}
+	for _, key := range joinable {
+		if entry, ok := pp.inflight[key]; ok {
+			pp.mu.Unlock()
+			pp.inflightWaits.Add(1)
+			pp.logger.Debug("[PotProvider] waiting for inflight request", "binding", bindingPrefix)
+			select {
+			case <-entry.done:
+				return entry.session, entry.err
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 	}
 
 	// Mark as inflight
-	entry := &inflightEntry{done: make(chan struct{})}
-	pp.inflight[contentBinding] = entry
+	if bypassCache {
+		pp.cacheGen++ // anything minted before this is stale from now on
+	}
+	entry := &inflightEntry{done: make(chan struct{}), gen: pp.cacheGen}
+	pp.inflight[inflightKey] = entry
 
 	// Check minter cache (unless bypassing — TS skips both caches when bypass_cache=true).
 	// Single-minter design: the cached minter (if any) lives under
@@ -298,10 +330,10 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 	entry.err = err
 
 	pp.mu.Lock()
-	if err == nil {
+	if err == nil && entry.gen == pp.cacheGen {
 		pp.sessionCache[contentBinding] = session
 	}
-	delete(pp.inflight, contentBinding)
+	delete(pp.inflight, inflightKey)
 	pp.mu.Unlock()
 
 	close(entry.done)
@@ -320,6 +352,7 @@ func (pp *PotProvider) InvalidateCaches() {
 	}
 	pp.sessionCache = make(map[string]*SessionData)
 	pp.minterCache = make(map[string]*TokenMinter)
+	pp.cacheGen++
 	sc := pp.sidecar
 	pp.mu.Unlock()
 
@@ -350,6 +383,7 @@ func (pp *PotProvider) InvalidateIntegrityTokens() {
 		toCleanup = append(toCleanup, m)
 	}
 	pp.minterCache = make(map[string]*TokenMinter)
+	pp.cacheGen++
 	sc := pp.sidecar
 	pp.mu.Unlock()
 
