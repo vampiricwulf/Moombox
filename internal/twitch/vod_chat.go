@@ -221,9 +221,13 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 	var cursor string
 	consecutiveErrors := 0
 
-	// Try loading resume state
+	// Try loading resume state. sidecarCounted records that it says the file
+	// holds messages: one that counted none had no history to lose with the
+	// file (the YouTube downloader draws the same line).
+	sidecarCounted := false
 	if state, err := vcd.loadResumeState(); err == nil && state != nil {
 		if state.StreamID == vcd.vodID {
+			sidecarCounted = state.MessageCount > 0
 			contentOffset = state.LastOffsetSeconds
 			vcd.totalCount.Store(int64(state.MessageCount))
 			vcd.dedup.Restore(state.RecentIDs)
@@ -234,7 +238,26 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 			)
 		}
 	}
-	vcd.repairDamagedFile()
+	kept, salvaged := vcd.repairDamagedFile()
+	fileGone := sidecarCounted && !salvaged && vcd.outputFileMissing()
+	if salvaged || fileGone {
+		// The sidecar's offset, IDs and count describe the file as it was
+		// when they were saved, and the damage — or the file's loss — took
+		// part of that away. Kept, the run carried on from the sidecar's
+		// offset with its dedup, so the pages the disk lost were never asked
+		// for again: a file cut inside its fourth comment ended with six of
+		// twelve while the job read "finished". The file is what the archive
+		// holds, so the run continues from it — its count, its own IDs
+		// (adoptExistingFile below seeds them) and its newest offset, even
+		// when that is below the sidecar's, or 0 with no file at all. The
+		// YouTube downloader clears its dedup and replay mark the same way
+		// (internal/chat/downloader.go).
+		vcd.logger.Warn("[TwitchVodChat] the chat file no longer holds what the resume state covers; continuing from the file",
+			"vodID", vcd.vodID, "sidecarOffset", contentOffset, "fileMessages", kept, "fileGone", fileGone)
+		contentOffset = 0
+		vcd.dedup.Restore(nil)
+		vcd.totalCount.Store(int64(kept))
+	}
 	if fileOffset, ok := vcd.adoptExistingFile(); ok && fileOffset > contentOffset {
 		// The file reaches further than the sidecar says (or there is no
 		// sidecar at all): continue from the file's newest message. A run that
@@ -245,6 +268,12 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 		vcd.logger.Info("continuing VOD chat from the existing file's newest message",
 			"vodID", vcd.vodID, "offset", fileOffset, "sidecarOffset", contentOffset)
 		contentOffset = fileOffset
+	}
+	if salvaged || fileGone {
+		// And the sidecar follows the file now, not at the first checkpoint:
+		// a process killed before then left the old one beside a file that
+		// reads intact, and the next run trusted it and lost the same pages.
+		vcd.saveResumeState(contentOffset)
 	}
 
 	lastFlush := time.Now()
@@ -551,12 +580,16 @@ func (vcd *VodChatDownloader) adoptExistingFile() (offsetSeconds float64, ok boo
 // flush failed against it and the completion path ignored that: the chat was
 // lost while the job read "finished". The intact messages are kept, the
 // original bytes are kept beside it as .corrupt, and the count follows.
-func (vcd *VodChatDownloader) repairDamagedFile() {
+//
+// salvaged reports that the file was rewritten, and kept is how many messages
+// it holds now: what the damage took may be below the sidecar's offset, and
+// Start must not resume past it.
+func (vcd *VodChatDownloader) repairDamagedFile() (kept int, salvaged bool) {
 	if vcd.outputPath == "" {
-		return
+		return 0, false
 	}
 	if intact, err := utils.ChatFileEndIntact(vcd.outputPath); err != nil || intact {
-		return
+		return 0, false
 	}
 	vcd.logger.Warn("[TwitchVodChat] the existing chat file is damaged; salvaging it",
 		"vodID", vcd.vodID, "path", vcd.outputPath)
@@ -565,10 +598,21 @@ func (vcd *VodChatDownloader) repairDamagedFile() {
 	})
 	if err != nil {
 		vcd.logger.Error("[TwitchVodChat] could not salvage the damaged chat file", "path", vcd.outputPath, "err", err)
-		return
+		return 0, false
 	}
 	vcd.totalCount.Store(int64(kept))
 	vcd.wroteFile.Store(true)
+	return kept, true
+}
+
+// outputFileMissing reports whether the chat file is positively absent — not
+// merely unreadable, which says nothing about what it holds.
+func (vcd *VodChatDownloader) outputFileMissing() bool {
+	if vcd.outputPath == "" {
+		return false
+	}
+	_, err := os.Stat(vcd.outputPath)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // checkpoint flushes and, only when that wrote everything, saves the resume

@@ -225,6 +225,140 @@ func TestAVodChatOverADamagedFileIsSalvaged(t *testing.T) {
 	}
 }
 
+// seedVodChatBelowSidecar leaves what a run that checkpointed three pages
+// (c0-* at 100 s, c1-* at 150 s, c2-* at 200 s) leaves on disk — a sidecar at
+// offset 200 covering nine comments — and then cuts the file inside c1-0, the
+// way a crash tears it: the salvage can keep only c0-*.
+func seedVodChatBelowSidecar(t *testing.T, out string) {
+	t.Helper()
+	prev := newVodChatForTest(out)
+	for page, off := range []float64{100, 150, 200} {
+		for i := range 3 {
+			id := fmt.Sprintf("c%d-%d", page, i)
+			prev.dedup.Add(id)
+			prev.messages = append(prev.messages, TwitchChatMessage{ID: id, OffsetMs: int64(off * 1000), Message: "hello", MessageType: "chat"})
+			prev.totalCount.Add(1)
+		}
+		prev.checkpoint(off)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := bytes.Index(raw, []byte(`"c1-0"`))
+	if i < 0 {
+		t.Fatalf("no c1-0 in %s", raw)
+	}
+	if err := os.WriteFile(out, raw[:i+3], 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// vodSalvageTestPages is the VOD seedVodChatBelowSidecar's run was paging.
+var vodSalvageTestPages = []vodCommentPageSpec{
+	{count: 3, offset: 100, hasNext: true},
+	{count: 3, offset: 150, hasNext: true},
+	{count: 3, offset: 200, hasNext: true},
+	{count: 3, offset: 300, hasNext: false},
+}
+
+// TestAVodSalvageBelowTheSidecarRefetchesWhatTheDamageTook: the resume
+// restored the sidecar's offset, count and IDs before the damaged file was
+// salvaged, and the file's own offset could only move the run FORWARD — so a
+// salvage that kept less than the sidecar covered resumed from the sidecar's
+// offset with its dedup, never asked for the pages the damage took, and Start
+// returned nil over six of twelve comments. The run now continues from the
+// salvaged file.
+//
+// Mutant: drop the `salvaged || fileGone` reset in Start — the run asks for
+// offset 200 and the file holds 6.
+func TestAVodSalvageBelowTheSidecarRefetchesWhatTheDamageTook(t *testing.T) {
+	asked := installOffsetAwareVodCommentStub(t, vodSalvageTestPages)
+	out := filepath.Join(t.TempDir(), "chat.json")
+	seedVodChatBelowSidecar(t, out)
+
+	vcd := newVodChatForTest(out)
+	if err := vcd.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(*asked) == 0 || (*asked)[0] != "offset:100" {
+		t.Errorf("the run entered the VOD by %v, want offset:100 — the salvaged file's newest comment", *asked)
+	}
+	header, ids := readVodChatIDs(t, out)
+	if len(ids) != 12 || countDistinct(ids) != 12 || header != 12 {
+		t.Errorf("file holds %v (header %d), want all 12 comments once", ids, header)
+	}
+	if got := vcd.MessageCount(); got != 12 {
+		t.Errorf("MessageCount %d, want 12", got)
+	}
+}
+
+// TestAVodSidecarWithoutItsFileStartsOver: a sidecar whose chat file is gone
+// restored a count and IDs for messages no longer on disk, so the header
+// counted six over an array of three and the first page — dropped as already
+// seen — was never fetched again.
+//
+// Mutant: drop `fileGone` from the reset in Start — header 6 over c1-* alone.
+func TestAVodSidecarWithoutItsFileStartsOver(t *testing.T) {
+	installOffsetAwareVodCommentStub(t, []vodCommentPageSpec{
+		{count: 3, offset: 100, hasNext: true},
+		{count: 3, offset: 200, hasNext: false},
+	})
+	out := filepath.Join(t.TempDir(), "chat.json")
+	prev := newVodChatForTest(out)
+	for i := range 3 {
+		id := fmt.Sprintf("c0-%d", i)
+		prev.dedup.Add(id)
+		prev.messages = append(prev.messages, TwitchChatMessage{ID: id, OffsetMs: 100_000, Message: "hello", MessageType: "chat"})
+		prev.totalCount.Add(1)
+	}
+	prev.checkpoint(100)
+	if err := os.Remove(out); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := newVodChatForTest(out).Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	header, ids := readVodChatIDs(t, out)
+	if len(ids) != 6 || countDistinct(ids) != 6 || header != 6 {
+		t.Errorf("file holds %v (header %d), want both pages' 6 comments", ids, header)
+	}
+}
+
+// TestAVodSalvageMovesTheSidecarAtOnce: after the salvage the old sidecar
+// still pointed past what the file holds, and the file now read intact — so a
+// process killed before the run's first checkpoint resumed from that sidecar
+// next time and lost the same pages after all. Start saves the sidecar as soon
+// as it has continued from the salvaged file.
+//
+// Mutant: drop the saveResumeState after the adoption in Start — the second
+// run resumes at offset 200 and the file holds 6.
+func TestAVodSalvageMovesTheSidecarAtOnce(t *testing.T) {
+	orig := twitchHTTPClient
+	t.Cleanup(func() { twitchHTTPClient = orig })
+	out := filepath.Join(t.TempDir(), "chat.json")
+	seedVodChatBelowSidecar(t, out)
+
+	// The process dies on the first page fetch: a panic unwinds Start with no
+	// checkpoint at all, which is as much as a kill leaves behind.
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(*http.Request) (*http.Response, error) {
+		panic("killed")
+	})}
+	if err := newVodChatForTest(out).Start(context.Background()); err == nil {
+		t.Fatal("precondition: the first run must die on its first page")
+	}
+
+	installOffsetAwareVodCommentStub(t, vodSalvageTestPages)
+	if err := newVodChatForTest(out).Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	header, ids := readVodChatIDs(t, out)
+	if len(ids) != 12 || countDistinct(ids) != 12 || header != 12 {
+		t.Errorf("file holds %v (header %d), want all 12 comments once", ids, header)
+	}
+}
+
 // TestAVodChatThatFetchesNothingStillRepairsItsFile: the flush salvages a
 // damaged file only when there is something to write. A run whose remaining
 // pages are empty never flushes, so without the repair at Start it finished
