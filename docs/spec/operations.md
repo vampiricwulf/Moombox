@@ -505,7 +505,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `quality_split` | Stream quality changed mid-download; previous part closed |
 | `gap_split` | Twitch live segments expired unrecoverably; part closed, new part at live edge |
 | `connectivity_resume` | Connectivity restored; the same Twitch job resumed. Carries the pause instant as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, for one release |
-| `connectivity_split` | Broadcast ended or changed during the outage; captured data finalized. Not sent for a VOD: an outage mid-VOD ends the job in Error with staging intact (Mux keeps what was captured, Retry downloads it again) rather than finalizing a truncated file |
+| `connectivity_split` | Broadcast ended or changed during the outage; captured data finalized. Not sent for a VOD: an outage mid-VOD does not interrupt it — the download waits for connectivity and carries on where it stopped |
 | `connectivity_restored` | Global connectivity restored — fires the "Outage Alert": start/end as Discord dynamic timestamps plus the duration. Deliberately the ONLY global-outage event: a lost-connectivity webhook has no connectivity to deliver over, so there is no `connectivity_lost` (removed in v2.8; stale filter entries warn at startup and strip on the next UI save) |
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |

@@ -754,59 +754,77 @@ func TestTwitchVodDownloadFailureLandsInError(t *testing.T) {
 	}
 }
 
-// TestTwitchVodOutageLandsInError: a connectivity outage mid-VOD used to
-// "finalize what was captured" — mux the partial file, write Finished, and
-// let processJob delete the staging — so the operator was left a silently
-// truncated archive with neither Retry nor Resume on offer. It now ends with
-// an error before the Muxing write, staging intact.
+// TestTwitchVodRidesOutAnOutage: a connectivity outage mid-VOD used to cancel
+// the download and end the job in Error, and the only way on from there —
+// Retry — downloaded the whole VOD again. A VOD has no live edge to lose, so
+// the engine now waits the outage out and carries on from where it stopped.
 //
-// Mutant: set outageFinalize instead of vodOutageErr in the VOD outage arm.
-func TestTwitchVodOutageLandsInError(t *testing.T) {
-	inFlight := make(chan struct{}, 8)
+// While "offline" the server answers every request with a 503, as a dead
+// network would; the outage starts on the third segment's first request.
+//
+// Mutant: registering the offline cancel for VODs again.
+func TestTwitchVodRidesOutAnOutage(t *testing.T) {
+	const segments = 6
+	ts := oneSecondTS(t)
+	h := newEndVerdictHarness(t, "tw_vod_outage")
+	var offline atomic.Bool
+	var mu sync.Mutex
+	served := map[string]int{}
+	tripped := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, ".m3u8") {
-			var b strings.Builder
-			b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n")
-			for i := range 20 {
-				fmt.Fprintf(&b, "#EXTINF:2.000,\nseg%d.ts\n", i)
-			}
-			b.WriteString("#EXT-X-ENDLIST\n")
-			w.Write([]byte(b.String()))
+		if offline.Load() {
+			http.Error(w, "unreachable", http.StatusServiceUnavailable)
 			return
 		}
-		select {
-		case inFlight <- struct{}{}:
-		default:
+		if strings.HasSuffix(r.URL.Path, ".m3u8") {
+			var b strings.Builder
+			b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-PLAYLIST-TYPE:VOD\n")
+			for i := range segments {
+				fmt.Fprintf(&b, "#EXTINF:1.000,\nseg%d.ts\n", i)
+			}
+			b.WriteString("#EXT-X-ENDLIST\n")
+			_, _ = w.Write([]byte(b.String()))
+			return
 		}
-		<-r.Context().Done() // a segment that never arrives until the session is cut
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		mu.Lock()
+		first := name == "seg2.ts" && !tripped
+		if first {
+			tripped = true
+		} else {
+			served[name]++
+		}
+		mu.Unlock()
+		if first {
+			offline.Store(true)
+			h.conn.set(false)
+			go func() {
+				time.Sleep(time.Second)
+				offline.Store(false)
+				h.conn.set(true)
+			}()
+			http.Error(w, "unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp2t")
+		_, _ = w.Write(ts)
 	}))
 	t.Cleanup(srv.Close)
 
-	h := newEndVerdictHarness(t, "tw_vod_outage")
 	h.variant.URL = srv.URL + "/vod.m3u8"
-	statuses := h.watchStatuses()
+	h.jobCtx.OutputDir = t.TempDir()
+	h.jobCtx.Filename = "vod"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, true, nil) }()
-
-	select {
-	case <-inFlight:
-	case <-time.After(30 * time.Second):
-		t.Fatal("no segment fetch began")
+	if err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, true, nil); err != nil {
+		t.Fatalf("ExecuteTwitch = %v, want the VOD finished once connectivity returned", err)
 	}
-	h.conn.set(false)
-
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "connectivity") {
-			t.Fatalf("ExecuteTwitch = %v, want the connectivity error — the outage finalized a truncated VOD", err)
+	mu.Lock()
+	defer mu.Unlock()
+	for i := range segments {
+		if n := served[fmt.Sprintf("seg%d.ts", i)]; n != 1 {
+			t.Errorf("seg%d.ts was served %d times, want once — the download must continue, not start over", i, n)
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("ExecuteTwitch did not return after the outage")
-	}
-	if seq := statuses(); sawMuxing(seq) {
-		t.Errorf("the cut-off VOD was advertised Muxing (sequence %v)", seq)
 	}
 }

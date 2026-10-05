@@ -96,13 +96,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// the downloader stops fetching against a dead network. The session loop
 	// below then waits for restoration and resumes the SAME job instead of
 	// finalizing it (one job per broadcast).
+	//
+	// Live only. A VOD has no live edge to lose and no broadcast to
+	// re-verify, so the engine's IsOnline wiring waits an outage out in place
+	// and the download carries on from where it stopped, as on the YouTube
+	// paths. Cancelling it ended the job in Error, and the only way on from
+	// there — Retry — downloaded the whole VOD again.
 	var offlineCancelled atomic.Bool
 	// finalizing switches the offline cancel off once the session loop is
 	// over: muxing and the chat drain need no network, and a blip there used
 	// to cancel the final mux — a complete recording landing in Error, a
 	// split job finishing without its last part.
 	var finalizing atomic.Bool
-	if o.conn != nil {
+	if o.conn != nil && !isVod {
 		unregisterConn := o.conn.OnStateChange(func(online bool) {
 			if !online && !finalizing.Load() {
 				offlineCancelled.Store(true)
@@ -514,12 +520,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// why the in-loop variant refresh retries before taking this exit.
 	var unconfirmedEndErr error
 
-	// vodOutageErr is a VOD's connectivity-outage exit (see the session
-	// loop's outage branch). Separate from unconfirmedEndErr because the
-	// session ctx is already cancelled when it is set, which is exactly the
-	// state that latch's return path reads as a shutdown.
-	var vodOutageErr error
-
 	// latchIfUnconfirmed takes that latch unless the broadcast is CONFIRMED
 	// over, and reports whether it did. Every inner-loop exit that leaves on
 	// a failure routes through this one rule (owner decision O-C, sweep-2
@@ -847,17 +847,6 @@ sessionLoop:
 		if !isOutage {
 			break sessionLoop
 		}
-		if isVod {
-			// A VOD has no live edge to chase, so holding a download slot
-			// through an unbounded wait buys nothing — but the capture is
-			// incomplete, and finalizing it marked a truncated file Finished
-			// and deleted its staging (and the resume sidecar in it). It
-			// ends in Error with staging intact instead: Mux keeps what was
-			// captured, Retry downloads the VOD again.
-			vodOutageErr = errors.New("connectivity was lost during the VOD download; the capture is incomplete")
-			break sessionLoop
-		}
-
 		// ---- Connectivity outage (live): pause, then resume the same job ----
 		// The flag is consumed HERE; a re-drop at any later point in the
 		// recovery sets it again, and the checks below route back to the
@@ -1028,18 +1017,7 @@ sessionLoop:
 	// chat was Stop()'d, the file on disk is complete through its last flush,
 	// and the job is going to Error with staging intact, so waiting out
 	// chatWaitTimeout buys nothing. A Retry re-runs the whole capture.
-	//
-	// A VOD cut off by an outage takes the same exit: its session ctx is
-	// already cancelled, so it is told apart from a shutdown or user cancel
-	// by the parent ctx and the cancel flag instead.
-	var errorExit error
-	switch {
-	case unconfirmedEndErr != nil && ctx.Err() == nil:
-		errorExit = unconfirmedEndErr
-	case vodOutageErr != nil && parentCtx.Err() == nil && !userCancelled.Load():
-		errorExit = vodOutageErr
-	}
-	if errorExit != nil {
+	if unconfirmedEndErr != nil && ctx.Err() == nil {
 		segmentMuxWg.Wait()
 		if twitchChatDl != nil {
 			if twitchChatDl.IsRunning() {
@@ -1048,7 +1026,7 @@ sessionLoop:
 			outcome := o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, 2*time.Second, 2*time.Second)
 			o.recordChatOutcome(jobCtx, twitchChatDl.MessageCount(), outcome)
 		}
-		return errorExit
+		return unconfirmedEndErr
 	}
 
 	// Stream is no longer downloading. Flip status to Muxing now so the
