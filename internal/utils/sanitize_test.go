@@ -132,3 +132,23 @@ func TestSanitizeForFilename_WindowsReservedNames(t *testing.T) {
 		}
 	}
 }
+
+// TestSanitizeForFilenameReservedNameAtFirstDot pins Windows' rule: the device
+// name is the part before the FIRST dot, so a multi-dot title is a device too.
+// Stripping only the last extension left "CON.Quest.Ep1" bare, and an import
+// named after it was written to the console device instead of a file.
+//
+// Mutant: test `strings.TrimSuffix(result, filepath.Ext(result))` again — the
+// multi-dot rows come back unprefixed.
+func TestSanitizeForFilenameReservedNameAtFirstDot(t *testing.T) {
+	for _, name := range []string{"CON.Quest.Ep1", "NUL.tar.gz", "com1.a.b", "AUX .Live.Ep2", "LPT¹.Stream"} {
+		if got := SanitizeForFilename(name); got != "_"+name {
+			t.Errorf("SanitizeForFilename(%q) = %q, want %q", name, got, "_"+name)
+		}
+	}
+	for _, safe := range []string{"Concert.Live.Ep1", "Null.Island.Tour", "Comet.1.2"} {
+		if got := SanitizeForFilename(safe); got != safe {
+			t.Errorf("SanitizeForFilename(%q) = %q, want it unchanged", safe, got)
+		}
+	}
+}

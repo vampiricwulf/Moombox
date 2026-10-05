@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -26,6 +25,10 @@ var (
 		"lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
 		"conin$":  true,
 		"conout$": true,
+		// Windows reads the ISO 8859-1 superscript digits as digits in a
+		// COM or LPT device name.
+		"com¹": true, "com²": true, "com³": true,
+		"lpt¹": true, "lpt²": true, "lpt³": true,
 	}
 )
 
@@ -67,9 +70,12 @@ func SanitizeForFilename(name string) string {
 		result = "untitled"
 	}
 
-	// Guard against Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
-	base := strings.ToLower(strings.TrimSuffix(result, filepath.Ext(result)))
-	if windowsReservedNames[base] {
+	// Guard against Windows reserved device names (CON, PRN, AUX, NUL,
+	// COM0-9, LPT0-9). Windows tests the part before the FIRST dot, so
+	// "CON.Quest.Ep1" is the console: stripping only the last extension
+	// checked "con.quest", left the title bare, and an import written to
+	// "CON.Quest.Ep1 [id].mp4" went to the console device instead of a file.
+	if IsWindowsReservedName(result) {
 		result = "_" + result
 	}
 
