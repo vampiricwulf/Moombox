@@ -1073,6 +1073,51 @@ func TestHasActiveJob(t *testing.T) {
 	}
 }
 
+// A manually added Twitch job for an offline channel is
+// `tw_manual_<login>_<ns>` with no stream ID, so only its ID names the
+// channel it waits on. Logins carry underscores, which a LIKE pattern would
+// read as wildcards, and one login can be a prefix of another.
+//
+// Mutants: a prefix match on the login (foo matches foo_bar's job), and the
+// terminal-status filter dropped (a finished job still claims the channel).
+func TestHasActiveManualTwitchJob(t *testing.T) {
+	t.Parallel()
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	add := func(id string, st JobStatus) {
+		t.Helper()
+		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Platform: "twitch", Status: st}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("tw_manual_foo_bar_1700000000000000001", StatusUpcoming)
+	add("tw_manual_done_1700000000000000002", StatusFinished)
+	add("tw_4242", StatusLive)
+
+	for _, tc := range []struct {
+		login string
+		want  bool
+	}{
+		{"foo_bar", true},
+		{"Foo_Bar", true},
+		{"foo", false},
+		{"done", false},
+		{"4242", false},
+	} {
+		got, err := db.HasActiveManualTwitchJob(tc.login)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("HasActiveManualTwitchJob(%q) = %v, want %v", tc.login, got, tc.want)
+		}
+	}
+}
+
 func TestWatchedAndResumePosition(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

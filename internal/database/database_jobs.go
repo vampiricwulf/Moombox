@@ -306,6 +306,39 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	return true, nil
 }
 
+// HasActiveManualTwitchJob reports whether a manually added Twitch job for
+// login's channel is still waiting or recording: a `tw_manual_<login>_<ns>`
+// row, which the Web add creates when the channel is offline. Such a row
+// carries no stream ID, so the Twitch monitor's HasActiveJob(streamID) dedupe
+// never matched it, and the monitor created a second job for the very
+// broadcast the manual one was waiting on — both recorded it. The login is
+// everything between the prefix and the last underscore (the add's UnixNano
+// suffix has none), matched in Go because a login's own underscores are LIKE
+// wildcards.
+func (db *Database) HasActiveManualTwitchJob(login string) (bool, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id FROM jobs WHERE id LIKE 'tw\_manual\_%' ESCAPE '\' AND status NOT IN (?, ?, ?)`,
+		StatusFinished, StatusError, StatusCancelled)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		rest := strings.TrimPrefix(id, "tw_manual_")
+		if i := strings.LastIndex(rest, "_"); i > 0 && strings.EqualFold(rest[:i], login) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // QueuedChannels returns the distinct channel IDs that currently have Queued
 // (un-admitted backlog) jobs. NULL channel_id rows are excluded: Twitch and
 // manual adds have no channel affiliation and are never scheduler-paced, and

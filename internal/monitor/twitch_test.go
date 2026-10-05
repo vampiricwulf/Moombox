@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -126,5 +127,40 @@ func TestTwitch_AWholeBatchFailureStreakIsWarnedOnce(t *testing.T) {
 	}
 	if infos != 1 {
 		t.Errorf("%d recovery lines, want 1", infos)
+	}
+}
+
+// A manual add for an offline channel parks a `tw_manual_<login>_<ns>` job in
+// waitForTwitchLive. It has no stream ID, so the monitor's dedupe never
+// matched it: when the channel went live the monitor created a second job and
+// both recorded the broadcast. Once the manual job is over, the monitor takes
+// the channel's broadcasts again.
+//
+// Mutant: processStreamInfo without the manual-job check — OnStreamFound
+// fires while the manual job waits.
+func TestTwitch_AManualJobWaitingOnTheChannelIsNotDuplicated(t *testing.T) {
+	ch := config.ChannelConfig{ID: "streamerx", Name: "streamerx", Platform: "twitch"}
+	tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+		return []*twitch.TwitchStreamInfo{{StreamID: "4242", ChannelLogin: "streamerx", ChannelDisplayName: "StreamerX", Title: "hi", IsLive: true}}, []error{nil}, nil
+	}, ch)
+	const manualID = "tw_manual_streamerx_1700000000000000001"
+	if _, err := tm.db.AddJob(&database.Job{ID: manualID, VideoID: manualID, URL: "https://www.twitch.tv/streamerx",
+		Platform: "twitch", Status: database.StatusUpcoming, ManuallyAdded: true}); err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) { found = append(found, info.StreamID) }
+
+	tm.doCheck(context.Background())
+	if len(found) != 0 {
+		t.Fatalf("OnStreamFound = %v while a manual job waits on the channel", found)
+	}
+
+	if tm.db.UpdateJobFields(manualID, map[string]any{"status": database.StatusFinished}) == nil {
+		t.Fatal("UpdateJobFields: no row")
+	}
+	tm.doCheck(context.Background())
+	if len(found) != 1 || found[0] != "4242" {
+		t.Errorf("OnStreamFound = %v after the manual job finished, want [4242]", found)
 	}
 }

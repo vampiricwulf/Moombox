@@ -483,6 +483,20 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 	if active {
 		return nil
 	}
+	// A manually added job parked on this channel (waitForTwitchLive) is
+	// waiting for exactly this broadcast and records it when its own poll
+	// sees it live. It is the operator's explicit request, so it stands
+	// whatever the channel's terms say.
+	waiting, mErr := tm.db.HasActiveManualTwitchJob(info.ChannelLogin)
+	if mErr != nil {
+		tm.logger.Debug("HasActiveManualTwitchJob query failed", "channel", info.ChannelLogin, "err", mErr)
+		return nil
+	}
+	if waiting {
+		tm.logger.Debug("twitch stream already claimed by a manually added job",
+			"channel", info.ChannelLogin, "streamID", info.StreamID)
+		return nil
+	}
 
 	// Term matching: title OR category can match (checked independently)
 	titleMatch := MatchesTerms(info.Title, ch)
