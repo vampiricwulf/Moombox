@@ -306,37 +306,38 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	return true, nil
 }
 
-// HasActiveManualTwitchJob reports whether a manually added Twitch job for
-// login's channel is still waiting or recording: a `tw_manual_<login>_<ns>`
-// row, which the Web add creates when the channel is offline. Such a row
+// ManualTwitchJobs returns the non-terminal manually added Twitch jobs for
+// login's channel — the `tw_manual_<login>_<ns>` rows the Web add creates when
+// the channel is offline — with ID, Status and StreamStartTime set. Such a row
 // carries no stream ID, so the Twitch monitor's HasActiveJob(streamID) dedupe
-// never matched it, and the monitor created a second job for the very
-// broadcast the manual one was waiting on — both recorded it. The login is
-// everything between the prefix and the last underscore (the add's UnixNano
-// suffix has none), matched in Go because a login's own underscores are LIKE
-// wildcards.
-func (db *Database) HasActiveManualTwitchJob(login string) (bool, error) {
+// never matches it; the monitor decides from these whether one has claimed a
+// broadcast (manualJobClaims). The login is everything between the prefix and
+// the last underscore (the add's UnixNano suffix has none), matched in Go
+// because a login's own underscores are LIKE wildcards.
+func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id FROM jobs WHERE id LIKE 'tw\_manual\_%' ESCAPE '\' AND status NOT IN (?, ?, ?)`,
+		`SELECT id, status, stream_start_time FROM jobs WHERE id LIKE 'tw\_manual\_%' ESCAPE '\' AND status NOT IN (?, ?, ?)`,
 		StatusFinished, StatusError, StatusCancelled)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer rows.Close()
+	var out []*Job
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return false, err
+		var id, status string
+		var start sql.NullString
+		if err := rows.Scan(&id, &status, &start); err != nil {
+			return nil, err
 		}
 		rest := strings.TrimPrefix(id, "tw_manual_")
 		if i := strings.LastIndex(rest, "_"); i > 0 && strings.EqualFold(rest[:i], login) {
-			return true, nil
+			out = append(out, &Job{ID: id, VideoID: id, Status: JobStatus(status), StreamStartTime: start.String})
 		}
 	}
-	return false, rows.Err()
+	return out, rows.Err()
 }
 
 // QueuedChannels returns the distinct channel IDs that currently have Queued

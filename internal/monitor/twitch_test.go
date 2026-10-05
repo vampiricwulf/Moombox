@@ -133,34 +133,44 @@ func TestTwitch_AWholeBatchFailureStreakIsWarnedOnce(t *testing.T) {
 // A manual add for an offline channel parks a `tw_manual_<login>_<ns>` job in
 // waitForTwitchLive. It has no stream ID, so the monitor's dedupe never
 // matched it: when the channel went live the monitor created a second job and
-// both recorded the broadcast. Once the manual job is over, the monitor takes
-// the channel's broadcasts again.
+// both recorded the broadcast. The monitor stands aside for a manual job that
+// is waiting, or recording this same broadcast — and only those: one parked
+// in COOKIES? or muxing an earlier broadcast blocked every later one.
 //
-// Mutant: processStreamInfo without the manual-job check — OnStreamFound
-// fires while the manual job waits.
-func TestTwitch_AManualJobWaitingOnTheChannelIsNotDuplicated(t *testing.T) {
-	ch := config.ChannelConfig{ID: "streamerx", Name: "streamerx", Platform: "twitch"}
-	tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
-		return []*twitch.TwitchStreamInfo{{StreamID: "4242", ChannelLogin: "streamerx", ChannelDisplayName: "StreamerX", Title: "hi", IsLive: true}}, []error{nil}, nil
-	}, ch)
-	const manualID = "tw_manual_streamerx_1700000000000000001"
-	if _, err := tm.db.AddJob(&database.Job{ID: manualID, VideoID: manualID, URL: "https://www.twitch.tv/streamerx",
-		Platform: "twitch", Status: database.StatusUpcoming, ManuallyAdded: true}); err != nil {
-		t.Fatal(err)
-	}
-	var found []string
-	tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) { found = append(found, info.StreamID) }
+// Mutants: manualJobClaims claiming for every status (the parked and muxing
+// rows find nothing), and never claiming (the waiting row is duplicated).
+func TestTwitch_AManualJobClaimsOnlyTheBroadcastItWaitsFor(t *testing.T) {
+	const started = "2026-10-05T12:00:00Z"
+	for _, tc := range []struct {
+		name      string
+		status    database.JobStatus
+		start     string
+		wantFound bool
+	}{
+		{"waiting", database.StatusUpcoming, "", false},
+		{"recording this broadcast", database.StatusDownloading, started, false},
+		{"recording an earlier broadcast", database.StatusDownloading, "2026-10-04T12:00:00Z", true},
+		{"parked", database.StatusCookies, "", true},
+		{"muxing an earlier broadcast", database.StatusMuxing, "2026-10-04T12:00:00Z", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := config.ChannelConfig{ID: "streamerx", Name: "streamerx", Platform: "twitch"}
+			tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+				return []*twitch.TwitchStreamInfo{{StreamID: "4242", ChannelLogin: "streamerx", ChannelDisplayName: "StreamerX",
+					Title: "hi", IsLive: true, StartedAt: started}}, []error{nil}, nil
+			}, ch)
+			const manualID = "tw_manual_streamerx_1700000000000000001"
+			if _, err := tm.db.AddJob(&database.Job{ID: manualID, VideoID: manualID, URL: "https://www.twitch.tv/streamerx",
+				Platform: "twitch", Status: tc.status, ManuallyAdded: true, StreamStartTime: tc.start}); err != nil {
+				t.Fatal(err)
+			}
+			var found []string
+			tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) { found = append(found, info.StreamID) }
 
-	tm.doCheck(context.Background())
-	if len(found) != 0 {
-		t.Fatalf("OnStreamFound = %v while a manual job waits on the channel", found)
-	}
-
-	if tm.db.UpdateJobFields(manualID, map[string]any{"status": database.StatusFinished}) == nil {
-		t.Fatal("UpdateJobFields: no row")
-	}
-	tm.doCheck(context.Background())
-	if len(found) != 1 || found[0] != "4242" {
-		t.Errorf("OnStreamFound = %v after the manual job finished, want [4242]", found)
+			tm.doCheck(context.Background())
+			if got := len(found) == 1; got != tc.wantFound {
+				t.Errorf("OnStreamFound = %v, want a job: %v", found, tc.wantFound)
+			}
+		})
 	}
 }

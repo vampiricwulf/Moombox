@@ -435,6 +435,45 @@ func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelC
 	}
 }
 
+// manualJobClaims reports whether one of a channel's manually added jobs has
+// claimed the broadcast that started at startedAt. One waiting in
+// waitForTwitchLive (Upcoming, or Live on its way to downloading) takes
+// whatever goes live next; one downloading has claimed the broadcast it is
+// recording, the one its stream_start_time names. Anything else — parked in
+// COOKIES?, muxing an earlier broadcast — claims nothing: standing aside for
+// those blocked every later broadcast on the channel, indefinitely for a park
+// no sweep resumes.
+func manualJobClaims(jobs []*database.Job, startedAt string) bool {
+	for _, j := range jobs {
+		switch j.Status {
+		case database.StatusUpcoming, database.StatusLive:
+			return true
+		case database.StatusDownloading:
+			if sameTwitchStart(j.StreamStartTime, startedAt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sameTwitchStart is the worker's sameBroadcastStart rule
+// (internal/worker/stream_processor_twitch.go): stream_start_time is a
+// broadcast's stable identity across restarts, a minute of tolerance absorbs
+// the API's formatting jitter, and an unknown start matches.
+func sameTwitchStart(known, current string) bool {
+	if known == "" || current == "" {
+		return true
+	}
+	a, errA := time.Parse(time.RFC3339, known)
+	b, errB := time.Parse(time.RFC3339, current)
+	if errA != nil || errB != nil {
+		return true
+	}
+	d := b.Sub(a)
+	return d <= time.Minute && d >= -time.Minute
+}
+
 // processStreamInfo handles a channel that GetStreamInfoBatch reported LIVE:
 // dedup, recovery, term matching, and OnStreamFound dispatch. (The fetch
 // itself moved to the batch call in doCheck.)
@@ -483,16 +522,15 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 	if active {
 		return nil
 	}
-	// A manually added job parked on this channel (waitForTwitchLive) is
-	// waiting for exactly this broadcast and records it when its own poll
-	// sees it live. It is the operator's explicit request, so it stands
+	// A manually added job for this channel may have claimed this broadcast
+	// (manualJobClaims). It is the operator's explicit request, so it stands
 	// whatever the channel's terms say.
-	waiting, mErr := tm.db.HasActiveManualTwitchJob(info.ChannelLogin)
+	manual, mErr := tm.db.ManualTwitchJobs(info.ChannelLogin)
 	if mErr != nil {
-		tm.logger.Debug("HasActiveManualTwitchJob query failed", "channel", info.ChannelLogin, "err", mErr)
+		tm.logger.Debug("ManualTwitchJobs query failed", "channel", info.ChannelLogin, "err", mErr)
 		return nil
 	}
-	if waiting {
+	if manualJobClaims(manual, info.StartedAt) {
 		tm.logger.Debug("twitch stream already claimed by a manually added job",
 			"channel", info.ChannelLogin, "streamID", info.StreamID)
 		return nil

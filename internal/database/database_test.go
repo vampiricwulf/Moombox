@@ -1079,8 +1079,8 @@ func TestHasActiveJob(t *testing.T) {
 // read as wildcards, and one login can be a prefix of another.
 //
 // Mutants: a prefix match on the login (foo matches foo_bar's job), and the
-// terminal-status filter dropped (a finished job still claims the channel).
-func TestHasActiveManualTwitchJob(t *testing.T) {
+// terminal-status filter dropped (a finished job is returned).
+func TestManualTwitchJobs(t *testing.T) {
 	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -1090,7 +1090,8 @@ func TestHasActiveManualTwitchJob(t *testing.T) {
 
 	add := func(id string, st JobStatus) {
 		t.Helper()
-		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Platform: "twitch", Status: st}); err != nil {
+		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Platform: "twitch", Status: st,
+			StreamStartTime: "2026-10-05T12:00:00Z"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1100,21 +1101,25 @@ func TestHasActiveManualTwitchJob(t *testing.T) {
 
 	for _, tc := range []struct {
 		login string
-		want  bool
+		want  int
 	}{
-		{"foo_bar", true},
-		{"Foo_Bar", true},
-		{"foo", false},
-		{"done", false},
-		{"4242", false},
+		{"foo_bar", 1},
+		{"Foo_Bar", 1},
+		{"foo", 0},
+		{"done", 0},
+		{"4242", 0},
 	} {
-		got, err := db.HasActiveManualTwitchJob(tc.login)
+		got, err := db.ManualTwitchJobs(tc.login)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != tc.want {
-			t.Errorf("HasActiveManualTwitchJob(%q) = %v, want %v", tc.login, got, tc.want)
+		if len(got) != tc.want {
+			t.Errorf("ManualTwitchJobs(%q) = %d jobs, want %d", tc.login, len(got), tc.want)
 		}
+	}
+	got, _ := db.ManualTwitchJobs("foo_bar")
+	if len(got) == 1 && (got[0].Status != StatusUpcoming || got[0].StreamStartTime != "2026-10-05T12:00:00Z") {
+		t.Errorf("ManualTwitchJobs returned %+v, want its status and stream start", *got[0])
 	}
 }
 
