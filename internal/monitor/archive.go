@@ -10,9 +10,7 @@ import (
 )
 
 // JobDisposition tells the host's OnVideoFound wiring HOW a job should be
-// created — spec §10's creator table. Plan 4 implements the creation
-// semantics (Queued vs admitted, queue_priority); until then the host maps
-// every disposition to today's behavior (Upcoming + enqueue).
+// created — spec §10's creator table (Queued vs admitted, queue_priority).
 type JobDisposition int
 
 const (

@@ -1211,8 +1211,9 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Date-completing fetch for the two-phase probe (§9): the ANDROID_VR/TV
 	// status probes carry no microformat, so vod-family results arrive
-	// dateless; both monitors call this (one anonymous WEB player fetch)
-	// when a date is actually needed for a window decision.
+	// dateless; both monitors call this (one WEB player fetch carrying the
+	// jar's credentials) when a date is actually needed for a window
+	// decision.
 	probeDateFunc := func(ctx context.Context, videoID string) (string, string, error) {
 		return s.ytService.ProbeVideoDate(ctx, videoID)
 	}

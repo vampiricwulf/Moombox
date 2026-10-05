@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -836,5 +837,51 @@ func TestProcessYouTubeVideo_ProbedUpcomingStillJobs(t *testing.T) {
 	})
 	if !res.ShouldProcess || res.Denied {
 		t.Fatalf("a public upcoming premiere must still job: %+v", res)
+	}
+}
+
+// matchTerm checks if text matches a single term pattern — the test-side
+// convenience over matchTermNormalized, which production calls with text it
+// has already normalized.
+func matchTerm(text, pattern string) bool {
+	return matchTermNormalized(normalizeText(text), text, pattern)
+}
+
+// TestProcessYouTubeVideo_GiveUpWarningNamesTheRealNextStep pins the give-up
+// warning's wording to what actually follows: "backing off" only when a
+// cooldown window will suppress the next probes, "retrying next cycle" when
+// the cooldown is disabled and the poll interval is the only throttle.
+func TestProcessYouTubeVideo_GiveUpWarningNamesTheRealNextStep(t *testing.T) {
+	failing := func(_ context.Context, _ string) (*VideoProbeResult, error) {
+		return nil, errors.New("probe failed")
+	}
+	cases := []struct {
+		name     string
+		cooldown *ProbeCooldown
+		want     string
+	}{
+		{"enabled", NewProbeCooldown(time.Hour), "backing off"},
+		{"disabled", NewProbeCooldown(0), "retrying next cycle"},
+		{"nil", nil, "retrying next cycle"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &warnRecordingLogger{}
+			tracker := NewMetadataFailureTracker()
+			for range maxMetadataFailures {
+				ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+					VideoID:    "vid1",
+					Channel:    &config.ChannelConfig{},
+					ProbeVideo: failing,
+					Tracker:    tracker,
+					Cooldown:   tc.cooldown,
+					Logger:     log,
+				})
+			}
+			last := log.warnings[len(log.warnings)-1]
+			if !strings.Contains(last, tc.want) {
+				t.Fatalf("give-up warning %q, want it to say %q", last, tc.want)
+			}
+		})
 	}
 }

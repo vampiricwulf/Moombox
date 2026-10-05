@@ -157,6 +157,16 @@ func (cd *ProbeCooldown) ShouldProbe(videoID string) bool {
 	return time.Since(last) >= cd.duration
 }
 
+// enabled reports whether the cooldown window is active (non-nil, > 0).
+func (cd *ProbeCooldown) enabled() bool {
+	if cd == nil {
+		return false
+	}
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return cd.duration > 0
+}
+
 // Record marks videoID as just-probed with the current window. Called after a
 // SUCCESSFUL probe classification, and after giving up on a persistently
 // failing video (so it isn't re-probed every cycle). A no-op when the cooldown
@@ -393,16 +403,22 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 		if giveUp {
 			// Give up on this video. AddToHistory (run by the composed
 			// caller when GaveUp is true) does NOT actually stop re-probing —
-			// HasProcessed only flips the reprobe/log-level flag; feed/DECAPI
-			// still call ProcessYouTubeVideo — so the cooldown is the only
-			// rate limiter. Record the window (giveUp also resets the
-			// tracker's escalation to 0), otherwise a broken-but-still-
-			// matching video re-probes every cycle. When the cooldown is
-			// disabled the operator has accepted that per-cycle re-probe
-			// (Record is a no-op) — the poll interval is the throttle.
+			// HasProcessed only flips the reprobe/log-level flag; DECAPI
+			// still calls ProcessYouTubeVideo and the feed walk still calls
+			// probeAndClassify — so the cooldown is the only rate limiter.
+			// Record the window (giveUp also resets the tracker's escalation
+			// to 0), otherwise a broken-but-still-matching video re-probes
+			// every cycle. When the cooldown is disabled the operator has
+			// accepted that per-cycle re-probe (Record is a no-op) — the
+			// poll interval is the throttle, and the log says so rather than
+			// claiming a back-off that does not happen.
 			p.Cooldown.Record(p.VideoID)
-			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, backing off: %v",
-				p.VideoID, count, err))
+			next := "retrying next cycle"
+			if p.Cooldown.enabled() {
+				next = "backing off"
+			}
+			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, %s: %v",
+				p.VideoID, count, next, err))
 		} else {
 			// Transient failure: leave the cooldown UNRECORDED so the next
 			// cycle re-probes promptly — a freshly-live video must not be
@@ -622,14 +638,9 @@ func getCachedRegex(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-// matchTerm checks if text matches a single term pattern.
-// All patterns are treated as regex (matching TypeScript behavior).
-// Supports /pattern/flags syntax and (?i) prefix for case-insensitive.
-func matchTerm(text, pattern string) bool {
-	return matchTermNormalized(normalizeText(text), text, pattern)
-}
-
-// matchTermNormalized is like matchTerm but takes pre-normalized text to avoid redundant work.
+// matchTermNormalized checks whether text matches a single term pattern,
+// taking pre-normalized text to avoid redundant work. All patterns are
+// treated as regex; /pattern/flags syntax and a (?i) prefix are supported.
 //
 // The pattern must be transformed to correspond to the normalized text it
 // runs against: normText is diacritic-stripped AND lowercased, so patterns

@@ -175,9 +175,7 @@ type FeedMonitor struct {
 	OnSchedule func(nextCheckAt int64)
 	// OnVideoFound is fired by the ARCHIVE step (archive.go) for every item
 	// the §10 decision table admits. The disposition tells the host HOW to
-	// create the job (spec §10's creator table); Plan 4 implements those
-	// semantics — until then the host maps every disposition to today's
-	// Upcoming+enqueue behavior (see the PLAN4 marker in monitor_callbacks.go).
+	// create the job (spec §10's creator table).
 	OnVideoFound func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
 	ProbeVideo   VideoProbeFunc
 	// ProbeVideoAuth is the AUTHENTICATED probe used only for members-only
@@ -191,9 +189,10 @@ type FeedMonitor struct {
 	// The status probes (ANDROID_VR/TV) carry no microformat and therefore
 	// no publish dates; when a vod-family probe returns dateless on a row
 	// whose own date is only an estimate (coarse/assumed), the walk calls
-	// this once — an anonymous WEB player fetch — to date the row. The
-	// ladder makes the upgrade one-time per video. Nil disables the second
-	// phase (rows with rankable dates still classify; see applyProbe).
+	// this once — a WEB player fetch carrying the jar's credentials — to
+	// date the row. The ladder makes the upgrade one-time per video. Nil
+	// disables the second phase (rows with rankable dates still classify;
+	// see applyProbe).
 	ProbeDate       func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle

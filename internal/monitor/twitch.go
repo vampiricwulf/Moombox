@@ -172,8 +172,8 @@ func (tm *TwitchMonitor) CheckNow() {
 // scheduling: the delay is interval minus the elapsed cycle time, so the
 // configured interval is a true period — previously it was a GAP after
 // each cycle, silently inflating detection latency by the cycle duration
-// (~0.5s×N channels every cycle, permanently). Zero-value cycleStart
-// (initial Start scheduling) behaves as a plain interval.
+// (~0.5s×N channels every cycle, permanently). A zero-value cycleStart
+// behaves as a plain interval.
 func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	// Same rule as runCycle's guard, for the path that arms the timer: a
 	// cancelled context means this chain was retired by Stop(), and a retired
