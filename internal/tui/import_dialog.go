@@ -64,6 +64,9 @@ func newImportPicker() filepicker.Model {
 	fp.ShowSize = true
 	fp.ShowPermissions = false
 	fp.AutoHeight = false
+	// bubbles' own empty-folder text is "Bummer. No Files Found." — which
+	// also reads as a failure when the folder simply holds no .zip.
+	fp.Styles.EmptyDirectory = fp.Styles.EmptyDirectory.SetString("No .zip archives here (← goes up a folder)")
 	return fp
 }
 
@@ -208,6 +211,17 @@ func (m *ImportDialogModel) GetImportChannel() string {
 	return m.channel
 }
 
+// importPickerHint is the picker step's key line at the box's content width:
+// the full wording is 68 columns and the box is 54 wide at the 60-column
+// floor, where it wrapped and left "Esc: Cancel" alone on a second row.
+func importPickerHint(contentW int) string {
+	full := "↑↓: Navigate  ←/Backspace: Back  →/Enter: Open/Select  Esc: Cancel"
+	if ansi.StringWidth(full) <= contentW {
+		return full
+	}
+	return "↑↓  ←: Back  →/Enter: Open/Select  Esc: Cancel"
+}
+
 // View renders the dialog as a centered overlay.
 func (m *ImportDialogModel) View() string {
 	if !m.visible {
@@ -228,7 +242,7 @@ func (m *ImportDialogModel) View() string {
 		content.WriteString("\n\n")
 		content.WriteString(m.picker.View())
 		content.WriteString("\n")
-		content.WriteString(DimStyle.Render("↑↓: Navigate  ←/Backspace: Back  →/Enter: Open/Select  Esc: Cancel"))
+		content.WriteString(DimStyle.Render(importPickerHint(contentW)))
 
 	case 1:
 		content.WriteString(TitleStyle.Render("Import Archive — Metadata"))
