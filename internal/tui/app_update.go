@@ -391,7 +391,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case releaseNotesFetchedMsg:
-		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+		// Only the viewer this fetch was for: if the overlay was closed and
+		// R N re-opened it on a pending update meanwhile, the late answer
+		// put the running version's notes and tag under a footer still
+		// offering U and S — both of which then refused on the tag guard.
+		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() && !a.releaseNotesPopup.pending {
 			// A failed fetch carries no tag (OnFetchReleaseNotes returns
 			// "", "", err), and reopening with it blanked the title to
 			// "Release Notes — ". Keep the tag R N opened the overlay with.
