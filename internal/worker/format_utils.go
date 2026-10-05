@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -261,6 +262,22 @@ func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHei
 		return nil
 	}
 	return &streams[candidates[idx]]
+}
+
+// warnUnhonouredPins logs a manual itag the live selection could not honour.
+// SelectBestDashStream falls back to automatic selection when a pinned itag
+// is not in the pool, and the live strategies used to say nothing about it —
+// only "selected" lines naming another itag, while the whole-file VOD path
+// warns ("Manual video itag N not found, falling back to auto"). A pin also
+// switches the quality monitor off, so this line is the one place the
+// operator learns the pin did not take.
+func warnUnhonouredPins(job *JobContext, videoItag int, video *DashStreamInfo, audioItag int, audio *DashStreamInfo) {
+	if videoItag > 0 && video != nil && video.Itag != videoItag {
+		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d not offered for this stream; recording itag %d instead", videoItag, video.Itag))
+	}
+	if audioItag > 0 && audio != nil && audio.Itag != audioItag {
+		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d not offered for this stream; recording itag %d instead", audioItag, audio.Itag))
+	}
 }
 
 // DashStreamInfo holds basic info about a DASH stream for selection.

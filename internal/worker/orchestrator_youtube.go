@@ -532,7 +532,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					case <-qualityChangeCh:
 					default:
 					}
-					monitor.UpdateBaseline(currentQuality)
+					monitor.ReconcileSameQuality(currentQuality)
 				}
 
 				attachProgress(result)

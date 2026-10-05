@@ -100,6 +100,11 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 
 	// Step 3: Select best variant respecting max_video_resolution and quality preference
 	qualityPref := job.Job.QualityPreference
+	// HLS variants carry no itag, so a manual pin cannot be honoured here;
+	// say so rather than record some other variant without a word.
+	if pin := pinnedVideoItag(job); pin > 0 {
+		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d cannot be honoured on an HLS stream (its variants carry no itag); selecting automatically", pin))
+	}
 	if qualityPref == "audio_only" {
 		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
 	}
@@ -258,6 +263,17 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 		}
 	}
 	return atSize[rankByFPSThenBandwidth(atSize, hlsFieldAccessor, fpsPreference(0, prefer60fps))]
+}
+
+// pinnedVideoItag is the manual video itag the job asks for, the per-job
+// selection over the config default, or 0 for none (-1, "no video", is not a
+// pin of a rendition).
+func pinnedVideoItag(job *JobContext) int {
+	pin := job.Config.VideoItag
+	if job.Job.SelectedVideoItag != nil {
+		pin = *job.Job.SelectedVideoItag
+	}
+	return max(pin, 0)
 }
 
 // hlsFieldAccessor measures a variant by its frame's shorter edge — see

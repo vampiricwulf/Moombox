@@ -228,6 +228,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	if audioItag != -1 {
 		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "", false)
 	}
+	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 
 	// DASH requires both video and audio streams (matching TS), unless user explicitly excluded one
 	if videoStream == nil && videoItag != -1 {

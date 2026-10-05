@@ -389,6 +389,7 @@ else:
 3. Simultaneously listens for quality change signals on `qualityChangeCh`
 4. When quality changes mid-stream:
    - Ignores if segment is shorter than 10 seconds (`minSegmentDuration`)
+   - A refresh that comes back at the download's own quality (and itags) continues in place; the monitor is re-baselined to the download's quality so an early refresh is retried on the next signal — until the SAME probed quality has been answered "unchanged" three times running (`sameQualityStrikeLimit`), when the probe and the download disagree for good (an HLS download beside the probe's DASH ladder) and the monitor takes the probe's reading as its baseline instead (`ReconcileSameQuality`, `internal/worker/quality_monitor.go`); before that bound, such a job cancelled and rebuilt its downloaders every 30 s for the rest of the broadcast
    - Cancels current downloaders
    - Muxes the current segment in a background goroutine parented by the orchestrator's mux root (`launchBackgroundSegmentMux` in `internal/worker/quality_split_common.go`), not `context.Background()`
    - Records segment metadata in database

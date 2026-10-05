@@ -15,7 +15,19 @@ type QualityMonitor struct {
 	current  QualityInfo
 	probeFn  func(ctx context.Context) (*QualityInfo, error)
 	logger   logger
+
+	// lastSignaled is the probed quality the last change signal carried;
+	// strikeQuality and strikes count how many times running that same
+	// quality was signalled and answered "unchanged" (ReconcileSameQuality).
+	lastSignaled  QualityInfo
+	strikeQuality QualityInfo
+	strikes       int
 }
+
+// sameQualityStrikeLimit is how many consecutive refreshes may answer the same
+// probed quality with "the download is unchanged" before the monitor takes the
+// probe's reading as its baseline — see ReconcileSameQuality.
+const sameQualityStrikeLimit = 3
 
 // NewQualityMonitor creates a quality monitor.
 func NewQualityMonitor(interval time.Duration, current QualityInfo, probeFn func(ctx context.Context) (*QualityInfo, error), logger logger) *QualityMonitor {
@@ -59,6 +71,7 @@ func (m *QualityMonitor) Run(ctx context.Context, changeCh chan<- QualityInfo) {
 					"from", m.current.Label, "to", probed.Label,
 					"fromRes", formatRes(m.current), "toRes", formatRes(*probed))
 				m.current = *probed
+				m.lastSignaled = *probed
 			}
 			m.mu.Unlock()
 			if changed {
@@ -77,7 +90,40 @@ func (m *QualityMonitor) Run(ctx context.Context, changeCh chan<- QualityInfo) {
 func (m *QualityMonitor) UpdateBaseline(q QualityInfo) {
 	m.mu.Lock()
 	m.current = q
+	m.strikes = 0
 	m.mu.Unlock()
+}
+
+// ReconcileSameQuality is the loop's answer to a change signal whose refresh
+// came back at the download's own quality. Normally it re-baselines to that
+// quality, as UpdateBaseline does, so a probe that reports the signalled
+// quality again signals again — the refresh may simply have run before the
+// new rendition reached the manifest. But when the SAME probed quality has
+// been signalled and answered "unchanged" sameQualityStrikeLimit times
+// running, the probe and the download disagree for good — an HLS download
+// beside the probe's DASH ladder, a top rung the probe's client sees and the
+// downloader's does not — and re-baselining to the download's quality made
+// every 30 s tick cancel and rebuild the downloaders for the rest of the
+// broadcast. The baseline then becomes the probed quality instead, so the
+// monitor stays quiet until the probe itself reports something else. It
+// reports whether it settled that way.
+func (m *QualityMonitor) ReconcileSameQuality(download QualityInfo) (settled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.strikes > 0 && !m.lastSignaled.Changed(m.strikeQuality) {
+		m.strikes++
+	} else {
+		m.strikeQuality, m.strikes = m.lastSignaled, 1
+	}
+	if m.strikes >= sameQualityStrikeLimit {
+		m.current = m.lastSignaled
+		m.strikes = 0
+		m.logger.Warn("the quality probe and the download disagree persistently; following the download until the probe reports something new",
+			"probe", m.lastSignaled.Label, "download", download.Label)
+		return true
+	}
+	m.current = download
+	return false
 }
 
 func formatRes(q QualityInfo) string {

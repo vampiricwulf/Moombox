@@ -153,6 +153,7 @@ func DownloadManifestlessDash(
 	if audioItag != -1 {
 		audioStream = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false)
 	}
+	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 	if videoStream == nil && videoItag != -1 {
 		return nil, fmt.Errorf("manifestless DASH: no suitable video adaptive format")
 	}
