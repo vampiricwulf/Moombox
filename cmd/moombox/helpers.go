@@ -198,6 +198,10 @@ func announceUpdateCleared(wsHub *web.WebSocketHub, tuiCh chan<- tui.UpdateStatu
 	}
 }
 
+// checkForUpdate is (*updater.Updater).CheckForUpdate, a seam for the tests of
+// the periodic and TUI checks, which need a check to answer without GitHub.
+var checkForUpdate = (*updater.Updater).CheckForUpdate
+
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
 //
 // configStore is re-read AFTER the network check so a "Skip this version" /
@@ -216,7 +220,7 @@ func checkAndBroadcastUpdate(
 	lastNotifiedTag *string,
 ) {
 	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
-	release, err := upd.CheckForUpdate(ctx)
+	release, err := checkForUpdate(upd, ctx)
 	if err != nil {
 		// A check cut short by shutdown is not a failure worth a warning.
 		if ctx.Err() != nil {

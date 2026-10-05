@@ -457,27 +457,7 @@ func (s *runState) runTUI() {
 		}
 	}
 	if s.upd != nil {
-		app.OnCheckUpdate = func() (*tui.UpdateStatusMsg, error) {
-			s.log.Info("Update check requested from TUI")
-			seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
-			release, err := s.upd.CheckForUpdate(context.Background())
-			if err != nil {
-				return nil, err
-			}
-			if release == nil {
-				if tag := routes.ClearPendingUpdate(seen); tag != "" {
-					announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
-				}
-				return nil, nil
-			}
-			routes.SharedUpdateInfo.Store(release)
-			s.wsHub.Broadcast("update_available", release)
-			return &tui.UpdateStatusMsg{
-				Version:      release.Version,
-				TagName:      release.TagName,
-				ReleaseNotes: release.ReleaseNotes,
-			}, nil
-		}
+		app.OnCheckUpdate = s.checkUpdateFromTUI
 		app.OnApplyUpdate = func(ver string) string {
 			release := routes.SharedUpdateInfo.Load()
 			if release == nil {
@@ -1275,4 +1255,30 @@ func readCookieFileCapped(path string) ([]byte, error) {
 			routes.MaxCookieImportBytes/1024)
 	}
 	return data, nil
+}
+
+// checkUpdateFromTUI is the TUI's R V: a manual check. An up-to-date answer
+// withdraws the release that was pending before the check (seen) — and only
+// that one, so a release another check found during this one's round trip
+// survives it.
+func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
+	s.log.Info("Update check requested from TUI")
+	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
+	release, err := checkForUpdate(s.upd, context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		if tag := routes.ClearPendingUpdate(seen); tag != "" {
+			announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
+		}
+		return nil, nil
+	}
+	routes.SharedUpdateInfo.Store(release)
+	s.wsHub.Broadcast("update_available", release)
+	return &tui.UpdateStatusMsg{
+		Version:      release.Version,
+		TagName:      release.TagName,
+		ReleaseNotes: release.ReleaseNotes,
+	}, nil
 }
