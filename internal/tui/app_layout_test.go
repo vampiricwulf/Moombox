@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -486,5 +487,28 @@ func TestBothBannersAndLogsFocusFitTheFloorTerminal(t *testing.T) {
 				t.Errorf("%dx20, focus %v: frame is %d rows", w, focus, n)
 			}
 		}
+	}
+}
+
+// TestFeedbackLineIsCutToTheWidth: only the R C line was clamped; any other
+// long one — "Deleted: <a 128-character title>" — ran past the terminal and
+// bubbletea clipped it, losing the end with no sign it was cut. The row is
+// cut at render with an ellipsis, so it stays within the width.
+//
+// Mutant: dropping the truncation in addOverlayMessage — the row is wider
+// than the terminal.
+func TestFeedbackLineIsCutToTheWidth(t *testing.T) {
+	app := NewApp()
+	app.width, app.height = 80, 24
+	app.recalcLayout()
+	app.setFeedback("Deleted: " + strings.Repeat("a very long stream title ", 6) + "(3s)")
+	for _, line := range strings.Split(app.View().Content, "\n") {
+		if w := ansi.StringWidth(line); w > 80 {
+			t.Fatalf("a %d-cell line on an 80-column terminal: %q", w, stripANSI(line))
+		}
+	}
+	if !strings.Contains(stripANSI(app.View().Content), "Deleted: a very long stream title") ||
+		!strings.Contains(stripANSI(app.View().Content), "…") {
+		t.Error("the long feedback line is not shown cut with an ellipsis")
 	}
 }

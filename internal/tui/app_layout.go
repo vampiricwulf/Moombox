@@ -256,11 +256,19 @@ func securityBanner(width int, msg string) string {
 	return style.Render(msg)
 }
 
+// addOverlayMessage writes msg over the row above the status bar, padded to
+// the width — and cut to it with an ellipsis: bubbletea clips a line wider
+// than the terminal, so a long one (a 128-character title in "Deleted: …")
+// simply lost its end, closing quote and "(3s)" countdown included, with
+// nothing to say so.
 func addOverlayMessage(content string, width int, msg string) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) > 2 {
 		idx := len(lines) - 2
 		padded := "  " + msg
+		if width > 0 {
+			padded = truncateWidth(padded, width, "…")
+		}
 		paddedW := lipgloss.Width(padded)
 		lines[idx] = padded + strings.Repeat(" ", max(0, width-paddedW))
 	}

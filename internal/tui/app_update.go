@@ -1152,17 +1152,13 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 
 // fitFeedback clamps a feedback line to the room the overlay actually has.
 //
-// addOverlayMessage renders the line as "  "+msg and pads it out to a.width; it
-// does NOT clip. A line wider than the terminal therefore wraps, and because it
-// is written into a fixed row of an already-composed frame, the wrap pushes
-// every row below it down — the whole dashboard shifts for three seconds.
-//
-// Every other string reaching setFeedback is composed here out of bounded
-// vocabulary, so nothing needed this before. The recheck reason is the first
-// one whose length is decided elsewhere (a resolver's DNS wording, a proxy's
-// host name), which is why the clamp lives at the composer rather than inside
-// setFeedback: putting it there would silently truncate messages whose exact
-// text other tests pin.
+// addOverlayMessage cuts every line to the width at render time; this clamp is
+// earlier, at the composer, for the one line whose severity matters to read
+// right: the recheck reason's length is decided elsewhere (a resolver's DNS
+// wording, a proxy's host name), and the composer states the severity of the
+// line it actually shows (see feedbackSeverity). It lives here rather than
+// inside setFeedback because putting it there would silently truncate
+// messages whose exact text other tests pin.
 //
 // truncateString is the task list's own ellipsis helper, so an over-long line
 // ends the same way an over-long title does. Below the first WindowSizeMsg
