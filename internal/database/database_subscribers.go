@@ -377,19 +377,19 @@ func (db *Database) notifyJobUpdate(job *Job, changes []string) {
 // nil-check then correctly distinguishes "skip" (nil) from "dispatch
 // the empty list" ([]*Job{}).
 // Audit reports/database.md C2.
-func (db *Database) snapshotJobsChange() []*Job {
+func (db *Database) snapshotJobsChange() jobsSnapshot {
 	db.subMu.RLock()
 	n := len(db.onJobsChange)
 	db.subMu.RUnlock()
 	if n == 0 {
-		return nil
+		return jobsSnapshot{}
 	}
 	jobs, err := db.getAllJobsUnlocked()
 	if err != nil {
 		if db.logger != nil {
 			db.logger.Error("snapshotJobsChange: failed to read jobs", "err", err)
 		}
-		return nil
+		return jobsSnapshot{}
 	}
 	if jobs == nil {
 		// getAllJobsUnlocked returns a nil slice when no rows match —
@@ -397,7 +397,17 @@ func (db *Database) snapshotJobsChange() []*Job {
 		// caller's dispatchJobsChange fires with the empty list.
 		jobs = []*Job{}
 	}
-	return jobs
+	// Numbered here, under db.mu (every caller holds it), so the order of
+	// the numbers is the order the snapshots were read in.
+	db.jobsChangeSeq++
+	return jobsSnapshot{jobs: jobs, seq: db.jobsChangeSeq}
+}
+
+// jobsSnapshot is one OnJobsChange full list and its place in write order.
+// A zero value (nil jobs) means "nothing to dispatch".
+type jobsSnapshot struct {
+	jobs []*Job
+	seq  uint64
 }
 
 // dispatchJobsChange fans out the OnJobsChange callbacks. Caller MUST
@@ -407,7 +417,13 @@ func (db *Database) snapshotJobsChange() []*Job {
 // Per-callback invocations run sequentially in a fresh goroutine so the
 // caller's write path returns immediately. A top-level recover guards
 // the goroutine itself; safeCallJobsChange recovers per-callback panics.
-func (db *Database) dispatchJobsChange(jobs []*Job) {
+//
+// Those goroutines are not ordered, so each one checks its snapshot's
+// sequence number under jobsChangeMu and stands down if a newer snapshot has
+// already gone out: subscribers replace their whole job list from this, and
+// an older one arriving last resurrected deleted jobs and reverted toggles.
+func (db *Database) dispatchJobsChange(snap jobsSnapshot) {
+	jobs := snap.jobs
 	if jobs == nil {
 		return
 	}
@@ -429,6 +445,12 @@ func (db *Database) dispatchJobsChange(jobs []*Job) {
 				db.logger.Error("dispatchJobsChange goroutine panic", "panic", r)
 			}
 		}()
+		db.jobsChangeMu.Lock()
+		defer db.jobsChangeMu.Unlock()
+		if snap.seq <= db.jobsChangeDelivered {
+			return // a newer full list has already been delivered
+		}
+		db.jobsChangeDelivered = snap.seq
 		for _, fn := range subs {
 			db.safeCallJobsChange(fn, jobs)
 		}

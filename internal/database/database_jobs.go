@@ -398,7 +398,7 @@ func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []
 // under db.mu and, when rows were deleted, snapshots the post-delete jobs
 // list for the caller's OnJobsChange dispatch (the snapshot must be taken
 // while the lock is still held).
-func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus) (deleted int, snapshot []*Job, err error) {
+func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus) (deleted int, snapshot jobsSnapshot, err error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -413,7 +413,7 @@ func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses 
 	ctx := db.getCtx()
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
 	defer tx.Rollback()
 
@@ -421,20 +421,20 @@ func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses 
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM history WHERE video_id IN (SELECT id FROM jobs WHERE "+match+")",
 		args...); err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
 
 	res, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE "+match, args...)
 	if err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
 	n, _ := res.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
 	if n == 0 {
-		return 0, nil, nil
+		return 0, jobsSnapshot{}, nil
 	}
 	return int(n), db.snapshotJobsChange(), nil
 }

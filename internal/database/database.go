@@ -115,6 +115,17 @@ type Database struct {
 	nextSubID      uint64
 	subMu          sync.RWMutex
 
+	// jobsChangeSeq numbers each OnJobsChange snapshot as it is TAKEN (under
+	// db.mu, so in write order); jobsChangeDelivered is the newest number
+	// handed to subscribers, guarded by jobsChangeMu. dispatchJobsChange runs
+	// asynchronously, so two bulk writes in quick succession raced to the
+	// subscribers, and an older full list landing last brought pruned jobs
+	// back onto every dashboard. A snapshot older than one already delivered
+	// is dropped instead.
+	jobsChangeSeq       uint64
+	jobsChangeMu        sync.Mutex
+	jobsChangeDelivered uint64
+
 	// Prepared statements
 	stmtGetJob *sql.Stmt
 	// preparedStmts tracks every *sql.Stmt prepared via prepareStmt so Close
