@@ -1766,6 +1766,13 @@ export class MoomboxApp {
 
     const filtered = this.filterBar.getFilteredJobs();
     const isFiltered = this.filterBar.tokens("jobs").length > 0;
+    // And the ones the filter hides: a batch action acts on what is on
+    // screen. Kept, a job ticked before the filter changed stayed in the
+    // "N selected" count and in the Delete or Cancel it was never shown in.
+    const visibleIds = new Set(filtered.map(j => j.id));
+    this._selectedTaskJobs.forEach(id => {
+      if (!visibleIds.has(id)) this._selectedTaskJobs.delete(id);
+    });
 
     // Update filter count
     if (filterCount) {
@@ -2016,6 +2023,11 @@ export class MoomboxApp {
 
     const filtered = this.filterBar.getFilteredArchivedJobs();
     const isFiltered = this.filterBar.tokens("archived").length > 0;
+    // And the ones the filter hides — see renderJobs.
+    const visibleArchivedIds = new Set(filtered.map(j => j.id));
+    this._selectedArchivedJobs.forEach(id => {
+      if (!visibleArchivedIds.has(id)) this._selectedArchivedJobs.delete(id);
+    });
 
     // Update filter count
     if (filterCount) {

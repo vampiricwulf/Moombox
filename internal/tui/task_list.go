@@ -887,6 +887,11 @@ func (m *TaskListModel) rebuildVirtualList() {
 	m.archivedSet = make(map[string]bool, len(m.jobs))
 	for _, j := range m.jobs {
 		if !m.passes(j) {
+			// A job the filter hides leaves the selection: a batch action
+			// acts on what is on screen. Kept, a job ticked before the filter
+			// changed was still counted in the confirm and still deleted or
+			// cancelled by it. The Web prunes its selection the same way.
+			delete(m.selected, j.ID)
 			continue
 		}
 
