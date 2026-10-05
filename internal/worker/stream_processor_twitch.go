@@ -23,6 +23,27 @@ import (
 // the predicate accepts exactly this string.
 const TwitchOfflineErrMsg = "twitch channel is offline"
 
+// twitchEndedOfflineErrMsg is the error a Twitch job interrupted mid-capture
+// takes when its broadcast is over by the time Moombox is back: the staged
+// footage is complete as far as it will ever get (Twitch has no DVR to fetch
+// the gap from), and the Mux action turns it into the archive.
+const twitchEndedOfflineErrMsg = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
+
+// twitchOfflineError picks the error a non-manual Twitch job takes when its
+// channel is offline. A Downloading row re-enqueued at boot whose staging
+// holds footage was interrupted mid-broadcast, and "twitch channel is
+// offline" told its operator nothing about the hours of capture sitting in
+// staging — the auto-recovery never takes it (LastVideoSeq is set), so the
+// only way forward is the Mux action, which the message now names, as the
+// changed-broadcast branch in processTwitchLive already does. Every other
+// offline job keeps TwitchOfflineErrMsg, the exact string that recovery keys on.
+func twitchOfflineError(job *database.Job, stagingBase string) string {
+	if job.Status == database.StatusDownloading && HasSegmentFiles(stagingBase, job.ID) {
+		return twitchEndedOfflineErrMsg
+	}
+	return TwitchOfflineErrMsg
+}
+
 // sameBroadcastStart is THE broadcast-identity rule for Twitch jobs:
 // stream_start_time is written once per job and compared against the
 // currently-live broadcast's StartedAt with ±1 minute of tolerance (absorbs
@@ -500,8 +521,11 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 			streamInfo = waitInfo
 			// Fall through to existing live handling below
 		} else {
-			sp.logger.Info(TwitchOfflineErrMsg, "channel", login)
-			return &StreamProcessResult{ShouldDownload: false, Error: TwitchOfflineErrMsg}, nil
+			var stagingBase string
+			sp.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			msg := twitchOfflineError(job, stagingBase)
+			sp.logger.Info(msg, "channel", login, "jobID", job.ID)
+			return &StreamProcessResult{ShouldDownload: false, Error: msg}, nil
 		}
 	}
 
