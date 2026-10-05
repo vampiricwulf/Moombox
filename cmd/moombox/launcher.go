@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
@@ -162,6 +164,11 @@ func launchAndSupervise() {
 		// child. A genuine stop re-sets it via the forwarder.
 		terminating.Store(false)
 
+		// Whether this child starts with an .update-pending breadcrumb to
+		// resolve: only then can the breadcrumb's absence at exit say the
+		// boot proved itself (updateBootProved).
+		pendingAtSpawn := firstAfterUpdate && updatePendingPresent(exePath)
+
 		starting.Store(true)
 		spawnedAt = time.Now()
 		if startErr := cmd.Start(); startErr != nil {
@@ -188,7 +195,10 @@ func launchAndSupervise() {
 		child.Store(nil)
 
 		ranFor := time.Since(spawnedAt)
-		wasFirstAfterUpdate := firstAfterUpdate
+		// A first boot that reached the first-successful-boot milestone has
+		// proved the update: its exits are ordinary from then on, however
+		// soon they come.
+		wasFirstAfterUpdate := firstAfterUpdate && !updateBootProved(exePath, pendingAtSpawn)
 		firstAfterUpdate = false
 		// A healthy run ends the crash streak. (Quick deaths of RESPAWNED
 		// children deliberately don't reset — they're the streak.)
@@ -404,8 +414,33 @@ func crashBackoff(n int) time.Duration {
 // post-update child an abnormal exit is treated as "the update is broken"
 // (preserve the rollback binary) rather than an ordinary crash later in
 // life. Generous enough for slow AV-scanned first boots; a child that ran
-// past it has proven the binary starts.
+// past it has proven the binary starts. So has one that reached the
+// first-successful-boot milestone sooner (updateBootProved).
 const postUpdateFailureWindow = 2 * time.Minute
+
+// updatePendingPresent reports whether ApplyUpdate's .update-pending
+// breadcrumb is on disk.
+func updatePendingPresent(exePath string) bool {
+	_, err := os.Stat(exePath + updater.PendingVersionSuffix)
+	return err == nil
+}
+
+// updateBootProved reports whether the first boot of a fresh update reached
+// the first-successful-boot milestone, where run() sweeps .old and then
+// resolves the .update-pending breadcrumb (cmd/moombox/main.go). Past it a
+// Linux install has no rollback artifact left, and an exit inside
+// postUpdateFailureWindow used to end the launcher on preserve-with-
+// instructions where any other boot's crash is respawned. Windows keeps the
+// launcher's ~ image past the sweep and rolled back a release that had
+// started; both now take ordinary crash supervision.
+//
+// Only a breadcrumb that was there when the child was spawned can say so:
+// ApplyUpdate writes it best-effort, so its absence alone proves nothing
+// and a boot that started without one stays unproven until the window
+// ends.
+func updateBootProved(exePath string, pendingAtSpawn bool) bool {
+	return pendingAtSpawn && !updatePendingPresent(exePath)
+}
 
 // postUpdateVerdict is what the launcher does with a non-zero exit from the
 // first boot of a freshly-applied update.
