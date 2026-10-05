@@ -289,6 +289,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		segJobCtx.AudioStartSeq = oldAudioSeq
 
 		refreshResult, refreshErr := o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
+		if refreshErr != nil {
+			// The same retry the quality-loss refresh gets: the part was
+			// already closed, and ending the job here finalized a stream
+			// YouTube still calls live.
+			refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker,
+				func(info *youtube.VideoInfo) (*DownloadResult, error) {
+					return o.refreshDownload(ctx, &segJobCtx, info, result.IsHls)
+				})
+		}
 
 		if refreshErr != nil {
 			o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
@@ -501,10 +510,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// normal bounded exit below, exactly like a permission-
 				// denied call: log and return, letting muxAndFinalize
 				// process whatever was captured.
-				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				// Return nil to exit the live loop; muxAndFinalize will process
-				// whatever video/audio data was captured before the refresh failed.
-				return result, waitedForResume.value(), nil
+				// No resume evidence — but YouTube answered this very refresh
+				// with "live", and finalizing a stream it still calls live
+				// marked the job Finished mid-broadcast over what is often a
+				// transient manifest or cipher fetch. Retry on the still-live
+				// verify branch's cadence and budget first, from the same
+				// forced position.
+				curCtx.VideoStartSeq, curCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
+				refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker,
+					func(info *youtube.VideoInfo) (*DownloadResult, error) {
+						return o.refreshDownload(ctx, curCtx, info, result.IsHls)
+					})
+				curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
+				if refreshErr != nil {
+					o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+					// Return nil to exit the live loop; muxAndFinalize will process
+					// whatever video/audio data was captured before the refresh failed.
+					return result, waitedForResume.value(), nil
+				}
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
@@ -709,6 +732,75 @@ streamEnded:
 	}
 
 	return result, waitedForResume.value(), nil
+}
+
+// liveRefreshProber is the slice of the YouTube service refreshWhileLive needs.
+type liveRefreshProber interface {
+	GetVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+}
+
+// refreshWhileLive retries a live capture's failed refresh for as long as
+// YouTube keeps reporting the stream live: it waits streamEndVerifyInterval,
+// re-reads the player response, and refreshes again, spending the still-live
+// verify branch's budget (checks against maxConsecutiveLiveChecks). It returns
+// the first refresh that succeeds, or the last refresh error once the stream
+// is no longer reported live, the budget is spent, or ctx ends. A failed
+// re-read is not a verdict: it costs one check and the loop goes on.
+//
+// The live loop's refresh sites without resume evidence used to finalize on a
+// single failed refresh — a transient manifest or cipher fetch — and so marked
+// a stream YouTube had just called live Finished mid-broadcast.
+func (o *DownloadOrchestrator) refreshWhileLive(ctx context.Context, jobCtx *JobContext, info *youtube.VideoInfo, err error,
+	checks *atomic.Int32, tracker *ProgressTracker, refresh func(*youtube.VideoInfo) (*DownloadResult, error)) (*DownloadResult, error) {
+	var prober liveRefreshProber
+	if jobCtx.YT != nil {
+		prober = jobCtx.YT
+	}
+	return refreshWhileLiveWith(ctx, prober, jobCtx.Job.VideoID, info, err, checks,
+		func() {
+			if tracker != nil {
+				tracker.SetWaitActivity(engine.ActivityRetrying)
+			}
+		}, liveRefreshRetryWait, refresh, o.logger, jobCtx.Job.ID)
+}
+
+// liveRefreshRetryWait is refreshWhileLive's pause between attempts; a
+// variable so tests need not sleep it out.
+var liveRefreshRetryWait = streamEndVerifyInterval
+
+// refreshWhileLiveWith is refreshWhileLive with its collaborators passed in.
+func refreshWhileLiveWith(ctx context.Context, prober liveRefreshProber, videoID string, info *youtube.VideoInfo, err error,
+	checks *atomic.Int32, waiting func(), wait time.Duration, refresh func(*youtube.VideoInfo) (*DownloadResult, error),
+	lg logger, jobID string) (*DownloadResult, error) {
+	for prober != nil && info != nil && info.StreamStatus == youtube.StreamLive {
+		if checks.Add(1) >= maxConsecutiveLiveChecks {
+			return nil, err
+		}
+		lg.Warn("refresh failed while YouTube reports the stream live — retrying instead of ending the recording",
+			"err", err, "retryIn", wait, "jobID", jobID)
+		waiting()
+		if sleepErr := utils.Sleep(ctx, wait); sleepErr != nil {
+			return nil, sleepErr
+		}
+		fresh, getErr := prober.GetVideoInfo(ctx, videoID)
+		if getErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lg.Warn("re-reading the stream status for the refresh retry failed", "err", getErr, "jobID", jobID)
+			continue
+		}
+		info = fresh
+		if info.StreamStatus != youtube.StreamLive {
+			return nil, err
+		}
+		r, refreshErr := refresh(info)
+		if refreshErr == nil {
+			return r, nil
+		}
+		err = refreshErr
+	}
+	return nil, err
 }
 
 // qualityChangeInfo fetches the player response a quality change is judged

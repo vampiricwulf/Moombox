@@ -1,0 +1,100 @@
+package worker
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/youtube"
+)
+
+type scriptedProber struct {
+	answers []*youtube.VideoInfo
+	errs    []error
+	calls   int
+}
+
+func (p *scriptedProber) GetVideoInfo(context.Context, string) (*youtube.VideoInfo, error) {
+	i := p.calls
+	p.calls++
+	if i < len(p.errs) && p.errs[i] != nil {
+		return nil, p.errs[i]
+	}
+	if i < len(p.answers) {
+		return p.answers[i], nil
+	}
+	return &youtube.VideoInfo{StreamStatus: youtube.StreamLive}, nil
+}
+
+var errManifest = errors.New("dash manifest fetch: 503")
+
+// A live refresh that failed without resume evidence used to end the
+// recording on the spot — a transient manifest or cipher fetch marked a
+// stream YouTube had just called live Finished mid-broadcast. It is retried
+// now, for as long as YouTube keeps saying live and within the still-live
+// verify budget.
+//
+// Mutant: refreshWhileLiveWith returning the error at once — the "recovers"
+// row gets no result.
+func TestRefreshWhileLive(t *testing.T) {
+	live := &youtube.VideoInfo{StreamStatus: youtube.StreamLive}
+	ended := &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive}
+	for _, tc := range []struct {
+		name        string
+		info        *youtube.VideoInfo
+		prober      *scriptedProber
+		startChecks int32
+		failFirst   int // refreshes that fail before one succeeds
+		wantOK      bool
+		wantRefresh int
+	}{
+		{"recovers", live, &scriptedProber{}, 0, 1, true, 2},
+		{"ends while retrying", live, &scriptedProber{answers: []*youtube.VideoInfo{ended}}, 0, 9, false, 0},
+		{"budget spent", live, &scriptedProber{}, maxConsecutiveLiveChecks - 1, 9, false, 0},
+		{"not live to begin with", ended, &scriptedProber{}, 0, 9, false, 0},
+		{"a failed re-read is not a verdict", live, &scriptedProber{errs: []error{errors.New("429")}}, 0, 0, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var checks atomic.Int32
+			checks.Store(tc.startChecks)
+			refreshes := 0
+			r, err := refreshWhileLiveWith(context.Background(), tc.prober, "v", tc.info, errManifest, &checks, func() {},
+				time.Millisecond, func(*youtube.VideoInfo) (*DownloadResult, error) {
+					refreshes++
+					if refreshes <= tc.failFirst {
+						return nil, errManifest
+					}
+					return &DownloadResult{}, nil
+				}, nopWorkerLogger{}, "j")
+			if ok := err == nil && r != nil; ok != tc.wantOK {
+				t.Errorf("result %v, err %v — want success %v", r, err, tc.wantOK)
+			}
+			if refreshes != tc.wantRefresh {
+				t.Errorf("%d refreshes, want %d", refreshes, tc.wantRefresh)
+			}
+			if !tc.wantOK && err == nil {
+				t.Error("a failed retry must hand back an error")
+			}
+		})
+	}
+}
+
+// runLiveStreamDownload cannot be driven from a test (the YouTube service has
+// no injectable transport), so the two call sites are pinned by source: the
+// quality-loss refresh without resume evidence and the split's refresh both
+// go through refreshWhileLive before giving up.
+//
+// Mutant: either site calling refreshDownload alone again.
+func TestLiveRefreshSitesRetryWhileLive(t *testing.T) {
+	src, err := os.ReadFile("orchestrator_youtube.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(src), "o.refreshWhileLive(ctx,"); n != 2 {
+		t.Errorf("refreshWhileLive is called from %d live-loop sites, want 2 (quality loss, split)", n)
+	}
+}
