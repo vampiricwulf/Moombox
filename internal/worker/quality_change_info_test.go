@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,4 +87,52 @@ func TestQualityChangeInfoRetriesUntilSegmentsGoQuiet(t *testing.T) {
 			t.Errorf("got err=%v after %d fetches, want context.Canceled after 1", err, calls)
 		}
 	})
+}
+
+// TestQualityChangeInfoKeepsRetryingInsideAResumeWait: the quality-change
+// branch can run inside a resume wait — the monitor sees the broadcast back at
+// another quality — and there the downloaders are cancelled, so the time since
+// the last segment always reads past streamSegmentTimeout. The first failed
+// fetch then ended the job in Error although interruption_timeout still
+// allowed the wait. The wait's deadline bounds the retries instead; once it
+// passes, the segment clock decides again.
+//
+// Mutant: qualityChangeQuiet ignoring waiting — the first fetch's error comes
+// back.
+func TestQualityChangeInfoKeepsRetryingInsideAResumeWait(t *testing.T) {
+	errFetch := errors.New("player fetch failed")
+	const timeout = 30 * time.Minute
+	now := time.Now()
+	var episode waitDeadline
+	episode.exceeded(now, timeout) // the wait began now
+	sinceLastSeg := 2 * streamSegmentTimeout
+
+	calls := 0
+	_, err := qualityChangeInfo(context.Background(),
+		func(context.Context) (*youtube.VideoInfo, error) {
+			calls++
+			if calls > 100 {
+				t.Fatal("still fetching after the wait's deadline passed")
+			}
+			return nil, errFetch
+		},
+		func() time.Duration { return qualityChangeQuiet(episode.active(now, timeout), sinceLastSeg) },
+		func(context.Context, error) { now = now.Add(streamEndVerifyInterval) },
+	)
+	if !errors.Is(err, errFetch) {
+		t.Fatalf("err = %v, want the fetch's own error once the wait ran out", err)
+	}
+	if want := int(timeout/streamEndVerifyInterval) + 1; calls != want {
+		t.Errorf("calls = %d, want %d (one per verify interval until the wait's deadline)", calls, want)
+	}
+
+	// runLiveStreamDownload cannot be driven, so its call is pinned by source:
+	// the quiet clock it hands qualityChangeInfo consults the wait episode.
+	src, err := os.ReadFile("orchestrator_youtube.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "return qualityChangeQuiet(waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout),") {
+		t.Error("the quality-change refresh's quiet clock no longer consults the wait episode")
+	}
 }

@@ -419,7 +419,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				func(c context.Context) (*youtube.VideoInfo, error) {
 					return jobCtx.YT.GetVideoInfo(c, jobCtx.Job.VideoID)
 				},
-				func() time.Duration { return time.Since(lastSegTime.Load()) },
+				func() time.Duration {
+					return qualityChangeQuiet(waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout),
+						time.Since(lastSegTime.Load()))
+				},
 				func(c context.Context, err error) {
 					o.logger.Warn("failed to refresh video info after quality change, retrying",
 						"err", err, "retryIn", streamEndVerifyInterval, "jobID", jobCtx.Job.ID)
@@ -968,6 +971,19 @@ func qualityChangeInfo(
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// qualityChangeQuiet is the quiet time qualityChangeInfo gives up on. Inside a
+// resume wait the downloaders are cancelled, so the time since the last
+// segment always reads "too long" there, and the first failed fetch ended a
+// wait interruption_timeout still allowed, the job in Error. The wait's own
+// deadline bounds the retries instead (waiting is waitEpisode.active), as it
+// bounds the verify branch's unreadable looks.
+func qualityChangeQuiet(waiting bool, sinceLastSeg time.Duration) time.Duration {
+	if waiting {
+		return 0
+	}
+	return sinceLastSeg
 }
 
 // refreshDownload re-creates downloaders for an in-progress live stream from
