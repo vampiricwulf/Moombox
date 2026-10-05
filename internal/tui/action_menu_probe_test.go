@@ -360,3 +360,21 @@ func findMenuItemIn(t *testing.T, items []ActionMenuItem, chord string) (int, *A
 	t.Fatalf("%s is not in buildMenuItems", chord)
 	return -1, nil
 }
+
+// TestFilterEntryNamesWhatFDoesHere: the action menu's F entry read "Cycle
+// Filter" from every panel, but F toggles the description with Details
+// focused and cycles the log level with Logs focused.
+//
+// Mutant: a fixed label again.
+func TestFilterEntryNamesWhatFDoesHere(t *testing.T) {
+	for panel, want := range map[FocusPanel]string{
+		PanelTasks: "Cycle Status Filter", PanelDetails: "Toggle Description", PanelLogs: "Cycle Log Level",
+	} {
+		a := NewApp()
+		a.focusedPanel = panel
+		_, item := findMenuItemIn(t, a.buildMenuItems(), "F")
+		if item.Label != want {
+			t.Errorf("panel %v: F entry = %q, want %q", panel, item.Label, want)
+		}
+	}
+}

@@ -971,9 +971,18 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras"})
 	}
 
-	// Filter + Other
+	// Filter + Other. F does what handleFilter does for the focused panel,
+	// so the entry says that — "Cycle Filter" from Details toggled the
+	// description, and from Logs cycled the level.
+	filterLabel := "Cycle Status Filter"
+	switch a.focusedPanel {
+	case PanelDetails:
+		filterLabel = "Toggle Description"
+	case PanelLogs:
+		filterLabel = "Cycle Log Level"
+	}
 	items = append(items,
-		ActionMenuItem{Chord: "F", Label: "Cycle Filter", HintLabel: "Filter", Category: "Filter"},
+		ActionMenuItem{Chord: "F", Label: filterLabel, HintLabel: "Filter", Category: "Filter"},
 		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other"},
 		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other"},
 		ActionMenuItem{Chord: "Q Q", Label: "Quit", HintLabel: "Quit", Category: "Other"},
