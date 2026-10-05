@@ -138,12 +138,14 @@ type updateCheckTiming struct {
 
 // runUpdateCheckLoop runs the auto-update check: once shortly after boot, then
 // every period, each only while enabled() — re-read every time, so disabling
-// the toggle (the settings, or the dismiss route) stops an armed schedule
-// without a restart. It also re-reads the toggle every poll and checks at
-// once when it has turned ON: enabling it at runtime used to do nothing until
-// the next daily tick, up to a day later. Polling the store rather than
-// wiring a callback covers every writer of the flag — both settings UIs, the
-// setup wizard and the dismiss route. Returns when ctx ends.
+// the toggle in either settings UI stops an armed schedule without a restart.
+// It also re-reads the toggle every poll and checks at once when it has
+// turned ON: enabling it at runtime used to do nothing until the next daily
+// tick, up to a day later. Polling the store rather than wiring a callback
+// covers every writer of the flag — the web Settings save
+// (config_routes.go) and the TUI's — and any added later. (The dismiss route
+// is not one: it records SkippedVersion and leaves the toggle alone.)
+// Returns when ctx ends.
 func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), t updateCheckTiming) {
 	select {
 	case <-time.After(t.initialDelay):
