@@ -624,3 +624,58 @@ func TestOnFinishFiresOncePerRun(t *testing.T) {
 		t.Errorf("OnFinish fired %d time(s), want exactly 1 per completed run", finishes)
 	}
 }
+
+// TestStopAfterAGiveUpExitStillSavesTheSidecar covers the window between
+// runChatLoop returning and Start applying the completion rule. The loop here
+// leaves on a give-up (stale exhaustion), seeing no cancellation; a Stop()
+// then lands during Start's final flush — the orchestrator tearing the job
+// down. Start's switch takes the cancellation arm, which used to trust the
+// loop to have saved on its way out: it had not, so the sidecar was never
+// written and the next run would start at count 0 over the file's history.
+func TestStopAfterAGiveUpExitStillSavesTheSidecar(t *testing.T) {
+	dir := t.TempDir()
+	// The chat file's directory is a regular file, so the final flush fails
+	// and reports through OnError — the hook this test uses to land Stop()
+	// after the loop has left.
+	blocker := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resume := filepath.Join(dir, "chat.resume.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:             "vidLateStop",
+		OutputFile:          filepath.Join(blocker, "chat.json"),
+		ResumeFile:          resume,
+		InitialContinuation: "tok0",
+		ApiKey:              "k",
+		IsLiveOrUpcoming:    true,
+	})
+	loopLeft := false
+	cd.testRecoveryOverride = func(context.Context) bool {
+		loopLeft = true // the give-up: the loop leaves right after this
+		return false
+	}
+	cd.OnError = func(error) {
+		if loopLeft {
+			cd.Stop()
+		}
+	}
+
+	// m1 arrives first and is flushed at once, which also saves the sidecar
+	// at count 1; m2 lands inside the write interval, so only the end-of-run
+	// save can record it.
+	startWithScript(t, cd,
+		chatResponseWithIDs([]string{"m1"}, "tok1"),
+		chatResponseWithIDs([]string{"m2"}, ""))
+
+	if !cd.wasCancelledOrShutdown(context.Background()) {
+		t.Fatal("the test's Stop() never landed — the scenario under test did not happen")
+	}
+	state, ok := readSidecar(t, resume)
+	if !ok {
+		t.Fatal("a run stopped after its loop gave up must still save its resume sidecar")
+	}
+	if state.MessageCount != 2 {
+		t.Errorf("sidecar messageCount = %d, want 2 — the end-of-run save was skipped, leaving the in-loop one", state.MessageCount)
+	}
+}

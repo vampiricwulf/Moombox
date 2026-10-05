@@ -395,9 +395,9 @@ func staleRecoveryDelay(n int) time.Duration {
 // handleFetchError's consecutive-error budget, ErrAuthRequired — is NOT the
 // stream ending: the broadcast is still coming and another run will follow.
 // Those exits KEEP the sidecar and refresh it (saveResume) on the way out, so
-// the continuation and count on disk match what this run reached. The
-// cancel/shutdown save in runChatLoop and the ioErrorOccurred guard (never
-// clear after a failed flush) are unchanged. Without this rule a
+// the continuation and count on disk match what this run reached, and so
+// does a cancelled/shut-down run. The ioErrorOccurred guard (never clear after
+// a failed flush) is unchanged. Without this rule a
 // waiting-room chat that YouTube reset after inactivity lost its whole
 // archive: the next run found no sidecar, started at count 0, and its first
 // message took the full-write path over chat.json.
@@ -417,14 +417,15 @@ func staleRecoveryDelay(n int) time.Duration {
 // block's own comment below.
 //
 // THE OUTCOME. Start returns nil for every exit that is not a give-up. There
-// are three exceptions, and the worker turns any of them into chat_status
+// are four exceptions, and the worker turns any of them into chat_status
 // "incomplete" because messages can still be missing:
 //   - errStaleRecoveryExhausted — a stale-continuation cap firing on a
 //     still-live broadcast, either the consecutive-recovery one in runChatLoop
 //     or recoverStaleContinuation's own retry budget.
 //   - errChatFetchExhausted — handleFetchError's consecutive-error budget.
 //   - errChatAuthLost — the chat API refused the credentials (HTTP 401).
-func (cd *ChatDownloader) Start(ctx context.Context) error {
+//   - a recovered panic, reported as "chat downloader panic: ...".
+func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	if cd.running {
 		done := cd.done
@@ -475,8 +476,29 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	}
 	cd.mu.Unlock()
 
+	// Registered first so it runs LAST: done closes only after the recover
+	// below has recorded a panic's verdict, so a handoff waiter woken by the
+	// close reads that verdict rather than nil.
+	defer func() {
+		cd.mu.Lock()
+		cd.running = false
+		cd.cancelCtx = nil
+		done := cd.done
+		cd.done = nil
+		cd.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
+	}()
+
 	defer func() {
 		if r := recover(); r != nil {
+			// A panic is an outcome, not a clean exit: the capture stopped,
+			// so the run reports it like any other give-up and the worker
+			// records chat_status "incomplete" instead of "finished".
+			panicErr := fmt.Errorf("chat downloader panic: %v", r)
+			cd.setTerminalErr(panicErr)
+			retErr = panicErr
 			// Capture the stack at the point of panic so production crashes
 			// are diagnosable from the OnError sink alone.
 			stack := debug.Stack()
@@ -487,24 +509,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 					defer func() {
 						_ = recover()
 					}()
-					cd.OnError(fmt.Errorf("chat downloader panic: %v\n%s", r, stack))
+					cd.OnError(fmt.Errorf("%w\n%s", panicErr, stack))
 				}()
 			}
-			cd.mu.Lock()
-			cd.running = false
-			cd.mu.Unlock()
-		}
-	}()
-
-	defer func() {
-		cd.mu.Lock()
-		cd.running = false
-		cd.cancelCtx = nil
-		done := cd.done
-		cd.done = nil
-		cd.mu.Unlock()
-		if done != nil {
-			close(done)
 		}
 	}()
 
@@ -641,12 +648,15 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	completed := cd.streamEnded || !cd.opts.IsLiveOrUpcoming
 	cd.mu.Unlock()
 	switch {
-	case cd.wasCancelledOrShutdown(ctx):
-		// Cancellation / shutdown — runChatLoop already saved on its way out.
-	case !completed:
-		// A live/upcoming run that left for some reason OTHER than the stream
-		// ending. The next run needs the sidecar to know chat.json already
-		// holds history; refresh it so the continuation and count are current.
+	case cd.wasCancelledOrShutdown(ctx), !completed:
+		// Cancellation / shutdown, or a live/upcoming run that left for some
+		// reason OTHER than the stream ending. The next run needs the sidecar
+		// to know chat.json already holds history; save it here, after the
+		// final flush above, so the continuation and count are current. The
+		// cancellation case is decided HERE rather than on the loop's way
+		// out: a Stop() that lands after the loop left on a give-up but
+		// before this switch takes this arm, and must not find the save
+		// skipped because the loop saw no cancellation when it exited.
 		if cd.flushedToDisk || len(cd.messages) > 0 {
 			cd.saveResume()
 		}
@@ -968,13 +978,6 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		if delay := cd.computePollDelay(resp); delay > 0 {
 			cd.sleep(ctx, delay)
 		}
-	}
-
-	// Save resume state when cancelled or context cancelled (shutdown race).
-	// We save if there are unflushed messages OR any disk-flushed state exists
-	// (dedup IDs, continuation token) so a resume can pick up where we left off.
-	if cd.wasCancelledOrShutdown(ctx) && (len(cd.messages) > 0 || cd.flushedToDisk) {
-		cd.saveResume()
 	}
 }
 

@@ -1226,7 +1226,7 @@ func (cd *ChatDownloader) clearResumeState() {
 // than racing on the dedup/resume state — the struct retains its dedup set
 // across calls, and re-initialising it while a previous session is still
 // draining would drop messages.
-func (cd *ChatDownloader) Start(ctx context.Context) error {
+func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	if cd.running {
 		cd.mu.Unlock()
@@ -1291,6 +1291,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		if r := recover(); r != nil {
 			cd.logger.Error("chat downloader panic", "panic", r)
 			panicked = true
+			// A panic is an outcome, not a clean exit: the worker records
+			// chat_status "incomplete" for it instead of "finished".
+			retErr = fmt.Errorf("twitch chat downloader panic: %v", r)
 		}
 
 		cd.mu.Lock()

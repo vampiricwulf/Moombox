@@ -148,12 +148,15 @@ func (vcd *VodChatDownloader) currentAuthToken() string {
 }
 
 // Start downloads all VOD chat comments.
-func (vcd *VodChatDownloader) Start(ctx context.Context) error {
+func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 	vcd.running.Store(true)
 	defer vcd.running.Store(false)
 	defer func() {
 		if r := recover(); r != nil {
 			vcd.logger.Error("VOD chat downloader panic", "panic", r, "vodID", vcd.vodID)
+			// A panic is an outcome, not a clean exit: the worker records
+			// chat_status "incomplete" for it instead of "finished".
+			retErr = fmt.Errorf("VOD chat downloader panic: %v", r)
 		}
 	}()
 
