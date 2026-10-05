@@ -182,10 +182,18 @@ func (sp *StreamProcessor) SetOnTwitchAuthLoss(fn func(reason string)) {
 // releaseArchiveSlot wakes the scheduler after a slot-release flip when the
 // job actually held a slot (priority 1). Ordinary broadcasts (priority 0)
 // free nothing, so no sweep is provoked for them.
+//
+// Both flip sites have just written queue_priority 0 to the row; this brings
+// the *Job that processJob carries for the rest of the run into line. It used
+// to keep the stale 1, and CookieResumeStatus reads the struct: a backlog
+// row that turned out to be a live broadcast, then lost its cookies mid-
+// capture, was resumed by the automatic refresh as Queued — a live broadcast
+// waiting for its channel's archive slot behind the VOD downloads.
 func (sp *StreamProcessor) releaseArchiveSlot(job *database.Job) {
 	if job.QueuePriority == 1 && sp.wakeScheduler != nil {
 		sp.wakeScheduler()
 	}
+	job.QueuePriority = 0
 }
 
 // Stop gracefully stops the stream processor and any active chat downloaders.

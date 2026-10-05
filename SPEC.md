@@ -253,7 +253,7 @@ SEGMENT muxes run on goroutines parented by the orchestrator's mux root rather t
 
 The worker also owns the **backlog Scheduler**: a single admission goroutine that is the only path out of `Queued`. Woken by backlog-job creation and job completion (with a heartbeat safety net), it admits per channel at most `archive_slots` minus that channel's in-flight backlog jobs, newest published first — writing `Upcoming` durably before enqueueing so a crash between the two steps self-heals on restart. `ShouldProcess(Queued)` is false by design, so neither startup recovery nor the heartbeat poller ever touches a `Queued` row.
 
-Priority ordering: Live=1 (highest), Upcoming/Downloading=0, Error=-1 (lowest). Live streams are always processed before upcoming or retried jobs. The pending queue caps at 100 entries; jobs beyond that are dropped with a warning log. Duplicate detection uses both the pending set and the processing map — a job that is already pending or actively processing is not re-enqueued.
+Priority ordering: Live=1 (highest), everything else 0 — every retry path writes Upcoming or Downloading before it enqueues. Live streams are always processed before upcoming or retried jobs. The pending queue caps at 100 entries; jobs beyond that are dropped with a warning log. Duplicate detection uses both the pending set and the processing map — a job that is already pending or actively processing is not re-enqueued.
 
 **processJob flow** (DownloadWorker.processJob, runs in a goroutine per job):
 1. Fetch job from database, verify it is still in a processable state

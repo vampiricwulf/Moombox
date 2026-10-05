@@ -138,30 +138,18 @@ func TestDequeue_ContextCancellation(t *testing.T) {
 func TestDequeue_PriorityOrdering(t *testing.T) {
 	q := NewJobQueue(10)
 
-	// Enqueue jobs with different priorities: Error(-1), Upcoming(0), Live(1)
-	q.Enqueue("error_job", database.StatusError)
+	// Live (priority 1) jumps the queue; everything else is FIFO at 0.
 	q.Enqueue("upcoming_job", database.StatusUpcoming)
+	q.Enqueue("downloading_job", database.StatusDownloading)
 	q.Enqueue("live_job", database.StatusLive)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	// Live should come first (priority 1)
-	id1, _, ok1 := q.Dequeue(ctx)
-	if !ok1 || id1 != "live_job" {
-		t.Errorf("first dequeue = %q, ok=%v, want live_job/true", id1, ok1)
-	}
-
-	// Upcoming should come second (priority 0)
-	id2, _, ok2 := q.Dequeue(ctx)
-	if !ok2 || id2 != "upcoming_job" {
-		t.Errorf("second dequeue = %q, ok=%v, want upcoming_job/true", id2, ok2)
-	}
-
-	// Error should come last (priority -1)
-	id3, _, ok3 := q.Dequeue(ctx)
-	if !ok3 || id3 != "error_job" {
-		t.Errorf("third dequeue = %q, ok=%v, want error_job/true", id3, ok3)
+	for i, want := range []string{"live_job", "upcoming_job", "downloading_job"} {
+		if id, _, ok := q.Dequeue(ctx); !ok || id != want {
+			t.Errorf("dequeue %d = %q, ok=%v, want %s/true", i+1, id, ok, want)
+		}
 	}
 }
 
@@ -566,7 +554,7 @@ func TestCalculatePriority(t *testing.T) {
 		{database.StatusLive, 1},
 		{database.StatusUpcoming, 0},
 		{database.StatusDownloading, 0},
-		{database.StatusError, -1},
+		{database.StatusError, 0},
 		{database.StatusFinished, 0},
 		{database.StatusCancelled, 0},
 	}

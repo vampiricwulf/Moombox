@@ -24,30 +24,6 @@ func (stubCipherSolver) Batch(_ context.Context, _ string, sigs, ns []string) (m
 	return map[string]string{}, map[string]string{}, nil
 }
 
-func TestIsTerminalStatus(t *testing.T) {
-	tests := []struct {
-		status   database.JobStatus
-		expected bool
-	}{
-		{database.StatusFinished, true},
-		{database.StatusError, true},
-		{database.StatusCancelled, true},
-		{database.StatusUpcoming, false},
-		{database.StatusLive, false},
-		{database.StatusDownloading, false},
-		{database.StatusMuxing, false},
-		{database.StatusCookies, false},
-		{database.StatusQueued, false},
-	}
-
-	for _, tt := range tests {
-		result := isTerminalStatus(tt.status)
-		if result != tt.expected {
-			t.Errorf("isTerminalStatus(%q) = %v, want %v", tt.status, result, tt.expected)
-		}
-	}
-}
-
 // testWorkerSetup creates a DownloadWorker against a temp SQLite DB with a
 // minimal config. Returned worker has no Twitch service, no notifier, no
 // connectivity monitor — sufficient for testing pure DB-driven methods like

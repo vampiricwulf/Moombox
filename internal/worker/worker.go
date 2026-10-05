@@ -703,9 +703,23 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
-	// Check if job is already in a terminal state (stale check)
-	if isTerminalStatus(job.Status) {
-		w.logger.Debug("skipping terminal job", "jobID", jobID, "status", job.Status)
+	// Stale check: the row must still be one the queue processes. Terminal
+	// rows were the only ones skipped, but a heartbeat that read the row
+	// before a run parked it in COOKIES? (or a sweep that sent it back to
+	// Queued) can enqueue it once that run exits — and this run would then
+	// probe, notify and refresh cookies for a parked row all over again, or
+	// download a backlog VOD the scheduler never admitted.
+	if !ShouldProcess(job) {
+		if job.Status == database.StatusCancelled && w.queue.WasCancelled(jobID) {
+			// Cancelled between Dequeue and here: queue.Cancel flagged this
+			// run, so the cancel route left the notification to it.
+			w.logger.Info("job cancelled by user", "jobID", jobID)
+			if w.notifier != nil {
+				w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
+			}
+			return
+		}
+		w.logger.Debug("skipping job no longer in a processable state", "jobID", jobID, "status", job.Status)
 		return
 	}
 
@@ -752,14 +766,19 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.handleCancellation(job)
 			return
 		}
-		if result.Error != "" {
-			// AsError preserves any ErrSentinel attached by the producer
-			// (e.g. ErrCookiesRequired from checkPlayability) so
-			// setJobError's errors.Is checks fire correctly. Without
-			// this wrap, the prior code's errors.New stripped the
-			// sentinel and forced setJobError back to string-matching.
-			w.setJobError(job, result.AsError())
+		if result.Error == "" {
+			// Every producer of ShouldDownload:false names a reason today.
+			// One that did not would leave the row in whatever non-terminal
+			// state it had, with nothing driving it and nothing said; make
+			// that visible instead.
+			result.Error = "stream processing declined the job without a reason"
 		}
+		// AsError preserves any ErrSentinel attached by the producer (e.g.
+		// ErrCookiesRequired from checkPlayability) so setJobError's
+		// errors.Is checks fire correctly. Without this wrap, the prior
+		// code's errors.New stripped the sentinel and forced setJobError
+		// back to string-matching.
+		w.setJobError(job, result.AsError())
 		return
 	}
 
@@ -1167,15 +1186,6 @@ func cancelledChatStatus(current string) (string, bool) {
 		return "", true
 	}
 	return "", false
-}
-
-func isTerminalStatus(status database.JobStatus) bool {
-	switch status {
-	case database.StatusFinished, database.StatusError, database.StatusCancelled:
-		return true
-	default:
-		return false
-	}
 }
 
 func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {

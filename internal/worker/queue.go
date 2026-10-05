@@ -14,20 +14,16 @@ type pendingJob struct {
 	Priority int
 }
 
-// calculatePriority returns the queue priority for a job status.
-// Live=1 (highest), Upcoming/Downloading=0, Error=-1 (lowest).
-// Matches TS: Live streams are processed before upcoming/retried jobs.
+// calculatePriority returns the queue priority for a job status: Live=1
+// (highest), everything else 0. Matches TS: Live streams are processed before
+// upcoming and resumed jobs. (There was an Error=-1 tier "for retries", but
+// every retry path writes Upcoming or Downloading before it enqueues, and
+// processJob skips a row the queue does not process, so nothing reached it.)
 func calculatePriority(status database.JobStatus) int {
-	switch status {
-	case database.StatusLive:
+	if status == database.StatusLive {
 		return 1
-	case database.StatusUpcoming, database.StatusDownloading:
-		return 0
-	case database.StatusError:
-		return -1
-	default:
-		return 0
 	}
+	return 0
 }
 
 // JobQueue manages the download job queue with separate lifecycle and download concurrency.
@@ -391,12 +387,6 @@ func (q *JobQueue) Complete(jobID string) {
 		q.releaseDownloadSlotLocked(jobID)
 	}
 
-	// Wake a parked Dequeue so it re-checks the backlog (the lifecycle slot is
-	// released above, and Dequeue no longer waits on it).
-	select {
-	case q.notify <- struct{}{}:
-	default:
-	}
 }
 
 // Cancel cancels a specific job (user-initiated). Returns true when it
