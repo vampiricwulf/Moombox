@@ -123,6 +123,9 @@ globalThis.__makeApp = function (jobs, parkedBaseline) {
     // job_update (to or from Finished) and job_deleted refresh the Player's
     // recording picker; a no-op here.
     _refreshPlayerPicker() {},
+    // A same-status job_update re-renders when the row's sort key moved; the
+    // title is the key for every status these rows use.
+    _sortKey(job) { return job.title; },
     settings: { refreshBackfillBadges() {} },
     stats: { updateActiveIndicator() {}, updateDiskIndicator() {} },
     // The Arc I controllers handleMessage reaches: the log panel, the details
