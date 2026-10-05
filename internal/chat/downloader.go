@@ -2,7 +2,6 @@ package chat
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1601,96 +1600,6 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 	return nil
 }
 
-// salvageChatFileMessages reads the chat file at path and returns every
-// message it holds intact. damaged reports that the file stops parsing
-// somewhere — a zero-filled tail a crash left, a cut mid-record — and the
-// messages returned are the ones before that point. err is for a file that
-// could not be read at all (os.IsNotExist for a missing one).
-//
-// Read whole, like the full Unmarshal it replaces: this is the rewrite
-// fallback's input, and the rewrite holds every message in memory anyway.
-func salvageChatFileMessages(path string) (msgs []ChatMessage, damaged bool, err error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if tok, terr := dec.Token(); terr != nil || tok != json.Delim('{') {
-		return nil, true, nil
-	}
-	for {
-		keyTok, kerr := dec.Token()
-		if kerr != nil {
-			return msgs, true, nil
-		}
-		if keyTok == json.Delim('}') {
-			break
-		}
-		key, isKey := keyTok.(string)
-		if !isKey {
-			return msgs, true, nil
-		}
-		if key != "messages" {
-			if serr := utils.SkipJSONValue(dec); serr != nil {
-				return msgs, true, nil
-			}
-			continue
-		}
-		opening, oerr := dec.Token()
-		if oerr != nil {
-			return msgs, true, nil
-		}
-		if opening == nil { // "messages": null
-			continue
-		}
-		if opening != json.Delim('[') {
-			return msgs, true, nil
-		}
-		for dec.More() {
-			var m ChatMessage
-			if derr := dec.Decode(&m); derr != nil {
-				return msgs, true, nil
-			}
-			msgs = append(msgs, m)
-		}
-		if _, cerr := dec.Token(); cerr != nil { // the array's ']'
-			return msgs, true, nil
-		}
-	}
-	if _, eerr := dec.Token(); !errors.Is(eerr, io.EOF) {
-		return msgs, true, nil
-	}
-	return msgs, false, nil
-}
-
-// preserveChatFileCopy keeps the bytes at path under dst before a rewrite
-// replaces them: a hard link where the filesystem allows one (the atomic
-// rewrite swaps a new file in under path, so the link keeps the old one at no
-// cost), else a copy. A dst left by an earlier preservation is replaced, as
-// adoption's rename to the same name replaces it.
-func preserveChatFileCopy(path, dst string) error {
-	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.Link(path, dst); err == nil {
-		return nil
-	}
-	src, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, src); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
-}
-
 // adoptExistingChatFile is THE ADOPTION RULE: when Start finds no usable
 // resume sidecar but OutputFile already exists, that file is history from an
 // earlier run of this same job — most often an early-chat run that exited
@@ -1795,7 +1704,7 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 // would overwrite history this run never saw, so the batch waits for the next
 // flush instead.
 func (cd *ChatDownloader) prependExistingMessages(outputFile string) bool {
-	existing, damaged, err := salvageChatFileMessages(outputFile)
+	existing, damaged, err := utils.SalvageChatMessages[ChatMessage](outputFile)
 	if err != nil && !os.IsNotExist(err) {
 		cd.reportIOError(fmt.Errorf("read chat file for rewrite: %w", err))
 		return false
@@ -1803,7 +1712,7 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) bool {
 	if damaged {
 		corruptPath := outputFile + corruptChatSuffix
 		cd.reportIOError(fmt.Errorf("chat file damaged; keeping its %d intact messages and the original as %s", len(existing), corruptPath))
-		if perr := preserveChatFileCopy(outputFile, corruptPath); perr != nil {
+		if perr := utils.PreserveFileCopy(outputFile, corruptPath); perr != nil {
 			cd.reportIOError(fmt.Errorf("preserve damaged chat file: %w", perr))
 		}
 	}

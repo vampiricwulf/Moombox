@@ -397,3 +397,94 @@ func writeHeaderFieldsToOpenFile(f *os.File, size int64, count int) error {
 	}
 	return nil
 }
+
+// SalvageChatMessages reads the chat file at path and returns every
+// message it holds intact. damaged reports that the file stops parsing
+// somewhere — a zero-filled tail a crash left, a cut mid-record — and the
+// messages returned are the ones before that point. err is for a file that
+// could not be read at all (os.IsNotExist for a missing one).
+//
+// Read whole: this is a rewrite's input, and the rewrite holds every message
+// in memory anyway. Shared by the YouTube and Twitch chat writers, whose
+// files keep their messages array last (AppendChatMessages relies on it).
+func SalvageChatMessages[T any](path string) (msgs []T, damaged bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, terr := dec.Token(); terr != nil || tok != json.Delim('{') {
+		return nil, true, nil
+	}
+	for {
+		keyTok, kerr := dec.Token()
+		if kerr != nil {
+			return msgs, true, nil
+		}
+		if keyTok == json.Delim('}') {
+			break
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return msgs, true, nil
+		}
+		if key != "messages" {
+			if serr := SkipJSONValue(dec); serr != nil {
+				return msgs, true, nil
+			}
+			continue
+		}
+		opening, oerr := dec.Token()
+		if oerr != nil {
+			return msgs, true, nil
+		}
+		if opening == nil { // "messages": null
+			continue
+		}
+		if opening != json.Delim('[') {
+			return msgs, true, nil
+		}
+		for dec.More() {
+			var m T
+			if derr := dec.Decode(&m); derr != nil {
+				return msgs, true, nil
+			}
+			msgs = append(msgs, m)
+		}
+		if _, cerr := dec.Token(); cerr != nil { // the array's ']'
+			return msgs, true, nil
+		}
+	}
+	if _, eerr := dec.Token(); !errors.Is(eerr, io.EOF) {
+		return msgs, true, nil
+	}
+	return msgs, false, nil
+}
+
+// PreserveFileCopy keeps the bytes at path under dst before a rewrite
+// replaces them: a hard link where the filesystem allows one (the atomic
+// rewrite swaps a new file in under path, so the link keeps the old one at no
+// cost), else a copy. A dst left by an earlier preservation is replaced, as
+// adoption's rename to the same name replaces it.
+func PreserveFileCopy(path, dst string) error {
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Link(path, dst); err == nil {
+		return nil
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}

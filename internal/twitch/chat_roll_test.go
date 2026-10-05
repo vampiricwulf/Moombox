@@ -140,7 +140,9 @@ func TestRestoreResumeState(t *testing.T) {
 	}{
 		{"legacy single-file state", ChatResumeState{MessageCount: 42, RecentIDs: []string{"x"}}, true, 42, 42, true},
 		{"part-aware state", ChatResumeState{MessageCount: 5, TotalCount: 120, RecentIDs: []string{"x"}}, true, 5, 120, true},
-		{"state without its chat file", ChatResumeState{MessageCount: 5, TotalCount: 120, RecentIDs: []string{"x"}}, false, 0, 120, false},
+		// The part's 5 messages went with its file, so they leave the job
+		// total too (they used to stay in it for the rest of the job).
+		{"state without its chat file", ChatResumeState{MessageCount: 5, TotalCount: 120, RecentIDs: []string{"x"}}, false, 0, 115, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

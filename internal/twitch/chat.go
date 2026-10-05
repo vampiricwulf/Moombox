@@ -317,6 +317,11 @@ type ChatDownloader struct {
 	fileCount        int   // messages belonging to the CURRENT part file (header count)
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
+	// partUnread records that the part file existed at Start but could not be
+	// read (an AV lock, a sharing violation), so it was neither adopted nor
+	// moved aside. Until it is adopted, flushLocked must not take the
+	// first-write path, which would replace its history. Guarded by cd.mu.
+	partUnread bool
 	// lastResumeSave is when saveResumeStateThrottled last WROTE. Guarded by
 	// cd.mu; the zero value means "never", which always writes. A time.Time
 	// in a struct field keeps its monotonic reading, so the comparison below
@@ -784,14 +789,18 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 	}
 
 	cd.mu.Lock()
+	cd.totalCount = max(state.TotalCount, state.MessageCount) + unsaved
 	if fileExists {
 		cd.fileCount = state.MessageCount + unsaved
 		cd.flushedToDisk = true
 	} else {
 		cd.fileCount = 0
 		cd.flushedToDisk = false
+		// The job total counted this part's messages too, and they went with
+		// the file: kept, the total stayed above everything on disk for the
+		// rest of the job.
+		cd.totalCount = max(cd.totalCount-state.MessageCount, 0)
 	}
-	cd.totalCount = max(state.TotalCount, state.MessageCount) + unsaved
 	cd.lastTimestampMs = state.LastTimestampMs
 	cd.dedup.Restore(state.RecentIDs)
 	cd.mu.Unlock()
@@ -1002,23 +1011,36 @@ var chatFileRecordingBaseMs = func(path string) (int64, bool, error) {
 // call RollFile in between — and the new part's counters must not be seeded
 // from the closed part's file.
 func (cd *ChatDownloader) adoptExistingPartFile() int {
+	n, _ := cd.adoptPartFile(false)
+	return n
+}
+
+// adoptPartFile is adoptExistingPartFile's body. retry is set when flushLocked
+// tries again a part that could not be read at Start: by then the counters
+// hold the messages captured since, so the adopted ones are ADDED to them
+// rather than taking their place. unread reports that the file is still
+// there and still could not be read — the caller must not write over it.
+func (cd *ChatDownloader) adoptPartFile(retry bool) (adopted int, unread bool) {
 	path := cd.currentOutputPath()
 	if path == "" {
-		return 0
+		return 0, false
 	}
 	summary, err := readChatPartFileSummary(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0 // nothing on disk — a fresh part
+			cd.setPartUnread(false)
+			return 0, false // nothing on disk — a fresh part
 		}
 		if !errors.Is(err, errChatPartMalformed) {
 			// Read failure, not a content verdict. Leave the file where it is
-			// and leave flushedToDisk false: this part behaves exactly as it
-			// did before the adoption existed.
+			// and leave flushedToDisk false — and remember it, so the first
+			// flush adopts it then instead of writing over it (flushLocked).
 			cd.logger.Warn("twitch chat: cannot read the existing part file; leaving it in place",
 				"channel", cd.channelLogin, "path", path, "err", err)
-			return 0
+			cd.setPartUnread(true)
+			return 0, true
 		}
+		cd.setPartUnread(false)
 		corruptPath := path + chatCorruptSuffix
 		cd.logger.Error("twitch chat: existing part file unreadable; preserving it instead of overwriting",
 			"channel", cd.channelLogin, "path", path, "preservedAs", corruptPath, "err", err)
@@ -1026,19 +1048,26 @@ func (cd *ChatDownloader) adoptExistingPartFile() int {
 			cd.logger.Error("twitch chat: could not preserve the unreadable part file; the next flush will overwrite it",
 				"channel", cd.channelLogin, "path", path, "err", renameErr)
 		}
-		return 0
+		return 0, false
 	}
+	cd.setPartUnread(false)
 	if summary.messages == 0 {
-		return 0
+		return 0, false
 	}
 
 	cd.mu.Lock()
 	adopt := cd.outputPath == path && !cd.flushedToDisk
 	if adopt {
-		cd.fileCount = summary.messages
-		// The job-level metric never drops: a sidecar that restored a larger
-		// cumulative total (parts closed earlier in this job) keeps it.
-		cd.totalCount = max(cd.totalCount, summary.messages)
+		if retry {
+			cd.fileCount += summary.messages
+			cd.totalCount += summary.messages
+		} else {
+			cd.fileCount = summary.messages
+			// The job-level metric never drops: a sidecar that restored a
+			// larger cumulative total (parts closed earlier in this job)
+			// keeps it.
+			cd.totalCount = max(cd.totalCount, summary.messages)
+		}
 		cd.flushedToDisk = true
 		// Add, not Restore: additive seeding cannot discard whatever a
 		// sidecar restore already put there.
@@ -1052,11 +1081,53 @@ func (cd *ChatDownloader) adoptExistingPartFile() int {
 	cd.mu.Unlock()
 
 	if !adopt {
-		return 0
+		return 0, false
 	}
 	cd.logger.Info("twitch chat: adopting the existing part file",
 		"channel", cd.channelLogin, "path", path, "messages", summary.messages)
-	return summary.messages
+	return summary.messages, false
+}
+
+// setPartUnread records whether the current part file is one that exists and
+// could not be read; see partUnread.
+func (cd *ChatDownloader) setPartUnread(v bool) {
+	cd.mu.Lock()
+	cd.partUnread = v
+	cd.mu.Unlock()
+}
+
+// repairDamagedPart salvages a resumed part whose file no longer ends the way
+// an append needs (a crash-torn tail, a cut mid-record). The resume trusted
+// the file on a stat, so every flush failed against it: the batch stayed in
+// memory, was retried each second, and was thrown away at the stream's end
+// while the job read "finished". The intact messages are kept, the original
+// bytes are kept beside it as <path>.corrupt, and the counters follow the
+// rewritten file.
+func (cd *ChatDownloader) repairDamagedPart() {
+	path := cd.currentOutputPath()
+	if path == "" {
+		return
+	}
+	if intact, err := utils.ChatFileEndIntact(path); err != nil || intact {
+		return
+	}
+	cd.mu.Lock()
+	before := cd.fileCount
+	startMs := cd.recordingStartMs.Load()
+	cd.mu.Unlock()
+	cd.logger.Warn("twitch chat: the resumed part file is damaged; salvaging it",
+		"channel", cd.channelLogin, "path", path)
+	kept, err := rewriteChatFileWithHistory(path, nil, cd.logger, func(merged []TwitchChatMessage) error {
+		return cd.writeFullChatFileTo(path, merged, len(merged), startMs)
+	})
+	if err != nil {
+		cd.logger.Error("twitch chat: could not salvage the damaged part file", "path", path, "err", err)
+		return
+	}
+	cd.mu.Lock()
+	cd.fileCount += kept - before
+	cd.totalCount = max(cd.totalCount+kept-before, 0)
+	cd.mu.Unlock()
 }
 
 // chatPartFileSummary is everything adoptExistingPartFile needs out of a part
@@ -1302,6 +1373,12 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		cd.mu.Lock()
 		sidecarRestored := cd.flushedToDisk
 		cd.mu.Unlock()
+		if sidecarRestored {
+			// The sidecar says the part holds history; make sure an append can
+			// still reach its end before trusting it with one. After the base
+			// adoption above, so the rewrite keeps the part's own base.
+			cd.repairDamagedPart()
+		}
 		if !sidecarRestored {
 			// The adopted count is deliberately NOT pushed through
 			// callOnProgress here. MessageCount() is cd.totalCount, which this
@@ -1332,7 +1409,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		cd.running = false
 		streamEnded := cd.streamEnded
 		cd.mu.Unlock()
-		cd.flush()
+		flushErr := cd.flush()
 
 		if panicked {
 			// Don't clear resume state on panic — allow resume on restart.
@@ -1352,6 +1429,31 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			// here used to destroy all previously archived chat), and skip
 			// emote enrichment: enriched files must not receive appends.
 			cd.saveResumeState()
+			return
+		}
+
+		if flushErr != nil {
+			// The stream is over and the file would not take the last
+			// messages. They used to be dropped here with the sidecar cleared
+			// and nil returned, so the job read "finished" over a capture
+			// that had lost them. Spill them beside the part, keep the
+			// sidecar, and report the capture incomplete.
+			cd.mu.Lock()
+			pending := append([]TwitchChatMessage(nil), cd.messages...)
+			path := cd.outputPath
+			cd.mu.Unlock()
+			if len(pending) > 0 && path != "" {
+				if dumpErr := dumpLostChatBatch(path, pending); dumpErr != nil {
+					cd.logger.Error("twitch chat: could not spill the unwritten messages", "path", path, "err", dumpErr)
+				} else {
+					cd.logger.Error("twitch chat: final flush failed; unwritten messages spilled for recovery",
+						"path", path+".lostbatch.json", "messages", len(pending))
+				}
+			}
+			cd.saveResumeState()
+			if retErr == nil {
+				retErr = fmt.Errorf("twitch chat: final flush failed, %d messages not written to %s: %w", len(pending), path, flushErr)
+			}
 			return
 		}
 

@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -356,24 +357,27 @@ func (l *allLevelLogger) sawContaining(needle string) bool {
 	return false
 }
 
-// TestStartLeavesAnUnreadablePartFileWhenTheSidecarRestoredIt is the gate: the
+// TestStartSalvagesADamagedPartFileTheSidecarRestored keeps the gate: the
 // adoption is for the case where NO sidecar restored the part, and it must not
 // run — must not even READ the file — when one did.
 //
 // The sidecar sets flushedToDisk from a file that merely stats, so if the
 // adoption still ran here its corrupt branch would rename that file aside
 // while the flag stayed true: every later flush would then take the append
-// path against a path with no file, fail, fail again through the merge
-// fallback, and keep the batch pending forever — the whole broadcast buffered
-// in memory with nothing on disk.
+// path against a path with no file.
 //
-// What this test does NOT do is repair that input. A part file that has become
-// unreadable while its sidecar still points at it loses the session's chat
-// today and lost it before the adoption existed too (the append finds no
-// closing bracket and the merge fallback cannot parse the file, so flushLocked
-// retries forever). That is PRE-EXISTING behaviour, pinned here as it stands:
-// the file is left exactly where it is, holding exactly its own bytes.
-func TestStartLeavesAnUnreadablePartFileWhenTheSidecarRestoredIt(t *testing.T) {
+// A part file that went bad under its sidecar is REPAIRED instead
+// (repairDamagedPart): the resume checks the file still ends the way an
+// append needs, and when it does not, keeps its intact messages, keeps the
+// original bytes beside it as .corrupt, and rewrites it. It used to be
+// trusted as is: the append found no closing bracket, the merge fallback
+// could not parse it, and flushLocked retried every second with the batch
+// growing in memory — then threw it away at the stream's end while the job
+// read "finished".
+//
+// Mutant: skip repairDamagedPart in Start — the part keeps its garbage and
+// the batch stays pending.
+func TestStartSalvagesADamagedPartFileTheSidecarRestored(t *testing.T) {
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	chatPath := filepath.Join(t.TempDir(), "seg_2", "chat.json")
 	seed := newTestChatDownloader(t, chatPath)
@@ -402,30 +406,15 @@ func TestStartLeavesAnUnreadablePartFileWhenTheSidecarRestoredIt(t *testing.T) {
 	if !logger.sawContaining("Resuming from saved state") {
 		t.Fatalf("the sidecar did not restore the part; the test input is wrong")
 	}
-	if _, err := os.Stat(chatPath + chatCorruptSuffix); err == nil {
-		t.Errorf("the part file was renamed to %s even though the sidecar restored it", chatPath+chatCorruptSuffix)
+	// The adoption's O(file) pass still does not run for a restored part.
+	if logger.sawContaining("adopting the existing part file") || logger.sawContaining("cannot read the existing part file") {
+		t.Errorf("the adoption ran even though the sidecar restored the part: %v", logger.lines)
 	}
-	onDisk, err := os.ReadFile(chatPath)
-	if err != nil {
-		t.Fatalf("the part file is gone from its path: %v", err)
-	}
-	if string(onDisk) != garbage {
-		t.Errorf("part file = %q, want it left exactly as it was", string(onDisk))
+	preserved, err := os.ReadFile(chatPath + chatCorruptSuffix)
+	if err != nil || string(preserved) != garbage {
+		t.Errorf("the damaged original was not kept as .corrupt (err %v): %q", err, string(preserved))
 	}
 
-	// The O(file) pass must not have run at all: for THIS input the reader
-	// cannot return without the caller logging one of its two failure lines.
-	if logger.sawContaining("unreadable") || logger.sawContaining("cannot open") ||
-		logger.sawContaining("adopting the existing part file") {
-		t.Errorf("the part file was read even though the sidecar restored it: %v", logger.lines)
-	}
-
-	// And the pre-existing outcome, pinned as it stands rather than repaired:
-	// flushedToDisk is true from the sidecar, so the flush takes the append
-	// path, AppendChatMessages finds no closing bracket in the garbage, the
-	// merge fallback cannot parse it either, and flushLocked keeps the batch
-	// pending for the next attempt. The session's chat does not reach disk —
-	// which is exactly what this input did before the adoption existed.
 	for i, at := range []time.Duration{40 * time.Second, 50 * time.Second} {
 		cd.addMessage(&TwitchChatMessage{
 			ID:          []string{"m4", "m5"}[i],
@@ -434,17 +423,26 @@ func TestStartLeavesAnUnreadablePartFileWhenTheSidecarRestoredIt(t *testing.T) {
 			TimestampMs: base.Add(at).UnixMilli(),
 		})
 	}
-	cd.flush()
+	if err := cd.flush(); err != nil {
+		t.Fatalf("flush after the salvage: %v", err)
+	}
 
-	after, err := os.ReadFile(chatPath)
-	if err != nil || string(after) != garbage {
-		t.Errorf("the flush changed the unreadable file (err %v): %q", err, string(after))
+	raw, err := os.ReadFile(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data TwitchChatData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("the part file does not parse after the salvage: %v", err)
+	}
+	if len(data.Messages) != 2 || data.MessageCount != 2 {
+		t.Errorf("part holds %d messages (header %d), want m4 and m5", len(data.Messages), data.MessageCount)
 	}
 	cd.mu.Lock()
-	pending := len(cd.messages)
+	pending, fileCount := len(cd.messages), cd.fileCount
 	cd.mu.Unlock()
-	if pending != 2 {
-		t.Errorf("pending messages after the failed flush = %d, want 2 (the batch is retried, not dropped)", pending)
+	if pending != 0 || fileCount != 2 {
+		t.Errorf("pending %d, fileCount %d; want 0 and the file's 2", pending, fileCount)
 	}
 }
 

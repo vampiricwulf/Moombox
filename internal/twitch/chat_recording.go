@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,42 +23,73 @@ func dumpLostChatBatch(path string, batch any) error {
 	return os.WriteFile(path+".lostbatch.json", data, 0o644)
 }
 
-func (cd *ChatDownloader) flush() {
+// flush writes pending messages to the current part file and reports whether
+// any are still pending because the write failed.
+// appendChatMessages is utils.AppendChatMessages for both Twitch writers; a
+// test replaces it to make an append fail the way a full disk does.
+var appendChatMessages = utils.AppendChatMessages[TwitchChatMessage]
+
+func (cd *ChatDownloader) flush() error {
 	cd.flushMu.Lock()
 	defer cd.flushMu.Unlock()
-	cd.flushLocked()
+	return cd.flushLocked()
 }
 
 // flushLocked writes pending messages to the current part file. Caller must
-// hold flushMu.
-func (cd *ChatDownloader) flushLocked() {
+// hold flushMu. A non-nil return means the batch is still pending.
+func (cd *ChatDownloader) flushLocked() error {
 	cd.mu.Lock()
 	snapshotLen := len(cd.messages)
 	msgs := make([]TwitchChatMessage, snapshotLen)
 	copy(msgs, cd.messages)
 	count := cd.fileCount
 	flushed := cd.flushedToDisk
+	unread := cd.partUnread
 	path := cd.outputPath
 	startMs := cd.recordingStartMs.Load()
 	cd.mu.Unlock()
 
 	if snapshotLen == 0 || path == "" {
-		return
+		return nil
 	}
 
-	if err := cd.writeBatch(path, msgs, count, flushed, startMs); err != nil {
+	if !flushed && unread {
+		// The part file was there at Start and could not be read (an AV lock,
+		// a sharing violation), so it was neither adopted nor moved aside.
+		// The first write would be a FULL one and replace its history with
+		// this batch: adopt it now instead, or keep the batch until it can be.
+		n, stillUnread := cd.adoptPartFile(true)
+		if stillUnread {
+			err := fmt.Errorf("part file %s still unreadable; holding %d messages", path, snapshotLen)
+			cd.logger.Warn("twitch chat: not writing over a part file that cannot be read yet", "err", err)
+			return err
+		}
+		cd.mu.Lock()
+		flushed = cd.flushedToDisk
+		cd.mu.Unlock()
+		count += n
+	}
+
+	written, err := cd.writeBatch(path, msgs, count, flushed, startMs)
+	if err != nil {
 		// Can't write without destroying data — leave the file alone and
 		// keep the batch in the in-memory buffer so the next flush retries.
 		// The early return skips the truncation below.
 		cd.logger.Error("write chat file failed; retrying next flush", "err", err)
-		return
+		return err
 	}
 
 	// Remove only the messages we successfully wrote, preserving any
-	// that arrived concurrently during the write.
+	// that arrived concurrently during the write. A salvage rewrite
+	// (writeBatch) can leave the file holding a different number than the
+	// counters expected; the counters follow the file.
 	cd.mu.Lock()
 	cd.messages = cd.messages[snapshotLen:]
 	cd.flushedToDisk = true
+	if delta := written - count; delta != 0 {
+		cd.fileCount += delta
+		cd.totalCount = max(cd.totalCount+delta, 0)
+	}
 	cd.mu.Unlock()
 
 	// Prune dedup set to prevent unbounded memory growth
@@ -66,6 +98,7 @@ func (cd *ChatDownloader) flushLocked() {
 	// Save resume state after a flush, no more often than
 	// delays.resumeSaveFloor (owner ruling; see ircResumeSaveFloor).
 	cd.saveResumeStateThrottled()
+	return nil
 }
 
 // writeBatch persists one batch of messages to path: full atomic write for a
@@ -74,47 +107,85 @@ func (cd *ChatDownloader) flushLocked() {
 // parameter so the drain can keep writing to the CLOSED part's path after
 // the in-memory state already points at the next part.
 //
-// A nil return means the batch is on disk (or deliberately abandoned: the
-// partial-write sentinel marks the on-disk tail broken, where retry/merge
-// would corrupt history). A non-nil return means nothing was written and the
-// caller decides whether the batch stays pending.
-func (cd *ChatDownloader) writeBatch(path string, msgs []TwitchChatMessage, count int, alreadyFlushed bool, startMs int64) error {
+// A nil error means the batch is on disk, and written is the number of
+// messages the file now holds: count, unless a damaged file had to be salvaged
+// (rewriteWithHistory), when it is what the salvage kept plus the batch. A
+// non-nil error means nothing was written and the caller decides whether the
+// batch stays pending.
+func (cd *ChatDownloader) writeBatch(path string, msgs []TwitchChatMessage, count int, alreadyFlushed bool, startMs int64) (written int, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return 0, err
 	}
 
 	if !alreadyFlushed {
 		// First write: complete file
-		return cd.writeFullChatFileTo(path, msgs, count, startMs)
+		return count, cd.writeFullChatFileTo(path, msgs, count, startMs)
 	}
 
 	// Subsequent writes: append new messages to the existing file. The header
 	// count/downloadedAt refresh is folded into AppendChatMessages' open handle
 	// (warn-only on failure, as before).
-	writeErr := utils.AppendChatMessages(path, msgs, count, cd.logger)
+	writeErr := appendChatMessages(path, msgs, count, cd.logger)
 	if writeErr == nil {
-		return nil
+		return count, nil
 	}
 	if errors.Is(writeErr, utils.ErrChatFilePartialWrite) {
-		// Truncated-then-failed write: the on-disk tail is broken, and the
-		// merge below would parse-fail (dropping history) or splice into
-		// garbage on retry. Per the sentinel's contract, advance past the
-		// batch.
-		cd.logger.Error("partial chat append; advancing past batch", "err", writeErr)
-		return nil
+		// The write failed and the append put the file's end back: the file
+		// holds none of the batch, which stays pending for the next flush. It
+		// used to be dropped here while the counters kept it, so the header
+		// and the job total over-counted the file for good.
+		return 0, writeErr
 	}
-	// Fallback: read the existing file, merge with the current batch, and
-	// rewrite. The earlier implementation passed only `msgs` to the full
-	// write here, which replaced the aggregate with just the latest batch —
-	// silently dropping every message from prior flushes whenever append
-	// hit a transient I/O glitch.
-	cd.logger.Warn("append failed, merging existing file with current batch", "err", writeErr)
-	existing, readErr := readChatFileMessages(path)
-	if readErr != nil {
-		return readErr
+	cd.logger.Warn("append failed, rewriting the part with its history", "err", writeErr)
+	return rewriteChatFileWithHistory(path, msgs, cd.logger, func(merged []TwitchChatMessage) error {
+		return cd.writeFullChatFileTo(path, merged, len(merged), startMs)
+	})
+}
+
+// rewriteChatFileWithHistory is the append fallback both Twitch writers share:
+// the file is written whole, its history ahead of the batch. The history is
+// read by utils.SalvageChatMessages, so a damaged file — the zero tail a crash
+// leaves, a cut mid-record — keeps every intact message, and its original
+// bytes are kept beside it as <path>.corrupt first. The fallback used to read
+// the file with a full Unmarshal, which fails on exactly those files, so the
+// batch was retried every flush and never written. A batch message the file
+// already holds is not written twice. A file that cannot be read at all is
+// left alone (error). Returns the number of messages written.
+func rewriteChatFileWithHistory(path string, msgs []TwitchChatMessage, logger interface {
+	Error(msg string, args ...any)
+}, write func([]TwitchChatMessage) error) (int, error) {
+	existing, damaged, readErr := utils.SalvageChatMessages[TwitchChatMessage](path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return 0, readErr
 	}
-	merged := append(existing, msgs...)
-	return cd.writeFullChatFileTo(path, merged, count, startMs)
+	if damaged {
+		corruptPath := path + chatCorruptSuffix
+		logger.Error("twitch chat: chat file damaged; keeping its intact messages and the original",
+			"path", path, "kept", len(existing), "preservedAs", corruptPath)
+		if err := utils.PreserveFileCopy(path, corruptPath); err != nil {
+			logger.Error("twitch chat: could not preserve the damaged chat file", "path", path, "err", err)
+		}
+	}
+	onDisk := make(map[string]struct{}, len(existing))
+	for _, m := range existing {
+		if m.ID != "" {
+			onDisk[m.ID] = struct{}{}
+		}
+	}
+	merged := existing
+	for _, m := range msgs {
+		if _, dup := onDisk[m.ID]; dup && m.ID != "" {
+			continue
+		}
+		merged = append(merged, m)
+	}
+	if merged == nil {
+		merged = []TwitchChatMessage{}
+	}
+	if err := write(merged); err != nil {
+		return 0, err
+	}
+	return len(merged), nil
 }
 
 // writeFullChatFileTo writes all messages as a complete JSON file atomically.
@@ -189,6 +260,7 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 	cd.outputPath = newOutputPath
 	cd.fileCount = 0
 	cd.flushedToDisk = false
+	cd.partUnread = false // the new part's file is this downloader's own
 	// The new part has no sidecar yet, so the floor must not carry across
 	// the boundary: its first flush has to write one.
 	cd.lastResumeSave = time.Time{}
@@ -202,7 +274,15 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 		closedPath = oldPath
 	}
 	if len(batch) > 0 {
-		if err := cd.writeBatch(oldPath, batch, oldCount, oldFlushed, oldBase); err != nil {
+		written, err := cd.writeBatch(oldPath, batch, oldCount, oldFlushed, oldBase)
+		if err == nil && written != oldCount {
+			// A salvage rewrite of the closed part: the job total follows the
+			// file, as flushLocked's does.
+			cd.mu.Lock()
+			cd.totalCount = max(cd.totalCount+written-oldCount, 0)
+			cd.mu.Unlock()
+		}
+		if err != nil {
 			cd.logger.Error("final drain of rolled chat part failed; boundary batch lost",
 				"path", oldPath, "messages", len(batch), "err", err)
 			// Spill the un-writable batch to a sidecar so the messages are
