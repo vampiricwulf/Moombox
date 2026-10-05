@@ -1077,8 +1077,18 @@ func (m *TaskListModel) View() string {
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
 				DimStyle.Render("or A A to add a video.")
 		default:
-			listContent = DimStyle.Render("No tasks. Press A to add, or use Web UI.")
+			listContent = DimStyle.Render("No tasks. Press A A to add a video, or use the Web UI.")
 		}
+		// Rendered outside the list, which pads and clips itself to its
+		// rows; this block has to do both on its own. Wrapped at the panel
+		// width and cut at the rows the list would have had — with Logs
+		// focused the top row is a quarter of the screen, and the setup
+		// message alone used to push the panel's top border off it.
+		rows := m.contentHeight()
+		if m.searching {
+			rows = max(rows-1, 1)
+		}
+		listContent = lipgloss.NewStyle().Width(contentW).MaxHeight(rows).Render(listContent)
 	} else {
 		listContent = m.list.View()
 	}
