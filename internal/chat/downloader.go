@@ -36,6 +36,10 @@ const (
 	// survive for a human to look at, not that every failed parse accumulates
 	// its own artifact in staging.
 	corruptChatSuffix = ".corrupt"
+	// replayRerunSuffix names the file a replay re-run writes while an
+	// archive it must not shrink sits at the output path (THE RE-RUN RULE in
+	// Start's doc comment). Removed when the run ends, swapped in or not.
+	replayRerunSuffix = ".rerun"
 	// liveChatPollDefault is the live endpoint's own fallback poll interval —
 	// what computePollDelay uses when YouTube sends no usable TimeoutMs. It is
 	// also the FLOOR under repeated stale-continuation recovery: a recovery
@@ -380,20 +384,16 @@ func staleRecoveryDelay(n int) time.Duration {
 //
 // THE COMPLETION RULE. Start clears the resume sidecar only on a GENUINE
 // completion: the orchestrator marked the stream ended (MarkStreamEnded), or
-// this was a replay/VOD run (!IsLiveOrUpcoming). The predicate is exactly
-// that — ANY exit of a replay run counts, not only a finished loop, so a
-// replay that gives up on its error budget clears too: the 6th consecutive
-// failure, transient ones included (75 s of backoff between them), or an auth
-// loss. That is the pre-existing behaviour and a choice rather than a
-// necessity — a replay token is a stable archive position — made because a
-// VOD's chat can be re-fetched in full: the next attempt re-pages the
-// archive from the top. The one replay path that
-// DOES keep its sidecar is cancellation/shutdown, which the first arm of the
-// switch below handles before this rule is reached — and that is exactly the
-// path a resume needs, because a replay's sidecar continuation IS its
-// position in the archive (the resume block installs it over any fresh token;
-// see preferFresh), so keeping it is what stops a cancelled VOD chat
-// re-downloading from the top. Every
+// this was a replay/VOD run (!IsLiveOrUpcoming) whose loop reached the end of
+// the archive — it left with no terminal error. A replay that GIVES UP (its
+// error budget, an auth loss) is not a completion and keeps its sidecar, as a
+// cancelled or shut-down one always did: a replay's sidecar continuation IS
+// its position in the archive (the resume block installs it over any fresh
+// token; see preferFresh), so the next run resumes there instead of paging
+// from the top. Clearing it used to be the rule, on the grounds that a VOD's
+// chat can be re-fetched in full — but with the sidecar gone the next run
+// found the archive with nothing describing it, and rewrote it from its own
+// first page. Every
 // other exit of a live/upcoming run — stale-continuation exhaustion
 // (recoverStaleContinuation giving up after maxStaleContinuationAttempts),
 // handleFetchError's consecutive-error budget, ErrAuthRequired — is NOT the
@@ -405,6 +405,17 @@ func staleRecoveryDelay(n int) time.Duration {
 // waiting-room chat that YouTube reset after inactivity lost its whole
 // archive: the next run found no sidecar, started at count 0, and its first
 // message took the full-write path over chat.json.
+//
+// THE RE-RUN RULE. A replay run that finds an archive on disk with no
+// usable sidecar — one an earlier replay completed, a live capture whose
+// sidecar a replay refuses, or one an older build left — must never replace
+// it with a fragment, so it writes to <OutputFile>.rerun instead
+// (beginReplayRerun) and the archive changes only when the run ends with
+// something no worse: a genuine completion, or at least as many messages
+// (finishReplayRerun). Otherwise the archive it found stays, and so does its
+// count. Before this rule a re-run's first flush rewrote chat.json from its
+// own buffer, and a re-run that then gave up left a 200-message fragment
+// where a complete 2000-message archive had been.
 //
 // THE MODE RULE (the first thing Start decides, before either rule below). A
 // REPLAY run refuses a sidecar a LIVE/upcoming run wrote (ChatResumeState.Mode)
@@ -652,6 +663,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	if !resuming && cd.opts.IsLiveOrUpcoming {
 		adopted = cd.adoptExistingChatFile()
 	}
+	// The replay half of the same protection (THE RE-RUN RULE).
+	var rerun *replayRerun
+	if !resuming && !cd.opts.IsLiveOrUpcoming {
+		rerun = cd.beginReplayRerun()
+	}
 
 	if cd.OnStart != nil {
 		// Adopted history counts as resuming for the CALLER: the counts this
@@ -684,17 +700,38 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	ioErr := cd.ioErrorOccurred
 	// Genuine completion: the orchestrator declared the stream over, or this
-	// was a replay/VOD run and its loop reached the end of the archive.
-	completed := cd.streamEnded || !cd.opts.IsLiveOrUpcoming
+	// was a replay/VOD run and its loop reached the end of the archive — a
+	// give-up leaves a terminal error behind.
+	completed := cd.streamEnded || (!cd.opts.IsLiveOrUpcoming && cd.terminalErr == nil)
 	cd.mu.Unlock()
+	cancelled := cd.wasCancelledOrShutdown(ctx)
+	// A re-run that stopped short leaves the archive it found as the
+	// archive, described by nothing but itself — as before the run — so the
+	// completion rule is skipped: a sidecar saved now would describe the
+	// discarded re-run.
+	if rerun == nil || cd.finishReplayRerun(rerun, completed && !cancelled) {
+		cd.applyCompletionRule(cancelled, completed, ioErr)
+	}
+
+	if cd.OnFinish != nil {
+		cd.OnFinish()
+	}
+
+	return cd.terminalError()
+}
+
+// applyCompletionRule keeps or clears the resume sidecar on the way out of
+// Start (see its doc comment's completion rule).
+func (cd *ChatDownloader) applyCompletionRule(cancelled, completed, ioErr bool) {
 	switch {
-	case cd.wasCancelledOrShutdown(ctx), !completed:
-		// Cancellation / shutdown, or a live/upcoming run that left for some
-		// reason OTHER than the stream ending. The next run needs the sidecar
-		// to know chat.json already holds history; save it here, after the
-		// final flush above, so the continuation and count are current. The
-		// cancellation case is decided HERE rather than on the loop's way
-		// out: a Stop() that lands after the loop left on a give-up but
+	case cancelled, !completed:
+		// Cancellation / shutdown, a live/upcoming run that left for some
+		// reason OTHER than the stream ending, or a replay that gave up. The
+		// next run needs the sidecar to know chat.json already holds history
+		// (and, for a replay, where in the archive it stopped); save it here,
+		// after the final flush, so the continuation and count are current.
+		// The cancellation case is decided by Start rather than on the loop's
+		// way out: a Stop() that lands after the loop left on a give-up but
 		// before this switch takes this arm, and must not find the save
 		// skipped because the loop saw no cancellation when it exited.
 		if cd.flushedToDisk || len(cd.messages) > 0 {
@@ -706,12 +743,81 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		// (audit chat.md C8).
 		cd.clearResume()
 	}
+}
 
-	if cd.OnFinish != nil {
-		cd.OnFinish()
+// replayRerun is a replay run writing beside an archive it must not shrink
+// (THE RE-RUN RULE): the archive's own paths, restored when the run ends, and
+// the message count it held when the run began.
+type replayRerun struct {
+	outputFile, resumeFile string
+	existing               int
+}
+
+// beginReplayRerun points a replay run that found an archive on disk at a
+// file of its own, <OutputFile>.rerun, its sidecar beside it. nil when there
+// is no archive to protect: no output path yet, no file, or one whose header
+// counts no message (a damaged header falls to the full rewrite, as before).
+// A .rerun an earlier re-run left is a fragment nothing points at; the first
+// flush writes over it whole.
+func (cd *ChatDownloader) beginReplayRerun() *replayRerun {
+	outputFile, resumeFile := cd.getOutputPaths()
+	if outputFile == "" {
+		return nil
 	}
+	n, ok := utils.ReadChatFileMessageCount(outputFile)
+	if !ok || n <= 0 {
+		return nil
+	}
+	tmp := outputFile + replayRerunSuffix
+	cd.mu.Lock()
+	cd.opts.OutputFile = tmp
+	cd.opts.ResumeFile = tmp + ".resume.json"
+	cd.mu.Unlock()
+	cd.logInfo("chat: a replay archive is already on disk; this run writes beside it and replaces it only if it gets at least as far",
+		"videoID", cd.opts.VideoID, "archiveMessages", n)
+	return &replayRerun{outputFile: outputFile, resumeFile: resumeFile, existing: n}
+}
 
-	return cd.terminalError()
+// finishReplayRerun settles a re-run: its file replaces the archive when the
+// run completed or holds at least as many messages, and is discarded
+// otherwise, the run's count going back to the archive's so MessageCount (and
+// the job row fed from it) describes the file that is actually there. Either
+// way the downloader's paths are the archive's again. Reports whether the
+// re-run is now the archive.
+//
+// A run whose flush failed is never swapped in: its file may not hold what
+// it counted.
+func (cd *ChatDownloader) finishReplayRerun(rr *replayRerun, completed bool) bool {
+	tmp, tmpResume := cd.getOutputPaths()
+	cd.mu.Lock()
+	got := cd.messageCount
+	ioErr := cd.ioErrorOccurred
+	cd.opts.OutputFile, cd.opts.ResumeFile = rr.outputFile, rr.resumeFile
+	cd.mu.Unlock()
+	if err := os.Remove(tmpResume); err != nil && !os.IsNotExist(err) {
+		cd.logDebug("chat: could not remove the re-run's resume state", "file", tmpResume, "err", err)
+	}
+	_, statErr := os.Stat(tmp)
+	if !ioErr && statErr == nil && (completed || got >= rr.existing) {
+		err := utils.ReplaceFile(tmp, rr.outputFile)
+		if err == nil {
+			cd.logInfo("chat: the replay re-run replaced the archive",
+				"videoID", cd.opts.VideoID, "messages", got, "archiveMessages", rr.existing, "complete", completed)
+			return true
+		}
+		cd.reportIOError(fmt.Errorf("replace the chat archive with the replay re-run: %w", err))
+	}
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		cd.logDebug("chat: could not remove the discarded re-run", "file", tmp, "err", err)
+	}
+	cd.mu.Lock()
+	cd.messageCount = rr.existing
+	cd.messages = nil
+	cd.flushedToDisk = true
+	cd.mu.Unlock()
+	cd.logInfo("chat: the replay re-run stopped short of the archive already on disk; that archive is kept",
+		"videoID", cd.opts.VideoID, "rerunMessages", got, "archiveMessages", rr.existing)
+	return false
 }
 
 // MarkStreamEnded signals that the stream has ended naturally.
