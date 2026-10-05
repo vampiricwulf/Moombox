@@ -80,3 +80,28 @@ test("the restart prompt names HTTPS/TLS among the settings it covers", { skip }
   assert.equal(asked.length, 1, "toggling HTTPS did not prompt");
   assert.match(asked[0], /HTTPS\/TLS/);
 });
+
+// The channel card's monitoring switch had only a title, which is not an
+// accessible name for the switch's inner input: a screen reader announced an
+// unnamed switch per channel. Its label slot now carries screen-reader-only
+// text naming the channel.
+// Mutant: drop the visually-hidden span — the label is empty.
+test("each channel's monitoring switch is named for its channel", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.config = { ...(h.app.config || {}), channels: [{ id: "UCabc", name: "Miko <Ch>", platform: "youtube", enabled: true }] };
+  h.app.settings.renderChannelsList();
+  const sw = h.el("channels-list").querySelector('sl-switch[data-action="toggle"]');
+  assert.ok(sw, "no monitoring switch rendered");
+  const label = sw.querySelector(".visually-hidden");
+  assert.ok(label, "the switch has no screen-reader label");
+  assert.equal(label.textContent, "Monitor Miko <Ch>");
+});
+
+// The three restart-required cookie fields carried a Restart badge but help
+// text that never said so, unlike every other restart-required field.
+test("restart-required cookie fields say so in their help text", { skip }, async () => {
+  const h = await harness.makeApp();
+  for (const id of ["cfg-cookie-file", "cfg-cookie-refresh-interval", "cfg-auto-cookies-profile-dir"]) {
+    assert.match(h.el(id).getAttribute("help-text"), /Requires restart\.$/, id);
+  }
+});

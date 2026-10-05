@@ -1405,7 +1405,7 @@ export class SettingsController {
             </div>
           </div>
           <div class="channel-card-actions">
-            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" data-action="toggle" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-switch>
+            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" data-action="toggle" data-channel-id="${this.app.escapeHtml(ch.id)}"><span class="visually-hidden">Monitor ${this.app.escapeHtml(ch.name || ch.id)}</span></sl-switch>
             <sl-icon-button name="pencil" label="Edit" data-action="edit" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-icon-button>
             <sl-icon-button name="trash" label="Delete" data-action="delete" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-icon-button>
           </div>

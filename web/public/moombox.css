@@ -1227,6 +1227,13 @@ sl-progress-bar {
     margin-top: var(--sl-spacing-x-small);
 }
 
+/* The channel switch's label is screen-reader-only text (it names the
+   channel the switch monitors), so the label part's gap would only push the
+   icon buttons over. */
+.channel-card-actions sl-switch::part(label) {
+    margin-inline-start: 0;
+}
+
 .channel-card-actions {
     display: flex;
     gap: var(--sl-spacing-x-small);
