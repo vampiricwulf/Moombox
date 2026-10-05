@@ -18,13 +18,18 @@ type ChatFileLogger interface {
 	Warn(msg string, args ...any)
 }
 
-// ErrChatFilePartialWrite is returned by AppendChatMessages when the file was
-// successfully truncated at the closing-bracket position but the subsequent
-// WriteAt failed. The file is now in a broken state on disk, but the caller
-// should advance its in-memory state rather than falling back to a full
-// rewrite — a full rewrite would read the partial file (which no longer
-// parses), recover no prior messages, and overwrite history with just the
-// current batch.
+// ErrChatFilePartialWrite is returned by AppendChatMessages when the write of
+// the batch failed (a full disk, an IO error). The append then puts the file's
+// "]\n}" back, so in the ordinary case the file is byte-identical to before
+// and holds none of the batch: the caller keeps the batch and retries it on
+// its next flush. If putting the end back failed as well, the file ends in
+// whatever part of the batch was written; the next append then sees
+// ErrChatFileDamaged, and the caller's salvage keeps every intact message.
+//
+// It used to mean "the file is broken, advance past the batch": the write
+// came after a truncate, so a failure left no closing bracket at all. The
+// write now comes first, and dropping the batch while still counting it made
+// the header over-count the array for good.
 var ErrChatFilePartialWrite = errors.New("chat file truncated but subsequent write failed")
 
 // ErrChatFileDamaged is returned by AppendChatMessages when the file's end is
@@ -81,9 +86,9 @@ func WriteChatFileAtomic[T any](path string, data T) error {
 //
 // Per-message json.Marshal failures are skipped after a logger.Warn (if logger
 // is non-nil); a batch in which none marshal leaves the file untouched. A
-// truncate-then-write-failure returns ErrChatFilePartialWrite
-// so the chat-side caller can avoid the history-dropping fallback path; see
-// the sentinel's doc.
+// failed write of the batch returns ErrChatFilePartialWrite, and a file whose
+// end is not its messages array's returns ErrChatFileDamaged; see the
+// sentinels' docs for what the caller does with each.
 //
 // count is the new total message count; the header's messageCount/downloadedAt
 // are updated in-place within this same open handle (folded in so a flush is
@@ -195,8 +200,8 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 	// theoretical shorter-old-tail remainder.
 	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
 		// Partial/failed write: restore a valid closing bracket so the file
-		// stays parseable (dropping only this batch), then signal the sentinel
-		// so the caller advances instead of doing a history-dropping rewrite.
+		// stays parseable and holds none of this batch, then signal the
+		// sentinel so the caller keeps the batch for its next flush.
 		// The bytes before bracketBytePos are the old tail's "\n  ", so only
 		// "]\n}" goes back: the file is then byte-identical to before.
 		if _, rerr := f.WriteAt([]byte("]\n}"), bracketBytePos); rerr == nil {

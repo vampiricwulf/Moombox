@@ -155,8 +155,10 @@ type ChatDownloader struct {
 	// goroutine and read by that waiter on another.
 	terminalErr error
 	// replayHighWaterUsec is the highest ABSOLUTE timestamp (timestampUsec)
-	// this run has committed, and hasReplayHighWater says whether one exists
-	// yet (a zero timestamp is a value, not a sentinel). It bounds a replay
+	// committed to the file — by this run, or by the run whose sidecar or file
+	// this one resumed (ChatResumeState.ReplayHighWaterUsec, adoption's
+	// newest message) — and hasReplayHighWater says whether one exists yet (a
+	// zero timestamp is a value, not a sentinel). It bounds a replay
 	// pass adopted mid-run: the watch page hands back the reload token, i.e.
 	// the START of the archive, and the 5000-ID dedup window cannot span an
 	// archive bigger than itself.
@@ -456,10 +458,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	// A fresh run carries no give-up verdict from a prior run on this same
 	// instance, for the same reason liveContinuationOpen is re-armed below.
 	cd.terminalErr = nil
-	// And no replay high-water mark: the mark is one RUN's "highest absolute
-	// timestamp committed so far", so carrying a prior run's would make this
-	// run's first replay pass drop everything below a boundary it never set.
-	// Re-armed here, beside terminalErr, for the same reason.
+	// And no replay high-water mark from a previous run on this instance: the
+	// mark is "the highest absolute timestamp committed to the file", and
+	// only what this Start loads — the sidecar, or the adopted file — says
+	// what that is now. Re-armed here, beside terminalErr, and set again by
+	// the resume or the adoption below.
 	cd.replayHighWaterUsec, cd.hasReplayHighWater = 0, false
 	// A fresh run starts with no resume signal, not whatever a PRIOR run on
 	// this same instance last left behind (e.g. a completed run that ended
@@ -612,8 +615,13 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 				// The history the sidecar counted went with the file. The
 				// first flush writes the file whole from this run's buffer,
 				// so the count starts from that: kept, the new header and
-				// the job row counted messages the array no longer had.
+				// the job row counted messages the array no longer had. The
+				// dedup and the replay mark describe that history too, and
+				// kept, a replay pass dropped every message they covered —
+				// all of it, gone from disk and never fetched again.
 				cd.messageCount = 0
+				cd.dedup.Restore(nil)
+				cd.replayHighWaterUsec, cd.hasReplayHighWater = 0, false
 			}
 		}
 		// The sidecar says the file holds history; check it still ends the way
@@ -1435,6 +1443,13 @@ func (cd *ChatDownloader) epochRFC3339() string {
 func (cd *ChatDownloader) writeFullChatFile() bool {
 	outputFile, _ := cd.getOutputPaths()
 
+	messages := cd.messages
+	if messages == nil {
+		// "[]", never "null": an append needs the array's ']' to find, and a
+		// salvage that kept nothing would otherwise make the next append fail
+		// (and report) before rewriting the file.
+		messages = []ChatMessage{}
+	}
 	data := ChatData{
 		VideoID:         cd.opts.VideoID,
 		VideoTitle:      cd.opts.VideoTitle,
@@ -1442,7 +1457,7 @@ func (cd *ChatDownloader) writeFullChatFile() bool {
 		StreamStartTime: cd.epochRFC3339(),
 		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
 		MessageCount:    cd.messageCount,
-		Messages:        cd.messages,
+		Messages:        messages,
 	}
 
 	if err := utils.WriteChatFileAtomic(outputFile, &data); err != nil {
@@ -1792,20 +1807,64 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) bool {
 			cd.reportIOError(fmt.Errorf("preserve damaged chat file: %w", perr))
 		}
 	}
+	// A batch message the file already holds is not written twice: an append
+	// whose write failed and whose end could not be put back left the
+	// messages it did write in the file, and the salvage finds them there.
+	onDisk := make(map[string]struct{}, len(existing))
+	for _, msg := range existing {
+		if msg.ID != "" {
+			onDisk[msg.ID] = struct{}{}
+		}
+	}
 	// Locked for the same reason as processBatch: MessageCount() reads
 	// messageCount from another goroutine.
 	cd.mu.Lock()
-	cd.messages = append(existing, cd.messages...)
+	pending := cd.messages[:0:0]
+	for _, msg := range cd.messages {
+		if _, dup := onDisk[msg.ID]; dup && msg.ID != "" {
+			continue
+		}
+		pending = append(pending, msg)
+	}
+	cd.messages = append(existing, pending...)
 	cd.messageCount = len(cd.messages)
 	cd.mu.Unlock()
-	// Register recovered message IDs in the dedup to prevent duplicates
-	// on subsequent polls.
-	for _, msg := range existing {
+	if damaged {
+		// What the damage took is gone from disk, so nothing may treat it as
+		// committed: the dedup and the replay high-water mark are rebuilt from
+		// what the rewrite will hold. Kept, a replay pass dropped every lost
+		// message below the old mark, and the dedup every recent one.
+		cd.dedup.Restore(nil)
+		cd.replayHighWaterUsec, cd.hasReplayHighWater = replayMarkOf(cd.messages)
+	}
+	// Register what the rewrite will hold in the dedup, so an overlapping
+	// poll cannot duplicate it: the recovered history, and — after a rebuild —
+	// the batch too.
+	for _, msg := range cd.messages {
 		if msg.ID != "" {
 			cd.dedup.Add(msg.ID)
 		}
 	}
 	return true
+}
+
+// replayMarkOf is the replay high-water mark a set of committed messages
+// implies: their highest timestampUsec, ignoring the far-future values
+// processBatch's own guard refuses (see replayMarkFutureSlack).
+func replayMarkOf(msgs []ChatMessage) (int64, bool) {
+	limit := time.Now().Add(replayMarkFutureSlack).UnixMicro()
+	var mark int64
+	has := false
+	for _, m := range msgs {
+		usec, err := strconv.ParseInt(m.TimestampUsec, 10, 64)
+		if err != nil || usec > limit {
+			continue
+		}
+		if !has || usec > mark {
+			mark, has = usec, true
+		}
+	}
+	return mark, has
 }
 
 // updateChatFileHeader updates messageCount and downloadedAt in the JSON
