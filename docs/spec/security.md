@@ -319,6 +319,8 @@ Client tokens provide a "remember this browser" mechanism for remote clients, su
 
 **Auth flow integration:** When the `moombox_session` cookie is missing or invalid, the AuthMiddleware falls back to checking the `moombox_client` cookie. If the client token is valid, a fresh session is issued (new `moombox_session` cookie set on the response) and the request proceeds.
 
+**Expiry is enforced on the server.** `network.client_token_ttl_days` sets the cookie's `Max-Age`, but that is the client's to ignore, so the same TTL is checked against the row's `created_at` in `clientTokenFor` (`cmd/moombox/ws_wiring.go`), the one check the HTTP fallback and the WebSocket upgrade share. An expired token is refused and its row deleted; an unreadable `created_at` counts as expired.
+
 **Source:** `GenerateToken`, `TokenPrefix`, `HashToken`, `VerifyToken` in `internal/web/auth.go`. Client token database storage in `internal/database/`.
 
 ### Auth Flow Summary

@@ -3,6 +3,7 @@ package main
 import (
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -22,12 +23,8 @@ func (s *runState) wireWebSocket() {
 
 	// Wire persistent client token check for AuthMiddleware fallback
 	s.webServer.ClientTokenCheck = func(rawToken, ip string) (bool, string) {
-		prefix := web.TokenPrefix(rawToken)
-		ct, err := s.db.GetClientTokenByPrefix(prefix)
-		if err != nil || ct == nil {
-			return false, ""
-		}
-		if !web.VerifyToken(rawToken, ct.TokenHash) {
+		ct := s.clientTokenFor(rawToken)
+		if ct == nil {
 			return false, ""
 		}
 		sessionToken, err := s.authSvc.CreateSession()
@@ -67,21 +64,18 @@ func (s *runState) wireWebSocket() {
 		// Fallback: check persistent client token (can't set cookies on WS
 		// upgrade, just allow the connection).
 		if cookie, err := r.Cookie("moombox_client"); err == nil && cookie.Value != "" {
-			prefix := web.TokenPrefix(cookie.Value)
-			if ct, err := s.db.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
-				if web.VerifyToken(cookie.Value, ct.TokenHash) {
-					go func() {
-						defer func() {
-							if r := recover(); r != nil {
-								s.log.Error("client token usage update panic", "panic", r)
-							}
-						}()
-						if err := s.db.UpdateClientTokenUsage(ct.ID, web.EffectiveClientIP(s.configStore, r)); err != nil {
-							s.log.Debug("client token last-used update failed", "error", err)
+			if ct := s.clientTokenFor(cookie.Value); ct != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							s.log.Error("client token usage update panic", "panic", r)
 						}
 					}()
-					return true
-				}
+					if err := s.db.UpdateClientTokenUsage(ct.ID, web.EffectiveClientIP(s.configStore, r)); err != nil {
+						s.log.Debug("client token last-used update failed", "error", err)
+					}
+				}()
+				return true
 			}
 		}
 		return false
@@ -136,4 +130,47 @@ func (s *runState) wireWebSocket() {
 	// Serve embedded static files (web dashboard) with SPA fallback
 	staticFS, _ := fs.Sub(webpublic.PublicFS, "public")
 	s.webServer.MountStaticFiles(staticFS)
+}
+
+// clientTokenFor returns the stored client token a raw moombox_client value
+// proves, or nil. The one check both auth paths (the HTTP fallback and the
+// WebSocket upgrade) share.
+//
+// network.client_token_ttl_days is enforced HERE, against the row's
+// created_at. It used to set only the cookie's Max-Age, which is the client's
+// to ignore: a value captured once (a plain-HTTP external install, a proxy
+// log, a copied browser profile) authenticated forever with `curl -b`,
+// minting a fresh session per request. An expired row is deleted, so the
+// client-token list stops showing it too.
+func (s *runState) clientTokenFor(raw string) *database.ClientToken {
+	ct, err := s.db.GetClientTokenByPrefix(web.TokenPrefix(raw))
+	if err != nil || ct == nil || !web.VerifyToken(raw, ct.TokenHash) {
+		return nil
+	}
+	var ttlDays int
+	s.configStore.Read(func(c *config.MoomboxConfig) { ttlDays = c.Network.ClientTokenTTLDays })
+	if clientTokenExpired(ct.CreatedAt, ttlDays, time.Now()) {
+		if err := s.db.DeleteClientToken(ct.ID); err != nil {
+			s.log.Debug("expired client token delete failed", "error", err)
+		}
+		s.log.Info("expired client token refused and removed", "label", ct.Label, "createdAt", ct.CreatedAt)
+		return nil
+	}
+	return ct
+}
+
+// clientTokenExpired reports whether a token created at createdAt (RFC 3339,
+// as AddClientToken's caller writes it) has outlived ttlDays. A ttl of 0
+// means the 365-day default, as setClientCookie does. An unreadable
+// timestamp counts as expired: the row cannot prove its age, and the cost is
+// one fresh login.
+func clientTokenExpired(createdAt string, ttlDays int, now time.Time) bool {
+	if ttlDays <= 0 {
+		ttlDays = 365
+	}
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return true
+	}
+	return now.Sub(t) > time.Duration(ttlDays)*24*time.Hour
 }
