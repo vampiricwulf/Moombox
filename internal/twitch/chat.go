@@ -70,7 +70,8 @@ const (
 	// capture for the rest of the job — a four-minute Twitch IRC outage, the
 	// video unaffected, cost hours of chat on a marathon stream, and nothing
 	// relaunched it outside a connectivity outage. Past the budget the loop
-	// keeps trying at this slow cadence for as long as the job runs.
+	// keeps trying at this slow cadence for as long as the job runs; Stop,
+	// MarkStreamEnded and RetryNow cut a wait short (see wake).
 	ircExhaustedRetry = 2 * time.Minute
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
 	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
@@ -344,6 +345,16 @@ type ChatDownloader struct {
 	// ircReadDeadline) reacts immediately instead of minutes later.
 	sessionCancel context.CancelFunc
 
+	// wake cuts short the reconnect backoff in Start — the one wait
+	// sessionCancel cannot reach, because no session exists during it. Stop
+	// and MarkStreamEnded send on it so a downloader idling on the slow
+	// post-budget cadence (ircExhaustedRetry) exits at once; RetryNow sends
+	// on it so the next attempt is made now. Buffered 1, sent without
+	// blocking: one pending wake covers any number of requests. nil in a
+	// struct built without NewChatDownloader, where every send is a no-op and
+	// the backoff simply runs its course.
+	wake chan struct{}
+
 	// delays is every keepalive wait runIRCSession sleeps on;
 	// defaultChatDelays() in production, a scaled copy in tests (see delays.go).
 	// Assigned once at construction and never written again, so the session
@@ -445,6 +456,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		streamStartMs:   streamStartMs,
 		dedup:           utils.NewOrderedDedup[string](),
 		delays:          defaultChatDelays(),
+		wake:            make(chan struct{}, 1),
 		keepaliveWrite:  writeIRCFrame,
 		emoteResolver:   opts.EmoteResolver,
 		logger:          logger,
@@ -1405,6 +1417,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			select {
 			case <-ctx.Done():
 				return nil
+			case <-cd.wake:
+				// Stop / MarkStreamEnded (the loop head returns) or RetryNow
+				// (it reconnects now).
 			case <-time.After(delay):
 			}
 		}
@@ -1691,6 +1706,24 @@ func (cd *ChatDownloader) Stop() {
 	cd.running = false
 	cd.mu.Unlock()
 	cd.interruptSession()
+	cd.wakeBackoff()
+}
+
+// wakeBackoff cuts short a reconnect backoff Start is sleeping in (see wake).
+func (cd *ChatDownloader) wakeBackoff() {
+	select {
+	case cd.wake <- struct{}{}:
+	default:
+	}
+}
+
+// RetryNow makes a downloader waiting out a reconnect backoff try again at
+// once. The orchestrator calls it when connectivity returns: past the
+// reconnect budget the backoff is ircExhaustedRetry, and a downloader that
+// kept failing through an outage would otherwise sit out up to that long
+// after the network came back. A no-op when no backoff is running.
+func (cd *ChatDownloader) RetryNow() {
+	cd.wakeBackoff()
 }
 
 // MarkStreamEnded signals that the upstream live stream has ended and the
@@ -1705,4 +1738,5 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.running = false
 	cd.mu.Unlock()
 	cd.interruptSession()
+	cd.wakeBackoff()
 }

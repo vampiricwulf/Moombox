@@ -991,6 +991,10 @@ sessionLoop:
 		drainQualityCh()
 		if twitchChatDl != nil && !twitchChatDl.IsRunning() {
 			startChat()
+		} else if r, ok := twitchChatDl.(interface{ RetryNow() }); ok {
+			// Still running, so possibly waiting out a reconnect backoff that
+			// the outage stretched to its slow cadence: reconnect now.
+			r.RetryNow()
 		}
 
 		o.logger.Info("Twitch download resumed after connectivity outage",
