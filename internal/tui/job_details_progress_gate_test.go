@@ -136,7 +136,7 @@ func widestDescriptionRow(m *JobDetailsModel) int {
 }
 
 // buildRows bakes the panel width into the rows it emits — the Description
-// and Error blocks are wrapped to the value column there, not at render time
+// and Error blocks are wrapped to the panel width there, not at render time
 // — so a width change has to REBUILD the rows, not just re-render the ones it
 // already has. cycleFocus gives each panel a different share of the terminal,
 // so every Tab press resizes this one.
@@ -156,13 +156,13 @@ func TestSetSizeRewrapsTheDescription(t *testing.T) {
 	p := &ProgressData{Progress: "V:1 A:1"}
 	m.SetProgress(p)
 
-	const wideWrap = 120 - 2 - labelWidth
+	const wideWrap = 120 - 2
 	if got := widestDescriptionRow(m); got <= wideWrap/2 {
 		t.Fatalf("the fixture must wrap wide first: widest description line is %d columns, want close to %d", got, wideWrap)
 	}
 
 	m.SetSize(50, 24)
-	const narrowWrap = 50 - 2 - labelWidth
+	const narrowWrap = 50 - 2
 	if got := widestDescriptionRow(m); got == 0 || got > narrowWrap {
 		t.Errorf("SetSize left the description wrapped at the old width: widest line is %d columns, the panel wraps at %d", got, narrowWrap)
 	}

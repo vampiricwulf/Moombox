@@ -106,6 +106,15 @@ func NewJobDetailsModel() *JobDetailsModel {
 	return &JobDetailsModel{viewport: vp, progress: pb}
 }
 
+// blockWrapWidth is the width the Error and Description blocks wrap to: the
+// whole content width, the one renderRow is handed. Those lines carry no label
+// and render from column 0, so wrapping them to the value column (what they
+// used to do) left a blank labelWidth-wide strip down the right edge — at an
+// 80-column terminal a 42-column Details panel set its error text in 28.
+func (m *JobDetailsModel) blockWrapWidth() int {
+	return max(m.width-2, 1)
+}
+
 // titleValueWidth computes the available width for the title value column.
 func (m *JobDetailsModel) titleValueWidth() int {
 	valueW := max(m.width-2-labelWidth, 10)
@@ -236,7 +245,7 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	// A width change (focus change, terminal resize, or the initial
 	// WindowSizeMsg arriving after jobs are already loaded) invalidates the
 	// rows themselves, not just their rendering: buildRows wraps the Error
-	// and Description blocks to the value column, so the wrap is baked into
+	// and Description blocks to the panel's width, so the wrap is baked into
 	// the row values. cycleFocus gives each panel a different share of the
 	// terminal, so this runs on every Tab press — and a re-render alone left
 	// the old wrap standing until the next rebuild, which the SetProgress
@@ -664,12 +673,7 @@ func (m *JobDetailsModel) buildRows() {
 		}
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: header})
-		contentW := max(m.width-2, 20)
-		valueW := contentW - labelWidth
-		if valueW < 10 {
-			valueW = contentW
-		}
-		for _, line := range wrapText(j.Error, valueW) {
+		for _, line := range wrapText(j.Error, m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: color})
 		}
 	}
@@ -723,9 +727,7 @@ func (m *JobDetailsModel) buildRows() {
 	if j.Description != "" && !m.hideDescription {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Description"})
-		// Match TS: wrap to value column width (contentWidth - 14), not full width
-		descW := max(m.width-2-labelWidth, 20)
-		for _, line := range wrapText(j.Description, descW) {
+		for _, line := range wrapText(j.Description, m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
 		}
 	}
