@@ -599,8 +599,12 @@ through `UpdateNotificationMsgs`: a silent single-column write that bumps no
 message. The History does not persist — the message keeps being edited, but its
 History begins again at the first state after the restart.
 
-Ids are keyed on the resolved URL, so the two spellings of one webhook share one
-message; a target the operator removed leaves an orphaned entry that nothing
+Ids are keyed on the resolved URL, so every spelling of one webhook shares one
+message — `discord://ID/TOKEN`, the legacy `discordapp.com`, a `ptb.`/`canary.`
+host and a trailing slash all resolve to the one `https://discord.com/…` form
+(`canonicalDiscordURL`), which is also what target dedupe keys on (a slash or a
+`ptb.` host used to build a second target that posted every embed again, and in
+edit mode opened new messages for every job in progress); a target the operator removed leaves an orphaned entry that nothing
 reads; a target the operator adds starts a new message at its next allowed
 event; and deleting the job drops the row and the ids with it (no DELETE is ever
 sent to Discord) — and the running process's copy too: `onJobDeleted` calls

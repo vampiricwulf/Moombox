@@ -177,7 +177,14 @@ func TestParseTargetAcceptsTheLegacyDiscordappHost(t *testing.T) {
 		wantURL string
 	}{
 		{"https://discordapp.com/api/webhooks/" + id + "/" + tok, "https://discord.com/api/webhooks/" + id + "/" + tok},
-		{"https://ptb.discordapp.com/api/webhooks/" + id + "/" + tok, "https://ptb.discord.com/api/webhooks/" + id + "/" + tok},
+		// Every spelling of one webhook resolves to ONE URL (canonicalDiscordURL):
+		// ptb./canary. subdomains, a trailing slash, the legacy host — each used
+		// to build its own target and post every embed again. The query stays.
+		// Mutant: the host or the slash left as given — these rows differ.
+		{"https://ptb.discordapp.com/api/webhooks/" + id + "/" + tok, "https://discord.com/api/webhooks/" + id + "/" + tok},
+		{"https://canary.discord.com/api/webhooks/" + id + "/" + tok, "https://discord.com/api/webhooks/" + id + "/" + tok},
+		{"https://discord.com/api/webhooks/" + id + "/" + tok + "/", "https://discord.com/api/webhooks/" + id + "/" + tok},
+		{"https://discord.com/api/webhooks/" + id + "/" + tok + "/?thread_id=9", "https://discord.com/api/webhooks/" + id + "/" + tok + "?thread_id=9"},
 		{"https://discord.com/api/webhooks/" + id + "/" + tok, "https://discord.com/api/webhooks/" + id + "/" + tok},
 	} {
 		s, err := parseTarget(tc.in)

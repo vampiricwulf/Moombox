@@ -382,12 +382,7 @@ func parseTarget(url string) (sender, error) {
 		return &DiscordWebhook{URL: resolved}, nil
 
 	case discordWebhookRe.MatchString(url):
-		// Canonicalise the legacy host. Two reasons, both load-bearing:
-		// buildTargets dedupes on the RESOLVED URL, so the two spellings of
-		// one webhook would otherwise build two targets and post every embed
-		// twice; and Go's http.Client turns a 301/302 on a POST into a GET,
-		// so following discordapp.com's redirect would drop the body.
-		return &DiscordWebhook{URL: strings.Replace(url, "discordapp.com", "discord.com", 1)}, nil
+		return &DiscordWebhook{URL: canonicalDiscordURL(url)}, nil
 
 	case strings.Contains(url, "discord.com/api/webhooks"), strings.Contains(url, "discordapp.com/api/webhooks"):
 		return nil, fmt.Errorf("invalid Discord webhook URL: must be HTTPS with a numeric ID and token")
@@ -395,6 +390,25 @@ func parseTarget(url string) (sender, error) {
 	default:
 		return nil, fmt.Errorf("unsupported notification URL scheme (Discord webhooks only)")
 	}
+}
+
+// canonicalDiscordURL is the one spelling of an https webhook URL that
+// discordWebhookRe has accepted: host discord.com, whatever subdomain or
+// legacy discordapp.com it was given as, and no trailing slash on the path,
+// with the query kept. Load-bearing twice over. buildTargets dedupes on the
+// RESOLVED URL and targetMsgKey hashes it, so "…/TOKEN", "…/TOKEN/" and
+// "ptb.discord.com/…/TOKEN" built three targets that posted every embed three
+// times — and a slash added in edit mode opened new messages for every job in
+// progress. And Go's http.Client turns a 301/302 on a POST into a GET, so
+// following discordapp.com's redirect would drop the body.
+func canonicalDiscordURL(raw string) string {
+	rest := strings.TrimPrefix(raw, "https://")
+	path := rest[strings.Index(rest, "/"):] // the pattern guarantees a path
+	query := ""
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path, query = path[:i], path[i:]
+	}
+	return "https://discord.com" + strings.TrimSuffix(path, "/") + query
 }
 
 // ValidateURL reports whether a notification URL would be accepted by the

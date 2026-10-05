@@ -551,6 +551,16 @@ func TestBuildTargetsDedupesByResolvedURL(t *testing.T) {
 			1, map[string]bool{"found": true},
 		},
 		{
+			// Mutant: canonicalDiscordURL keeping the host or the slash — 4.
+			"every spelling of one webhook",
+			[]config.NotificationConfig{
+				{URL: full}, {URL: full + "/"},
+				{URL: "https://ptb.discord.com/api/webhooks/" + id + "/" + tok},
+				{URL: "https://canary.discordapp.com/api/webhooks/" + id + "/" + tok + "/"},
+			},
+			1, map[string]bool{"found": true},
+		},
+		{
 			"a nil filter wins over a narrow one, in either order",
 			[]config.NotificationConfig{
 				{URL: full, Events: []string{"found"}},
