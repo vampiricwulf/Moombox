@@ -253,6 +253,13 @@ type DownloadWorker struct {
 	// which the sweep resolves permissively.
 	CurrentCredentialIdentity func(platform string) string
 
+	// backlogRetries counts each backlog job's consecutive transient
+	// pre-download failures (requeueBacklogAfterTransientFailure). In memory,
+	// like the scheduler's holds: a restart grants a fresh budget, which still
+	// ends a permanently broken video in Error. Lazily allocated.
+	backlogRetryMu sync.Mutex
+	backlogRetries map[string]int
+
 	// processStreamFn and refreshVodInfoFn replace streamProc.Process and
 	// streamProc.RefreshVodInfo when set — a test seam, since youtube.Service
 	// has none of its own. nil in production (processStream,
@@ -337,6 +344,7 @@ func NewDownloadWorker(
 	}
 
 	sched := newScheduler(db, queue, logger)
+	sched.conn = conn
 	// Slot-release flips (spec §10) free an archive slot mid-flight — a
 	// backlog job going Live or entering the upcoming wait stops counting in
 	// M. The wake lets the scheduler admit the channel's next backlog VOD
@@ -784,9 +792,13 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.handleCancellation(job)
 			return
 		}
-		w.setJobError(job, err)
+		requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
+		if !requeued {
+			w.setJobError(job, err)
+		}
 		return
 	}
+	w.forgetBacklogRetries(job.ID)
 
 	if !result.ShouldDownload {
 		if errors.Is(result.ErrSentinel, ErrCancelled) {
@@ -856,7 +868,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.handleCancellation(job)
 			return
 		}
-		w.setJobError(job, err)
+		requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
+		if !requeued {
+			w.setJobError(job, err)
+		}
 		return
 	}
 

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -34,6 +35,20 @@ type Scheduler struct {
 	// drains at most one signal per admission sweep.
 	wake chan struct{}
 	log  logger
+
+	// conn is the connectivity monitor (nil: always online). An admission
+	// made during an outage is a backlog VOD sent to fail its first fetch, so
+	// sweep admits nothing while it reports offline, and Run sweeps again the
+	// moment it reports online.
+	conn Connectivity
+
+	// holds are the backlog jobs a transient pre-download failure returned
+	// to Queued (DownloadWorker.requeueBacklogAfterTransientFailure), each
+	// with the time before which sweep must not admit it again. In memory:
+	// a restart forgets the backoff, never the job. Lazily allocated, so a
+	// Scheduler literal (the tests build several) needs no constructor.
+	holdMu sync.Mutex
+	holds  map[string]time.Time
 }
 
 // newScheduler creates the worker-owned scheduler. resolveSlots stays nil
@@ -48,6 +63,39 @@ func newScheduler(db *database.Database, queue jobEnqueuer, log logger) *Schedul
 		wake: make(chan struct{}, 1),
 		log:  log,
 	}
+}
+
+// holdUntil keeps sweep from admitting jobID before until.
+func (s *Scheduler) holdUntil(jobID string, until time.Time) {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	if s.holds == nil {
+		s.holds = map[string]time.Time{}
+	}
+	s.holds[jobID] = until
+}
+
+// held reports whether jobID is still held at now, forgetting a hold that
+// has run out.
+func (s *Scheduler) held(jobID string, now time.Time) bool {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	until, ok := s.holds[jobID]
+	if !ok {
+		return false
+	}
+	if !now.Before(until) {
+		delete(s.holds, jobID)
+		return false
+	}
+	return true
+}
+
+// heldCount is how many holds are outstanding, across every channel.
+func (s *Scheduler) heldCount() int {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	return len(s.holds)
 }
 
 // Wake signals the scheduler that backlog state changed (a Queued job was
@@ -69,6 +117,17 @@ func (s *Scheduler) Wake() {
 // goroutine owns the only path out of Queued, so a permanent death would
 // strand the backlog silently with no error anywhere.
 func (s *Scheduler) Run(ctx context.Context) {
+	// Connectivity returning is backlog state changing: sweep held every
+	// admission while offline, and the heartbeat would otherwise leave the
+	// backlog idle for up to a minute after the network came back.
+	if s.conn != nil {
+		unregister := s.conn.OnStateChange(func(online bool) {
+			if online {
+				s.Wake()
+			}
+		})
+		defer unregister()
+	}
 	// first gates the startup sweep below to the FIRST pass of this loop. The
 	// panic-restart re-enters the same func literal, so an ungated sweep-at-
 	// start would turn a deterministically panicking sweep() into a ~1 s loop
@@ -129,11 +188,21 @@ func (s *Scheduler) sweep() {
 		return
 	}
 
+	// No admissions during an outage. Every one would fail its first fetch
+	// and free the slot for the next, so a channel's whole backlog drained
+	// into Error in the minutes the network was down. Run's connectivity
+	// subscription sweeps again when it returns.
+	if s.conn != nil && !s.conn.IsOnline() {
+		s.log.Debug("scheduler: offline; backlog admission waits for connectivity")
+		return
+	}
+
 	channels, err := s.db.QueuedChannels()
 	if err != nil {
 		s.log.Error("scheduler: QueuedChannels failed", "err", err)
 		return
 	}
+	now := time.Now()
 	for _, ch := range channels {
 		inFlight, err := s.db.CountBacklogInFlight(ch)
 		if err != nil {
@@ -144,12 +213,23 @@ func (s *Scheduler) sweep() {
 		if admit <= 0 {
 			continue
 		}
-		ids, err := s.db.NextQueuedJobs(ch, admit)
+		// Past the held jobs, which wait out their backoff without costing
+		// the rest of the channel its turn: ask for enough rows that every
+		// hold could be among them.
+		ids, err := s.db.NextQueuedJobs(ch, admit+s.heldCount())
 		if err != nil {
 			s.log.Error("scheduler: NextQueuedJobs failed", "channel", ch, "err", err)
 			continue
 		}
+		admitted := 0
 		for _, id := range ids {
+			if admitted == admit {
+				break
+			}
+			if s.held(id, now) {
+				continue
+			}
+			admitted++
 			// 1. durable FIRST — this is what the M count observes; Enqueue
 			//    touches no DB row, so without this write M counts 0 forever
 			//    and every tick over-admits. Upcoming is what creators write

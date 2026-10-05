@@ -1,0 +1,93 @@
+package worker
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
+)
+
+const (
+	// backlogRetryLimit bounds how many times one backlog job goes back to
+	// Queued after a transient pre-download failure before the failure is
+	// taken at its word and the job ends in Error. A video that is really
+	// gone answers the same way every time, and must still reach Error.
+	backlogRetryLimit = 3
+	// backlogRetryBackoff is the first retry's delay; each later one doubles
+	// it (5, 10, 20 minutes), so the budget spans about half an hour — past
+	// a blip, and past the minutes a connectivity monitor can take to call
+	// an outage, after which the scheduler holds admission entirely.
+	backlogRetryBackoff = 5 * time.Minute
+)
+
+// requeueBacklogAfterTransientFailure sends a backlog VOD whose pre-download
+// fetch failed transiently back to Queued, held from re-admission for a
+// backoff, instead of ending it in Error. Reports whether it did; when it did
+// not, the error to record is returned — err itself, or err saying the retry
+// budget is spent.
+//
+// The case it exists for: during an outage the scheduler kept admitting a
+// channel's backlog, each admitted VOD failed its first GetVideoInfo straight
+// into Error and freed its archive slot for the next, and the whole Queued
+// backlog drained into Error in minutes. Nothing re-created them — the
+// archival pass skips videos it has history for — so nothing retried them.
+// The scheduler now holds admission while the connectivity monitor reports
+// offline, but a monitor calls an outage some seconds in, and not every
+// failure that will pass is an outage.
+//
+// Backlog only, and only where Queued can be left again: CookieResumeStatus —
+// the rule a cookie repair's re-queue follows — answers Queued for a
+// queue_priority 1 job whose feed_items partner exists, and nothing else. A
+// broadcast or a manually added video fails visibly, as before, rather than
+// waiting in a state the operator did not put it in; a backlog row with no
+// partner would never come out of Queued, since the scheduler admits through
+// that join. Transient is classifyProbeErr's verdict — network, timeout,
+// 429/5xx and everything it cannot place; a definitive refusal (a 404, a
+// playability verdict) is not retried.
+//
+// The hold is placed BEFORE the status write, so no sweep can see the row
+// Queued and unheld; the slots are released before it, so the next download
+// does not wait for this run's exit.
+func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, err error) (bool, error) {
+	if classifyProbeErr(err) != classNetwork || w.scheduler == nil {
+		return false, err
+	}
+	if status, perr := CookieResumeStatus(w.db, job); perr != nil || status != database.StatusQueued {
+		return false, err
+	}
+	attempt := w.noteBacklogRetry(job.ID)
+	if attempt > backlogRetryLimit {
+		w.forgetBacklogRetries(job.ID)
+		return false, fmt.Errorf("%w (gave up after %d retries)", err, backlogRetryLimit)
+	}
+	delay := backlogRetryBackoff << (attempt - 1)
+	w.queue.ReleaseSlots(job.ID)
+	w.scheduler.holdUntil(job.ID, time.Now().Add(delay))
+	w.db.UpdateJobFields(job.ID, map[string]any{
+		"status": database.StatusQueued,
+		"error":  "",
+	})
+	w.logger.Warn("backlog VOD's pre-download fetch failed; back to Queued for a retry",
+		"jobID", job.ID, "attempt", attempt, "of", backlogRetryLimit, "retryIn", delay, "err", err)
+	return true, nil
+}
+
+// noteBacklogRetry counts one more consecutive transient failure for jobID
+// and returns the count.
+func (w *DownloadWorker) noteBacklogRetry(jobID string) int {
+	w.backlogRetryMu.Lock()
+	defer w.backlogRetryMu.Unlock()
+	if w.backlogRetries == nil {
+		w.backlogRetries = map[string]int{}
+	}
+	w.backlogRetries[jobID]++
+	return w.backlogRetries[jobID]
+}
+
+// forgetBacklogRetries resets jobID's count: its fetch succeeded, or its
+// budget is spent and it is ending in Error.
+func (w *DownloadWorker) forgetBacklogRetries(jobID string) {
+	w.backlogRetryMu.Lock()
+	defer w.backlogRetryMu.Unlock()
+	delete(w.backlogRetries, jobID)
+}
