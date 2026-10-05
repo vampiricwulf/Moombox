@@ -461,6 +461,10 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 			"playability", string(fullInfo.PlayabilityError),
 			"sessionAuth", string(fullInfo.SessionAuth),
 			"reason", errMsg)
+		// What the fetch says about the job still reaches the row, as on the
+		// initial Process's park: blanks filled, nothing overwritten (and no
+		// schedule notification for a job that is not going to record).
+		sp.updateJobMetadata(job, fullInfo, false)
 		sp.stopEarlyChat(chatDl)
 		return &StreamProcessResult{
 			VideoInfo:      fullInfo,

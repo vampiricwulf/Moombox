@@ -135,6 +135,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// alongside every waitedForResume.resolved() call so a later,
 	// independent stall episode gets its own fresh budget.
 	var waitEpisode waitDeadline
+	// verifyWalled is whether the stream-end verify's last refresh failed on
+	// a credential wall. The second one in a row parks the job (see
+	// refreshWhileLiveWith for why one is not believed).
+	var verifyWalled bool
 
 	// Quality monitoring state
 	segmentIndex := startSegmentIndex
@@ -691,10 +695,16 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
 
 			if refreshErr != nil {
-				if credErr := liveCredentialFailure(freshInfo); credErr != nil {
+				credErr := liveCredentialFailure(freshInfo)
+				if credErr != nil && verifyWalled {
 					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
 						"err", credErr, "jobID", jobCtx.Job.ID)
 					return result, waitedForResume.value(), credErr
+				}
+				verifyWalled = credErr != nil
+				if verifyWalled {
+					o.logger.Warn("YouTube refused this capture's credentials — reading once more before parking the job",
+						"err", credErr, "jobID", jobCtx.Job.ID)
 				}
 				// The quality-loss branch's wait, continued here. That branch
 				// waits once: the downloaders it cancelled bring every later
@@ -750,6 +760,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// resolves any earlier wait-for-resume.
 			waitedForResume.resolved()
 			waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+			verifyWalled = false
 
 			attachProgress(result)
 
@@ -872,10 +883,13 @@ var liveRefreshRetryWait = streamEndVerifyInterval
 func refreshWhileLiveWith(ctx context.Context, prober liveRefreshProber, videoID string, info *youtube.VideoInfo, err error,
 	checks *atomic.Int32, waiting func(), wait time.Duration, refresh func(*youtube.VideoInfo) (*DownloadResult, error),
 	lg logger, jobID string) (*DownloadResult, error) {
+	// walled is whether the last player read was a credential wall. One wall
+	// is re-read before it is believed: a single walled answer to a healthy
+	// session parked a live capture for good — a membership park waits for
+	// an account change nothing will make. Two reads in a row are dead
+	// credentials, and no retry gets past those.
+	walled := liveCredentialFailure(info) != nil
 	for prober != nil && info != nil && info.StreamStatus == youtube.StreamLive {
-		if credErr := liveCredentialFailure(info); credErr != nil {
-			return nil, credErr // no retry gets past dead credentials
-		}
 		if checks.Add(1) >= maxConsecutiveLiveChecks {
 			return nil, err
 		}
@@ -897,6 +911,16 @@ func refreshWhileLiveWith(ctx context.Context, prober liveRefreshProber, videoID
 		if info.StreamStatus != youtube.StreamLive {
 			return nil, err
 		}
+		if credErr := liveCredentialFailure(info); credErr != nil {
+			if walled {
+				return nil, credErr
+			}
+			walled = true
+			lg.Warn("YouTube refused this capture's credentials — reading once more before parking the job",
+				"err", credErr, "jobID", jobID)
+			continue
+		}
+		walled = false
 		r, refreshErr := refresh(info)
 		if refreshErr == nil {
 			return r, nil

@@ -28,6 +28,7 @@ func TestGoLiveStopsOnDeadCredentials(t *testing.T) {
 
 	walled := func(formats int) *youtube.VideoInfo {
 		info := &youtube.VideoInfo{
+			Title:            "Members stream",
 			StreamStatus:     youtube.StreamLive,
 			PlayabilityError: youtube.PlayabilityMembersOnly,
 			SessionAuth:      youtube.SessionAuthLoggedOut,
@@ -57,6 +58,12 @@ func TestGoLiveStopsOnDeadCredentials(t *testing.T) {
 			}
 			if !tc.download && !errors.Is(res.ErrSentinel, ErrCookiesRequired) {
 				t.Errorf("sentinel = %v, want ErrCookiesRequired so the job parks at COOKIES?", res.ErrSentinel)
+			}
+			// A parked job still takes what the fetch said about it, as the
+			// initial Process's park does (blanks filled).
+			// Mutant: the park returning before updateJobMetadata.
+			if row, _ := db.GetJob(job.ID); !tc.download && (row == nil || row.Title != "Members stream") {
+				t.Errorf("the parked row's title is %q, want the fetch's", row.Title)
 			}
 		})
 	}

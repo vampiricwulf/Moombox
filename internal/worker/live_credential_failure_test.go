@@ -58,40 +58,48 @@ func TestLiveCredentialFailure(t *testing.T) {
 	}
 }
 
-// The still-live retry stops at once on a credential wall: no retry gets
-// past dead cookies, and the budget it spent was what turned the park into a
-// Finished job.
+// The still-live retry stops on a credential wall read twice in a row — no
+// retry gets past dead credentials, and the budget it spent was what turned
+// the park into a Finished job. One walled read is not believed: a transient
+// wall on a healthy session parked a live capture for good (a membership park
+// waits for an account change nothing will make), so it is read once more.
 //
-// Mutant: the credential check in refreshWhileLiveWith removed — the retry
-// runs and hands back the manifest error instead.
+// Mutants: the first wall believed — parking on the read the failed refresh
+// was given ("one wall, then healthy" never refreshes) or on the first walled
+// re-read ("a wall between healthy reads" parks); the wall check dropped (the
+// doomed refresh runs and the manifest error comes back instead).
 func TestRefreshWhileLiveStopsAtACredentialWall(t *testing.T) {
 	walled := &youtube.VideoInfo{
 		StreamStatus:     youtube.StreamLive,
 		PlayabilityError: youtube.PlayabilityMembersOnly,
 		SessionAuth:      youtube.SessionAuthLoggedOut,
 	}
+	healthy := &youtube.VideoInfo{StreamStatus: youtube.StreamLive}
 	for _, tc := range []struct {
-		name   string
-		info   *youtube.VideoInfo
-		prober *scriptedProber
+		name          string
+		info          *youtube.VideoInfo
+		prober        *scriptedProber
+		wantPark      bool
+		wantRefreshes int
 	}{
-		{"walled already", walled, &scriptedProber{}},
-		{"walls up while retrying", &youtube.VideoInfo{StreamStatus: youtube.StreamLive},
-			&scriptedProber{answers: []*youtube.VideoInfo{walled}}},
+		{"walled twice", walled, &scriptedProber{answers: []*youtube.VideoInfo{walled}}, true, 0},
+		{"walls up while retrying", healthy, &scriptedProber{answers: []*youtube.VideoInfo{walled, walled}}, true, 0},
+		{"one wall, then healthy", walled, &scriptedProber{answers: []*youtube.VideoInfo{healthy}}, false, 1},
+		{"a wall between healthy reads", healthy, &scriptedProber{answers: []*youtube.VideoInfo{walled, healthy}}, false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var checks atomic.Int32
 			refreshes := 0
-			_, err := refreshWhileLiveWith(context.Background(), tc.prober, "v", tc.info, errManifest, &checks, func() {},
+			r, err := refreshWhileLiveWith(context.Background(), tc.prober, "v", tc.info, errManifest, &checks, func() {},
 				time.Millisecond, func(*youtube.VideoInfo) (*DownloadResult, error) {
 					refreshes++
-					return nil, errManifest
+					return &DownloadResult{}, nil
 				}, nopWorkerLogger{}, "j")
-			if !errors.Is(err, ErrCookiesRequired) {
-				t.Fatalf("got %v, want the COOKIES? error", err)
+			if parked := errors.Is(err, ErrCookiesRequired); parked != tc.wantPark {
+				t.Errorf("err %v, result %v — want park %v", err, r, tc.wantPark)
 			}
-			if refreshes > 1 {
-				t.Errorf("%d refreshes against a credential wall", refreshes)
+			if refreshes != tc.wantRefreshes {
+				t.Errorf("%d refreshes, want %d", refreshes, tc.wantRefreshes)
 			}
 		})
 	}
@@ -100,9 +108,13 @@ func TestRefreshWhileLiveStopsAtACredentialWall(t *testing.T) {
 // runLiveStreamDownload cannot be driven, so the three refresh failures that
 // can see a credential wall — the quality-loss refresh, the split's refresh
 // and the stream-end verify's refresh — are pinned by source to return it
-// rather than finish the capture.
+// rather than finish the capture. The first two get the two-read rule from
+// refreshWhileLiveWith; the verify branch keeps its own (verifyWalled), set on
+// a walled failure, cleared on a successful refresh, and parking only on the
+// second wall in a row.
 //
-// Mutant: any one of the three returning nil again.
+// Mutants: any one of the three returning nil again; the verify branch
+// parking on its first wall; verifyWalled never cleared.
 func TestLiveLoopReturnsACredentialWall(t *testing.T) {
 	src, err := os.ReadFile("orchestrator_youtube.go")
 	if err != nil {
@@ -114,7 +126,9 @@ func TestLiveLoopReturnsACredentialWall(t *testing.T) {
 	}{
 		{"if cookiesStatusError(refreshErr) {", "return true, refreshErr"},
 		{"if cookiesStatusError(refreshErr) {", "return result, waitedForResume.value(), refreshErr"},
-		{"if credErr := liveCredentialFailure(freshInfo); credErr != nil {", "return result, waitedForResume.value(), credErr"},
+		{"if credErr != nil && verifyWalled {", "return result, waitedForResume.value(), credErr"},
+		{"credErr := liveCredentialFailure(freshInfo)", "verifyWalled = credErr != nil"},
+		{"waitedForResume.resolved()\n\t\t\twaitEpisode.reset()", "verifyWalled = false"},
 	} {
 		found := false
 		for off := 0; ; {
