@@ -2187,6 +2187,12 @@ sl-progress-bar {
     gap: var(--sl-spacing-medium);
 }
 
+/* Focused programmatically when its page appears (SetupController._focusPage)
+   so the next Tab lands inside the page; it is not a control, so no ring. */
+.setup-page > h2:focus {
+    outline: none;
+}
+
 .setup-page h2 {
     margin: 0;
     font-size: var(--sl-font-size-large);

@@ -694,3 +694,26 @@ test("the dashboard is reachable when no overlay is up", { skip }, async () => {
   const h = await booted();
   assert.deepEqual(inertRegions(h), []);
 });
+
+// The wizard's Next/Back buttons live on the page they hide, so moving between
+// pages dropped focus to the body: a keyboard user Tabbed in from the top and
+// a screen reader announced nothing. Each page now takes focus as it appears,
+// and the current step indicator carries aria-current="step".
+// MUTANT: drop _focusPage from showPage or showAdvancedStep — focus stays on
+// the body. MUTANT: drop the aria-current lines — no step is current.
+test("the setup wizard moves focus into each page and marks the current step", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { setup: { isFirstRun: true, ffmpegValid: true } } });
+  const doc = h.el("setup-overlay").ownerDocument;
+  assert.equal(doc.activeElement, h.el("setup-mode-quick"), "the mode page opens on its first card");
+
+  h.el("setup-mode-quick").click();
+  await h.flush();
+  const cookiesHeading = h.el("setup-simple-cookies").querySelector(":scope > h2");
+  assert.equal(doc.activeElement, cookiesHeading, "Quick Setup focuses the cookie page's heading");
+
+  h.app.setup.showAdvancedStep(3);
+  const heading = h.el("setup-adv-step-3").querySelector(":scope > h2");
+  assert.equal(doc.activeElement, heading, "an advanced step focuses its heading");
+  const current = [...doc.querySelectorAll('#setup-adv-steps .setup-step[aria-current="step"]')];
+  assert.deepEqual(current.map((s) => s.dataset.step), ["3"], "exactly the shown step is current");
+});

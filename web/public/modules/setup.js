@@ -83,7 +83,24 @@ export class SetupController {
     const advSteps = document.getElementById("setup-adv-steps");
     if (advSteps) advSteps.style.display = "none";
     const el = document.getElementById(id);
-    if (el) el.style.display = "";
+    if (el) {
+      el.style.display = "";
+      this._focusPage(el);
+    }
+  }
+
+  /**
+   * Move focus into a page that just appeared. The Next/Back button that got
+   * the user here was on the page just hidden, so focus otherwise falls to
+   * the body: a keyboard user has to Tab in from the top and a screen reader
+   * announces nothing. The mode page's first card is a real control; every
+   * other page leads with its heading, focused programmatically.
+   */
+  _focusPage(page) {
+    const target = page.querySelector(".setup-mode-card") || page.querySelector(":scope > h2");
+    if (!target) return;
+    if (target.tagName === "H2") target.setAttribute("tabindex", "-1");
+    target.focus();
   }
 
   setupListeners() {
@@ -740,9 +757,13 @@ export class SetupController {
     document.querySelectorAll("#setup-adv-steps .setup-step").forEach((s) => {
       const sn = parseInt(s.dataset.step);
       s.classList.remove("active", "completed");
-      if (sn === step) s.classList.add("active");
-      else if (sn < step) s.classList.add("completed");
+      s.removeAttribute("aria-current");
+      if (sn === step) {
+        s.classList.add("active");
+        s.setAttribute("aria-current", "step");
+      } else if (sn < step) s.classList.add("completed");
     });
+    if (el) this._focusPage(el);
 
     // Render channel list when entering channels step
     if (step === 7) {
