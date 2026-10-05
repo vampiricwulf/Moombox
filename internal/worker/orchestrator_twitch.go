@@ -874,12 +874,22 @@ sessionLoop:
 			// Back online — is the SAME broadcast still live? A broadcast
 			// that ended (or restarted) during the outage finalizes this
 			// job; the monitor picks a new broadcast up as its own job.
-			stillLive, info := o.recheckTwitchBroadcast(parentCtx, variant)
+			stillLive, info, recheckErr := o.recheckTwitchBroadcast(parentCtx, variant)
 			if parentCtx.Err() != nil || userCancelled.Load() {
 				break sessionLoop
 			}
 			if o.conn != nil && !o.conn.IsOnline() {
 				continue recoverLoop // dropped again mid-recheck
+			}
+			if recheckErr != nil {
+				// Online, and still no answer about the broadcast: the
+				// verdict is unknown, so the job keeps its staging and lands
+				// in Error rather than finishing over a capture that may be
+				// half of a broadcast still running.
+				o.logger.Warn("Twitch broadcast could not be rechecked after the outage — keeping staging for recovery",
+					"err", recheckErr, "jobID", jobCtx.Job.ID)
+				unconfirmedEndErr = fmt.Errorf("recheck Twitch broadcast after outage: %w", recheckErr)
+				break sessionLoop
 			}
 			if !stillLive || !o.sameTwitchBroadcast(jobCtx.Job.ID, info) {
 				o.logger.Info("Twitch broadcast ended or changed during outage; finalizing captured parts",
@@ -888,15 +898,35 @@ sessionLoop:
 				break sessionLoop
 			}
 
-			// Variant URLs are short-lived — refresh before resuming.
+			// Variant URLs are short-lived — refresh before resuming. A failed
+			// refresh says nothing about the broadcast (a usher 5xx, a token
+			// blip): retry, then re-verify exactly as the in-loop refresh
+			// does (sweep-2 R2) — only a confirmed end finalizes.
 			var fetchErr error
-			newVariant, fetchErr = refreshBestVariant(parentCtx)
+			for attempt := range postOutageRefreshAttempts {
+				if newVariant, fetchErr = refreshBestVariant(parentCtx); fetchErr == nil || parentCtx.Err() != nil {
+					break
+				}
+				if o.conn != nil && !o.conn.IsOnline() {
+					break
+				}
+				if attempt < postOutageRefreshAttempts-1 {
+					utils.Sleep(parentCtx, time.Duration(attempt+1)*postOutageRetryDelay)
+				}
+			}
 			if fetchErr != nil {
+				if parentCtx.Err() != nil || userCancelled.Load() {
+					break sessionLoop
+				}
 				if o.conn != nil && !o.conn.IsOnline() {
 					continue recoverLoop // dropped again mid-refresh
 				}
 				o.logger.Error("failed to refresh Twitch variants after outage", "err", fetchErr, "jobID", jobCtx.Job.ID)
-				outageFinalize = true
+				if !latchIfUnconfirmed(parentCtx, fmt.Errorf("refresh Twitch variants after outage: %w", fetchErr)) {
+					o.logger.Info("Twitch broadcast confirmed over after the failed post-outage refresh; finalizing captured parts",
+						"jobID", jobCtx.Job.ID)
+					outageFinalize = true
+				}
 				break sessionLoop
 			}
 			break // recovered
@@ -1325,38 +1355,53 @@ func (o *DownloadOrchestrator) waitForOnline(ctx context.Context) error {
 
 // recheckTwitchBroadcast fetches stream liveness with brief retries — the
 // first requests after connectivity restoration commonly fail while DNS and
-// routes settle. Returns (false, nil) when the stream is offline or info
-// stays unreachable through the retry budget.
-func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, variant *TwitchVariantInfo) (bool, *twitch.TwitchStreamInfo) {
+// routes settle. err is non-nil when no attempt got an answer (or ctx ended):
+// the verdict is UNKNOWN, which the caller must not read as "offline" — that
+// reading finalized a still-live broadcast as Finished, and the monitor then
+// never re-archived the rest of it. With no check wired at all the answer is
+// a plain "not live", as latchIfUnconfirmed treats it.
+func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, variant *TwitchVariantInfo) (live bool, info *twitch.TwitchStreamInfo, err error) {
 	const attempts = 4
+	var lastErr error
 	for i := range attempts {
 		if ctx.Err() != nil {
-			return false, nil
+			return false, nil, ctx.Err()
 		}
 		switch {
 		case variant.RecheckStreamFn != nil:
 			info, err := variant.RecheckStreamFn(ctx)
 			if err == nil {
-				return info != nil && info.IsLive, info
+				return info != nil && info.IsLive, info, nil
 			}
+			lastErr = err
 			o.logger.Debug("post-outage stream recheck failed, retrying", "attempt", i+1, "err", err)
 		case variant.CheckStreamFn != nil:
 			live, err := variant.CheckStreamFn(ctx)
 			if err == nil {
-				return live, nil
+				return live, nil, nil
 			}
+			lastErr = err
 			o.logger.Debug("post-outage stream check failed, retrying", "attempt", i+1, "err", err)
 		default:
-			return false, nil
+			return false, nil, nil
 		}
 		// No sleep after the final attempt — there is no retry left to wait
-		// for, and the caller is deciding whether to finalize the job.
+		// for, and the caller is deciding what to do with the job.
 		if i < attempts-1 {
-			utils.Sleep(ctx, time.Duration(3*(i+1))*time.Second)
+			utils.Sleep(ctx, time.Duration(i+1)*postOutageRetryDelay)
 		}
 	}
-	return false, nil
+	return false, nil, lastErr
 }
+
+// postOutageRefreshAttempts is how many times the recovery tries the master
+// playlist once the broadcast is confirmed live again — the same settling
+// window recheckTwitchBroadcast gives the liveness check.
+const postOutageRefreshAttempts = 3
+
+// postOutageRetryDelay is the backoff step of both post-outage retry loops:
+// the n-th retry waits n steps. A variable so tests need not sleep it out.
+var postOutageRetryDelay = 3 * time.Second
 
 // sameTwitchBroadcast reports whether info refers to the broadcast this job
 // has been recording, by the shared sameBroadcastStart identity rule against
