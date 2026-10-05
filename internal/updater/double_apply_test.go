@@ -54,3 +54,47 @@ func TestAFailedApplyCanBeRetried(t *testing.T) {
 		t.Errorf("exe holds %q after the retry", got)
 	}
 }
+
+// A swap that failed both ways — the new binary not placed, the running one
+// not renamed back — leaves the exe path empty and .old holding the running
+// binary, the only copy, with .new kept and .update-broken written. It
+// reports an error, so nothing latches and both UIs keep offering the update;
+// a retry then overwrote .new, removed .old and failed its rename for want of
+// an exe, leaving no binary anywhere. The state is laid out as that path
+// (reachable only through the two-rename swap) leaves it.
+//
+// Mutant: ApplyUpdate without swapLeftBroken — .old and .new are gone.
+func TestAnApplyOverABrokenSwapIsRefused(t *testing.T) {
+	srv := swapTestServer(t)
+	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
+	if err := os.Rename(exePath, exePath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exePath+".new", []byte("staged binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exePath+brokenUpdateSuffix, []byte("manual recovery required"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := u.ApplyUpdate(context.Background(), swapRelease(srv)); err == nil || !strings.Contains(err.Error(), "recover by hand") {
+		t.Fatalf("ApplyUpdate = %v, want a refusal", err)
+	}
+	if got, _ := os.ReadFile(exePath + ".old"); string(got) != "current binary" {
+		t.Errorf(".old holds %q, want the running binary", got)
+	}
+	if got, _ := os.ReadFile(exePath + ".new"); string(got) != "staged binary" {
+		t.Errorf(".new holds %q, want the staged binary left alone", got)
+	}
+
+	// Without the marker, an empty exe path is refused all the same.
+	if err := os.Remove(exePath + brokenUpdateSuffix); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.ApplyUpdate(context.Background(), swapRelease(srv)); err == nil {
+		t.Fatal("an apply with no running binary at the exe path went ahead")
+	}
+	if _, err := os.Stat(exePath + ".old"); err != nil {
+		t.Errorf(".old is gone: %v", err)
+	}
+}

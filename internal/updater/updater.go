@@ -362,6 +362,9 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	if u.applied.Load() {
 		return fmt.Errorf("an update is already applied — restart pending")
 	}
+	if err := u.swapLeftBroken(); err != nil {
+		return err
+	}
 
 	u.logger.Info("[Updater] Downloading update",
 		"version", release.Version,
@@ -435,7 +438,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 				"placeError", err.Error(),
 				"rollbackError", rbErr.Error(),
 			)
-			markerPath := u.exePath + ".update-broken"
+			markerPath := u.exePath + brokenUpdateSuffix
 			msg := fmt.Sprintf("Moombox update failed at %s\nplace error: %v\nrollback error: %v\nOriginal binary may be at %s and staged binary at %s — manual recovery required.\n",
 				time.Now().UTC().Format(time.RFC3339), err, rbErr, oldPath, newPath)
 			if mErr := os.WriteFile(markerPath, []byte(msg), 0o644); mErr != nil {
@@ -456,6 +459,27 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	}
 
 	u.updateApplied(release)
+	return nil
+}
+
+// brokenUpdateSuffix names the marker a swap writes when both placing the new
+// binary and renaming the running one back failed.
+const brokenUpdateSuffix = ".update-broken"
+
+// swapLeftBroken refuses an apply over a swap that failed both ways. That
+// failure leaves the exe path empty and .old holding the running binary —
+// the only copy — with .new kept beside it, and reports an error, so nothing
+// latches and both UIs keep offering the update. A retry's first steps were
+// to overwrite .new with the download and remove .old, then fail its rename
+// for want of an exe: no binary left anywhere. Recovery from that state is
+// by hand, as the marker says.
+func (u *Updater) swapLeftBroken() error {
+	if _, err := os.Stat(u.exePath + brokenUpdateSuffix); err == nil {
+		return fmt.Errorf("an earlier update left the install broken (%s) — recover by hand before updating", u.exePath+brokenUpdateSuffix)
+	}
+	if _, err := os.Stat(u.exePath); err != nil {
+		return fmt.Errorf("the running binary is missing from %s — recover by hand before updating", u.exePath)
+	}
 	return nil
 }
 

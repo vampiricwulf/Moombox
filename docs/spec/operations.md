@@ -336,6 +336,7 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 | Rename of current binary fails | `.new` cleaned up, error returned |
 | Rename of `.new` to current fails | Rollback attempted (`.old` -> current), error returned |
 | An update was already applied in this process | Refused before downloading ("an update is already applied — restart pending") |
+| An earlier swap failed both ways (`.update-broken` present), or nothing is at the exe path | Refused before downloading ("… recover by hand before updating"): that state's only binary is `.old`, and a retry overwrote the kept `.new` and removed `.old` before its rename failed for want of an exe (`swapLeftBroken`) |
 
 ---
 
