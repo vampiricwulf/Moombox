@@ -506,7 +506,8 @@ These are the event strings used for filtering. A target with no event filter re
 | `finished` | Job completed successfully. Warning-coloured rather than Success when the row carries `incomplete_tail` — the recording is knowingly short and Resume appends the rest — and the embed also reports an incomplete chat capture and any set-aside recordings still waiting in staging |
 | `error` | Job failed. The embed names the stage (`mux` or `download`, read off the error prefixes the orchestrator writes — `mux…`, `no media files to mux`, `create output dir`) and whether staging survived, which is the Retry-versus-Resume distinction: Retry deletes staging, Resume preserves it |
 | `cancelled` | Job cancelled by user |
-| `auth` | Any credential problem or recovery — cookies expired, member-only content, refresh failure, COOKIES? jobs resumed, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
+| `auth` | Any credential problem — cookies expired, member-only content, refresh failure, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
+| `auth_recovered` | Credentials work again ("Authentication Recovered"), or parked jobs were re-evaluated against re-observed credentials ("Parked Jobs Re-evaluated"). The close of `auth`, aliased to it — a target filtering `auth` also receives it — but never pinged through `auth`'s mention: they used to carry `auth` itself, and `auth` is in the default mention six, so every recovery pinged the role like the failure did |
 | `quality_split` | Stream quality changed mid-download; previous part closed |
 | `gap_split` | Twitch live segments expired unrecoverably; part closed, new part at live edge |
 | `connectivity_resume` | Connectivity restored; the same Twitch job resumed. Carries the pause instant as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, for one release |
@@ -656,7 +657,7 @@ instead of arming a window on an edit-mode target.
 
 ### Credential Notifications
 
-Every notification below carries `Event: "auth"`, so one filter entry covers the family. An empty `Event` would bypass every target's allowlist — the filter applies only when `Event != ""` — which is why none of them omits it.
+Every notification below carries `Event: "auth"` — or `"auth_recovered"`, the family's close, which the `auth` filter entry delivers through its alias — so one filter entry covers the family. An empty `Event` would bypass every target's allowlist — the filter applies only when `Event != ""` — which is why none of them omits it.
 
 | Title | Type | Fires from | What it asserts |
 |-------|------|-----------|-----------------|

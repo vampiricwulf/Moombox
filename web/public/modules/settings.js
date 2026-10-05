@@ -33,6 +33,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "error", label: "Error" },
       { id: "cancelled", label: "Cancelled" },
       { id: "auth", label: "Auth" },
+      { id: "auth_recovered", label: "Auth Recovered" },
     ],
   },
   {

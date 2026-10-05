@@ -381,9 +381,12 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			if resumed == 0 {
 				desc = fmt.Sprintf(authRecoveredNoParkedBody, platform)
 			}
-			// Event "auth" pairs with the worker's "Authentication Required"
-			// emit — an empty Event would bypass every target's allowlist
-			// (unfilterable) since the filter only applies when Event != "".
+			// Event "auth_recovered" is the close of the worker's
+			// "Authentication Required" (event "auth"), aliased to it so an
+			// "auth" filter still delivers it, but not pinged through auth's
+			// mention — an all-clear asks nothing of anyone. Never empty: an
+			// empty Event would bypass every target's allowlist (unfilterable)
+			// since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
 				desc,
 				notifications.TypeInfo,
@@ -391,7 +394,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 					{Name: "Platform", Value: platform, Inline: true},
 					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
 				},
-				notifications.SendOptions{Event: "auth"},
+				notifications.SendOptions{Event: "auth_recovered"},
 			)
 		}
 	}
@@ -455,8 +458,9 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			// and a login name rather than a Google account, and the old
 			// wording would have been simply wrong there.
 			//
-			// Same "auth" event as the recovery notification above, for the
-			// same reason: an empty Event bypasses every target's allowlist.
+			// Same "auth_recovered" event as the recovery notification above,
+			// for the same reasons: a re-evaluation is no alarm, and an empty
+			// Event bypasses every target's allowlist.
 			s.notifyMgr.Send("Parked Jobs Re-evaluated",
 				fmt.Sprintf(credentialsObservedResumedBody, resumed, platform),
 				notifications.TypeInfo,
@@ -464,7 +468,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 					{Name: "Platform", Value: platform, Inline: true},
 					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
 				},
-				notifications.SendOptions{Event: "auth"},
+				notifications.SendOptions{Event: "auth_recovered"},
 			)
 		}
 	}

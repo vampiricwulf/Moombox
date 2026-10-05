@@ -115,6 +115,8 @@ func TestMentionFor(t *testing.T) {
 			"the default six hold sidecar_down; its all-clear asks nothing of anyone and must not ping"},
 		{"close of a mention-eligible alert", config.NotificationConfig{Mention: "@here", MentionEvents: &warnOnly},
 			"disk_ok", "", "disk_ok is delivered through disk_warning's filter, but not pinged through its mention"},
+		{"auth recovery under the default list", config.NotificationConfig{Mention: "@here"}, "auth_recovered", "",
+			"auth is in the default six; Authentication Recovered is its close and must not ping (mutant: auth_recovered out of closeEvents)"},
 		{"close named explicitly", config.NotificationConfig{Mention: "@here", MentionEvents: &healthyOnly},
 			"channel_healthy", "@here", "a target that lists the close itself is pinged for it"},
 	} {

@@ -202,9 +202,9 @@ func TestAuthRecoveredFiresWithNothingParked(t *testing.T) {
 		s, rec := repairCallbackStateWithNotice(t, func(string) bool { return true })
 		s.cookieRefresh.OnAuthRecovered("youtube")
 
-		got := rec.ByEvent("auth")
+		got := rec.ByEvent("auth_recovered")
 		if len(got) != 1 {
-			t.Fatalf("recorded %d auth notifications, want 1: %+v", len(got), rec.Calls())
+			t.Fatalf("recorded %d auth_recovered notifications, want 1: %+v", len(got), rec.Calls())
 		}
 		if got[0].Title != "Authentication Recovered" {
 			t.Errorf("title = %q, want \"Authentication Recovered\"", got[0].Title)
@@ -265,7 +265,7 @@ func TestAuthRecoveredClosesOncePerEpisode(t *testing.T) {
 		if *failures != 1 {
 			t.Fatalf("the fixture announced %d failures, want 1 — the premise is wrong before the close is even read", *failures)
 		}
-		if got := rec.ByEvent("auth"); len(got) != 1 {
+		if got := rec.ByEvent("auth_recovered"); len(got) != 1 {
 			t.Errorf("one failure and three recovery edges produced %d \"Authentication Recovered\" embeds, want 1: %+v", len(got), got)
 		}
 	})
@@ -284,7 +284,7 @@ func TestAuthRecoveredClosesOncePerEpisode(t *testing.T) {
 		if *failures != 2 {
 			t.Errorf("the second failure reached the operator %d times in total, want 2 — a closed episode must not keep swallowing its successor", *failures)
 		}
-		if got := rec.ByEvent("auth"); len(got) != 2 {
+		if got := rec.ByEvent("auth_recovered"); len(got) != 2 {
 			t.Errorf("two failure episodes produced %d closes, want 2: %+v", len(got), got)
 		}
 	})
