@@ -343,3 +343,23 @@ func TestAsidesMemoFollowsTheJobsOwnTransitions(t *testing.T) {
 		t.Errorf("an unchanged row re-probed (%d → %d)", before, probes)
 	}
 }
+
+// TestDetailsLabelsMatchTheDashboard: the same rows were labelled "URL" and
+// "File" here and "Stream URL:" and "Filename:" in the dashboard's dialog.
+//
+// Mutant: either label back to its old word.
+func TestDetailsLabelsMatchTheDashboard(t *testing.T) {
+	m := NewJobDetailsModel()
+	m.SetSize(100, 40)
+	m.SetJob(&database.Job{ID: "j1", Title: "t", VideoID: "v", URL: "https://www.youtube.com/watch?v=v",
+		Status: database.StatusFinished, Platform: "youtube", Filename: "out.mp4"})
+	labels := map[string]bool{}
+	for _, r := range m.rows {
+		labels[r.label] = true
+	}
+	for _, want := range []string{"Stream URL", "Filename"} {
+		if !labels[want] {
+			t.Errorf("no %q row; labels: %v", want, labels)
+		}
+	}
+}

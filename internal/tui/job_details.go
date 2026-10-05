@@ -383,7 +383,7 @@ func (m *JobDetailsModel) buildRows() {
 	m.addField(vidIDLabel, vidID)
 	// URL only shown if present
 	if j.URL != "" {
-		m.addFieldLink("URL", j.URL, j.URL)
+		m.addFieldLink("Stream URL", j.URL, j.URL) // the dashboard dialog's label
 	}
 	m.addFieldColor("Status", StatusLabel(status), StatusColor(status))
 	// VOD/Live type indicator (matching Web UI)
@@ -674,7 +674,8 @@ func (m *JobDetailsModel) buildRows() {
 		}
 	}
 
-	// === File (J15 - label "File", truncate, gate on Filename to match TS) ===
+	// === Filename (J15 - truncate, gate on Filename to match TS; labelled as
+	// the dashboard dialog labels it) ===
 	if j.Filename != "" {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		// Build file:/// hyperlink from the full path (OutputFile) or OutputDirectory+Filename.
@@ -685,7 +686,7 @@ func (m *JobDetailsModel) buildRows() {
 			fullPath = filepath.Join(j.OutputDirectory, j.Filename)
 			fileLink = (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(fullPath)}).String()
 		}
-		m.addFieldLink("File", j.Filename, fileLink)
+		m.addFieldLink("Filename", j.Filename, fileLink)
 	}
 
 	// === Set-aside Recordings ===
