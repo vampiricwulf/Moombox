@@ -54,7 +54,9 @@ func TestMarqueeTickIsDemandDriven(t *testing.T) {
 	// resume the paused marquee in the same Update — not wait for the 1s
 	// backstop (the marquee pause is tick-counted, so backstop delay would
 	// be additive). addVideoResultMsg is one of the four async-close paths.
-	if _, c := app.Update(addVideoResultMsg{}); c == nil || !app.marqueeTicking {
+	app.addVideo.Open()
+	app.addVideo.videoID, app.addVideo.submitting = "v1", true
+	if _, c := app.Update(addVideoResultMsg{VideoID: "v1"}); c == nil || !app.marqueeTicking {
 		t.Fatal("expected the marquee loop to resume on an async dialog close")
 	}
 	app.marqueeTicking = false // reset for the next scenario

@@ -146,25 +146,25 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		url := fmt.Sprintf("%s/api/jobs", baseURL)
 		resp, err := client.Post(url, "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			return addVideoResultMsg{Feedback: "Failed to connect to server"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Failed to connect to server"}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 409 {
-			return addVideoResultMsg{Feedback: "Job already exists"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Job already exists"}
 		}
 		if resp.StatusCode >= 400 {
 			var errResp struct {
 				Error string `json:"error"`
 			}
 			if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr != nil {
-				return addVideoResultMsg{Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
+				return addVideoResultMsg{VideoID: input, Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
 			}
 			msg := errResp.Error
 			if msg == "" {
 				msg = fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)
 			}
-			return addVideoResultMsg{Feedback: msg}
+			return addVideoResultMsg{VideoID: input, Feedback: msg}
 		}
 
 		label := "Added to queue"
@@ -175,7 +175,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 				label = "Added Twitch channel to queue"
 			}
 		}
-		return addVideoResultMsg{Feedback: label}
+		return addVideoResultMsg{VideoID: input, Feedback: label}
 	})
 }
 
@@ -190,9 +190,9 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 		return safeCmd(func() tea.Msg {
 			data, err := cb(videoID)
 			if err != nil {
-				return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
+				return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 			}
-			return fetchFormatsResultMsg{Formats: data}
+			return fetchFormatsResultMsg{VideoID: videoID, Formats: data}
 		})
 	}
 
@@ -200,19 +200,19 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 		url := fmt.Sprintf("%s/api/formats/%s", baseURL, videoID)
 		resp, err := client.Get(url)
 		if err != nil {
-			return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
+			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
-			return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
+			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 		}
 
 		var data FormatsData
 		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			return fetchFormatsResultMsg{Err: "Failed to parse format data. Proceeding with auto selection."}
+			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to parse format data. Proceeding with auto selection."}
 		}
-		return fetchFormatsResultMsg{Formats: &data}
+		return fetchFormatsResultMsg{VideoID: videoID, Formats: &data}
 	})
 }
 

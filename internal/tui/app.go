@@ -120,11 +120,18 @@ type (
 	}
 
 	// Async results for AddVideo dialog
-	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
-	addVideoResultMsg          struct {
+	// Each carries the video ID it was issued for, so a result that lands
+	// after the operator moved on — a different ID, a closed or reopened
+	// dialog — is told apart from the one the dialog is waiting on.
+	fetchFormatsAutoAdvanceMsg struct { // timer msg to auto-skip format on error
+		VideoID string
+	}
+	addVideoResultMsg struct {
+		VideoID  string
 		Feedback string
 	}
 	fetchFormatsResultMsg struct {
+		VideoID string
 		Formats *FormatsData
 		Err     string
 	}

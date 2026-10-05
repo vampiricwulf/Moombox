@@ -518,31 +518,45 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case addVideoResultMsg:
-		a.addVideo.Close()
 		if msg.Feedback != "" {
 			a.setFeedback(msg.Feedback)
 		}
+		// Only the dialog that sent this closes on it: one Esc'd during the
+		// request and reopened for the next video must not vanish under the
+		// operator's typing.
+		if !a.addVideo.Submitting(msg.VideoID) {
+			return a, nil
+		}
+		a.addVideo.Close()
 		// Async close uncovers the task list — resume a paused marquee now
 		// rather than waiting for the 1s backstop.
 		return a, a.ensureMarqueeTicking()
 
 	case fetchFormatsResultMsg:
+		// A fetch the dialog has stopped waiting for (Esc, a different ID,
+		// closed) is dropped: its table and title would otherwise show
+		// beside another video's ID, and its itag be sent for that video.
+		if !a.addVideo.AwaitingFormats(msg.VideoID) {
+			return a, nil
+		}
 		if msg.Err != "" {
-			a.addVideo.SetError(msg.Err)
+			a.addVideo.SetFetchError(msg.Err)
 			// Auto-advance to confirmation after 2s on error (matching TS)
+			id := msg.VideoID
 			return a, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-				return fetchFormatsAutoAdvanceMsg{}
+				return fetchFormatsAutoAdvanceMsg{VideoID: id}
 			})
 		}
 		a.addVideo.SetFormats(msg.Formats)
 		return a, nil
 
 	case fetchFormatsAutoAdvanceMsg:
-		if a.addVideo.IsVisible() && a.addVideo.errorMsg != "" {
+		if a.addVideo.AutoAdvanceApplies(msg.VideoID) {
 			// Skip to confirmation with auto settings
 			a.addVideo.step = AddStepConfirm
 			a.addVideo.advancedMode = false
 			a.addVideo.loading = false
+			a.addVideo.fetchFailed = false
 		}
 		return a, nil
 

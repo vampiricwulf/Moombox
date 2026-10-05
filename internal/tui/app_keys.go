@@ -284,7 +284,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		action, data := a.addVideo.HandleKey(key)
 		switch action {
 		case "submit":
-			return a, a.addVideoCmd(data)
+			return a, tea.Batch(a.addVideoCmd(data), a.addVideo.SpinnerInit())
 		case "fetch_formats":
 			return a, tea.Batch(a.fetchFormatsCmd(data), a.addVideo.SpinnerInit())
 		}

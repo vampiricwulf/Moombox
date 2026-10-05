@@ -78,6 +78,15 @@ type AddVideoModel struct {
 	selectedVideoItag *int // nil=auto, -1=none, else specific itag
 	selectedAudioItag *int
 	loading           bool
+	// fetchFailed marks a format fetch that came back with an error, so the
+	// 2 s auto-advance to Confirm applies to that failure and nothing else
+	// (an Esc back to the URL step clears it).
+	fetchFailed bool
+
+	// submitting is set while POST /api/jobs is in flight: Enter does not
+	// post again (the second answer, a 409, used to overwrite "Added to
+	// queue"), and only the dialog this flag is on is closed by the result.
+	submitting bool
 
 	// Format tables (built when formats arrive)
 	videoTable table.Model
@@ -137,6 +146,8 @@ func (m *AddVideoModel) reset() {
 	m.selectedVideoItag = nil
 	m.selectedAudioItag = nil
 	m.loading = false
+	m.fetchFailed = false
+	m.submitting = false
 	m.startTimeInput = ""
 	m.endTimeInput = ""
 	m.timeInputFocus = 0
@@ -257,6 +268,32 @@ func (m *AddVideoModel) SetError(err string) {
 	m.loading = false
 }
 
+// SetFetchError applies a failed format fetch: the error, and the mark the
+// auto-advance to Confirm checks for.
+func (m *AddVideoModel) SetFetchError(err string) {
+	m.SetError(err)
+	m.fetchFailed = true
+}
+
+// AwaitingFormats reports whether a format fetch for videoID is the one this
+// dialog is waiting on. A result for anything else — an earlier ID the
+// operator Esc'd away from, or a dialog since closed — is stale.
+func (m *AddVideoModel) AwaitingFormats(videoID string) bool {
+	return m.visible && m.loading && m.step == AddStepVideoFormat && m.videoID == videoID
+}
+
+// AutoAdvanceApplies reports whether the 2 s auto-advance armed by a failed
+// fetch for videoID still applies: the dialog is still on the format step of
+// that video, showing that failure.
+func (m *AddVideoModel) AutoAdvanceApplies(videoID string) bool {
+	return m.visible && m.fetchFailed && m.step == AddStepVideoFormat && m.videoID == videoID
+}
+
+// Submitting reports whether this dialog has a POST in flight for videoID.
+func (m *AddVideoModel) Submitting(videoID string) bool {
+	return m.visible && m.submitting && m.videoID == videoID
+}
+
 // UpdateComponents routes tea.Msg to embedded textinput/spinner/table and syncs.
 func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible {
@@ -264,7 +301,7 @@ func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	}
 	var cmds []tea.Cmd
 	// Route spinner tick when loading
-	if m.loading {
+	if m.loading || m.submitting {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		if cmd != nil {
@@ -343,6 +380,14 @@ func (m *AddVideoModel) syncToTextInput() {
 // HandleKey processes key input. Returns (action, data) where action can be:
 // "submit" with URL, "fetch_formats" with video ID, or "" for no action.
 func (m *AddVideoModel) HandleKey(key string) (string, string) {
+	if m.submitting {
+		// The POST is in flight: nothing but Esc, which closes the dialog
+		// and leaves the answer to the feedback line.
+		if key == keyEsc {
+			m.Close()
+		}
+		return "", ""
+	}
 	// Clear error on input
 	if key != keyEnter && key != keyEsc && key != keyTab {
 		m.errorMsg = ""
@@ -375,6 +420,10 @@ func (m *AddVideoModel) handleEscape() (string, string) {
 	case AddStepVideoFormat:
 		m.step = AddStepURL
 		m.advancedMode = false
+		// A fetch still in flight is abandoned: its result is dropped
+		// (AwaitingFormats) and a failure's auto-advance disarmed.
+		m.loading = false
+		m.fetchFailed = false
 		m.syncToTextInput()
 	case AddStepAudioFormat:
 		m.step = AddStepVideoFormat
@@ -414,13 +463,10 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 		m.videoID = vid
 		m.platform = plat
 
-		// Twitch: no advanced options, submit directly with parsed ID
-		if plat == "twitch" {
-			return "submit", vid
-		}
-
-		// YouTube: check advanced mode
-		if !m.advancedEnabled {
+		// Twitch: no advanced options, submit directly with parsed ID.
+		// YouTube without advanced mode likewise.
+		if plat == "twitch" || !m.advancedEnabled {
+			m.startSubmit()
 			return "submit", vid
 		}
 
@@ -548,9 +594,22 @@ func (m *AddVideoModel) handleConfirmStep(key string) (string, string) {
 			m.errorMsg = "Cannot select None for both video and audio"
 			return "", ""
 		}
+		m.startSubmit()
 		return "submit", m.videoID
 	}
 	return "", ""
+}
+
+// startSubmit enters the in-flight state a submit holds until its result.
+func (m *AddVideoModel) startSubmit() {
+	m.submitting = true
+	m.spinner = newSpinner()
+	m.textInput.Blur()
+}
+
+// submittingLine is the hint row while a submit is in flight.
+func (m *AddVideoModel) submittingLine() string {
+	return m.spinner.View() + " Adding… " + DimStyle.Render("Esc: Close")
 }
 
 // GetSelectedVideoItag returns the selected video itag (nil=auto, -1=none).
@@ -658,7 +717,11 @@ func (m *AddVideoModel) renderURLStep(w, _ int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("Tab: Advanced | Enter: Continue | Esc: Cancel"))
+	if m.submitting {
+		lines = append(lines, m.submittingLine())
+	} else {
+		lines = append(lines, DimStyle.Render("Tab: Advanced | Enter: Continue | Esc: Cancel"))
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -810,7 +873,11 @@ func (m *AddVideoModel) renderConfirm(w, _ int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("Enter: Submit | Esc: Back"))
+	if m.submitting {
+		lines = append(lines, m.submittingLine())
+	} else {
+		lines = append(lines, DimStyle.Render("Enter: Submit | Esc: Back"))
+	}
 
 	return strings.Join(lines, "\n")
 }
