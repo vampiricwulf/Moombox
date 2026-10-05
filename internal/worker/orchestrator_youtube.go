@@ -97,13 +97,13 @@ func stagingPreservedRefusal(err error) bool {
 // refresh failures — not from an engine-side budget expiry), so
 // FinalizedDuringInterruption would otherwise stay false even though the
 // job deliberately waited for (or, config permitting, evidenced) a
-// resume. The wait branch's own giving-up is bounded by waitEpisode (I3
-// fix) — its ceiling is jobCtx.Config.InterruptionTimeout, NOT
-// maxConsecutiveLiveChecks: that counter belongs to a different branch
-// (the "normal download stop" still-live re-verification loop, reached
-// only once a refresh-failure retry falls through to a genuinely-idle
-// downloader rather than repeatedly re-entering the wait branch), and
-// never bounds this one. waitedForResume latches true when
+// resume. The wait is bounded by waitEpisode (I3 fix) — its ceiling is
+// jobCtx.Config.InterruptionTimeout, NOT maxConsecutiveLiveChecks. The
+// quality-loss branch waits once; the downloaders it cancelled bring every
+// later look to the "normal download stop" still-live re-verification
+// branch, which asks the same episode and, while it may keep waiting,
+// refunds the live check it spent — that counter bounds only the verify
+// branch's own retries outside a wait. waitedForResume latches true when
 // noteRefreshFailure's evidence check fires and is CLEARED again at every
 // later successful refresh (`result = refreshResult`) — a broadcast that
 // resumed, or a transient failure that self-healed, must not permanently
@@ -648,8 +648,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.logger.Info("stream still live, refreshing manifests",
 				"check", checks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
 
-			// Through the tracker — see the verify-retry branch above.
-			tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
+			// Through the tracker — see the verify-retry branch above. Inside
+			// a wait for an interrupted broadcast this sleep IS the wait, and
+			// says so.
+			if waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout) {
+				tracker.SetWaitActivity(engine.ActivityWaitingResume)
+			} else {
+				tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
+			}
 
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
@@ -689,6 +695,19 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
 						"err", credErr, "jobID", jobCtx.Job.ID)
 					return result, waitedForResume.value(), credErr
+				}
+				// The quality-loss branch's wait, continued here. That branch
+				// waits once: the downloaders it cancelled bring every later
+				// look to this branch, which spent a live check on each, so an
+				// interruption's wait ended after maxConsecutiveLiveChecks
+				// (about half an hour) instead of the interruption_timeout its
+				// waitEpisode is bounded by. A wait the episode allows spends
+				// no live check; its cadence is the sleep above.
+				if noteRefreshFailure(&waitedForResume, &waitEpisode, refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout, time.Now()) {
+					consecutiveLiveChecks.Add(-1)
+					o.logger.Warn("refresh failed but the broadcast may resume — still waiting",
+						"err", refreshErr, "jobID", jobCtx.Job.ID)
+					continue
 				}
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Through the tracker — see the verify-retry branch above.
