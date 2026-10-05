@@ -23,12 +23,13 @@ func dumpLostChatBatch(path string, batch any) error {
 	return os.WriteFile(path+".lostbatch.json", data, 0o644)
 }
 
-// flush writes pending messages to the current part file and reports whether
-// any are still pending because the write failed.
 // appendChatMessages is utils.AppendChatMessages for both Twitch writers; a
 // test replaces it to make an append fail the way a full disk does.
 var appendChatMessages = utils.AppendChatMessages[TwitchChatMessage]
 
+// flush writes pending messages to the current part file, serialized with
+// every other write to it by flushMu. A non-nil return means some are still
+// pending because the write failed.
 func (cd *ChatDownloader) flush() error {
 	cd.flushMu.Lock()
 	defer cd.flushMu.Unlock()
@@ -112,9 +113,9 @@ func (cd *ChatDownloader) flushLocked() error {
 //
 // A nil error means the batch is on disk, and written is the number of
 // messages the file now holds: count, unless a damaged file had to be salvaged
-// (rewriteWithHistory), when it is what the salvage kept plus the batch. A
-// non-nil error means nothing was written and the caller decides whether the
-// batch stays pending.
+// (rewriteChatFileWithHistory), when it is what the salvage kept plus the
+// batch. A non-nil error means nothing was written and the caller decides
+// whether the batch stays pending.
 func (cd *ChatDownloader) writeBatch(path string, msgs []TwitchChatMessage, count int, alreadyFlushed bool, startMs int64) (written int, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, err
