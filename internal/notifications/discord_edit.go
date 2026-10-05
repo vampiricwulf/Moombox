@@ -147,6 +147,7 @@ func (d *DiscordWebhook) postWaitOnce(body []byte) (string, error) {
 	case err != nil:
 		return "", fmt.Errorf("discord webhook request: %w", err)
 	case r.status == http.StatusTooManyRequests:
+		d.noteRateLimitGiveUp(r)
 		return "", fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	case r.status >= 400:
 		return "", discordStatusErr(r.status, r.snippet)
@@ -162,6 +163,7 @@ func (d *DiscordWebhook) patchMessageOnce(messageID string, body []byte) error {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
 	case r.status == http.StatusTooManyRequests:
+		d.noteRateLimitGiveUp(r)
 		return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	case r.status >= 400:
 		return asEditRefusal(messageID, discordStatusErr(r.status, r.snippet))
