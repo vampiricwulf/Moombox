@@ -8,6 +8,17 @@ import (
 )
 
 // AddJob inserts a new job into the database.
+//
+// The row and its gap rows go in one transaction: a gap insert that failed
+// used to leave the job row behind while AddJob reported an error and fired no
+// JobAdded — a job every list showed only after a restart, that its creator
+// believed was never made.
+//
+// JobAdded carries the row as STORED, read back inside the same lock: the
+// INSERT names a fixed column list, so a field it does not cover (watched,
+// incomplete_tail, park_reason, auto_retry_count — written later through
+// UpdateJobFields) takes the schema default no matter what the caller's struct
+// held, and subscribers must see what a GetJob would return, not the struct.
 func (db *Database) AddJob(job *Job) (bool, error) {
 	db.mu.Lock()
 
@@ -17,7 +28,15 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 	}
 	job.UpdatedAt = now
 
-	result, err := insertJobExec(db.getCtx(), db.db, job)
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		db.mu.Unlock()
+		return false, fmt.Errorf("failed to begin job insert: %w", err)
+	}
+	defer tx.Rollback() // a no-op once committed
+
+	result, err := insertJobExec(ctx, tx, job)
 	if err != nil {
 		db.mu.Unlock()
 		return false, fmt.Errorf("failed to insert job: %w", err)
@@ -32,12 +51,24 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 
 	// Insert gaps
 	for _, gap := range job.Gaps {
-		_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)`,
 			job.ID, gap.From, gap.To, gap.Stream)
 		if err != nil {
 			db.mu.Unlock()
 			return false, fmt.Errorf("failed to insert gap: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		db.mu.Unlock()
+		return false, fmt.Errorf("failed to commit job insert: %w", err)
+	}
+
+	added := job
+	if stored, err := scanJob(db.stmtGetJob.QueryRowContext(ctx, job.ID)); err == nil {
+		if gaps, gErr := db.getGaps(job.ID); gErr == nil {
+			stored.Gaps = gaps
+		}
+		added = stored
 	}
 
 	db.mu.Unlock()
@@ -46,7 +77,7 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 	// targeted lifecycle event (DECISIONS #21 consumer migration). Only
 	// the bulk writers (BatchSetWatched, DeleteJobsAndHistoryForChannel)
 	// still fire OnJobsChange.
-	db.notifyJobAdded(job)
+	db.notifyJobAdded(added)
 	return true, nil
 }
 
