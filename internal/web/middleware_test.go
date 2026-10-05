@@ -1284,11 +1284,20 @@ func TestHostGateRefusesARebindingHost(t *testing.T) {
 		{"lan", "192.168.1.10:774", http.StatusOK},
 		{"lan", "localhost:774", http.StatusOK},
 		{"lan", "attacker.example:774", http.StatusForbidden},
-		{"external", "attacker.example:774", http.StatusOK},
-		{"public", "moombox.example.com", http.StatusOK},
+		// external/public: the peers that skip auth (loopback, private) are
+		// held to a host rule — a DNS name needs a SAN, localhost or the
+		// public_url host. A public peer is not the rebinding victim.
+		// Mutant: externalHostRefused always false — the rebinding rows pass.
+		{"external", "attacker.example:774", http.StatusForbidden},
+		{"external", "192.168.1.10:774", http.StatusOK},
+		{"external", "moombox.example.com", http.StatusOK},
+		{"public", "attacker.example", http.StatusForbidden},
+		{"public", "localhost:774", http.StatusOK},
+		{"public", "moombox.example.com:443", http.StatusOK},
 	} {
 		cfg := config.Defaults()
 		cfg.Network.NetworkAccess = tc.access
+		cfg.Network.PublicURL = "https://moombox.example.com"
 		h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
 		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 		req.RemoteAddr = "127.0.0.1:50000"
@@ -1298,5 +1307,26 @@ func TestHostGateRefusesARebindingHost(t *testing.T) {
 		if rr.Code != tc.want {
 			t.Errorf("access=%q Host=%q: status %d, want %d", tc.access, tc.host, rr.Code, tc.want)
 		}
+	}
+}
+
+// The external/public host rule is for the peers that skip auth: a rebinding
+// page's request comes from the browser it runs in, on the LAN or the machine
+// itself. A public peer reaching an external install by its DNS name is the
+// normal case and passes.
+//
+// Mutant: externalHostRefused without the peer test — the public peer is 403.
+func TestHostGateLetsAPublicPeerUseADNSName(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	cfg := config.Defaults()
+	cfg.Network.NetworkAccess = "external"
+	h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req.RemoteAddr = "203.0.113.5:50000"
+	req.Host = "moombox.example.net"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("public peer by DNS name: status %d, want 200", rr.Code)
 	}
 }

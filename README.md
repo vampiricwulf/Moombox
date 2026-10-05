@@ -203,7 +203,9 @@ On `localhost` and `lan`, open the dashboard by **IP address or
 `localhost`**, not by a hostname: a name the server cannot vouch for is
 refused, which is what stops a malicious web page from reaching the
 dashboard through DNS rebinding. (A TLS certificate whose names include
-the hostname lifts this for that name.)
+the hostname lifts this for that name.) On `external` and `public` the
+same holds for clients on this machine or your LAN — the ones that skip
+the password — with the host of `network.public_url` admitted as well.
 
 To reach the dashboard from outside that boundary, pick one of these —
 strongest first.

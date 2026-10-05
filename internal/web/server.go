@@ -457,6 +457,13 @@ func (s *Server) Start(ctx context.Context) error {
 					http.Error(w, "Forbidden", http.StatusForbidden)
 					return
 				}
+				// And the external/public host rule HostGateMiddleware
+				// applies: the rebinding page's socket would otherwise carry
+				// the live stream its GETs are refused (externalHostRefused).
+				if externalHostRefused(store, r) {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
 				wsHandler(w, r)
 				return
 			}

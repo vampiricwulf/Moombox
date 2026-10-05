@@ -253,9 +253,12 @@ func IPGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 // is lost; one reached by a DNS name needs a certificate naming it, as the
 // spec already says.
 //
-// external/public are untouched: they are meant to be reached by DNS names,
-// and their rebinding defence is the certificate attestation on Origin. A
-// request with no Host at all (HTTP/1.0) passes — a browser always sends one.
+// external/public are meant to be reached by DNS names, so there only the
+// peers AuthMiddleware and the WebSocket waive auth for are held to a host
+// rule (externalHostRefused): a rebinding page's request comes from the
+// browser it runs in, on the LAN or the machine itself, and a certificate's
+// attestation on Origin never engages for a GET. A request with no Host at
+// all (HTTP/1.0) passes — a browser always sends one.
 func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -273,9 +276,65 @@ func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 					return
 				}
 			}
+			if externalHostRefused(store, r) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden: unrecognized host — open the dashboard by IP address, localhost or network.public_url"}`))
+				return
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// externalHostRefused reports whether a request on an external/public install
+// is the DNS-rebinding read: a loopback or private peer — the peers
+// AuthMiddleware and the WebSocket waive auth for — that addressed the server
+// by a DNS name no certificate SAN, `localhost` or network.public_url names.
+//
+// A page on attacker.example rebound to the server's LAN address fetched
+// /api/config, /api/jobs and /api/logs same-origin from the browser it runs
+// in: the LAN peer skipped the password, a GET carries no Origin check, and a
+// certificate's attestation on Origin never engages for one. Notification
+// webhook tokens were in the reply. A rebinding attack always arrives under a
+// DNS name, so an IP-literal Host is admitted; so is the operator's
+// public_url host, which is what a LAN client of a proxied install types.
+// This is the rule lan already applies (HostGateMiddleware), for the same
+// peers — a LAN client that reaches the dashboard by another name needs a
+// certificate naming it, or the IP.
+func externalHostRefused(store *config.Store, r *http.Request) bool {
+	var networkAccess, publicURL string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+		publicURL = c.Network.PublicURL
+	})
+	if networkAccess != "external" && networkAccess != "public" {
+		return false
+	}
+	if ip := EffectiveClientIP(store, r); !isLoopback(ip) && !isPrivateIP(ip) {
+		return false
+	}
+	host := effectiveRequestHost(store, r)
+	if host == "" {
+		return false
+	}
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	name = strings.TrimSuffix(strings.Trim(name, "[]"), ".")
+	if strings.EqualFold(name, "localhost") || net.ParseIP(name) != nil {
+		return false
+	}
+	for _, san := range identityHosts() {
+		if strings.EqualFold(san, name) {
+			return false
+		}
+	}
+	if u, err := url.Parse(publicURL); publicURL != "" && err == nil && strings.EqualFold(u.Hostname(), name) {
+		return false
+	}
+	return true
 }
 
 // LoopbackOnly is a middleware that restricts to loopback addresses only.
