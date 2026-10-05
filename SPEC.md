@@ -95,7 +95,7 @@ Always check Charm's ecosystem (`charm.land/bubbletea/v2`, `bubbles/v2`, `huh/v2
 
 Moombox uses a launcher/supervisor pattern controlled by the `_MOOMBOX_CHILD` environment variable:
 
-- **Without `_MOOMBOX_CHILD`** — The process acts as a launcher. It spawns itself as a child process with `_MOOMBOX_CHILD=1`, waits for it to exit, and respawns if the exit code is 42 (restart requested). The launcher uses `CreateNoWindow` (0x08000000) to prevent console window flashing on Windows. This keeps one stable parent process holding the console so the child's TUI can restore terminal state cleanly.
+- **Without `_MOOMBOX_CHILD`** — The process acts as a launcher. It spawns itself as a child process with `_MOOMBOX_CHILD=1`, waits for it to exit, and respawns if the exit code is 42 (restart requested). The child shares the launcher's console (the TUI needs it); `CREATE_NO_WINDOW` (0x08000000) is used only for the launcher's detached cleanup spawn. This keeps one stable parent process holding the console so the child's TUI can restore terminal state cleanly.
 
 - **With `_MOOMBOX_CHILD=1`** — The process runs the full application stack. When a restart is needed (config change, update applied, setup wizard completion, or API request — from the web or the TUI), `triggerRestart(source)` sets an atomic flag, puts the web server into drain mode (503 for new requests), and five seconds later cancels the main context and quits the TUI if it is running. The `run()` function returns `true`, and `main()` calls `os.Exit(42)`.
 
@@ -241,7 +241,7 @@ Twitch live recordings are additionally **gap-split**: Twitch has no DVR, so seg
 SEGMENT muxes run on goroutines parented by the orchestrator's mux root rather than by the job's own context, so a finished part is still muxed into a usable file even if that job is cancelled (user quits during download) rather than abandoned as raw segments. The job's FINAL mux is deliberately not on that root — it runs on the job's own context, so a cancel reaches it and the row stays `Muxing` for the next start; the off-queue restart/Mux path and the Twitch outage finalize, which have no job context to run on, use the root. The root is not `context.Background()` either: shutdown cancels it once the worker's ten-second wait for in-flight jobs runs out, so a daemon exit kills FFmpeg instead of leaving it writing into a staging dir the restarted child re-muxes over. Either way those rows stay `Muxing` with their staging deliberately intact, and the next start re-muxes them from it.
 
 **SegmentDownloader** has three modes:
-- **DASH sequential** — Increments segment number, fetches `{base_url}/sq/{n}`, handles 404 with exponential backoff. Saves resume state every 50 sequential segments. Verification is time-based: once the gap since the last segment crosses 30s, calls `checkStreamStatus()` (re-checked at most once per 30s) to verify whether the stream is still live. If the stream ended, exits cleanly; if still live, keeps waiting. A configurable `maximum_timeout` (default 600s, YouTube only) force-finalizes the recording if no segment arrives for that long even while YouTube still reports the stream live (its status can lag or stick); the clock resets whenever a segment lands, and offline time pauses it.
+- **DASH sequential** — Increments segment number, fetches `{base_url}/sq/{n}`, handles 404 with exponential backoff. Saves resume state every 50 sequential segments. Verification is time-based: once the gap since the last segment crosses 30s, calls the `CheckStreamStatus` callback (re-checked at most once per 30s) to verify whether the stream is still live. If the stream ended, exits cleanly; if still live, keeps waiting. A configurable `maximum_timeout` (default 600s, YouTube only) force-finalizes the recording if no segment arrives for that long even while YouTube still reports the stream live (its status can lag or stick); the clock resets whenever a segment lands, and offline time pauses it.
 - **HLS polling** — Re-fetches the media playlist, identifies new segments by media sequence number (`#EXT-X-MEDIA-SEQUENCE` plus position, compared against the next sequence the file needs), downloads them in order. YouTube HLS honors the same `maximum_timeout` backstop — on both strategies it ends the downloader's loop without marking the stream ended, so the resume sidecar survives for the worker's re-verify and a still-live refresh resumes from it; Twitch HLS relies on its GQL end-detection instead. Saves resume state at the same interval as DASH.
 - **VOD direct** — Knows the total size and downloads it sequentially in 5MB Range-request chunks, up to 3 attempts per chunk (`MaxChunkRetries`); there is no worker pool on this path. Reports percentage progress throttled to 500ms intervals (`ProgressThrottle`) to avoid flooding the UI.
 
@@ -769,7 +769,7 @@ The launcher (parent process, without `_MOOMBOX_CHILD`) spawns the application a
 - Exit code 42 — Restart requested. Launcher respawns immediately, picking up any new binary.
 - Any other exit — Launcher exits with the same code.
 
-The `CreateNoWindow` flag (0x08000000) on Windows prevents a console window flash during respawn. Restart triggers: config change requiring restart, update applied, setup wizard completion, `POST /api/restart`.
+The respawned child shares the launcher's console; the `CREATE_NO_WINDOW` flag (0x08000000) is used only for the detached cleanup spawn that deletes the superseded launcher binary. Restart triggers: config change requiring restart, update applied, setup wizard completion, `POST /api/restart`.
 
 ### Shutdown Sequence
 
@@ -804,7 +804,7 @@ Run `bash references/update-all.sh` to pull all upstream repos and see new commi
 
 ### Notifications
 
-Discord webhooks with queued dispatch. The `NotificationManager` validates webhook URLs, formats Discord embeds with color-coded types (Info=blue, Success=green, Warning=yellow, Error=red, Download=teal, Muxing=purple, Cancelled=orange), and hands each one to a per-target FIFO queue drained by a single goroutine. Supports event-based filtering per webhook target — see the event list below and the table in `docs/spec/operations.md`.
+Discord webhooks with queued dispatch. The `notifications.Manager` validates webhook URLs, formats Discord embeds with color-coded types (Info=blue, Success=green, Warning=yellow, Error=red, Download=teal, Muxing=purple, Cancelled=orange), and hands each one to a per-target FIFO queue drained by a single goroutine. Supports event-based filtering per webhook target — see the event list below and the table in `docs/spec/operations.md`.
 
 **Deep-dive:** [docs/spec/operations.md](docs/spec/operations.md)
 

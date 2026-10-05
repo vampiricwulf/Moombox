@@ -1063,7 +1063,7 @@ A divergence stated here is a specification. A divergence omitted is a bug repor
 
 ### First-Run Setup Wizard
 
-Both UIs implement a setup wizard that runs on first launch (before `setup_complete` is set in config):
+Both UIs implement a setup wizard that runs on first launch, i.e. when no config file was loaded (`isFirstRun` from `GET /api/setup/status`, `app.IsFirstRun` in the TUI — both `!ConfigLoaded`):
 
 1. **Basic configuration** — output directory, port, etc.
 2. **FFmpeg check** — validate FFmpeg on PATH, offer installation if missing.

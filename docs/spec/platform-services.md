@@ -136,7 +136,7 @@ All client configs are defined in `internal/constants/constants.go`:
 `GetVideoInfoAuthenticated` executes the following sequence:
 
 1. **Fetch watch page** -- GET `https://www.youtube.com/watch?v={videoID}&bpctr=9999999999&has_verified=1` with cookies. The two extra parameters are yt-dlp's age-gate bypass (`_video.py:3809`): without them an age-restricted video answers with the age-gate shell and its embedded player response is lost. Extracts `YtcfgData` (playerURL, visitorData, sessionIndex, delegatedSessionID) and `ytInitialPlayerResponse`.
-2. **Parse watch page response** -- If `ytInitialPlayerResponse` was found (tried against 3 regex patterns), parse it as a player response. Collect formats with `AuthLevelWatchPage`.
+2. **Parse watch page response** -- If `ytInitialPlayerResponse` was found (tried against 3 regex patterns), parse it as a player response. Collect formats with `AuthLevelWatchPageAuth`.
 3. **Extract STS** -- If a playerURL was found and a cipher solver is available, extract the `signatureTimestamp` from the player JavaScript.
 4. **Try WEB_EMBEDDED** -- POST with the embedded client (no embed-page fetch; `thirdParty.embedUrl` only). Collect formats with `AuthLevelWebEmbedded`. Purely a format-pool and DASH contributor: WEB_EMBEDDED reports "unavailable" for any embedding-disabled channel, so it must **never** drive playability classification — TV below stays the authority. Failure is logged at Debug and ignored.
 5. **Try TV_DOWNGRADED** -- POST to Innertube with TV client, STS, and auth headers. Collect formats with `AuthLevelTVAuth`. If HTTP error occurs, log warning and continue (do not return).
@@ -297,18 +297,21 @@ The live strategies choose from the DASH representations or the manifestless poo
 
 ### Stream Status Classification
 
-The `classifyStream` function determines the stream's lifecycle state from multiple signals in the player response:
+The `classifyStream` function determines the stream's lifecycle state (`youtube.StreamStatus`: `upcoming`, `live`, `post_live`, `vod`, `not_a_stream`) from multiple signals in the player response:
+
+The rules run in this order; the first that matches decides (`classifyStream`, `internal/youtube/player_api_parsing.go`):
 
 | Condition | Result |
 |-----------|--------|
-| `playabilityStatus.status == "LIVE_STREAM_OFFLINE"` | `UPCOMING` |
-| `playabilityStatus.status == "UNPLAYABLE"` and reason contains "live event will begin" | `UPCOMING` |
-| Premiere detected (has scheduled start, not live content, reason contains "premiere" or `isUpcoming=true`) and not live | `UPCOMING` |
-| `videoDetails.isLive == true` OR `liveBroadcastDetails.isLiveNow == true` | `LIVE` |
-| No `liveBroadcastDetails`, not `isLiveContent`, not a premiere | `NOT_A_STREAM` |
-| No formats but has `liveBroadcastDetails` or `isLiveContent` | `UPCOMING` |
-| `liveBroadcastDetails.endTimestamp` present and not live now | `POST_LIVE` (DVR) |
-| Default | `VOD` |
+| `playabilityStatus.status == "LIVE_STREAM_OFFLINE"`, or `"UNPLAYABLE"` with a reason saying the live event will begin (`isUpcomingFromPlayability`) | `upcoming` |
+| Premiere (has a scheduled start, not live content, reason contains "premiere" or `videoDetails.isUpcoming`), not live now, no formats | `upcoming` |
+| `videoDetails.isUpcoming == true` and no formats — overrides `isLive`, which YouTube sets on a waiting room once the scheduled time passes | `upcoming` |
+| `videoDetails.isLive == true` OR `liveBroadcastDetails.isLiveNow == true` (a live premiere included) | `live` |
+| `playabilityStatus.liveStreamability` renderer present and no formats — a scheduled stream some clients report without `isUpcoming` | `upcoming` |
+| No `liveBroadcastDetails`, not `isLiveContent`, not a premiere | `not_a_stream` |
+| No formats but has `liveBroadcastDetails` or `isLiveContent` | `upcoming` |
+| `liveBroadcastDetails.endTimestamp` present and not live now | `post_live` (DVR) |
+| Default | `vod` |
 
 ### Playability Status Parsing
 
