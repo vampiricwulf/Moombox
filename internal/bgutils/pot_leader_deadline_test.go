@@ -16,7 +16,7 @@ import (
 type deadlineBody struct{}
 
 func (deadlineBody) Read([]byte) (int, error) { return 0, context.DeadlineExceeded }
-func (deadlineBody) Close() error              { return nil }
+func (deadlineBody) Close() error             { return nil }
 
 // deadlineTransport answers every request with a deadlineBody and counts the
 // requests, one per mint that reached the network.
