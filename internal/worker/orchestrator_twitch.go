@@ -84,8 +84,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	// DB listener for cancellation (B6)
 	var userCancelled atomic.Bool
+	// The ID is read once, here: the callback runs on whichever goroutine
+	// wrote the row, and muxAndFinalize replaces jobCtx.Job with a fresh read
+	// while those writes continue, so reading jobCtx.Job inside it was a race.
+	jobID := jobCtx.Job.ID
 	unsubscribe := o.db.OnJobUpdate(func(updatedJob *database.Job) {
-		if updatedJob.ID == jobCtx.Job.ID && updatedJob.Status == database.StatusCancelled {
+		if updatedJob.ID == jobID && updatedJob.Status == database.StatusCancelled {
 			userCancelled.Store(true)
 			callCancel()
 		}

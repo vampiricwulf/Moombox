@@ -157,9 +157,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	jobCtx2, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The ID is read once, here: the callback runs on whichever goroutine
+	// wrote the row, and muxAndFinalize replaces jobCtx.Job with a fresh read
+	// while those writes continue, so reading jobCtx.Job inside it was a race.
+	jobID := jobCtx.Job.ID
 	unsubscribe := o.db.OnJobUpdate(func(updatedJob *database.Job) {
-		if updatedJob.ID == jobCtx.Job.ID && updatedJob.Status == database.StatusCancelled {
-			o.logger.Info("cancel detected via DB listener", "jobID", jobCtx.Job.ID)
+		if updatedJob.ID == jobID && updatedJob.Status == database.StatusCancelled {
+			o.logger.Info("cancel detected via DB listener", "jobID", jobID)
 			cancel()
 		}
 	})
