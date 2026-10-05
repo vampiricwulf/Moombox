@@ -119,6 +119,14 @@ type Updater struct {
 	// and race verify-then-rename into a corrupted live binary.
 	applying atomic.Bool
 
+	// applied latches once an update has been placed: from then on the exe
+	// path holds the new binary, .old holds the running one — the only
+	// rollback artifact — and the process is restart-pending. A second apply
+	// in the same process (R U pressed again inside triggerRestart's grace
+	// window, or a TUI apply after a Web one) would make .old the NEW binary
+	// and lose the running one, so every later apply is refused.
+	applied atomic.Bool
+
 	// apiBaseURL is the GitHub API origin. Tests override to point at an
 	// httptest server so CheckForUpdate doesn't hit github.com.
 	apiBaseURL string
@@ -319,6 +327,9 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("update already in progress")
 	}
 	defer u.applying.Store(false)
+	if u.applied.Load() {
+		return fmt.Errorf("an update is already applied — restart pending")
+	}
 
 	u.logger.Info("[Updater] Downloading update",
 		"version", release.Version,
@@ -422,6 +433,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 // failed-update marker (the launcher auto-rolled back) marks the version
 // skipped. Best-effort: without it the skip feature degrades, nothing else.
 func (u *Updater) updateApplied(release *ReleaseInfo) {
+	u.applied.Store(true)
 	pendingPath := u.exePath + PendingVersionSuffix
 	if err := os.WriteFile(pendingPath, []byte(release.TagName), 0o644); err != nil {
 		u.logger.Warn("[Updater] Failed to write pending-version breadcrumb",

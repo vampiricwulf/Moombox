@@ -105,3 +105,29 @@ func TestDismissUpdateResultFailureKeepsTheBadge(t *testing.T) {
 			app.updateAvailable, app.details.updateInfo)
 	}
 }
+
+// A placed update is restart-pending: the updater refuses a second apply
+// until the process restarts, so the badge and R U have nothing left to
+// offer. A failed apply leaves both, since installing is still possible.
+//
+// Mutant: the success branch leaving updateAvailable set.
+func TestAnAppliedUpdateClearsTheBadge(t *testing.T) {
+	app := newBadgeApp(t)
+	lightBadge(t, app, "v9.9.9")
+
+	app.Update(updateApplyResultMsg{Err: "download failed: boom"})
+	if app.updateAvailable == nil || app.details.updateInfo == nil {
+		t.Fatal("a failed apply must leave the pending release offered")
+	}
+
+	app.Update(updateApplyResultMsg{})
+	if app.updateAvailable != nil {
+		t.Errorf("an applied update must clear updateAvailable, got %#v", app.updateAvailable)
+	}
+	if app.details.updateInfo != nil {
+		t.Error("an applied update must clear details.updateInfo")
+	}
+	if strings.Contains(app.details.View(), "Update!") {
+		t.Error("the details header must not render the update glyph after the update is applied")
+	}
+}

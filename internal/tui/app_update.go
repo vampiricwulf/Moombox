@@ -359,8 +359,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateApplyResultMsg:
 		if msg.Err != "" {
 			a.setFeedback("Update failed: " + msg.Err)
+			return a, nil
 		}
-		// On success, the process is already exiting (QuitTUI was called)
+		// Placed: the restart's grace window is running. The release is no
+		// longer something to install — the updater refuses a second apply
+		// while the restart is pending — so R U and the badge go with it.
+		a.updateAvailable = nil
+		a.details.updateInfo = nil
+		a.setFeedback("Update applied — restarting")
 		return a, nil
 
 	case dismissUpdateResultMsg:

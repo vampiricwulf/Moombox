@@ -303,7 +303,7 @@ The self-updater lives in `internal/updater/`. It checks GitHub Releases, downlo
 
 6. **Breadcrumb** — After a successful swap, `ApplyUpdate` writes `<exe-path>.update-pending` containing the target release tag. The next boot resolves it: a boot running that version deletes it (update landed); a boot running a *different* version alongside a failed-update marker (the launcher auto-rolled back — see below) records the tag as `updates.skipped_version` so automatic checks stop offering the broken release (a manual "Check for updates" still retries it deliberately), then deletes it. Binaries that predate the breadcrumb ignore it; stale copies are inert until the next aware boot cleans them up.
 
-7. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary.
+7. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary. Until it does, the process is restart-pending: a placed update latches the Updater's `applied` flag and every later `ApplyUpdate` in that process is refused ("an update is already applied — restart pending"). A second apply — `R U` pressed again inside the restart's grace window, or a TUI apply after a Web one — would otherwise make `.old` the binary the first apply had just placed, so the running binary, the only rollback artifact, would be gone from disk. A failed apply changed nothing and does not latch. The TUI drops its update badge and `R U` once an apply succeeds.
 
 8. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, `.new.sig` and `.failed` files left by previous updates, interrupted downloads or an automatic rollback; on Windows it also sweeps an orphaned `~`. `<exe>.sig` is deliberately spared — Moombox never writes it, and it is the published signature asset a manual verifier leaves beside the binary.
 
@@ -333,6 +333,7 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 | Signature verification fails | `.new` and `.new.sig` cleaned up, error returned |
 | Rename of current binary fails | `.new` cleaned up, error returned |
 | Rename of `.new` to current fails | Rollback attempted (`.old` -> current), error returned |
+| An update was already applied in this process | Refused before downloading ("an update is already applied — restart pending") |
 
 ---
 
