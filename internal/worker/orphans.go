@@ -215,11 +215,45 @@ func canonicalDir(dir string) string {
 // findActiveJobForPath returns the ID of a currently-active job that owns the given path,
 // or "" if the path is not associated with any active job.
 //
-// For staging paths, the jobID is the first path component under the staging directory
-// (staging/<jobID>/...). For output paths, we scan all jobs and check their output/chat/
+// A path a running finalize is still writing (outputClaims) is owned by that
+// job before any column names it. Otherwise, for staging paths, the jobID is
+// the first path component under the staging directory (staging/<jobID>/...);
+// for output paths, we scan all jobs and check their output/chat/
 // thumbnail/description/segment file paths for a normalized match.
+//
+// The lookup runs on the path as given against the configured directories,
+// then again on its canonical spelling against the canonical directories —
+// the both-sides rule DeleteOrphanedFile's containment check already uses.
+// The first pass alone let a request spell an active job's staging through
+// the real directory behind a symlinked or junctioned staging_directory: it
+// passed containment (canonical on both sides), then filepath.Rel against the
+// configured spelling found no job, and the job's staging was RemoveAll'd.
 func findActiveJobForPath(absPath string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
-	stagingDir := resolveStagingDir(cfg)
+	// One check covers both spellings: claimOutputStem records the stem in
+	// its configured spelling and its canonical one.
+	if id := outputClaimOwner(absPath); id != "" {
+		return id, nil
+	}
+	stagingDir, outputDir := resolveStagingDir(cfg), resolveOutputDir(cfg)
+	if id, err := findActiveJobUnder(absPath, stagingDir, outputDir, db, cfg); err != nil || id != "" {
+		return id, err
+	}
+	realPath, err := utils.CanonicalPath(absPath)
+	if err != nil {
+		return "", nil
+	}
+	realStaging, realOutput := canonicalDir(stagingDir), canonicalDir(outputDir)
+	if realPath == absPath && realStaging == stagingDir && realOutput == outputDir {
+		return "", nil // nothing spells differently; the first pass was the whole answer
+	}
+	return findActiveJobUnder(realPath, realStaging, realOutput, db, cfg)
+}
+
+// findActiveJobUnder is findActiveJobForPath's lookup for one spelling of the
+// path and the two directories. A job column is matched in its stored
+// spelling and in its canonical one, so the canonical pass recognises a file
+// the row names through the configured (linked) directory.
+func findActiveJobUnder(absPath, stagingDir, outputDir string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
 	if rel, err := filepath.Rel(stagingDir, absPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
 		// Path under staging/ — the first component is the jobID
 		parts := strings.SplitN(rel, string(filepath.Separator), 2)
@@ -239,7 +273,6 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 		return "", nil
 	}
 
-	outputDir := resolveOutputDir(cfg)
 	if rel, err := filepath.Rel(outputDir, absPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
 		// Path under output/ — scan active jobs for a matching file reference
 		jobs, err := db.GetAllJobs()
@@ -247,13 +280,16 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 			return "", err
 		}
 		target := normalizePath(absPath)
+		names := func(candidate string) bool {
+			return normalizePath(candidate) == target || normalizePath(canonicalDir(candidate)) == target
+		}
 		absOut, absErr := filepath.Abs(outputDir)
 		for _, job := range jobs {
 			if !activeJobStatuses[job.Status] {
 				continue
 			}
 			for _, candidate := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
-				if candidate != "" && normalizePath(candidate) == target {
+				if candidate != "" && names(candidate) {
 					return job.ID, nil
 				}
 			}
@@ -265,16 +301,16 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 			// owns, not reproduce the full scan set.
 			if absErr == nil {
 				for _, rel := range []string{job.Filename, job.ChatFilename} {
-					if rel != "" && normalizePath(filepath.Join(absOut, rel)) == target {
+					if rel != "" && names(filepath.Join(absOut, rel)) {
 						return job.ID, nil
 					}
 				}
 			}
 			for _, seg := range job.Segments {
-				if seg.FilePath != "" && normalizePath(seg.FilePath) == target {
+				if seg.FilePath != "" && names(seg.FilePath) {
 					return job.ID, nil
 				}
-				if seg.ChatFile != "" && normalizePath(seg.ChatFile) == target {
+				if seg.ChatFile != "" && names(seg.ChatFile) {
 					return job.ID, nil
 				}
 			}
@@ -509,6 +545,9 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		absPath, _ := filepath.Abs(path)
 		if knownFiles[normalizePath(absPath)] {
 			return nil // Referenced by a job
+		}
+		if outputClaimOwner(absPath) != "" {
+			return nil // Being written by a finalize that has not named it yet
 		}
 
 		// A recovered set-aside recording (<stem>.restart-<ts>[-N].<ext>) is

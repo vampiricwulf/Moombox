@@ -726,6 +726,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		// Update local job reference for notifications below
 		jobCtx.Job = freshJob
 	}
+	// Until the Finished write below names them, the files this writes are
+	// on no row: keep the orphan sweep and its deletes off them.
+	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))()
 
 	// Recover parts whose mux never persisted a segment row — a daemon
 	// restart killed the background FFmpeg before AddSegment, or an
@@ -912,6 +915,21 @@ func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates 
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.
 // Individual segment .mp4 files are already muxed; this method copies assets and updates the job.
 func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobCtx *JobContext, segments []database.Segment) error {
+	// The plain-name rename, the merge temporaries and the assets are on no
+	// row until the writes below land (see outputClaims): claim the job's
+	// template stem and every part's base for the whole finalize.
+	releases := []func(){claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))}
+	for _, seg := range segments {
+		if seg.FilePath != "" {
+			releases = append(releases, claimOutputStem(jobCtx.Job.ID, filepath.Join(filepath.Dir(seg.FilePath), mergeBaseName(seg.Filename))))
+		}
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	})
@@ -1378,6 +1396,8 @@ func (o *DownloadOrchestrator) muxSegment(
 	}
 	partBase := fmt.Sprintf("%s - part%d", filepath.Base(filenameBase), segIdx+1)
 	segFilename := partBase + ".mp4"
+	// The part is on no row until AddSegment below (see outputClaims).
+	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(outputDir, partBase))()
 
 	outputPath := filepath.Join(outputDir, segFilename)
 
