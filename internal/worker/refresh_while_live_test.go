@@ -120,3 +120,34 @@ func TestLiveLoopStopsOnALocalWriteFailure(t *testing.T) {
 		t.Error("the ErrLocalWrite check no longer returns the download error")
 	}
 }
+
+// After the engine's maximum_timeout finalize the quiet time already exceeds
+// streamSegmentTimeout (both default to ten minutes), so the verify branch's
+// old rule — give up on the first failed status look once quiet that long —
+// ended the job on one bot-wall, 429 or 5xx. A failed look now spends the
+// still-live budget first.
+//
+// Mutant: giving up on quiet time alone — the second row ends the capture.
+func TestAnUnreadableStatusSpendsTheBudgetFirst(t *testing.T) {
+	for _, tc := range []struct {
+		checks int32
+		quiet  time.Duration
+		want   bool
+	}{
+		{1, time.Minute, false},
+		{1, streamSegmentTimeout, false},
+		{maxConsecutiveLiveChecks, time.Minute, false},
+		{maxConsecutiveLiveChecks, streamSegmentTimeout, true},
+	} {
+		if got := unreadableStatusEndsCapture(tc.checks, tc.quiet); got != tc.want {
+			t.Errorf("checks %d, quiet %v: gives up = %v, want %v", tc.checks, tc.quiet, got, tc.want)
+		}
+	}
+	src, err := os.ReadFile("orchestrator_youtube.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "unreadableStatusEndsCapture(checks, timeSinceLastSeg)") {
+		t.Error("the verify branch no longer decides through unreadableStatusEndsCapture")
+	}
+}

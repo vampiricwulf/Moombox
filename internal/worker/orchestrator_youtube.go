@@ -591,8 +591,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if err != nil {
 			o.logger.Warn("failed to verify stream status", "err", err, "jobID", jobCtx.Job.ID)
 
-			if timeSinceLastSeg >= streamSegmentTimeout {
-				o.logger.Info("no segments for too long and API failed, assuming ended", "jobID", jobCtx.Job.ID)
+			// A failed look is not a verdict, so it spends the same budget a
+			// still-live answer does rather than ending the job. The old
+			// shortcut — give up once timeSinceLastSeg reached
+			// streamSegmentTimeout — always held after the engine's own
+			// maximum_timeout finalize (both default to ten minutes), so one
+			// bot-wall, 429 or 5xx there finished the job, staging deleted.
+			if checks := consecutiveLiveChecks.Add(1); unreadableStatusEndsCapture(checks, timeSinceLastSeg) {
+				o.logger.Info("no segments for too long and the stream status stayed unreadable, assuming ended",
+					"checks", checks, "jobID", jobCtx.Job.ID)
 				break
 			}
 
@@ -743,6 +750,14 @@ streamEnded:
 	}
 
 	return result, waitedForResume.value(), nil
+}
+
+// unreadableStatusEndsCapture reports whether the live loop's stream-end
+// verification gives up on a stream whose status it cannot read: only once
+// the failed looks have spent the still-live budget (checks, counted with the
+// still-live answers) AND no segment has arrived for streamSegmentTimeout.
+func unreadableStatusEndsCapture(checks int32, quietFor time.Duration) bool {
+	return checks >= maxConsecutiveLiveChecks && quietFor >= streamSegmentTimeout
 }
 
 // liveRefreshProber is the slice of the YouTube service refreshWhileLive needs.
