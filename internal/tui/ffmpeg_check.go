@@ -728,7 +728,7 @@ func (m *FFmpegCheckModel) View() string {
 			lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("  "+linuxFFmpegInstallSuggestion()))
 			lines = append(lines, "")
 			lines = append(lines, DimStyle.Render("Then enter the FFmpeg path below, or restart Moombox"))
-			lines = append(lines, DimStyle.Render("(FFmpeg is usually at /usr/bin/ffmpeg after installation)."))
+			lines = append(lines, DimStyle.Render("(Usually /usr/bin/ffmpeg once installed.)"))
 		}
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
@@ -775,6 +775,11 @@ func (m *FFmpegCheckModel) View() string {
 		}
 	}
 
+	// Fit the terminal before anything is laid out: the box's Height only
+	// pads, and bubbletea drops a too-tall frame's overflow from the TOP, so
+	// Manual mode with a path result at 20 rows lost the warning title. The
+	// blank spacers go first — they carry nothing.
+	lines = dropSpacersToFit(lines, max(m.height-2, 1))
 	content := strings.Join(lines, "\n")
 
 	h := max(m.height-2, 10)
@@ -787,4 +792,22 @@ func (m *FFmpegCheckModel) View() string {
 		Render(content)
 
 	return centerBox(box, m.width, m.height)
+}
+
+// dropSpacersToFit removes blank spacer lines ("") from the bottom up until
+// lines — some of which may hold several rows, like a form's view — fit in
+// maxRows, or there is no blank left to remove. The first line is never
+// touched. Lines are assumed to fit the width already.
+func dropSpacersToFit(lines []string, maxRows int) []string {
+	rows := 0
+	for _, l := range lines {
+		rows += strings.Count(l, "\n") + 1
+	}
+	for i := len(lines) - 1; i > 0 && rows > maxRows; i-- {
+		if lines[i] == "" {
+			lines = append(lines[:i], lines[i+1:]...)
+			rows--
+		}
+	}
+	return lines
 }
