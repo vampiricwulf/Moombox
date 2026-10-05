@@ -16,6 +16,11 @@ import (
 // PoT → setup → ffmpeg → log → import → cookies → yt-dlp → restart →
 // update → auth → client-token → watch.
 func (s *runState) wireRoutes() func() {
+	// Before any handler exists: the restart, update-apply and setup
+	// post-save goroutines report a recovered panic through this. It was
+	// never installed, so those panics went to raw stderr — not the log
+	// file, and over the TUI's screen when it runs.
+	routes.SetPanicLogger(s.log)
 	routes.JobRoutes(
 		s.r,
 		s.db,
