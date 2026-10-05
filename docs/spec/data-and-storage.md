@@ -512,6 +512,11 @@ Warn per key, and the next save leaves them out of the file.
 
 `ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims, muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
 
+`staging_directory` is not restart-required, but it is read per job: `buildJobContext` snapshots it when a job
+starts, and the Mux and Resume lookups, `A R` / `A S` and the orphan scan all read the CURRENT value. A change
+therefore applies to jobs that start after it, and anything already staged under the old directory is no
+longer found by any of them until its folder is moved across; both help texts say so.
+
 #### [logs]
 
 | Field | Type | Default | TOML Key |

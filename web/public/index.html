@@ -726,7 +726,7 @@
                                 id="cfg-staging-dir"
                                 label="Staging Directory"
                                 placeholder="./staging"
-                                help-text="Temporary directory for downloads in progress"
+                                help-text="Temporary directory for downloads in progress. Applies to jobs that start after the save; anything already staged under the old directory is no longer found by Mux, Resume or the cleanup scan — move those folders across, or change this when nothing is staged."
                             ></sl-input>
                             <div style="display: flex; gap: 0.5em; align-items: flex-start;">
                                 <sl-input

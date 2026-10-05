@@ -135,7 +135,7 @@ var sections = []settingsSection{
 			{"database_path", "Database path", fieldText, nil, "SQLite database file (requires restart)", nil},
 			{"log_file_path", "Log file path", fieldText, nil, "log output file (requires restart)", nil},
 			{"output_directory", "Output directory", fieldText, nil, "where finished files go", nil},
-			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download", nil},
+			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download; new jobs use a change at once, but staging under the old dir is no longer found — move it across", nil},
 			{"ffmpeg_path", "FFmpeg path", fieldText, nil, "empty = system PATH", nil},
 		},
 	},
