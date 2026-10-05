@@ -169,10 +169,10 @@ func (o *DownloadOrchestrator) sendGapSplitNotification(
 	o.notifier.Send(
 		"Twitch Stream Gap — New Part Started",
 		fmt.Sprintf("Segments expired before they could be downloaded; part %d is complete and part %d continues at the live edge: %s",
-			segmentIndex+1, segmentIndex+2, jobCtx.Job.Title),
+			segmentIndex+1, segmentIndex+2, notifications.EscapeMarkdown(jobCtx.Job.Title)),
 		notifications.TypeWarning,
 		[]notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 			{Name: "Quality", Value: quality.Label, Inline: true},
 			{Name: "Completed Part", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
 		},
@@ -214,10 +214,10 @@ func (o *DownloadOrchestrator) sendQualitySplitNotification(
 	f := NotifyFacts(jobCtx.Job)
 	o.notifier.Send(
 		fmt.Sprintf("%s Quality Split", platformTitle),
-		fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
+		fmt.Sprintf("Stream quality changed during download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title)),
 		notifications.TypeDownload,
 		[]notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 			{Name: "From", Value: currentQuality.Label, Inline: true},
 			{Name: "To", Value: newQuality.Label, Inline: true},
 			partField,

@@ -124,10 +124,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Send "Twitch Download Starting" notification
 	if o.notifier != nil {
 		dlType := "Live Stream"
-		desc := fmt.Sprintf("Now live — beginning download: %s", jobCtx.Job.Title)
+		desc := fmt.Sprintf("Now live — beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		if isVod {
 			dlType = "VOD"
-			desc = fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title)
+			desc = fmt.Sprintf("Beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		}
 		qualityLabel := variant.Name
 		if variant.Height > 0 {
@@ -138,12 +138,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			qualityLabel = fmt.Sprintf("%s (%dp%s)", variant.Name, variant.Height, fpsStr)
 		}
 		startFields := []notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 			{Name: "Quality", Value: qualityLabel, Inline: true},
 			{Name: "Type", Value: dlType, Inline: true},
 		}
 		if jobCtx.Job.TwitchCategory != "" {
-			startFields = append(startFields, notifications.Field{Name: "Category", Value: jobCtx.Job.TwitchCategory, Inline: true})
+			startFields = append(startFields, notifications.Field{Name: "Category", Value: notifications.EscapeMarkdown(jobCtx.Job.TwitchCategory), Inline: true})
 		}
 		// The YouTube twin of this send (orchestrator.go) carries the same
 		// three identity fields off the same mapper, for the same reason:
@@ -943,7 +943,7 @@ sessionLoop:
 		o.logger.Info("Twitch download resumed after connectivity outage",
 			"part", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Resumed",
-			fmt.Sprintf("Connectivity restored, resuming download: %s", jobCtx.Job.Title),
+			fmt.Sprintf("Connectivity restored, resuming download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title)),
 			notifications.TypeDownload, "connectivity_resume", currentQuality, segmentIndex+1,
 			twitchOutageField(pausedAt))
 	}
@@ -1027,9 +1027,9 @@ sessionLoop:
 		// finalize everything captured up to the outage.
 		o.logger.Warn("Twitch download cut off by connectivity outage, finalizing captured data", "jobID", jobCtx.Job.ID)
 
-		desc := fmt.Sprintf("Connectivity lost during download: %s", jobCtx.Job.Title)
+		desc := fmt.Sprintf("Connectivity lost during download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		if !isVod {
-			desc = fmt.Sprintf("Broadcast ended while connectivity was down: %s", jobCtx.Job.Title)
+			desc = fmt.Sprintf("Broadcast ended while connectivity was down: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		}
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Finalizing — Connectivity Lost",
 			desc, notifications.TypeDownload, "connectivity_split", currentQuality, segmentIndex+1)
@@ -1208,7 +1208,7 @@ func (o *DownloadOrchestrator) sendTwitchSessionNotification(
 		return
 	}
 	fields := []notifications.Field{
-		{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+		{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 		{Name: "Quality", Value: quality.Label, Inline: true},
 		{Name: "Part", Value: fmt.Sprintf("%d", partNo), Inline: true},
 	}

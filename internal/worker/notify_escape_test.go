@@ -138,3 +138,64 @@ func TestHandBuiltSendsEscapeJobText(t *testing.T) {
 		}
 	})
 }
+
+// TestLifecycleSendsEscapeJobText covers the lifecycle sends that still put
+// the raw title and channel into their embed: the gap and quality splits, the
+// Twitch session resume/split, and Muxing Starting (title only — its fields
+// are counts). A title like "*LIVE* <3 || secret" italicised the rest of the
+// description or opened a spoiler.
+//
+// MUTANT: dropping any one EscapeMarkdown wrap — that send carries the raw
+// "*Live*".
+func TestLifecycleSendsEscapeJobText(t *testing.T) {
+	job := &database.Job{
+		ID: "tw_esc", VideoID: "esc", Platform: "twitch",
+		Title: markdownTitle, ChannelName: markdownChannel,
+		Status: database.StatusDownloading,
+	}
+	q := QualityInfo{Label: "1080p60", Width: 1920, Height: 1080, FPS: 60}
+
+	newOrch := func(t *testing.T) (*DownloadOrchestrator, *notificationtest.Recorder, *JobContext) {
+		t.Helper()
+		db, err := database.Open(filepath.Join(t.TempDir(), "esc.db"))
+		if err != nil {
+			t.Fatalf("database.Open: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+		rec := notificationtest.New()
+		return &DownloadOrchestrator{notifier: rec, db: db, logger: discardLogger{}}, rec, &JobContext{Job: job, DB: db}
+	}
+
+	t.Run("gap_split", func(t *testing.T) {
+		o, rec, jc := newOrch(t)
+		o.sendGapSplitNotification(jc, 0, q)
+		assertEscaped(t, rec, "gap_split", "Channel", markdownChannel)
+	})
+	t.Run("quality_split", func(t *testing.T) {
+		o, rec, jc := newOrch(t)
+		o.sendQualitySplitNotification(jc, "Twitch", q, QualityInfo{Label: "720p", Height: 720}, 0, true)
+		assertEscaped(t, rec, "quality_split", "Channel", markdownChannel)
+	})
+	t.Run("connectivity_resume", func(t *testing.T) {
+		o, rec, jc := newOrch(t)
+		o.sendTwitchSessionNotification(jc, "Twitch Download Resumed",
+			"Connectivity restored, resuming download: "+notifications.EscapeMarkdown(job.Title),
+			notifications.TypeDownload, "connectivity_resume", q, 2)
+		assertEscaped(t, rec, "connectivity_resume", "Channel", markdownChannel)
+	})
+	t.Run("muxing", func(t *testing.T) {
+		o, rec, jc := newOrch(t)
+		o.sendMuxingStarting(jc)
+		got := rec.ByEvent("muxing")
+		if len(got) != 1 {
+			t.Fatalf("muxing sends = %d, want 1", len(got))
+		}
+		if want := notifications.EscapeMarkdown(markdownTitle); !strings.Contains(got[0].Description, want) ||
+			strings.Contains(got[0].Description, markdownTitle) {
+			t.Errorf("muxing description = %q, want the escaped title %q", got[0].Description, want)
+		}
+	})
+}

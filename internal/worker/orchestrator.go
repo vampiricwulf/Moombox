@@ -179,13 +179,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// Send "Download Starting" notification
 	if o.notifier != nil {
 		dlType := "Live Stream"
-		desc := fmt.Sprintf("Now live — beginning download: %s", jobCtx.Job.Title)
+		desc := fmt.Sprintf("Now live — beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		if isVod {
 			dlType = "VOD"
-			desc = fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title)
+			desc = fmt.Sprintf("Beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		}
 		startFields := []notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 			{Name: "Type", Value: dlType, Inline: true},
 		}
 		// Include scheduled start time if available

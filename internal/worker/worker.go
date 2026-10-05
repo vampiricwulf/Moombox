@@ -1434,9 +1434,9 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			// 400 that drops the whole embed, and a raw title beside an
 			// escaped one renders two ways in one embed.
 			authFields := notifications.NewFieldBuilder().
-				AddInlineIf(job.ChannelName != "", "Channel", job.ChannelName).
+				AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
 				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
-				Add("Reason", reason).
+				Add("Reason", notifications.EscapeMarkdown(reason)).
 				Build()
 			// The same row→facts mapper the Job Failed send below uses, for
 			// the same three reasons and one more. This is a PER-JOB auth

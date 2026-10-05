@@ -151,6 +151,9 @@ func TestEscapeMarkdown(t *testing.T) {
 		{"line1\n# line2", "line1\n\\# line2"},
 		{"\n- second line", "\n\\- second line"},
 		{"あ_い", `あ\_い`},
+		// A masked link renders in descriptions and field values; escaping
+		// the brackets keeps a title's [text](url) literal.
+		{"[Claim prize](https://phish.example)", `\[Claim prize\](https://phish.example)`},
 	} {
 		if got := EscapeMarkdown(tc.in); got != tc.want {
 			t.Errorf("EscapeMarkdown(%q) = %q, want %q", tc.in, got, tc.want)
@@ -206,4 +209,27 @@ func TestParseTargetAcceptsTheLegacyDiscordappHost(t *testing.T) {
 			t.Errorf("built %d targets, want 1 — the legacy spelling must dedupe against the current one", got)
 		}
 	})
+}
+
+// TestClampEmbedDropsEmptyFields: Discord answers a field with an empty name
+// or value with a 400, deliver treats that as permanent, and the whole embed
+// is dropped. Trim Failed carried the job's channel straight from the row and
+// Trim Deleted its title, so a channel-less job's failure was never delivered.
+// The empty field goes; the message stays.
+//
+// Mutant: dropping the filter — the empty fields survive.
+func TestClampEmbedDropsEmptyFields(t *testing.T) {
+	e := &discordEmbed{
+		Title: "Trim Failed",
+		Fields: []discordField{
+			{Name: "Channel", Value: ""},
+			{Name: "Video ID", Value: "abc"},
+			{Name: "", Value: "orphan value"},
+			{Name: "Source Video", Value: "   "},
+		},
+	}
+	clampEmbed(e)
+	if len(e.Fields) != 1 || e.Fields[0].Name != "Video ID" {
+		t.Errorf("fields after clamp = %+v, want only the non-empty Video ID", e.Fields)
+	}
 }

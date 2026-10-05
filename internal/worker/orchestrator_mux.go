@@ -703,7 +703,7 @@ func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 	// apply.
 	f := NotifyFacts(job)
 	o.notifier.Send("Muxing Starting",
-		fmt.Sprintf("Download complete, muxing: %s", job.Title),
+		fmt.Sprintf("Download complete, muxing: %s", notifications.EscapeMarkdown(job.Title)),
 		notifications.TypeMuxing,
 		fb.Build(),
 		notifications.SendOptions{
