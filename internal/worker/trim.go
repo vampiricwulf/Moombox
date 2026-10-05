@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,6 +182,9 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 
 	trimBasename := uniqueTrimBasename(existing, job.VideoID, startTime, endTime)
 	trimPath := filepath.Join(trimDir, trimBasename)
+	// No trim row names the file until the encode is done, which for a long
+	// range is a long time to be an unreferenced file in trim/.
+	defer claimOutputStem(job.ID, strings.TrimSuffix(trimPath, filepath.Ext(trimPath)))()
 
 	// Store relative path including parent directory from source job's filename
 	// (matches TS: path.join(path.dirname(sourceJob.filename), "trim", trimFilename))
@@ -420,6 +424,7 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 	// serialises trims per job).
 	trimBasename := uniqueTrimBasename(existing, job.VideoID, startTime, endTime)
 	trimPath := filepath.Join(trimDir, trimBasename)
+	defer claimOutputStem(job.ID, strings.TrimSuffix(trimPath, filepath.Ext(trimPath)))() // see CreateTrim
 
 	// Relative path for DB storage
 	sourceParentDir := filepath.Dir(job.Filename)

@@ -392,6 +392,9 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 
 		jobID := de.Name()
 		absPath := filepath.Join(absStagingDir, jobID)
+		if outputClaimOwner(absPath) != "" {
+			continue // an off-queue recovery is reading it
+		}
 
 		// Check if job exists and its status
 		job, err := db.GetJob(jobID)
@@ -709,6 +712,9 @@ func scanTrimOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orphan
 		absPath, _ := filepath.Abs(path)
 		if knownTrimFiles[normalizePath(absPath)] {
 			return nil // Referenced by a trim record
+		}
+		if outputClaimOwner(absPath) != "" {
+			return nil // An encode that has not recorded its trim yet
 		}
 
 		relPath, _ := filepath.Rel(absOutputDir, absPath)

@@ -29,6 +29,11 @@ import (
 // only keeps it off the orphan list until the finalize returns, which errs the
 // safe way.
 //
+// Two claims are not a finalize's: a trim encode claims its trim file's stem
+// until the trim row is written, and an aside recovery claims the job's
+// staging directory, which it reads under a row whose status still says the
+// staging is unowned.
+//
 // In-process state, deliberately: the sweep and the deletes run in the same
 // process as the worker (internal/web/routes/files.go, the TUI's Files
 // dialog), and a claim must vanish with the process that holds it — a crash

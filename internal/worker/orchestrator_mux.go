@@ -625,6 +625,11 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 		return fmt.Errorf("create output dir: %w", err)
 	}
 	filenameBase = filepath.Base(filenameBase)
+	// The siblings and the copied chat capture share the archive's stem and
+	// reach no column of the row, so for the sweep they are strays while
+	// FFmpeg writes them — and for a Cancelled or Error job no known stem
+	// folds them in either. Claimed like a finalize's output.
+	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase))()
 
 	before := len(groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir)))
 	if before == 0 {

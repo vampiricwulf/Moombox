@@ -2257,6 +2257,10 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	if err != nil {
 		return err
 	}
+	// The recovery keeps the row's status, so a Cancelled or Error job's
+	// staging still reads as an orphan to the Files sweep — offered for
+	// deletion while FFmpeg reads the asides out of it. Claimed for the run.
+	releaseStaging := claimOutputStem(jobID, filepath.Join(stagingBase, jobID))
 	// The job is terminal, so nothing is routing its log lines (CORE-12).
 	// Both UIs point the operator at the job's log for this run's progress, so
 	// route to it for the duration and hand it back at the end. Best-effort,
@@ -2279,6 +2283,7 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 			}
 		}()
 		defer release()
+		defer releaseStaging()
 
 		jobCtx := w.buildJobContext(job)
 		// The orchestrator's mux root, never context.Background(), for the
