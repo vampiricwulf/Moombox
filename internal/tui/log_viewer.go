@@ -387,6 +387,12 @@ func (m *LogViewerModel) updateViewportContent() {
 	// One funnel for every content change — the render cache keys on this.
 	m.contentSeq++
 	if len(m.filtered) == 0 {
+		// Lines exist but the level filter hides them all: say so, rather
+		// than "No logs yet." under a header reading "Logs (0) [WARN+]".
+		if len(m.lines) > 0 && m.level != LogLevelAll {
+			m.viewport.SetContent("No " + m.level.String() + "+ lines. F cycles the level.")
+			return
+		}
 		m.viewport.SetContent("No logs yet.")
 		return
 	}

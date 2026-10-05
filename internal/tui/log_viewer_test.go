@@ -425,3 +425,27 @@ func TestWrapLogLineAtZeroWidthReturnsTheLine(t *testing.T) {
 		t.Errorf("wrapLogLine(%q, 0) = %#v, want one unwrapped element", "abc", got)
 	}
 }
+
+// TestLogFilterHidingEveryLineSaysSo: with lines in the buffer and a level
+// filter that hides them all, the panel read "No logs yet." under a header
+// saying "Logs (0) [WARN+]" — as if nothing had been logged at all.
+//
+// Mutant: dropping the filtered-empty arm — "No logs yet." again.
+func TestLogFilterHidingEveryLineSaysSo(t *testing.T) {
+	m := NewLogViewerModel()
+	m.SetSize(80, 10)
+	m.AddLine("2026-10-05 12:00:00 INFO  something ordinary happened")
+	m.CycleLevel() // INFO+
+	m.CycleLevel() // WARN+
+	view := stripANSI(m.View())
+	if strings.Contains(view, "No logs yet.") || !strings.Contains(view, "No WARN+ lines") {
+		t.Errorf("a filter hiding every line is not named:\n%s", view)
+	}
+
+	empty := NewLogViewerModel()
+	empty.SetSize(80, 10)
+	empty.CycleLevel()
+	if !strings.Contains(stripANSI(empty.View()), "No logs yet.") {
+		t.Error("an empty buffer no longer says No logs yet.")
+	}
+}
