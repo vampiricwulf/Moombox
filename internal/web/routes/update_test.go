@@ -114,6 +114,7 @@ func TestUpdateApplyNoUpdater(t *testing.T) {
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
 
 	req := httptest.NewRequest("POST", "/api/update/apply", nil)
+	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -149,6 +150,7 @@ func TestUpdateApplyAlreadyInProgress(t *testing.T) {
 	updateInProgress.Store(true)
 
 	req := httptest.NewRequest("POST", "/api/update/apply", nil)
+	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -171,6 +173,7 @@ func TestUpdateApplyNoReleaseAvailable(t *testing.T) {
 
 	// Pre-condition: SharedUpdateInfo is nil (resetUpdateGlobals).
 	req := httptest.NewRequest("POST", "/api/update/apply", nil)
+	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -548,6 +551,33 @@ func TestReleaseNotesAcceptsEveryPublishedTagShape(t *testing.T) {
 		r.ServeHTTP(rec, req)
 		if rec.Code == http.StatusBadRequest {
 			t.Errorf("version=%q: rejected as malformed, but Moombox has published that shape", good)
+		}
+	}
+}
+
+// TestUpdateApplyRefusesALANPeerWithALoopbackOrigin: the gate used to read
+// only the Origin, which the client chooses — a LAN peer sending
+// `Origin: http://localhost:774` passed it. The direct peer must be loopback.
+//
+// Mutant: drop the IsLoopbackRequest check from updateApplyOriginAllowed.
+func TestUpdateApplyRefusesALANPeerWithALoopbackOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		peer, origin string
+		want         bool
+	}{
+		{"192.168.1.20:50000", "http://localhost:774", false},
+		{"192.168.1.20:50000", "", false},
+		{"127.0.0.1:50000", "http://localhost:774", true},
+		{"127.0.0.1:50000", "", true},
+		{"127.0.0.1:50000", "http://192.168.1.10:774", false},
+	} {
+		req := httptest.NewRequest("POST", "/api/update/apply", nil)
+		req.RemoteAddr = tc.peer
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		if got := updateApplyOriginAllowed(req); got != tc.want {
+			t.Errorf("peer %s origin %q: allowed = %v, want %v", tc.peer, tc.origin, got, tc.want)
 		}
 	}
 }

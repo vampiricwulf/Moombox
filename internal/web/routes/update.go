@@ -12,6 +12,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/updater"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // updateCheckDebounce bounds how often POST /api/update/check actually asks
@@ -44,9 +45,20 @@ var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$
 // (reports/web.md S-8) explicitly wanted this tightened beyond the generic
 // CSRFMiddleware so a LAN peer can't trigger it even when network_access
 // is "lan" / "external". Returns true when the request originates from
-// loopback (no Origin header set, or Origin host is 127.0.0.1 / ::1 /
-// localhost).
+// loopback: the DIRECT peer is loopback, and the Origin (if any) names
+// 127.0.0.1 / ::1 / localhost.
+//
+// The peer test comes first because the Origin is the client's to choose: a
+// LAN peer could send `Origin: http://localhost:774` (with a matching Host,
+// which CSRF also accepts on lan) and pass an Origin-only gate — the very
+// case S-8 meant to close. The direct peer, not the forwarded one: a proxy
+// in front means the caller is not on this machine. (Docker's bridge peer is
+// never loopback either, and in-app update is not offered there — a pulled
+// image replaces the binary.)
 func updateApplyOriginAllowed(r *http.Request) bool {
+	if !web.IsLoopbackRequest(r) {
+		return false
+	}
 	// No Origin header on a mutating request is normally rejected by
 	// CSRFMiddleware before this handler runs; if we got here, that's a
 	// same-process caller (e.g. TUI presenting InternalToken).
