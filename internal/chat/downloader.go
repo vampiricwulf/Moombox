@@ -1093,7 +1093,16 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 			}
 		}
 
-		if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
+		// ONE FILE, ONE EPOCH. A live/upcoming run writes every offset against
+		// cd.streamStartMs, the file's epoch — typically the SCHEDULED start.
+		// A replay pass inside that run (the page flipped to replay once the
+		// broadcast ended, or the run began on a replay token) is handed
+		// YouTube's videoOffsetTimeMsec, which counts from the ACTUAL start;
+		// kept, the replay half read early by the late-start delta under the
+		// one bias the player applies per file. So in such a run the offset
+		// always comes from the absolute timestamp. A replay/VOD run keeps
+		// YouTube's offsets: its file is replay-only (the mode rule).
+		if (!msg.HasOffset || cd.opts.IsLiveOrUpcoming) && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
 			if !hasUsec {
 				cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec)
 			} else if usec > 0 {
