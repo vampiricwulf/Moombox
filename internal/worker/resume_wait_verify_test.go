@@ -58,4 +58,14 @@ func TestTheVerifyBranchKeepsUpAResumeWait(t *testing.T) {
 	if !strings.Contains(body, "if waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout) {\n\t\t\t\ttracker.SetWaitActivity(engine.ActivityWaitingResume)") {
 		t.Error("the still-live sleep is not labelled a wait inside a resume wait")
 	}
+	// An unreadable look inside the wait is a wait tick too, not a spent
+	// check — six flaky fetches used to end a wait the budget still allowed.
+	// Mutant: the active-wait branch ahead of unreadableStatusEndsCapture removed.
+	unreadable := strings.Index(body, "if checks := consecutiveLiveChecks.Add(1); unreadableStatusEndsCapture(checks, timeSinceLastSeg) {")
+	if unreadable < 0 {
+		t.Fatal("cannot find the unreadable-look budget")
+	}
+	if guard := strings.LastIndex(body[:unreadable], "if waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout) {"); guard < 0 || unreadable-guard > 600 {
+		t.Error("an unreadable look inside a resume wait still spends a live check")
+	}
 }

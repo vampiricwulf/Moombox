@@ -611,6 +611,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// streamSegmentTimeout — always held after the engine's own
 			// maximum_timeout finalize (both default to ten minutes), so one
 			// bot-wall, 429 or 5xx there finished the job, staging deleted.
+			// Inside a resume wait an unreadable look is one more wait tick,
+			// not a spent check: the downloaders are cancelled, so quiet time
+			// always reads "too long" here, and six flaky fetches would end a
+			// wait interruption_timeout still allows.
+			if waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout) {
+				tracker.SetWaitActivity(engine.ActivityWaitingResume)
+				utils.Sleep(ctx, streamEndVerifyInterval)
+				continue
+			}
 			if checks := consecutiveLiveChecks.Add(1); unreadableStatusEndsCapture(checks, timeSinceLastSeg) {
 				o.logger.Info("no segments for too long and the stream status stayed unreadable, assuming ended",
 					"checks", checks, "jobID", jobCtx.Job.ID)
