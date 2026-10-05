@@ -532,3 +532,47 @@ func TestAFailedFinalFlushIsReportedNotDropped(t *testing.T) {
 		t.Errorf("the sidecar was not kept: %v", err)
 	}
 }
+
+// A roll with nothing pending drains nothing, so writeBatch's salvage never
+// reads the closed part. A roll that landed between Start's resume and its
+// repair handed a torn part to the part's mux and enrichment that way. The
+// closed part is now salvaged at the roll itself when its end is torn.
+//
+// Mutant: RollFile without the empty-drain salvage — the closed part ends
+// torn and no .corrupt is kept.
+func TestARollWithNothingPendingSalvagesATornClosedPart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+	cd := newTestChatDownloader(t, path)
+	for i := range 5 {
+		cd.addMessage(damageTestMessage("m", i))
+	}
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := strings.Index(string(raw), `"m3"`)
+	if cut < 0 {
+		t.Fatalf("no m3 in %s", raw)
+	}
+	if err := os.WriteFile(path, raw[:cut+2], 0o644); err != nil { // torn inside m3
+		t.Fatal(err)
+	}
+
+	closed := cd.RollFile(rollTestNextPart(t, path), "2026-06-11T11:00:00Z")
+	if closed != path {
+		t.Fatalf("RollFile returned %q, want the closed part", closed)
+	}
+	if intact, err := utils.ChatFileEndIntact(path); err != nil || !intact {
+		t.Errorf("the closed part is still torn (intact=%v, err=%v)", intact, err)
+	}
+	if _, err := os.Stat(path + ".corrupt"); err != nil {
+		t.Errorf("the torn original was not kept beside it: %v", err)
+	}
+	if got := len(readDamageTestFile(t, path).Messages); got != 3 {
+		t.Errorf("the salvaged part holds %d messages, want the 3 intact ones", got)
+	}
+}

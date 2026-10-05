@@ -1151,26 +1151,38 @@ func (cd *ChatDownloader) repairDamagedPart() {
 	if path == "" {
 		return
 	}
-	if intact, err := utils.ChatFileEndIntact(path); err != nil || intact {
-		return
-	}
 	cd.mu.Lock()
 	before := cd.fileCount
 	startMs := cd.recordingStartMs.Load()
 	cd.mu.Unlock()
-	cd.logger.Warn("twitch chat: the resumed part file is damaged; salvaging it",
-		"channel", cd.channelLogin, "path", path)
-	kept, err := rewriteChatFileWithHistory(path, nil, cd.logger, func(merged []TwitchChatMessage) error {
-		return cd.writeFullChatFileTo(path, merged, len(merged), startMs)
-	})
-	if err != nil {
-		cd.logger.Error("twitch chat: could not salvage the damaged part file", "path", path, "err", err)
+	kept, salvaged := cd.salvageDamagedPartLocked(path, startMs, "the resumed part file is damaged; salvaging it")
+	if !salvaged {
 		return
 	}
 	cd.mu.Lock()
 	cd.fileCount += kept - before
 	cd.totalCount = max(cd.totalCount+kept-before, 0)
 	cd.mu.Unlock()
+}
+
+// salvageDamagedPartLocked rewrites a part file whose end an append can no
+// longer reach (utils.ChatFileEndIntact) out of its intact messages, with the
+// original kept beside it as .corrupt, on the part's own base startMs. It
+// reports how many messages the file keeps, and false when the file was
+// intact, unreadable, or could not be salvaged. Caller holds flushMu.
+func (cd *ChatDownloader) salvageDamagedPartLocked(path string, startMs int64, why string) (kept int, salvaged bool) {
+	if intact, err := utils.ChatFileEndIntact(path); err != nil || intact {
+		return 0, false
+	}
+	cd.logger.Warn("twitch chat: "+why, "channel", cd.channelLogin, "path", path)
+	kept, err := rewriteChatFileWithHistory(path, nil, cd.logger, func(merged []TwitchChatMessage) error {
+		return cd.writeFullChatFileTo(path, merged, len(merged), startMs)
+	})
+	if err != nil {
+		cd.logger.Error("twitch chat: could not salvage the damaged part file", "path", path, "err", err)
+		return 0, false
+	}
+	return kept, true
 }
 
 // chatPartFileSummary is everything adoptExistingPartFile needs out of a part

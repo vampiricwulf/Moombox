@@ -359,6 +359,18 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 				closedPath = "" // nothing ever reached disk for this part
 			}
 		}
+	} else if oldFlushed && !oldUnread {
+		// Nothing to drain, so writeBatch's salvage never reads the closed
+		// part — and it can be torn: a roll that lands between Start's resume
+		// and its repair (repairDamagedPart) found the restored sidecar, the
+		// path already swapped, or no salvage yet, and handed the torn file to
+		// the part's mux and enrichment. Salvage it here, under the flushMu
+		// the roll holds.
+		if kept, salvaged := cd.salvageDamagedPartLocked(oldPath, oldBase, "the closed part file is damaged; salvaging it"); salvaged {
+			cd.mu.Lock()
+			cd.totalCount = max(cd.totalCount+kept-oldCount, 0)
+			cd.mu.Unlock()
+		}
 	}
 
 	if closedPath != "" {
