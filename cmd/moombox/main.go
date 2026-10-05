@@ -36,10 +36,11 @@ const exitCodeRestart = 42
 // a web bind that cannot succeed in headless mode. The launcher treats it as
 // "this install's environment is wrong", never as "the update is broken": no
 // automatic rollback, no skipped version, the rollback artifact preserved
-// with instructions. Before this, the classification depended on whether the
-// operator pressed Enter at waitForKeypress inside postUpdateFailureWindow
-// (CORE-23). Launchers that predate this constant have no case for it and
-// fall through to exactly today's behaviour, so the change is forward-only.
+// with instructions — and never crash-respawned. Its timing decides nothing
+// (classifyChildExit): the child waits at waitForKeypress before exiting, so
+// how long it ran measures the operator, which once decided both the
+// rollback (CORE-23) and whether a slow keypress was respawned into the same
+// prompt five times.
 const exitCodeStartupError = 3
 
 func init() {

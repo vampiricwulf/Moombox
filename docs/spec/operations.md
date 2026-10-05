@@ -11,7 +11,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 - **CI publishes on tag push only** (tags matching `v*`), and only after the test suite has passed on the tagged commit. The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
 - **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
-- **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. On a fresh launch it fails fast and propagates like any other startup-time code; what makes it its own code is that the post-update window never rolls back on it — the environment failed, not the new binary.
+- **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. It always propagates, never crash-respawns, and the post-update rule never rolls back on it — the environment failed, not the new binary. Its timing decides nothing: the child waits for a keypress before exiting 3, so how long it "ran" measures the operator, not the binary (`classifyChildExit`, `cmd/moombox/launcher.go`).
 - **Version is set in `cmd/moombox/main.go`** as `var version = "x.y.z"`. CI overrides this via `-ldflags -X main.version=...` at build time.
 - **Windows resource embedding** uses `go-winres` to generate `.syso` files at build time. These files are not committed to the repository.
 - **CGO_ENABLED=0** — the build uses no C dependencies. This is enforced in CI and expected locally.
@@ -362,8 +362,10 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
   "update failed" marker behind.
 - A non-zero exit from the FIRST boot after an update, inside `postUpdateFailureWindow` (2 minutes):
   automatic rollback (above), unless the code is `exitCodeStartupError`, which is preserved-with-
-  instructions instead.
+  instructions instead — whenever it arrives, since its timing is the operator's keypress.
 - Exit code 130 or 143 (128+SIGINT / 128+SIGTERM): propagate — user intent.
+- Exit code 3 (`exitCodeStartupError`) otherwise: propagate, whatever the timing and whether or not
+  the child was a respawn — a respawn hits the same wall.
 - Any other non-zero exit within `launcherHealthyWindow` (60 s) on a FRESH launch: propagate and
   terminate — a deterministic startup failure must fail fast and visibly, not crash-loop against the
   same wall.

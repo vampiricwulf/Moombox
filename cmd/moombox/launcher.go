@@ -207,8 +207,8 @@ func launchAndSupervise() {
 			}
 		}
 
-		switch {
-		case code == exitCodeRestart:
+		switch classifyChildExit(code, ranFor, wasFirstAfterUpdate, terminating.Load(), wasRespawn, consecutiveCrashes) {
+		case childRestart:
 			// Update applied: rename .old → ~ on Windows so the .old name
 			// is free for the next update (returns whether a .old existed,
 			// i.e. binary update vs config restart). Linux just reports.
@@ -220,34 +220,17 @@ func launchAndSupervise() {
 				(wasFirstAfterUpdate && ranFor < postUpdateFailureWindow)
 			continue
 
-		case code == 0:
-			// Deliberate quit — clean up as always.
-			deferDeleteOldLauncher(exePath)
-			os.Exit(0)
-
-		case terminating.Load():
-			// The launcher forwarded a stop signal — the user/system asked
-			// for this exit. Never respawn it AND never treat it as a
-			// failed update (checked before the preserve branch: stopping
-			// the service right after updating must not leave a scary
-			// "update failed" marker), whatever the code.
-			deferDeleteOldLauncher(exePath)
-			os.Exit(code)
-
-		case wasFirstAfterUpdate && code != 0 && ranFor < postUpdateFailureWindow:
-			// First boot of a fresh update failed almost immediately —
-			// retrying a binary that just proved broken buys nothing, so
-			// this takes priority over crash-respawn. Roll back to the
-			// preserved previous binary and respawn it as a KNOWN-GOOD
-			// fresh launch: not a crash respawn (no _MOOMBOX_CRASH_RESPAWN
-			// — the restored version didn't crash), and with a clean crash
-			// budget (any pre-update streak belonged to different
-			// circumstances). firstAfterUpdate is already false, so a quick
-			// death of the RESTORED binary hits the normal fail-fast path
-			// — no rollback ping-pong is possible. When the artifact is
-			// gone (the boot reached the milestone sweep before dying) or
-			// the restore fails, fall back to preserving what's left with
-			// manual instructions.
+		case childPostUpdateFailure:
+			// Roll back to the preserved previous binary and respawn it as a
+			// KNOWN-GOOD fresh launch: not a crash respawn (no
+			// _MOOMBOX_CRASH_RESPAWN — the restored version didn't crash),
+			// and with a clean crash budget (any pre-update streak belonged
+			// to different circumstances). firstAfterUpdate is already false,
+			// so a quick death of the RESTORED binary hits the normal
+			// fail-fast path — no rollback ping-pong is possible. When the
+			// artifact is gone (the boot reached the milestone sweep before
+			// dying) or the restore fails, fall back to preserving what's
+			// left with manual instructions.
 			//
 			// A deterministic startup error (exitCodeStartupError) skips the
 			// rollback entirely: the environment, not the binary, is what
@@ -265,31 +248,11 @@ func launchAndSupervise() {
 			preserveUpdateRollback(exePath, code)
 			os.Exit(code)
 
-		case code == 130 || code == 143:
-			// Unix user-interrupt conventions (128+SIGINT / 128+SIGTERM):
-			// user intent, propagate as before.
+		case childPropagate:
 			deferDeleteOldLauncher(exePath)
 			os.Exit(code)
 
-		case ranFor < launcherHealthyWindow && !wasRespawn && consecutiveCrashes == 0:
-			// Supervision arms only after a child proves it can run: a
-			// deterministic startup failure (bad config exit 1, bad flags
-			// exit 2, refused DB migration) on a FRESH launch must fail
-			// fast and visibly — exactly today's behavior — not crash-loop
-			// against the same wall. Quick deaths of respawned children
-			// fall through to the counter below instead: they're what the
-			// backoff + cutoff exist for, and routing them here would cap
-			// supervision at a single retry forever. The first post-update
-			// window above already handled the fresh-update flavor.
-			deferDeleteOldLauncher(exePath)
-			os.Exit(code)
-
-		default:
-			// A previously-healthy child died abnormally (panic exit 2,
-			// OOM/AV kill, signal death) — or a respawned child crashed
-			// again mid-streak. For a 24/7 unattended archiver a
-			// dead-until-noticed daemon is the worst outcome — respawn with
-			// backoff, bounded by the crash-loop cutoff.
+		default: // childCrash
 			consecutiveCrashes++
 			if consecutiveCrashes > maxConsecutiveCrashes {
 				fmt.Fprintf(os.Stderr,
@@ -309,6 +272,80 @@ func launchAndSupervise() {
 			crashRespawnCode = code
 			continue
 		}
+	}
+}
+
+// childExitAction is what the launcher does with one child exit.
+type childExitAction int
+
+const (
+	childRestart           childExitAction = iota // respawn: an update or config restart (exitCodeRestart)
+	childPropagate                                // stop supervising and exit with the child's code
+	childPostUpdateFailure                        // a fresh update's first boot failed: roll back or preserve
+	childCrash                                    // count the crash and respawn with backoff
+)
+
+// classifyChildExit decides what one child exit means. Pure, so the order of
+// the rules below — which is the whole policy — is testable.
+func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, terminating, wasRespawn bool, consecutiveCrashes int) childExitAction {
+	switch {
+	case code == exitCodeRestart:
+		return childRestart
+
+	case code == 0:
+		// Deliberate quit — clean up as always.
+		return childPropagate
+
+	case terminating:
+		// The launcher forwarded a stop signal — the user/system asked for
+		// this exit. Never respawn it AND never treat it as a failed update
+		// (checked before the post-update rule: stopping the service right
+		// after updating must not leave a scary "update failed" marker),
+		// whatever the code.
+		return childPropagate
+
+	case wasFirstAfterUpdate && code != 0 &&
+		(ranFor < postUpdateFailureWindow || code == exitCodeStartupError):
+		// First boot of a fresh update failed almost immediately — retrying
+		// a binary that just proved broken buys nothing, so this takes
+		// priority over crash-respawn. A startup error is routed here
+		// whatever its timing: the child waits for a keypress before exiting
+		// 3, so how long it "ran" is how long the operator took to press
+		// Enter, which must not decide whether the rollback artifact is kept
+		// (CORE-23).
+		return childPostUpdateFailure
+
+	case code == 130 || code == 143:
+		// Unix user-interrupt conventions (128+SIGINT / 128+SIGTERM): user
+		// intent, propagate as before.
+		return childPropagate
+
+	case code == exitCodeStartupError:
+		// A deterministic startup error: the environment is wrong, and a
+		// respawn hits the same wall. Propagated whatever the timing, for
+		// the keypress reason above — the healthy-window rule below used to
+		// decide it, so an operator who took over a minute to press Enter
+		// was put through five identical prompts and a "crashed 5 times"
+		// verdict.
+		return childPropagate
+
+	case ranFor < launcherHealthyWindow && !wasRespawn && consecutiveCrashes == 0:
+		// Supervision arms only after a child proves it can run: a
+		// deterministic startup failure (bad config exit 1, bad flags exit
+		// 2, refused DB migration) on a FRESH launch must fail fast and
+		// visibly — exactly today's behavior — not crash-loop against the
+		// same wall. Quick deaths of respawned children fall through to the
+		// counter instead: they're what the backoff + cutoff exist for, and
+		// routing them here would cap supervision at a single retry forever.
+		return childPropagate
+
+	default:
+		// A previously-healthy child died abnormally (panic exit 2, OOM/AV
+		// kill, signal death) — or a respawned child crashed again
+		// mid-streak. For a 24/7 unattended archiver a dead-until-noticed
+		// daemon is the worst outcome — respawn with backoff, bounded by the
+		// crash-loop cutoff.
+		return childCrash
 	}
 }
 
