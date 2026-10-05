@@ -464,3 +464,27 @@ func TestViewTerminalTooSmallNamesTheSize(t *testing.T) {
 		}
 	}
 }
+
+// TestBothBannersAndLogsFocusFitTheFloorTerminal: with the restart and
+// security banners up, Logs focused gave the top row 25% of what was left —
+// 3 rows at 20 — while each top panel still draws 4, so the frame came out a
+// row taller than the terminal and bubbletea dropped the top line.
+//
+// Mutant: dropping the minPanelH clamp — the frame is 21 rows.
+func TestBothBannersAndLogsFocusFitTheFloorTerminal(t *testing.T) {
+	for _, w := range []int{60, 80} {
+		for _, focus := range []FocusPanel{PanelLogs, PanelTasks} {
+			cfg := config.Defaults()
+			cfg.Network.NetworkAccess = "external"
+			app := NewApp()
+			app.configStore = config.NewStore(cfg, "")
+			app.restartPending = true
+			app.width, app.height = w, 20
+			app.focusedPanel = focus
+			app.recalcLayout()
+			if n := strings.Count(app.View().Content, "\n") + 1; n > 20 {
+				t.Errorf("%dx20, focus %v: frame is %d rows", w, focus, n)
+			}
+		}
+	}
+}

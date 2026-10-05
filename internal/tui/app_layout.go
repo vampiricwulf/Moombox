@@ -21,6 +21,11 @@ const (
 	minTermHeight = 20
 )
 
+// minPanelH is the fewest rows a bordered panel renders: two border rows, its
+// header and one content row. A height below it is padded back up to it, so
+// the layout must never hand one out.
+const minPanelH = 4
+
 func (a *App) recalcLayout() {
 	// Status bar is 1 row at the bottom
 	contentH := a.height - 1
@@ -41,15 +46,18 @@ func (a *App) recalcLayout() {
 		contentH -= bannerH
 	}
 
-	// Top panels: 70% focused, 25% unfocused (A4 - match TypeScript)
+	// Top panels: 70% focused, 25% unfocused (A4 - match TypeScript) — but
+	// never below the rows a bordered panel draws anyway (minPanelH). With
+	// both banners up at 20 rows the 25% share was 3, each top panel still
+	// drew 4, and the frame came out a row taller than the terminal.
 	var topH, logH int
 	if a.focusedPanel == PanelLogs {
 		topH = contentH * 25 / 100
-		logH = contentH - topH
 	} else {
 		topH = contentH * 70 / 100
-		logH = contentH - topH
 	}
+	topH = max(min(topH, contentH-minPanelH), minPanelH)
+	logH = contentH - topH
 
 	// Task list vs details width split (A5 - match TypeScript)
 	var taskW, detailW int
