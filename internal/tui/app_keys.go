@@ -13,18 +13,24 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// afterSettingsClose re-applies hide_finished_age_days, which a save may
-// have changed. Read under the store lock — HTTP handlers mutate config via
+// afterSettingsClose re-applies what a save may have changed and nothing
+// else re-reads: hide_finished_age_days, and the status bar's platform
+// indicators (cookies.active_platforms), which otherwise followed only an
+// auth transition — a platform switched off kept its indicator indefinitely.
+// Read under the store lock — HTTP handlers mutate config via
 // configStore.Update concurrently (matches getPort/apiBaseURL).
 func (a *App) afterSettingsClose() {
 	if a.configStore == nil {
 		return
 	}
 	var days float64
+	var ytActive, twActive bool
 	a.configStore.Read(func(c *config.MoomboxConfig) {
 		days = c.Monitors.HideFinishedAgeDays.Days()
+		ytActive, twActive = config.GetActivePlatforms(c)
 	})
 	a.taskList.SetHideFinishedAgeDays(days)
+	a.statusBar.SetActivePlatforms(ytActive, twActive)
 	a.updateSelectedJob() // the rebuild can move the cursor
 }
 

@@ -1163,6 +1163,17 @@ func (s *runState) runTUI() {
 	}
 }
 
+// resendTUICookieStatus re-sends the TUI's cookie status line, whose
+// platform indicators come from config.GetActivePlatforms — wired to
+// OnActivePlatformsChange so a dashboard save reaches the status bar instead
+// of waiting for the next auth transition. A no-op without a TUI (the slot
+// is stored only by runTUI).
+func (s *runState) resendTUICookieStatus() {
+	if fn := s.authChangeTUI.Load(); fn != nil && s.cookieRefresh != nil {
+		(*fn)(s.cookieRefresh.GetStatus())
+	}
+}
+
 // httpsEnabled and ffmpegPathOrDefault read through the config store.
 // Closures that outlive wiring must never touch s.cfg's fields directly:
 // PUT /api/config assigns *cfg = cfgCopy under the store's lock, so an

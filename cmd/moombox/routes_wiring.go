@@ -81,6 +81,7 @@ func (s *runState) wireRoutes() func() {
 		OnHideFinishedAgeChanged: s.broadcastHideFinishedAge,
 		OnChannelChange:          s.kickMonitors,
 		OnMonitorIntervalChange:  s.kickMonitors,
+		OnActivePlatformsChange:  s.resendTUICookieStatus,
 		OnNotificationsChange: func() {
 			// Hot-reload notification targets so edits apply immediately —
 			// previously they silently required a restart nothing asked for.

@@ -69,6 +69,11 @@ type ConfigRoutesCallbacks struct {
 	// monitors, applied the same change at once. Not called when the save
 	// also carried channels: OnChannelChange kicks them already.
 	OnMonitorIntervalChange func()
+	// OnActivePlatformsChange is called when the platforms whose cookie
+	// indicators show (config.GetActivePlatforms) change, so the TUI's
+	// status bar follows a dashboard save — it otherwise re-read them only
+	// on an auth transition.
+	OnActivePlatformsChange func()
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -1152,6 +1157,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldReorderBudget := cfg.Downloader.ReorderBudgetMB
 		oldPublicURL := cfg.Network.PublicURL
 		oldIntervals := monitorIntervalsOf(cfg)
+		oldYTActive, oldTWActive := config.GetActivePlatforms(cfg)
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1180,6 +1186,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newReorderBudget := cfg.Downloader.ReorderBudgetMB
 		newPublicURL := cfg.Network.PublicURL
 		newIntervals := monitorIntervalsOf(cfg)
+		newYTActive, newTWActive := config.GetActivePlatforms(cfg)
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1204,6 +1211,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if !hasChannels && newIntervals != oldIntervals && callbacks.OnMonitorIntervalChange != nil {
 				callbacks.OnMonitorIntervalChange()
+			}
+			if (newYTActive != oldYTActive || newTWActive != oldTWActive) && callbacks.OnActivePlatformsChange != nil {
+				callbacks.OnActivePlatformsChange()
 			}
 			// public_url lives in [network], not [notifications], but the
 			// notification manager is its only consumer — it reads the base
