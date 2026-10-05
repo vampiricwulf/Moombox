@@ -724,6 +724,25 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 	}
 }
 
+// ClearManualRelogin lowers a platform's re-login flag and reports whether it
+// was raised. For the recovery the flag's own clearers (a browser refresh,
+// setup, an import) never see: authentication coming back through the
+// background re-check — a cookies.txt the operator replaced by hand, as the
+// failure notification suggests, or a transient signed-out reading that
+// healed. The flag stayed up, and both dashboards rank it above
+// "Authenticated", so they showed "Re-login required" until a restart.
+func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch platform {
+	case "youtube", "twitch":
+		was := s.needsRelogin[platform]
+		s.needsRelogin[platform] = false
+		return was
+	}
+	return false
+}
+
 // Stop stops the auto-cookie service, permanently for this service's
 // lifetime. After it, StartSetup returns ErrServiceStopped and
 // RefreshCookies/RefreshCookiesDetailed decline.

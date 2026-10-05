@@ -339,6 +339,17 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 	// they failed and which this transition therefore cannot fix.
 	s.cookieRefresh.OnAuthRecovered = func(platform string) {
 		reauth(platform)
+		// The re-login flag's own clearers — a browser refresh, setup, an
+		// import — never see a recovery made here: a cookies.txt replaced by
+		// hand, as the failure notification suggests, or a transient
+		// signed-out reading that healed. Both dashboards rank the flag above
+		// "Authenticated", so they kept showing "Re-login required" until a
+		// restart. OnAuthChange has already pushed the badges with the flag
+		// still up, so the TUI's are sent again.
+		if s.autoCookieSvc != nil && s.autoCookieSvc.ClearManualRelogin(platform) {
+			s.log.Info("auth recovered — cleared the re-login flag", "platform", platform)
+			s.resendTUICookieStatus()
+		}
 		// A YouTube session that has just come back from not-authenticated
 		// may have left non-member memos behind, and each one suppresses the
 		// only path by which members-only content is discovered at all. The
