@@ -655,8 +655,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				result.AudioDownloader.Cancel()
 			}
 
-			// B4: Refresh manifests and create new downloaders
+			// B4: Refresh manifests and create new downloaders — from the
+			// position the stopped ones reached, as the quality-loss refresh
+			// does. Without a forced start they resumed through the sidecar,
+			// and a sidecar the engine had already cleared (one cookieless
+			// probe read "ended" that YouTube's full check then contradicted)
+			// left them to the job's start-of-run DB seq: on a fresh job
+			// seq 0, refused over the staged media (Error); on a restarted
+			// one a stale position, re-fetching and appending footage the
+			// file already held. A usable sidecar still wins over the forced
+			// position in the engine.
+			if result.VideoDownloader != nil {
+				curCtx.VideoStartSeq = result.VideoDownloader.CurrentSeq()
+			}
+			if result.AudioDownloader != nil {
+				curCtx.AudioStartSeq = result.AudioDownloader.CurrentSeq()
+			}
 			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
+			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
 
 			if refreshErr != nil {
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
@@ -668,9 +684,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// The stream may have come back at a different quality — an
 			// encoder restart during the stall is the usual cause. The
-			// refreshed downloaders carry no forced start, so they resume the
-			// current part through its sidecar: run as-is they would APPEND
-			// the new rendition's fragments under the old init segment, and
+			// refreshed downloaders continue the current part (through its
+			// sidecar, or from the forced position above): run as-is they
+			// would APPEND the new rendition's fragments under the old init
+			// segment, and
 			// the mixed tail would be muxed into this part before the
 			// monitor's next tick noticed. Split exactly as a quality change
 			// does instead; the refresh above was only the look.

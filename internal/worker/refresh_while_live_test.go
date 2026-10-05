@@ -151,3 +151,33 @@ func TestAnUnreadableStatusSpendsTheBudgetFirst(t *testing.T) {
 		t.Error("the verify branch no longer decides through unreadableStatusEndsCapture")
 	}
 }
+
+// The still-live refresh starts its new downloaders from the position the
+// stopped ones reached, like the quality-loss refresh. Without it they fell
+// back to the job's start-of-run DB seq whenever the engine had cleared the
+// sidecar — seq 0 on a fresh job (refused over the staged media) or a stale
+// position on a restarted one (footage re-fetched and appended). Pinned by
+// source; the loop cannot be driven.
+//
+// Mutant: the forced start removed from the still-live refresh.
+func TestStillLiveRefreshStartsWhereTheCaptureStopped(t *testing.T) {
+	src, err := os.ReadFile("orchestrator_youtube.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	i := strings.Index(body, "// B4: Refresh manifests and create new downloaders")
+	if i < 0 {
+		t.Fatal("the still-live refresh (B4) is gone")
+	}
+	block := body[i:]
+	call := strings.Index(block, "o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)")
+	seed := strings.Index(block, "curCtx.VideoStartSeq = result.VideoDownloader.CurrentSeq()")
+	clear := strings.Index(block, "curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0")
+	if call < 0 || seed < 0 || seed > call {
+		t.Error("the still-live refresh no longer seeds its start from the stopped downloaders' position")
+	}
+	if clear < call {
+		t.Error("the still-live refresh's forced start is not cleared after the refresh")
+	}
+}
