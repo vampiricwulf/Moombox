@@ -364,24 +364,26 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 
 ### Key Settings
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `port` | `774` | Web dashboard port |
-| `network_access` | `"localhost"` | `"localhost"`, `"lan"`, `"external"`, or `"public"` — `"public"` behaves like `"external"` and is only settable in `config.toml` ([Remote Access](#remote-access)) |
-| `trusted_proxies` | `[]` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
-| `log_level` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
-| `downloader.max_video_resolution` | `2160` | Cap on the SHORTER frame edge (so `2160` is 4K in either orientation); picks the largest rendition at or below it, else the closest above; `0` = unbounded |
-| `cookies.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
-| `downloader.download_chat` | `true` | Download live chat alongside streams |
-| `downloader.prefer_60fps` | `true` | Prefer 60fps when same resolution available |
-| `downloader.num_parallel_downloads` | `10` | Simultaneous download jobs |
-| `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
-| `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
-| `twitch_check_interval` | `15` | Seconds between Twitch GQL live-status checks (with jitter) |
-| `monitors.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
-| `memory.go_soft_limit_mb` | `256` | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
-| `memory.sidecar_soft_limit_mb` | `200` | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
-| `memory.sidecar_hard_limit_mb` | `512` | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
+| Setting | Default | Restart? | Description |
+|---------|---------|----------|-------------|
+| `port` | `774` | Yes | Web dashboard port |
+| `network_access` | `"localhost"` | Bind only | `"localhost"`, `"lan"`, `"external"`, or `"public"` — `"public"` behaves like `"external"` and is only settable in `config.toml` ([Remote Access](#remote-access)) |
+| `trusted_proxies` | `[]` | No | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
+| `log_level` | `"INFO"` | No | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
+| `downloader.max_video_resolution` | `2160` | No | Cap on the SHORTER frame edge (so `2160` is 4K in either orientation); picks the largest rendition at or below it, else the closest above; `0` = unbounded |
+| `cookies.cookie_file` | `"./cookies.txt"` | Yes | Netscape-format cookie file |
+| `downloader.download_chat` | `true` | No | Download live chat alongside streams |
+| `downloader.prefer_60fps` | `true` | No | Prefer 60fps when same resolution available |
+| `downloader.num_parallel_downloads` | `10` | No | Simultaneous download jobs |
+| `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | No | Output path template |
+| `feed_check_interval` | `10` | No | Minutes between RSS feed checks (also accepts `"10m"`) |
+| `twitch_check_interval` | `15` | No | Seconds between Twitch GQL live-status checks (with jitter) |
+| `monitors.hide_finished_age_days` | `30` | No | Days before finished jobs move to Archived (also accepts `"30d"`) |
+| `memory.go_soft_limit_mb` | `256` | No | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
+| `memory.sidecar_soft_limit_mb` | `200` | No | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
+| `memory.sidecar_hard_limit_mb` | `512` | Yes | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
+
+"Restart?" is whether a change waits for a restart. `network_access` decides who is admitted as soon as it is saved; only moving off `localhost` needs the restart, to listen on the network. Settings marked "No" apply when saved — the downloader ones to jobs that start afterwards.
 
 ### Channel Monitoring
 
