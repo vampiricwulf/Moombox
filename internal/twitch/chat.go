@@ -720,9 +720,18 @@ func (cd *ChatDownloader) saveResumeState() {
 	cd.mu.Lock()
 	// Newest-first window, not the whole set — see chatResumeIDCap.
 	recentIDs := cd.dedup.Snapshot(chatResumeIDCap)
+	// The counts are what the FILE holds. fileCount and totalCount already
+	// include the messages still pending — a batch the last flush could not
+	// write, or ones that arrived while it wrote — and Start's exit paths save
+	// right after a flush that may have failed. A sidecar counting them was
+	// restored by the next run as if the part held them, and the header read 6
+	// over an array of 4 for good: restoreResumeState lets the part's header
+	// raise a count, never lower one (a header refresh that failed leaves it
+	// behind the array).
+	pending := len(cd.messages)
 	state := ChatResumeState{
-		MessageCount:    cd.fileCount,
-		TotalCount:      cd.totalCount,
+		MessageCount:    max(cd.fileCount-pending, 0),
+		TotalCount:      max(cd.totalCount-pending, 0),
 		LastTimestampMs: cd.lastTimestampMs,
 		Timestamp:       time.Now().UnixMilli(),
 		StreamID:        cd.streamID,

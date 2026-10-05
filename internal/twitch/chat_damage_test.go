@@ -442,6 +442,56 @@ func TestAPartAdoptedAtItsFirstFlushKeepsItsClock(t *testing.T) {
 	}
 }
 
+// TestAnExitAfterAFailedFlushSavesTheFilesCount: Start's exit paths save the
+// sidecar right after a flush that may have failed, and the sidecar counted
+// the batch that flush could not write. The next run restored it as if the
+// part held them, and since the part's header may raise a restored count but
+// never lower it, the header read 6 over an array of 4 for good. The sidecar
+// now counts what the file holds.
+//
+// Mutant: save fileCount/totalCount without subtracting the pending messages
+// in saveResumeState — the sidecar says 5 and the header 6 over 4.
+func TestAnExitAfterAFailedFlushSavesTheFilesCount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat.json")
+	cd := newTestChatDownloader(t, path)
+	for i := range 3 {
+		cd.addMessage(damageTestMessage("m", i))
+	}
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	real := appendChatMessages
+	t.Cleanup(func() { appendChatMessages = real })
+	appendChatMessages = func(string, []TwitchChatMessage, int, utils.ChatFileLogger) error {
+		return fmt.Errorf("%w: disk full", utils.ErrChatFilePartialWrite)
+	}
+	for i := 3; i < 5; i++ {
+		cd.addMessage(damageTestMessage("m", i))
+	}
+	_ = cd.Start(cancelledContext(t)) // an interrupted exit: its flush fails, its sidecar is saved
+	appendChatMessages = real
+
+	state := cd.loadResumeState()
+	if state == nil {
+		t.Fatal("the interrupted exit saved no sidecar")
+	}
+	if state.MessageCount != 3 || state.TotalCount != 3 {
+		t.Errorf("the sidecar counts %d (total %d), want the 3 messages the part holds", state.MessageCount, state.TotalCount)
+	}
+	next := newTestChatDownloader(t, path)
+	_ = next.Start(cancelledContext(t))
+	next.addMessage(damageTestMessage("n", 0))
+	if err := next.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if d := readDamageTestFile(t, path); len(d.Messages) != 4 || d.MessageCount != 4 {
+		t.Errorf("part holds %d messages under a header of %d, want 4 over 4", len(d.Messages), d.MessageCount)
+	}
+	if got := next.MessageCount(); got != 4 {
+		t.Errorf("MessageCount %d, want 4", got)
+	}
+}
+
 // TestAFailedFinalFlushIsReportedNotDropped: at the stream's end the pending
 // messages were flushed, and when that failed they were thrown away with the
 // sidecar cleared and nil returned — the job read "finished" over a capture
