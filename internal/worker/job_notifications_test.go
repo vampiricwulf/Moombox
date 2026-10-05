@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -531,6 +532,49 @@ func TestJobFailedNamesTheStageAndTheStaging(t *testing.T) {
 
 		if got := notifyField(t, rec.ByEvent("error")[0], "Staging"); got != "preserved" {
 			t.Errorf("Staging = %q — Resume is YouTube-only in both UIs and the route answers 400", got)
+		}
+	})
+
+	// A non-actionable failure suppresses the report but not the close: an
+	// edit-mode target's lifecycle message used to stay at "Downloading" for
+	// good. The send is EditOnly, which an ordinary failure is not; the
+	// Twitch retry suppression sends nothing, since the monitor restarts that
+	// job and its next event edits the same message.
+	//
+	// Mutants: drop the non-actionable else-if in setJobError — no send;
+	// pass editOnly false there — a full report; key the else-if on
+	// suppressNotification — the retry-suppressed job is closed too.
+	t.Run("a non-actionable failure only closes the lifecycle message", func(t *testing.T) {
+		rec.Reset()
+		job := &database.Job{ID: "vidE5", VideoID: "vidE5", Platform: "youtube", Title: "Restricted", Status: database.StatusDownloading}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		w.setJobError(job, fmt.Errorf("%w: age-restricted", ErrNonActionable))
+		calls := rec.ByEvent("error")
+		if len(calls) != 1 || !calls[0].Opts.EditOnly {
+			t.Fatalf("sends = %+v, want one EditOnly error", calls)
+		}
+
+		rec.Reset()
+		plain := &database.Job{ID: "vidE6", VideoID: "vidE6", Platform: "youtube", Title: "Broke", Status: database.StatusDownloading}
+		if _, err := db.AddJob(plain); err != nil {
+			t.Fatal(err)
+		}
+		w.setJobError(plain, errors.New("mux: ffmpeg: exit status 1"))
+		if calls := rec.ByEvent("error"); len(calls) != 1 || calls[0].Opts.EditOnly {
+			t.Errorf("an ordinary failure's sends = %+v, want one full report", calls)
+		}
+
+		rec.Reset()
+		retrying := &database.Job{ID: "tw_E7", VideoID: "E7", Platform: "twitch", Title: "Flap",
+			Status: database.StatusDownloading, AutoRetryCount: 1}
+		if _, err := db.AddJob(retrying); err != nil {
+			t.Fatal(err)
+		}
+		w.setJobError(retrying, errors.New(TwitchOfflineErrMsg))
+		if calls := rec.ByEvent("error"); len(calls) != 0 {
+			t.Errorf("a retry-suppressed failure sent %+v, want nothing", calls)
 		}
 	})
 }

@@ -1487,7 +1487,8 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		errMsg == TwitchOfflineErrMsg &&
 		job.LastVideoSeq == nil &&
 		job.AutoRetryCount < MaxTwitchAutoRetries
-	suppressNotification := errors.Is(err, ErrNonActionable) || (job.AutoRetryCount > 0 && retryLikely)
+	nonActionable := errors.Is(err, ErrNonActionable)
+	suppressNotification := nonActionable || (job.AutoRetryCount > 0 && retryLikely)
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
@@ -1529,63 +1530,16 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				},
 			)
 		} else {
-			// The one row→facts mapper, so the only job send that is not a
-			// builder call still carries the identity every builder sets: the
-			// URL with its watch fallback, the author line, the platform and
-			// the job id. Arc N3's terminal edit on "error" and Arc N2b's deep
-			// link both key on Opts.JobID, and an embed with none can be
-			// neither edited nor linked.
-			f := NotifyFacts(job)
-			var stagingBase string
-			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
-			// "preserved" is the same predicate the resume route gates on
-			// (HasStagingFiles), and Resume is YouTube-only in both UIs — a
-			// Twitch job told "Resume available" gets a 400.
-			staging := "removed"
-			if HasStagingFiles(stagingBase, job.ID) {
-				staging = "preserved"
-				if job.Platform != "twitch" {
-					staging = "preserved — Resume available"
-				}
-			}
-			asides := len(ScanAsides(stagingBase, job.ID).Groups)
-
-			fields := notifications.NewFieldBuilder().
-				// Guarded for the same reason the builders guard their id
-				// field: Field.Value carries no omitempty, clampEmbed never
-				// drops an empty value, and Discord answers one with a 400 that
-				// discord.go treats as permanent — the whole embed is dropped
-				// after a single attempt.
-				AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
-				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
-				// Error is ALREADY wrapped by N1 — this Error field is one of
-				// the four sites N1 escapes. Carry N1's line through unchanged;
-				// a second wrap renders every \* as \\*. ChannelName is NOT one
-				// of N1's four, so the wrap above is new and single. (No line
-				// number: the one this comment used to carry was stale within
-				// the arc, and nothing checks comments.)
-				Add("Error", notifications.EscapeMarkdown(errMsg)).
-				AddInline("Stage", errorStage(errMsg)).
-				AddInline("Staging", staging).
-				AddIf(job.AutoRetryCount > 0, "Automatic Retries",
-					fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
-				AddIf(asides > 0, "Set-aside recordings",
-					fmt.Sprintf("%d — Recover to mux them", asides)).
-				Build()
-			w.notifier.Send("Job Failed",
-				fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
-				notifications.TypeError,
-				fields,
-				notifications.SendOptions{
-					URL:       f.URL,
-					Thumbnail: f.ThumbnailURL,
-					Event:     "error",
-					Author:    notifyAuthor(f),
-					Platform:  f.Platform,
-					JobID:     f.ID,
-				},
-			)
+			w.sendJobFailed(job, errMsg, false)
 		}
+	} else if w.notifier != nil && nonActionable && status == database.StatusError {
+		// The failure report is suppressed, but an edit-mode target may hold
+		// this job's lifecycle message open at "Found" or "Downloading" — and
+		// with no terminal send it stayed there for good. An EditOnly send
+		// closes it and posts nothing (notifications.SendOptions.EditOnly).
+		// The Twitch retry suppression is not this: the monitor restarts that
+		// job, and its next event goes on editing the same message.
+		w.sendJobFailed(job, errMsg, true)
 	}
 
 	// Automatic cookie recovery. Deliberately OUTSIDE the notifier branch
@@ -1597,6 +1551,69 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	if status == database.StatusCookies {
 		w.attemptCookieRefresh(job, err)
 	}
+}
+
+// sendJobFailed sends the "Job Failed" embed for job. editOnly marks the
+// non-actionable case: the report is suppressed and the send only closes an
+// open lifecycle message (notifications.SendOptions.EditOnly).
+func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, editOnly bool) {
+	// The one row→facts mapper, so the only job send that is not a
+	// builder call still carries the identity every builder sets: the
+	// URL with its watch fallback, the author line, the platform and
+	// the job id. Arc N3's terminal edit on "error" and Arc N2b's deep
+	// link both key on Opts.JobID, and an embed with none can be
+	// neither edited nor linked.
+	f := NotifyFacts(job)
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	// "preserved" is the same predicate the resume route gates on
+	// (HasStagingFiles), and Resume is YouTube-only in both UIs — a
+	// Twitch job told "Resume available" gets a 400.
+	staging := "removed"
+	if HasStagingFiles(stagingBase, job.ID) {
+		staging = "preserved"
+		if job.Platform != "twitch" {
+			staging = "preserved — Resume available"
+		}
+	}
+	asides := len(ScanAsides(stagingBase, job.ID).Groups)
+
+	fields := notifications.NewFieldBuilder().
+		// Guarded for the same reason the builders guard their id
+		// field: Field.Value carries no omitempty, clampEmbed never
+		// drops an empty value, and Discord answers one with a 400 that
+		// discord.go treats as permanent — the whole embed is dropped
+		// after a single attempt.
+		AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
+		AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
+		// Error is ALREADY wrapped by N1 — this Error field is one of
+		// the four sites N1 escapes. Carry N1's line through unchanged;
+		// a second wrap renders every \* as \\*. ChannelName is NOT one
+		// of N1's four, so the wrap above is new and single. (No line
+		// number: the one this comment used to carry was stale within
+		// the arc, and nothing checks comments.)
+		Add("Error", notifications.EscapeMarkdown(errMsg)).
+		AddInline("Stage", errorStage(errMsg)).
+		AddInline("Staging", staging).
+		AddIf(job.AutoRetryCount > 0, "Automatic Retries",
+			fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+		AddIf(asides > 0, "Set-aside recordings",
+			fmt.Sprintf("%d — Recover to mux them", asides)).
+		Build()
+	w.notifier.Send("Job Failed",
+		fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
+		notifications.TypeError,
+		fields,
+		notifications.SendOptions{
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
+			Event:     "error",
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
+			EditOnly:  editOnly,
+		},
+	)
 }
 
 // attemptCookieRefresh runs (or deliberately declines to run) the automatic

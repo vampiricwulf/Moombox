@@ -254,6 +254,14 @@ type SendOptions struct {
 	// Tier ranks this send for the queue's overflow policy. Leave it
 	// TierUnset to derive it from Event.
 	Tier Tier
+	// EditOnly marks a terminal send whose report is deliberately suppressed
+	// — a failure there is nothing to do about — but whose job may have a
+	// lifecycle message open. On an edit-mode target holding one it closes
+	// that message (dispatchOne) and posts nothing; everywhere else — a
+	// separate-mode target, no open message, a transport that cannot edit —
+	// it sends nothing at all. Suppressing the send outright left the message
+	// reading "Found" or "Downloading" for good.
+	EditOnly bool
 
 	// There is deliberately NO mention here. A ping is per TARGET and per
 	// MESSAGE, never per producer and never per embed: Manager.Send resolves

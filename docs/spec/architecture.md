@@ -795,7 +795,7 @@ Cancellation never reaches `setJobError`: `handleCancellation` asks the queue wh
 
 ### Notification and Recovery Suppression
 
-- `errors.Is(err, ErrNonActionable)` suppresses the failure notification (an age-restricted stream or an exhausted probe budget was never going to succeed) and skips the automatic cookie refresh — recovery would re-queue the job and reset its retry budget.
+- `errors.Is(err, ErrNonActionable)` suppresses the failure notification (an age-restricted stream or an exhausted probe budget was never going to succeed) and skips the automatic cookie refresh — recovery would re-queue the job and reset its retry budget. The report is suppressed, not the close: the "Job Failed" embed still goes out marked `SendOptions.EditOnly`, which on an edit-mode target holding the job's lifecycle message edits it to its terminal look and posts nothing else, without the mention, and everywhere else sends nothing (`dispatchOne`, `internal/notifications/lifecycle.go`). Suppressing the send outright left that message reading "Found" or "Downloading" for good. The Twitch retry suppression beside it sends nothing at all: the monitor restarts that job, and its next event goes on editing the same message.
 - A Twitch flap still inside its auto-retry budget (`AutoRetryCount > 0` and the exact offline message with no delivered segments) is also silent, because the monitor will `AutoReinitializeJob` on its next poll; a terminal failure on a retried job does notify.
 - `ErrNotAMember` parks the job but skips the automatic cookie refresh (`cookieRefreshWorthAttempting`): the cookies are alive, they belong to the wrong account, and only a different account's credentials resume it.
 

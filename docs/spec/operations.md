@@ -585,7 +585,11 @@ target sees the mention in the message and gets a notification only when
 terminal look, and the separate embed is still posted, when a lifecycle
 message is already open; a terminal event never creates one, so a target
 whose first word about a job is "failed" simply posts it. Two messages on
-failure, by design — the separate one is what pings.
+failure, by design — the separate one is what pings. A failure whose report is
+suppressed (`worker.ErrNonActionable`: age-restricted, probe budget exhausted)
+still closes the open message, and only that: its `error` send is marked
+`EditOnly`, so the edit carries no mention, no separate embed follows, and a
+target with no open message — or in `separate` mode — gets nothing.
 
 There are no progress edits. A cadence-driven PATCH would spend the bucket for
 nothing.

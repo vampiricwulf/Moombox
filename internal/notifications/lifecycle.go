@@ -498,9 +498,17 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	// job for messages this transport can never rewrite.
 	edit, editable := t.sender.(editableSender)
 	if !editable {
+		if opts.EditOnly {
+			return nil // nothing to close here, and the report is suppressed
+		}
 		return sendPlain(t.sender, msg, once)
 	}
 	plan := m.planLifecycle(t, opts)
+	if opts.EditOnly && plan.MessageID == "" {
+		// No open message to close (a terminal event never opens one), or
+		// not an edit-mode target at all.
+		return nil
+	}
 	if !plan.Manage {
 		return sendPlain(t.sender, msg, once)
 	}
@@ -509,15 +517,21 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	e := msg.Embeds[0]
 	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, time.Now())
 	// The ping is per MESSAGE (content + allowed_mentions), so it is carried
-	// over from the queued Message, not rebuilt from the embed.
-	body, err := buildPayload(Message{Embeds: []Embed{e}, Mention: msg.Mention, MentionAllowed: msg.MentionAllowed})
+	// over from the queued Message, not rebuilt from the embed. An EditOnly
+	// close carries none: its report is suppressed, and the role text would
+	// still show in the edited message.
+	mention, allowed := msg.Mention, msg.MentionAllowed
+	if opts.EditOnly {
+		mention, allowed = "", nil
+	}
+	body, err := buildPayload(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
 	if err != nil {
 		return err
 	}
 
 	lifecycleErr := m.postOrPatch(edit, tr, opts.JobID, t.msgKey, opts.Event, plan, body, once)
 
-	if plan.AlsoSeparate {
+	if plan.AlsoSeparate && !opts.EditOnly {
 		// The separate embed carries the mention and must go out even if the
 		// closing edit failed (owner ruling: two messages on failure).
 		if sepErr := sendPlain(t.sender, msg, once); sepErr != nil {
