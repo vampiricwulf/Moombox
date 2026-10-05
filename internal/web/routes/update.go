@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -164,6 +165,10 @@ func ClearPendingUpdate(seen *updater.ReleaseInfo) string {
 // that needs a check to answer without reaching GitHub.
 var checkForUpdate = (*updater.Updater).CheckForUpdate
 
+// applyUpdate is (*updater.Updater).ApplyUpdate, a seam for the test that
+// needs to see the context an apply runs under without replacing a binary.
+var applyUpdate = (*updater.Updater).ApplyUpdate
+
 // UpdateRoutes registers the update check/apply/dismiss API endpoints. The
 // Store carries the cfg + lock + savePath; /api/update/dismiss records the
 // pending tag as Updates.SkippedVersion through DismissUpdate, which persists
@@ -266,7 +271,13 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
-		if err := deps.Updater.ApplyUpdate(r.Context(), release); err != nil {
+		// Detached from the request: a slow link's download outlives what a
+		// browser waits for a response (Firefox gives up after 300 s), and
+		// the abort cancelled the request context — the very download the
+		// stall timer exists to let finish. The updater's stall timeout and
+		// two-hour backstop bound it instead; on success the restart below
+		// still runs, whether or not anyone is still listening.
+		if err := applyUpdate(deps.Updater, context.WithoutCancel(r.Context()), release); err != nil {
 			updateInProgress.Store(false)
 			// The toast reads "Update failed: <this>"; it used to read
 			// "Update failed: update failed".

@@ -3,6 +3,7 @@ package routes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -664,5 +665,36 @@ func TestUpdateCheckUpToDateKeepsAReleaseFoundDuringIt(t *testing.T) {
 	}
 	if len(cleared) != 0 {
 		t.Errorf("OnCleared = %q, want nothing withdrawn", cleared)
+	}
+}
+
+// A slow link's download outlives what a browser waits for a response —
+// Firefox gives up after 300 s — and the abort cancelled the request context
+// the apply ran under: the very download the updater's stall timer exists to
+// let finish. The apply now runs detached from the request.
+//
+// Mutant: the route passing r.Context() — the apply sees it cancelled.
+func TestUpdateApplyOutlivesTheRequest(t *testing.T) {
+	orig := applyUpdate
+	t.Cleanup(func() { applyUpdate = orig })
+	var sawCancelled bool
+	applyUpdate = func(_ *updater.Updater, ctx context.Context, _ *updater.ReleaseInfo) error {
+		sawCancelled = ctx.Err() != nil
+		return errors.New("stop here")
+	}
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the browser has already stopped waiting
+	req := httptest.NewRequest("POST", "/api/update/apply", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:50000"
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	if sawCancelled {
+		t.Error("the apply ran under the request's cancelled context")
 	}
 }
