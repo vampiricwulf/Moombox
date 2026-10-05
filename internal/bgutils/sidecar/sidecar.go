@@ -36,6 +36,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // Logger is the structured logging interface Moombox uses everywhere.
@@ -128,6 +129,20 @@ type Sidecar struct {
 	readyOnce sync.Once
 	readyCh   chan struct{}
 	readyErr  error // set inside readyOnce.Do before close(readyCh)
+
+	// stderrTail keeps the child's last few stderr lines (stderrPump), so a
+	// child that dies before ready can say why: Node's own fatal errors —
+	// a module that will not load, a missing shared library — are
+	// unprefixed and logged at Debug, and "sidecar exited before ready" was
+	// all the operator was told. Reset at every start.
+	stderrMu   sync.Mutex
+	stderrTail []string
+	// reextracted latches the one re-extraction a child that died before
+	// ready earns: a tree that is broken under a valid stamp (a payload cut
+	// short by a crash) is never re-extracted otherwise, while one that
+	// still fails after a fresh extraction is the environment, not the
+	// files, and is not rewritten again every retry.
+	reextracted atomic.Bool
 
 	// Lifecycle. stopping signals to readPump/stderrPump that a teardown is
 	// under way and they should exit silently rather than mark unhealthy.
@@ -310,6 +325,9 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	s.job = job
 	<-s.writeSem
 
+	s.stderrMu.Lock()
+	s.stderrTail = nil
+	s.stderrMu.Unlock()
 	s.pumpsDone.Add(2)
 	go s.readPump()
 	go s.stderrPump()
@@ -326,12 +344,18 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	select {
 	case <-s.readyCh:
 		if s.readyErr != nil {
-			_ = s.teardownLocked()
-			return fmt.Errorf("ready: %w", s.readyErr)
+			_ = s.teardownLocked() // joins the pumps: the stderr tail is complete
+			if !s.reextracted.Swap(true) {
+				if err := os.Remove(filepath.Join(cacheDir, "version.txt")); err == nil {
+					s.cfg.Logger.Warn("sidecar exited before ready; its extracted files will be rewritten on the next start",
+						"cacheDir", cacheDir)
+				}
+			}
+			return fmt.Errorf("ready: %w%s", s.readyErr, s.stderrTailSuffix())
 		}
 	case <-readyCtx.Done():
 		_ = s.teardownLocked()
-		return fmt.Errorf("ready: %w", readyCtx.Err())
+		return fmt.Errorf("ready: %w%s", readyCtx.Err(), s.stderrTailSuffix())
 	}
 
 	s.healthy.Store(true)
@@ -1098,6 +1122,9 @@ func (s *Sidecar) stderrPump() {
 		if line == "" {
 			continue
 		}
+		if !isHarmlessJSDOMStderr(line) {
+			s.noteStderr(line)
+		}
 		switch {
 		case strings.HasPrefix(line, "[bgutil-sidecar:error]"):
 			// Real server.js error — operator should see this.
@@ -1119,6 +1146,60 @@ func (s *Sidecar) stderrPump() {
 			s.cfg.Logger.Debug("sidecar stderr", "line", line)
 		}
 	}
+}
+
+// stderrTailLines and stderrTailLineBytes bound what stderrTail keeps.
+const (
+	stderrTailLines     = 6
+	stderrTailLineBytes = 300
+)
+
+// noteStderr adds one stderr line to stderrTail, keeping the last few. A
+// Node fatal error ends in stack frames, a "{ code: … }" block and a
+// "Node.js vX" footer; kept, those pushed the line that says what went wrong
+// out of the tail, so they are not kept.
+func (s *Sidecar) noteStderr(line string) {
+	if !informativeStderr(line) {
+		return
+	}
+	if len(line) > stderrTailLineBytes {
+		cut := stderrTailLineBytes
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut] + "…"
+	}
+	s.stderrMu.Lock()
+	defer s.stderrMu.Unlock()
+	s.stderrTail = append(s.stderrTail, line)
+	if len(s.stderrTail) > stderrTailLines {
+		s.stderrTail = s.stderrTail[len(s.stderrTail)-stderrTailLines:]
+	}
+}
+
+// informativeStderr reports whether a stderr line says something beyond a
+// stack frame or a bracket — see noteStderr.
+func informativeStderr(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "at ") || strings.HasPrefix(t, "Node.js v") {
+		return false
+	}
+	return strings.Trim(t, "{}^ ") != ""
+}
+
+// stderrTailSuffix renders stderrTail for an error that ends a start: empty
+// when the child said nothing, else " — the child said: …".
+func (s *Sidecar) stderrTailSuffix() string {
+	s.stderrMu.Lock()
+	defer s.stderrMu.Unlock()
+	if len(s.stderrTail) == 0 {
+		return ""
+	}
+	parts := make([]string, len(s.stderrTail))
+	for i, l := range s.stderrTail {
+		parts[i] = strings.TrimSpace(l)
+	}
+	return " — the child said: " + strings.Join(parts, " | ")
 }
 
 // isHarmlessJSDOMStderr reports whether a stderr line is known JSDOM
