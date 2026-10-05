@@ -590,16 +590,15 @@ func TestRestartSiblingStem(t *testing.T) {
 	}
 }
 
-// TestStagedRecordingPartsOrdersAsidesFirst pins extra item (d): the engine
+// TestStagedRestartAsidesInRecordingOrder pins extra item (d): the engine
 // leaves a recording it could not resume beside the fresh one as
-// <file>.restart-<ts>, and the part list a staging dir yields is those asides
-// in recording order followed by the live recording — with the sidecar twin
-// excluded, since muxing a JSON file is not a recovery.
+// <file>.restart-<ts>, and the asides a staging dir yields come in recording
+// order — without the live recording, and with the sidecar twin excluded,
+// since muxing a JSON file is not a recovery.
 //
-// Mutants: ignoring the aside (the part list is just the live recording, and
-// the set-aside footage is invisible to every consumer), or treating the
-// .resume.json twin as a part.
-func TestStagedRecordingPartsOrdersAsidesFirst(t *testing.T) {
+// Mutants: ignoring the asides (the set-aside footage is invisible to every
+// consumer), or treating the .resume.json twin as one.
+func TestStagedRestartAsidesInRecordingOrder(t *testing.T) {
 	dir := t.TempDir()
 	live := filepath.Join(dir, "video.mp4")
 	aside := filepath.Join(dir, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
@@ -610,14 +609,14 @@ func TestStagedRecordingPartsOrdersAsidesFirst(t *testing.T) {
 		}
 	}
 
-	got := stagedRecordingParts(dir)
-	want := []string{older, aside, live}
+	got := stagedRestartAsides(dir)
+	want := []string{older, aside}
 	if len(got) != len(want) {
-		t.Fatalf("stagedRecordingParts = %v, want %v", got, want)
+		t.Fatalf("stagedRestartAsides = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("stagedRecordingParts = %v, want %v (recording order: asides oldest first, then the live recording)", got, want)
+			t.Fatalf("stagedRestartAsides = %v, want %v (recording order: oldest first)", got, want)
 		}
 	}
 }

@@ -180,10 +180,8 @@ func (o *DownloadOrchestrator) discardRejectedMuxOutput(jobID, outputFile string
 	}
 }
 
-// stagedRecordingParts returns the recordings inside ONE staging dir in
-// RECORDING ORDER: first every <file>.restart-<ts> the engine set aside when
-// a restart could not resume (oldest timestamp first — that is the order they
-// were captured in), then the dir's live recording.
+// stagedRestartAsides returns the set-aside recordings in ONE dir, oldest
+// stamp first (the order they were captured in).
 //
 // The engine preserves rather than truncates a headed recording it cannot
 // resume (engine.StagedRestartSuffix), and until this list existed nothing in
@@ -192,26 +190,10 @@ func (o *DownloadOrchestrator) discardRejectedMuxOutput(jobID, outputFile string
 // every cleanup — which meant a fresh capture finishing cleanly deleted them.
 // The sidecar twin (<file>.restart-<ts>.resume.json) is excluded by
 // engine.IsStagedRestartPath: muxing a JSON file is not a recovery.
-func stagedRecordingParts(dir string) []string {
-	parts := stagedRestartAsides(dir)
-	if media := discoverStagingMedia(dir); media != nil {
-		live := media.VideoPath
-		if live == "" {
-			live = media.AudioPath
-		}
-		if live != "" {
-			parts = append(parts, live)
-		}
-	}
-	return parts
-}
-
-// stagedRestartAsides returns the set-aside recordings in ONE dir, oldest
-// stamp first — stagedRecordingParts without the live recording, and so
-// without discoverStagingMedia's Stat of every candidate media name.
 //
-// Split out because the orphan sweep asks for asides and nothing else, for
-// every job, on every pass (jobNeedsStaging and scanStagingOrphans in
+// Asides only, never the live recording, and no Stat of candidate media
+// names: the orphan sweep asks for asides and nothing else, for every job,
+// on every pass (jobNeedsStaging and scanStagingOrphans in
 // internal/worker/orphans.go, via stagedAsideRecordings): one ReadDir per dir
 // is the whole cost, and a result that never contains the live recording is
 // also the correct ANSWER there — an ordinary staging file is not

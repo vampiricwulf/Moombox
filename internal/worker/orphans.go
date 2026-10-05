@@ -92,8 +92,11 @@ func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] 
 // job-finish time (see (*DownloadWorker).cleanupStagingAfterMux in
 // worker.go): a Finished job's staging only survives cleanup for four
 // reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
-// capture ended incomplete (the chat resume sidecar in staging is what a
-// later Retry pages on from), it still holds a recording the engine set
+// capture ended incomplete (no verb re-pages from the capture kept in
+// staging — Retry refuses a Finished job and Reinitialize starts over — but
+// it can be the only copy of those comments when the archive's chat copy
+// failed, an aside recovery carries it beside the recovered recording, and
+// the operator can take it by hand), it still holds a recording the engine set
 // aside rather than truncated (engine.StagedRestartSuffix), or it still has
 // an unmuxed captured part (recoverable via the Mux action). The tail and
 // chat shields expire on one age rule — which is ON by default: the option

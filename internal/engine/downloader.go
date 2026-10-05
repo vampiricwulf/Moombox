@@ -1054,7 +1054,7 @@ func StagedRestartSidecar(aside string) string { return aside + resumeFileSuffix
 // which shares that timestamped stem as <file>.restart-<unix ts>.resume.json.
 //
 // Exported because resumeFileSuffix is not: package worker's staging scan
-// (internal/worker/orchestrator_mux.go, stagedRecordingParts) has to tell the
+// (internal/worker/orchestrator_mux.go, stagedRestartAsides) has to tell the
 // recording from its twin, and hardcoding either literal there is exactly the
 // drift StagedRestartSuffix's doc comment exists to prevent. The timestamp is
 // required to be digits so an ordinary file that merely contains ".restart-"

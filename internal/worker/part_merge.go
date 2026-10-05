@@ -122,13 +122,16 @@ type mergeRun struct {
 // independent files are the last remaining copy of their span.
 //
 // Chat-merge failure aborts the RUN, not the batch: if any part in a run
-// carries a ChatFile and mergeChatFiles fails on it (the only production
-// case today is a Twitch gap-split run — its chat is twitch.TwitchChatData,
-// whose "message" field is a string, while mergeChatFiles unmarshals
-// chat.ChatData, whose "message" is []MessagePart, so the unmarshal always
-// errors), that run's video is discarded too (its temp concat output is
+// carries a ChatFile and mergeChatFiles fails on it, that run's video is
+// discarded too (its temp concat output is
 // removed) and its ORIGINAL per-part segments are pushed back into the
 // replacement slice unchanged — identical to a len(run)==1 passthrough.
+// No production run carries a ChatFile today: finalizeMultiSegmentJob calls
+// the merge for YouTube jobs only, and only Twitch live IRC chat rolls per
+// part (a Twitch run would fail here anyway — twitch.TwitchChatData's
+// "message" is a string, chat.ChatData's a []MessagePart). The chat merge is
+// kept so a future per-part YouTube chat cannot slip a run through with its
+// chat dropped.
 // Nothing about that run's parts, rows, or chat files is ever touched, and
 // the run never reaches `pending` so post-commit cleanup never runs for it
 // either. Other runs in the same finalize call are unaffected and still
@@ -251,14 +254,10 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 				// C1 ruling: chat-merge failure aborts THIS RUN's identity
 				// entirely, not just its chat -- media is not merged
 				// either, so the parts, their rows, and every per-part
-				// chat file all stay exactly as they were. This is the
-				// only way a Twitch gap-split run (the sole production
-				// case with per-part ChatFile) ever reaches here today,
-				// since its chat is twitch.TwitchChatData ("message" a
-				// string) and mergeChatFiles unmarshals chat.ChatData
-				// ("message" a []MessagePart) -- the schema mismatch
-				// always errors. Other runs in this same finalize proceed
-				// independently; see merge's doc comment.
+				// chat file all stay exactly as they were. Unreachable in
+				// production today (no merged run carries a ChatFile; see
+				// merge's doc comment). Other runs in this same finalize
+				// proceed independently.
 				pm.logger.Warn("part merge: chat merge failed, aborting this run's merge -- media left split, every per-part chat file untouched", "err", err, "jobID", jobID, "run", runIdx)
 				os.Remove(videoTemp) // this run never reaches pending, so nothing else will clean up its orphaned temp output
 				for _, idx := range run {
