@@ -2442,6 +2442,11 @@ sl-progress-bar {
     filter: brightness(1.2);
 }
 
+.trim-handle:focus-visible {
+    outline: 2px solid var(--sl-color-primary-600);
+    outline-offset: 2px;
+}
+
 .trim-existing-mark {
     position: absolute;
     top: 0;

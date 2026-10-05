@@ -129,6 +129,12 @@ export class TrimController {
     // Multi-segment: auto-advance on segment end
     video.addEventListener("ended", () => this._onSegmentEnded(), { signal: sig });
 
+    // A missing or refused file otherwise leaves a black box reading
+    // 0:00 / 0:00 with nothing said.
+    video.addEventListener("error", () => {
+      this.app.showToast("The trim preview could not load this recording", "danger");
+    }, { signal: sig });
+
     // Click video to toggle play/pause
     video.addEventListener("click", () => this._togglePlay(), { signal: sig });
 
@@ -160,12 +166,20 @@ export class TrimController {
     dialog.addEventListener("keydown", (e) => this._onKeyDown(e), { signal: sig });
 
     // Text input sync (inputs -> markers), clamped to opposite marker
+    // A refused value is put back and said, rather than left in the box while
+    // the marker and timeline keep the old one.
+    const refuse = (input, marker) => {
+      input.value = fmtPrecise(marker);
+      this.app.showToast(`Enter a time between 0:00 and ${fmtPrecise(this.duration)}`, "warning");
+    };
     startInput.addEventListener("sl-change", () => {
       const val = this.app.parseTimeInput(startInput.value);
       if (val !== null && val >= 0 && val <= this.duration) {
         this.startMarker = Math.min(val, this.endMarker);
         startInput.value = fmtPrecise(this.startMarker);
         this._updateTimeline();
+      } else {
+        refuse(startInput, this.startMarker);
       }
     }, { signal: sig });
 
@@ -175,6 +189,8 @@ export class TrimController {
         this.endMarker = Math.max(val, this.startMarker);
         endInput.value = fmtPrecise(this.endMarker);
         this._updateTimeline();
+      } else {
+        refuse(endInput, this.endMarker);
       }
     }, { signal: sig });
 
@@ -262,9 +278,14 @@ export class TrimController {
     this._el.range.style.left = `${startPct}%`;
     this._el.range.style.width = `${endPct - startPct}%`;
 
-    // Handles
+    // Handles — sliders to assistive tech, so their values follow the markers.
     this._el.handleStart.style.left = `${startPct}%`;
     this._el.handleEnd.style.left = `${endPct}%`;
+    for (const [handle, value] of [[this._el.handleStart, this.startMarker], [this._el.handleEnd, this.endMarker]]) {
+      handle.setAttribute("aria-valuemax", String(this.duration));
+      handle.setAttribute("aria-valuenow", String(value));
+      handle.setAttribute("aria-valuetext", fmtPrecise(value));
+    }
 
     // Range label
     const dur = this.endMarker - this.startMarker;
@@ -430,6 +451,23 @@ export class TrimController {
     // keydown for shortcuts, the player document keydown for transport)
     // can also act on it. Anything we handle here is trim-local.
     const handle = () => { e.preventDefault(); e.stopPropagation(); };
+
+    // A focused timeline handle is a slider: the arrows move ITS marker
+    // (1 s, Shift 5 s) instead of seeking the video.
+    const focusedHandle = e.composedPath().find((el) => el === this._el.handleStart || el === this._el.handleEnd);
+    if (focusedHandle && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      handle();
+      const delta = (e.shiftKey ? 5 : 1) * (e.key === "ArrowLeft" ? -1 : 1);
+      if (focusedHandle === this._el.handleStart) {
+        this.startMarker = Math.max(0, Math.min(this.startMarker + delta, this.endMarker));
+        this._el.startInput.value = fmtPrecise(this.startMarker);
+      } else {
+        this.endMarker = Math.min(this.duration, Math.max(this.endMarker + delta, this.startMarker));
+        this._el.endInput.value = fmtPrecise(this.endMarker);
+      }
+      this._updateTimeline();
+      return;
+    }
 
     switch (e.key) {
       case " ":
