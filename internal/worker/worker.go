@@ -1113,13 +1113,11 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	userCancelled := w.queue.WasCancelled(job.ID)
 
 	if userCancelled {
-		// Written BEFORE Complete, unlike setJobError's I2 order. Complete
-		// closes the job's Done channel, and a Retry/Resume/Reinitialize
-		// clicked while this run unwound waits on exactly that
-		// (afterJobExit): written after it, this Cancelled — CancelJob already
-		// wrote one — landed on top of the retry's fresh status. Nothing
-		// re-enqueues a user-cancelled job, so I2's reason for freeing the
-		// slot first does not apply here.
+		// Written while the run is still registered: a Retry/Resume/
+		// Reinitialize clicked while this run unwound waits for its Done
+		// (afterJobExit), which only processJob's deferred Complete closes —
+		// so this Cancelled (CancelJob already wrote one) cannot land on top
+		// of the retry's fresh status.
 		updates := map[string]any{"status": database.StatusCancelled}
 		if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil {
 			if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
@@ -1129,10 +1127,9 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 		w.db.UpdateJobFields(job.ID, updates)
 	}
 
-	// Free the queue slot — before the notification, symmetric with
-	// setJobError (see I2 race comment there). Idempotent against the
-	// deferred Complete.
-	w.queue.Complete(job.ID)
+	// Free the slots — before the notification, symmetric with setJobError.
+	// The run itself ends at processJob's deferred Complete.
+	w.queue.ReleaseSlots(job.ID)
 
 	if userCancelled {
 		w.logger.Info("job cancelled by user", "jobID", job.ID)
@@ -1351,12 +1348,14 @@ func errorStage(errMsg string) string {
 }
 
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
-	// Free the queue slot BEFORE committing the error to DB so a concurrent
-	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
-	// IsProcessing dedup. processJob's deferred Complete is idempotent and
-	// remains as a safety net (covers panics that bypass this helper).
-	// Closes the I2 race documented in the v2.6.10 final review.
-	w.queue.Complete(job.ID)
+	// Give the slots back before the tail below (notifications, and an
+	// automatic cookie refresh that can take minutes), so the next download
+	// does not wait on it. Only the slots: the run stays registered until
+	// processJob's deferred Complete — see JobQueue.ReleaseSlots. Whatever
+	// re-enqueues this job meanwhile (AutoReinitializeJob, the cookie
+	// resume below) waits for that exit through afterJobExit instead of
+	// starting a second run beside this one.
+	w.queue.ReleaseSlots(job.ID)
 
 	errMsg := err.Error()
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
@@ -1594,13 +1593,19 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
 		})
-		if status == database.StatusQueued {
-			if w.scheduler != nil {
-				w.scheduler.Wake()
+		// This runs inside the parked run's own tail, which is still
+		// registered: an Enqueue now would be dropped as a duplicate (and the
+		// job left for the heartbeat), so the hand-off waits for the run to
+		// exit.
+		w.afterJobExit(job.ID, "cookie-refresh resume", func() {
+			if status == database.StatusQueued {
+				if w.scheduler != nil {
+					w.scheduler.Wake()
+				}
+			} else {
+				w.queue.Enqueue(job.ID, database.StatusUpcoming)
 			}
-		} else {
-			w.queue.Enqueue(job.ID, database.StatusUpcoming)
-		}
+		})
 		return
 	}
 
@@ -1922,6 +1927,14 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 // (discoverResumeSegment returns maxRecorded+1). Clearing here would throw away
 // captured footage of a live broadcast — the opposite of recovery.
 func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
+	// The monitor reacts to the Error row the moment setJobError writes it,
+	// while that run is still finishing its tail: wait for it to exit, as a
+	// user's Reinitialize does, rather than reset the row and staging under
+	// it (and have the Enqueue dropped as a duplicate).
+	w.afterJobExit(jobID, "auto-reinitialize", func() { w.autoReinitializeNow(jobID) })
+}
+
+func (w *DownloadWorker) autoReinitializeNow(jobID string) {
 	prev, err := w.db.GetJob(jobID)
 	if err != nil || prev == nil {
 		w.logger.Warn("AutoReinitializeJob: job not found", "jobID", jobID, "err", err)

@@ -239,6 +239,12 @@ func TestReinitializeDuringUnwindWaitsForTheRun(t *testing.T) {
 	if len(cancelledWhileProcessing) != 1 || !cancelledWhileProcessing[0] {
 		t.Errorf("handleCancellation's Cancelled write saw processing=%v; want it written before Complete", cancelledWhileProcessing)
 	}
+	// handleCancellation gives back only the slots; the run ends where
+	// processJob's deferred Complete ends it.
+	if !w.queue.IsProcessing(id) {
+		t.Error("handleCancellation unregistered the run; only processJob's deferred Complete may")
+	}
+	w.queue.Complete(id)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {

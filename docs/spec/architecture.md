@@ -527,7 +527,8 @@ The `JobQueue` implements a two-tier concurrency model:
 - `AcquireLifecycleSlot(ctx, jobID) -> bool`: Blocks until one of the 100 lifecycle slots is free, then claims it for the job. Returns false if context cancelled. Warns once per wait past 30 s.
 - `AcquireDownloadSlot(ctx, jobID) -> bool`: Blocks until a download slot is free. Returns false if context cancelled.
 - `ReleaseDownloadSlot(jobID)`: Frees the download slot. Signals waiting jobs.
-- `Complete(jobID)`: Frees lifecycle slot and download slot (if held). Cancels the per-job context.
+- `ReleaseSlots(jobID)`: Frees the lifecycle and download slots (if held) without ending the run. `setJobError` and `handleCancellation` call it before their tails (notifications, an automatic cookie refresh), so the next download need not wait on them.
+- `Complete(jobID)`: Ends the run — frees any slot still held, cancels the per-job context, unregisters it and closes its `Done` channel. Called once per run, by `processJob`'s defer, when the goroutine returns. An early call used to unregister a run still in its tail, so a re-enqueue in that window started a second run, which the first run's deferred `Complete` then tore down; whatever re-enqueues a job from inside its own run (the automatic cookie refresh's resume, `AutoReinitializeJob`) now waits for the exit through `afterJobExit`.
 - `Cancel(jobID)`: User-initiated cancellation. Sets `cancelled` flag, cancels context, removes from pending queue.
 - `WasCancelled(jobID) -> bool`: Returns and clears the cancellation flag. Used to distinguish user cancellation from shutdown.
 
@@ -863,7 +864,8 @@ Key methods:
 - `AcquireLifecycleSlot(ctx, jobID) -> bool`: Blocking lifecycle-slot acquisition, taken at the download decision.
 - `AcquireDownloadSlot(ctx, jobID) -> bool`: Blocking download slot acquisition.
 - `ReleaseDownloadSlot(jobID)`: Non-blocking slot release.
-- `Complete(jobID)`: Free all slots, cancel context.
+- `ReleaseSlots(jobID)`: Free the slots, keep the run registered.
+- `Complete(jobID)`: End the run — free all slots, cancel context, close `Done`.
 - `Cancel(jobID)`: User cancellation.
 - `WasCancelled(jobID) -> bool`: Check and clear cancellation flag.
 - `SetMaxDownloads(n)`: Runtime update.

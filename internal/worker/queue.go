@@ -312,29 +312,56 @@ func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 func (q *JobQueue) ReleaseDownloadSlot(jobID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.releaseDownloadSlotLocked(jobID)
+}
 
-	if q.holdingDlSlot[jobID] {
-		delete(q.holdingDlSlot, jobID)
-		q.activeDownloads--
-		// Signal that a download slot is free
-		select {
-		case q.dlNotify <- struct{}{}:
-		default:
-		}
+// releaseDownloadSlotLocked frees jobID's download slot if it holds one.
+// Caller holds q.mu.
+func (q *JobQueue) releaseDownloadSlotLocked(jobID string) {
+	if !q.holdingDlSlot[jobID] {
+		return
+	}
+	delete(q.holdingDlSlot, jobID)
+	q.activeDownloads--
+	// Signal that a download slot is free
+	select {
+	case q.dlNotify <- struct{}{}:
+	default:
 	}
 }
 
-// Complete marks a job as finished, freeing its lifecycle slot and cleaning up.
-// Also releases the download slot if still held.
+// ReleaseSlots gives back jobID's lifecycle and download slots WITHOUT ending
+// its run. setJobError and handleCancellation call it first thing, so the next
+// download does not wait out a failing run's tail — notifications, and an
+// automatic cookie refresh that can take minutes.
+//
+// They used to call Complete for this, and Complete also unregisters the run:
+// with the run gone from processing, anything that re-enqueued the job during
+// that tail (a Retry, the heartbeat, the cookie sweep) started a SECOND run,
+// and the first run's deferred Complete then cancelled the second's context,
+// closed its Done and released its slots — a live capture stalled until the
+// heartbeat restarted it. Done also closed before the goroutine returned,
+// which is what afterJobExit and WaitForJobExit rely on it not doing. The run
+// now stays registered until processJob's deferred Complete, its only one.
+// Idempotent, like the release helpers it calls.
+func (q *JobQueue) ReleaseSlots(jobID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.releaseLifecycleSlotLocked(jobID)
+	q.releaseDownloadSlotLocked(jobID)
+}
+
+// Complete ends a job's run: it frees any slot still held, cancels the run's
+// context, unregisters it and closes its Done channel. processJob's deferred
+// call is the only caller — once per run, when the goroutine returns (see
+// ReleaseSlots for why nothing calls it earlier).
 func (q *JobQueue) Complete(jobID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	// Outside the processing branch on purpose: a job that claimed a slot and
-	// then had its row deleted (or whose setJobError/handleCancellation
-	// Complete already removed the processing entry) must still give the slot
-	// back. The holdingLifecycle guard makes the repeat call a no-op, so the
-	// two Completes every error path fires cannot over-release.
+	// then had its row deleted must still give the slot back. The
+	// holdingLifecycle guard makes a call after ReleaseSlots a no-op.
 	q.releaseLifecycleSlotLocked(jobID)
 
 	// Outside the processing branch for the same reason: a job with a
@@ -361,14 +388,7 @@ func (q *JobQueue) Complete(jobID string) {
 		}
 
 		// Also release download slot if still held
-		if q.holdingDlSlot[jobID] {
-			delete(q.holdingDlSlot, jobID)
-			q.activeDownloads--
-			select {
-			case q.dlNotify <- struct{}{}:
-			default:
-			}
-		}
+		q.releaseDownloadSlotLocked(jobID)
 	}
 
 	// Wake a parked Dequeue so it re-checks the backlog (the lifecycle slot is
