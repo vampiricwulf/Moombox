@@ -41,11 +41,13 @@ Moombox uses a two-process model controlled by the `_MOOMBOX_CHILD` environment 
 ```
 triggerRestart(source string) {
     restartRequested.Store(true)  // atomic bool
-    cancel()                      // cancel the main context
-    quitTUI()                     // if TUI is running, unblock tea.Program.Run()
+    webServer.StartDrain()        // 503 for new requests from here on
+    after 5s:                     // let in-flight setup/save requests finish
+        cancel()                  // cancel the main context
+        quitTUI()                 // if TUI is running, unblock tea.Program.Run()
 }
 ```
-Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoutes` (after applying update), `routes.RestartRoute` (manual API restart).
+Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoutes` (after applying update), `routes.RestartRoute` (manual API restart), and the TUI (settings save, update apply, setup wizard — `cmd/moombox/tui_wiring.go`).
 
 **Shutdown sequence** (`shutdown()` in `cmd/moombox/shutdown.go`; every stop is wrapped in `stopService` panic isolation, and SPEC.md's Shutdown Sequence section carries the same list):
 1. Context cancellation propagates to all services; the TUI quits (if running)
@@ -90,7 +92,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 - Level filtering (DEBUG/INFO/WARN/ERROR, changeable at runtime)
 
 ### 3. Updater
-`updater.New()` creates the GitHub release checker. Cleans up `.old` binary from previous update via `CleanupOldBinary()`. Performs Ed25519 signature verification before applying binary swaps.
+`updater.New()` creates the GitHub release checker. Its `CleanupOldBinary()` sweep of the previous update's `.old` (and `.failed`) binary does not run here but at the first-successful-boot milestone in `run()`, after the database opened and the web bind resolved, so a boot-crashing update still has its rollback artifact. Performs Ed25519 signature verification before applying binary swaps.
 
 ### 4. Database
 `database.Open()` opens SQLite with WAL mode, 5-second busy timeout, foreign keys enabled, single-writer connection pool (`MaxOpenConns=1`). Runs schema migrations (`migrate()`, up to `schemaVersion` in `internal/database/migrations.go` — 20 at the time of writing; `appendix-metrics.md` tracks it). Prepares the hot-path `GetJob` statement (`prepareStatements`). Starts no goroutine: every job write is a synchronous `UpdateJobFields` call.
@@ -108,7 +110,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 `bgutils.NewPotProvider()` creates the BotGuard PO token provider with its triple-layer cache: session cache (6h TTL), minter cache (single-minter design, dynamic TTL from BotGuard response), and inflight dedup (concurrent requests share a single generation via channel synchronization). Immediately after, when `cfg.Bgutils.UseSidecar` is true (default), `sidecar.New(...)` constructs a `Sidecar` and `Start(ctx)` launches the embedded Node.js subprocess: extract `node.exe.gz` + `sidecar.tar.gz` from `go:embed` to `%LOCALAPPDATA%/Moombox/sidecar/`, apply user-only DACL, spawn `node src/server.js` pinned to a Windows Job Object, ping/pong handshake. On success, `potProvider.SetSidecar(s)` attaches it; `PotProvider.generateAndMint` then prefers the sidecar path and falls through to the goja-only path on any sidecar error so PO-token generation never goes completely dark. Failure to start the sidecar is non-fatal — Moombox logs a warning and continues with goja-fallback. On Linux the per-platform blob (`node-linux-amd64.gz` or `node-linux-arm64.gz`) is selected at runtime; the extraction directory is platform-appropriate (e.g. `~/.local/share/moombox/sidecar/` on Linux).
 
 ### 9. Cipher Solver
-`cipher.NewSolver(cacheDir, log)` creates the YouTube signature cipher solver. Cache directory is `%TEMP%/yt-cipher`. Manages a 10-VM LRU cache keyed by `player.js` URL. Wired to `ytService.PlayerAPI.SetCipherSolver()` so format URL decryption is transparent. Uses full AST parsing with regex fallback for extraction.
+`cipher.NewGojaResolver(cacheDir, log)` creates the goja cipher resolver (cache directory `%TEMP%/yt-cipher`, a 10-VM LRU keyed by `player.js` URL); `cipher.NewSidecarSolver` and `cipher.NewCompositeSolver` layer the BotGuard sidecar's V8 ejs in front of it. The resolver is wired to `ytService.PlayerAPI.SetCipherSolver()` for the signature timestamp, and the composite solver to the worker, which resolves each chosen format's URL after selection. Uses full AST parsing with regex fallback for extraction.
 
 ### 10. Notification Manager
 `notifications.NewManager(cfg, log)` creates the notification dispatcher. Currently supports Discord webhooks. Sends notifications for: stream found, stream live, download starting, download finished, download error, auth required, trim created, update available.

@@ -36,9 +36,10 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 //  1. fileMu     — protects file rotation (rotate() and Write of formatted line)
 //  2. subMu      — protects the subscribers slice
 //  3. ringMu     — protects the ringBuffer slice + ringIndex/ringCount.
-//     Leaf lock: broadcast's slow-subscriber drop path ring-appends while
-//     holding subMu.RLock, and rotate→diagf ring-appends while holding
-//     fileMu — so nothing may acquire another logger lock under ringMu.
+//     Leaf lock: rotate→diagf ring-appends while holding fileMu, so
+//     nothing may acquire another logger lock under ringMu. (broadcast's
+//     slow-subscriber warning is appended only after it releases
+//     subMu.RLock, so subMu and ringMu are never held together.)
 //
 // Most operations only take one lock. The Write path takes fileMu first,
 // then publishes to ring/subscribers (each under its own mutex) without

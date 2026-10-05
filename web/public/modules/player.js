@@ -270,7 +270,6 @@ export class PlayerController {
   constructor(app) {
     this.app = app;
     this.playerJob = null;
-    this.playerChatData = null;
     this.playerChatMessages = [];
     this.playerAutoScroll = true;
     this.playerScrollLock = false;
@@ -867,7 +866,6 @@ export class PlayerController {
     this._dismissResumeDialog();
 
     this.playerJob = null;
-    this.playerChatData = null;
     this.playerChatMessages = [];
     this.twitchEmoteMap = new Map();
     this.playerAutoScroll = true;
@@ -1163,7 +1161,6 @@ export class PlayerController {
     // - a `seeked` inside the fetch window (a restored resume position) would
     //   re-anchor over the old job's flying text on top of the new picture.
     this.playerChatMessages = [];
-    this.playerChatData = null;
     this._chatParts = null;
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
@@ -1210,35 +1207,33 @@ export class PlayerController {
     // the source swap).
     if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
-        this.playerChatData = await this._fetchChatData(jobId, selectionId);
+        // A block-scoped local, not a field: nothing reads the raw file
+        // after this block, and going out of scope here releases it (the
+        // normalized copy in playerChatMessages is what everything reads).
+        const chatData = await this._fetchChatData(jobId, selectionId);
         if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
-        if (this.playerChatData) {
+        if (chatData) {
           // Chat-to-video timing correction (see chat-timeline.js for the
           // semantics per platform). Multi-part YouTube jobs use the same
           // rule: the video begins at the actual stream start regardless of
           // when Moombox started downloading.
           const chatBiasMs = computeChatBiasMs({
-            platform: this.playerChatData.platform,
-            chatStreamStartTime: this.playerChatData.streamStartTime,
+            platform: chatData.platform,
+            chatStreamStartTime: chatData.streamStartTime,
             jobStreamStartTime: this.playerJob.streamStartTime,
           });
-          this.playerChatMessages = (this.playerChatData.messages || [])
+          this.playerChatMessages = (chatData.messages || [])
             .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
           // Build 3rd-party emote lookup map for Twitch chat
           // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
-          if (this.playerChatData.emotes) {
-            const { bttv, ffz, seventv } = this.playerChatData.emotes;
+          if (chatData.emotes) {
+            const { bttv, ffz, seventv } = chatData.emotes;
             for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
             for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
             for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
           }
-
-          // Release the raw array now that playerChatMessages holds the
-          // normalized/biased copy — halves peak memory for large chat
-          // files. filterChat and everything else read playerChatMessages.
-          this.playerChatData.messages = null;
         }
       } catch (e) {
         console.error("Failed to load chat:", e);

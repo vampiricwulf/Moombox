@@ -1767,15 +1767,27 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
 	s.logSub = s.log.Subscribe()
+	s.logSubDone = make(chan struct{})
+	logSub, logSubDone := s.logSub, s.logSubDone
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("log forwarder panic", "panic", r)
 			}
 		}()
-		for line := range s.logSub {
-			s.wsHub.BroadcastLog(line)
-			s.db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
+		// Not `range logSub`: Unsubscribe never closes the channel (see
+		// Logger.Subscribe), so shutdown closes logSubDone after it.
+		for {
+			select {
+			case <-logSubDone:
+				return
+			case line, ok := <-logSub:
+				if !ok {
+					return
+				}
+				s.wsHub.BroadcastLog(line)
+				s.db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
+			}
 		}
 	}()
 

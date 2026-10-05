@@ -171,7 +171,10 @@ type runState struct {
 
 	// --- Subscription handles (assigned by monitor_callbacks wiring; needed
 	// by shutdown to unsubscribe cleanly before the database closes) ---
-	logSub              chan string
+	logSub chan string
+	// logSubDone stops the log forwarder after shutdown unsubscribes logSub:
+	// Unsubscribe never closes the channel, so the forwarder needs its own signal.
+	logSubDone          chan struct{}
 	unsubWSJobUpdate    func()
 	unsubWSJobAdded     func()
 	unsubWSJobDeleted   func()

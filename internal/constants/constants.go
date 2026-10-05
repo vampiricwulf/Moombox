@@ -68,19 +68,15 @@ var UserAgents = struct {
 
 // YouTubeURLs contains base URLs for YouTube services.
 var YouTubeURLs = struct {
-	Base      string
-	API       string
-	Watch     string
-	Embed     string
-	Feed      string
-	Thumbnail string
+	Base  string
+	API   string
+	Watch string
+	Embed string
 }{
-	Base:      "https://www.youtube.com",
-	API:       "https://www.youtube.com/youtubei/v1",
-	Watch:     "https://www.youtube.com/watch",
-	Embed:     "https://www.youtube.com/embed",
-	Feed:      "https://www.youtube.com/feeds/videos.xml",
-	Thumbnail: "https://i.ytimg.com/vi",
+	Base:  "https://www.youtube.com",
+	API:   "https://www.youtube.com/youtubei/v1",
+	Watch: "https://www.youtube.com/watch",
+	Embed: "https://www.youtube.com/embed",
 }
 
 // DefaultAPIKey is the default YouTube API key.
@@ -238,20 +234,16 @@ var AndroidVRClient = YouTubeClientConfig{
 
 // TwitchURLs contains base URLs for Twitch services.
 var TwitchURLs = struct {
-	Base          string
 	GQL           string
 	UsherLive     string
 	UsherVOD      string
-	EmoteCDN      string
 	PreviewCDN    string
 	IRCWS         string
 	OAuthValidate string
 }{
-	Base:          "https://www.twitch.tv",
 	GQL:           "https://gql.twitch.tv/gql",
 	UsherLive:     "https://usher.ttvnw.net/api/channel/hls",
 	UsherVOD:      "https://usher.ttvnw.net/vod",
-	EmoteCDN:      "https://static-cdn.jtvnw.net/emoticons/v2",
 	PreviewCDN:    "https://static-cdn.jtvnw.net/previews-ttv",
 	IRCWS:         "wss://irc-ws.chat.twitch.tv:443",
 	OAuthValidate: "https://id.twitch.tv/oauth2/validate",
@@ -311,6 +303,6 @@ const (
 	// internal/engine/downloader_direct.go. Only shared constant that is still
 	// actively consumed from this package; the rest of the earlier catalog was
 	// aspirational and has been removed in favour of consumers owning their own
-	// values (see the #30 cleanup note in DECISIONS.md).
+	// values.
 	DownloadChunkSize = 5 * 1024 * 1024
 )

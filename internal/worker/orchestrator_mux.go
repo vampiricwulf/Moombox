@@ -1007,9 +1007,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// Per-part chat: when parts carry their own chat files, the staging
 	// chat.json belongs to part 1 (already enriched + copied at its mux) —
 	// the legacy whole-job copy in copyAssets would duplicate it under the
-	// plain name. The job-level chat fields follow the FIRST part only, so
-	// the dashboard player (which plays output_file = first part) replays
-	// the matching chat; later parts' chat is reachable via segment rows.
+	// plain name. The job-level chat fields follow the FIRST part only; the
+	// dashboard player stitches every part and fetches each part's chat
+	// through its segment row, merging them onto the global timeline.
 	anyPartChat := false
 	for _, seg := range segments {
 		if seg.ChatFile != "" {

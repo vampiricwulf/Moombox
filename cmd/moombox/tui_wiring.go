@@ -963,11 +963,22 @@ func (s *runState) runTUI() {
 				s.log.Error("[Main] Panic in TUI log forwarder", "panic", fmt.Sprint(r))
 			}
 		}()
-		for line := range tuiLogSub {
+		// Not `range tuiLogSub`: Unsubscribe never closes the channel (see
+		// Logger.Subscribe), and the TUI's exit cancels s.ctx before it
+		// unsubscribes.
+		for {
 			select {
-			case logCh <- line:
-			default:
-				tuiDroppedLogs.Add(1)
+			case <-s.ctx.Done():
+				return
+			case line, ok := <-tuiLogSub:
+				if !ok {
+					return
+				}
+				select {
+				case logCh <- line:
+				default:
+					tuiDroppedLogs.Add(1)
+				}
 			}
 		}
 	}()

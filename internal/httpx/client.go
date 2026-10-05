@@ -13,8 +13,7 @@ import (
 	"time"
 )
 
-// defaultTransport is the shared *http.Transport used by Client() and
-// ClientWithTimeout(). Tuning matches utils' previous utilsHTTPClient:
+// defaultTransport is the shared *http.Transport used by Client(). Tuning matches utils' previous utilsHTTPClient:
 //
 //   - ForceAttemptHTTP2: true — match upstream YouTube/Twitch CDN
 //     expectations; HTTP/2 multiplexing reduces handshake cost on
@@ -28,7 +27,7 @@ import (
 // Engine downloads use a custom-built transport with a fixed, generously
 // sized MaxIdleConnsPerHost (engineMaxIdleConnsPerHost = 64) — see the
 // engine package for that. All other packages should use this default via
-// Client() or ClientWithTimeout().
+// Client().
 //
 // The transport is package-private so callers can't mutate it; if a
 // package needs a different shape, build a fresh Transport via

@@ -126,6 +126,9 @@ func (s *runState) shutdown() bool {
 	// anyway so an early-exit shutdown path does not NPE).
 	if s.logSub != nil {
 		s.log.Unsubscribe(s.logSub)
+		if s.logSubDone != nil {
+			close(s.logSubDone)
+		}
 	}
 	if s.unsubWSJobUpdate != nil {
 		s.unsubWSJobUpdate()
