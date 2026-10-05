@@ -381,10 +381,12 @@ func staleRecoveryDelay(n int) time.Duration {
 // completion: the orchestrator marked the stream ended (MarkStreamEnded), or
 // this was a replay/VOD run (!IsLiveOrUpcoming). The predicate is exactly
 // that — ANY exit of a replay run counts, not only a finished loop, so a
-// replay that dies on its 5-error budget clears too. That is the
-// pre-existing behaviour and it is right: a replay run that leaves its loop
-// has either reached the end of the archive or hit a permanent error, and
-// neither leaves a position worth resuming from. The one replay path that
+// replay that gives up on its error budget clears too: the 6th consecutive
+// failure, transient ones included (75 s of backoff between them), or an auth
+// loss. That is the pre-existing behaviour and a choice rather than a
+// necessity — a replay token is a stable archive position — made because a
+// VOD's chat can be re-fetched in full: the next attempt re-pages the
+// archive from the top. The one replay path that
 // DOES keep its sidecar is cancellation/shutdown, which the first arm of the
 // switch below handles before this rule is reached — and that is exactly the
 // path a resume needs, because a replay's sidecar continuation IS its
