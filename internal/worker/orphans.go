@@ -512,6 +512,13 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		for _, seg := range job.Segments {
 			if seg.FilePath != "" {
 				known(seg.FilePath)
+				// And the base the parts share ("X" for "X - part2.mp4"):
+				// the job's recovered set-aside siblings are named after it
+				// (pinnedPartLocation), and with no thumbnail or description
+				// to carry that stem they were offered as strays.
+				if dir, base, ok := recordedArchiveLocation(seg.FilePath); ok {
+					knownStems[normalizePath(filepath.Join(dir, base))] = true
+				}
 			}
 			if seg.ChatFile != "" {
 				known(seg.ChatFile)

@@ -677,6 +677,20 @@ func pinnedPartLocation(outputRoot string, seg database.Segment) (dir, base, rel
 	return dir, m[1], filepath.Join(r, m[1]), true
 }
 
+// recordedArchiveLocation splits a job's recorded output_file into its
+// directory and the stem the job's assets share. A part's " - partN" comes
+// off, as pinnedPartLocation takes it off for the finalize.
+func recordedArchiveLocation(outputFile string) (dir, base string, ok bool) {
+	if outputFile == "" {
+		return "", "", false
+	}
+	name := filepath.Base(outputFile)
+	if m := partBaseRe.FindStringSubmatch(name); m != nil {
+		return filepath.Dir(outputFile), m[1], true
+	}
+	return filepath.Dir(outputFile), strings.TrimSuffix(name, filepath.Ext(name)), true
+}
+
 // copyKeptChatSidecar puts the chat capture a preserved staging dir is still
 // holding beside a recovered set-aside recording, and returns where it landed
 // ("" when there was nothing to copy, or a copy of it is already in the output
@@ -739,10 +753,19 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 	// carry a subdirectory ("${channel}/...") into a directory and a base.
 	filenameBase := jobCtx.Filename
 	outputDir := filepath.Dir(filepath.Join(jobCtx.OutputDir, filenameBase+".mp4"))
+	filenameBase = filepath.Base(filenameBase)
+	// A job that already has an archive gets its siblings beside it, under
+	// its stem: where its finalize put the ones it recovered, and the stem the
+	// output sweep folds them under. The fresh name is for a job with no
+	// archive yet (Cancelled, Error). A title or template edited after the
+	// finalize used to send them to a name no archive has, and the sweep then
+	// offered them as deletable strays.
+	if dir, base, ok := recordedArchiveLocation(jobCtx.Job.OutputFile); ok {
+		outputDir, filenameBase = dir, base
+	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
-	filenameBase = filepath.Base(filenameBase)
 	// The siblings and the copied chat capture share the archive's stem and
 	// reach no column of the row, so for the sweep they are strays while
 	// FFmpeg writes them — and for a Cancelled or Error job no known stem
