@@ -118,9 +118,10 @@ type pathField struct {
 	required bool
 }
 
-// validateConfigUpdates validates the config update map against TypeScript Zod
-// schema constraints. Returns a map of field->error messages (empty if valid).
-// Matches TypeScript updateConfigSchema constraints exactly.
+// validateConfigUpdates validates the config update map against the field
+// constraints config.Validate enforces, so a bad value is a 400 naming the
+// field rather than a save the store refuses. Returns a map of field->error
+// messages (empty if valid).
 func validateConfigUpdates(updates map[string]any) map[string]string {
 	errs := make(map[string]string)
 
@@ -426,9 +427,12 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			}
 		}
 		// browser_type alone (without browser_path) is allowed but unused — no validation needed
-		if v, ok := ck["refresh_interval"].(float64); ok {
-			// 10..10080 mirrors config.validateOrNormalize (CORE-21).
-			if v < 10 || v > 10080 {
+		if raw, exists := ck["refresh_interval"]; exists {
+			// 10..10080 mirrors config.validateOrNormalize (CORE-21). The
+			// string form ("12h") is checked too: applyConfigUpdates parses
+			// it, and an out-of-range string that reached the store failed
+			// Validate there and came back as a 500.
+			if v, ok := flexDurationValue(raw, "minutes"); ok && (v < 10 || v > 10080) {
 				errs["cookies.refresh_interval"] = "refresh_interval must be between 10 and 10080"
 			}
 		}
@@ -601,7 +605,6 @@ func jsonTypeName(t reflect.Type) string {
 
 // applyConfigUpdates applies allowlisted config fields from a snake_case map
 // to the config struct. Used by both PUT /config and POST /setup/complete.
-// Matches TypeScript updateConfigSchema field names exactly.
 func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	// Network sub-fields
 	if net, ok := updates["network"].(map[string]any); ok {
@@ -813,8 +816,10 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			} else if vs, ok := val.(string); ok {
 				cfg.Cookies.RefreshInterval = config.ParseFlexDuration(vs, "minutes", cfg.Cookies.RefreshInterval.Value)
 			} else {
-				// null — reset to zero; RefreshService defaults to 30min at runtime
-				cfg.Cookies.RefreshInterval = config.FlexDuration{}
+				// null resets to the default. Zero is not a usable "unset":
+				// Validate refuses anything under 10 minutes, so storing it
+				// failed the save with a 500.
+				cfg.Cookies.RefreshInterval = config.Defaults().Cookies.RefreshInterval
 			}
 		}
 		if v, ok := ck["dpapi_fallback"].(bool); ok {
@@ -1009,7 +1014,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			return
 		}
 
-		// Validate with Zod-equivalent schema constraints (match TS updateConfigSchema)
+		// Validate the field constraints before anything is applied.
 		validationErrs := validateConfigUpdates(updates)
 
 		// Notification webhook URLs must parse at save time — previously a

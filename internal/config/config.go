@@ -684,7 +684,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Monitors.DecapiCheckInterval = nil
 		}
 	}
-	// Aligned with the PUT /api/config Zod schema (config_routes.go:142)
+	// Aligned with PUT /api/config's validateConfigUpdates (config_routes.go)
 	// so a hand-edited TOML can't sneak in a value the web UI rejects.
 	// 1-second polling against Twitch's GQL endpoint floods their rate
 	// limiter; 5 seconds is the established minimum that matches the
@@ -696,7 +696,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Monitors.TwitchCheckInterval = nil
 		}
 	}
-	// Bounds match the PUT /api/config Zod schema (config_routes.go) so a
+	// Bounds match PUT /api/config's validateConfigUpdates (config_routes.go) so a
 	// hand-edited TOML can't get past Validate with a value the web UI
 	// would have rejected. 1KB lower bound prevents pathological log
 	// rotation; 1GB upper bound prevents accidental disk exhaustion.

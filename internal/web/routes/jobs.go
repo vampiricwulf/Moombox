@@ -641,7 +641,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// Cross-field validation (matches TS Zod refinements)
+		// Cross-field validation
 		if body.SelectedVideoItag != nil && body.SelectedAudioItag != nil &&
 			*body.SelectedVideoItag == -1 && *body.SelectedAudioItag == -1 {
 			jsonError(rw, "cannot skip both video and audio", http.StatusBadRequest)

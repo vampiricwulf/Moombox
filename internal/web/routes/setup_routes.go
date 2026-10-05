@@ -89,7 +89,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		installYtdlp, _ := updates["install_ytdlp_plugin"].(bool)
 		delete(updates, "install_ytdlp_plugin")
 
-		// Validate with Zod-equivalent schema constraints (match TS updateConfigSchema)
+		// Validate the field constraints before anything is applied.
 		if validationErrs := validateConfigUpdates(updates); len(validationErrs) > 0 {
 			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusBadRequest)

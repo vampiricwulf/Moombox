@@ -2709,11 +2709,6 @@ export class SettingsController {
     }
   }
 
-  formatRelativeTime(isoDate) {
-    if (!isoDate) return "never";
-    return formatRelativeTime(isoDate);
-  }
-
   // ─── Auto Cookie Methods ─────────────────────────────────────
 
   // NOT gated on cfg-auto-cookies-enabled, deliberately. Everything below is
