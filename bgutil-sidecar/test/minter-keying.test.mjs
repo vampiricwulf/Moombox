@@ -97,3 +97,63 @@ test("an interleaved different challenge does not break same-challenge joining",
     assert.equal(calls.length, 2, "X and Y only — C must join A rather than start a third pass");
     assert.equal(ra.m, rc.m, "C joined A's generation");
 });
+
+// Leaves an EXPIRED minter in the cache, so a non-fresh caller arriving after
+// this finds nothing to reuse — the state the next two tests start from.
+async function expireCachedMinter() {
+    await getOrCreateMinter(null, "key-expire", true, async () => ({
+        minter: { mintAsWebsafeString: async () => "old" },
+        expiresAt: Date.now() - 1,
+        webPoSignalOutput: [],
+        globalName: "g",
+        minterSource: "att_get",
+    }));
+}
+const ticks = async (n) => {
+    for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
+};
+
+// A non-fresh caller that found the cache empty queued its own generation
+// behind a different key's and, when its turn came, paid for a second
+// BotGuard pass instead of taking the minter that generation had just cached.
+//
+// Mutant: the cache re-check after `await runAfter` removed — two factory calls.
+test("a non-fresh caller queued behind another generation reuses what it cached", async () => {
+    await expireCachedMinter();
+    const { factory, calls, releaseAll } = makeFactory();
+    const gvs = getOrCreateMinter({ program: "X" }, "key-X", true, factory);
+    await ticks(2);
+    const player = getOrCreateMinter(null, null, false, factory);
+    await ticks(2);
+    releaseAll();
+    await ticks(4);
+    releaseAll();
+    const [a, b] = await Promise.all([gvs, player]);
+    assert.equal(calls.length, 1, "the queued caller ran its own BotGuard pass");
+    assert.equal(b.m, a.m);
+    assert.equal(b.fresh, false, "a reused minter is not reported fresh");
+});
+
+// …and a caller that needs a fresh minter never joins a generation that may
+// hand back the cached one.
+//
+// Mutant: the mayReuse guard removed — the fresh caller joins the player's
+// generation and gets the GVS pass's minter, reported fresh.
+test("a fresh caller does not join a generation that may reuse the cache", async () => {
+    await expireCachedMinter();
+    const { factory, calls, releaseAll } = makeFactory();
+    const gvs = getOrCreateMinter({ program: "X" }, "key-X", true, factory);
+    await ticks(2);
+    const player = getOrCreateMinter(null, null, false, factory);
+    await ticks(2);
+    const fresh = getOrCreateMinter(null, null, true, factory);
+    await ticks(2);
+    for (let i = 0; i < 4; i++) {
+        releaseAll();
+        await ticks(4);
+    }
+    const [a, , c] = await Promise.all([gvs, player, fresh]);
+    assert.equal(calls.length, 2);
+    assert.equal(c.fresh, true);
+    assert.notEqual(c.m, a.m, "the fresh caller got the earlier generation's minter");
+});
