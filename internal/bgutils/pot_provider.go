@@ -24,6 +24,11 @@ type inflightEntry struct {
 	gen uint64
 }
 
+// isContextErr reports whether err is a context's cancellation or deadline.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 // errSidecarDown answers a mint while the configured sidecar is down. There
 // is no goja fallback in sidecar mode: BotGuard's timing check rejects the
 // in-process path, so it mints no PO token in practice, and running it cost
@@ -287,6 +292,14 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 			pp.logger.Debug("[PotProvider] waiting for inflight request", "binding", bindingPrefix)
 			select {
 			case <-entry.done:
+				// The leader's own context ending is not an answer for a
+				// caller whose context is live: a cancelled monitor probe
+				// used to hand "context canceled" to a job's mint for the
+				// same video, which went on without a token and 403'd. Ask
+				// again; the leader's entry is gone by now.
+				if isContextErr(entry.err) && ctx.Err() == nil {
+					return pp.generatePoTokenChallenge(ctx, contentBinding, bypassCache, challenge)
+				}
 				return entry.session, entry.err
 			case <-ctx.Done():
 				return nil, ctx.Err()
