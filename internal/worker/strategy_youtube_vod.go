@@ -142,6 +142,10 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		audioPoToken = vodPoToken
 	}
 
+	if err := setAsideLiveShapesForVod(job); err != nil { // staging_shapes.go
+		return nil, err
+	}
+
 	// Store video metadata on job (matching DASH strategy behavior)
 	if selected.Video != nil {
 		updates := map[string]any{}
