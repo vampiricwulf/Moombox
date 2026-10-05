@@ -996,7 +996,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/api/import` | Upload a zip archive to import as a job. **500 MB body limit** (overrides the default 1 MB). Rate limited. Headers: `X-Import-Title`, `X-Import-Channel` for overrides. |
+| `POST` | `/api/import` | Upload a zip archive to import as a job. **500 MB body limit** (overrides the default 1 MB); a larger body is `413`. Rate limited. Headers: `X-Import-Title`, `X-Import-Channel` for overrides; without them the chat file's metadata, then the video's file name — less its `[id]` — gives the title. A non-UTF-8 entry name is read as CP437. The `201` row carries what a recording's does: absolute `outputFile`/`chatFile`, `outputDirectory` and `fileSize`. An insert that fails removes what it extracted. |
 
 ### PO Token (yt-dlp Plugin Compatibility)
 

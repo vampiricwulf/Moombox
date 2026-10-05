@@ -5,17 +5,20 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/text/encoding/charmap"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -64,7 +67,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 	importRL.ClientIP = func(r *http.Request) string { return web.EffectiveClientIP(store, r) }
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload
-		req.Body = http.MaxBytesReader(rw, req.Body, 500*1024*1024)
+		req.Body = http.MaxBytesReader(rw, req.Body, maxImportUpload)
 
 		contentType := req.Header.Get("Content-Type")
 		if !strings.Contains(contentType, "application/octet-stream") &&
@@ -111,13 +114,21 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			return
 		}
 
-		_, err = copyWithLimit(tmpFile, req.Body, 500*1024*1024-int64(n))
+		// One byte past the cap is read on purpose: an upload that stops
+		// exactly AT the cap was copied silently truncated before, and then
+		// failed as "invalid zip file" — a 400 that blamed the archive for
+		// what was its size. MaxBytesReader answers the byte past the cap
+		// with *http.MaxBytesError; either sign is a 413.
+		_, err = copyWithLimit(tmpFile, req.Body, maxImportUpload-int64(n))
+		tmpFile.Close()
 		if err != nil {
-			tmpFile.Close()
+			if importUploadTooLarge(err) {
+				jsonError(rw, "upload too large (max 500 MB)", http.StatusRequestEntityTooLarge)
+				return
+			}
 			jsonError(rw, "failed to read upload", http.StatusBadRequest)
 			return
 		}
-		tmpFile.Close()
 
 		// Try to open as ZIP
 		zipReader, zipErr := zip.OpenReader(tmpPath)
@@ -153,10 +164,15 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			return
 		}
 
-		// Validate paths for traversal
+		// Validate paths for traversal. Defence in depth — no entry name
+		// ever reaches a destination path (the output name is built from the
+		// sanitised title and a validated id below) — so the rule is a ".."
+		// path COMPONENT, not the substring: Moombox's own naming writes
+		// "Wait... what_ [id].mp4", which the substring test refused to
+		// re-import.
 		for _, f := range zipReader.File {
-			name := filepath.Clean(f.Name)
-			if strings.Contains(name, "..") || filepath.IsAbs(name) {
+			name := filepath.ToSlash(filepath.Clean(f.Name))
+			if slices.Contains(strings.Split(name, "/"), "..") || filepath.IsAbs(f.Name) || strings.HasPrefix(name, "/") {
 				jsonError(rw, "invalid zip entry path", http.StatusBadRequest)
 				return
 			}
@@ -221,15 +237,20 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		}
 
 		// Derive metadata
-		videoFilename := filepath.Base(videoFile.Name)
+		videoFilename := filepath.Base(zipEntryName(videoFile))
 		videoExt := filepath.Ext(videoFilename)
 		videoBasename := strings.TrimSuffix(videoFilename, videoExt)
 
-		// Try to extract video ID from [XXXXXXXXXXX] pattern
+		// Try to extract video ID from [XXXXXXXXXXX] pattern. The title a
+		// filename yields is the name WITHOUT it: the output name appends
+		// " [id]" itself, and keeping it doubled the id in both the title and
+		// the file ("video [id] [id].mp4").
 		idMatch := bracketIDRe.FindStringSubmatch(videoBasename)
 		videoID := ""
+		nameTitle := videoBasename
 		if idMatch != nil {
 			videoID = idMatch[1]
+			nameTitle = strings.Join(strings.Fields(strings.Replace(videoBasename, idMatch[0], "", 1)), " ")
 		}
 
 		// Read optional chat metadata for videoId/title/channel
@@ -273,7 +294,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			title = meta.VideoTitle
 		}
 		if title == "" {
-			title = videoBasename
+			title = nameTitle
 		}
 		if title == "" {
 			title = "Import"
@@ -324,38 +345,63 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		}
 
 		// Extract chat file if present
-		chatOutName := ""
+		chatOutName, chatOutPath := "", ""
 		if chatFile != nil {
 			chatOutName = filepath.Join("imports", baseFilename+".chat.json")
-			chatOutPath := filepath.Join(outputDir, chatOutName)
+			chatOutPath = filepath.Join(outputDir, chatOutName)
 			if _, ok := validatePathTraversal(chatOutPath, outputDir); !ok {
-				chatOutName = ""
+				chatOutName, chatOutPath = "", ""
 			} else if err := extractZipEntry(chatFile, chatOutPath); err != nil {
 				// Non-fatal, just skip chat
-				chatOutName = ""
+				chatOutName, chatOutPath = "", ""
 			}
+		}
+
+		// The row a recording gets, so an import is not a second-class job:
+		// absolute output/chat paths, the pinned output directory the
+		// relative names resolve against, and the size (Stats' recorded
+		// total and the details dialog's size line both read it).
+		absVideo, _ := filepath.Abs(videoOutPath)
+		absChat := ""
+		if chatOutPath != "" {
+			absChat, _ = filepath.Abs(chatOutPath)
+		}
+		var fileSize *int64
+		if info, err := os.Stat(videoOutPath); err == nil {
+			size := info.Size()
+			fileSize = &size
 		}
 
 		// Create job
 		job := &database.Job{
-			ID:            videoID,
-			VideoID:       videoID,
-			URL:           "https://www.youtube.com/watch?v=" + videoID,
-			Title:         title,
-			ChannelName:   channel,
-			ThumbnailURL:  "https://i.ytimg.com/vi/" + videoID + "/maxresdefault.jpg",
-			Platform:      "youtube",
-			Status:        database.StatusFinished,
-			Progress:      "Imported",
-			Percent:       100,
-			Filename:      videoOutName,
-			ChatFilename:  chatOutName,
-			ManuallyAdded: true,
-			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
-			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+			ID:              videoID,
+			VideoID:         videoID,
+			URL:             "https://www.youtube.com/watch?v=" + videoID,
+			Title:           title,
+			ChannelName:     channel,
+			ThumbnailURL:    "https://i.ytimg.com/vi/" + videoID + "/maxresdefault.jpg",
+			Platform:        "youtube",
+			Status:          database.StatusFinished,
+			Progress:        "Imported",
+			Percent:         100,
+			Filename:        videoOutName,
+			ChatFilename:    chatOutName,
+			OutputFile:      absVideo,
+			ChatFile:        absChat,
+			OutputDirectory: outputDir,
+			FileSize:        fileSize,
+			ManuallyAdded:   true,
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
 		}
 
 		if _, err := db.AddJob(job); err != nil {
+			// No row will ever name what was just extracted: take it back
+			// out rather than leave it for the Files tab to find as orphans.
+			os.Remove(videoOutPath)
+			if chatOutPath != "" {
+				os.Remove(chatOutPath)
+			}
 			jsonError(rw, "failed to create job", http.StatusInternalServerError)
 			return
 		}
@@ -402,8 +448,43 @@ func extractZipEntry(f *zip.File, destPath string) error {
 	return err
 }
 
+// maxImportUpload caps an import upload (the whole request body).
+const maxImportUpload = 500 * 1024 * 1024
+
+// errImportTooLarge is copyWithLimit's answer to a body longer than its limit.
+var errImportTooLarge = errors.New("upload exceeds the import size limit")
+
+// copyWithLimit copies at most limit bytes and reports errImportTooLarge when
+// src holds more — read one byte past the limit to tell the two apart.
 func copyWithLimit(dst *os.File, src io.Reader, limit int64) (int64, error) {
-	return io.Copy(dst, io.LimitReader(src, limit))
+	n, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err == nil && n > limit {
+		return n, errImportTooLarge
+	}
+	return n, err
+}
+
+// importUploadTooLarge reports whether a spool error means the body ran past
+// the cap — copyWithLimit's own verdict, or MaxBytesReader's.
+func importUploadTooLarge(err error) bool {
+	_, overMax := errors.AsType[*http.MaxBytesError](err)
+	return overMax || errors.Is(err, errImportTooLarge)
+}
+
+// zipEntryName returns f's name as UTF-8. A name that is not valid UTF-8 is
+// CP437 — the zip format's encoding when the UTF-8 flag is clear, and what
+// older Windows zippers write — and is decoded as such; a name that IS valid
+// UTF-8 is used as-is even with the flag clear, because many tools write UTF-8
+// without setting it. Raw CP437 bytes otherwise became an invalid-UTF-8 title
+// and filename, which JSON then rendered as U+FFFD.
+func zipEntryName(f *zip.File) string {
+	if utf8.ValidString(f.Name) {
+		return f.Name
+	}
+	if s, err := charmap.CodePage437.NewDecoder().String(f.Name); err == nil {
+		return s
+	}
+	return strings.ToValidUTF8(f.Name, "\uFFFD")
 }
 
 // randomHex returns n random bytes as a hex string.
