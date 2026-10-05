@@ -208,12 +208,20 @@ the hostname lifts this for that name.)
 To reach the dashboard from outside that boundary, pick one of these —
 strongest first.
 
-### 1. VPN / Tailscale (recommended)
+### 1. VPN (recommended)
 
-Put the host on a tailnet or WireGuard network and change nothing in
-Moombox. VPN clients arrive with private addresses, so they pass the
+Put the host on a WireGuard (or similar) network that hands out private
+addresses (`10.x`, `172.16–31.x`, `192.168.x`) and change nothing in
+Moombox. VPN clients arrive with those addresses, so they pass the
 `lan` filter as if they were on the LAN. No open ports, no password to
 manage, and network membership is the authentication.
+
+**Tailscale is the exception.** Its `100.x.y.z` addresses come from the
+carrier-grade-NAT range (`100.64.0.0/10`), which the `lan` filter does
+not treat as private — the same range some ISPs give their customers, so
+trusting it would also trust strangers on such an ISP. A tailnet client
+is therefore refused under `lan`; use option 2 or 3 below, with a
+password, to reach Moombox over Tailscale.
 
 ### 2. Reverse proxy with HTTPS
 

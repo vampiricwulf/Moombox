@@ -763,7 +763,7 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **[operations.md](operations.md)** — Ed25519 signing in the release process, binary swap mechanism during updates, CI signing workflow.
 - **[data-and-storage.md](data-and-storage.md)** — Client token storage in the database (`client_tokens` table, schema v6), password hash storage in the TOML config file.
 - **[operations.md](operations.md#docker-image)** — Docker image build, entrypoint config seeding, and the compose network.
-- **[`README.md`](../../README.md#remote-access)** — Operator-facing "Remote Access" guide: VPN/Tailscale, reverse proxy, direct exposure, and the Docker caveats in practical form.
+- **[`README.md`](../../README.md#remote-access)** — Operator-facing "Remote Access" guide: VPN (and why a Tailscale `100.64.0.0/10` address is not treated as private), reverse proxy, direct exposure, and the Docker caveats in practical form.
 - **Source: [`internal/web/middleware.go`](../../internal/web/middleware.go)** — CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, LoopbackOnly, ExtractIP, EffectiveClientIP, canonicalizeForwardedIP, loadTrustedProxies, isPrivateIP, isLoopback.
 - **Source: [`internal/config/types.go`](../../internal/config/types.go)** — `NetworkConfig`, including `TrustedProxies` and `TrustForwardedProto`.
 - **Source: [`docker-compose.yml`](../../docker-compose.yml)** — IPv6-enabled network, port-publish guidance, Docker Desktop caveat. Its comments are the reference wording for the IPv6 behavior.
