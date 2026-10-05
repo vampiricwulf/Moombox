@@ -26,10 +26,21 @@ import (
 // safeCmd wraps a tea.Cmd closure with panic recovery. If the closure panics,
 // the recovery converts it into a panicRecoveryMsg that displays feedback.
 func safeCmd(fn func() tea.Msg) tea.Cmd {
+	return safeCmdOr(fn, func(text string) tea.Msg { return panicRecoveryMsg{Text: text} })
+}
+
+// safeCmdOr is safeCmd for a command a dialog is waiting on: a recovered panic
+// is answered with onPanic's message — the command's own error result —
+// rather than a generic panicRecoveryMsg. The generic one says nothing about
+// WHICH command died, so the dialog that asked never heard back: the import
+// overlay spun on step 2 with no key to leave it, trimInProgress stayed set
+// for the session, and the install and add spinners ran forever, each with
+// its explanation on a feedback line the overlay covers.
+func safeCmdOr(fn func() tea.Msg, onPanic func(text string) tea.Msg) tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
-				msg = panicRecoveryMsg{Text: fmt.Sprintf("unexpected error: %v", r)}
+				msg = onPanic(fmt.Sprintf("unexpected error: %v", r))
 			}
 		}()
 		return fn()
@@ -115,7 +126,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		a.OnAddVideo(input)
 	}
 
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		body := map[string]any{
 			"videoId": input,
 		}
@@ -176,7 +187,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			}
 		}
 		return addVideoResultMsg{VideoID: input, Feedback: label}
-	})
+	}, func(text string) tea.Msg { return addVideoResultMsg{VideoID: input, Feedback: text} })
 }
 
 // fetchFormatsCmd fetches format options from the local API for advanced mode.
@@ -187,16 +198,16 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 	// If a callback is provided, use it directly (avoids HTTP round-trip)
 	if a.OnFetchFormats != nil {
 		cb := a.OnFetchFormats
-		return safeCmd(func() tea.Msg {
+		return safeCmdOr(func() tea.Msg {
 			data, err := cb(videoID)
 			if err != nil {
 				return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 			}
 			return fetchFormatsResultMsg{VideoID: videoID, Formats: data}
-		})
+		}, func(text string) tea.Msg { return fetchFormatsResultMsg{VideoID: videoID, Err: text} })
 	}
 
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		url := fmt.Sprintf("%s/api/formats/%s", baseURL, videoID)
 		resp, err := client.Get(url)
 		if err != nil {
@@ -213,7 +224,7 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to parse format data. Proceeding with auto selection."}
 		}
 		return fetchFormatsResultMsg{VideoID: videoID, Formats: &data}
-	})
+	}, func(text string) tea.Msg { return fetchFormatsResultMsg{VideoID: videoID, Err: text} })
 }
 
 // importFileCmd reads a ZIP file and uploads it to the import API.
@@ -226,16 +237,16 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	// If a callback is provided, use it directly
 	if a.OnImportFile != nil {
 		cb := a.OnImportFile
-		return safeCmd(func() tea.Msg {
+		return safeCmdOr(func() tea.Msg {
 			importedTitle, err := cb(path, title, channel)
 			if err != nil {
 				return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 			}
 			return importResultMsg{Title: importedTitle}
-		})
+		}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 	}
 
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		f, err := os.Open(path)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
@@ -283,7 +294,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			importedTitle = "archive"
 		}
 		return importResultMsg{Title: importedTitle}
-	})
+	}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 }
 
 // importCookieFileCmd runs OnImportCookieFile off the UI goroutine.
@@ -299,7 +310,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 // even be authenticated to.
 func (a *App) importCookieFileCmd(path string) tea.Cmd {
 	fn := a.OnImportCookieFile
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if fn == nil {
 			// Unreachable from the keyboard — with no callback the chord is
 			// not registered — but a nil call here would panic the command
@@ -308,14 +319,14 @@ func (a *App) importCookieFileCmd(path string) tea.Cmd {
 		}
 		res, err := fn(path)
 		return cookieImportResultMsg{Result: res, Err: err}
-	})
+	}, func(text string) tea.Msg { return cookieImportResultMsg{Err: errors.New(text)} })
 }
 
 func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 	createFn := a.OnCreateTrim
 	progressMu := &a.trimProgressMu
 	progressPct := &a.trimProgressPct
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if createFn == nil {
 			return createTrimResultMsg{Err: "Create trim not available"}
 		}
@@ -329,7 +340,7 @@ func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 			return createTrimResultMsg{Err: errMsg}
 		}
 		return createTrimResultMsg{Filename: filename}
-	})
+	}, func(text string) tea.Msg { return createTrimResultMsg{Err: text} })
 }
 
 func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
@@ -342,15 +353,15 @@ func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
 			break
 		}
 	}
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if deleteFn == nil {
-			return deleteTrimResultMsg{Err: "Delete trim not available"}
+			return deleteTrimResultMsg{JobID: jobID, Err: "Delete trim not available"}
 		}
 		if err := deleteFn(jobID, trimID); err != nil {
-			return deleteTrimResultMsg{Err: err.Error()}
+			return deleteTrimResultMsg{JobID: jobID, Err: err.Error()}
 		}
-		return deleteTrimResultMsg{TrimID: trimID, Filename: filename}
-	})
+		return deleteTrimResultMsg{JobID: jobID, TrimID: trimID, Filename: filename}
+	}, func(text string) tea.Msg { return deleteTrimResultMsg{JobID: jobID, Err: text} })
 }
 
 func (a *App) fetchOrphansCmd() tea.Cmd {
@@ -416,12 +427,12 @@ func (a *App) ytdlpStatusCmd() tea.Cmd {
 // for a direct caller.
 func (a *App) ytdlpInstallCmd() tea.Cmd {
 	installFn := a.OnInstallYtdlpPlugin
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if installFn == nil {
 			return ytdlpInstallResultMsg{Err: errors.New("yt-dlp plugin install is not available in this process")}
 		}
 		return ytdlpInstallResultMsg{Err: installFn()}
-	})
+	}, func(text string) tea.Msg { return ytdlpInstallResultMsg{Err: errors.New(text)} })
 }
 
 // fetchStatsCmd runs OnGetStats off the UI goroutine, tagging the result with
@@ -542,7 +553,7 @@ func (a *App) deleteAllHistoryCmd(ids []string) tea.Cmd {
 // ffmpegCheckCmd runs FFmpeg path validation asynchronously via tea.Cmd.
 func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 	checkFn := a.OnCheckFFmpeg
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if checkFn == nil {
 			return ffmpegCheckResultMsg{Valid: false, Path: path}
 		}
@@ -551,14 +562,14 @@ func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 		}
 		valid, ver, warn := checkFn(path)
 		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Warning: warn, Path: path}
-	})
+	}, func(text string) tea.Msg { return ffmpegCheckResultMsg{Valid: false, Path: path} })
 }
 
 // ffmpegPrepareCmd checks elevation and either installs directly or returns
 // a script for review.
 func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
 	prepareFn := a.OnPrepareInstall
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if prepareFn == nil {
 			return ffmpegPrepareResultMsg{Err: "install not available"}
 		}
@@ -571,13 +582,13 @@ func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
 			Script:         script,
 			Token:          token,
 		}
-	})
+	}, func(text string) tea.Msg { return ffmpegPrepareResultMsg{Err: text} })
 }
 
 // ffmpegConfirmCmd executes a reviewed elevated install.
 func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 	confirmFn := a.OnConfirmInstall
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if confirmFn == nil {
 			return ffmpegConfirmResultMsg{Err: "confirm not available"}
 		}
@@ -585,7 +596,7 @@ func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 			return ffmpegConfirmResultMsg{Err: err.Error()}
 		}
 		return ffmpegConfirmResultMsg{}
-	})
+	}, func(text string) tea.Msg { return ffmpegConfirmResultMsg{Err: text} })
 }
 
 // testNotificationCmd delivers a test embed to url via the local API

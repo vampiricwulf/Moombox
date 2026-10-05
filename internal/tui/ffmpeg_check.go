@@ -459,6 +459,16 @@ func (m *FFmpegCheckModel) handleInstallKey(key string) string {
 	return ""
 }
 
+// beginVerify moves from the install to checking the result of it. Input
+// stays blocked (checking) until the check's answer lands through
+// SetInstallResult: clearing installing alone opened a window in which a
+// second install could be queued, or Esc Esc quit, while the check ran.
+func (m *FFmpegCheckModel) beginVerify() {
+	m.installing = false
+	m.checking = true
+	m.installResult = "Verifying installation..."
+}
+
 // SetInstallResult updates the install result display. Called by App after async install completes.
 func (m *FFmpegCheckModel) SetInstallResult(result string, isError bool) {
 	m.installResult = result

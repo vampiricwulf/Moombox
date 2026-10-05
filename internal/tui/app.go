@@ -154,6 +154,7 @@ type (
 		Err      string
 	}
 	deleteTrimResultMsg struct {
+		JobID    string // the job whose trim dialog asked
 		TrimID   string
 		Filename string
 		Err      string

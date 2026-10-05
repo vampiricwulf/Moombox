@@ -616,6 +616,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.ensureMarqueeTicking()
 
 	case deleteTrimResultMsg:
+		// The dialog that asked may be gone — closed, or reopened on another
+		// job, whose list this trim is not in and whose dialog must not show
+		// this job's error. Then the answer goes to the feedback line.
+		if !a.trimDlg.IsVisible() || a.trimDlg.JobID() != msg.JobID {
+			if msg.Err != "" {
+				a.setFeedbackWithSeverity("Trim delete failed: "+msg.Err, severityError)
+			} else {
+				a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
+			}
+			return a, nil
+		}
 		a.trimDlg.SetLoading(false)
 		if msg.Err != "" {
 			a.trimDlg.SetError(msg.Err)
@@ -763,8 +774,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.ShowReview(msg.Script, msg.Token)
 		} else {
 			// Ran directly (already elevated) — verify
-			a.ffmpegCheck.installing = false
-			a.ffmpegCheck.installResult = "Verifying installation..."
+			a.ffmpegCheck.beginVerify()
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
@@ -774,8 +784,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
 		} else {
 			// Elevated install succeeded — verify FFmpeg is available
-			a.ffmpegCheck.installing = false
-			a.ffmpegCheck.installResult = "Verifying installation..."
+			a.ffmpegCheck.beginVerify()
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
