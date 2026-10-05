@@ -291,7 +291,7 @@ The self-updater lives in `internal/updater/`. It checks GitHub Releases, downlo
 
 1. **Check** (`updater.go: CheckForUpdate`) — Queries `https://api.github.com/repos/vampiricwulf/Moombox/releases/latest`. Compares the remote version against the current version using semver comparison. Returns `nil` if already up-to-date, or a `ReleaseInfo` struct if a newer version exists. HTTP timeout: 10 seconds. An up-to-date answer from any check — the periodic one, the Web's "Check for updates", the TUI's `R V` — withdraws a release still pending (`routes.ClearPendingUpdate`): it was pulled from GitHub, and its download no longer exists. Both UIs drop the badge (`update_cleared`, and the TUI's tagged clear).
 
-2. **Download binary** (`updater.go: ApplyUpdate`) — Downloads the running platform's binary asset from the release — `Moombox.exe`, `moombox-linux-amd64` or `moombox-linux-arm64`, chosen by GOOS/GOARCH through `releaseAssetMap` — to `<exe-path>.new`. HTTP timeout: 5 minutes (separate client from the 10-second API client, since binaries are 10-30 MB).
+2. **Download binary** (`updater.go: ApplyUpdate`) — Downloads the running platform's binary asset from the release — `Moombox.exe`, `moombox-linux-amd64` or `moombox-linux-arm64`, chosen by GOOS/GOARCH through `releaseAssetMap` — to `<exe-path>.new`. A separate client from the 10-second API client, since binaries are 78-87 MB: what ends a download is a STALL — no byte for `downloadStallTimeout` (60 s), response headers included — reported as "download stalled: no data for 1m0s". A total deadline only backstops it (`downloadMaxDuration`, 2 hours, about 12 KB/s for the largest binary). The 5-minute total deadline this used to carry killed every download slower than about 2.3 Mbit/s however steadily it was arriving.
 
 3. **Download signature** — Downloads that asset's `.sig` (`Moombox.exe.sig`, `moombox-linux-amd64.sig`, …) to `<exe-path>.new.sig`.
 
@@ -385,15 +385,17 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 
 When that rename cannot happen, the surviving `.old` is the freshest previous binary and the `~` file is
 one version older still; the rollback path prefers `.old` for exactly that reason, and the `~` file is
-swept by the next launcher start once the `.update-failed` marker is gone.
+swept by the next launcher start once neither failed-update marker (`.update-failed`, `.update-broken`)
+remains (`cleanupOrphans`, `cmd/moombox/launcher_windows.go`) — or by a healthy boot's `CleanupOldBinary`,
+whenever no running launcher still holds it.
 
 ### Restart Triggers
 
-All restart triggers call `triggerRestart(source)`, which:
+All restart triggers call `triggerRestart(source)` (`cmd/moombox/services.go`), which:
 1. Logs `"Restart requested"` with the source string
 2. Sets `restartRequested.Store(true)` (atomic bool)
-3. Calls `cancel()` to cancel the root context (propagates to all services)
-4. Calls `quitTUI()` if the TUI is running
+3. Starts the web server's drain (`StartDrain`), so no new request is taken
+4. After a 5-second grace — time for the response that asked for the restart to reach its client — calls `cancel()` to cancel the root context (propagates to all services) and `quitTUI()` if the TUI is running
 
 | Source | Trigger |
 |--------|---------|

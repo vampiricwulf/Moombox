@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -136,12 +137,43 @@ type Updater struct {
 	verifySignature func(binaryPath, sigPath string) error
 }
 
-// downloadClient is the shared HTTP client used for binary downloads.
-// Backed by the shared httpx transport. The 5-minute timeout is
-// generous to accommodate slow connections on 20-30 MB update
-// payloads; the per-request u.client (10s timeout) is reserved for
-// quick GitHub API calls.
-var downloadClient = httpx.Client(5 * time.Minute)
+// downloadClient is the shared HTTP client used for binary downloads,
+// backed by the shared httpx transport; the per-request u.client (10s
+// timeout) is reserved for quick GitHub API calls.
+//
+// Its timeout is only a backstop. What ends a download that has stopped is
+// downloadStallTimeout: a release binary is 78-87 MB, and the 5-minute total
+// deadline this used to carry killed every download slower than about
+// 2.3 Mbit/s however steadily it was arriving — on exactly the connections
+// that most needed the time.
+var downloadClient = httpx.Client(downloadMaxDuration)
+
+// downloadMaxDuration bounds one download whatever its progress — a trickle
+// of a byte a minute never stalls. Two hours is about 12 KB/s for the
+// largest binary.
+const downloadMaxDuration = 2 * time.Hour
+
+// downloadStallTimeout is how long a download may go without receiving a
+// byte, response headers included, before it is abandoned. A var so a test
+// can shorten it.
+var downloadStallTimeout = 60 * time.Second
+
+// errDownloadStalled is the cause downloadFile cancels a stalled request with.
+var errDownloadStalled = errors.New("download stalled")
+
+// stallReader resets the stall timer on every read that returned data.
+type stallReader struct {
+	r     io.Reader
+	timer *time.Timer
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(downloadStallTimeout)
+	}
+	return n, err
+}
 
 // githubRelease is the subset of the GitHub API response we parse.
 type githubRelease struct {
@@ -593,7 +625,23 @@ func (u *Updater) CleanupOldBinary() {
 	}
 }
 
-func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
+// downloadFile downloads url to dest, refusing an HTML error page and
+// anything over the size cap.
+//
+// The request is cancelled with errDownloadStalled when no byte arrives for
+// downloadStallTimeout — response headers included — and the error then
+// says so rather than "context canceled".
+func (u *Updater) downloadFile(parent context.Context, url, dest string) (err error) {
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	stall := time.AfterFunc(downloadStallTimeout, func() { cancel(errDownloadStalled) })
+	defer stall.Stop()
+	defer func() {
+		if err != nil && errors.Is(context.Cause(ctx), errDownloadStalled) {
+			err = fmt.Errorf("download stalled: no data for %s", downloadStallTimeout)
+		}
+	}()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
@@ -606,6 +654,7 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	body := &stallReader{r: resp.Body, timer: stall}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
@@ -621,7 +670,7 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	// HTML doctype or tag, so this catches the real problem here, by name.
 	const sniffSize = 512
 	sniff := make([]byte, sniffSize)
-	sn, err := io.ReadFull(resp.Body, sniff)
+	sn, err := io.ReadFull(body, sniff)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		return err
 	}
@@ -649,7 +698,7 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	// above counts toward the cap, so the limit reader only needs to cover
 	// what is left of it.
 	const maxDownloadSize = 200 << 20
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize+1-int64(sn)))
+	n, err := io.Copy(f, io.LimitReader(body, maxDownloadSize+1-int64(sn)))
 	if err != nil {
 		f.Close()
 		return err
