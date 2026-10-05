@@ -2381,8 +2381,15 @@ export class PlayerController {
       focusPlayerSurface();
     };
 
+    // Both document handlers below answer only while the Player tab is
+    // showing. Leaving the tab does not dismiss the dialog (it is still
+    // waiting when the user comes back), and without this guard its Tab trap
+    // swallowed every Tab app-wide and its Escape started the hidden video.
+    const playerShowing = () =>
+      document.querySelector('sl-tab-panel[name="player"]')?.hasAttribute("active") === true;
+
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || !playerShowing()) return;
       if (document.querySelector("sl-dialog[open]") || isTypingInInput(e)) return;
       e.preventDefault();
       // Start from beginning on Escape (same as clicking "Start from beginning")
@@ -2404,7 +2411,7 @@ export class PlayerController {
     const focusables = () => [...overlay.querySelectorAll("sl-button, button, [tabindex]:not([tabindex='-1'])")]
       .filter((el) => !el.disabled);
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Tab") return;
+      if (e.key !== "Tab" || !playerShowing()) return;
       const items = focusables();
       if (!items.length) return;
       const first = items[0], last = items[items.length - 1];

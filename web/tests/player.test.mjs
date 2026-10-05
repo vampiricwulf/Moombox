@@ -1018,6 +1018,31 @@ test("Tab from outside the dialog is pulled into it", { skip }, async () => {
     "Tab from the page behind the dialog enters it at the first action");
 });
 
+// The resume dialog's Tab trap and Escape handler are bound on `document`,
+// and leaving the Player tab does not dismiss the dialog — so they used to run
+// app-wide: every Tab on the Tasks tab was swallowed, and Escape there started
+// the hidden video. Mutant: drop the playerShowing() guard from either handler.
+test("the resume dialog leaves the keyboard alone on other tabs", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: { resumePosition: 42 } });
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  h.document.querySelector('sl-tab-panel[name="player"]').removeAttribute("active");
+  h.player.detachKeyboardControls();
+  h.document.activeElement?.blur?.();
+
+  const tab = new h.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+  h.document.dispatchEvent(tab);
+  assert.equal(tab.defaultPrevented, false, "a Tab on another tab must not be trapped");
+
+  const plays = () => h.mediaCalls.filter((c) => c === "play").length;
+  const before = plays();
+  h.key("Escape");
+  assert.equal(plays(), before, "Escape on another tab must not start the hidden video");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"),
+    "the dialog is still waiting for the user's return");
+});
+
 // ── 19. Player review can-wait pins (Arc J, Task 12 / J15) ──────────────────
 // #23 (Space is inert under the resume dialog) is already covered by test 17
 // above ("player shortcuts are ignored while the resume overlay is up") and
