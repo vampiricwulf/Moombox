@@ -517,6 +517,15 @@ func siblingReachable(siblings []channelHealthReporter, channelID string, now ti
 // it does not know that the alert was suppressed because a sibling monitor
 // still reaches the channel. Closing a suppressed streak would announce a
 // recovery from an incident the operator was never told about.
+//
+// incidents is that set, shared by every monitor covering the platform's
+// channels. The alert says NO monitor reaches the channel, so it is one
+// incident per channel, not one per monitor: with a set each, a real YouTube
+// outage — the feed and DECAPI both failing — sent two identical "Channel Not
+// Responding" embeds, and when DECAPI reached the channel again while RSS
+// kept failing, only DECAPI's closed and the feed's stayed open for good. Now
+// the second monitor's alert finds the incident already announced, and the
+// first monitor to reach the channel closes it.
 func channelHealthNotifiers(
 	n notifications.Sender,
 	log interface {
@@ -526,10 +535,9 @@ func channelHealthNotifiers(
 		Error(msg string, args ...any)
 	},
 	platform string,
+	incidents *channelIncidents,
 	siblings ...channelHealthReporter,
 ) (func(channelID string, consecutive int, lastErr string), func(channelID string)) {
-	var mu sync.Mutex
-	sent := map[string]bool{}
 
 	unhealthy := func(channelID string, consecutive int, lastErr string) {
 		// Cross-monitor confirmation: a channel is only "not responding" if
@@ -544,9 +552,13 @@ func channelHealthNotifiers(
 		}
 		log.Warn("channel failing monitor checks — verify it still exists",
 			"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
-		mu.Lock()
-		sent[channelID] = true
-		mu.Unlock()
+		incidents.mu.Lock()
+		announced := incidents.sent[channelID]
+		incidents.sent[channelID] = true
+		incidents.mu.Unlock()
+		if announced {
+			return // another monitor already reported this channel's outage
+		}
 		n.Send("Channel Not Responding",
 			fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
 			notifications.TypeWarning,
@@ -560,10 +572,10 @@ func channelHealthNotifiers(
 	}
 
 	healthy := func(channelID string) {
-		mu.Lock()
-		fire := sent[channelID]
-		delete(sent, channelID)
-		mu.Unlock()
+		incidents.mu.Lock()
+		fire := incidents.sent[channelID]
+		delete(incidents.sent, channelID)
+		incidents.mu.Unlock()
 		if !fire {
 			return
 		}
@@ -580,6 +592,18 @@ func channelHealthNotifiers(
 	}
 
 	return unhealthy, healthy
+}
+
+// channelIncidents is the set of channels whose "Channel Not Responding" was
+// sent and not yet closed, shared by the monitors covering one platform
+// (channelHealthNotifiers).
+type channelIncidents struct {
+	mu   sync.Mutex
+	sent map[string]bool
+}
+
+func newChannelIncidents() *channelIncidents {
+	return &channelIncidents{sent: map[string]bool{}}
 }
 
 // resumeOnRedetect decides what a live re-detection of an EXISTING job does.
@@ -1685,27 +1709,27 @@ func (s *runState) wireMonitorCallbacks() {
 	// Channel-health notifications: a channel that fails every check for a
 	// sustained streak (renamed/banned Twitch login, dead YouTube channel,
 	// 404 RSS) previously rotted at Debug level until a stream was missed.
-	// One notification per streak, per monitor; the /api/status
-	// channelHealth surface shows the live state. platform label is set per
-	// monitor so the operator knows which source flagged it.
+	// One notification per channel outage — the YouTube monitors share it —
+	// and the /api/status channelHealth surface shows the live state per
+	// monitor.
 	//
 	// YouTube channels are covered by both the RSS feed and DECAPI monitors, so
 	// each cross-confirms against the other before alerting. Twitch has a single
 	// (reliable GQL) monitor with no sibling to confirm against.
 	//
-	// Each monitor gets its OWN pair, so each keeps its own `sent` set — which
-	// is right: the feed monitor losing a channel and DECAPI losing it are
-	// separate incidents with separate closes, exactly as the two alerts are
-	// separate today.
-	feedUnhealthy, feedHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", s.decapiMon)
+	// Each monitor gets its own pair, and the two YouTube monitors share one
+	// incident set: the alert says no monitor reaches the channel, which is one
+	// incident however many monitors observe it (channelHealthNotifiers).
+	youtubeIncidents := newChannelIncidents()
+	feedUnhealthy, feedHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", youtubeIncidents, s.decapiMon)
 	s.feedMon.SetOnChannelUnhealthy(feedUnhealthy)
 	s.feedMon.SetOnChannelHealthy(feedHealthy)
 
-	decapiUnhealthy, decapiHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", s.feedMon)
+	decapiUnhealthy, decapiHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", youtubeIncidents, s.feedMon)
 	s.decapiMon.SetOnChannelUnhealthy(decapiUnhealthy)
 	s.decapiMon.SetOnChannelHealthy(decapiHealthy)
 
-	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch")
+	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch", newChannelIncidents())
 	s.twitchMon.SetOnChannelUnhealthy(twitchUnhealthy)
 	s.twitchMon.SetOnChannelHealthy(twitchHealthy)
 
