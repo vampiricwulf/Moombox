@@ -22,6 +22,13 @@ type inflightEntry struct {
 	// cached only if nothing has invalidated the caches or begun a bypass
 	// mint since (see cacheGen).
 	gen uint64
+	// leaderGone records that the leader's own context had ended when its
+	// mint returned. Only then is a context error the leader's leaving rather
+	// than the mint's answer: a sidecar RequestTimeout or an HTTP client
+	// timeout is a DeadlineExceeded too, and treating it as the leader's
+	// leaving re-ran the doomed mint once per waiter, each one queued behind
+	// the last.
+	leaderGone bool
 }
 
 // isContextErr reports whether err is a context's cancellation or deadline.
@@ -296,8 +303,10 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 				// caller whose context is live: a cancelled monitor probe
 				// used to hand "context canceled" to a job's mint for the
 				// same video, which went on without a token and 403'd. Ask
-				// again; the leader's entry is gone by now.
-				if isContextErr(entry.err) && ctx.Err() == nil {
+				// again; the leader's entry is gone by now. Any other
+				// failure, a timeout inside the mint included, is the
+				// answer (see leaderGone).
+				if entry.leaderGone && isContextErr(entry.err) && ctx.Err() == nil {
 					return pp.generatePoTokenChallenge(ctx, contentBinding, bypassCache, challenge)
 				}
 				return entry.session, entry.err
@@ -368,6 +377,7 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 	// Store result on the entry so all waiters can read it, then signal
 	entry.session = session
 	entry.err = err
+	entry.leaderGone = ctx.Err() != nil
 
 	pp.mu.Lock()
 	if err == nil && entry.gen == pp.cacheGen {
