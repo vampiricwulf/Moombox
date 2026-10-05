@@ -297,7 +297,6 @@ func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
 			return &VideoProbeResult{
 				StreamStatus: "live",
 				Title:        "Better Title",
-				ChannelName:  "TestChannel",
 			}, nil
 		},
 		Tracker: NewMetadataFailureTracker(),
@@ -309,9 +308,6 @@ func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
 	}
 	if result.Title != "Better Title" {
 		t.Errorf("title: got %q, want %q", result.Title, "Better Title")
-	}
-	if result.ChannelName != "TestChannel" {
-		t.Errorf("channelName: got %q, want %q", result.ChannelName, "TestChannel")
 	}
 }
 

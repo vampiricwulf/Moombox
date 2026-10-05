@@ -1041,15 +1041,9 @@ type atomFeed struct {
 }
 
 type atomEntry struct {
-	VideoID   string     `xml:"http://www.youtube.com/xml/schemas/2015 videoId"`
-	Title     string     `xml:"title"`
-	Published string     `xml:"published"` // RFC3339, e.g. 2026-07-13T04:18:12+00:00
-	Links     []atomLink `xml:"link"`
-}
-
-type atomLink struct {
-	Rel  string `xml:"rel,attr"`
-	Href string `xml:"href,attr"`
+	VideoID   string `xml:"http://www.youtube.com/xml/schemas/2015 videoId"`
+	Title     string `xml:"title"`
+	Published string `xml:"published"` // RFC3339, e.g. 2026-07-13T04:18:12+00:00
 }
 
 // resolveArchiveWindowDays is THE per-channel resolver for how many days back
@@ -1098,9 +1092,7 @@ func (fm *FeedMonitor) membershipDiscoveryEnabled() bool {
 type discoveredVideo struct {
 	videoID   string
 	title     string
-	url       string    // RSS alternate link; not stored
 	published time.Time // RSS <published> — 'exact' in the store; zero ⇒ 'assumed'/cycle-now
-	source    string    // always "rss" (feed_items.source)
 }
 
 // parseFeedCandidates parses an Atom feed into discovery candidates. It returns
@@ -1124,14 +1116,6 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 			continue
 		}
 
-		videoURL := ""
-		for _, link := range entry.Links {
-			if link.Rel == "alternate" {
-				videoURL = link.Href
-				break
-			}
-		}
-
 		// A missing/invalid <published> parses to the zero time. The zero
 		// value is a SIGNAL, not a date: the STORE step (checkChannel) maps
 		// it to precision 'assumed' with published = the cycle's now, never
@@ -1143,9 +1127,7 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 		out = append(out, discoveredVideo{
 			videoID:   entry.VideoID,
 			title:     entry.Title,
-			url:       videoURL,
 			published: published,
-			source:    "rss",
 		})
 	}
 	return out, nil

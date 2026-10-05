@@ -32,7 +32,6 @@ const (
 type VideoProbeResult struct {
 	StreamStatus       string // "live", "upcoming", "vod", "post_live", "not_a_stream"
 	Title              string // metadata title (may be better than feed title)
-	ChannelName        string // metadata channel name
 	PublishedAt        string // probe's authoritative publish date (RFC3339, may be empty)
 	PublishedPrecision string // "started" or "day", empty when PublishedAt is empty
 	PlayabilityError   string // playability status from YouTube API (may be empty for OK videos)
@@ -228,7 +227,6 @@ type ProcessYouTubeVideoParams struct {
 type ProcessYouTubeVideoResult struct {
 	ShouldProcess bool   // true if the video should be queued as a job
 	Title         string // possibly updated title from metadata
-	ChannelName   string // possibly updated channel name from metadata
 	// StreamStatus is the probe's classification ("live", "upcoming", "vod",
 	// "post_live", "not_a_stream"). It is populated whenever a probe COMPLETED
 	// — including the two arms that then decline to process the video — and is
@@ -345,13 +343,12 @@ type ProbeClassifyParams struct {
 type ProbeClassifyResult struct {
 	Outcome ProbeOutcome
 
-	// StreamStatus, Title, ChannelName, PublishedAt, and PublishedPrecision
+	// StreamStatus, Title, PublishedAt, and PublishedPrecision
 	// are populated on OutcomeProbed and OutcomeDenied (a successful probe);
 	// zero-valued otherwise. PlayabilityError is always carried on those two
 	// outcomes — the escalation reads it even when Outcome == OutcomeDenied.
 	StreamStatus       string
 	Title              string
-	ChannelName        string
 	PublishedAt        string
 	PublishedPrecision string
 	PlayabilityError   string
@@ -439,7 +436,6 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 		Outcome:            OutcomeProbed,
 		StreamStatus:       meta.StreamStatus,
 		Title:              meta.Title,
-		ChannelName:        meta.ChannelName,
 		PublishedAt:        meta.PublishedAt,
 		PublishedPrecision: meta.PublishedPrecision,
 		PlayabilityError:   meta.PlayabilityError,
@@ -567,21 +563,16 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 
 	p.Logger.Debug(fmt.Sprintf("[Monitor] Video %s classified as: %s", p.VideoID, cr.StreamStatus))
 
-	// Use metadata title/channel if available, but don't let API fallback
+	// Use the metadata title if available, but don't let API fallback
 	// placeholders ("Unknown Title") overwrite the real feed title.
 	title := p.Title
 	if cr.Title != "" && cr.Title != "Unknown Title" {
 		title = cr.Title
 	}
-	channelName := ""
-	if cr.ChannelName != "" {
-		channelName = cr.ChannelName
-	}
 
 	return ProcessYouTubeVideoResult{
 		ShouldProcess: true,
 		Title:         title,
-		ChannelName:   channelName,
 		StreamStatus:  cr.StreamStatus,
 		PublishedAt:   cr.PublishedAt,
 	}

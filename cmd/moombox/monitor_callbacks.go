@@ -1200,7 +1200,6 @@ func (s *runState) wireMonitorCallbacks() {
 		return &monitor.VideoProbeResult{
 			StreamStatus:       string(meta.StreamStatus),
 			Title:              meta.Title,
-			ChannelName:        meta.ChannelName,
 			PublishedAt:        meta.PublishedAt,
 			PublishedPrecision: meta.PublishedPrecision,
 			PlayabilityError:   string(meta.PlayabilityError),
@@ -1233,7 +1232,6 @@ func (s *runState) wireMonitorCallbacks() {
 		return &monitor.VideoProbeResult{
 			StreamStatus:       string(meta.StreamStatus),
 			Title:              meta.Title,
-			ChannelName:        meta.ChannelName,
 			PublishedAt:        meta.PublishedAt,
 			PublishedPrecision: meta.PublishedPrecision,
 			PlayabilityError:   string(meta.PlayabilityError),
