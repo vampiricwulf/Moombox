@@ -813,6 +813,14 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			d.OutputTemplate = defaults.Downloader.OutputTemplate
 		}
 	}
+	// One rule for every writer: the web PUT capped the template and the TUI
+	// and a hand-edited file did not.
+	if len(d.OutputTemplate) > OutputTemplateMaxLen {
+		fail("downloader.output_template must be at most %d characters", OutputTemplateMaxLen)
+		if !reportOnly {
+			d.OutputTemplate = defaults.Downloader.OutputTemplate
+		}
+	}
 	if d.MaximumTimeout < 30 {
 		fail("downloader.maximum_timeout %d must be at least 30 seconds", d.MaximumTimeout)
 		if !reportOnly {
@@ -1358,6 +1366,11 @@ func guardReservedComponents(p string) string {
 	}
 	return b.String()
 }
+
+// OutputTemplateMaxLen is the longest downloader.output_template accepted, in
+// bytes — by config.Validate for every writer, and by the web PUT and the TUI
+// settings up front so the refusal names the field.
+const OutputTemplateMaxLen = 500
 
 // ResolveTemplate resolves an output template with the given variables.
 func ResolveTemplate(template string, vars TemplateVariables) string {

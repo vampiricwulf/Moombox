@@ -361,8 +361,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	// Downloader sub-fields
 	if dl, ok := updates["downloader"].(map[string]any); ok {
 		if v, ok := dl["output_template"].(string); ok {
-			if len(v) > 500 {
-				errs["downloader.output_template"] = "output_template must be at most 500 characters"
+			if len(v) > config.OutputTemplateMaxLen {
+				errs["downloader.output_template"] = fmt.Sprintf("output_template must be at most %d characters", config.OutputTemplateMaxLen)
 			}
 		}
 		if v, ok := dl["num_parallel_downloads"].(float64); ok {

@@ -860,6 +860,11 @@ func (m *SettingsModel) applyValues() {
 			return
 		}
 	}
+	if len(m.values["output_template"]) > config.OutputTemplateMaxLen {
+		m.errorMsg = fmt.Sprintf("Output template must be at most %d characters", config.OutputTemplateMaxLen)
+		m.status = saveError
+		return
+	}
 	// Path fields: reject ".." segments. Absolute paths are accepted here and
 	// in the Web UI alike — config.PathHasTraversal is the single rule both
 	// call, because a value one UI saves and the other refuses is exactly the

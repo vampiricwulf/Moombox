@@ -709,6 +709,7 @@ Handles backward compatibility with older flat config formats. All migrations ar
 - ProgressIntervalMS: min 1, no max. The one downloader key where `0` is an error rather than a documented "disabled" value, because an ungated progress tracker writes the database once per segment callback
 - MaxVideoResolution: min 0 (`0` = unbounded; only a negative value resets to the default)
 - MaximumTimeout: min 30 seconds (no maximum)
+- OutputTemplate: non-empty, at most `OutputTemplateMaxLen` (500) bytes — one rule for every writer; the web PUT and the TUI also refuse a longer one up front, naming the field
 - DiskWarnPercent: 1-99, DiskCriticalPercent: must be > WarnPercent (auto-adjusted if not)
 - CookieRefreshInterval: min 10 minutes
 - QualityPreference: validated against a fixed set of allowed values (best, 2160p60, 2160p, 1440p60, 1440p, 1080p60, 1080p, 900p60, 900p, 720p60, 720p, 480p, 360p, 160p, audio_only)
