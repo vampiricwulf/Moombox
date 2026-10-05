@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"slices"
@@ -12,6 +13,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
@@ -112,6 +115,15 @@ func (d taskDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 
 // TaskListModel manages the job list panel.
 type TaskListModel struct {
+	// titleCollator and titleKeys order active rows by title the way the
+	// dashboard does (localeCompare, sensitivity "base"): case and accents
+	// ignored, so "école" sorts beside "ecole" rather than after "zebra" as
+	// a lowercased byte compare put it. Keys are cached per title because
+	// the list re-sorts on every progress tick. Both are touched only from
+	// rebuildVirtualList, on the update goroutine.
+	titleCollator *collate.Collator
+	titleKeys     map[string][]byte
+
 	jobs     []*database.Job
 	jobIndex map[string]int // job ID → index in jobs slice (O(1) lookup)
 	// virtualIndex maps job ID → position in the bubbles/list-level items
@@ -925,15 +937,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 			}
 			return 0
 		}
-		la := strings.ToLower(a.Title)
-		lb := strings.ToLower(b.Title)
-		if la < lb {
-			return -1
-		}
-		if la > lb {
-			return 1
-		}
-		return 0
+		return bytes.Compare(m.titleSortKey(a.Title), m.titleSortKey(b.Title))
 	})
 
 	// Sort archived: newest first
@@ -1467,4 +1471,23 @@ func cutWidth(s string, left, right int) string {
 		out = ansi.Cut(s, left, r)
 	}
 	return out
+}
+
+// titleSortKey is title's collation key (see titleCollator), cached. The cache
+// is dropped when it outgrows the jobs it serves several times over, so the
+// titles of deleted jobs do not pile up for the life of the process.
+func (m *TaskListModel) titleSortKey(title string) []byte {
+	if k, ok := m.titleKeys[title]; ok {
+		return k
+	}
+	if m.titleCollator == nil {
+		m.titleCollator = collate.New(language.Und, collate.IgnoreCase, collate.IgnoreDiacritics)
+	}
+	if m.titleKeys == nil || len(m.titleKeys) > 4*len(m.jobs)+64 {
+		m.titleKeys = make(map[string][]byte, len(m.jobs))
+	}
+	var buf collate.Buffer
+	k := slices.Clone(m.titleCollator.KeyFromString(&buf, title))
+	m.titleKeys[title] = k
+	return k
 }
