@@ -309,25 +309,21 @@ func (m *LogViewerModel) CycleLevel() {
 	m.viewport.GotoBottom()
 }
 
-// wrapLogLine hard-wraps one plain-text log line to width columns, using the
-// same character-wrap rule the viewport's own softWrap applies
-// (ansi.Cut(line, idx, idx+width)) so nothing about the rendered result
-// changes — only WHEN the work is done. Lines that already fit are returned
-// as a one-element slice sharing the original string, and a width of 0 (the
-// panel has not been sized yet) wraps nothing.
+// wrapLogLine wraps one plain-text log line to width columns at its spaces,
+// breaking only a word longer than a whole row. It used to cut at exact
+// columns — the viewport's own softWrap rule — which split the very tokens a
+// log line is read for: "addr=127.0.0." on one row and "1:7743" on the next,
+// a URL or a video ID across two. Lines that already fit are returned as a
+// one-element slice sharing the original string, and a width of 0 (the panel
+// has not been sized yet) wraps nothing.
 func wrapLogLine(line string, width int) []string {
 	if width <= 0 {
 		return []string{line}
 	}
-	total := ansi.StringWidth(line)
-	if total <= width {
+	if ansi.StringWidth(line) <= width {
 		return []string{line}
 	}
-	out := make([]string, 0, (total+width-1)/width)
-	for idx := 0; idx < total; idx += width {
-		out = append(out, ansi.Cut(line, idx, idx+width))
-	}
-	return out
+	return strings.Split(ansi.Wrap(line, width, ""), "\n")
 }
 
 // rebuildFiltered rebuilds the DISPLAY buffer: level-filter the raw lines,
