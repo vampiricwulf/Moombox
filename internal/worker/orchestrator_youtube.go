@@ -299,6 +299,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				})
 		}
 
+		if cookiesStatusError(refreshErr) {
+			o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
+				"err", refreshErr, "jobID", jobCtx.Job.ID)
+			return true, refreshErr
+		}
 		if refreshErr != nil {
 			o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 			// Return nil to exit the live loop; muxAndFinalize will process
@@ -532,6 +537,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 						return o.refreshDownload(ctx, curCtx, info, result.IsHls)
 					})
 				curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
+				if cookiesStatusError(refreshErr) {
+					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
+						"err", refreshErr, "jobID", jobCtx.Job.ID)
+					return result, waitedForResume.value(), refreshErr
+				}
 				if refreshErr != nil {
 					o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
 					// Return nil to exit the live loop; muxAndFinalize will process
@@ -675,6 +685,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
 
 			if refreshErr != nil {
+				if credErr := liveCredentialFailure(freshInfo); credErr != nil {
+					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
+						"err", credErr, "jobID", jobCtx.Job.ID)
+					return result, waitedForResume.value(), credErr
+				}
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Through the tracker — see the verify-retry branch above.
 				tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
@@ -777,6 +792,29 @@ func unreadableStatusEndsCapture(checks int32, quietFor time.Duration) bool {
 	return checks >= maxConsecutiveLiveChecks && quietFor >= streamSegmentTimeout
 }
 
+// credentialVerdict reports whether a playability verdict is a credential
+// failure (sentinel ErrCookiesRequired or ErrNotAMember) on a player response
+// that also has nothing to download — the shape that parks a job at COOKIES?
+// rather than one a refresh could get past.
+func credentialVerdict(info *youtube.VideoInfo, sentinel error) bool {
+	return probeFormatCount(info) == 0 &&
+		(errors.Is(sentinel, ErrCookiesRequired) || errors.Is(sentinel, ErrNotAMember))
+}
+
+// liveCredentialFailure returns the COOKIES?-routing error for a mid-capture
+// player response whose cookies died (or whose membership wall went up), or
+// nil. Without it a failed refresh on that response was retried and then
+// finished like an ended stream, never reaching COOKIES? or its alert.
+func liveCredentialFailure(info *youtube.VideoInfo) error {
+	if info == nil {
+		return nil
+	}
+	if msg, sentinel := playabilityVerdict(info); msg != "" && credentialVerdict(info, sentinel) {
+		return fmt.Errorf("%s: %w", msg, sentinel)
+	}
+	return nil
+}
+
 // liveRefreshProber is the slice of the YouTube service refreshWhileLive needs.
 type liveRefreshProber interface {
 	GetVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
@@ -816,6 +854,9 @@ func refreshWhileLiveWith(ctx context.Context, prober liveRefreshProber, videoID
 	checks *atomic.Int32, waiting func(), wait time.Duration, refresh func(*youtube.VideoInfo) (*DownloadResult, error),
 	lg logger, jobID string) (*DownloadResult, error) {
 	for prober != nil && info != nil && info.StreamStatus == youtube.StreamLive {
+		if credErr := liveCredentialFailure(info); credErr != nil {
+			return nil, credErr // no retry gets past dead credentials
+		}
 		if checks.Add(1) >= maxConsecutiveLiveChecks {
 			return nil, err
 		}

@@ -374,6 +374,12 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 // produced the identical string and both parked the job in COOKIES?, so an
 // operator whose credentials were perfectly healthy was told to refresh them.
 func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, error) {
+	return playabilityVerdict(info)
+}
+
+// playabilityVerdict is checkPlayability's rule, free of the processor so the
+// live loop can apply it to a mid-capture player response too.
+func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 	if info.PlayabilityError == "" || info.PlayabilityError == youtube.PlayabilityOK {
 		return "", nil
 	}

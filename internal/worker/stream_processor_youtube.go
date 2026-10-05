@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -456,8 +455,7 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 	// from here to "no download strategy available": a plain Error with no
 	// "Authentication Required" alert, which the credential-recovery sweep —
 	// it resumes COOKIES? rows only — never looked at again.
-	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && probeFormatCount(fullInfo) == 0 &&
-		(errors.Is(sentinel, ErrCookiesRequired) || errors.Is(sentinel, ErrNotAMember)) {
+	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && credentialVerdict(fullInfo, sentinel) {
 		sp.logger.Warn("playability check failed at go-live",
 			"videoID", job.VideoID,
 			"playability", string(fullInfo.PlayabilityError),
