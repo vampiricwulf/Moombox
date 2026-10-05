@@ -161,9 +161,15 @@ func isJSTrimSpace(r rune) bool {
 	return r == '\uFEFF' || (unicode.IsSpace(r) && r != '\u0085')
 }
 
+// TrimQuery trims a query the way Parse does (JavaScript's String.trim), for
+// callers that keep the query text beside its tokens.
+func TrimQuery(query string) string {
+	return strings.TrimFunc(query, isJSTrimSpace)
+}
+
 // Parse tokenises a query the way web/public/modules/filter-parser.js does.
 func Parse(query string) []Token {
-	trimmed := strings.TrimFunc(query, isJSTrimSpace)
+	trimmed := TrimQuery(query)
 	if trimmed == "" {
 		return nil
 	}
@@ -212,14 +218,7 @@ func serializeToken(t Token) string {
 	if t.Negate {
 		prefix = "-"
 	}
-	// Re-quote spaced phrases or the round-trip corrupts them: an unquoted
-	// "-jelly fin" re-tokenizes as TWO tokens, flipping half the phrase
-	// from negated to required. A pipe needs the quotes just as much —
-	// unquoted, channel:"a|b" comes back as an OR group.
-	val := t.Value
-	if strings.ContainsAny(val, " |") {
-		val = `"` + val + `"`
-	}
+	val := quoteValue(t.Value, t.Kind == KindText)
 	if t.Kind == KindText {
 		return prefix + val
 	}
@@ -227,6 +226,27 @@ func serializeToken(t Token) string {
 }
 
 // Serialize renders tokens back to query text (filter-parser.js serializeToken).
+// quoteValue quotes a value so it parses back to itself — filter-parser.js
+// quoteValue, which carries the full rule set. In short: a space or a pipe, a
+// leading quote character, and for a text term a leading "-" or a filter-key
+// prefix need quotes; the quote is `"` unless the value holds one, then `'`
+// (a value holding both kinds cannot be quoted losslessly and keeps `"`).
+func quoteValue(value string, isText bool) string {
+	lower := strings.ToLower(value)
+	needs := strings.ContainsAny(value, " |") ||
+		strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "'") ||
+		(isText && (strings.HasPrefix(value, "-") ||
+			strings.HasPrefix(lower, "status:") || strings.HasPrefix(lower, "channel:") || strings.HasPrefix(lower, "platform:")))
+	if !needs {
+		return value
+	}
+	q := `"`
+	if strings.Contains(value, `"`) && !strings.Contains(value, "'") {
+		q = "'"
+	}
+	return q + value + q
+}
+
 func Serialize(tokens []Token) string {
 	parts := make([]string, len(tokens))
 	for i, t := range tokens {

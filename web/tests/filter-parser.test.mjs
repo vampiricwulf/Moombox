@@ -131,3 +131,23 @@ test("parse → serialize → parse is identity for common queries", () => {
     assert.deepEqual(reparsed, parsed, `identity failed for: ${q}`);
   }
 });
+
+// The values Go's TestSerializeRoundTrips (internal/jobfilter) runs through
+// its twin: each used to serialize to a form that parsed back as something
+// else — cut in two at an inner quote, swallowing the rest of the query,
+// losing a literal quote pair, flipping to negated, or turning into a filter.
+//
+// Mutant: quoteValue reduced to the old space/pipe rule.
+test("serializeToken round-trips values the old quoting broke", () => {
+  const values = [`foo" bar`, `"foo bar`, `"quoted"`, `'single'`, `-dash`, `status:live`, `Channel:x`, `mori's set`, `a|b`, `plain`];
+  for (const type of ["text", "channel"]) {
+    for (const negate of [false, true]) {
+      for (const value of values) {
+        const q = [serializeToken({ type, value, negate }), "status:active"].join(" ");
+        const got = parseFilterQuery(q);
+        assert.deepEqual(got, [{ type, value, negate }, { type: "status", value: "active", negate: false }],
+          `${type} ${JSON.stringify(value)} (negate ${negate}) serialized to ${q}`);
+      }
+    }
+  }
+});

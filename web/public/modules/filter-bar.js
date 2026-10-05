@@ -141,7 +141,16 @@ export class FilterBarController {
           newChips.push(t);
         }
       }
-      const allTokens = [...chipTokens, ...newChips, ...remainingText];
+      // One token per canonical form. AND-ing a token with itself changes
+      // nothing, but a chip typed again beside its existing chip rendered
+      // twice.
+      const seen = new Set();
+      const allTokens = [...chipTokens, ...newChips, ...remainingText].filter(t => {
+        const key = serializeToken(t);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
       setTokens(allTokens);
       // Update input to show only remaining free text
       if (newChips.length > 0) {

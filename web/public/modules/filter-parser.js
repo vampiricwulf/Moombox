@@ -114,17 +114,31 @@ export function serializeToken(token) {
     return token.terms.map(t => serializeToken(t)).join("|");
   }
   const prefix = token.negate ? "-" : "";
-  if (token.type === "text") {
-    // Re-quote spaced phrases or the round-trip corrupts them: the chip
-    // extractor rewrites leftover text tokens into the input, and an
-    // unquoted `-jelly fin` re-tokenizes as TWO tokens — flipping half the
-    // phrase from negated to required. A pipe needs the quotes just as much
-    // — unquoted, `channel:a|b` comes back as an OR group.
-    const needsQuotes = /[ |]/.test(token.value);
-    const val = needsQuotes ? `"${token.value}"` : token.value;
-    return `${prefix}${val}`;
-  }
-  const needsQuotes = /[ |]/.test(token.value);
-  const val = needsQuotes ? `"${token.value}"` : token.value;
+  const val = quoteValue(token.value, token.type === "text");
+  if (token.type === "text") return `${prefix}${val}`;
   return `${prefix}${token.type}:${val}`;
+}
+
+/**
+ * Quote a value so it parses back to itself — the Go twin is quoteValue in
+ * internal/jobfilter/jobfilter.go. Quotes are needed for:
+ *   - a space or a pipe: unquoted, `-jelly fin` re-tokenizes as TWO tokens
+ *     (half the phrase flips from negated to required) and `channel:a|b`
+ *     comes back as an OR group;
+ *   - a leading quote character, which would open quoting and swallow the
+ *     rest of the query (or, as a matching pair, be stripped off);
+ *   - for a text term, a leading `-` (it would come back negated) or a
+ *     filter-key prefix (`status:live` would come back as a status filter).
+ * The quote is `"` unless the value holds one, then `'`: a quote matching
+ * the delimiter ends the quoted span early, which cut `foo" bar` in two. A
+ * value holding both kinds cannot be quoted losslessly (there is no escape)
+ * and keeps `"`.
+ */
+function quoteValue(value, isText) {
+  const needs = /[ |]/.test(value) ||
+    value.startsWith('"') || value.startsWith("'") ||
+    (isText && (value.startsWith("-") || /^(status|channel|platform):/i.test(value)));
+  if (!needs) return value;
+  const q = value.includes('"') && !value.includes("'") ? "'" : '"';
+  return `${q}${value}${q}`;
 }

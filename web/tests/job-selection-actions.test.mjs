@@ -145,3 +145,17 @@ test("a renamed job moves to its sorted place, where navigation will look for it
   await h.flush();
   assert.deepEqual(dom(), ["z", "a"]);
 });
+
+// A chip typed again beside its existing chip rendered twice.
+//
+// Mutant: syncTokens' serializeToken de-duplication removed — two chips.
+test("typing a filter that is already a chip does not add it twice", async () => {
+  const h = await boot();
+  h.app.jobs = [fin(), live()];
+  h.app.renderJobs();
+  h.app.filterBar.tasksFilterTokens = [{ type: "status", value: "active", negate: false }];
+  const input = h.document.querySelector("#tasks-filter .unified-filter-input");
+  input.value = "status:active";
+  input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  assert.equal(h.app.filterBar.tasksFilterTokens.length, 1, JSON.stringify(h.app.filterBar.tasksFilterTokens));
+});

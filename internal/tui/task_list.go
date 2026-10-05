@@ -280,7 +280,10 @@ func (m *TaskListModel) refilterSelectTop() {
 // live typing, Esc, ClearSearch) goes through here so parse and rebuild
 // never fall out of step.
 func (m *TaskListModel) applyQuery(q string) {
-	m.queryText = strings.TrimSpace(q)
+	// Parse's own trim, not strings.TrimSpace: the two differ on U+0085,
+	// which JavaScript's trim keeps, and the box would otherwise hold a
+	// query the dashboard reads differently.
+	m.queryText = jobfilter.TrimQuery(q)
 	m.tokens = jobfilter.Parse(m.queryText)
 	m.refilterSelectTop()
 }
