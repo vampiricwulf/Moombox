@@ -27,7 +27,7 @@ func TestClassifyChildExit(t *testing.T) {
 		ranFor             time.Duration
 		firstAfterUpdate   bool
 		terminating        bool
-		wasRespawn         bool
+		supervised         bool
 		consecutiveCrashes int
 		want               childExitAction
 	}{
@@ -43,9 +43,14 @@ func TestClassifyChildExit(t *testing.T) {
 		{"startup error on a respawn", exitCodeStartupError, quick, false, false, true, 1, childPropagate},
 		{"fresh launch fails fast", 1, quick, false, false, false, 0, childPropagate},
 		{"respawned child dies quickly", 2, quick, false, false, true, 1, childCrash},
+		// A post-update boot past its rollback artifact is supervised: it got
+		// past the startup the fail-fast arm is about, and failing fast ended
+		// the launcher with nothing restored. Mutant: the fail-fast arm
+		// testing only consecutiveCrashes — childPropagate.
+		{"post-update boot past its rollback dies quickly", 2, quick, false, false, true, 0, childCrash},
 		{"healthy child crashes", 2, slow, false, false, false, 0, childCrash},
 	} {
-		got := classifyChildExit(tc.code, tc.ranFor, tc.firstAfterUpdate, tc.terminating, tc.wasRespawn, tc.consecutiveCrashes)
+		got := classifyChildExit(tc.code, tc.ranFor, tc.firstAfterUpdate, tc.terminating, tc.supervised, tc.consecutiveCrashes)
 		if got != tc.want {
 			t.Errorf("%s: classifyChildExit = %v, want %v", tc.name, got, tc.want)
 		}

@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
@@ -164,11 +162,6 @@ func launchAndSupervise() {
 		// child. A genuine stop re-sets it via the forwarder.
 		terminating.Store(false)
 
-		// Whether this child starts with an .update-pending breadcrumb to
-		// resolve: only then can the breadcrumb's absence at exit say the
-		// boot proved itself (updateBootProved).
-		pendingAtSpawn := firstAfterUpdate && updatePendingPresent(exePath)
-
 		starting.Store(true)
 		spawnedAt = time.Now()
 		if startErr := cmd.Start(); startErr != nil {
@@ -195,10 +188,11 @@ func launchAndSupervise() {
 		child.Store(nil)
 
 		ranFor := time.Since(spawnedAt)
-		// A first boot that reached the first-successful-boot milestone has
-		// proved the update: its exits are ordinary from then on, however
-		// soon they come.
-		wasFirstAfterUpdate := firstAfterUpdate && !updateBootProved(exePath, pendingAtSpawn)
+		// A first boot of a fresh update whose rollback artifact is gone has
+		// nothing to roll back to (postUpdatePastRollback): its exit is an
+		// ordinary crash, and a supervised one however soon it comes.
+		pastRollback := firstAfterUpdate && postUpdatePastRollback(exePath)
+		wasFirstAfterUpdate := firstAfterUpdate && !pastRollback
 		firstAfterUpdate = false
 		// A healthy run ends the crash streak. (Quick deaths of RESPAWNED
 		// children deliberately don't reset — they're the streak.)
@@ -217,7 +211,7 @@ func launchAndSupervise() {
 			}
 		}
 
-		switch classifyChildExit(code, ranFor, wasFirstAfterUpdate, terminating.Load(), wasRespawn, consecutiveCrashes) {
+		switch classifyChildExit(code, ranFor, wasFirstAfterUpdate, terminating.Load(), wasRespawn || pastRollback, consecutiveCrashes) {
 		case childRestart:
 			// Update applied: rename .old → ~ on Windows so the .old name
 			// is free for the next update (returns whether a .old existed,
@@ -327,7 +321,11 @@ func forwardStop(goos string, p stoppable) {
 
 // classifyChildExit decides what one child exit means. Pure, so the order of
 // the rules below — which is the whole policy — is testable.
-func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, terminating, wasRespawn bool, consecutiveCrashes int) childExitAction {
+//
+// supervised marks a child whose quick death belongs to crash supervision
+// rather than the fail-fast arm: a respawn, or the first boot of an update
+// that got past its startup and its rollback artifact (postUpdatePastRollback).
+func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, terminating, supervised bool, consecutiveCrashes int) childExitAction {
 	switch {
 	case code == exitCodeRestart:
 		return childRestart
@@ -369,7 +367,7 @@ func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, term
 		// verdict.
 		return childPropagate
 
-	case ranFor < launcherHealthyWindow && !wasRespawn && consecutiveCrashes == 0:
+	case ranFor < launcherHealthyWindow && !supervised && consecutiveCrashes == 0:
 		// Supervision arms only after a child proves it can run: a
 		// deterministic startup failure (bad config exit 1, bad flags exit
 		// 2, refused DB migration) on a FRESH launch must fail fast and
@@ -377,6 +375,9 @@ func classifyChildExit(code int, ranFor time.Duration, wasFirstAfterUpdate, term
 		// same wall. Quick deaths of respawned children fall through to the
 		// counter instead: they're what the backoff + cutoff exist for, and
 		// routing them here would cap supervision at a single retry forever.
+		// So does a post-update boot past its rollback artifact: it passed
+		// the startup this arm is about, and failing fast would end the
+		// launcher with nothing restored.
 		return childPropagate
 
 	default:
@@ -414,32 +415,20 @@ func crashBackoff(n int) time.Duration {
 // post-update child an abnormal exit is treated as "the update is broken"
 // (preserve the rollback binary) rather than an ordinary crash later in
 // life. Generous enough for slow AV-scanned first boots; a child that ran
-// past it has proven the binary starts. So has one that reached the
-// first-successful-boot milestone sooner (updateBootProved).
+// past it has proven the binary starts.
 const postUpdateFailureWindow = 2 * time.Minute
 
-// updatePendingPresent reports whether ApplyUpdate's .update-pending
-// breadcrumb is on disk.
-func updatePendingPresent(exePath string) bool {
-	_, err := os.Stat(exePath + updater.PendingVersionSuffix)
-	return err == nil
-}
-
-// updateBootProved reports whether the first boot of a fresh update reached
-// the first-successful-boot milestone, where run() sweeps .old and then
-// resolves the .update-pending breadcrumb (cmd/moombox/main.go). Past it a
-// Linux install has no rollback artifact left, and an exit inside
-// postUpdateFailureWindow used to end the launcher on preserve-with-
-// instructions where any other boot's crash is respawned. Windows keeps the
-// launcher's ~ image past the sweep and rolled back a release that had
-// started; both now take ordinary crash supervision.
-//
-// Only a breadcrumb that was there when the child was spawned can say so:
-// ApplyUpdate writes it best-effort, so its absence alone proves nothing
-// and a boot that started without one stays unproven until the window
-// ends.
-func updateBootProved(exePath string, pendingAtSpawn bool) bool {
-	return pendingAtSpawn && !updatePendingPresent(exePath)
+// postUpdatePastRollback reports whether the first boot of a fresh update has
+// no rollback artifact left to restore (rollbackArtifactPath). On Linux that
+// is the boot that reached the first-successful-boot milestone, whose
+// CleanupOldBinary swept .old: an exit inside postUpdateFailureWindow then
+// used to end the launcher on preserve-with-instructions — with nothing to
+// preserve — where any other boot's crash is respawned. Windows keeps the
+// launcher's ~ image past that sweep, so a release that crashes soon after
+// starting is still rolled back there while the window lasts.
+func postUpdatePastRollback(exePath string) bool {
+	_, err := os.Stat(rollbackArtifactPath(exePath))
+	return err != nil
 }
 
 // postUpdateVerdict is what the launcher does with a non-zero exit from the
