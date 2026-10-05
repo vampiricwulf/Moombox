@@ -229,6 +229,12 @@ func (s *Service) CookielessFormats(ctx context.Context, videoID string) ([]Form
 // two-phase probe (spec §9): the ANDROID_VR/TV status probes carry no
 // microformat and therefore no dates.
 func (s *Service) ProbeVideoDate(ctx context.Context, videoID string) (publishedAt, precision string, err error) {
+	// Credentialed like ProbeVideoStatusAuthenticated, so it syncs the jar
+	// the same way: a cookies.txt replaced by hand must reach this probe
+	// too, not only the paths that happen to sync first.
+	if err := s.Auth.SyncCookies(); err != nil {
+		s.logger.Warn("[YouTube] SyncCookies failed before date probe", "error", err)
+	}
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()

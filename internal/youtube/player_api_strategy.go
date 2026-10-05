@@ -126,7 +126,14 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		// AFTER the IP-block branch on purpose: a positive substitution
 		// signal is a better diagnosis than plain exhaustion, so Task 3's
 		// verdict keeps its precedence.
-		p.logger.Warn("[PlayerApi] no Innertube client produced a player response",
+		// A cancelled job or a shutdown fails every client with
+		// context.Canceled; that is the operator's own stop, not an
+		// extraction failure worth a warning.
+		logExhausted := p.logger.Warn
+		if errors.Is(tally.lastErr, context.Canceled) {
+			logExhausted = p.logger.Debug
+		}
+		logExhausted("[PlayerApi] no Innertube client produced a player response",
 			"videoID", videoID, "clients", tally.attempts, "lastError", errText(tally.lastErr))
 		if tally.lastErr != nil {
 			// Wrapped, not replaced: probe_classify.go keys on the
@@ -938,7 +945,10 @@ func (p *PlayerAPI) fetchWithClientOpts(ctx context.Context, videoID string, cli
 		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
 
-	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "Innertube", videoID)
+	// The client's own name, not a generic label: this error is what lands in
+	// the job's error column, and "Innertube API error: HTTP 403" could not
+	// say which of the cascade's clients was refused.
+	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, client.ClientName, videoID)
 }
 
 // fetchWithCookielessClient performs a bare player request for the cookieless
