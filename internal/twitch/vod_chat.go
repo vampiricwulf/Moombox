@@ -221,6 +221,20 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 	var cursor string
 	consecutiveErrors := 0
 
+	// A previous run on this instance — the orchestrator re-Starts the same
+	// downloader after a connectivity outage — can have left a batch its last
+	// flush could not write, with the sidecar still at the last good flush.
+	// The resume below restored that sidecar's count, replaced the dedup and
+	// paged again from its offset, so the same comments were buffered a second
+	// time behind the first: 13 records, 7 of them distinct. The run starts
+	// from what the disk holds, as a fresh downloader does, and the batch is
+	// fetched again from the resume offset. The IDs and the count go with it:
+	// kept where no sidecar replaces them, the dropped batch's IDs filtered out
+	// every comment fetched again in its place.
+	vcd.messages = nil
+	vcd.dedup.Restore(nil)
+	vcd.totalCount.Store(0)
+
 	// Try loading resume state. sidecarCounted records that it says the file
 	// holds messages: one that counted none had no history to lose with the
 	// file (the YouTube downloader draws the same line).

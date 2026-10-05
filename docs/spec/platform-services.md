@@ -682,6 +682,8 @@ Similar to IRC, but tracks `lastOffsetSeconds` instead of `lastTimestampMs`:
 
 Both chat downloaders cap their sidecar at the newest 1000 dedup IDs — one constant, `chatResumeIDCap` (`internal/twitch/chat.go`). The IRC path used to snapshot its whole 5000-entry set on every flush (about once a second on a busy channel: a ~200 KB marshal, fsync and rename), for a window an IRC reconnect replay can only overlap by seconds.
 
+A VOD downloader the orchestrator re-Starts on the same instance after a connectivity outage (`startChat`, `internal/worker/orchestrator_twitch.go`) first drops whatever its previous run left in memory — a batch its last flush could not write, the dedup and the count — and resumes from the sidecar and the file exactly as a fresh downloader does, fetching that batch again from the resume offset. Kept, the batch sat ahead of the re-fetched copy of the same comments and both were written (13 records, 7 distinct); and with no sidecar to replace them, the kept IDs filtered out every comment fetched again in the batch's place.
+
 ### Emote Resolution
 
 `EmoteResolver` in `emotes.go` fetches and caches third-party emotes from BTTV, FFZ, and 7TV.

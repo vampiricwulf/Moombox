@@ -359,6 +359,83 @@ func TestAVodSalvageMovesTheSidecarAtOnce(t *testing.T) {
 	}
 }
 
+// TestAVodRestartOfTheSameDownloaderDoesNotDuplicate: the orchestrator
+// re-Starts the same VodChatDownloader after a connectivity outage. A run
+// whose final flush failed kept its batch in memory while the sidecar stayed
+// at the last good flush; the re-Start restored that sidecar's count and
+// dedup, paged again from its offset and buffered the same comments behind
+// the first copy — 13 records, 7 distinct, under a header of 7.
+//
+// Mutant: drop `vcd.messages = nil` at the top of Start — 13 records.
+func TestAVodRestartOfTheSameDownloaderDoesNotDuplicate(t *testing.T) {
+	installOffsetAwareVodCommentStub(t, []vodCommentPageSpec{
+		{count: 3, offset: 100, hasNext: true},
+		{count: 3, offset: 200, hasNext: false},
+	})
+	out := filepath.Join(t.TempDir(), "chat.json")
+	prev := newVodChatForTest(out)
+	prev.dedup.Add("x0")
+	prev.messages = append(prev.messages, TwitchChatMessage{ID: "x0", OffsetMs: 10_000, Message: "hello", MessageType: "chat"})
+	prev.totalCount.Add(1)
+	prev.checkpoint(10)
+
+	real := appendChatMessages
+	t.Cleanup(func() { appendChatMessages = real })
+	appendChatMessages = func(string, []TwitchChatMessage, int, utils.ChatFileLogger) error {
+		return fmt.Errorf("%w: disk full", utils.ErrChatFilePartialWrite)
+	}
+	vcd := newVodChatForTest(out)
+	if err := vcd.Start(context.Background()); err == nil {
+		t.Fatal("precondition: the first run's final flush must fail")
+	}
+	appendChatMessages = real
+	if err := vcd.Start(context.Background()); err != nil { // the relaunch, same instance
+		t.Fatalf("Start again: %v", err)
+	}
+	header, ids := readVodChatIDs(t, out)
+	if len(ids) != 7 || countDistinct(ids) != 7 || header != 7 {
+		t.Errorf("file holds %v (header %d), want x0 and the 6 fetched once each", ids, header)
+	}
+}
+
+// TestAVodRestartWithoutASidecarFetchesTheDroppedBatchAgain: the same
+// relaunch where no flush ever wrote — so no sidecar replaces anything — must
+// not keep the dropped batch's IDs or count: kept, every comment fetched again
+// was filtered as already seen and the file never got any, or the header
+// counted each one twice.
+//
+// Mutants: drop `vcd.dedup.Restore(nil)` at the top of Start — no file is
+// ever written; drop `vcd.totalCount.Store(0)` — header 12 over 6.
+func TestAVodRestartWithoutASidecarFetchesTheDroppedBatchAgain(t *testing.T) {
+	installOffsetAwareVodCommentStub(t, []vodCommentPageSpec{
+		{count: 3, offset: 100, hasNext: true},
+		{count: 3, offset: 200, hasNext: false},
+	})
+	out := filepath.Join(t.TempDir(), "chat.json")
+	// A directory where the chat file belongs: nothing the first run writes
+	// can land, so it ends holding the whole VOD's chat in memory.
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vcd := newVodChatForTest(out)
+	if err := vcd.Start(context.Background()); err == nil {
+		t.Fatal("precondition: the first run's final flush must fail")
+	}
+	if _, err := os.Stat(out + ".resume.json"); !os.IsNotExist(err) {
+		t.Fatalf("precondition: no flush wrote, so no sidecar (stat err %v)", err)
+	}
+	if err := os.Remove(out); err != nil {
+		t.Fatal(err)
+	}
+	if err := vcd.Start(context.Background()); err != nil { // the relaunch, same instance
+		t.Fatalf("Start again: %v", err)
+	}
+	header, ids := readVodChatIDs(t, out)
+	if len(ids) != 6 || countDistinct(ids) != 6 || header != 6 {
+		t.Errorf("file holds %v (header %d), want both pages' 6 comments once", ids, header)
+	}
+}
+
 // TestAVodChatThatFetchesNothingStillRepairsItsFile: the flush salvages a
 // damaged file only when there is something to write. A run whose remaining
 // pages are empty never flushes, so without the repair at Start it finished
