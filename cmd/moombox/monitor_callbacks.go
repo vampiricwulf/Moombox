@@ -12,7 +12,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
@@ -1687,23 +1686,16 @@ func (s *runState) wireMonitorCallbacks() {
 	// UpdateJobFields caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
-		// Follow the job's status for per-job log routing (CORE-12). Ahead
-		// of the archive gate below, which returns early for exactly the
-		// rows that most need it.
+		// Follow the job's status for per-job log routing (CORE-12).
 		s.syncJobLogRoutingOnChange(ev)
-		// Skip broadcasting updates for archived (old finished) jobs — same
-		// classification as the list filter, via the shared
-		// jobfilter.IsArchivedAt predicate so the two can never disagree
-		// about which jobs are archived.
-		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
-			var hideAgeDays float64
-			s.configStore.Read(func(c *config.MoomboxConfig) {
-				hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
-			})
-			if jobfilter.IsArchivedAt(job, hideAgeDays, time.Now()) {
-				return
-			}
-		}
+		// No archive gate. One used to skip broadcasting rows the list
+		// classifies as archived, but every event here comes from
+		// UpdateJobFields, which stamps updated_at with the write time — so it
+		// could only ever fire at hide_finished_age_days = 0, where a row is
+		// archived the second it is written, and there it swallowed the
+		// Muxing → Finished transition itself: the dashboard kept a "Muxing"
+		// card until the next reconnect. The client archives a Finished row
+		// it is sent on its own (_evaluateArchiveBoundary).
 		// A tick that moved only progress columns is broadcast as the slim
 		// job_progress frame; everything else — every state transition,
 		// status included — stays on job_update, which the client handles

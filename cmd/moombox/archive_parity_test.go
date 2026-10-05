@@ -32,7 +32,8 @@ var (
 	}
 )
 
-// The list filter and the job_update broadcast gate are two of the four
+// The list filter and the clocked predicate (jobfilter.IsArchivedAt, which a
+// job_update broadcast gate also used until that gate was removed) are
 // classifiers CORE-8 folded into one predicate. They disagreed below one
 // hour: both computed time.Duration(days*24)*time.Hour, which truncates the
 // float to whole HOURS before multiplying, so a "0.02d" threshold (≈29 min,
@@ -65,7 +66,7 @@ func TestArchiveClassifiersAgree(t *testing.T) {
 		}
 		cutoff := jobfilter.ArchiveCutoff(now, days)
 		for _, j := range jobs {
-			// The WS broadcast gate in monitor_callbacks.go.
+			// The clocked predicate.
 			gate := jobfilter.IsArchivedAt(j, days, now)
 			// The bare predicate, cutoff computed once per sweep.
 			base := days >= 0 && jobfilter.IsArchived(j, cutoff)
