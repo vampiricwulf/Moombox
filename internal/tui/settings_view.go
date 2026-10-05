@@ -492,10 +492,11 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 
 	var lines []string
 
-	// Action bar
-	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
+	// Action bar. The delete prompt replaces the key list rather than
+	// trailing it: the two together are wider than a 60-column box.
+	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete")
 	if m.channelDeleteConf {
-		actionBar += YellowStyle.Render("Press D again to confirm delete")
+		actionBar = YellowStyle.Render("Press D again to confirm delete")
 	}
 	lines = append(lines, actionBar)
 
@@ -542,22 +543,30 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 			nameStyle = nameStyle.Faint(true)
 		}
 
-		idStr := DimStyle.Render(truncateString(ch.ID, 24))
-
-		line := prefix + platStr + " " + nameStyle.Render(truncateString(name, 20)) + " " + idStr
+		// One row per channel, as listWindowStart and the mouse map assume:
+		// the ID gives way first so "(disabled)" stays readable, and the
+		// filter, last, is cut at the box edge.
+		nameStr := truncateString(name, 20)
+		disabledTag := ""
 		if !enabled {
-			line += YellowFaintStyle.Render(" (disabled)")
+			disabledTag = " (disabled)"
+		}
+		// The last -1 keeps the cell the cut's "…" takes when a filter follows.
+		idW := min(24, w-len(prefix)-len("[YT] ")-ansi.StringWidth(nameStr)-1-len(disabledTag)-1)
+
+		line := prefix + platStr + " " + nameStyle.Render(nameStr)
+		if idW >= 6 {
+			line += " " + DimStyle.Render(truncateString(ch.ID, idW))
+		}
+		if disabledTag != "" {
+			line += YellowFaintStyle.Render(disabledTag)
 		}
 		terms := ch.Terms.Simple
 		if terms != "" {
 			line += DimStyle.Render(" filter: " + truncateString(terms, 20))
 		}
 
-		if selected {
-			line = lipgloss.NewStyle().Render(line)
-		}
-
-		lines = append(lines, line)
+		lines = append(lines, ansi.Truncate(line, w, "…"))
 	}
 
 	return strings.Join(lines, "\n")
@@ -639,9 +648,10 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 
 	var lines []string
 
-	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  T: Test  ")
+	// The delete prompt replaces the key list — see the Channels twin.
+	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  T: Test")
 	if m.notifDeleteConf {
-		actionBar += YellowStyle.Render("Press D again to confirm delete")
+		actionBar = YellowStyle.Render("Press D again to confirm delete")
 	}
 	lines = append(lines, actionBar)
 
@@ -663,8 +673,6 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			prefix = "> "
 		}
 
-		urlDisplay := truncateString(n.URL, 50)
-
 		nameStyle := lipgloss.NewStyle()
 		if selected {
 			nameStyle = lipgloss.NewStyle().Foreground(ColorCyan)
@@ -678,12 +686,20 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			filter = fmt.Sprintf(" (%d/%d events)", len(n.Events), len(allNotifEvents))
 		}
 
-		line := prefix + nameStyle.Render(urlDisplay) + DimStyle.Render(filter)
 		// The mute is invisible in a URL list otherwise, and a muted target
-		// looks identical to a broken one.
+		// looks identical to a broken one — so it goes straight after the
+		// URL, where the row's cut at the box edge never reaches it.
+		muted := ""
 		if !n.IsEnabled() {
-			line += YellowStyle.Render(" Muted")
+			muted = " Muted"
 		}
+		urlDisplay := truncateString(n.URL, min(50, max(w-len(prefix)-len(muted)-len(filter)-1, 12)))
+
+		line := prefix + nameStyle.Render(urlDisplay)
+		if muted != "" {
+			line += YellowStyle.Render(muted)
+		}
+		line += DimStyle.Render(filter)
 		if n.Mention != "" {
 			line += DimStyle.Render(" " + n.Mention)
 		}
@@ -693,7 +709,8 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			line += DimStyle.Render(" · one message per job")
 		}
 
-		lines = append(lines, line)
+		// One row per webhook, as listWindowStart and the mouse map assume.
+		lines = append(lines, ansi.Truncate(line, w, "…"))
 	}
 
 	return strings.Join(lines, "\n")
