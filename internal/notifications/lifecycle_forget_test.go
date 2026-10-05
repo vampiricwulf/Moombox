@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -94,5 +95,62 @@ func TestRetainJobsKeepsAListedJobsMessage(t *testing.T) {
 	}
 	if h := historyValue(c.Body); !strings.Contains(h, titleFor("found")) {
 		t.Errorf("History = %q, want it to keep the found line", h)
+	}
+}
+
+// Retiring a target lets its goroutine finish the delivery in flight;
+// re-adding the same webhook — mute then unmute, remove then paste back —
+// built a new queue and sender at once, so two goroutines delivered for one
+// webhook: the job's next event POSTed a second lifecycle message beside the
+// one still being created. The re-added queue now takes the old sender and
+// waits for the old goroutine to exit.
+//
+// Mutant: applyTargets starting the new queue without waiting — 2 POSTs.
+func TestAReAddedWebhookWaitsForItsRetiredDelivery(t *testing.T) {
+	gate := make(chan struct{})
+	var gateOnce sync.Once
+	release := func() { gateOnce.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
+		if n == 0 {
+			<-gate // Discord is slow on the first POST
+		}
+		createdInOrder(n, r, rw)
+	})
+	st := newMemStore()
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	m.applyTargets([]notificationTarget{editTarget(f, nil, ModeEdit)})
+	t.Cleanup(func() {
+		m.targetsMu.RLock()
+		defer m.targetsMu.RUnlock()
+		for _, q := range m.targets {
+			q.stopDiscard()
+		}
+	})
+
+	const job = "tw_123456789"
+	m.Send("Stream Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})
+	if !waitCalls(t, f, 1, 3*time.Second) {
+		t.Fatal("found POST never reached the server")
+	}
+	// Muted, then unmuted while the found POST is still in flight.
+	m.applyTargets(nil)
+	m.applyTargets([]notificationTarget{editTarget(f, nil, ModeEdit)})
+
+	m.Send("Download Starting", "y", TypeDownload, nil, SendOptions{Event: "downloading", JobID: job})
+	time.Sleep(50 * time.Millisecond) // the new queue's chance to jump the gate
+	release()
+	if !waitCalls(t, f, 2, 3*time.Second) {
+		t.Fatal("downloading never reached the server")
+	}
+	posts := 0
+	for _, c := range f.calls() {
+		if c.Method == http.MethodPost {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Errorf("one job got %d lifecycle POSTs on one webhook, want 1", posts)
 	}
 }

@@ -279,6 +279,11 @@ type Manager struct {
 	// byKey indexes targets by resolved webhook URL so Reload can tell a
 	// surviving target from a new one.
 	byKey map[string]*targetQueue
+	// retiring holds, by key, the queues applyTargets retired whose goroutine
+	// may still be finishing an in-flight delivery (a retired queue exits
+	// after its current item). Guarded by targetsMu. A target re-added under
+	// the same key waits on it — see applyTargets.
+	retiring map[string]*targetQueue
 	// publicURL is network.public_url: the dashboard base every job embed's
 	// title links into. Guarded by targetsMu like the targets themselves, and
 	// written BEFORE applyTargets by both NewManager and Reload, so a Send
@@ -690,17 +695,56 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			delete(previous, t.key)
 			continue
 		}
+		// A webhook retired by an earlier reload — muted then unmuted, removed
+		// then pasted back — may still be finishing the delivery in flight when
+		// it was retired (the retry ladder makes that window up to ~75 s). Two
+		// goroutines would then deliver for one webhook at once: a job's PATCH
+		// could overtake the POST that creates its message and open a second
+		// one, and the two senders would learn separate rate buckets. The new
+		// queue takes the old one's sender, and with it the bucket, and starts
+		// draining only once the old goroutine has exited.
+		var predecessor *targetQueue
+		if old := m.retiring[t.key]; old != nil && t.key != "" {
+			predecessor = old
+			t.sender = old.sender
+			delete(m.retiring, t.key)
+		}
 		q := newTargetQueue(t, m.logger, &m.shuttingDown, m.clock)
 		bind(q)
 		next = append(next, q)
 		if t.key != "" {
 			byKey[t.key] = q
 		}
-		go q.run()
+		if predecessor == nil {
+			go q.run()
+		} else {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Error("panic waiting for a retired notification target", "panic", fmt.Sprint(r))
+					}
+				}()
+				<-predecessor.done
+				q.run()
+			}()
+		}
 	}
 	retired := make([]*targetQueue, 0, len(previous))
-	for _, q := range previous {
+	if m.retiring == nil {
+		m.retiring = map[string]*targetQueue{}
+	}
+	for key, q := range m.retiring {
+		select {
+		case <-q.done:
+			delete(m.retiring, key) // finished: nothing left to wait for
+		default:
+		}
+	}
+	for key, q := range previous {
 		retired = append(retired, q)
+		if key != "" {
+			m.retiring[key] = q
+		}
 	}
 	m.targets = next
 	m.byKey = byKey
