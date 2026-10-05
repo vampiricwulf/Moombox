@@ -282,7 +282,21 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// Re-fetch manifest FIRST to determine if quality actually changed.
 			// This must happen before muxing so we can skip the split for same-quality.
-			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+			freshInfo, err := qualityChangeInfo(ctx,
+				func(c context.Context) (*youtube.VideoInfo, error) {
+					return jobCtx.YT.GetVideoInfo(c, jobCtx.Job.VideoID)
+				},
+				func() time.Duration { return time.Since(lastSegTime.Load()) },
+				func(c context.Context, err error) {
+					o.logger.Warn("failed to refresh video info after quality change, retrying",
+						"err", err, "retryIn", streamEndVerifyInterval, "jobID", jobCtx.Job.ID)
+					tracker.SetWaitActivity(engine.ActivityRetrying)
+					utils.Sleep(c, streamEndVerifyInterval)
+				},
+			)
+			if ctx.Err() != nil {
+				return result, waitedForResume.value(), ctx.Err()
+			}
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
 				return result, waitedForResume.value(), fmt.Errorf("refresh after quality change: %w", err)
@@ -657,6 +671,33 @@ streamEnded:
 	}
 
 	return result, waitedForResume.value(), nil
+}
+
+// qualityChangeInfo fetches the player response a quality change is judged
+// against, retrying a failed fetch on the verify branch's cadence. Both
+// downloaders are already stopped when it runs, so a single failure used to end
+// a still-live job in Error over what is usually a transient API fault — while
+// the verify branch's own failed status fetch, a few lines further down the
+// loop, waits and asks again. It gives up on the same clock that branch does:
+// once segments have been quiet for streamSegmentTimeout the error is returned
+// (staging intact, so the job can be resumed). quietFor reads that clock;
+// pause logs and waits before the next attempt.
+func qualityChangeInfo(
+	ctx context.Context,
+	fetch func(context.Context) (*youtube.VideoInfo, error),
+	quietFor func() time.Duration,
+	pause func(context.Context, error),
+) (*youtube.VideoInfo, error) {
+	for {
+		info, err := fetch(ctx)
+		if err == nil || ctx.Err() != nil || quietFor() >= streamSegmentTimeout {
+			return info, err
+		}
+		pause(ctx, err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // refreshDownload re-creates downloaders for an in-progress live stream from

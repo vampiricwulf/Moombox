@@ -492,10 +492,11 @@ The `QualityMonitor` runs alongside a live stream download and detects resolutio
 
 When a quality change is detected and the current segment has been running for at least 10 seconds, the orchestrator:
 1. Cancels current downloaders
-2. Muxes the current segment in a goroutine parented by the orchestrator's mux root (`muxRoot` in `internal/worker/quality_split_common.go`), not `context.Background()`
-3. Records the segment in the `segments` database table
-4. Re-fetches video info and creates new downloaders at the new quality
-5. Updates the monitor baseline to the new quality
+2. Re-fetches video info FIRST, to tell a real change from a transient blip. On YouTube (`qualityChangeInfo` in `internal/worker/orchestrator_youtube.go`) a failed fetch is retried every 5 minutes (`streamEndVerifyInterval`) until segments have been quiet for 10 (`streamSegmentTimeout`) — the verify branch's own clock — and only then ends the job in Error with staging intact; one transient API fault used to do that at once
+3. If the refreshed quality matches, continues in the same staging directory with fresh downloaders — no split
+4. Otherwise muxes the current segment in a goroutine parented by the orchestrator's mux root (`muxRoot` in `internal/worker/quality_split_common.go`), not `context.Background()`, and records it in the `segments` database table
+5. Creates new downloaders at the new quality in the next part's staging directory
+6. Updates the monitor baseline to the new quality
 
 ### JobQueue
 
