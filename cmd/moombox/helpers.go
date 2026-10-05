@@ -148,6 +148,11 @@ func checkAndBroadcastUpdate(
 ) {
 	release, err := upd.CheckForUpdate(ctx)
 	if err != nil {
+		// A check cut short by shutdown is not a failure worth a warning.
+		if ctx.Err() != nil {
+			log.Debug("[Updater] Check cancelled", slog.String("error", err.Error()))
+			return
+		}
 		log.Warn("[Updater] Check failed", slog.String("error", err.Error()))
 		return
 	}
