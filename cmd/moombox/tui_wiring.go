@@ -402,20 +402,20 @@ func (s *runState) runTUI() {
 		// the change gate the Web route applies before calling, so a save
 		// that did not move the threshold still costs nothing.
 		s.broadcastHideFinishedAge()
+		// Everything below reads a Snapshot, NOT updatedCfg: that's the live
+		// *MoomboxConfig pointer, and reading it unlocked would race a
+		// concurrent web PUT /api/config whole-struct store.
+		snap := s.configStore.Snapshot()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
-		if updatedCfg.Logs.LogLevel != "" {
-			s.log.SetLevel(updatedCfg.Logs.LogLevel)
+		if snap.Logs.LogLevel != "" {
+			s.log.SetLevel(snap.Logs.LogLevel)
 		}
-		if updatedCfg.Downloader.NumParallelDownloads > 0 {
-			s.dlWorker.SetParallelDownloads(updatedCfg.Downloader.NumParallelDownloads)
+		if snap.Downloader.NumParallelDownloads > 0 {
+			s.dlWorker.SetParallelDownloads(snap.Downloader.NumParallelDownloads)
 		}
 		// Notification targets hot-reload (mirrors the web route's
 		// OnNotificationsChange). Unconditional — the rebuild is a few URL
-		// parses, cheaper than diffing the section. Snapshot, NOT
-		// updatedCfg: that's the live *MoomboxConfig pointer, and reading
-		// its Notifications slice unlocked would race a concurrent web
-		// PUT /api/config whole-struct store.
-		snap := s.configStore.Snapshot()
+		// parses, cheaper than diffing the section.
 		s.notifyMgr.Reload(snap)
 		// The four read-once settings the web PUT re-applies via
 		// ConfigRoutesCallbacks; applied unconditionally here for the same

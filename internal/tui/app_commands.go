@@ -675,6 +675,11 @@ func Run(app *App) error {
 	p := tea.NewProgram(app, tea.WithFPS(tuiTargetFPS))
 	app.program.Store(p)
 	_, err := p.Run()
+	// A SIGINT delivered from outside (kill -INT) surfaces as ErrInterrupted;
+	// it is a request to quit like any other, not a TUI failure.
+	if errors.Is(err, tea.ErrInterrupted) {
+		return nil
+	}
 	return err
 }
 

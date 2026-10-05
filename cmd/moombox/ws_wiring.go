@@ -41,7 +41,9 @@ func (s *runState) wireWebSocket() {
 					s.log.Error("client token usage update panic", "panic", r)
 				}
 			}()
-			s.db.UpdateClientTokenUsage(ct.ID, ip)
+			if err := s.db.UpdateClientTokenUsage(ct.ID, ip); err != nil {
+				s.log.Debug("client token last-used update failed", "error", err)
+			}
 		}()
 		return true, sessionToken
 	}
@@ -74,7 +76,9 @@ func (s *runState) wireWebSocket() {
 								s.log.Error("client token usage update panic", "panic", r)
 							}
 						}()
-						s.db.UpdateClientTokenUsage(ct.ID, web.EffectiveClientIP(s.configStore, r))
+						if err := s.db.UpdateClientTokenUsage(ct.ID, web.EffectiveClientIP(s.configStore, r)); err != nil {
+							s.log.Debug("client token last-used update failed", "error", err)
+						}
 					}()
 					return true
 				}

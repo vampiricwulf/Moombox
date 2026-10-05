@@ -56,6 +56,40 @@ func TestCLIAddHonoursConfigOnEitherSide(t *testing.T) {
 	}
 }
 
+// TestCLIVersionEqualsTrueSkipsTheLauncher: only the literal -version and
+// --version were answered before the launcher gate, so `-version=true` went
+// through the launcher — taking the single-instance lock (failing while the
+// daemon runs) and spawning a child just to print a line. Run WITHOUT
+// _MOOMBOX_CHILD, the way a user would: a launcher dispatch here would spawn
+// this test binary again rather than print the version.
+//
+// Mutant: move the *showVersion check back below the launcher gate.
+func TestCLIVersionEqualsTrueSkipsTheLauncher(t *testing.T) {
+	if os.Getenv("MOOMBOX_CLI_HELPER") == "1" {
+		os.Args = append([]string{"moombox"}, strings.Fields(os.Getenv("MOOMBOX_CLI_ARGS"))...)
+		main()
+		os.Exit(0)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCLIVersionEqualsTrueSkipsTheLauncher$")
+	cmd.Dir = t.TempDir()
+	env := []string{"MOOMBOX_CLI_HELPER=1", "MOOMBOX_CLI_ARGS=-version=true", "MOOMBOX_NO_TUI=1"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "_MOOMBOX_CHILD=") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("the command did not exit:\n%s", out)
+	}
+	if err != nil || !strings.HasPrefix(string(out), "moombox "+version) {
+		t.Fatalf("exit = %v, output = %q; want the version line and status 0", err, out)
+	}
+}
+
 // TestUsageNamesTheAddSubcommand: -h printed the daemon's flags only, and
 // `add` appeared nowhere until it was run without an argument.
 func TestUsageNamesTheAddSubcommand(t *testing.T) {

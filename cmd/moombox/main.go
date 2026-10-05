@@ -148,6 +148,14 @@ func main() {
 	// process chain buildup across multiple restarts.
 	flag.Parse()
 
+	// The literal -version/--version is answered above without parsing; a
+	// spelled-out -version=true lands here, still ahead of the launcher gate
+	// for the same reason (no instance lock, no child just to print a line).
+	if *showVersion {
+		fmt.Printf("moombox %s (%s)\n", version, commit)
+		return
+	}
+
 	// Subcommands (like `moombox add <url>`) do not need the launcher/child
 	// split — they run briefly in-process and exit. Dispatching them before
 	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
@@ -167,11 +175,6 @@ func main() {
 	if os.Getenv("_MOOMBOX_CHILD") != "1" {
 		launchAndSupervise()
 		return
-	}
-
-	if *showVersion {
-		fmt.Printf("moombox %s (%s)\n", version, commit)
-		os.Exit(0)
 	}
 
 	// TTY detection: only use TUI if both stdin/stdout are terminals
@@ -223,6 +226,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// release.
 	if err := s.initServices(logLevelOverride); err != nil {
 		fmt.Fprintf(os.Stderr, "Startup error: %v\n", err)
+		// Into the log too, when initServices got far enough to open it (a
+		// database or cache-dir failure): otherwise the file ends at
+		// "Starting Moombox" with no cause, and the only trace is a console
+		// that, on Windows, closes on the keypress below.
+		if s.log != nil {
+			s.log.Error("Startup error", slog.String("error", err.Error()))
+			if s.closeLog != nil {
+				s.closeLog()
+			}
+		}
 		waitForKeypress()
 		os.Exit(exitCodeStartupError)
 	}
@@ -548,14 +561,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			if len(content) > 600 {
 				content = content[:600] // markers are ASCII; plain byte cut is safe
 			}
+			details := string(content) + sweptFailedReleaseNote(string(content), exeSelf+failedBinarySuffix)
 			log.Error("previous self-update failure marker present — manual attention needed",
-				slog.String("marker", marker), slog.String("details", string(content)))
+				slog.String("marker", marker), slog.String("details", details))
 			notifyMgr.Send("Previous Update Failed",
 				"A marker from a failed self-update is present — verify the running binary, then delete the marker file",
 				notifications.TypeError,
 				[]notifications.Field{
 					{Name: "Marker", Value: marker},
-					{Name: "Details", Value: string(content)},
+					{Name: "Details", Value: details},
 				},
 				notifications.SendOptions{Event: "update_failed"},
 			)
