@@ -362,7 +362,7 @@ The `DownloadOrchestrator` manages the complete download lifecycle for a single 
 9. Execute download:
    - VOD: `runVodDownloadWithRefresh()` — wraps `runDownloaders()` (one-shot via `errgroup`) in a bounded re-extraction loop for YouTube jobs that finalize behind head (see below)
    - Live: `runLiveStreamDownload()` (loop with stream-end verification and quality monitoring); returns the final `*DownloadResult`, since a quality refresh/split reassigns the downloader pair inside the loop and the caller's original pointer would otherwise go stale
-10. After download completes: finalize progress, sync total sequence counts
+10. After download completes: finalize progress, sync total sequence counts. Both branches write `Muxing` here, ahead of the chat wait, so a restart inside that wait re-muxes from staging (`muxOnRestart`) instead of re-downloading a complete recording — the live branch at `streamEnded`, the VOD branch with its final progress write
 11. Signal chat to finish and wait for it. A live job waits `chatWaitTimeout` (2 minutes) — a live chat stops when the broadcast does. A VOD goes through `resolveVodChatOutcome` in `internal/worker/orchestrator_chat.go`, which releases the download slot FIRST and only then waits `vodChatWaitTimeout`: the video's own length, floored at 30 minutes and capped at 6 hours (owner decision O-A), because a VOD's comment pager is still paging long after the video finished downloading
 12. Release download slot (muxing is CPU-bound, not a download) — already released, and therefore a no-op, for a VOD that came through the chat wait above
 13. Mux and finalize (FFmpeg combines video + audio + metadata, ffprobe extracts dimensions/duration)

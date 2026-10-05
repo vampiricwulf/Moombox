@@ -498,7 +498,16 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// the chat count from then on). Finalize still runs after and
 			// flushes the gaps; Close is idempotent.
 			tracker.Close()
+			// Muxing now, not after the chat wait below — the live branch
+			// writes it before its own wait for the same reason. A VOD's chat
+			// replay can page for hours after the media is complete, and a
+			// restart in that window found the row still Downloading,
+			// re-probed it and downloaded the whole recording again (setting
+			// the complete one aside). As Muxing, enqueueExistingJobs re-muxes
+			// it from staging (muxOnRestart) — or, for an incomplete tail,
+			// still sends it back through the refresh loop.
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"status":   database.StatusMuxing,
 				"progress": progressStr,
 				"percent":  percent,
 			})
