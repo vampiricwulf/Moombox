@@ -119,7 +119,7 @@ var sections = []settingsSection{
 		name: "Network",
 		fields: []fieldDef{
 			{"port", "Port", fieldNumber, nil, "web dashboard port, 1-65535 (requires restart)", nil},
-			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, "who can reach the dashboard (requires restart)", nil},
+			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, "who can reach the dashboard; applies now, but leaving localhost needs a restart to listen on the network", nil},
 			{"https_enabled", "HTTPS enabled", fieldToggle, nil, "serve over HTTPS, needs TLS cert + key (requires restart)", nil},
 			{"tls_cert_path", "TLS cert path", fieldText, nil, "PEM format certificate file (requires restart)", nil},
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
