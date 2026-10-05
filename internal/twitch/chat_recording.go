@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,15 +13,44 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// dumpLostChatBatch writes a boundary batch that writeBatch could not persist to
-// a "<path>.lostbatch.json" sidecar so the messages are recoverable rather than
-// only logged. Best-effort.
-func dumpLostChatBatch(path string, batch any) error {
-	data, err := json.MarshalIndent(batch, "", "  ")
+// dumpLostChatBatch writes a batch that could not be written to the part file
+// at path to a "<path>.lostbatch.json" sidecar, so the messages are
+// recoverable rather than only logged. Best-effort.
+//
+// A spill already there is extended, never replaced: a part resumed after a
+// restart, or one whose roll spilled before its stream-end did, can spill
+// twice, and the second write used to overwrite the first's messages. A file
+// at that name this cannot read as a spill is kept aside under its own
+// timestamped name instead. The result is written beside it and renamed into
+// place, so a failure part-way never costs the spill already on disk.
+func dumpLostChatBatch[T any](path string, batch []T) error {
+	spill := path + ".lostbatch.json"
+	var all []T
+	if data, err := os.ReadFile(spill); err == nil {
+		if jsonErr := json.Unmarshal(data, &all); jsonErr != nil {
+			if err := os.Rename(spill, fmt.Sprintf("%s.%d", spill, time.Now().UnixNano())); err != nil {
+				return err
+			}
+			all = nil
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	all = append(all, batch...)
+	data, err := json.MarshalIndent(all, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path+".lostbatch.json", data, 0o644)
+	tmp := spill + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, spill); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // appendChatMessages is utils.AppendChatMessages for both Twitch writers; a
