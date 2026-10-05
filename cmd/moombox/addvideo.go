@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -87,7 +89,7 @@ func addVideo(input, configPath string) {
 	defer db.Close()
 
 	// Init notification manager for "Video Added" dispatch (matches TS addVideo)
-	notifyMgr := notifications.NewManager(cfg, &nopLogger{})
+	notifyMgr := notifications.NewManager(cfg, cliNotifyLogger(os.Stderr))
 	// `added` is a lifecycle event, and this side process writes it against
 	// the same database the daemon reads — without the store an edit-mode
 	// target would open a message here that the daemon could never edit.
@@ -188,4 +190,13 @@ func addVideo(input, configPath string) {
 	// 500ms sleep with a deterministic flush so we do not lose notifications
 	// when a webhook is slow and do not linger when they are fast.
 	notifyMgr.Wait()
+}
+
+// cliNotifyLogger is the notification manager's logger in `moombox add`: its
+// warnings and errors reach the operator's terminal, and nothing quieter
+// does. The side process has no log of its own, and it used nopLogger, so a
+// webhook that refused the "Job Added" embed — a revoked token, a 400 —
+// failed without a trace anywhere.
+func cliNotifyLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }

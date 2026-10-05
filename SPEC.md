@@ -20,7 +20,7 @@ Deployment is a single binary plus FFmpeg on PATH. First-run triggers a setup wi
 
 The application listens on port 774 by default. Configuration lives in `config.toml` searched in: current directory, `./config/`, `~/.config/moombox/`. The database is SQLite in WAL mode. Output files go to a configurable directory with per-channel subdirectories.
 
-**CLI interface:** `moombox` (run the application), `moombox add <url_or_id>` (add a video/stream to the queue from the command line without starting the full app), `moombox --version` (show version), `moombox --headless` or `--no-tui` (web-only mode without TUI). The `MOOMBOX_NO_TUI=1` environment variable also disables TUI. TTY detection automatically falls back to headless mode when stdin/stdout are not terminals.
+**CLI interface:** `moombox` (run the application), `moombox add <url_or_id>` (add a video/stream to the queue from the command line without starting the full app; it sends the "Job Added" notification itself and prints any delivery warning or error to stderr), `moombox --version` (show version), `moombox --headless` or `--no-tui` (web-only mode without TUI). The `MOOMBOX_NO_TUI=1` environment variable also disables TUI. TTY detection automatically falls back to headless mode when stdin/stdout are not terminals.
 
 **Key dependencies:**
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -167,5 +168,26 @@ func TestATUICancelOfAJobNoRunHoldsIsAnnounced(t *testing.T) {
 	}
 	if got := len(rec.ByEvent("cancelled")); got != 2 {
 		t.Errorf("cancelled notifications = %d, want 2", got)
+	}
+}
+
+// `moombox add` has no log of its own, so the notification manager's warnings
+// and errors go to the operator's terminal — it used nopLogger, and a webhook
+// that refused the embed failed without a trace. Its routine lines stay off
+// the terminal.
+//
+// Mutants: a logger at Info level — the routine line prints; the old
+// nopLogger — the failure does not.
+func TestCLINotifyLoggerShowsFailuresOnly(t *testing.T) {
+	var buf strings.Builder
+	log := cliNotifyLogger(&buf)
+	log.Info("notification delivered", "target", "discord")
+	log.Warn("notification delivery failed", "status", 401)
+	out := buf.String()
+	if !strings.Contains(out, "notification delivery failed") || !strings.Contains(out, "status=401") {
+		t.Errorf("the failure is not on the terminal: %q", out)
+	}
+	if strings.Contains(out, "notification delivered") {
+		t.Errorf("a routine line reached the terminal: %q", out)
 	}
 }

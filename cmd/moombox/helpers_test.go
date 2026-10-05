@@ -439,3 +439,11 @@ func TestLoadConfigWithNoFlagRunsTheSearch(t *testing.T) {
 		}
 	})
 }
+
+// nopLogger is a no-op logger for the tests that need one.
+type nopLogger struct{}
+
+func (n *nopLogger) Debug(_ string, _ ...any) {}
+func (n *nopLogger) Info(_ string, _ ...any)  {}
+func (n *nopLogger) Warn(_ string, _ ...any)  {}
+func (n *nopLogger) Error(_ string, _ ...any) {}

@@ -89,14 +89,6 @@ func resolveOutputDir(ch *config.ChannelConfig, store *config.Store) string {
 	return dir
 }
 
-// nopLogger is a no-op logger for CLI commands where full logging isn't needed.
-type nopLogger struct{}
-
-func (n *nopLogger) Debug(_ string, _ ...any) {}
-func (n *nopLogger) Info(_ string, _ ...any)  {}
-func (n *nopLogger) Warn(_ string, _ ...any)  {}
-func (n *nopLogger) Error(_ string, _ ...any) {}
-
 // loadConfig loads the configuration for the -config flag's value and returns
 // it with the path every later save must target. An empty flagPath runs
 // config.Load's search (cwd, ./config/, ~/.config/moombox/); a named one is
