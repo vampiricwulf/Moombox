@@ -95,7 +95,8 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		case "upcoming", "live":
 			// Job iff FRESH this cycle — never windowed, never M-gated, and
 			// NEVER HasProcessed-gated: history rows exist with no job row
-			// (DECAPI give-up, legacy rows), and gating here would skip the
+			// (a deleted job, rows DECAPI wrote before it stopped recording
+			// skips and give-ups), and gating here would skip the
 			// stream the moment its probe returned live (§10). A stale
 			// upcoming/live row the walk could not probe this cycle
 			// (cooldown, error, cookie gate) waits for the next one.

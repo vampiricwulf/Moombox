@@ -58,12 +58,11 @@ type rateLimitState struct {
 // the endpoint reported, the classification the probe gave it, and — when the
 // sighting ended on the §13 window skip — the window it was judged against.
 //
-// outsideWindow exists because the two ways a terminal sighting can end leave
-// DIFFERENT traces. A skip that writes a history row is picked up on the next
-// cycle by HasProcessed; the window skip writes none (it is not "we have dealt
-// with this video", it is "this video is not in scope"), so for an
-// include_non_live_content channel `reprobe` stays false forever and the memo
-// could never engage. That is the dormant-channel case the memo was built for,
+// outsideWindow exists because no terminal sighting that DECAPI skips leaves a
+// trace in history — history means "a job was created", and only the host
+// writes it — so `reprobe` is true only for a video that was jobbed. For an
+// include_non_live_content channel whose newest VOD is out of the window it
+// stays false forever, and without this the memo could never engage. That is the dormant-channel case the memo was built for,
 // costing two anonymous requests every 15 s: the classifying probe and the §9
 // date fetch.
 //
@@ -103,6 +102,11 @@ type decapiTerminalMemo struct {
 	// probe), which is what this latch relies on as cover — and which needs
 	// monitors.membership_discovery, default on.
 	denied bool
+	// nonLiveOff records that a terminal sighting was skipped because the
+	// channel does not archive VODs. It holds only while that is still so:
+	// the skip used to write a history row, which kept both monitors from
+	// archiving the video after include_non_live_content was turned on.
+	nonLiveOff bool
 }
 
 // decapiTerminalStatus reports whether a classification can no longer change.
@@ -778,16 +782,15 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// 15 s interval floor that is ~240 anonymous player probes/hour/channel
 	// for an answer that cannot change. Skip only when the ID is the one we
 	// classified last, that classification was terminal, AND the reason it
-	// stopped being our business still holds: either history says it was
-	// processed, or it was judged outside this same archive window (see
-	// decapiTerminalMemo — the window skip writes no history row, so on an
-	// include_non_live_content channel that second arm is the only one that
-	// ever engages).
+	// stopped being our business still holds: history says it was jobbed, it
+	// was judged outside this same archive window, or it was skipped because
+	// the channel does not archive VODs and still does not (see
+	// decapiTerminalMemo — no skip writes a history row).
 	//
 	// The HasProcessed read above is deliberately NOT memoized. Clearing an
 	// orphaned history row is the documented way to put a video back in play
 	// (database_extras.go:48-56), and it has to work on the very next cycle.
-	if dm.terminalMemoHit(ch.ID, videoID, reprobe, windowDays) {
+	if dm.terminalMemoHit(ch.ID, videoID, reprobe, windowDays, ch.IncludeNonLiveContent) {
 		dm.logger.Debug("decapi: newest video unchanged and terminal; skipping re-probe",
 			"videoID", videoID, "channel", ch.Name)
 		return nil
@@ -807,16 +810,15 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 
 	// Probe video metadata to classify stream status before creating job
 	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
-		Ctx:          ctx,
-		VideoID:      videoID,
-		Title:        title,
-		Channel:      ch,
-		ProbeVideo:   dm.ProbeVideo,
-		AddToHistory: func(id string) error { return dm.db.AddToHistory(id) },
-		Tracker:      dm.MetadataTracker,
-		Cooldown:     dm.ProbeCooldown,
-		IsReprobe:    reprobe,
-		Logger:       dm.logger,
+		Ctx:        ctx,
+		VideoID:    videoID,
+		Title:      title,
+		Channel:    ch,
+		ProbeVideo: dm.ProbeVideo,
+		Tracker:    dm.MetadataTracker,
+		Cooldown:   dm.ProbeCooldown,
+		IsReprobe:  reprobe,
+		Logger:     dm.logger,
 	})
 	// Record what the probe made of this ID so the next cycle can skip a
 	// classification that cannot change. An errored or cooled-down probe
@@ -825,6 +827,9 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// anonymous prober (deniedIsSettled) — a login_required refusal creates no
 	// job but is deliberately not remembered.
 	dm.recordTerminalMemo(ch.ID, videoID, result.StreamStatus, result.Denied)
+	if !result.ShouldProcess && !ch.IncludeNonLiveContent && decapiTerminalStatus(result.StreamStatus) {
+		dm.noteTerminalMemoNonLiveOff(ch.ID, videoID)
+	}
 	// Window check (§13): "the newest video on the channel" is not the same
 	// as "recent" — on a dormant channel it can be a year old, and jobbing it
 	// is the headline bug through a second door. Vod-family results job only
@@ -903,18 +908,20 @@ func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
 // answer DECAPI cannot change. A different ID — the channel published
 // something new — is a miss, and the fresh probe overwrites the memo.
 //
-// The reason to skip is one of three, and none is redundant:
+// The reason to skip is one of four, and none is redundant:
 //
 //   - a denied verdict: YouTube refused the probe with a settled refusal
 //     (deniedIsSettled — members_only, never login_required). It rides on the
 //     non-terminal status "upcoming", so it is answered before the
 //     terminal-status test.
-//   - reprobe: history says the video was dealt with, read fresh every cycle
-//     so that clearing an orphaned row re-opens it immediately.
+//   - reprobe: history says the video was jobbed, read fresh every cycle so
+//     that clearing an orphaned row re-opens it immediately.
 //   - the memoized window skip, valid only while the window is the one the
 //     skip was judged against — so widening monitors.archive_window_days (or
 //     a channel's override) re-probes once and then settles again.
-func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool, windowDays int) bool {
+//   - the memoized include_non_live_content skip, valid only while the
+//     channel still does not archive VODs — turning it on re-probes once.
+func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool, windowDays int, includeNonLive bool) bool {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	m, ok := dm.terminalMemo[channelID]
@@ -922,8 +929,8 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 		return false
 	}
 	if m.denied {
-		// A settled refusal needs no second reason, and the two arms below
-		// cannot supply one: the status it rides on ("upcoming") is not
+		// A settled refusal needs no second reason, and the arms below cannot
+		// supply one: the status it rides on ("upcoming") is not
 		// terminal, so decapiTerminalStatus returns false before `reprobe` or
 		// the window verdict is ever consulted — for a verdict that is in
 		// fact settled until the channel publishes something new.
@@ -932,7 +939,7 @@ func (dm *DecapiMonitor) terminalMemoHit(channelID, videoID string, reprobe bool
 	if !decapiTerminalStatus(m.status) {
 		return false
 	}
-	return reprobe || (m.outsideWindow && m.windowDays == windowDays)
+	return reprobe || (m.outsideWindow && m.windowDays == windowDays) || (m.nonLiveOff && !includeNonLive)
 }
 
 // recordTerminalMemo stores this cycle's classification for the channel,
@@ -966,6 +973,20 @@ func (dm *DecapiMonitor) noteTerminalMemoOutsideWindow(channelID, videoID string
 	}
 	m.outsideWindow = true
 	m.windowDays = windowDays
+	dm.terminalMemo[channelID] = m
+}
+
+// noteTerminalMemoNonLiveOff records that the memo recordTerminalMemo just
+// wrote for channelID ended on the include_non_live_content skip. Same
+// videoID guard, for the same reason, as noteTerminalMemoOutsideWindow.
+func (dm *DecapiMonitor) noteTerminalMemoNonLiveOff(channelID, videoID string) {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	m, ok := dm.terminalMemo[channelID]
+	if !ok || m.videoID != videoID {
+		return
+	}
+	m.nonLiveOff = true
 	dm.terminalMemo[channelID] = m
 }
 

@@ -312,7 +312,6 @@ func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
 }
 
 func TestProcessYouTubeVideo_NotAStream(t *testing.T) {
-	historyAdded := false
 	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
 		VideoID: "vid123",
 		Title:   "Regular Video",
@@ -320,19 +319,12 @@ func TestProcessYouTubeVideo_NotAStream(t *testing.T) {
 		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{StreamStatus: "not_a_stream"}, nil
 		},
-		AddToHistory: func(id string) error {
-			historyAdded = true
-			return nil
-		},
 		Tracker: NewMetadataFailureTracker(),
 		Logger:  &testMonitorLogger{},
 	})
 
 	if result.ShouldProcess {
 		t.Error("expected ShouldProcess=false for not_a_stream")
-	}
-	if !historyAdded {
-		t.Error("expected video to be added to history")
 	}
 }
 
@@ -442,28 +434,6 @@ func TestProbeAndClassify_Outcomes(t *testing.T) {
 	}))
 	if r.Outcome != OutcomeErrored {
 		t.Fatalf("errored: %+v", r)
-	}
-}
-
-func TestProbeAndClassify_NoHistoryWrites(t *testing.T) {
-	// The split exists because ProcessYouTubeVideo has AddToHistory side effects.
-	// probeAndClassify has NO AddToHistory parameter, which the compiler
-	// enforces — this test pins the DECAPI side instead: ProcessYouTubeVideo
-	// (composed) still writes history on a skipped vod.
-	var histCalls int
-	res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
-		Ctx: context.Background(), VideoID: "v", Channel: &config.ChannelConfig{Name: "c"},
-		ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
-			return &VideoProbeResult{StreamStatus: "vod", Title: "T", PlayabilityError: "ok"}, nil
-		},
-		AddToHistory: func(id string) error { histCalls++; return nil },
-		Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
-	})
-	if res.ShouldProcess {
-		t.Fatal("skipped vod (IncludeNonLiveContent false) must not process")
-	}
-	if histCalls != 1 {
-		t.Fatalf("DECAPI path must keep its history write, got %d calls", histCalls)
 	}
 }
 
@@ -776,9 +746,6 @@ func (silentLogger) Error(msg string, args ...any) {}
 //   - latch every refusal (deniedIsSettled -> always true, or `Denied: true`)
 //     -> the login_required subtest fails: one unlucky cycle would park
 //     DECAPI on a public video until the channel publishes something new.
-//   - write history on the denied arm -> histCalls becomes 1; a refusal is
-//     not "we dealt with this video", and a history row would make the
-//     members-only escalation's later sighting read as a re-probe.
 func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
 	for _, tc := range []struct {
 		playability string
@@ -788,15 +755,13 @@ func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
 		{"login_required", false},
 	} {
 		t.Run(tc.playability, func(t *testing.T) {
-			var histCalls int
 			res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
 				Ctx: context.Background(), VideoID: "v", Title: "T",
 				Channel: &config.ChannelConfig{Name: "c"},
 				ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
 					return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: tc.playability}, nil
 				},
-				AddToHistory: func(id string) error { histCalls++; return nil },
-				Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
+				Tracker: NewMetadataFailureTracker(), Logger: silentLogger{},
 			})
 			if res.ShouldProcess {
 				t.Errorf("ShouldProcess = true for a %s refusal — DECAPI would create an Upcoming job and park it in COOKIES?", tc.playability)
@@ -810,9 +775,6 @@ func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
 			}
 			if res.StreamStatus != "upcoming" {
 				t.Errorf("StreamStatus = %q, want %q — the memo records what the probe said", res.StreamStatus, "upcoming")
-			}
-			if histCalls != 0 {
-				t.Errorf("AddToHistory called %d times — a refusal is not a video we dealt with", histCalls)
 			}
 		})
 	}

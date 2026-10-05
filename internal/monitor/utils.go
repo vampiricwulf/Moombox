@@ -206,16 +206,15 @@ func (cd *ProbeCooldown) evictExcess() {
 
 // ProcessYouTubeVideoParams holds the dependencies for ProcessYouTubeVideo.
 type ProcessYouTubeVideoParams struct {
-	Ctx          context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
-	VideoID      string
-	Title        string
-	Channel      *config.ChannelConfig
-	ProbeVideo   VideoProbeFunc
-	AddToHistory func(videoID string) error
-	Tracker      *MetadataFailureTracker
-	Cooldown     *ProbeCooldown // optional: skips re-probes within the cooldown window
-	IsReprobe    bool           // true if re-checking a previously processed video (logs demoted to Debug)
-	Logger       interface {
+	Ctx        context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
+	VideoID    string
+	Title      string
+	Channel    *config.ChannelConfig
+	ProbeVideo VideoProbeFunc
+	Tracker    *MetadataFailureTracker
+	Cooldown   *ProbeCooldown // optional: skips re-probes within the cooldown window
+	IsReprobe  bool           // true if re-checking a previously processed video (logs demoted to Debug)
+	Logger     interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -321,9 +320,8 @@ const (
 
 // ProbeClassifyParams holds the dependencies for probeAndClassify — the
 // probe+classify core that ProcessYouTubeVideo recomposes. Deliberately a
-// subset of ProcessYouTubeVideoParams: no AddToHistory (probeAndClassify has
-// no history side effects — see ProbeClassifyResult.GaveUp) and no IsReprobe
-// (log-level demotion is a composed-function concern).
+// subset of ProcessYouTubeVideoParams: no IsReprobe (log-level demotion is a
+// composed-function concern).
 type ProbeClassifyParams struct {
 	Ctx        context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
 	VideoID    string
@@ -352,13 +350,6 @@ type ProbeClassifyResult struct {
 	PublishedAt        string
 	PublishedPrecision string
 	PlayabilityError   string
-
-	// GaveUp is meaningful IFF Outcome == OutcomeErrored: true when the
-	// failure tracker just gave up on this video (maxMetadataFailures
-	// reached this call). probeAndClassify takes no AddToHistory parameter
-	// by design (the compiler enforces it) — the composed ProcessYouTubeVideo
-	// uses GaveUp as its cue to run the give-up AddToHistory side effect.
-	GaveUp bool
 }
 
 // probeAndClassify runs one probe of a YouTube video and classifies it into
@@ -398,12 +389,13 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 	if err != nil {
 		count, giveUp := p.Tracker.RecordFailure(p.VideoID)
 		if giveUp {
-			// Give up on this video. AddToHistory (run by the composed
-			// caller when GaveUp is true) does NOT actually stop re-probing —
-			// HasProcessed only flips the reprobe/log-level flag; DECAPI
+			// Give up on this video. Nothing stops re-probing it — DECAPI
 			// still calls ProcessYouTubeVideo and the feed walk still calls
 			// probeAndClassify — so the cooldown is the only rate limiter.
-			// Record the window (giveUp also resets the tracker's escalation
+			// (DECAPI used to write a history row here as well. History is
+			// what the feed's archive gates VODs on, so three transient
+			// failures on a channel's newest VOD kept it from ever being
+			// archived.) Record the window (giveUp also resets the tracker's escalation
 			// to 0), otherwise a broken-but-still-matching video re-probes
 			// every cycle. When the cooldown is disabled the operator has
 			// accepted that per-cycle re-probe (Record is a no-op) — the
@@ -424,7 +416,7 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
 				p.VideoID, count, maxMetadataFailures, err))
 		}
-		return ProbeClassifyResult{Outcome: OutcomeErrored, GaveUp: giveUp}
+		return ProbeClassifyResult{Outcome: OutcomeErrored}
 	}
 
 	// Successful probe: record the (configured) cooldown to limit total
@@ -454,10 +446,15 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 // or false if it was skipped (non-stream, ended stream, or probe failure).
 //
 // Recomposed on top of probeAndClassify: this function owns the passthrough
-// (no ProbeVideo configured), the AddToHistory side effects, and the
-// IsReprobe log-level demotion — probeAndClassify owns none of those. Its
-// observable behavior for the DECAPI caller (decapi.go) is unchanged by the
-// split; see utils_test.go for the pinning tests.
+// (no ProbeVideo configured) and the IsReprobe log-level demotion —
+// probeAndClassify owns neither. See utils_test.go for the pinning tests.
+//
+// It writes NO history. History means "a job was created" (the host writes
+// it at creation, monitor_callbacks.go), and both monitors' archive steps
+// gate VODs on it, so a row for a video we only skipped or failed to probe
+// kept that VOD from ever being archived — by the feed after three
+// transient probe failures here, and by both monitors after a skip while
+// include_non_live_content was off, even once it was turned on.
 func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult {
 	includeNonLive := p.Channel.IncludeNonLiveContent
 
@@ -481,9 +478,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 
 	case OutcomeErrored:
-		if cr.GaveUp && p.AddToHistory != nil {
-			p.AddToHistory(p.VideoID)
-		}
 		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 
 	case OutcomeDenied:
@@ -493,11 +487,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		// launders the 2.7.2 misfire into a broadcast job — an Upcoming row,
 		// a "Stream Found" notification, and then a COOKIES? park the config
 		// never asked for.
-		//
-		// NO AddToHistory. A refusal is not "we dealt with this video": the
-		// members-only escalation lives on the FEED path, which owns the
-		// authenticated answer, and a history row here would make its later
-		// sighting read as a re-probe.
 		//
 		// The cost of routing login_required away is that a channel under
 		// sustained anti-bot pushback gets its upcoming streams from the feed
@@ -536,9 +525,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	case "not_a_stream":
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping non-stream content (%s): %s (%s)", reason, p.Title, p.VideoID))
-			if p.AddToHistory != nil {
-				p.AddToHistory(p.VideoID)
-			}
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including non-stream content (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
@@ -553,9 +539,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	case "post_live", "vod":
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s, %s): %s (%s)", cr.StreamStatus, reason, p.Title, p.VideoID))
-			if p.AddToHistory != nil {
-				p.AddToHistory(p.VideoID)
-			}
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including ended stream (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))

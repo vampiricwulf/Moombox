@@ -940,7 +940,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/history/orphaned` | List processing-history rows with no matching job (job deleted, or the video was skipped and never jobbed). While the row remains, the monitor treats the video as already-processed and won't re-discover it. Keyed by job ID, so the match is against `jobs.id`. |
+| `GET` | `/api/history/orphaned` | List processing-history rows with no matching job (the job was deleted, or a row DECAPI wrote for a video it skipped or gave up on, before it stopped recording those). While the row remains, the monitor treats the video as already-processed and won't re-discover it. Keyed by job ID, so the match is against `jobs.id`. |
 | `DELETE` | `/api/history/orphaned` | Remove the given history video IDs (JSON body `{"videoIds":[...]}`), unblocking re-discovery. |
 
 ### Updates
