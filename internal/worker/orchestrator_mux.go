@@ -285,9 +285,16 @@ type asideGroup struct {
 // dir, timestamp), classifying each file by the stem the engine stamped —
 // the same names discoverStagingMedia recognises. Input order is preserved,
 // so groups come back oldest recording first.
+//
+// The two halves of one DASH restart are stamped by two SegmentDownloaders,
+// each reading the clock itself, so a restart that straddles a second
+// boundary stamps them a second apart. Grouping by the exact stamp alone made
+// that one recording two single-stream siblings; pairStraddledHalves rejoins
+// them.
 func groupStagedAsides(asides []string) []asideGroup {
 	var order []string
 	byKey := map[string]*asideGroup{}
+	dirOf := map[string]string{}
 	for _, p := range asides {
 		base := filepath.Base(p)
 		i := strings.LastIndex(base, engine.StagedRestartSuffix)
@@ -300,6 +307,7 @@ func groupStagedAsides(asides []string) []asideGroup {
 		if g == nil {
 			g = &asideGroup{stamp: stamp}
 			byKey[key] = g
+			dirOf[key] = filepath.Dir(p)
 			order = append(order, key)
 		}
 		g.files = append(g.files, p)
@@ -310,8 +318,49 @@ func groupStagedAsides(asides []string) []asideGroup {
 		}
 	}
 	out := make([]asideGroup, 0, len(order))
+	dirs := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, *byKey[k])
+		dirs = append(dirs, dirOf[k])
+	}
+	return pairStraddledHalves(out, dirs)
+}
+
+// pairStraddledHalves merges a video-only group into the audio-only group of
+// the same staging dir stamped one second either side of it — one DASH
+// restart whose two downloaders read the clock on either side of a second
+// boundary. Two separate restarts are never a second apart (each is a full
+// downloader restart), so the pairing cannot join two recordings. The merged
+// group keeps the video half's stamp and position. dirs[i] is groups[i]'s dir.
+func pairStraddledHalves(groups []asideGroup, dirs []string) []asideGroup {
+	used := make([]bool, len(groups))
+	for i := range groups {
+		if used[i] || groups[i].video == "" || groups[i].audio != "" {
+			continue
+		}
+		vs, err := strconv.ParseInt(groups[i].stamp, 10, 64)
+		if err != nil {
+			continue
+		}
+		for j := range groups {
+			if j == i || used[j] || dirs[j] != dirs[i] || groups[j].audio == "" || groups[j].video != "" {
+				continue
+			}
+			as, err := strconv.ParseInt(groups[j].stamp, 10, 64)
+			if err != nil || (as-vs != 1 && vs-as != 1) {
+				continue
+			}
+			groups[i].audio = groups[j].audio
+			groups[i].files = append(groups[i].files, groups[j].files...)
+			used[j] = true
+			break
+		}
+	}
+	out := groups[:0]
+	for i, g := range groups {
+		if !used[i] {
+			out = append(out, g)
+		}
 	}
 	return out
 }
