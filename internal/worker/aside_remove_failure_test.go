@@ -60,3 +60,38 @@ func TestARecoveredAsideThatCannotBeRemovedIsNotMuxedTwice(t *testing.T) {
 		t.Error("the aside or its marker survived a pass after the handle was released")
 	}
 }
+
+// The marker used to be written only after a FAILED removal, so a process
+// killed between the verified copy and the removal left an unmarked aside,
+// and the next recovery muxed it again to "-2". The marker is on disk before
+// the removal is attempted now, and gone once the removal succeeds.
+//
+// Mutant: writing the marker only when the removal fails — the stub sees no
+// marker at the moment of removal.
+func TestTheRecoveredMarkerIsWrittenBeforeTheAsideIsRemoved(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	staging, outputDir := muxFixtureJob(t, w, db, "j-aside-order")
+	aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
+	writeAsideFixture(t, ffmpegPath, aside, 3)
+
+	markedAtRemoval := false
+	removeAsideFile = func(p string) error {
+		if p == aside {
+			markedAtRemoval = fileExists(p + asideRecoveredMarker)
+		}
+		return os.Remove(p)
+	}
+	t.Cleanup(func() { removeAsideFile = os.Remove })
+
+	job, _ := db.GetJob("j-aside-order")
+	if got := w.orchestrator.muxStagedAsides(t.Context(), w.buildJobContext(job), outputDir, "archive"); len(got) != 1 {
+		t.Fatalf("recovered %v, want one sibling", got)
+	}
+	if !markedAtRemoval {
+		t.Error("the aside was removed before it was marked recovered — a crash in between re-muxes it to -2")
+	}
+	if fileExists(aside) || fileExists(aside+asideRecoveredMarker) {
+		t.Error("the aside or its marker survived a successful removal")
+	}
+}

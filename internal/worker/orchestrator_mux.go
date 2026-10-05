@@ -584,20 +584,26 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
 		recovered = append(recovered, out)
 		for _, p := range g.files {
+			// Marked BEFORE the removal: an aside left as it was — its
+			// removal failed (a Windows handle), or the process died between
+			// the verified copy and the removal — was found again by the next
+			// finalize or recovery and muxed a second time, to "-2". The
+			// marker takes it out of every aside scan, and
+			// removeRecoveredAsides finishes the removal on a later pass.
+			if mErr := os.WriteFile(p+asideRecoveredMarker, []byte(out), 0o644); mErr != nil {
+				o.logger.Warn("could not mark a recovered set-aside recording before removing it",
+					"aside", p, "err", mErr, "jobID", jobCtx.Job.ID)
+			}
 			if err := removeAsideFile(p); err != nil {
-				// Left as it was, the next finalize or recovery found the
-				// aside again and muxed it a second time, to "-2". The marker
-				// takes it out of every aside scan; removeRecoveredAsides
-				// retries the removal on the next pass.
-				o.logger.Warn("could not remove a recovered set-aside recording; marking it recovered", "aside", p, "err", err, "jobID", jobCtx.Job.ID)
-				if mErr := os.WriteFile(p+asideRecoveredMarker, []byte(out), 0o644); mErr != nil {
-					o.logger.Warn("could not mark the set-aside recording recovered either; the next recovery muxes it again",
-						"aside", p, "err", mErr, "jobID", jobCtx.Job.ID)
-				}
+				o.logger.Warn("could not remove a recovered set-aside recording; its marker keeps it from being recovered again",
+					"aside", p, "err", err, "jobID", jobCtx.Job.ID)
 				continue
 			}
 			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
 				o.logger.Warn("could not remove a recovered aside's resume sidecar", "sidecar", engine.StagedRestartSidecar(p), "err", err, "jobID", jobCtx.Job.ID)
+			}
+			if err := os.Remove(p + asideRecoveredMarker); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("could not remove a recovered aside's marker", "marker", p+asideRecoveredMarker, "err", err, "jobID", jobCtx.Job.ID)
 			}
 		}
 	}
@@ -605,8 +611,10 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 }
 
 // asideRecoveredMarker, appended to an aside's path, names the file written
-// beside an aside whose recovery succeeded but whose removal failed (a
-// Windows handle on it). It holds the sibling the aside was recovered to.
+// beside an aside once its recovery is verified, just before the aside is
+// removed; it outlives the aside only when the removal fails (a Windows
+// handle on it) or the process dies in between. It holds the sibling the
+// aside was recovered to.
 const asideRecoveredMarker = ".recovered"
 
 // removeAsideFile is os.Remove, a variable so a test can make an aside's
