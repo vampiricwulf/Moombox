@@ -681,6 +681,14 @@ func announcesJobFound(d monitor.JobDisposition) bool {
 	return d != monitor.DispositionBacklogVOD
 }
 
+// announceYouTubeJobFound is createYouTubeJob's "Stream Found" for the job it
+// just created, held back for a disposition announcesJobFound excludes.
+func announceYouTubeJobFound(n notifications.Notifier, job *database.Job, d monitor.JobDisposition) {
+	if announcesJobFound(d) && n.HasTargets() {
+		notifyStreamFound(n, job, "", "")
+	}
+}
+
 // authFailureNotifier is wireMonitorCallbacks' cooldown-guarded notification
 // sender. Threaded into runCookieRecovery as a parameter rather than reached
 // through runState, both because the cooldown map is a local of the wiring
@@ -1521,9 +1529,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// AddJob's OnJobAdded handler (wired below) handles the WS
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
-		if announcesJobFound(d) && s.notifyMgr.HasTargets() {
-			notifyStreamFound(s.notifyMgr, job, "", "")
-		}
+		announceYouTubeJobFound(s.notifyMgr, job, d)
 	}
 
 	// Monitor -> Worker: create jobs for found videos. Panic recovery
