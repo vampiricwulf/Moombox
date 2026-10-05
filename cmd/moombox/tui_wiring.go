@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -414,9 +415,7 @@ func (s *runState) runTUI() {
 		// concurrent web PUT /api/config whole-struct store.
 		snap := s.configStore.Snapshot()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
-		if snap.Logs.LogLevel != "" {
-			s.log.SetLevel(snap.Logs.LogLevel)
-		}
+		s.applyConfiguredLogLevel(snap.Logs.LogLevel)
 		if snap.Downloader.NumParallelDownloads > 0 {
 			s.dlWorker.SetParallelDownloads(snap.Downloader.NumParallelDownloads)
 		}
@@ -1163,6 +1162,25 @@ func (s *runState) runTUI() {
 	}
 	if n := tuiDroppedLogs.Load(); n > 0 {
 		s.log.Warn("TUI dropped log messages", slog.Int64("count", n))
+	}
+}
+
+// applyConfiguredLogLevel puts the running logger on a saved logs.log_level —
+// but only when that CONFIGURED level changed since it was last applied. A
+// -log-level override is a one-off diagnostic the logger alone carries; an
+// explicit level choice ends it, a save of some other setting must not. Both
+// save paths call this: the web PUT on its own change gate, the TUI save on
+// every save (it has no pre-mutation snapshot to diff against).
+func (s *runState) applyConfiguredLogLevel(level string) {
+	if level == "" {
+		return
+	}
+	s.configuredLogLevelMu.Lock()
+	changed := !strings.EqualFold(level, s.configuredLogLevel)
+	s.configuredLogLevel = level
+	s.configuredLogLevelMu.Unlock()
+	if changed {
+		s.log.SetLevel(level)
 	}
 }
 

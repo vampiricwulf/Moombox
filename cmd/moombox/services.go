@@ -474,17 +474,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// and every later UI save write the override to disk, so a single
 	// `-log-level=debug` run permanently changed the configured level, and
 	// the operator's only clue was a level that never went back (CORE-10).
-	// A later TUI settings save legitimately re-applies the CONFIGURED level
-	// via Logger.SetLevel and so drops the override — that is the operator
-	// having chosen a level explicitly. The Web PUT only does so when the
-	// level itself changed (config_routes.go gates OnLogLevelChange on
-	// newLogLevel != oldLogLevel), so an unrelated web save leaves the
-	// running logger on the override for the rest of the session.
+	// A later save from either UI re-applies the CONFIGURED level only when
+	// that level changed (applyConfiguredLogLevel) — the operator choosing a
+	// level explicitly, which drops the override; an unrelated save leaves
+	// the running logger on the override for the rest of the session. (The
+	// TUI save used to re-apply it on every save, so saving any setting from
+	// the terminal silently ended a -log-level=debug session.)
 	log, err := logger.New(cfg.Paths.LogFilePath, effectiveLogLevel(cfg.Logs.LogLevel, logLevelOverride), cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
 	s.log = log
+	s.configuredLogLevel = cfg.Logs.LogLevel
 	// Close the logger at most once — the deferred close at the bottom of
 	// run() AND the force-exit timer both need to flush buffered lines on
 	// exit, and logger.Close is not guaranteed idempotent at this layer.

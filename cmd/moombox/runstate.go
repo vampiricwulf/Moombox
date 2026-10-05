@@ -155,6 +155,11 @@ type runState struct {
 	tuiDiskStatusCh   chan tui.DiskStatusMsg
 	tuiBackfillCh     chan tui.BackfillStatusMsg
 
+	// configuredLogLevel is the logs.log_level the running logger last had
+	// applied from config (see applyConfiguredLogLevel); guarded by its mutex.
+	configuredLogLevelMu sync.Mutex
+	configuredLogLevel   string
+
 	// diskRecheck asks the periodic loop for a disk reading now (see
 	// requestDiskRecheck). Buffered 1: requests coalesce.
 	diskRecheck chan struct{}

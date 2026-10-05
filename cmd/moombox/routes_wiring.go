@@ -72,9 +72,7 @@ func (s *runState) wireRoutes() func() {
 		},
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
-		OnLogLevelChange: func(level string) {
-			s.log.SetLevel(level)
-		},
+		OnLogLevelChange: s.applyConfiguredLogLevel,
 		OnMaxParallelChange: func(n int) {
 			s.dlWorker.SetParallelDownloads(n)
 		},
