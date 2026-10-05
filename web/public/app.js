@@ -2790,6 +2790,13 @@ export class MoomboxApp {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
     if (!await this.showConfirm("Are you sure you want to cancel this job?", { okLabel: "Cancel Job", okVariant: "danger" })) return;
+    // Re-read after the confirm (see batchAction): a row this tab holds that
+    // left the cancellable states meanwhile is not cancelled.
+    const nowCancel = this._currentJob(id);
+    if (nowCancel && !CANCEL_STATUSES.has(nowCancel.status)) {
+      this.showToast(`Not cancelled — the job is ${nowCancel.status} now`, "warning");
+      return;
+    }
 
     this._jobActionsInFlight.add(id);
     try {
@@ -2939,6 +2946,14 @@ export class MoomboxApp {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
     if (!await this.showConfirm("Are you sure you want to delete this job?", { okLabel: "Delete", okVariant: "danger" })) return;
+    // Re-read after the confirm (see batchAction): the DELETE route cancels a
+    // running download before removing it, and a job retried while the dialog
+    // was open must not be pulled out from under its worker.
+    const nowDelete = this._currentJob(id);
+    if (nowDelete && !DELETE_STATUSES.has(nowDelete.status)) {
+      this.showToast(`Not deleted — the job is ${nowDelete.status} now`, "warning");
+      return;
+    }
 
     this._jobActionsInFlight.add(id);
     try {
@@ -3709,6 +3724,13 @@ export class MoomboxApp {
     }
   }
 
+  // _currentJob is the row this tab holds for id now — the active list, then
+  // the archived one — for actions that must re-read a status after a confirm
+  // the operator may have left open.
+  _currentJob(id) {
+    return this.jobs.find(j => j.id === id) || this.archivedJobs.find(j => j.id === id);
+  }
+
   async batchAction(action) {
     const selectedJobs = this._getSelectedJobs();
     // Strip jobs already being acted on (single-click cancel/resume/etc.
@@ -3717,31 +3739,36 @@ export class MoomboxApp {
     const eligibleJobs = isPerJob
       ? selectedJobs.filter(j => !this._jobActionsInFlight.has(j.id))
       : selectedJobs;
-    let targets, confirmMsg, apiCall;
+    let targets, confirmMsg, apiCall, qualifies;
 
     switch (action) {
       case "cancel":
-        targets = eligibleJobs.filter(j => CANCEL_STATUSES.has(j.status));
+        qualifies = j => CANCEL_STATUSES.has(j.status);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Cancel ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
         break;
       case "resume":
-        targets = eligibleJobs.filter(j => canResumeJob(j));
+        qualifies = j => canResumeJob(j);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Resume ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/resume`, { method: "POST" });
         break;
       case "reinitialize":
-        targets = eligibleJobs.filter(j => REINIT_STATUSES.has(j.status));
+        qualifies = j => REINIT_STATUSES.has(j.status);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Reinitialize ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/reinitialize`, { method: "POST" });
         break;
       case "delete":
-        targets = eligibleJobs.filter(j => DELETE_STATUSES.has(j.status));
+        qualifies = j => DELETE_STATUSES.has(j.status);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Delete ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
         break;
       case "watched":
-        targets = selectedJobs.filter(j => j.status === "Finished" && !j.watched);
+        qualifies = j => j.status === "Finished" && !j.watched;
+        targets = selectedJobs.filter(qualifies);
         confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as watched?`;
         apiCall = () => fetch("/api/jobs/batch/watched", {
           method: "POST",
@@ -3750,7 +3777,8 @@ export class MoomboxApp {
         });
         break;
       case "unwatched":
-        targets = selectedJobs.filter(j => j.status === "Finished" && (j.watched || j.resumePosition != null));
+        qualifies = j => j.status === "Finished" && (j.watched || j.resumePosition != null);
+        targets = selectedJobs.filter(qualifies);
         confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as unwatched?`;
         apiCall = () => fetch("/api/jobs/batch/watched", {
           method: "DELETE",
@@ -3768,6 +3796,18 @@ export class MoomboxApp {
       okVariant: action === "delete" ? "danger" : action === "cancel" ? "warning" : "primary"
     });
     if (!confirmed) return;
+
+    // The dialog waits on the operator, and rows move meanwhile — an Error
+    // job a monitor retried is Downloading by the time OK is clicked, and the
+    // DELETE route cancels a running download before removing it. Act only on
+    // what still qualifies now, as the TUI re-validates at its confirm.
+    const offered = targets.length;
+    targets = targets.map(j => this._currentJob(j.id)).filter(j => j && qualifies(j));
+    if (targets.length < offered) {
+      const moved = offered - targets.length;
+      this.showToast(`${moved} job${moved !== 1 ? "s" : ""} changed state while you confirmed and ${moved !== 1 ? "were" : "was"} skipped`, "warning");
+    }
+    if (targets.length === 0) return;
 
     let succeeded, failed;
     if (action === "watched" || action === "unwatched") {

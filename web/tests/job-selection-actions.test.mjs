@@ -54,3 +54,53 @@ test("an Archived filter drops the selection it hides", async () => {
   h.app.renderArchivedJobs();
   assert.equal(h.app._selectedArchivedJobs.size, 0, "the hidden archived job is still selected");
 });
+
+// The confirm waits on the operator, and a row can move meanwhile: an Error
+// job the monitor retries is Downloading by the time OK is clicked, and the
+// DELETE route cancels a running download before removing it. Every action
+// re-reads the row after its confirm and acts only on what still qualifies.
+//
+// Mutants: batchAction's post-confirm re-filter removed; deleteJob's or
+// cancelJob's post-confirm status check removed.
+test("a batch delete skips a job that started downloading while the confirm was open", async () => {
+  const h = await boot({ "DELETE /api/jobs/:id": () => ({ success: true }) });
+  const err = fin({ id: "err-1", videoId: "e1", status: "Error" });
+  h.app.jobs = [err, live()];
+  h.app.renderJobs();
+  h.app._selectedTaskJobs.add("err-1");
+  h.app.showConfirm = async () => {
+    h.app.handleMessage({ type: "job_update", payload: { ...err, status: "Downloading" } });
+    return true;
+  };
+  await h.app.batchAction("delete");
+  await h.flush();
+  assert.deepEqual(h.fetchLog.filter((c) => c.method === "DELETE").map((c) => c.url), []);
+});
+
+test("a single delete does not reach a job that started downloading while the confirm was open", async () => {
+  const h = await boot({ "DELETE /api/jobs/:id": () => ({ success: true }) });
+  const err = fin({ id: "err-1", videoId: "e1", status: "Error" });
+  h.app.jobs = [err];
+  h.app.renderJobs();
+  h.app.showConfirm = async () => {
+    h.app.handleMessage({ type: "job_update", payload: { ...err, status: "Downloading" } });
+    return true;
+  };
+  await h.app.deleteJob("err-1");
+  await h.flush();
+  assert.deepEqual(h.fetchLog.filter((c) => c.method === "DELETE").map((c) => c.url), []);
+});
+
+test("a single cancel does not reach a job that finished while the confirm was open", async () => {
+  const h = await boot({ "POST /api/jobs/:id/cancel": () => ({ success: true }) });
+  const dl = live({ id: "dl-1", videoId: "d1", status: "Downloading" });
+  h.app.jobs = [dl];
+  h.app.renderJobs();
+  h.app.showConfirm = async () => {
+    h.app.handleMessage({ type: "job_update", payload: { ...dl, status: "Finished" } });
+    return true;
+  };
+  await h.app.cancelJob("dl-1");
+  await h.flush();
+  assert.deepEqual(h.fetchLog.filter((c) => c.url.endsWith("/cancel")).map((c) => c.url), []);
+});
