@@ -224,6 +224,109 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// into part 1's already-muxed staging files.
 	curCtx := curStart
 
+	// splitPart closes the current part where the stream changed quality and
+	// opens the next in a fresh seg_N directory, continuing from the old
+	// downloaders' next sequences (oldVideoSeq/oldAudioSeq). It is the one
+	// split both paths that can discover a new quality take: a quality change
+	// (monitor or ErrQualityLost) and a still-live stall refresh. exit reports
+	// that the loop must return result with err; otherwise the new part's
+	// downloaders are in result and the loop continues.
+	splitPart := func(newQuality QualityInfo, freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int, shortSegment bool, segmentEndTime int64) (exit bool, err error) {
+		o.logger.Info("quality split",
+			"from", currentQuality.Label, "to", newQuality.Label,
+			"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
+
+		o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
+
+		// Mux the old segment in the background (unless too short).
+		// No preMux: YouTube chat stays a single whole-job file.
+		if !shortSegment {
+			// A resumed part's true start pre-dates this session — pass
+			// the sentinel so muxSegment derives it from the muxed
+			// duration instead of stamping it with the restart time.
+			muxStart := segmentStartTime
+			if partResumed {
+				muxStart = 0
+			}
+			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+				muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
+			segmentIndex++
+		} else {
+			o.logger.Debug("skipping short segment mux",
+				"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
+				"jobID", jobCtx.Job.ID)
+		}
+
+		// Create downloaders in the NEW staging dir. The caller's refresh points
+		// at the old staging dir and was used only to check quality — it is
+		// discarded unrun.
+		segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
+		if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+			return true, fmt.Errorf("create segment staging dir: %w", err)
+		}
+		if shortSegment && segStagingDir == curCtx.StagingDir {
+			// Short-span discard reusing the same index/dir: physically
+			// remove the span's media and resume sidecars, or the engine
+			// would resume-append the NEW quality onto the discarded
+			// old-quality data — a mixed-codec file under a stale init
+			// segment. Mirrors the Twitch discard in advanceToNewPart.
+			// video.ts is the YouTube HLS strategy's staging name;
+			// video_stream/audio_stream are the DASH family's.
+			for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
+				p := filepath.Join(segStagingDir, name)
+				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+					o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
+				}
+				if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
+					o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
+				}
+			}
+		}
+
+		segJobCtx := *jobCtx
+		segJobCtx.StagingDir = segStagingDir
+		segJobCtx.VideoStartSeq = oldVideoSeq
+		segJobCtx.AudioStartSeq = oldAudioSeq
+
+		refreshResult, refreshErr := o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
+
+		if refreshErr != nil {
+			o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+			// Return nil to exit the live loop; muxAndFinalize will process
+			// whatever video/audio data was captured in the current staging dir.
+			return true, nil
+		}
+
+		// The new segment's staging dir is now the current one for all
+		// future refreshes. Clear the seqs — they were only for this
+		// downloader creation, and a later still-live refresh must not
+		// inherit them as a forced start position.
+		segJobCtx.VideoStartSeq = 0
+		segJobCtx.AudioStartSeq = 0
+		curCtx = &segJobCtx
+
+		currentQuality = newQuality
+		result = refreshResult
+		// See the identical clear + comment at the loop's same-quality
+		// success path — a successful refresh resolves any earlier
+		// wait-for-resume.
+		waitedForResume.resolved()
+		waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+		segmentStartTime = time.Now().Unix()
+		partResumed = false // the next span is watched from birth
+
+		if monitor != nil {
+			select {
+			case <-qualityChangeCh:
+			default:
+			}
+			monitor.UpdateBaseline(currentQuality)
+		}
+
+		attachProgress(result)
+		return false, nil
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return result, waitedForResume.value(), ctx.Err()
@@ -437,97 +540,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			// Quality actually changed — split into a new segment.
-			o.logger.Info("quality split",
-				"from", currentQuality.Label, "to", newQuality.Label,
-				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
-
-			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
-
-			// Mux the old segment in the background (unless too short).
-			// No preMux: YouTube chat stays a single whole-job file.
-			if !shortSegment {
-				// A resumed part's true start pre-dates this session — pass
-				// the sentinel so muxSegment derives it from the muxed
-				// duration instead of stamping it with the restart time.
-				muxStart := segmentStartTime
-				if partResumed {
-					muxStart = 0
-				}
-				o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
-					muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
-				segmentIndex++
-			} else {
-				o.logger.Debug("skipping short segment mux",
-					"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
-					"jobID", jobCtx.Job.ID)
+			if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, segmentEndTime); exit {
+				return result, waitedForResume.value(), err
 			}
-
-			// Create downloaders in the NEW staging dir. The refreshResult created above points
-			// to the old staging dir and was used only to check quality — discard it.
-			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
-			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
-				return result, waitedForResume.value(), fmt.Errorf("create segment staging dir: %w", err)
-			}
-			if shortSegment && segStagingDir == curCtx.StagingDir {
-				// Short-span discard reusing the same index/dir: physically
-				// remove the span's media and resume sidecars, or the engine
-				// would resume-append the NEW quality onto the discarded
-				// old-quality data — a mixed-codec file under a stale init
-				// segment. Mirrors the Twitch discard in advanceToNewPart.
-				// video.ts is the YouTube HLS strategy's staging name;
-				// video_stream/audio_stream are the DASH family's.
-				for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
-					p := filepath.Join(segStagingDir, name)
-					if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-						o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
-					}
-					if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
-						o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
-					}
-				}
-			}
-
-			segJobCtx := *jobCtx
-			segJobCtx.StagingDir = segStagingDir
-			segJobCtx.VideoStartSeq = oldVideoSeq
-			segJobCtx.AudioStartSeq = oldAudioSeq
-
-			refreshResult, refreshErr = o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
-
-			if refreshErr != nil {
-				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				// Return nil to exit the live loop; muxAndFinalize will process
-				// whatever video/audio data was captured in the current staging dir.
-				return result, waitedForResume.value(), nil
-			}
-
-			// The new segment's staging dir is now the current one for all
-			// future refreshes. Clear the seqs — they were only for this
-			// downloader creation, and a later still-live refresh must not
-			// inherit them as a forced start position.
-			segJobCtx.VideoStartSeq = 0
-			segJobCtx.AudioStartSeq = 0
-			curCtx = &segJobCtx
-
-			currentQuality = newQuality
-			result = refreshResult
-			// See the identical clear + comment at the same-quality
-			// success path above — a successful refresh resolves any
-			// earlier wait-for-resume.
-			waitedForResume.resolved()
-			waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
-			segmentStartTime = time.Now().Unix()
-			partResumed = false // the next span is watched from birth
-
-			if monitor != nil {
-				select {
-				case <-qualityChangeCh:
-				default:
-				}
-				monitor.UpdateBaseline(currentQuality)
-			}
-
-			attachProgress(result)
 			continue
 		}
 
@@ -607,6 +622,29 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// Through the tracker — see the verify-retry branch above.
 				tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
 				utils.Sleep(ctx, streamEndVerifyInterval)
+				continue
+			}
+
+			// The stream may have come back at a different quality — an
+			// encoder restart during the stall is the usual cause. The
+			// refreshed downloaders carry no forced start, so they resume the
+			// current part through its sidecar: run as-is they would APPEND
+			// the new rendition's fragments under the old init segment, and
+			// the mixed tail would be muxed into this part before the
+			// monitor's next tick noticed. Split exactly as a quality change
+			// does instead; the refresh above was only the look.
+			if newQuality := o.extractQualityFromResult(refreshResult); newQuality.Changed(currentQuality) {
+				var oldVideoSeq, oldAudioSeq int
+				if result.VideoDownloader != nil {
+					oldVideoSeq = result.VideoDownloader.CurrentSeq()
+				}
+				if result.AudioDownloader != nil {
+					oldAudioSeq = result.AudioDownloader.CurrentSeq()
+				}
+				shortSegment := !partResumed && time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
+				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, time.Now().Unix()); exit {
+					return result, waitedForResume.value(), err
+				}
 				continue
 			}
 
