@@ -311,7 +311,13 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 			d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 				"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
-			d.streamEnded.Store(true)
+			// Not a confirmed end, so streamEnded stays unset and the loop's
+			// exit keeps the resume sidecar — the DASH backstop's rule
+			// (downloader_dash.go). The worker re-verifies after this return,
+			// and when YouTube still says live it refreshes the capture, which
+			// must resume from the sidecar: cleared here, the fresh downloader
+			// met the staged media with no sidecar, refused to start over it
+			// (ErrStagedMediaPresent), and the job ended in Error.
 			return nil
 		}
 
