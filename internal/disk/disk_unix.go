@@ -39,12 +39,10 @@ func GetDiskSpace(path string) (*DiskSpace, error) {
 		target = parent
 	}
 
-	// Bsize is int32 on 32-bit platforms (386, arm) and int64 on 64-bit
-	// (amd64, arm64). Casting to uint64 is safe because Bsize is always
-	// positive for a mounted filesystem. The multiplications below cannot
-	// overflow on realistic volumes — even with 4 KB blocks, you'd need
-	// volumes larger than ~75 ZB to wrap a uint64.
-	bsize := uint64(stat.Bsize)
+	// blockUnit is the size Blocks and Bavail are counted in (see its doc).
+	// The multiplications below cannot overflow on realistic volumes — even
+	// with 4 KB blocks, you'd need volumes larger than ~75 ZB to wrap a uint64.
+	bsize := blockUnit(&stat)
 	free := stat.Bavail * bsize
 	total := stat.Blocks * bsize
 

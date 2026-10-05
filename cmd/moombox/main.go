@@ -674,6 +674,20 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		var prevHeapMB float64
 		diskCheckCounter := 0
 		diskAlerter := newDiskAlerts(notifyMgr, log)
+		// The boot-time reading (UpdateDiskStatus above) goes through the
+		// alert decision too: the ticker's first disk check is three ticks
+		// away, so a volume already full at boot was not announced for six
+		// minutes while recordings kept writing to it.
+		if ds := routes.SharedDiskStatus.Load(); ds != nil {
+			var bootOutputDir string
+			var warnPct, critPct int
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				bootOutputDir = c.Paths.OutputDirectory
+				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
+			})
+			diskAlerter.setThresholds(warnPct, critPct)
+			diskAlerter.onReading(ds, bootOutputDir, time.Now())
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -755,9 +769,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
 					var diskOutputDir string
+					var warnPct, critPct int
 					s.configStore.Read(func(c *config.MoomboxConfig) {
 						diskOutputDir = c.Paths.OutputDirectory
+						warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 					})
+					diskAlerter.setThresholds(warnPct, critPct)
 					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{

@@ -13,6 +13,13 @@ import (
 // A level change (warn -> critical) never waits it out.
 const diskNotifyCooldown = 30 * time.Minute
 
+// diskRecoveryMargin is how far, in percentage points, usage must fall below
+// a threshold before an open alert at that level closes or steps down. Without
+// it a volume sitting on the line — 90.0% one reading, 89.9% the next — sent a
+// Warning and a Recovered on every six-minute check, ten an hour, because the
+// cooldown only spaces repeats of the SAME level and an ok reading reset it.
+const diskRecoveryMargin = 2.0
+
 // diskReadFailuresBeforeAlert is how many consecutive failed readings the
 // low-disk safety net must miss before the operator hears about it. The second
 // failure is roughly twelve minutes in, which rides out a transient SMB blip or
@@ -44,6 +51,11 @@ type diskAlerts struct {
 	lastNotify time.Time
 	lastLevel  string
 
+	// warnPct and critPct are the configured thresholds, refreshed before
+	// every reading (setThresholds), that diskRecoveryMargin is measured
+	// from. Zero disables the hold for that level.
+	warnPct, critPct float64
+
 	// readFailing/readFailCount track the monitoring-failure streak, and
 	// readFailNotified says whether that streak was reported — the first
 	// failure never is.
@@ -71,6 +83,26 @@ func absOutputDir(outputDir string) string {
 	return outputDir
 }
 
+// setThresholds records the configured warn/critical percentages the next
+// reading's recovery margin is measured from. Called before every onReading,
+// so a threshold edited in Settings applies from the next check.
+func (d *diskAlerts) setThresholds(warnPct, critPct int) {
+	d.warnPct, d.critPct = float64(warnPct), float64(critPct)
+}
+
+// heldOpen reports whether a reading whose level is below the open alert's
+// should still count as inside that incident: usage has not yet fallen
+// diskRecoveryMargin below the open level's threshold.
+func (d *diskAlerts) heldOpen(ds *routes.DiskStatus) bool {
+	switch {
+	case d.lastLevel == "critical" && ds.WarnLevel != "critical":
+		return d.critPct > 0 && ds.UsedPct > d.critPct-diskRecoveryMargin
+	case d.lastLevel == "warn" && ds.WarnLevel == "ok":
+		return d.warnPct > 0 && ds.UsedPct > d.warnPct-diskRecoveryMargin
+	}
+	return false
+}
+
 // onReading feeds one successful disk reading in.
 //
 // A reading can close TWO incidents at once: monitoring that had been reported
@@ -90,6 +122,12 @@ func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time
 				notifications.SendOptions{Event: "disk_ok"},
 			)
 		}
+	}
+
+	// Just below the open alert's threshold: still the same incident. Neither
+	// a step down nor a recovery is announced until usage clears the margin.
+	if d.heldOpen(ds) {
+		return
 	}
 
 	if ds.WarnLevel != "ok" {

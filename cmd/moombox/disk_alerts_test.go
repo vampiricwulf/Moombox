@@ -167,3 +167,63 @@ func TestDiskAlertsNameTheAbsoluteOutputDirectory(t *testing.T) {
 		}
 	}
 }
+
+// TestDiskAlertsHoldAnIncidentAcrossAThresholdFlap: the cooldown spaces only
+// repeats of the SAME level, and an ok reading reset it, so a volume sitting
+// on the warn line (90.0% then 89.9%) sent a Warning and a Recovered on every
+// six-minute check, and one on the critical line alternated Critical and
+// Warning. An open alert now holds until usage falls diskRecoveryMargin below
+// its threshold.
+//
+// Mutants: dropping the heldOpen check — the flaps alert every reading;
+// measuring the margin from the wrong threshold — the step-down or the
+// recovery arrives at the wrong reading.
+func TestDiskAlertsHoldAnIncidentAcrossAThresholdFlap(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	d.setThresholds(90, 95)
+	now := time.Now()
+	tick := func(level string, pct float64) {
+		now = now.Add(6 * time.Minute)
+		d.onReading(diskReading(level, pct), "./output", now)
+	}
+	events := func() []string {
+		var out []string
+		for _, c := range rec.Calls() {
+			out = append(out, c.Opts.Event)
+		}
+		return out
+	}
+
+	for range 5 { // an hour on the warn line
+		tick("warn", 90.0)
+		tick("ok", 89.9)
+	}
+	// The opening Warning and its one 30-minute repeat; never a Recovered.
+	if got := events(); len(got) != 2 || got[0] != "disk_warning" || got[1] != "disk_warning" {
+		t.Fatalf("an hour of warn-line flap sent %v, want [disk_warning disk_warning]", got)
+	}
+	rec.Reset()
+	tick("ok", 88.1)
+	if got := events(); len(got) != 0 {
+		t.Fatalf("88.1%% is inside the 2-point margin, but %v was sent", got)
+	}
+	tick("ok", 87.9)
+	if got := events(); len(got) != 1 || got[0] != "disk_ok" {
+		t.Fatalf("clearing the margin sent %v, want a disk_ok", got)
+	}
+
+	rec.Reset()
+	tick("critical", 95.0)
+	for range 2 { // under half an hour on the critical line
+		tick("warn", 94.9)
+		tick("critical", 95.0)
+	}
+	if got := events(); len(got) != 1 || got[0] != "disk_critical" {
+		t.Fatalf("critical-line flap sent %v, want one disk_critical", got)
+	}
+	tick("warn", 92.5)
+	if got := events(); len(got) != 2 || got[1] != "disk_warning" {
+		t.Fatalf("stepping down past the critical margin sent %v, want a disk_warning", got)
+	}
+}

@@ -510,8 +510,8 @@ These are the event strings used for filtering. A target with no event filter re
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |
 | `trim_error` | Trim operation failed |
-| `disk_warning` | Disk usage exceeds warning threshold (also fired for monitoring-read failures) |
-| `disk_critical` | Disk usage exceeds critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
+| `disk_warning` | Disk usage reached the warning threshold (also fired for monitoring-read failures) |
+| `disk_critical` | Disk usage reached the critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
 | `disk_ok` | Disk usage fell back under the warning threshold after a warning or critical alert was sent ("Disk Space Recovered"), or disk monitoring recovered after a read-failure alert ("Disk Monitoring Recovered"). Success-coloured; the close of the `disk_warning`/`disk_critical` family. Targets filtering on `disk_warning` also receive it, via the manager's event alias, so an incident that was reported always gets an end. A reading that closes both incidents at once sends both embeds — two alerts, two closes |
 | `update_available` | New version detected |
 | `update_applied` | Moombox restarted on a different version than the previous run (embed reports whether the web dashboard came back) |
@@ -707,9 +707,9 @@ The window is separate-mode only: an edit-mode target's `found` embed IS the job
 
 ### Implementation
 
-**File:** `internal/disk/disk_windows.go`
+**Files:** `internal/disk/disk_windows.go`, `internal/disk/disk_unix.go`
 
-Uses Windows kernel32 `GetDiskFreeSpaceExW` via `syscall` FFI (no CGo). Queries the volume containing a given path and returns:
+On Windows, kernel32 `GetDiskFreeSpaceExW` via `syscall` FFI (no CGo); on Linux, `statfs(2)`, with block counts multiplied by `f_frsize` (`blockUnit`, `internal/disk/blockunit_linux.go`) — the unit they are counted in, which `f_bsize` (the preferred I/O size, 1 MiB on a CIFS mount) is not. Both query the volume containing a given path (a path that does not exist yet answers for the nearest existing ancestor) and return:
 
 ```go
 type DiskSpace struct {
@@ -719,7 +719,7 @@ type DiskSpace struct {
 }
 ```
 
-The path is resolved to an absolute path, then the volume root is extracted (`filepath.VolumeName(abs) + "\"`).
+On Windows the path is resolved to an absolute path, then the volume root is extracted (`filepath.VolumeName(abs) + "\"`).
 
 ### Thresholds
 
@@ -736,7 +736,7 @@ Validation rules:
 
 ### Status Reporting
 
-Disk space information is included in the `GET /api/status` response and displayed in both the Web UI status bar and TUI status bar. When usage exceeds thresholds, a `disk_warning` notification is dispatched.
+Disk space information is included in the `GET /api/status` response and displayed in both the Web UI status bar and TUI status bar. It is read at boot and then every third stats tick (~6 minutes), and each reading goes through `diskAlerts` (`cmd/moombox/disk_alerts.go`), the boot reading included — the ticker's first check is six minutes in, and a volume already full at boot went unannounced for that long. A level is reached when usage is AT OR ABOVE its threshold (`ComputeWarnLevel`). Reaching warn sends `disk_warning`, reaching critical `disk_critical`; the same level repeats at most every 30 minutes, and a change of level is sent at once. An open alert holds until usage falls 2 points below its threshold (`diskRecoveryMargin`): only then does a critical step down to a warning or a warning close with `disk_ok`, so a volume sitting on a line no longer alerts and recovers on every check. Disk reads that fail twice in a row send `disk_warning` ("Disk Monitoring Failed") and the next good reading `disk_ok`.
 
 ---
 
