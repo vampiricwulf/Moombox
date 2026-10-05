@@ -380,3 +380,37 @@ func TestArchive_DatelessFreshFallsBackToRowDate(t *testing.T) {
 		t.Fatalf("status = %q, want vod", got)
 	}
 }
+
+// An RSS <published> is the announcement time. A stream scheduled further
+// ahead than the archive window is older than the cutoff the first time
+// Moombox sees it — its channel just added, or Moombox down while it waited —
+// and it used to sit in neither scope arm: never probed, never jobbed, not
+// while upcoming and not once live. A VOD among the same old listings is
+// still judged by its date.
+//
+// Mutant: FeedScope's unresolved arm without the rss clause — nothing probed.
+func TestArchive_AStreamAnnouncedBeforeTheWindowIsStillJobbed(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	announced := now.Add(-5 * 24 * time.Hour).Format(time.RFC3339) // window is 3 days
+	probe := func(_ context.Context, id string) (*VideoProbeResult, error) {
+		if id == "oldUpload01" {
+			return &VideoProbeResult{StreamStatus: "vod", Title: id}, nil
+		}
+		return &VideoProbeResult{StreamStatus: "upcoming", Title: id}, nil
+	}
+	rss := rssWith(
+		rssItem{ID: "scheduled01", Title: "anniversary stream", Published: announced},
+		rssItem{ID: "oldUpload01", Title: "last week's stream", Published: announced},
+	)
+	fm := newTestFeedMonitor(t, db, withRSS(rss), withMembership(membWith()), withProbe(probe), withNow(now))
+	found := recordVideoFound(fm)
+	fm.runCycleForTest(t, "UC1")
+
+	if len(*found) != 1 || (*found)[0].videoID != "scheduled01" || (*found)[0].d != DispositionBroadcast {
+		t.Fatalf("found = %v, want only scheduled01 as a broadcast", *found)
+	}
+	if it := mustGetFeedItem(t, db, "UC1", "scheduled01"); it.Status != "upcoming" {
+		t.Errorf("scheduled01 status = %q, want the probe's upcoming", it.Status)
+	}
+}

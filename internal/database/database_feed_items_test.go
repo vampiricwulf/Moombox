@@ -120,6 +120,62 @@ func TestFeedScope_Q1UnionQ2(t *testing.T) {
 	}
 }
 
+// An RSS <published> is the announcement time, so a stream scheduled further
+// ahead than the window is older than the cutoff the moment it is first seen
+// — when its channel is added, or after downtime. It used to sit in neither
+// arm and was never probed, even once live. An unknown RSS row now stays in
+// scope while its first sighting is inside the window; a row first seen
+// before the window, and an unknown exact row from any other source, do not.
+//
+// Mutants: the arm without the first_seen bound (stale row in scope), and
+// without the source check (old 'videos' row in scope).
+func TestFeedScope_UnresolvedRSSRowFirstSeenInsideTheWindow(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -3).Format(time.RFC3339)
+	announced := now.AddDate(0, 0, -10).Format(time.RFC3339)
+	seenNow := now.Format(time.RFC3339)
+
+	add := func(vid, src, firstSeen string, pos int) {
+		t.Helper()
+		it := fi("UC1", vid, announced, "exact", src, "unknown", pos)
+		it.FirstSeen = firstSeen
+		if _, err := db.UpsertFeedItem(it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("scheduled", "rss", seenNow, 0)
+	add("stale", "rss", now.AddDate(0, 0, -20).Format(time.RFC3339), 1)
+	add("listed", "videos", seenNow, 2)
+
+	got, err := db.FeedScope("UC1", cutoff, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idsOf(got)
+	if !ids["scheduled"] {
+		t.Error("an unresolved RSS row first seen inside the window must be in scope, whatever its announcement date")
+	}
+	if ids["stale"] {
+		t.Error("an unresolved RSS row first seen before the window must stay out of scope")
+	}
+	if ids["listed"] {
+		t.Error("an unresolved exact row from a dated listing must stay out of scope")
+	}
+
+	// Once a probe resolves it, the row leaves the arm: an upcoming one is
+	// carried by status, a VOD is judged by its date like any other.
+	if err := db.ApplyProbeToFeedItem("UC1", "scheduled", "vod", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.FeedScope("UC1", cutoff, false)
+	if idsOf(got)["scheduled"] {
+		t.Error("a resolved VOD older than the window must leave scope")
+	}
+}
+
 func TestFeedScope_QueryPlan(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)

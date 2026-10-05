@@ -109,8 +109,9 @@ func feedScopeQ1SQL(includeMembership bool) string {
 }
 
 func feedScopeQ2SQL(includeMembership bool) string {
-	// Fetch three statuses via the index; the unresolved-arm precision filter is
-	// applied in Go (spec §7: post-filter unknown rows to assumed-only).
+	// Fetch three statuses via the index; the unresolved-arm filter is applied
+	// in Go (spec §7: post-filter unknown rows to assumed precision, or to RSS
+	// rows first seen inside the window — see FeedScope).
 	q := `SELECT video_id, title, published, date_precision, catalog_pos, source, status, first_seen
   FROM feed_items WHERE channel_id = ? AND status IN ('upcoming','live','unknown')`
 	if !includeMembership {
@@ -155,8 +156,17 @@ func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) 
 		seen[it.VideoID] = true
 	}
 	for _, it := range q2 {
-		// unresolved arm: unknown rows qualify only at 'assumed' precision (§7).
-		if it.Status == "unknown" && it.DatePrecision != "assumed" {
+		// unresolved arm (§7): an unknown row qualifies at 'assumed' precision —
+		// its published is a sighting instant, not a date — or when RSS first
+		// listed it inside the window. An RSS <published> is the ANNOUNCEMENT
+		// time, so a stream scheduled further ahead than the window is already
+		// older than the cutoff when first seen (a channel added, or Moombox
+		// down, while it waits): it sat in neither arm, never probed and never
+		// jobbed, even once live. first_seen bounds it — a row whose probe keeps
+		// failing gets the window's worth of attempts, like an in-window row,
+		// and rows from before this arm existed do not all re-probe at once.
+		if it.Status == "unknown" && it.DatePrecision != "assumed" &&
+			(it.Source != "rss" || it.FirstSeen < cutoff) {
 			continue
 		}
 		if !seen[it.VideoID] {
