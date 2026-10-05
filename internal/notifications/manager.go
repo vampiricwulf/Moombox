@@ -154,9 +154,10 @@ type Sender interface {
 	Send(title, description string, ntype NotificationType, fields []Field, opts SendOptions)
 }
 
-// Notifier is the OWNER surface: a Sender plus the three lifecycle calls only
-// cmd/moombox makes — the cost gate before building an embed (HasTargets), the
-// config hot-apply (Reload), and the shutdown pair (BeginShutdown then Wait).
+// Notifier is the OWNER surface: a Sender plus the calls only cmd/moombox
+// makes — the cost gate before building an embed (HasTargets), the config
+// hot-apply (Reload), the shutdown pair (BeginShutdown then Wait), and the
+// deleted-job hooks (ForgetJob, RetainJobs).
 //
 // Separate from Sender on purpose. A producer that could call Reload could
 // reload the targets from a download goroutine; a producer that could call
@@ -168,6 +169,8 @@ type Notifier interface {
 	Reload(cfg *config.MoomboxConfig)
 	BeginShutdown()
 	Wait()
+	ForgetJob(jobID string)
+	RetainJobs(live map[string]struct{})
 }
 
 // Author is the embed's author line: the channel that produced the job,

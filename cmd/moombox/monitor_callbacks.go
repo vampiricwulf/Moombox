@@ -1793,6 +1793,12 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.db.SyncJobLogTracking(jobs)
 		s.db.PruneJobLogs(activeIDs)
+		// The bulk deletes (a departed channel's prune) fire only this event,
+		// so the notifier's edit-mode state for their jobs goes here, as
+		// onJobDeleted drops a single job's.
+		if s.notifyMgr != nil {
+			s.notifyMgr.RetainJobs(activeIDs)
+		}
 		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 	})
 
@@ -1909,7 +1915,9 @@ func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
 }
 
 // onJobDeleted is the OnJobDeleted subscriber's body: drop exactly the deleted
-// job's log buffer and tell the dashboards the row is gone.
+// job's log buffer, tell the dashboards the row is gone, and drop the
+// notification manager's edit-mode state for it — a re-added job with the
+// same id must open its own message, not edit the deleted one's.
 //
 // ClearJobLogs, not the activeIDs + PruneJobLogs walk this used to do. That old
 // walk read the whole jobs table per delete to answer a question it already
@@ -1920,6 +1928,9 @@ func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
 func (s *runState) onJobDeleted(jobID string) {
 	s.db.ClearJobLogs(jobID)
 	s.wsHub.BroadcastJobDeleted(jobID)
+	if s.notifyMgr != nil {
+		s.notifyMgr.ForgetJob(jobID)
+	}
 }
 
 // outageAlert builds the Outage Alert notification for a connectivity

@@ -335,6 +335,36 @@ func (l *lifecycleTracker) release(jobID, key string) {
 	delete(l.touched, jobID)
 }
 
+// drop removes everything held for a job that no longer exists. Unlike
+// release it is not per target and leaves nothing to re-read: the row and the
+// ids it stored are gone. A YouTube job's id is its video id, so the same id
+// comes back on a re-add — or when a channel removed and re-added re-detects
+// it — and an entry kept from the deleted job used to PATCH that job's old
+// message, far up the channel where an edit notifies nobody, with the old
+// History carried over.
+func (l *lifecycleTracker) drop(jobID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.jobs, jobID)
+	delete(l.touched, jobID)
+}
+
+// retain drops every job not in live: the bulk counterpart of drop, for the
+// deletes that fire no per-job event (a departed channel's prune). A job added
+// after the list was taken can lose its entry too; that costs only the
+// in-process History, as a release does — its stored ids are re-read on the
+// next touch.
+func (l *lifecycleTracker) retain(live map[string]struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id := range l.jobs {
+		if _, ok := live[id]; !ok {
+			delete(l.jobs, id)
+			delete(l.touched, id)
+		}
+	}
+}
+
 // trackedJobs is how many jobs the cache is holding. Test-only reader for the
 // eviction guarantees; nothing in the program calls it, and that is the point.
 func (l *lifecycleTracker) trackedJobs() int {
@@ -589,4 +619,17 @@ func (m *Manager) tracker() *lifecycleTracker {
 // it edit mode still works within a process; only restart survival is lost.
 func (m *Manager) SetMessageStore(s MessageStore) {
 	m.tracker().setStore(s)
+}
+
+// ForgetJob drops the edit-mode state held for a deleted job (see drop).
+// cmd/moombox calls it from its OnJobDeleted subscriber.
+func (m *Manager) ForgetJob(jobID string) {
+	m.tracker().drop(jobID)
+}
+
+// RetainJobs drops the edit-mode state of every job not in live (see
+// retain). cmd/moombox calls it from its OnJobsChange subscriber, which is
+// the only event a bulk delete fires.
+func (m *Manager) RetainJobs(live map[string]struct{}) {
+	m.tracker().retain(live)
 }

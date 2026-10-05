@@ -133,3 +133,10 @@ func (r *Recorder) BeginShutdown() {}
 
 // Wait is a no-op: a Recorder has no queue to drain.
 func (r *Recorder) Wait() {}
+
+// ForgetJob and RetainJobs are no-ops: a Recorder keeps no per-job message
+// state.
+func (r *Recorder) ForgetJob(string) {}
+
+// RetainJobs is a no-op; see ForgetJob.
+func (r *Recorder) RetainJobs(map[string]struct{}) {}
