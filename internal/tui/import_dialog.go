@@ -45,17 +45,26 @@ type ImportDialogModel struct {
 // NewImportDialogModel creates a new model with initialized filepicker and
 // textinput.
 func NewImportDialogModel() *ImportDialogModel {
+	return &ImportDialogModel{
+		picker:    newImportPicker(),
+		textInput: newTextInput(),
+		spinner:   newSpinner(),
+	}
+}
+
+// newImportPicker builds the .zip file picker. Open builds a fresh one every
+// time rather than re-pointing the last: the picker's cursor index and its
+// directory stack are private and survive a Close, and bubbles indexes its
+// file list with that cursor on Enter/→ guarded only by an empty list — so a
+// second A Z in a directory with fewer entries than the last cursor position
+// panicked, and runTUI turns a TUI panic into a shutdown of the whole process.
+func newImportPicker() filepicker.Model {
 	fp := filepicker.New()
 	fp.AllowedTypes = []string{".zip"}
 	fp.ShowSize = true
 	fp.ShowPermissions = false
 	fp.AutoHeight = false
-
-	return &ImportDialogModel{
-		picker:    fp,
-		textInput: newTextInput(),
-		spinner:   newSpinner(),
-	}
+	return fp
 }
 
 // Open opens the dialog at the given starting directory.
@@ -67,6 +76,7 @@ func (m *ImportDialogModel) Open(startDir string) tea.Cmd {
 	m.channel = ""
 	m.metaFocus = 0
 	m.errorMsg = ""
+	m.picker = newImportPicker()
 	m.picker.CurrentDirectory = startDir
 	m.picker.SetHeight(max(1, m.height-8))
 	return m.picker.Init()
