@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -127,8 +128,8 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 	if bracketOffset == -1 {
 		return fmt.Errorf("%w: no closing bracket in the last %d bytes", ErrChatFileDamaged, tailSize)
 	}
-	if !closesChatDocument(tailBuf[bracketOffset+1:]) {
-		return fmt.Errorf("%w: the last ']' is not followed by the closing '}'", ErrChatFileDamaged)
+	if !closesChatDocument(tailBuf[:bracketOffset], tailBuf[bracketOffset+1:]) {
+		return fmt.Errorf("%w: the last ']' does not close the messages array", ErrChatFileDamaged)
 	}
 
 	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
@@ -226,9 +227,24 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 	return nil
 }
 
-// closesChatDocument reports whether rest — the bytes after the messages
-// array's ']' — is the object's closing '}' and nothing else but whitespace.
-func closesChatDocument(rest []byte) bool {
+// closesChatDocument reports whether a ']' is the messages array's own,
+// closing the document: before is everything ahead of it, rest everything
+// after.
+//
+// rest must be the object's closing '}' and nothing else but whitespace. That
+// alone is not enough: most messages END with their own "message" array, so a
+// file cut right after a message's closing brace ends "...]}" (an appended,
+// compact message) or "\n      ]\n    }" (an indented one) — a ']' and a '}'
+// all the same, and an append there wrote the batch into that message. So the
+// ']' must also sit where the writers put the messages array's: on its own
+// line at the top level's two-space indent ("\n  ]", what MarshalIndent and
+// AppendChatMessages both write), or straight after its '[' when the array is
+// empty ("[]"). A message's own arrays close deeper ("\n      ]") or compact
+// ("}]").
+func closesChatDocument(before, rest []byte) bool {
+	if !bytes.HasSuffix(before, []byte("\n  ")) && !bytes.HasSuffix(before, []byte("[")) {
+		return false
+	}
 	closed := false
 	for _, b := range rest {
 		switch b {
@@ -269,7 +285,7 @@ func ChatFileEndIntact(path string) (bool, error) {
 	}
 	for i, b := range slices.Backward(tail) {
 		if b == ']' {
-			return closesChatDocument(tail[i+1:]), nil
+			return closesChatDocument(tail[:i], tail[i+1:]), nil
 		}
 	}
 	return false, nil
