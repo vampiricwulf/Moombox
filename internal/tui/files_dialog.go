@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // OrphanedFileEntry represents an orphaned file for TUI display.
@@ -651,6 +652,23 @@ func (m *FilesDialogModel) loadErrorText() string {
 	}
 }
 
+// footerHint is the key line, one row at the box's content width. Box height
+// budgets it a single row (filesBoxDims), but the full wording is 66 columns
+// and the box is 54 wide at the 60-column floor, so it wrapped and left
+// "| Esc: Close" alone on a second row. The shorter wording fits the floor;
+// with nothing listed only the keys that still do anything are named.
+func (m *FilesDialogModel) footerHint(contentW, total int) string {
+	if total == 0 && !m.loading {
+		return "R: Refresh | Esc: Close"
+	}
+	// The arm hint already names what "all" covers.
+	full := "↑↓: Navigate | D: Delete | A: Delete all | R: Refresh | Esc: Close"
+	if ansi.StringWidth(full) <= contentW {
+		return full
+	}
+	return "↑↓ | D: Delete | A: All | R: Refresh | Esc: Close"
+}
+
 // View renders the files dialog overlay.
 func (m *FilesDialogModel) View() string {
 	if !m.visible {
@@ -695,9 +713,7 @@ func (m *FilesDialogModel) View() string {
 	}
 
 	lines = append(lines, "")
-	// 62 columns: at 80 the content width is 74, and the longer wording wrapped
-	// onto a second row. The arm hint already names what "all" covers.
-	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | A: Delete all | R: Refresh | Esc: Close"))
+	lines = append(lines, DimStyle.Render(m.footerHint(boxW-2, total)))
 
 	content := strings.Join(lines, "\n")
 
