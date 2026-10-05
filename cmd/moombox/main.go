@@ -688,6 +688,48 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			diskAlerter.setThresholds(warnPct, critPct)
 			diskAlerter.onReading(ds, bootOutputDir, time.Now())
 		}
+		// checkDisk takes a reading, publishes it to both UIs and runs the
+		// alert decision. The ticker calls it every third tick; a save that
+		// changes the thresholds or the output directory asks for one at once
+		// (requestDiskRecheck), so the gauge and the alerts do not keep the
+		// old settings for up to six minutes.
+		checkDisk := func() {
+			var diskOutputDir string
+			var warnPct, critPct int
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				diskOutputDir = c.Paths.OutputDirectory
+				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
+			})
+			diskAlerter.setThresholds(warnPct, critPct)
+			if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
+				// Broadcast to web clients
+				wsHub.Broadcast("disk_status", map[string]any{
+					"free":      ds.Free,
+					"total":     ds.Total,
+					"usedPct":   ds.UsedPct,
+					"warnLevel": ds.WarnLevel,
+				})
+
+				// Push to TUI
+				select {
+				case tuiDiskStatusCh <- tui.DiskStatusMsg{
+					Free: ds.Free, UsedPct: ds.UsedPct, Warn: ds.WarnLevel,
+				}:
+				default:
+				}
+
+				// The whole notification decision — the 30-minute
+				// cooldown, the level escalation, and the all-clear
+				// that closes them — lives in diskAlerts, where it
+				// can be tested.
+				diskAlerter.onReading(ds, diskOutputDir, time.Now())
+			} else {
+				// GetDiskSpace failed (volume offline, I/O error): the
+				// dashboard disk gauge and low-disk notifications are
+				// frozen at the last good reading until it recovers.
+				diskAlerter.onReadFailure(diskOutputDir)
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -768,42 +810,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// existing ticker).
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
-					var diskOutputDir string
-					var warnPct, critPct int
-					s.configStore.Read(func(c *config.MoomboxConfig) {
-						diskOutputDir = c.Paths.OutputDirectory
-						warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
-					})
-					diskAlerter.setThresholds(warnPct, critPct)
-					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
-						// Broadcast to web clients
-						wsHub.Broadcast("disk_status", map[string]any{
-							"free":      ds.Free,
-							"total":     ds.Total,
-							"usedPct":   ds.UsedPct,
-							"warnLevel": ds.WarnLevel,
-						})
-
-						// Push to TUI
-						select {
-						case tuiDiskStatusCh <- tui.DiskStatusMsg{
-							Free: ds.Free, UsedPct: ds.UsedPct, Warn: ds.WarnLevel,
-						}:
-						default:
-						}
-
-						// The whole notification decision — the 30-minute
-						// cooldown, the level escalation, and the all-clear
-						// that closes them — lives in diskAlerts, where it
-						// can be tested.
-						diskAlerter.onReading(ds, diskOutputDir, time.Now())
-					} else {
-						// GetDiskSpace failed (volume offline, I/O error): the
-						// dashboard disk gauge and low-disk notifications are
-						// frozen at the last good reading until it recovers.
-						diskAlerter.onReadFailure(diskOutputDir)
-					}
+					checkDisk()
 				}
+			case <-s.diskRecheck:
+				checkDisk()
 			}
 		}
 	}()

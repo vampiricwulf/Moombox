@@ -82,6 +82,7 @@ func (s *runState) wireRoutes() func() {
 		OnChannelChange:          s.kickMonitors,
 		OnMonitorIntervalChange:  s.kickMonitors,
 		OnActivePlatformsChange:  s.resendTUICookieStatus,
+		OnDiskSettingsChange:     s.requestDiskRecheck,
 		OnNotificationsChange: func() {
 			// Hot-reload notification targets so edits apply immediately —
 			// previously they silently required a restart nothing asked for.

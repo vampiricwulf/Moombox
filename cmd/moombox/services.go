@@ -1511,6 +1511,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// before wireMonitorCallbacks wires the backfill OnProgress producer.
 	s.tuiUpdateStatusCh = make(chan tui.UpdateStatusMsg, 2)
 	s.tuiDiskStatusCh = make(chan tui.DiskStatusMsg, 5)
+	s.diskRecheck = make(chan struct{}, 1)
 	s.tuiBackfillCh = make(chan tui.BackfillStatusMsg, 16)
 	s.backfillProgress = make(map[string]backfillProgressState)
 

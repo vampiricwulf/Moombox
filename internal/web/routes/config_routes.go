@@ -74,6 +74,11 @@ type ConfigRoutesCallbacks struct {
 	// status bar follows a dashboard save — it otherwise re-read them only
 	// on an auth transition.
 	OnActivePlatformsChange func()
+	// OnDiskSettingsChange is called when disk.disk_warn_percent,
+	// disk.disk_critical_percent or paths.output_directory changes, so the
+	// disk gauge and alerts take a reading against the new settings now
+	// rather than at the next ~6-minute check.
+	OnDiskSettingsChange func()
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -93,6 +98,16 @@ type ConfigRoutesCallbacks struct {
 	// whole saved DownloaderConfig because the two keys are reconciled
 	// against each other (see config.DownloaderConfig.ReorderLimitBytes).
 	OnReorderBudgetChange func(d config.DownloaderConfig)
+}
+
+// diskSettings is the comparable form of what the disk gauge reads.
+type diskSettings struct {
+	warn, critical int
+	outputDir      string
+}
+
+func diskSettingsOf(cfg *config.MoomboxConfig) diskSettings {
+	return diskSettings{warn: cfg.Disk.WarnPercent, critical: cfg.Disk.CriticalPercent, outputDir: cfg.Paths.OutputDirectory}
 }
 
 // monitorIntervals is the comparable form of the three monitor check
@@ -1158,6 +1173,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldPublicURL := cfg.Network.PublicURL
 		oldIntervals := monitorIntervalsOf(cfg)
 		oldYTActive, oldTWActive := config.GetActivePlatforms(cfg)
+		oldDisk := diskSettingsOf(cfg)
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1187,6 +1203,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newPublicURL := cfg.Network.PublicURL
 		newIntervals := monitorIntervalsOf(cfg)
 		newYTActive, newTWActive := config.GetActivePlatforms(cfg)
+		newDisk := diskSettingsOf(cfg)
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1214,6 +1231,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if (newYTActive != oldYTActive || newTWActive != oldTWActive) && callbacks.OnActivePlatformsChange != nil {
 				callbacks.OnActivePlatformsChange()
+			}
+			if newDisk != oldDisk && callbacks.OnDiskSettingsChange != nil {
+				callbacks.OnDiskSettingsChange()
 			}
 			// public_url lives in [network], not [notifications], but the
 			// notification manager is its only consumer — it reads the base

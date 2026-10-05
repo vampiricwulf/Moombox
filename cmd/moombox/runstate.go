@@ -155,6 +155,10 @@ type runState struct {
 	tuiDiskStatusCh   chan tui.DiskStatusMsg
 	tuiBackfillCh     chan tui.BackfillStatusMsg
 
+	// diskRecheck asks the periodic loop for a disk reading now (see
+	// requestDiskRecheck). Buffered 1: requests coalesce.
+	diskRecheck chan struct{}
+
 	// --- Backfill progress snapshot ---
 	// backfillProgress holds the last backfill OnProgress emission per
 	// channel — the disk_status snapshot role (routes.SharedDiskStatus) for

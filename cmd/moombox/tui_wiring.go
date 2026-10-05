@@ -433,6 +433,9 @@ func (s *runState) runTUI() {
 		s.applyReorderBudget(snap.Downloader)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
+		// The disk thresholds and the output directory, read by the disk
+		// loop only every third tick otherwise.
+		s.requestDiskRecheck()
 		return nil
 	}
 	// The FFmpeg overlay's own path applier. OnSaveConfig returns above
@@ -1160,6 +1163,17 @@ func (s *runState) runTUI() {
 	}
 	if n := tuiDroppedLogs.Load(); n > 0 {
 		s.log.Warn("TUI dropped log messages", slog.Int64("count", n))
+	}
+}
+
+// requestDiskRecheck asks the periodic loop in run() for a disk reading now,
+// for a save that changed the disk thresholds or the output directory.
+// Coalescing and non-blocking: a request already pending covers this one,
+// and a nil channel (a runState built by a test) makes it a no-op.
+func (s *runState) requestDiskRecheck() {
+	select {
+	case s.diskRecheck <- struct{}{}:
+	default:
 	}
 }
 
