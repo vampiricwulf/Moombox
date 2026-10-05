@@ -26,6 +26,14 @@ type ChatFileLogger interface {
 // current batch.
 var ErrChatFilePartialWrite = errors.New("chat file truncated but subsequent write failed")
 
+// ErrChatFileDamaged is returned by AppendChatMessages when the file's end is
+// not the end of its messages array: no ']' in the tail at all (a crash left
+// the tail zero-filled), or a last ']' followed by anything but the object's
+// closing '}' (the file was cut mid-record, so that ']' belongs to a
+// message's own array). Nothing is written. Splicing there reported success
+// over a file that no longer parsed, and every later append did the same.
+var ErrChatFileDamaged = errors.New("chat file does not end with its messages array")
+
 // WriteChatFileAtomic writes data as JSON to path through WriteFileAtomic: a
 // uniquely named temp file in the same directory, fsync, chmod 0644 and
 // ReplaceFile. Calls PadMessageCountJSON on the marshaled bytes so
@@ -92,7 +100,7 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		return fmt.Errorf("stat: %w", err)
 	}
 	if info.Size() < 10 {
-		return fmt.Errorf("file too small (%d bytes)", info.Size())
+		return fmt.Errorf("%w: file too small (%d bytes)", ErrChatFileDamaged, info.Size())
 	}
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
@@ -117,7 +125,10 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		}
 	}
 	if bracketOffset == -1 {
-		return fmt.Errorf("no closing bracket found")
+		return fmt.Errorf("%w: no closing bracket in the last %d bytes", ErrChatFileDamaged, tailSize)
+	}
+	if !closesChatDocument(tailBuf[bracketOffset+1:]) {
+		return fmt.Errorf("%w: the last ']' is not followed by the closing '}'", ErrChatFileDamaged)
 	}
 
 	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
@@ -213,6 +224,55 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		return fmt.Errorf("fsync: %w", err)
 	}
 	return nil
+}
+
+// closesChatDocument reports whether rest — the bytes after the messages
+// array's ']' — is the object's closing '}' and nothing else but whitespace.
+func closesChatDocument(rest []byte) bool {
+	closed := false
+	for _, b := range rest {
+		switch b {
+		case ' ', '\n', '\r', '\t':
+		case '}':
+			if closed {
+				return false
+			}
+			closed = true
+		default:
+			return false
+		}
+	}
+	return closed
+}
+
+// ChatFileEndIntact reports whether the chat file at path still ends the way
+// AppendChatMessages needs: its messages array's ']' followed by the closing
+// '}'. It reads only the tail. A missing file is an error the caller can test
+// with os.IsNotExist.
+func ChatFileEndIntact(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if info.Size() < 10 {
+		return false, nil
+	}
+	tailSize := min(int64(256), info.Size())
+	tail := make([]byte, tailSize)
+	if _, err := f.ReadAt(tail, info.Size()-tailSize); err != nil {
+		return false, err
+	}
+	for i, b := range slices.Backward(tail) {
+		if b == ']' {
+			return closesChatDocument(tail[i+1:]), nil
+		}
+	}
+	return false, nil
 }
 
 // UpdateChatFileHeaderFields updates messageCount and downloadedAt in the JSON

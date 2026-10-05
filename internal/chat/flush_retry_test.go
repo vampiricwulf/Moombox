@@ -2,9 +2,12 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // TestAFailedFlushKeepsItsBatch: writeChatFile cleared the buffer and marked
@@ -54,5 +57,51 @@ func TestAFailedFlushKeepsItsBatch(t *testing.T) {
 	}
 	if doc.MessageCount != 2 {
 		t.Errorf("header messageCount = %d, want 2", doc.MessageCount)
+	}
+}
+
+// TestAPartialAppendKeepsItsBatch: an append whose write failed (a full disk)
+// puts the file's end back, so the file holds what it held before — but the
+// batch was dropped while cd.messageCount kept counting it, and the header and
+// the job row over-counted the array for good. The batch now waits for the
+// next flush.
+//
+// Mutant: clear cd.messages on ErrChatFilePartialWrite again — m2 never
+// reaches the file and the header says 3 over an array of 2.
+func TestAPartialAppendKeepsItsBatch(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "chat.json")
+	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: out})
+	cd.processBatch(&ChatApiResponse{Messages: []ChatMessage{{ID: "m1"}}})
+	cd.writeChatFile()
+
+	real := appendChatMessages
+	t.Cleanup(func() { appendChatMessages = real })
+	appendChatMessages = func(string, []ChatMessage, int, utils.ChatFileLogger) error {
+		return fmt.Errorf("%w: no space left on device", utils.ErrChatFilePartialWrite)
+	}
+	cd.processBatch(&ChatApiResponse{Messages: []ChatMessage{{ID: "m2"}}})
+	cd.writeChatFile()
+
+	appendChatMessages = real
+	cd.processBatch(&ChatApiResponse{Messages: []ChatMessage{{ID: "m3"}}})
+	cd.writeChatFile()
+
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc ChatData
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("chat file is not JSON: %v", err)
+	}
+	var ids []string
+	for _, m := range doc.Messages {
+		ids = append(ids, m.ID)
+	}
+	if len(ids) != 3 || ids[0] != "m1" || ids[1] != "m2" || ids[2] != "m3" {
+		t.Errorf("messages on disk = %v, want [m1 m2 m3]", ids)
+	}
+	if doc.MessageCount != len(ids) {
+		t.Errorf("header messageCount = %d, array %d", doc.MessageCount, len(ids))
 	}
 }

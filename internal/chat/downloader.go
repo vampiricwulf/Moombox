@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -591,9 +592,31 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		// write would take the incremental-append path and fail (audit
 		// chat.md G5).
 		cd.flushedToDisk = cd.messageCount > 0
-		if cd.flushedToDisk && cd.opts.OutputFile != "" {
-			if _, statErr := os.Stat(cd.opts.OutputFile); statErr != nil {
+		// Through getOutputPaths, like every other read of the paths outside
+		// the lock's owner: the waiting-room loop can SetOutputFile on this
+		// instance while its early run is starting.
+		outputFile, _ := cd.getOutputPaths()
+		if cd.flushedToDisk && outputFile != "" {
+			if _, statErr := os.Stat(outputFile); statErr != nil {
 				cd.flushedToDisk = false
+				// The history the sidecar counted went with the file. The
+				// first flush writes the file whole from this run's buffer,
+				// so the count starts from that: kept, the new header and
+				// the job row counted messages the array no longer had.
+				cd.messageCount = 0
+			}
+		}
+		// The sidecar says the file holds history; check it still ends the way
+		// an append needs before trusting it with one. A crash can leave a
+		// zero-filled tail or a cut mid-record, and an append splices into
+		// that (or, with no ']' at all, the rewrite fallback used to replace
+		// everything with one batch). Repaired now, not at the first flush,
+		// so a run that gets no new message still leaves a parseable file.
+		if cd.flushedToDisk && outputFile != "" {
+			if intact, endErr := utils.ChatFileEndIntact(outputFile); endErr == nil && !intact {
+				cd.logInfo("chat: the resumed chat file is damaged; salvaging it",
+					"videoID", cd.opts.VideoID)
+				cd.rewriteWithHistory(outputFile)
 			}
 		}
 		resuming = true
@@ -1327,51 +1350,62 @@ func (cd *ChatDownloader) writeChatFile() {
 		return
 	}
 
-	// Incremental append: open existing file and append new messages.
-	// If any step fails, fall back to a full rewrite that prepends on-disk
-	// messages — both paths clear the in-memory buffer on success.
-	if cd.incrementalAppend(outputFile) {
+	// Incremental append: open the existing file and append the batch.
+	err := cd.incrementalAppend(outputFile)
+	switch {
+	case err == nil:
 		cd.messages = nil
 		return
+	case errors.Is(err, utils.ErrChatFilePartialWrite):
+		// The append's write failed and it put the file's end back, so the
+		// file holds what it held before: keep the batch for the next flush.
+		// It used to be dropped here while cd.messageCount kept counting it,
+		// so the header and the job row over-counted the array for good. If
+		// the end could not be put back either, the next append finds the
+		// damage and takes the rewrite below.
+		return
 	}
+	// Any other failure — a damaged file included — rewrites the file whole:
+	// its history, salvaged if need be, then the batch.
+	cd.rewriteWithHistory(outputFile)
+}
+
+// appendChatMessages is utils.AppendChatMessages; a test replaces it to make
+// an append fail the way a full disk does mid-write.
+var appendChatMessages = utils.AppendChatMessages[ChatMessage]
+
+// incrementalAppend appends cd.messages to the chat file on disk through
+// utils.AppendChatMessages, reporting any failure (which also keeps the
+// resume sidecar, audit chat.md C8).
+func (cd *ChatDownloader) incrementalAppend(outputFile string) error {
+	if len(cd.messages) == 0 {
+		return nil
+	}
+	err := appendChatMessages(outputFile, cd.messages, cd.messageCount, chatWarnAdapter{cd})
+	if err != nil {
+		cd.reportIOError(fmt.Errorf("chat file append: %w", err))
+	}
+	return err
+}
+
+// rewriteWithHistory writes the chat file whole: the history already on disk,
+// then the buffered batch. Returns whether it did. On a failed write the
+// buffer goes back to just the batch, so the retry does not count the history
+// twice — the history is still on disk for it.
+func (cd *ChatDownloader) rewriteWithHistory(outputFile string) bool {
 	cd.mu.Lock()
 	pending, pendingCount := cd.messages, cd.messageCount
 	cd.mu.Unlock()
-	cd.prependExistingMessages(outputFile)
+	if !cd.prependExistingMessages(outputFile) {
+		return false
+	}
 	if cd.writeFullChatFile() {
 		cd.messages = nil
-		return
+		return true
 	}
-	// Put the buffer back to just this batch: the on-disk history the
-	// prepend pulled in is still on disk, and the retry appends to it.
 	cd.mu.Lock()
 	cd.messages, cd.messageCount = pending, pendingCount
 	cd.mu.Unlock()
-}
-
-// incrementalAppend performs an in-place append of cd.messages to the existing
-// chat file on disk via utils.AppendChatMessages. Returns true on success or
-// on the truncate-then-write-failure path (file broken but caller should
-// advance in-memory state, per utils.ErrChatFilePartialWrite). Returns false
-// when the caller should fall back to a full rewrite.
-func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
-	newMessages := cd.messages
-	if len(newMessages) == 0 {
-		return true
-	}
-
-	err := utils.AppendChatMessages(outputFile, newMessages, cd.messageCount, chatWarnAdapter{cd})
-	if err == nil {
-		return true
-	}
-	cd.reportIOError(fmt.Errorf("chat file append: %w", err))
-	if errors.Is(err, utils.ErrChatFilePartialWrite) {
-		// File was truncated but WriteAt failed — falling back to full rewrite
-		// would read the broken file, recover zero prior messages, and drop
-		// history. Advance in-memory state instead; the C8 reportIOError path
-		// already preserved the resume file (audit chat.md C8).
-		return true
-	}
 	return false
 }
 
@@ -1533,34 +1567,94 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 	return nil
 }
 
-// readExistingChatData attempts to read the previously-flushed chat file on
-// disk in full (header included). The only caller left is
-// prependExistingMessages, writeChatFile's append-failure fallback; adoption
-// reads the header through readChatFileAdoptionSummary (a stream, not a whole
-// slurp) since T4-35, so this full read never runs on the adoption path. The
-// error is returned (rather than folded into a nil result) so callers can tell
-// "no file" from "a file that does not parse" — those two need opposite
-// handling.
-func (cd *ChatDownloader) readExistingChatData(path string) (*ChatData, error) {
+// salvageChatFileMessages reads the chat file at path and returns every
+// message it holds intact. damaged reports that the file stops parsing
+// somewhere — a zero-filled tail a crash left, a cut mid-record — and the
+// messages returned are the ones before that point. err is for a file that
+// could not be read at all (os.IsNotExist for a missing one).
+//
+// Read whole, like the full Unmarshal it replaces: this is the rewrite
+// fallback's input, and the rewrite holds every message in memory anyway.
+func salvageChatFileMessages(path string) (msgs []ChatMessage, damaged bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var chatData ChatData
-	if err := json.Unmarshal(data, &chatData); err != nil {
-		return nil, err
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, terr := dec.Token(); terr != nil || tok != json.Delim('{') {
+		return nil, true, nil
 	}
-	return &chatData, nil
+	for {
+		keyTok, kerr := dec.Token()
+		if kerr != nil {
+			return msgs, true, nil
+		}
+		if keyTok == json.Delim('}') {
+			break
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return msgs, true, nil
+		}
+		if key != "messages" {
+			if serr := utils.SkipJSONValue(dec); serr != nil {
+				return msgs, true, nil
+			}
+			continue
+		}
+		opening, oerr := dec.Token()
+		if oerr != nil {
+			return msgs, true, nil
+		}
+		if opening == nil { // "messages": null
+			continue
+		}
+		if opening != json.Delim('[') {
+			return msgs, true, nil
+		}
+		for dec.More() {
+			var m ChatMessage
+			if derr := dec.Decode(&m); derr != nil {
+				return msgs, true, nil
+			}
+			msgs = append(msgs, m)
+		}
+		if _, cerr := dec.Token(); cerr != nil { // the array's ']'
+			return msgs, true, nil
+		}
+	}
+	if _, eerr := dec.Token(); !errors.Is(eerr, io.EOF) {
+		return msgs, true, nil
+	}
+	return msgs, false, nil
 }
 
-// readExistingMessages is a thin wrapper over readExistingChatData for
-// callers that only need the message slice.
-func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, error) {
-	d, err := cd.readExistingChatData(path)
-	if err != nil {
-		return nil, err
+// preserveChatFileCopy keeps the bytes at path under dst before a rewrite
+// replaces them: a hard link where the filesystem allows one (the atomic
+// rewrite swaps a new file in under path, so the link keeps the old one at no
+// cost), else a copy. A dst left by an earlier preservation is replaced, as
+// adoption's rename to the same name replaces it.
+func preserveChatFileCopy(path, dst string) error {
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	return d.Messages, nil
+	if err := os.Link(path, dst); err == nil {
+		return nil
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // adoptExistingChatFile is THE ADOPTION RULE: when Start finds no usable
@@ -1646,13 +1740,31 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 	return adopted
 }
 
-// prependExistingMessages reads previously-flushed messages from disk and prepends
-// them to cd.messages. It also registers their IDs in seenIDs to prevent duplicates
-// on subsequent API responses that may overlap with the recovered messages.
-func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
-	existing, err := cd.readExistingMessages(outputFile)
-	if err != nil || existing == nil {
-		return
+// prependExistingMessages puts the history already on disk ahead of the
+// buffered batch, for rewriteWithHistory, and registers its IDs with the
+// dedup so an overlapping poll cannot duplicate them. The count becomes the
+// length of what will be written: the array is the data.
+//
+// A missing file has no history. A file that no longer parses keeps every
+// message before the damage, and its bytes are kept beside it as
+// <file>.corrupt first, since whatever followed the damage is lost to the
+// rewrite. This used to read the damaged file as nothing at all, and the
+// rewrite replaced the whole history with one batch while the header went on
+// counting it. A file that cannot be read at all returns false: rewriting
+// would overwrite history this run never saw, so the batch waits for the next
+// flush instead.
+func (cd *ChatDownloader) prependExistingMessages(outputFile string) bool {
+	existing, damaged, err := salvageChatFileMessages(outputFile)
+	if err != nil && !os.IsNotExist(err) {
+		cd.reportIOError(fmt.Errorf("read chat file for rewrite: %w", err))
+		return false
+	}
+	if damaged {
+		corruptPath := outputFile + corruptChatSuffix
+		cd.reportIOError(fmt.Errorf("chat file damaged; keeping its %d intact messages and the original as %s", len(existing), corruptPath))
+		if perr := preserveChatFileCopy(outputFile, corruptPath); perr != nil {
+			cd.reportIOError(fmt.Errorf("preserve damaged chat file: %w", perr))
+		}
 	}
 	// Locked for the same reason as processBatch: MessageCount() reads
 	// messageCount from another goroutine.
@@ -1667,6 +1779,7 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
 			cd.dedup.Add(msg.ID)
 		}
 	}
+	return true
 }
 
 // updateChatFileHeader updates messageCount and downloadedAt in the JSON
@@ -1683,7 +1796,8 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 }
 
 func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
-	store := utils.ResumeStore[ChatResumeState]{Path: cd.opts.ResumeFile}
+	_, resumeFile := cd.getOutputPaths()
+	store := utils.ResumeStore[ChatResumeState]{Path: resumeFile}
 	state, err := store.Load()
 	if err != nil {
 		return nil, err

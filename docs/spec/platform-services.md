@@ -1221,17 +1221,21 @@ Super Chat tiers (1-7; blue, cyan, green, yellow, orange, magenta, red) are reso
 
 ### Deduplication
 
-Identical to Twitch chat: `seenIDs` map + `seenOrder` slice. Cull when exceeding 5000 entries by removing the oldest by insertion order.
+Identical to Twitch chat: a `utils.OrderedDedup` (a set that keeps insertion order). After every successful fetch it is culled back to the newest 5000 IDs (`dedupKeepSize`) once it holds more.
 
 ### File IO Strategy
 
-1. **First flush**: Atomic write via `.tmp` + rename. Complete JSON with all messages.
-2. **Subsequent flushes**: Incremental append. Read last 10 bytes to find `]`, truncate there, append new messages + closing structure. Memory cost: O(new messages), not O(file size).
+1. **First flush**: Atomic write (`utils.WriteChatFileAtomic`: a uniquely named temp file, fsync, rename). Complete JSON with all messages.
+2. **Subsequent flushes**: Incremental append (`utils.AppendChatMessages`). Read the last 256 bytes to find the messages array's `]`, write the new messages plus the closing structure from there, then truncate. Memory cost: O(new messages), not O(file size). The `]` must be followed by nothing but the object's closing `}`: a file whose tail is zero-filled (a crash after the size grew but before the data reached disk) has no `]` at all, and one cut mid-record has its last `]` inside the final message's own array — splicing there used to report success over a file that no longer parsed. Either refuses with `utils.ErrChatFileDamaged` and writes nothing.
 3. **Header updates**: `messageCount` and `downloadedAt` are updated in-place by reading only the first 1024 bytes of the file. The `messageCount` value is padded to 20 characters with trailing whitespace to keep byte offsets stable.
 4. **Batching window**: Messages are batched within a 1-second window (`writeIntervalMs = 1000`).
-5. **Fallback**: If incremental append fails (e.g., corrupt file), falls back to full rewrite.
+5. **A failed append's write** (`utils.ErrChatFilePartialWrite`, a full disk say): the append puts the file's `]\n}` back, so the file holds what it held before, and the batch stays buffered for the next flush. It used to be dropped while `messageCount` went on counting it.
+6. **Fallback** (`rewriteWithHistory`): any other append failure rewrites the file whole — its history, then the batch. The history is read by `salvageChatFileMessages`: a file that no longer parses keeps every message before the damage, the damaged original is kept beside it as `chat.json.corrupt` (a hard link, else a copy) and the damage is reported. It used to read such a file as nothing at all and replace the whole history with one batch while the header kept counting it. A file that cannot be read at all is not rewritten; the batch waits. The count becomes the length of the array written.
+7. **Resume over a damaged file**: a sidecar resume checks that the file still ends the way an append needs (`utils.ChatFileEndIntact`) and, if not, runs the same salvage at `Start`, so a run that gets no new message still leaves a parseable file. A sidecar whose chat file is gone starts its count from 0, since the first flush writes the file whole from this run's buffer.
 
 ### Error Limits
+
+The run gives up when the consecutive-error count EXCEEDS the limit (`>`, matching the TypeScript original), i.e. on the 21st live or the 6th replay error in a row.
 
 | Mode | Max Consecutive Errors | Backoff |
 |------|----------------------|---------|
