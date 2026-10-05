@@ -18,11 +18,12 @@ const (
 	// queue_priority 0 — never windowed, never M-counted (§10).
 	DispositionBroadcast JobDisposition = iota
 	// DispositionNewVOD is past content first inserted into the store THIS
-	// cycle: admitted immediately, queue_priority 0 — new content skips the
-	// queue (§10).
+	// cycle — or by a cycle within newVODCarry that has not jobbed it yet
+	// (carryNewIDs): admitted immediately, queue_priority 0 — new content
+	// skips the queue (§10).
 	DispositionNewVOD
-	// DispositionBacklogVOD is past content already in the store before this
-	// cycle: created Queued, queue_priority 1 — the only thing M paces (§10).
+	// DispositionBacklogVOD is every other past content: created Queued,
+	// queue_priority 1 — the only thing M paces (§10).
 	DispositionBacklogVOD
 )
 
@@ -53,7 +54,8 @@ func passBudget(rows int) time.Duration {
 // to create a job — and with what disposition. scope is the RE-READ of
 // FeedScope after the walk (the walk corrected dates and statuses, so a FRESH
 // row's status here already reflects this cycle's probe). newIDs marks rows
-// first inserted THIS cycle (new vs backlog); fresh carries the walk's
+// first inserted this cycle, or by a recent one that has not jobbed them yet
+// (new vs backlog — carryNewIDs); fresh carries the walk's
 // successful probe results so nothing is probed twice in one cycle —
 // probe_cooldown defaults to 0, so nothing else would suppress the repeat.
 func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, chID, cutoff string, scope []database.FeedItem, newIDs map[string]bool, fresh map[string]ProbeClassifyResult) {

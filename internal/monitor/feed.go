@@ -239,6 +239,17 @@ type FeedMonitor struct {
 	// on its own account never draws on it. Guarded by fm.mu.
 	membershipLivenessTries int
 
+	// carriedNew keeps the "new" standing the STORE step gives a video in the
+	// cycle that first stores it (§10's DispositionNewVOD) past that cycle,
+	// until a job exists for it or newVODCarry passes: channel ID → video ID
+	// → the cycle that stored it. Without it, one failed probe in that cycle
+	// (or a spent walk budget, or a failed date fetch) made a brand-new VOD
+	// backlog the next cycle — Queued at priority 1 behind the channel's
+	// archive slots, which newly published content never waits on.
+	// In-process only: a restart in between still makes it backlog. Guarded
+	// by fm.mu.
+	carriedNew map[string]map[string]time.Time
+
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
 	FetchRSS RSSFetchFunc
@@ -592,7 +603,9 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 //  2. STORE   Upsert every item seen (db.UpsertFeedItem) with its
 //     listing-derived date/precision and collect the video IDs
 //     inserted (not merely re-sighted) THIS cycle into newIDs, for
-//     the ARCHIVE step to disposition as new-vs-backlog.
+//     the ARCHIVE step to disposition as new-vs-backlog — joined by
+//     the ones earlier cycles inserted and have not jobbed yet
+//     (carryNewIDs).
 //  3. WALK    the serial probe pass over the store's scope (walk.go, spec §8),
 //     returning the FRESH map of this cycle's successful probes.
 //  4. ARCHIVE re-read scope — the walk corrected dates and statuses, so rows
@@ -704,6 +717,8 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		}
 	}
 
+	fm.carryNewIDs(chID, newIDs, cycleNow)
+
 	// 3. WALK — the serial probe pass over the store's scope (spec §8).
 	scope, scopeErr := fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
 	if scopeErr != nil {
@@ -724,8 +739,73 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	archiveCtx, archiveCancel := context.WithTimeout(ctx, passBudget(len(scope)))
 	fm.archive(archiveCtx, ch, chID, cutoff, scope, newIDs, fresh)
 	archiveCancel()
+	fm.settleNewIDs(chID, newIDs)
 
 	return rssErr
+}
+
+// newVODCarry is how long a video keeps the "new" standing of the cycle that
+// first stored it while no job exists for it (carriedNew). Long enough to
+// outlast any run of transient probe failures; past it, content that waited
+// that long for its first job is paced like the backlog.
+const newVODCarry = 24 * time.Hour
+
+// carryNewIDs adds to this cycle's newIDs the videos earlier cycles stored
+// as new and have not jobbed yet, records this cycle's own, and drops entries
+// older than newVODCarry from every channel — so a removed channel's entries
+// age out too.
+func (fm *FeedMonitor) carryNewIDs(chID string, newIDs map[string]bool, now time.Time) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	for id, ids := range fm.carriedNew {
+		for vid, at := range ids {
+			if now.Sub(at) >= newVODCarry {
+				delete(ids, vid)
+			}
+		}
+		if len(ids) == 0 {
+			delete(fm.carriedNew, id)
+		}
+	}
+	carried := fm.carriedNew[chID]
+	for vid := range carried {
+		newIDs[vid] = true
+	}
+	for vid := range newIDs {
+		if _, ok := carried[vid]; ok {
+			continue
+		}
+		if carried == nil {
+			if fm.carriedNew == nil {
+				fm.carriedNew = map[string]map[string]time.Time{}
+			}
+			carried = map[string]time.Time{}
+			fm.carriedNew[chID] = carried
+		}
+		carried[vid] = now
+	}
+}
+
+// settleNewIDs drops the carried videos a job now exists for. A DB error
+// keeps the entry: newVODCarry bounds it either way.
+func (fm *FeedMonitor) settleNewIDs(chID string, newIDs map[string]bool) {
+	var jobbed []string
+	for vid := range newIDs {
+		if has, err := fm.db.HasAnyJob(vid); err == nil && has {
+			jobbed = append(jobbed, vid)
+		}
+	}
+	if len(jobbed) == 0 {
+		return
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	for _, vid := range jobbed {
+		delete(fm.carriedNew[chID], vid)
+	}
+	if len(fm.carriedNew[chID]) == 0 {
+		delete(fm.carriedNew, chID)
+	}
 }
 
 // rssFetch is the injectable RSS-fetch seam: FetchRSS when a test has wired

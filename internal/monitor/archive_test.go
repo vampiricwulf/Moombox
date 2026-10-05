@@ -2,10 +2,12 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // foundCall records one OnVideoFound emission — the job pipeline's endpoint
@@ -412,5 +414,80 @@ func TestArchive_AStreamAnnouncedBeforeTheWindowIsStillJobbed(t *testing.T) {
 	}
 	if it := mustGetFeedItem(t, db, "UC1", "scheduled01"); it.Status != "upcoming" {
 		t.Errorf("scheduled01 status = %q, want the probe's upcoming", it.Status)
+	}
+}
+
+// "New" (DispositionNewVOD: admitted at once, priority 0) used to mean only
+// "stored by THIS cycle". One failed probe in that cycle — or a spent walk
+// budget, or a failed date fetch — and the next cycle made a brand-new VOD
+// backlog: Queued at priority 1 behind the channel's archive slots, which
+// newly published content never waits on. The standing is now carried until
+// the video is jobbed or newVODCarry passes.
+//
+// Mutants: carryNewIDs not adding the carried IDs (cycle 1 reports backlog),
+// and not expiring them (the late sighting still reports new).
+func TestArchive_ANewVODWhoseFirstProbeFailedIsStillNew(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		later time.Duration
+		want  JobDisposition
+	}{
+		{"next cycle", 10 * time.Minute, DispositionNewVOD},
+		{"after the carry", newVODCarry + time.Minute, DispositionBacklogVOD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			now := fixedNow()
+			pub := now.Add(-2 * time.Hour).Format(time.RFC3339)
+			failing := true
+			probe := func(_ context.Context, id string) (*VideoProbeResult, error) {
+				if failing {
+					return nil, errors.New("player 503")
+				}
+				return &VideoProbeResult{StreamStatus: "vod", Title: id, PublishedAt: pub, PublishedPrecision: "day"}, nil
+			}
+			rss := rssWith(rssItem{ID: "newVOD00001", Title: "fresh upload", Published: pub})
+			fm := newTestFeedMonitor(t, db, withRSS(rss), withMembership(membWith()), withProbe(probe), withNow(now))
+			found := recordVideoFound(fm)
+
+			fm.runCycleForTest(t, "UC1")
+			if len(*found) != 0 {
+				t.Fatalf("found = %v on the failed probe", *found)
+			}
+
+			failing = false
+			fm.now = func() time.Time { return now.Add(tc.later) }
+			fm.runCycleForTest(t, "UC1")
+			if len(*found) != 1 || (*found)[0].d != tc.want {
+				t.Errorf("found = %v, want newVOD00001 as %s", *found, tc.want)
+			}
+		})
+	}
+}
+
+// A carried entry goes once the video has a job, so the carry holds only
+// what is still waiting for one.
+//
+// Mutant: settleNewIDs not deleting — the entry stays.
+func TestArchive_AJobbedVideoLeavesTheNewCarry(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	pub := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	probe := func(_ context.Context, id string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "vod", Title: id, PublishedAt: pub, PublishedPrecision: "day"}, nil
+	}
+	rss := rssWith(rssItem{ID: "newVOD00002", Title: "fresh upload", Published: pub})
+	fm := newTestFeedMonitor(t, db, withRSS(rss), withMembership(membWith()), withProbe(probe), withNow(now))
+	fm.OnVideoFound = func(videoID, title, url string, _ *config.ChannelConfig, _ JobDisposition) {
+		if _, err := db.AddJob(&database.Job{ID: videoID, VideoID: videoID, URL: url, Title: title, Status: database.StatusUpcoming}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fm.runCycleForTest(t, "UC1")
+
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if _, ok := fm.carriedNew["UC1"]["newVOD00002"]; ok {
+		t.Error("a jobbed video is still carried as new")
 	}
 }
