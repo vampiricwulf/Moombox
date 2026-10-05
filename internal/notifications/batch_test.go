@@ -517,3 +517,52 @@ func TestReloadFlushesARetiredTargetsWindow(t *testing.T) {
 			n, len(removed.delivered()), lg.sumWarnArg("dropped"))
 	}
 }
+
+// An immediate send goes ahead of OTHER jobs' coalesced embeds, but not ahead
+// of an embed it follows. A job's "Download Starting" used to land above its
+// own "Stream Found" whenever the worker got there inside the window, and an
+// "Authentication Recovered" won quickly by the automatic refresh sat above
+// the per-job alarm it closed. The window now goes first in those cases; an
+// unrelated immediate send still does not wait for it.
+//
+// Mutant: holdsPredecessor always false — the immediate send comes first.
+func TestBatcherAnImmediateSendFollowsItsOwnJobsWindow(t *testing.T) {
+	titles := func(got *[]Message, mu *sync.Mutex) []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, m := range *got {
+			for _, e := range m.Embeds {
+				out = append(out, e.Title)
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		window Embed
+		now    Embed
+		want   []string
+	}{
+		{"the same job", found("j1"),
+			Embed{Title: "Download Starting", Opts: SendOptions{Event: "downloading", JobID: "j1"}},
+			[]string{"Stream Found", "Download Starting"}},
+		{"an auth recovery over a per-job alarm",
+			Embed{Title: "Authentication Required", Opts: SendOptions{Event: "auth", JobID: "j2"}},
+			Embed{Title: "Authentication Recovered", Opts: SendOptions{Event: "auth_recovered"}},
+			[]string{"Authentication Required", "Authentication Recovered"}},
+		{"another job's error does not wait", found("j1"),
+			Embed{Title: "Download Failed", Opts: SendOptions{Event: "error", JobID: "j9"}},
+			[]string{"Download Failed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, mu, emit := collector()
+			b := newBatcher(batchWindow, &fakeBatchClock{}, emit, testLogger{})
+			b.Add(tc.window, "", nil)
+			b.Add(tc.now, "", nil)
+			if g := titles(got, mu); strings.Join(g, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("emitted %q, want %q", g, tc.want)
+			}
+		})
+	}
+}
