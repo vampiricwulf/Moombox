@@ -103,6 +103,7 @@ func resolveManifestlessStream(
 	maxRes int,
 	isVideo bool,
 	qualityPref string,
+	prefer60fps bool,
 	routed cipher.Solver,
 	goja *cipher.GojaResolver,
 	playerURL string,
@@ -133,7 +134,7 @@ func resolveManifestlessStream(
 		return "", nil, fmt.Errorf("no remaining candidates after excluding itag %d", chosen.Itag)
 	}
 
-	retry := SelectBestDashStream(filtered, preferItag, maxRes, isVideo, qualityPref)
+	retry := SelectBestDashStream(filtered, preferItag, maxRes, isVideo, qualityPref, prefer60fps)
 	if retry == nil {
 		return "", nil, fmt.Errorf("re-selection produced no candidate after excluding itag %d", chosen.Itag)
 	}

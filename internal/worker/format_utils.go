@@ -24,10 +24,18 @@ func IsProgressiveFormat(f *youtube.Format) bool {
 //  3. Quality preference (qualityPref) — targets a specific resolution/FPS like
 //     "1080p60" among everything at or below the chosen size, so a per-job
 //     preference lower than the cap is still honoured
-//  4. Highest bandwidth among the streams AT the chosen size (source/best)
+//  4. Among the streams AT the chosen size (source/best): the frame rate
+//     prefer60fps asks for, then the highest bandwidth
 //
-// For audio streams (isVideo=false), qualityPref and maxRes are ignored.
-func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, isVideo bool, qualityPref string) *DashStreamInfo {
+// Sizes are the frame's SHORTER edge (utils.CapDimension) throughout — the
+// cap's own measure — so a portrait stream's "1080p" is its 1080x1920
+// rendition, not whichever rendition happens to be 1080 tall. Frame rate is
+// ranked by fpsPreference: an explicit "…p60" asks for 60, and otherwise
+// prefer60fps decides, as it does on the whole-file VOD path.
+//
+// For audio streams (isVideo=false), qualityPref, maxRes and prefer60fps are
+// ignored.
+func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, isVideo bool, qualityPref string, prefer60fps bool) *DashStreamInfo {
 	// Manual itag selection — bypasses all other logic
 	if preferItag > 0 {
 		for i := range streams {
@@ -81,7 +89,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	if isVideo && qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			if match := selectByHeightPref(streams, candidates, targetHeight, targetFPS); match != nil {
+			if match := selectByHeightPref(streams, candidates, targetHeight, fpsPreference(targetFPS, prefer60fps)); match != nil {
 				return match
 			}
 			// Target height not found — descend through lower heights
@@ -108,50 +116,81 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 			atSize = candidates
 		}
 	}
-	best := atSize[0]
-	for _, idx := range atSize[1:] {
-		if streams[idx].Bandwidth > streams[best].Bandwidth {
-			best = idx
+	if !isVideo {
+		best := atSize[0]
+		for _, idx := range atSize[1:] {
+			if streams[idx].Bandwidth > streams[best].Bandwidth {
+				best = idx
+			}
 		}
+		return &streams[best]
 	}
-	return &streams[best]
+	filtered := make([]DashStreamInfo, len(atSize))
+	for i, idx := range atSize {
+		filtered[i] = streams[idx]
+	}
+	return &streams[atSize[rankByFPSThenBandwidth(filtered, dashFieldAccessor, fpsPreference(0, prefer60fps))]]
 }
 
-// selectAtHeightIdx returns the index into items of the best-bandwidth entry
-// at targetHeight, preferring entries whose FPS meets targetFPS-1 when
-// targetFPS > 0. Returns -1 when no entry matches the target height.
-// Accessor extracts (height, fps, bandwidth) from each item.
+// fpsPreference is the frame-rate test a rendition is ranked by among those of
+// one size: an explicit "…p60" (targetFPS > 0) asks for at least targetFPS-1;
+// otherwise prefer60fps decides — 50 fps and up when set, a known rate of 31
+// and below when not. The VOD path's selector honours prefer_60fps the same
+// way; the live paths used to ignore it, so a 30 fps recording of a stream
+// that also offered 60 could not be had short of pinning an itag.
+func fpsPreference(targetFPS int, prefer60fps bool) func(fps int) bool {
+	switch {
+	case targetFPS > 0:
+		return func(fps int) bool { return fps >= targetFPS-1 }
+	case prefer60fps:
+		return func(fps int) bool { return fps >= 50 }
+	default:
+		return func(fps int) bool { return fps > 0 && fps <= 31 }
+	}
+}
+
+// rankByFPSThenBandwidth returns the index of the best item: the highest
+// bandwidth among those whose frame rate prefer accepts, or among all of them
+// when it accepts none. items must not be empty.
+func rankByFPSThenBandwidth[T any](items []T, accessor func(T) (size, fps, bandwidth int), prefer func(int) bool) int {
+	best, bestPreferred := -1, false
+	var bestBw int
+	for i, item := range items {
+		_, f, bw := accessor(item)
+		preferred := prefer(f)
+		switch {
+		case best < 0, preferred && !bestPreferred:
+		case preferred == bestPreferred && bw > bestBw:
+		default:
+			continue
+		}
+		best, bestPreferred, bestBw = i, preferred, bw
+	}
+	return best
+}
+
+// selectAtHeightIdx returns the index into items of the best entry at
+// targetHeight — ranked by rankByFPSThenBandwidth under prefer — or -1 when no
+// entry matches the target height. Accessor extracts (size, fps, bandwidth)
+// from each item, size being the frame's shorter edge.
 //
 // Shared between DASH and HLS variant selection — the algorithm is identical
 // modulo the underlying stream type (audit reports/worker.md F35).
-func selectAtHeightIdx[T any](items []T, accessor func(T) (height, fps, bandwidth int), targetHeight, targetFPS int) int {
-	best := -1
-	var bestBw int
-	foundAtFPS := false
+func selectAtHeightIdx[T any](items []T, accessor func(T) (size, fps, bandwidth int), targetHeight int, prefer func(int) bool) int {
+	var at []int
 	for i, item := range items {
-		h, f, bw := accessor(item)
-		if h != targetHeight {
-			continue
-		}
-		isFPSMatch := targetFPS > 0 && f >= targetFPS-1
-		if !isFPSMatch && foundAtFPS {
-			// Already have FPS matches; ignore non-FPS entries.
-			continue
-		}
-		if isFPSMatch && !foundAtFPS {
-			// First FPS match — reset best to favour this entry over any
-			// earlier non-FPS ones.
-			best = i
-			bestBw = bw
-			foundAtFPS = true
-			continue
-		}
-		if best < 0 || bw > bestBw {
-			best = i
-			bestBw = bw
+		if h, _, _ := accessor(item); h == targetHeight {
+			at = append(at, i)
 		}
 	}
-	return best
+	if len(at) == 0 {
+		return -1
+	}
+	sub := make([]T, len(at))
+	for i, idx := range at {
+		sub[i] = items[idx]
+	}
+	return at[rankByFPSThenBandwidth(sub, accessor, prefer)]
 }
 
 // selectNextLowerIdx returns the index into items of the best-bandwidth entry
@@ -182,24 +221,28 @@ func selectNextLowerIdx[T any](items []T, accessor func(T) (height, bandwidth in
 	return best
 }
 
+// dashFieldAccessor and dashHeightBandwidth measure a stream by its frame's
+// SHORTER edge, the cap's own measure (ruling R1): a preference compared
+// against the raw Height sent a portrait stream's "1080p" (1080x1920) down
+// the next-lower-height descent to its 480x854 rendition.
 func dashFieldAccessor(s DashStreamInfo) (int, int, int) {
-	return s.Height, s.FPS, s.Bandwidth
+	return utils.CapDimension(s.Width, s.Height), s.FPS, s.Bandwidth
 }
 
 func dashHeightBandwidth(s DashStreamInfo) (int, int) {
-	return s.Height, s.Bandwidth
+	return utils.CapDimension(s.Width, s.Height), s.Bandwidth
 }
 
-// selectByHeightPref finds a DASH stream matching the target height, optionally with FPS.
-// Returns highest bandwidth at that height, preferring FPS match if targetFPS > 0.
-func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight, targetFPS int) *DashStreamInfo {
+// selectByHeightPref finds a DASH stream matching the target height, ranked by
+// frame rate (prefer) and then bandwidth.
+func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight int, prefer func(int) bool) *DashStreamInfo {
 	// Build a filtered view so the generic helper operates on exactly the
 	// caller's candidate set; map the returned index back to the original.
 	filtered := make([]DashStreamInfo, len(candidates))
 	for i, idx := range candidates {
 		filtered[i] = streams[idx]
 	}
-	idx := selectAtHeightIdx(filtered, dashFieldAccessor, targetHeight, targetFPS)
+	idx := selectAtHeightIdx(filtered, dashFieldAccessor, targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}

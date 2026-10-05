@@ -103,7 +103,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	if qualityPref == "audio_only" {
 		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
 	}
-	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution)
+	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution, job.Config.Prefer60fps)
 	if bestVariant == nil {
 		return nil, fmt.Errorf("invalid HLS master playlist (no variants found)")
 	}
@@ -200,7 +200,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 //
 // Returns nil only for an empty variant list — DownloadHls rejects a master
 // playlist with no variants before calling this.
-func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int) *engine.HlsVariant {
+func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int, prefer60fps bool) *engine.HlsVariant {
 	if len(variants) == 0 {
 		return nil
 	}
@@ -235,7 +235,7 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	if qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			if v := selectHlsByHeight(capped, targetHeight, targetFPS); v != nil {
+			if v := selectHlsByHeight(capped, targetHeight, fpsPreference(targetFPS, prefer60fps)); v != nil {
 				return v
 			}
 			if v := selectNextLowerHls(capped, targetHeight); v != nil {
@@ -257,21 +257,19 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 			atSize = exact
 		}
 	}
-	best := atSize[0]
-	for _, v := range atSize[1:] {
-		if v.Bandwidth > best.Bandwidth {
-			best = v
-		}
-	}
-	return best
+	return atSize[rankByFPSThenBandwidth(atSize, hlsFieldAccessor, fpsPreference(0, prefer60fps))]
+}
+
+// hlsFieldAccessor measures a variant by its frame's shorter edge — see
+// dashFieldAccessor.
+func hlsFieldAccessor(v *engine.HlsVariant) (int, int, int) {
+	return utils.CapDimension(v.Width, v.Height), v.FPS, v.Bandwidth
 }
 
 // selectHlsByHeight finds an HLS variant matching the target height, optionally with FPS.
 // Thin wrapper around the generic selectAtHeightIdx (audit reports/worker.md F35).
-func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight, targetFPS int) *engine.HlsVariant {
-	idx := selectAtHeightIdx(variants, func(v *engine.HlsVariant) (int, int, int) {
-		return v.Height, v.FPS, v.Bandwidth
-	}, targetHeight, targetFPS)
+func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight int, prefer func(int) bool) *engine.HlsVariant {
+	idx := selectAtHeightIdx(variants, hlsFieldAccessor, targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}
@@ -283,7 +281,7 @@ func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight, targetFPS in
 // (audit reports/worker.md F36).
 func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int) *engine.HlsVariant {
 	idx := selectNextLowerIdx(variants, func(v *engine.HlsVariant) (int, int) {
-		return v.Height, v.Bandwidth
+		return utils.CapDimension(v.Width, v.Height), v.Bandwidth
 	}, targetHeight)
 	if idx < 0 {
 		return nil

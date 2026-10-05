@@ -287,6 +287,10 @@ The two AAC profiles share a score, as they share yt-dlp's `mp4a` rank, so the b
 - Any other value selects that specific itag if found in the format pool.
 - Unresolved tracks fall back to auto-selection.
 
+#### Live Selection
+
+The live strategies choose from the DASH representations or the manifestless pool (`SelectBestDashStream`, `internal/worker/format_utils.go`) or from an HLS master playlist (`selectHlsVariant`, `internal/worker/strategy_youtube_hls.go`), and the 30 s quality probe (`buildYouTubeProbeFn`, `internal/worker/orchestrator_youtube.go`) selects with exactly the same inputs — a probe that ranked differently from the downloader would report a quality change on every tick. Sizes are the frame's SHORTER edge throughout, the cap's own measure, so a portrait stream's `1080p` is its 1080x1920 rendition. A pinned itag wins outright; then the cap resolves to one size as above; then a `quality_preference` is matched at its size, descending to the next lower size when that one is missing; otherwise the renditions AT the chosen size are ranked. Within one size the frame rate decides before bandwidth: an explicit `…p60` asks for 60 fps, and otherwise `prefer_60fps` does — 50 fps and up when set, a stated 31 and below when not — exactly as the VOD selector's FPS rung honours it. A rate the manifest does not state is never "preferred", so a ladder without frame rates ranks by bandwidth alone. Pinned by `TestLiveSelectorsHonourPrefer60fps`, `TestPortraitPreferenceMatchesTheShortEdge` and `TestEveryVideoSelectionCarriesPrefer60fps` (`internal/worker/fps_preference_test.go`).
+
 ### Stream Status Classification
 
 The `classifyStream` function determines the stream's lifecycle state from multiple signals in the player response:
