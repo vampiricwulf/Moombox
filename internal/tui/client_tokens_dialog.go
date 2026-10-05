@@ -136,6 +136,7 @@ func (m *ClientTokensDialogModel) Open() {
 	m.loading = true
 	m.spinner = newSpinner()
 	m.list.SetItems(nil)
+	m.list.ResetSelected()
 	m.revokeConfirmID = ""
 	m.confirmTimer = time.Time{}
 	m.errorMsg = ""
@@ -170,7 +171,9 @@ func (m *ClientTokensDialogModel) SetTokens(tokens []*database.ClientToken) tea.
 	for i, ct := range tokens {
 		items[i] = clientTokenItem{token: ct}
 	}
-	return m.list.SetItems(items)
+	cmd := m.list.SetItems(items)
+	clampListCursor(&m.list)
+	return cmd
 }
 
 // SetError sets an error message.
@@ -200,6 +203,7 @@ func (m *ClientTokensDialogModel) RemoveToken(id string) {
 		ci, ok := item.(clientTokenItem)
 		if ok && ci.token.ID == id {
 			m.list.RemoveItem(i)
+			clampListCursor(&m.list)
 			m.revokeConfirmID = ""
 			break
 		}
@@ -349,5 +353,16 @@ func relativeTime(t time.Time) string {
 			return "1d ago"
 		}
 		return fmt.Sprintf("%dd ago", days)
+	}
+}
+
+// clampListCursor keeps a bubbles list's cursor on an item after the list
+// shrank. The list keeps its index across SetItems and RemoveItem, so with the
+// cursor on the row just deleted — or a dialog re-opened onto fewer rows than
+// it last showed — nothing was selected or drawn as selected, and D/A/R
+// silently did nothing until the operator pressed Up.
+func clampListCursor(l *list.Model) {
+	if n := len(l.Items()); l.Index() >= n {
+		l.Select(max(n-1, 0))
 	}
 }

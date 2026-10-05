@@ -241,6 +241,7 @@ func (m *FilesDialogModel) Open() {
 	m.loading = true
 	m.spinner = newSpinner()
 	m.list.SetItems(nil)
+	m.list.ResetSelected()
 	m.deleteConfirmID = ""
 	m.confirmTimer = time.Time{}
 	m.deleteAllArmed = false
@@ -328,7 +329,14 @@ func (m *FilesDialogModel) rebuildList() tea.Cmd {
 	for _, h := range m.history {
 		items = append(items, historyItem{entry: h})
 	}
-	return m.list.SetItems(items)
+	cmd := m.list.SetItems(items)
+	clampListCursor(&m.list)
+	// A deleted row's neighbours shift up under the cursor, and the one that
+	// lands there can be the divider: step back onto the row before it.
+	if _, isHeader := m.list.SelectedItem().(sectionHeaderItem); isHeader {
+		m.list.CursorUp()
+	}
+	return cmd
 }
 
 // SetFilesError records a failure to load the orphaned files. The two sources
@@ -495,6 +503,10 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 		return "close", nil
 	case "r", "R":
 		m.loading = true
+		// A confirm armed against the list being replaced is retracted with it.
+		m.deleteConfirmID, m.confirmTimer = "", time.Time{}
+		m.deleteAllArmed, m.deleteAllSection, m.deleteAllTimer = false, "", time.Time{}
+		m.feedbackMsg = ""
 		m.filesErr = ""
 		m.historyErr = ""
 		m.actionErr = ""
@@ -502,6 +514,11 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 		m.historyLoaded = false
 		return "refresh", nil
 	case "a", "A":
+		// While a scan runs the view shows only "Scanning…": the list D and A
+		// would act on is the stale one the operator cannot see.
+		if m.loading {
+			return "", nil
+		}
 		section, count := m.currentSection()
 		if count == 0 {
 			return "", nil
@@ -539,7 +556,7 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 		m.feedbackMsg = fmt.Sprintf("Press A again to delete all %d %s", count, noun)
 		return "", nil
 	case "d", "D":
-		if len(m.list.Items()) == 0 {
+		if m.loading || len(m.list.Items()) == 0 {
 			return "", nil
 		}
 		m.actionErr = "" // starting a fresh delete clears any prior failure
