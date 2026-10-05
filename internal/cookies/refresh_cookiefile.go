@@ -7,6 +7,7 @@ package cookies
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -415,6 +416,10 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 	}, true
 }
 
+// errCookieSessionReplaced is updateCookieFile declining to write rotations
+// for a session cookies.txt no longer holds.
+var errCookieSessionReplaced = errors.New("cookies.txt holds a different session than the one the rotations are for")
+
 // updateCookieFile re-reads the cookie file, updates matching cookies with new
 // values and expiry, and adds new cookies not already in the file.
 //
@@ -459,7 +464,15 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 // unchanged and deliberate — name-loose updates re-sync stale twins on purpose,
 // domain-strict deletions keep .google.com auth out of reach of an unscoped
 // YouTube deletion.
-func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin) error {
+//
+// sentAs, when not empty, is the YouTubeIdentity of the session the response
+// answered (see checkAndRefreshYouTube). The file is re-read here, at write
+// time, and an import — or anything else that writes cookies.txt — can have
+// replaced it while the request was in flight: the old session's rotated
+// __Secure-1PSIDTS then landed on the new session's rows, a mixed file the
+// operator had just been told was imported. A file whose session is no longer
+// sentAs is left alone (errCookieSessionReplaced).
+func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin, sentAs string) error {
 	filePath := rs.jar.GetFilePath()
 	if filePath == "" {
 		return fmt.Errorf("no cookie file path configured")
@@ -468,6 +481,13 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("read cookie file: %w", err)
+	}
+	if sentAs != "" {
+		onDisk := NewCookieJar()
+		onDisk.loadFrom(data, filePath)
+		if onDisk.YouTubeIdentity() != sentAs {
+			return errCookieSessionReplaced
+		}
 	}
 
 	// Index by name once so each row costs a map lookup rather than a scan of

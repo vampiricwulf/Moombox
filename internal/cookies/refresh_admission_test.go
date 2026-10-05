@@ -472,7 +472,7 @@ func TestUnscopedDeletionFromTheWireStaysInsideTheOrigin(t *testing.T) {
 		".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tfixture-youtube\n"
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse("SAPISID=; Max-Age=0"))
+	rs.processYouTubeSetCookies(setCookieResponse("SAPISID=; Max-Age=0"), "")
 
 	rows := readCookieRows(t, path)
 	for _, r := range rowsNamed(rows, "SAPISID") {
@@ -517,7 +517,7 @@ func TestUnscopedInsertionLandsOnTheDeclaredOrigin(t *testing.T) {
 		// SID is isGoogleOnlyAuthName's headline name, so this is precisely the
 		// header the old heuristic sent to .google.com. No substring anywhere, so
 		// only the unscoped path can admit it.
-		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-only; Path=/; Secure"))
+		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-only; Path=/; Secure"), "")
 
 		rows := rowsNamed(readCookieRows(t, path), "SID")
 		if len(rows) != 1 {
@@ -566,7 +566,7 @@ func TestUnscopedInsertionLandsOnTheDeclaredOrigin(t *testing.T) {
 			updates := map[cookieUpdateKey]cookieUpdate{
 				{Name: "SID"}: {Value: "inserted-value", Expiry: 2100000000},
 			}
-			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+			if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 				t.Fatalf("updateCookieFile: %v", err)
 			}
 
@@ -611,7 +611,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 		rs.processYouTubeSetCookies(setCookieResponse(
 			"SID=unscoped-v1; Path=/; Secure",
 			"SID=scoped-v2; Domain=.google.com; Path=/",
-		))
+		), "")
 
 		rows := rowsNamed(readCookieRows(t, path), "SID")
 		if len(rows) != 1 {
@@ -647,7 +647,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 		rs.processYouTubeSetCookies(setCookieResponse(
 			"SID=scoped-google; Domain=.google.com; Path=/",
 			"SID=scoped-youtube; Domain=.youtube.com; Path=/",
-		))
+		), "")
 
 		rows := readCookieRows(t, path)
 		if got := len(rowsNamed(rows, "SID")); got != 2 {
@@ -680,7 +680,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 		rs.processYouTubeSetCookies(setCookieResponse(
 			"SID=; Domain=.google.com; Max-Age=0",
 			"SID=fresh; Path=/; Secure",
-		))
+		), "")
 
 		rows := rowsNamed(readCookieRows(t, path), "SID")
 		if len(rows) != 1 {
@@ -713,7 +713,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 		// The other control: the rule keys on the SIBLING, not on being unscoped.
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
 
-		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-alone; Path=/; Secure"))
+		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-alone; Path=/; Secure"), "")
 
 		rows := rowsNamed(readCookieRows(t, path), "SID")
 		if len(rows) != 1 || rows[0].value != "unscoped-alone" {
@@ -784,7 +784,7 @@ func TestScopedInsertionCreatesOnItsDeclaredDomain(t *testing.T) {
 	t.Run("a scoped google cookie from a youtube reply creates its row", func(t *testing.T) {
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
 
-		rs.processYouTubeSetCookies(setCookieResponse("SID=scoped-google; Domain=.google.com; Path=/"))
+		rs.processYouTubeSetCookies(setCookieResponse("SID=scoped-google; Domain=.google.com; Path=/"), "")
 
 		rows := rowsNamed(readCookieRows(t, path), "SID")
 		if len(rows) != 1 {
@@ -825,7 +825,7 @@ func TestScopedInsertionCreatesOnItsDeclaredDomain(t *testing.T) {
 	t.Run("a scoped twitch cookie from a youtube reply creates nothing", func(t *testing.T) {
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
 
-		rs.processYouTubeSetCookies(setCookieResponse("SID=scoped-twitch; Domain=.twitch.tv; Path=/"))
+		rs.processYouTubeSetCookies(setCookieResponse("SID=scoped-twitch; Domain=.twitch.tv; Path=/"), "")
 
 		if rows := rowsNamed(readCookieRows(t, path), "SID"); len(rows) != 0 {
 			t.Errorf("a .twitch.tv SID from a youtube.com reply created a row under %q — one "+
@@ -838,7 +838,7 @@ func TestScopedInsertionCreatesOnItsDeclaredDomain(t *testing.T) {
 	t.Run("an unscoped cookie against the same file lands on the origin's site", func(t *testing.T) {
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
 
-		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped; Path=/; Secure"))
+		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped; Path=/; Secure"), "")
 
 		rows := rowsNamed(readCookieRows(t, path), "SID")
 		if len(rows) != 1 {
@@ -871,7 +871,7 @@ func TestUnscopedUntrackedNameIsNotWritten(t *testing.T) {
 	rs.processYouTubeSetCookies(setCookieResponse(
 		"sessionid=fixture-session; Path=/; Secure; HttpOnly",
 		"_ga=fixture-analytics; Path=/",
-	))
+	), "")
 
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -911,7 +911,7 @@ func TestRowBreakingNameNeverReachesTheFile(t *testing.T) {
 				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfixture-login\n"
 			rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-			rs.processYouTubeSetCookies(setCookieResponse(header))
+			rs.processYouTubeSetCookies(setCookieResponse(header), "")
 
 			data, err := os.ReadFile(path)
 			if err != nil {
