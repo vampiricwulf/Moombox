@@ -294,6 +294,13 @@ the CDN; each part file is internally gapless):
 
 Index: `idx_segments_job_id(job_id)`.
 
+Every part of one recording takes the FIRST part's directory and base (`muxSegment`), so a retitle or
+channel rename mid-job — a restart re-reads stream info — cannot scatter one recording across names or
+folders. A finalize that keeps more than one part pins the job's own columns and assets to the same place
+(`pinnedPartLocation`): `filename`, `chat_filename`, the description and the thumbnail sit beside the
+parts, not under the freshly resolved template. A finalize left with a single part moves it to the fresh
+template's plain name instead (`renameSinglePartToPlain`).
+
 **client_tokens** (added v6):
 
 | Column | Type | Notes |

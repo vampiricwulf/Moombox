@@ -660,6 +660,33 @@ func (o *DownloadOrchestrator) removeRecoveredAsides(jobCtx *JobContext) {
 	}
 }
 
+// pinnedPartLocation returns where a recorded part says its recording lives:
+// the part file's directory, the base its "<base> - partN.mp4" name carries,
+// and that base relative to outputRoot (the shape the job's filename column
+// takes). ok is false when the part has no path, its name is not a part
+// name, or it lies outside outputRoot (the output directory moved mid-job),
+// in which case the caller keeps the fresh template.
+func pinnedPartLocation(outputRoot string, seg database.Segment) (dir, base, rel string, ok bool) {
+	if seg.FilePath == "" {
+		return "", "", "", false
+	}
+	m := partBaseRe.FindStringSubmatch(seg.Filename)
+	if m == nil {
+		return "", "", "", false
+	}
+	dir = filepath.Dir(seg.FilePath)
+	absRoot, rootErr := filepath.Abs(outputRoot)
+	absDir, dirErr := filepath.Abs(dir)
+	if rootErr != nil || dirErr != nil {
+		return "", "", "", false
+	}
+	r, err := filepath.Rel(absRoot, absDir)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", "", "", false
+	}
+	return dir, m[1], filepath.Join(r, m[1]), true
+}
+
 // copyKeptChatSidecar puts the chat capture a preserved staging dir is still
 // holding beside a recovered set-aside recording, and returns where it landed
 // ("" when there was nothing to copy, or a copy of it is already in the output
@@ -1088,11 +1115,23 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 
 	filenameBase := jobCtx.Filename
 	outputDir := filepath.Join(jobCtx.OutputDir, filepath.Dir(filenameBase))
+	filenameBase = filepath.Base(filenameBase)
+	relBase := jobCtx.Filename
+	// Parts that stay parts sit where muxSegment pinned them — the first
+	// part's directory and base — so the job's own assets and columns follow
+	// them there. Resolved from the fresh template instead, a mid-job channel
+	// rename put the chat, thumbnail and description in a different folder
+	// from the parts, and chat_filename named a file that was never written.
+	// A single part keeps the fresh template: renameSinglePartToPlain moves
+	// it there on purpose.
+	if len(segments) > 1 {
+		if dir, base, rel, ok := pinnedPartLocation(jobCtx.OutputDir, segments[0]); ok {
+			outputDir, filenameBase, relBase = dir, base, rel
+		}
+	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
-	filenameBase = filepath.Base(filenameBase)
-	relBase := jobCtx.Filename
 
 	// The multi-segment half of the aside recovery (see muxStagedAsides).
 	// muxAndFinalize returns into this function before its own call, so a job
