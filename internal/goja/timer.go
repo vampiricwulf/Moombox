@@ -161,13 +161,6 @@ func (tm *TimerManager) DrainCallbacks() (int, error) {
 	return len(cbs), firstErr
 }
 
-// HasPendingCallbacks returns true if there are queued callbacks waiting to be drained.
-func (tm *TimerManager) HasPendingCallbacks() bool {
-	tm.callbackMu.Lock()
-	defer tm.callbackMu.Unlock()
-	return len(tm.callbacks) > 0
-}
-
 // SetTimeout schedules a one-shot timer. Returns timer ID.
 // The callback is queued for execution via DrainCallbacks() — it is NOT called
 // directly from the timer goroutine (Goja is not goroutine-safe).
@@ -345,6 +338,19 @@ func (tm *TimerManager) ActiveCount() int {
 	return len(tm.timers)
 }
 
+// withExtraArgs binds a timer call's arguments after the delay to its
+// callback, which a browser passes them to (setTimeout(cb, 0, a, b) calls
+// cb(a, b)). Without them the queued call ran with none.
+func withExtraArgs(fn goja.Callable, args []goja.Value) goja.Callable {
+	if len(args) <= 2 {
+		return fn
+	}
+	extra := append([]goja.Value(nil), args[2:]...)
+	return func(this goja.Value, _ ...goja.Value) (goja.Value, error) {
+		return fn(this, extra...)
+	}
+}
+
 // RegisterTimers registers setTimeout/setInterval/clearTimeout/clearInterval on a Goja runtime.
 func RegisterTimers(vm *goja.Runtime, tm *TimerManager) error {
 	err := vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
@@ -353,7 +359,7 @@ func RegisterTimers(vm *goja.Runtime, tm *TimerManager) error {
 			return goja.Undefined()
 		}
 		delay := call.Argument(1).ToInteger()
-		id := tm.SetTimeout(fn, delay)
+		id := tm.SetTimeout(withExtraArgs(fn, call.Arguments), delay)
 		return vm.ToValue(id)
 	})
 	if err != nil {
@@ -366,7 +372,7 @@ func RegisterTimers(vm *goja.Runtime, tm *TimerManager) error {
 			return goja.Undefined()
 		}
 		delay := call.Argument(1).ToInteger()
-		id := tm.SetInterval(fn, delay)
+		id := tm.SetInterval(withExtraArgs(fn, call.Arguments), delay)
 		return vm.ToValue(id)
 	})
 	if err != nil {

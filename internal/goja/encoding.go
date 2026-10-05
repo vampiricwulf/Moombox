@@ -3,6 +3,7 @@ package goja
 import (
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"github.com/dop251/goja"
 )
@@ -17,7 +18,15 @@ import (
 func RegisterEncoding(vm *goja.Runtime) error {
 	// atob: base64 string -> binary string (one code unit per byte)
 	if err := vm.Set("atob", func(call goja.FunctionCall) goja.Value {
-		encoded := call.Argument(0).String()
+		// ASCII whitespace is stripped first, as a browser's forgiving-base64
+		// decode does; Go's decoder skips only \r and \n and refused the rest.
+		encoded := strings.Map(func(r rune) rune {
+			switch r {
+			case ' ', '\t', '\n', '\f', '\r':
+				return -1
+			}
+			return r
+		}, call.Argument(0).String())
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
 			// Try with padding stripped
@@ -54,7 +63,7 @@ func RegisterEncoding(vm *goja.Runtime) error {
 	// TextEncoder
 	textEncoderCode := `
 (function() {
-	function TextEncoder() {}
+	function TextEncoder() { this.encoding = 'utf-8'; }
 	TextEncoder.prototype.encode = function(str) {
 		if (typeof str !== 'string') str = String(str);
 		var buf = [];
@@ -94,8 +103,9 @@ func RegisterEncoding(vm *goja.Runtime) error {
 	// TextDecoder
 	textDecoderCode := `
 (function() {
-	function TextDecoder(encoding) {
+	function TextDecoder(encoding, options) {
 		this.encoding = (encoding || 'utf-8').toLowerCase();
+		this.ignoreBOM = !!(options && options.ignoreBOM);
 	}
 	TextDecoder.prototype.decode = function(input) {
 		if (!input) return '';
@@ -111,6 +121,11 @@ func RegisterEncoding(vm *goja.Runtime) error {
 		}
 		var result = '';
 		var i = 0;
+		// A leading UTF-8 BOM is consumed unless ignoreBOM was asked for, as
+		// a browser's decoder does.
+		if (!this.ignoreBOM && bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+			i = 3;
+		}
 		while (i < bytes.length) {
 			var b = bytes[i];
 			if (b < 0x80) {
