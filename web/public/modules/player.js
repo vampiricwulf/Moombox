@@ -454,6 +454,10 @@ export class PlayerController {
     video.addEventListener("seeked", () => {
       const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
+      // Scroll too. The seek's own timeupdate ran BEFORE this (see
+      // "seeking" above), against the pre-seek index, so it scrolled to the
+      // old position; while paused no further tick comes to correct it.
+      if (this.playerAutoScroll && !this.playerScrollLock) this.syncSidebarToTime();
       this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
     });
 
@@ -1093,6 +1097,9 @@ export class PlayerController {
       }
     } catch (e) {
       console.error("Failed to load player job list:", e);
+      // The half-failed list toasts above; a total failure (server
+      // unreachable) must too, or the picker just sits stale.
+      this.app.showToast(`Failed to load the video list: ${e.message}`, "warning");
     }
   }
 
@@ -1302,10 +1309,17 @@ export class PlayerController {
       // await inside the closure would throw on the stale `.find()` call
       // instead of falling through to the seq check below.
       const segOffsets = this._seg.segOffsets;
+      // A part whose chat fails to load is dropped from the merge, but not
+      // silently: "no chat for this part" (404) is ordinary, anything else
+      // is named, or the sidebar just reads short with no explanation.
+      const failedParts = [];
       const parts = await Promise.all(withChat.map(async (s) => {
         try {
           const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
-          if (!r.ok) return null;
+          if (!r.ok) {
+            if (r.status !== 404) failedParts.push(`part ${s.segmentIndex + 1}: ${await serverErrorMessage(r)}`);
+            return null;
+          }
           const data = await r.json();
           // Per part, against the PART's own header — before mergePartChats
           // shifts it onto the global timeline (one file, one epoch, and the
@@ -1322,17 +1336,28 @@ export class PlayerController {
           else if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
           const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
-        } catch {
+        } catch (e) {
+          failedParts.push(`part ${s.segmentIndex + 1}: ${e.message}`);
           return null;
         }
       }));
       if (this._selectionSeq !== selectionId) return null;
+      if (failedParts.length > 0) {
+        this.app.showToast(`Some chat replay failed to load (${failedParts.join("; ")})`, "warning");
+      }
       const merged = mergePartChats(parts.filter(Boolean));
       if (merged.messages.length > 0) return merged;
     }
     const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
     if (this._selectionSeq !== selectionId) return null;
-    if (!chatRes.ok) return null;
+    if (!chatRes.ok) {
+      // 404 is "this job has no chat"; anything else (a corrupt file's 422,
+      // a 403) is a chat that exists and failed, and says why.
+      if (chatRes.status !== 404) {
+        this.app.showToast(`Failed to load chat replay: ${await serverErrorMessage(chatRes)}`, "warning");
+      }
+      return null;
+    }
     const data = await chatRes.json();
     if (this._selectionSeq !== selectionId) return null;
     // A message the producer left without an offset of its own (offsetMs 0
@@ -1820,9 +1845,14 @@ export class PlayerController {
     // "Recording ended" divider so the tail — the part that has no playback
     // position of its own — is what the sync button hands you. Checked before
     // the active-index guard so a chat that is entirely post-end still syncs.
+    // On a multi-part job `ended` is the PART's: it already reads true on the
+    // last tick of every part but the final one, which jumped the sidebar to
+    // the divider at each boundary and back when the next part loaded.
     const video = document.getElementById("player-video");
     const p = this._chatParts;
-    if (video?.ended && p && p.firstPostIndex >= 0 && container.children[p.firstPostIndex]) {
+    const recordingEnded = video?.ended &&
+      (!this._seg.active || this._seg.segIdx === this._seg.segments.length - 1);
+    if (recordingEnded && p && p.firstPostIndex >= 0 && container.children[p.firstPostIndex]) {
       this._programmaticScroll = true;
       container.scrollTop = Math.max(0, container.children[p.firstPostIndex].offsetTop - 8);
       requestAnimationFrame(() => {

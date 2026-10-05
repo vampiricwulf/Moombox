@@ -305,6 +305,7 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   // messages seed-window chat (they entered a second before the anchor): losing
   // them is not a drop and is not reported.
   h.seek(2000);
+  h.tick(2000); // the first tick after `seeked` — the seek's own ran before it, un-anchored
   assert.equal(overlay.children.length, 17, "the stage is rebuilt at the seek target");
   h.tick(3100);
   assert.equal(h.player.nico.dropped, 3, "seed-window losses are not counted");
@@ -1041,6 +1042,101 @@ test("the resume dialog leaves the keyboard alone on other tabs", { skip }, asyn
   assert.equal(plays(), before, "Escape on another tab must not start the hidden video");
   assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"),
     "the dialog is still waiting for the user's return");
+});
+
+// A chat that exists and fails to load used to look exactly like a job with no
+// chat: the sidebar hid and nothing said why. 404 stays silent (no chat file);
+// anything else names the server's reason. Mutants: drop the non-404 toast on
+// the job-level fetch, or the failedParts toast on the per-part merge.
+test("a chat that fails to load says why; a job with no chat stays quiet", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" }), finished("j2", { chatFilename: "chat.json" })],
+    watchState: {},
+  });
+  h.http.on("GET /api/jobs/j1/chat", () => harness.response({ status: 422, body: { error: "Chat file is corrupt or unreadable" } }));
+  h.http.on("GET /api/jobs/j2/chat", () => harness.response({ status: 404, body: { error: "no chat file" } }));
+  await h.selectJob("j1");
+  assert.ok(h.app.toasts.some((t) => /Failed to load chat replay: Chat file is corrupt or unreadable/.test(t.message)),
+    `toasts: ${JSON.stringify(h.app.toasts)}`);
+  const before = h.app.toasts.length;
+  await h.selectJob("j2");
+  assert.equal(h.app.toasts.length, before, "a 404 (no chat file) must not toast");
+});
+
+test("a multi-part job names the part whose chat failed", { skip }, async () => {
+  const seg = (i, chat) => ({ segmentIndex: i, durationSeconds: 100, quality: "720p", chatFile: chat });
+  const twitchMsg = (offsetMs, text) => ({ offsetMs, authorName: "u", message: text, messageType: "chat" });
+  const h = harness.makePlayer({
+    jobs: [finished("t1", { chatFilename: "p1.chat.json", segments: [seg(0, "/a"), seg(1, "/b")] })],
+    watchState: {},
+    segmentChatById: { "t1/0": { platform: "twitch", emoteOffsets: "utf16", messages: [twitchMsg(1000, "a")] } },
+  });
+  h.http.on("GET /api/jobs/t1/segments/1/chat", () => harness.response({ status: 500, body: { error: "boom" } }));
+  await h.selectJob("t1");
+  assert.equal(h.player.playerChatMessages.length, 1, "the part that loaded still plays");
+  assert.ok(h.app.toasts.some((t) => /part 2: boom/.test(t.message)), `toasts: ${JSON.stringify(h.app.toasts)}`);
+});
+
+// A paused backward seek left the sidebar scrolled at the pre-seek row. The
+// browser fires the seek's timeupdate BEFORE seeked; that tick only walks the
+// active index forward, so it scrolled to the old row, and seeked fixed the
+// classes but not the scroll — while paused, nothing ticked again.
+// Mutant: drop the syncSidebarToTime call from the "seeked" listener.
+test("a paused backward seek scrolls the sidebar to the target", { skip }, async () => {
+  const rows = Array.from({ length: 200 }, (_, i) => ({ offsetMs: i * 1000, authorName: "u", message: [{ text: `m${i}` }] }));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: { messages: rows },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const list = h.sidebar();
+  h.video.paused = false;
+  h.tick(150_000);
+  h.flushRaf();
+  const atPlay = list.scrollTop;
+  h.video.paused = true;
+  h.seek(20_000);
+  h.flushRaf();
+  assert.equal(h.player.playerActiveChatIndex, 21);
+  assert.ok(list.scrollTop < atPlay, `scrollTop ${list.scrollTop} stayed at the pre-seek ${atPlay}`);
+});
+
+// On a multi-part job the element's `ended` is the PART's, and it already
+// reads true on each part's last tick, so the sidebar jumped to the
+// "Recording ended" divider at every part boundary.
+// Mutant: drop the last-part condition from syncSidebarToTime.
+test("a part boundary does not jump the sidebar to the recording-ended divider", { skip }, async () => {
+  const rows = Array.from({ length: 250 }, (_, i) => ({ offsetMs: i * 1000, authorName: "u", message: [{ text: `m${i}` }] }));
+  const part = (i) => ({ segmentIndex: i, durationSeconds: 100, quality: "720p" });
+  const h = harness.makePlayer({
+    jobs: [finished("t1", { chatFilename: "c.json", segments: [part(0), part(1)] })],
+    watchState: {},
+    chat: { messages: rows },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("t1");
+  const list = h.sidebar();
+  h.video.paused = false;
+  h.tick(99_000);
+  h.flushRaf();
+  h.video.ended = true; // part 1's last tick
+  h.tick(100_000);
+  h.flushRaf();
+  const divider = list.children[h.player._chatParts.firstPostIndex];
+  assert.notEqual(list.scrollTop, Math.max(0, divider.offsetTop - 8),
+    "the sidebar jumped to the divider in the middle of the recording");
+});
+
+// Mutant: drop the toast from loadPlayerJobList's catch — an unreachable
+// server leaves the picker stale with nothing said.
+test("an unreachable server says the video list failed to load", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: {} });
+  h.http.on("GET /api/jobs", () => { throw new TypeError("Failed to fetch"); });
+  await h.player.loadPlayerJobList();
+  assert.ok(h.app.toasts.some((t) => /Failed to load the video list: Failed to fetch/.test(t.message)),
+    `toasts: ${JSON.stringify(h.app.toasts)}`);
 });
 
 // ── 19. Player review can-wait pins (Arc J, Task 12 / J15) ──────────────────
