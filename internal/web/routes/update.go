@@ -146,15 +146,18 @@ func DismissUpdate(store *config.Store, tag string) error {
 // ClearPendingUpdate withdraws the pending release after a check found
 // nothing newer than the running version — the release it named was pulled
 // from GitHub, so the badge offered an update whose download no longer
-// exists. Returns the withdrawn tag, "" when nothing was pending.
-// CompareAndSwap for the reason DismissUpdate gives: a release found while
-// this ran must survive.
-func ClearPendingUpdate() string {
-	pending := SharedUpdateInfo.Load()
-	if pending == nil || !SharedUpdateInfo.CompareAndSwap(pending, nil) {
+// exists. Returns the withdrawn tag, "" when nothing was withdrawn.
+//
+// seen is SharedUpdateInfo as the caller loaded it BEFORE the check: only that
+// release is withdrawn, by CompareAndSwap. Loaded here instead, the swap
+// covered nanoseconds and not the check's GitHub round trip, so a release
+// another check found in that time — or one the stale answer predated — was
+// withdrawn, and every UI's badge with it until the next daily check.
+func ClearPendingUpdate(seen *updater.ReleaseInfo) string {
+	if seen == nil || !SharedUpdateInfo.CompareAndSwap(seen, nil) {
 		return ""
 	}
-	return pending.TagName
+	return seen.TagName
 }
 
 // checkForUpdate is (*updater.Updater).CheckForUpdate, a seam for the test
@@ -199,6 +202,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
+		seen := SharedUpdateInfo.Load()
 		release, err := checkForUpdate(deps.Updater, r.Context())
 		if err != nil {
 			// The cause, not a bare "check failed": the updater's own
@@ -226,7 +230,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			resp["releaseNotes"] = release.ReleaseNotes
 			resp["releaseNotesHtml"] = release.ReleaseNotesHtml
 			resp["publishedAt"] = release.PublishedAt
-		} else if tag := ClearPendingUpdate(); tag != "" && deps.OnCleared != nil {
+		} else if tag := ClearPendingUpdate(seen); tag != "" && deps.OnCleared != nil {
 			deps.OnCleared(tag)
 		}
 

@@ -628,3 +628,41 @@ func TestUpdateCheckUpToDateWithdrawsThePendingRelease(t *testing.T) {
 		}
 	}
 }
+
+// An up-to-date answer withdraws only the release pending when the check
+// started. Another check can find a release during this one's GitHub round
+// trip; withdrawing whatever was pending at the end withdrew that, and every
+// UI's badge with it until the next daily check.
+//
+// Mutant: the route loading SharedUpdateInfo after the check — v9.9.10 is
+// withdrawn.
+func TestUpdateCheckUpToDateKeepsAReleaseFoundDuringIt(t *testing.T) {
+	newer := &updater.ReleaseInfo{Version: "9.9.10", TagName: "v9.9.10"}
+	orig := checkForUpdate
+	t.Cleanup(func() { checkForUpdate = orig })
+	checkForUpdate = func(*updater.Updater, context.Context) (*updater.ReleaseInfo, error) {
+		SharedUpdateInfo.Store(newer) // another check found it meanwhile
+		return nil, nil
+	}
+
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	var cleared []string
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+		Updater:   upd,
+		Version:   "2.6.0-test",
+		OnCleared: func(tag string) { cleared = append(cleared, tag) },
+	})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/update/check", nil))
+	if got := SharedUpdateInfo.Load(); got != newer {
+		t.Errorf("SharedUpdateInfo = %+v, want the release found during the check", got)
+	}
+	if len(cleared) != 0 {
+		t.Errorf("OnCleared = %q, want nothing withdrawn", cleared)
+	}
+}

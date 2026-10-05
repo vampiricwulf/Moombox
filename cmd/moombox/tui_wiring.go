@@ -461,12 +461,13 @@ func (s *runState) runTUI() {
 	if s.upd != nil {
 		app.OnCheckUpdate = func() (*tui.UpdateStatusMsg, error) {
 			s.log.Info("Update check requested from TUI")
+			seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
 			release, err := s.upd.CheckForUpdate(context.Background())
 			if err != nil {
 				return nil, err
 			}
 			if release == nil {
-				if tag := routes.ClearPendingUpdate(); tag != "" {
+				if tag := routes.ClearPendingUpdate(seen); tag != "" {
 					announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
 				}
 				return nil, nil

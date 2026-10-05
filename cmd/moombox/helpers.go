@@ -215,6 +215,7 @@ func checkAndBroadcastUpdate(
 	configStore *config.Store,
 	lastNotifiedTag *string,
 ) {
+	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
 	release, err := upd.CheckForUpdate(ctx)
 	if err != nil {
 		// A check cut short by shutdown is not a failure worth a warning.
@@ -228,7 +229,7 @@ func checkAndBroadcastUpdate(
 	if release == nil {
 		// Already up to date — and so a release still pending names one that
 		// was pulled.
-		if tag := routes.ClearPendingUpdate(); tag != "" {
+		if tag := routes.ClearPendingUpdate(seen); tag != "" {
 			announceUpdateCleared(wsHub, tuiCh, tag)
 		}
 		return
