@@ -58,7 +58,7 @@ func (cd *ChatDownloader) flushLocked() error {
 		// a sharing violation), so it was neither adopted nor moved aside.
 		// The first write would be a FULL one and replace its history with
 		// this batch: adopt it now instead, or keep the batch until it can be.
-		n, stillUnread := cd.adoptPartFile(true)
+		n, stillUnread := cd.adoptUnreadPart()
 		if stillUnread {
 			err := fmt.Errorf("part file %s still unreadable; holding %d messages", path, snapshotLen)
 			cd.logger.Warn("twitch chat: not writing over a part file that cannot be read yet", "err", err)
@@ -66,6 +66,9 @@ func (cd *ChatDownloader) flushLocked() error {
 		}
 		cd.mu.Lock()
 		flushed = cd.flushedToDisk
+		startMs = cd.recordingStartMs.Load()
+		// Snapshotted again: the adoption rebased them onto the file's clock.
+		copy(msgs, cd.messages[:snapshotLen])
 		cd.mu.Unlock()
 		count += n
 	}

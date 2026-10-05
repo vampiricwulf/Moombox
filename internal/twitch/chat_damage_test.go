@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -170,6 +171,71 @@ func TestAPartUnreadableAtStartIsNotOverwritten(t *testing.T) {
 	}
 	if got := cd.MessageCount(); got != 41 {
 		t.Errorf("MessageCount %d, want 41", got)
+	}
+}
+
+// TestAPartAdoptedAtItsFirstFlushKeepsItsClock: a part Start could not read
+// could not give up its recording base either, so the run kept the restart as
+// its base — and the flush that adopted the part once the lock cleared
+// appended messages offset against the restart to a file whose header and
+// history count from 10:00: a message from 12:10 replayed at 0:10:00 instead
+// of 2:10:00. The flush now adopts the base with the file and rebases the
+// pending batch onto it.
+//
+// Mutants: drop adoptPartRecordingBase from adoptUnreadPart, or the rebase of
+// the pending batch, or flushLocked's re-snapshot after it — new0 is written
+// at 600000.
+func TestAPartAdoptedAtItsFirstFlushKeepsItsClock(t *testing.T) {
+	at := func(clock string) int64 {
+		t.Helper()
+		ts, err := time.Parse(time.RFC3339, "2026-06-11T"+clock+"Z")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ts.UnixMilli()
+	}
+	path := filepath.Join(t.TempDir(), "chat.json")
+	seed := newTestChatDownloader(t, path)
+	seed.SetRecordingStartTime("2026-06-11T10:00:00Z")
+	seed.addMessage(&TwitchChatMessage{ID: "old0", TimestampMs: at("10:30:00"), Message: "hi", MessageType: "chat"})
+	if err := seed.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(chatResumePath(path)); err != nil { // no usable sidecar
+		t.Fatal(err)
+	}
+
+	origSummary, origBase := readChatPartFileSummary, chatFileRecordingBaseMs
+	t.Cleanup(func() { readChatPartFileSummary, chatFileRecordingBaseMs = origSummary, origBase })
+	lockErr := errors.New("read: the file is being used by another process")
+	readChatPartFileSummary = func(string) (chatPartFileSummary, error) { return chatPartFileSummary{}, lockErr }
+	chatFileRecordingBaseMs = func(string) (int64, bool, error) { return 0, false, lockErr }
+
+	cd := newTestChatDownloader(t, path)
+	cd.SetRecordingStartTime("2026-06-11T12:00:00Z") // the restart, as the orchestrator hands it
+	_ = cd.Start(cancelledContext(t))
+	cd.addMessage(&TwitchChatMessage{ID: "new0", TimestampMs: at("12:10:00"), Message: "hi", MessageType: "chat"})
+	readChatPartFileSummary, chatFileRecordingBaseMs = origSummary, origBase // the lock clears
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	cd.addMessage(&TwitchChatMessage{ID: "new1", TimestampMs: at("12:20:00"), Message: "hi", MessageType: "chat"})
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	d := readDamageTestFile(t, path)
+	if d.RecordingStartTime != "2026-06-11T10:00:00Z" {
+		t.Fatalf("the part's base became %q, want its own 10:00", d.RecordingStartTime)
+	}
+	want := map[string]int64{"old0": 1_800_000, "new0": 7_800_000, "new1": 8_400_000}
+	if len(d.Messages) != len(want) {
+		t.Fatalf("part holds %d messages, want %d", len(d.Messages), len(want))
+	}
+	for _, m := range d.Messages {
+		if m.OffsetMs != want[m.ID] {
+			t.Errorf("%s at offset %d, want %d against the part's 10:00 base", m.ID, m.OffsetMs, want[m.ID])
+		}
 	}
 }
 

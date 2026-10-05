@@ -833,10 +833,11 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 // residual is therefore at most a window's worth of drift, against hours of
 // misplacement for the alternative.
 //
-// Only on a fresh Start (the caller's !alreadyInitialized gate). A downloader
-// the orchestrator re-Starts after a connectivity outage already holds the
-// base its part file was written with, so there is nothing to adopt and no
-// reason to race a roll for it.
+// Only on a fresh Start (the caller's !alreadyInitialized gate), and again at
+// the first write to a part Start could not read (adoptUnreadPart). A
+// downloader the orchestrator re-Starts after a connectivity outage already
+// holds the base its part file was written with, so there is nothing to adopt
+// and no reason to race a roll for it.
 //
 // The store is conditional on outputPath still being the path that was read.
 // Start runs on its own goroutine while the video loop is already going, so a
@@ -1086,6 +1087,30 @@ func (cd *ChatDownloader) adoptPartFile(retry bool) (adopted int, unread bool) {
 	cd.logger.Info("twitch chat: adopting the existing part file",
 		"channel", cd.channelLogin, "path", path, "messages", summary.messages)
 	return summary.messages, false
+}
+
+// adoptUnreadPart retries, at a write, the adoption Start could not make of a
+// part file it could not read (partUnread). Caller holds flushMu, so the part
+// cannot roll underneath it.
+//
+// Base first, in Start's order. The base read failed at Start with the rest of
+// the file, so recordingStartMs still holds the run's start — the restart — and
+// every message buffered since was offset against it; adopting the file alone
+// appended those offsets to a file whose header and history count from its
+// own base, two clocks in one file. The pending messages are rebased onto the
+// adopted base under cd.mu, the lock addMessage computes offsets under, so the
+// ones already buffered and the ones still to come share the file's clock.
+func (cd *ChatDownloader) adoptUnreadPart() (adopted int, unread bool) {
+	runBase := cd.recordingStartMs.Load()
+	cd.adoptPartRecordingBase()
+	cd.mu.Lock()
+	if base := cd.recordingStartMs.Load(); base > 0 && base != runBase {
+		for i := range cd.messages {
+			cd.messages[i].OffsetMs = cd.messages[i].TimestampMs - base
+		}
+	}
+	cd.mu.Unlock()
+	return cd.adoptPartFile(true)
 }
 
 // setPartUnread records whether the current part file is one that exists and
