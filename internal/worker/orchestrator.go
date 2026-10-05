@@ -422,7 +422,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 					// mid-capture has not finished, and recording nothing here
 					// would leave a previous run's verdict standing.
 					chatRec.record(fmt.Errorf("panic in YouTube chat downloader: %v", r))
-					o.logger.Error("panic in YouTube chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+					o.logger.Error("panic in YouTube chat downloader", "jobID", jobID, "panic", fmt.Sprint(r))
 				}
 			}()
 			chatRec.record(chatDl.Start(ctx))

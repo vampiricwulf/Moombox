@@ -189,19 +189,22 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Pre-download Twitch thumbnail to staging while stream is still live
 	// (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
 	if jobCtx.Job.ThumbnailURL != "" {
+		// Read here, not in the goroutine: it is not waited for, and
+		// muxAndFinalize replaces jobCtx.Job when a short VOD gets there first.
+		thumbURL, stagingDir := jobCtx.Job.ThumbnailURL, jobCtx.StagingDir
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					o.logger.Error("panic in thumbnail download", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+					o.logger.Error("panic in thumbnail download", "panic", fmt.Sprint(r), "jobID", jobID)
 				}
 			}()
 			thumbCtx, thumbCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer thumbCancel()
-			thumbPath := filepath.Join(jobCtx.StagingDir, "thumbnail.jpg")
-			if strings.Contains(jobCtx.Job.ThumbnailURL, ".webp") {
-				thumbPath = filepath.Join(jobCtx.StagingDir, "thumbnail.webp")
+			thumbPath := filepath.Join(stagingDir, "thumbnail.jpg")
+			if strings.Contains(thumbURL, ".webp") {
+				thumbPath = filepath.Join(stagingDir, "thumbnail.webp")
 			}
-			DownloadFileMinSize(thumbCtx, jobCtx.Job.ThumbnailURL, thumbPath, 1000, o.logger)
+			DownloadFileMinSize(thumbCtx, thumbURL, thumbPath, 1000, o.logger)
 		}()
 	}
 
@@ -404,7 +407,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 					// mid-capture has not finished, and recording nothing here
 					// would leave a previous run's verdict standing.
 					chatRec.record(fmt.Errorf("panic in Twitch chat downloader: %v", r))
-					o.logger.Error("panic in Twitch chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+					o.logger.Error("panic in Twitch chat downloader", "jobID", jobID, "panic", fmt.Sprint(r))
 				}
 			}()
 			chatRec.record(twitchChatDl.Start(parentCtx))
