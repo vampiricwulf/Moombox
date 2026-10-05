@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The first boot of a fresh update whose rollback artifact is gone has nothing
@@ -34,5 +35,42 @@ func TestPostUpdatePastRollbackFollowsTheArtifact(t *testing.T) {
 	// Windows falls back to the launcher's ~ image; there is none here.
 	if !postUpdatePastRollback(exePath) {
 		t.Error("with no rollback artifact left the boot is past rollback")
+	}
+}
+
+// The launcher loop feeds postUpdatePastRollback into classifyChildExit twice:
+// a first boot past its rollback artifact is no longer a first boot a
+// rollback can undo, and its quick death is supervised rather than failed
+// fast. Both helpers were tested; the wiring between them was not.
+//
+// Mutants: drop `|| pastRollback` from the supervised argument — the boot past
+// its artifact fails fast and ends the launcher; drop `&& !pastRollback` —
+// it is routed to a rollback that cannot happen.
+func TestJudgeChildExitWiresThePastRollbackBoot(t *testing.T) {
+	exePath := filepath.Join(t.TempDir(), "moombox")
+	if err := os.WriteFile(exePath, []byte("new release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backup := exePath + ".old"
+	if err := os.WriteFile(backup, []byte("previous release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	action, first := judgeChildExit(exePath, true, false, 1, 10*time.Second, false, 0)
+	if action != childPostUpdateFailure || !first {
+		t.Errorf("a quick crash with .old on disk = (%v, first %v), want a rollback of the first boot", action, first)
+	}
+
+	if err := os.Remove(backup); err != nil {
+		t.Fatal(err)
+	}
+	action, first = judgeChildExit(exePath, true, false, 1, 10*time.Second, false, 0)
+	if action != childCrash || first {
+		t.Errorf("a quick crash past the rollback artifact = (%v, first %v), want a supervised crash", action, first)
+	}
+
+	// Not a first boot at all: the fresh-launch fail-fast rule stands.
+	if action, _ := judgeChildExit(exePath, false, false, 1, 10*time.Second, false, 0); action != childPropagate {
+		t.Errorf("a fresh launch's quick crash = %v, want it propagated", action)
 	}
 }

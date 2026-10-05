@@ -188,12 +188,6 @@ func launchAndSupervise() {
 		child.Store(nil)
 
 		ranFor := time.Since(spawnedAt)
-		// A first boot of a fresh update whose rollback artifact is gone has
-		// nothing to roll back to (postUpdatePastRollback): its exit is an
-		// ordinary crash, and a supervised one however soon it comes.
-		pastRollback := firstAfterUpdate && postUpdatePastRollback(exePath)
-		wasFirstAfterUpdate := firstAfterUpdate && !pastRollback
-		firstAfterUpdate = false
 		// A healthy run ends the crash streak. (Quick deaths of RESPAWNED
 		// children deliberately don't reset — they're the streak.)
 		if ranFor >= launcherHealthyWindow {
@@ -211,7 +205,10 @@ func launchAndSupervise() {
 			}
 		}
 
-		switch classifyChildExit(code, ranFor, wasFirstAfterUpdate, terminating.Load(), wasRespawn || pastRollback, consecutiveCrashes) {
+		action, wasFirstAfterUpdate := judgeChildExit(exePath, firstAfterUpdate, wasRespawn,
+			code, ranFor, terminating.Load(), consecutiveCrashes)
+		firstAfterUpdate = false
+		switch action {
 		case childRestart:
 			// Update applied: rename .old → ~ on Windows so the .old name
 			// is free for the next update (returns whether a .old existed,
@@ -317,6 +314,22 @@ func forwardStop(goos string, p stoppable) {
 	if err := p.Signal(syscall.SIGTERM); err != nil {
 		_ = p.Kill()
 	}
+}
+
+// judgeChildExit is the launcher loop's decision for one child exit: the facts
+// the loop holds, wired into classifyChildExit. Split out so the wiring is
+// under test as well as the classifier. It also reports whether the exit
+// still counts as a fresh update's first boot, which the restart arm carries
+// forward.
+//
+// A first boot of a fresh update whose rollback artifact is gone has nothing
+// to roll back to (postUpdatePastRollback): its exit is an ordinary crash, and
+// a supervised one however soon it comes.
+func judgeChildExit(exePath string, firstAfterUpdate, wasRespawn bool, code int, ranFor time.Duration, terminating bool, consecutiveCrashes int) (action childExitAction, wasFirstAfterUpdate bool) {
+	pastRollback := firstAfterUpdate && postUpdatePastRollback(exePath)
+	wasFirstAfterUpdate = firstAfterUpdate && !pastRollback
+	return classifyChildExit(code, ranFor, wasFirstAfterUpdate, terminating, wasRespawn || pastRollback, consecutiveCrashes),
+		wasFirstAfterUpdate
 }
 
 // classifyChildExit decides what one child exit means. Pure, so the order of
