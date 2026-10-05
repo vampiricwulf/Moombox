@@ -98,7 +98,7 @@ func (d *SegmentDownloader) ensureHlsInit(ctx context.Context, mapURI string) er
 	}
 	n, werr := d.outputFile.Write(data)
 	if werr != nil {
-		return fmt.Errorf("%w: %v", errHlsInitWrite, werr)
+		return fmt.Errorf("%w: %w: %v", ErrLocalWrite, errHlsInitWrite, werr)
 	}
 	d.bytesWritten.Add(int64(n))
 	d.hlsInitWritten = true
@@ -709,7 +709,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			hlsSeq := int(d.currentSeq.Load())
 			n, writeErr := d.outputFile.Write(segData)
 			if writeErr != nil {
-				return fmt.Errorf("write HLS segment %d: %w", hlsSeq, writeErr)
+				return fmt.Errorf("%w: write HLS segment %d: %w", ErrLocalWrite, hlsSeq, writeErr)
 			}
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
@@ -1066,7 +1066,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 			n, err := d.outputFile.Write(data)
 			if err != nil {
-				return fmt.Errorf("write HLS VOD segment %d: %w", nextIdx, err)
+				return fmt.Errorf("%w: write HLS VOD segment %d: %w", ErrLocalWrite, nextIdx, err)
 			}
 			d.bytesWritten.Add(int64(n))
 			// Seq reports the just-WRITTEN sequence — the same last-written

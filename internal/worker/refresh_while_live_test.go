@@ -98,3 +98,25 @@ func TestLiveRefreshSitesRetryWhileLive(t *testing.T) {
 		t.Errorf("refreshWhileLive is called from %d live-loop sites, want 2 (quality loss, split)", n)
 	}
 }
+
+// A capture that cannot write its staging stops the live loop with the error
+// (Error status, staging and sidecar kept) instead of entering the stream-end
+// verification, which re-verified a stream it could not write for up to an
+// hour and then finished the job. runLiveStreamDownload cannot be driven, so
+// the branch is pinned by source.
+//
+// Mutant: the ErrLocalWrite check removed.
+func TestLiveLoopStopsOnALocalWriteFailure(t *testing.T) {
+	src, err := os.ReadFile("orchestrator_youtube.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	i := strings.Index(body, "errors.Is(downloadErr, engine.ErrLocalWrite)")
+	if i < 0 {
+		t.Fatal("the live loop no longer checks for engine.ErrLocalWrite")
+	}
+	if ret := strings.Index(body[i:], "return result, waitedForResume.value(), downloadErr"); ret < 0 || ret > 600 {
+		t.Error("the ErrLocalWrite check no longer returns the download error")
+	}
+}

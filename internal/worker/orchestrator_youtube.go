@@ -382,6 +382,16 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"err", downloadErr, "jobID", jobCtx.Job.ID)
 			return result, waitedForResume.value(), downloadErr
 		}
+		// Nor can one that cannot write its staging (a full disk, a
+		// permission): every refresh would fail on its first write. Read as a
+		// possible stream end, it was re-verified for up to an hour, logged
+		// nowhere, and then finished as if the stream had ended — footage of
+		// a live broadcast lost behind a Finished row.
+		if errors.Is(downloadErr, engine.ErrLocalWrite) {
+			o.logger.Error("the capture cannot be written to staging — stopping with staging and resume state kept",
+				"err", downloadErr, "jobID", jobCtx.Job.ID)
+			return result, waitedForResume.value(), downloadErr
+		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
 		isQualityLost := errors.Is(downloadErr, engine.ErrQualityLost)
@@ -573,6 +583,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		timeSinceLastSeg := time.Since(lastSegTime.Load())
 		o.logger.Info("segment downloaders stopped",
 			"timeSinceLastSeg", timeSinceLastSeg.Round(time.Second),
+			"err", downloadErr, // nil for a clean stop; otherwise logged nowhere else
 			"jobID", jobCtx.Job.ID)
 
 		// Verify stream status with YouTube API

@@ -242,7 +242,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		writeSeq := int(d.currentSeq.Load())
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
-			return fmt.Errorf("write segment %d: %w", writeSeq, writeErr)
+			return fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, writeSeq, writeErr)
 		}
 		d.bytesWritten.Add(int64(n))
 		d.lastSegTime.StoreNow()

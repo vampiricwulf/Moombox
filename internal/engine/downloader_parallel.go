@@ -578,7 +578,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 
 			n, err := d.outputFile.Write(data)
 			if err != nil {
-				return nextSeq, fmt.Errorf("write segment %d: %w", nextSeq, err)
+				return nextSeq, fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, nextSeq, err)
 			}
 			d.bytesWritten.Add(int64(n))
 			d.lastSegTime.StoreNow()

@@ -134,7 +134,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
-			return fmt.Errorf("write chunk: %w", writeErr)
+			return fmt.Errorf("%w: write chunk: %w", ErrLocalWrite, writeErr)
 		}
 		offset += int64(n)
 		d.bytesWritten.Store(offset)
@@ -309,7 +309,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			d.noteFetch(n)
 			written, writeErr := d.outputFile.Write(buf[:n])
 			if writeErr != nil {
-				return fmt.Errorf("write: %w", writeErr)
+				return fmt.Errorf("%w: write: %w", ErrLocalWrite, writeErr)
 			}
 			stagedBytes := d.bytesWritten.Add(int64(written))
 

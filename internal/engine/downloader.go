@@ -16,6 +16,15 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// ErrLocalWrite marks a failure to write the staged recording itself —
+// opening the output file or appending to it (a full disk, a permission, a
+// staging directory that went away). It says nothing about the stream, and
+// retrying against the same staging cannot help until the operator frees
+// space or fixes the path, so callers must not read it as a possible stream
+// end: the YouTube live loop did, re-verifying a stream it could not write
+// for up to an hour and then finishing the job as if it had ended.
+var ErrLocalWrite = errors.New("writing the staged recording failed")
+
 // ErrQualityLost signals that the stream is still live but the selected
 // quality variant/format has become unavailable (e.g. transcode removed).
 var ErrQualityLost = errors.New("stream quality became unavailable")
@@ -974,7 +983,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 
 	d.outputFile, err = os.OpenFile(d.opts.OutputFile, flags, 0o644)
 	if err != nil {
-		return fmt.Errorf("open output file: %w", err)
+		return fmt.Errorf("%w: open output file: %w", ErrLocalWrite, err)
 	}
 	// Closure (not `defer d.outputFile.Close()`): the direct-download
 	// discard (discardStagedMedia) reopens d.outputFile, and a method-value
