@@ -139,7 +139,7 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 			res, isFresh := fresh[row.VideoID]
 			if !isFresh {
 				var ok bool
-				res, ok = fm.probeRowDated(ctx, ch, chID, row)
+				res, ok = fm.probeRowDated(ctx, ch, chID, row, cutoff)
 				if !ok {
 					retries++ // date fetch failed — the errored-probe contract
 					continue

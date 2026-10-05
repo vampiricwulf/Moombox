@@ -491,3 +491,39 @@ func TestArchive_AJobbedVideoLeavesTheNewCarry(t *testing.T) {
 		t.Error("a jobbed video is still carried as new")
 	}
 }
+
+// An RSS <published> is the announcement time. A broadcast announced before
+// the window and first seen after it ended — the channel just added, or
+// Moombox down through it — probes as a VOD, and the production status probe
+// carries no date. The row's 'exact' date was trusted, so the VOD was
+// windowed out by the date it was announced, though it aired yesterday. An
+// rss row dated before the cutoff now has its real date fetched.
+//
+// Mutant: probeRowDated trusting every 'exact' row — no date fetch, no job.
+func TestArchive_AMissedBroadcastAnnouncedBeforeTheWindowIsArchived(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	announced := now.Add(-5 * 24 * time.Hour).Format(time.RFC3339) // window is 3 days
+	aired := now.Add(-24 * time.Hour).Format(time.RFC3339)
+	fetches := 0
+	probe := func(_ context.Context, id string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "vod", Title: id}, nil // dateless, as in production
+	}
+	probeDate := func(_ context.Context, id string) (string, string, error) {
+		fetches++
+		// A past broadcast's VOD carries liveBroadcastDetails.startTimestamp:
+		// 'started', which outranks the row's 'exact' announcement.
+		return aired, "started", nil
+	}
+	rss := rssWith(rssItem{ID: "endedStrm01", Title: "anniversary stream", Published: announced})
+	fm := newTestFeedMonitor(t, db, withRSS(rss), withMembership(membWith()), withProbe(probe), withProbeDate(probeDate), withNow(now))
+	found := recordVideoFound(fm)
+	fm.runCycleForTest(t, "UC1")
+
+	if fetches == 0 {
+		t.Error("no date was fetched for an rss row dated before the window")
+	}
+	if len(*found) != 1 || (*found)[0].videoID != "endedStrm01" {
+		t.Errorf("found = %v, want the VOD of the broadcast that aired yesterday", *found)
+	}
+}

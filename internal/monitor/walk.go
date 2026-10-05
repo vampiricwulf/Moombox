@@ -107,7 +107,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		}
 
 		probed++
-		res, ok := fm.probeRowDated(ctx, ch, chID, row)
+		res, ok := fm.probeRowDated(ctx, ch, chID, row, cutoff)
 		if !ok {
 			// The date fetch failed (transport error): a transient fault, not
 			// a classification. Nothing written, not FRESH, never exhausts —
@@ -181,14 +181,18 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 // youtube.PlayerAPI.ProbeVideoDate; only the STATUS probes are anonymous)
 // supplies it; the ladder makes the upgrade one-time per video. Rows already
 // holding day/exact/started dates never fetch: their date is authoritative and
-// the probe's absence costs nothing.
+// the probe's absence costs nothing — except an rss row dated before cutoff.
+// Its <published> is the ANNOUNCEMENT for a stream, so a broadcast announced
+// before the window and first seen after it ended (the channel just added,
+// or Moombox down through it) probed as a VOD and was windowed out by the
+// date it was announced, though it aired inside the window.
 //
 // ok=false means the date fetch itself FAILED (transport error): callers
 // treat the row like an errored probe — no write, no FRESH, no exhaustion,
 // retried next cycle. A fetch that succeeds but finds no date (YouTube has
 // none) returns ok=true with the result still dateless: applyProbe's
 // invariant and the archive's row-date fallback handle that honestly.
-func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem) (ProbeClassifyResult, bool) {
+func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConfig, chID string, row database.FeedItem, cutoff string) (ProbeClassifyResult, bool) {
 	res := fm.probeRow(ctx, ch, chID, row)
 	if res.Outcome != OutcomeProbed || res.PublishedAt != "" || fm.ProbeDate == nil {
 		return res, true
@@ -197,7 +201,8 @@ func (fm *FeedMonitor) probeRowDated(ctx context.Context, ch *config.ChannelConf
 	if !vodFamily {
 		return res, true // broadcasts are never windowed — no date needed (§12)
 	}
-	if row.DatePrecision != "coarse" && row.DatePrecision != "assumed" && row.DatePrecision != "" {
+	announcedEarly := row.Source == "rss" && row.Published < cutoff
+	if row.DatePrecision != "coarse" && row.DatePrecision != "assumed" && row.DatePrecision != "" && !announcedEarly {
 		return res, true // the row's own date is already authoritative
 	}
 	pub, prec, err := fm.ProbeDate(ctx, row.VideoID)
