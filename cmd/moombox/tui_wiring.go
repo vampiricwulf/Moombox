@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -650,7 +651,7 @@ func (s *runState) runTUI() {
 	if s.autoCookieSvc != nil {
 		app.OnImportCookieFile = func(path string) (cookies.ImportResult, error) {
 			s.log.Info("Cookie file import requested from TUI", slog.String("path", path))
-			data, err := os.ReadFile(path)
+			data, err := readCookieFileCapped(path)
 			if err != nil {
 				return cookies.ImportResult{}, err
 			}
@@ -1251,4 +1252,25 @@ func (s *runState) configLoaded() bool {
 	loaded := false
 	s.configStore.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
 	return loaded
+}
+
+// readCookieFileCapped reads the cookie file an operator named for E I,
+// refusing one larger than the Web import accepts (routes.MaxCookieImportBytes).
+// A mistyped path to a recording used to be read whole into memory before
+// the import could reject it. Only the size is reported, never the bytes.
+func readCookieFileCapped(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, routes.MaxCookieImportBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > routes.MaxCookieImportBytes {
+		return nil, fmt.Errorf("that file is larger than the %d KiB a cookie file can be — check the path",
+			routes.MaxCookieImportBytes/1024)
+	}
+	return data, nil
 }

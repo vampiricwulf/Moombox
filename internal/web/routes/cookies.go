@@ -372,7 +372,8 @@ func writeBrowserReadError(rw http.ResponseWriter, err error) bool {
 	return true
 }
 
-// maxCookieImportBytes caps POST /api/cookies/import.
+// MaxCookieImportBytes caps POST /api/cookies/import, and the TUI's E I import
+// of a file by path (cmd/moombox readCookieFileCapped).
 //
 // A Netscape export of a signed-in YouTube + Twitch profile is a few kilobytes;
 // 512 KiB is three orders of magnitude of headroom and still inside the
@@ -381,7 +382,7 @@ func writeBrowserReadError(rw http.ResponseWriter, err error) bool {
 // wrappers NEST rather than override — an inner SMALLER limit errors first,
 // which is the direction that makes this cap real; the import endpoint's 500 MB
 // reader is exempted from MaxBodySize for the opposite reason.
-const maxCookieImportBytes = 512 << 10
+const MaxCookieImportBytes = 512 << 10
 
 // readCookieImportBody pulls the Netscape text out of either accepted request
 // shape, answers the client itself on every refusal, and reports whether it
@@ -398,7 +399,7 @@ const maxCookieImportBytes = 512 << 10
 // empty request is a REQUEST-shape problem: "that cookie file has no cookie
 // rows" is a claim about a file, and the operator sent none.
 func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bool) {
-	req.Body = http.MaxBytesReader(rw, req.Body, maxCookieImportBytes)
+	req.Body = http.MaxBytesReader(rw, req.Body, MaxCookieImportBytes)
 
 	var raw []byte
 	var err error
@@ -408,7 +409,7 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 		// below rather than as "no cookies part" — FormFile would swallow the
 		// MaxBytesError into a generic parse failure and answer the wrong
 		// sentence.
-		if perr := req.ParseMultipartForm(maxCookieImportBytes); perr != nil {
+		if perr := req.ParseMultipartForm(MaxCookieImportBytes); perr != nil {
 			err = perr
 			break
 		}
@@ -432,7 +433,7 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			jsonError(rw, fmt.Sprintf("that cookie file is larger than the %d KiB this endpoint accepts",
-				maxCookieImportBytes/1024), http.StatusRequestEntityTooLarge)
+				MaxCookieImportBytes/1024), http.StatusRequestEntityTooLarge)
 			return "", false
 		}
 		jsonError(rw, "could not read the request body", http.StatusBadRequest)

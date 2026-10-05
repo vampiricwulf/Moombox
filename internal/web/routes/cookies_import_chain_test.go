@@ -279,7 +279,7 @@ func TestCookieImportChainRefusesUnauthenticatedAndCrossOrigin(t *testing.T) {
 // otherwise asserted only in a comment.
 //
 // THE MUTATION: drop maxCompressBodySize (internal/web/server.go) below
-// maxCookieImportBytes — for example to 1<<18. MaxBytesReader wrappers NEST, so
+// MaxCookieImportBytes — for example to 1<<18. MaxBytesReader wrappers NEST, so
 // the OUTER, smaller limit then errors first; and because errors.As matches the
 // outer *http.MaxBytesError just as happily, the endpoint answers 413 with its
 // OWN sentence naming 512 KiB — a limit the install does not have — while
@@ -301,10 +301,10 @@ func TestCookieImportChainAcceptsALargeButLegitimateExport(t *testing.T) {
 
 	c := newImportChain(t, "public", publicAddr, goodOrigin)
 	body := importPaste() + strings.Repeat("# padding\n", 40000)
-	if len(body) <= 1<<18 || len(body) >= maxCookieImportBytes {
+	if len(body) <= 1<<18 || len(body) >= MaxCookieImportBytes {
 		t.Fatalf("the fixture body is %d bytes; it must sit strictly between 1<<18 and the "+
 			"endpoint's own %d-byte cap or it cannot tell the two limits apart",
-			len(body), maxCookieImportBytes)
+			len(body), MaxCookieImportBytes)
 	}
 
 	rec := c.post(t, body, true, goodOrigin)
@@ -312,7 +312,7 @@ func TestCookieImportChainAcceptsALargeButLegitimateExport(t *testing.T) {
 		t.Fatalf("status %d, want 200 — a %d-byte export is inside this endpoint's %d-byte cap, so "+
 			"a refusal here means the chain-wide MaxBodySize has dropped below it and the operator "+
 			"is being told about a limit their install does not have: %s",
-			rec.Code, len(body), maxCookieImportBytes, rec.Body.String())
+			rec.Code, len(body), MaxCookieImportBytes, rec.Body.String())
 	}
 	if !strings.Contains(c.read(t), "fake-sapisid-aaaa") {
 		t.Error("the large export answered 200 but its rows never reached the file")
