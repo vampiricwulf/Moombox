@@ -70,8 +70,13 @@ func (s *runState) applyFfmpegPath(path string) {
 // the config PUT (OnSegmentWorkersChange, on a change) and the TUI save, the
 // way applyReorderBudget's clamp warning is: the example config and the spec
 // promise that values above the threshold are logged, and a runtime save
-// used to log nothing until the next boot.
+// used to log nothing until the next boot. Only a value that moved warns
+// (segWorkersSeen): the TUI save calls this on every save, and repeated the
+// warning for a setting nobody had touched.
 func (s *runState) warnSegmentWorkers(n int) {
+	if prev := s.segWorkersSeen.Swap(&n); prev != nil && *prev == n {
+		return
+	}
 	if s.log == nil || n <= config.SegmentWorkersWarnThreshold {
 		return
 	}

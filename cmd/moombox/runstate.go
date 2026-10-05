@@ -99,6 +99,11 @@ type runState struct {
 	// of them updated would go stale the moment the other changed the
 	// threshold. nil until the first broadcast.
 	hideAgeBroadcast atomic.Pointer[float64]
+	// segWorkersSeen is the downloader.segment_workers warnSegmentWorkers was
+	// last called with, so a save that did not move it says nothing — the
+	// Web PUT's change gate, which the TUI save cannot apply (see
+	// hideAgeBroadcast). nil until boot's call.
+	segWorkersSeen atomic.Pointer[int]
 	// hideAgeBroadcastMu serialises broadcastHideFinishedAge end to end.
 	// Load-compare-broadcast-Store is four steps, and its two callers are
 	// independent (a Web PUT and a TUI save): racing them could leave the
