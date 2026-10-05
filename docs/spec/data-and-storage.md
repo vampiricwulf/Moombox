@@ -491,7 +491,7 @@ Warn per key, and the next save leaves them out of the file.
 |-------|------|---------|----------|-------|
 | Port | int | 774 | `port` | Valid range: 1-65535 |
 | NetworkAccess | string | "localhost" | `network_access` | "localhost", "lan", "external", or "public" — "public" is a config-file-only synonym for "external" (rejected as an API input, absent from both UIs) |
-| HTTPSEnabled | bool | false | `https_enabled` | |
+| HTTPSEnabled | bool | false | `https_enabled` | Restart-required: the listener's scheme is fixed when the web server starts. Everything local that must reach that listener — the TUI's API client, `O W`, the yt-dlp plugin status and install — asks the bound server (`Server.TLSActive`) rather than reading this field, so a save without the restart cannot point them at the wrong scheme. |
 | TLSCertPath | string | "" | `tls_cert_path` | |
 | TLSKeyPath | string | "" | `tls_key_path` | |
 | PasswordHash | string | "" | `password_hash` | scrypt hash, omitted from JSON; a plaintext value is auto-converted on the next start |

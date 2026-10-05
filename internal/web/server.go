@@ -56,6 +56,7 @@ type Server struct {
 	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
+	tlsActive   atomic.Bool      // whether Start's listener serves HTTPS (set with actualPort)
 	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
@@ -153,6 +154,13 @@ func (s *Server) SetCommit(c string) {
 // rather than a plain int (sweep T4-35). int32 is deliberate: a TCP port never
 // exceeds 65535.
 func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
+
+// TLSActive reports whether the listener Start bound serves HTTPS. Like the
+// bind address, the scheme is fixed at boot: network.https_enabled saved
+// later takes effect at the next restart, so a local client that must reach
+// THIS listener asks here rather than reading the setting. Meaningful once
+// ActualPort is non-zero.
+func (s *Server) TLSActive() bool { return s.tlsActive.Load() }
 
 // setActualPort records the bound port. Called once, by Start.
 func (s *Server) setActualPort(port int) { s.actualPort.Store(int32(port)) }
@@ -536,6 +544,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Log the actual URL (matches TS: "Web dashboard available at ...")
 	actualPort := ln.Addr().(*net.TCPAddr).Port
+	s.tlsActive.Store(tlsConfig != nil)
 	s.setActualPort(actualPort)
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))

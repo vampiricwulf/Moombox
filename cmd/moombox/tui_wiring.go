@@ -159,6 +159,7 @@ func (s *runState) runTUI() {
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())
 	app.SetWebPort(s.currentWebPort)
+	app.SetWebHTTPS(s.httpsEnabled)
 	app.IsFirstRun = !s.configLoaded()
 
 	// Wire TUI callbacks
@@ -1210,7 +1211,15 @@ func (s *runState) resendTUICookieStatus() {
 // Closures that outlive wiring must never touch s.cfg's fields directly:
 // PUT /api/config assigns *cfg = cfgCopy under the store's lock, so an
 // unlocked field read races a whole-struct replacement (CORE-24).
+//
+// httpsEnabled answers for the LISTENER once it is bound — its scheme is fixed
+// at boot, like currentWebPort's port — and falls back to the setting before
+// that. Everything local that must reach this server (the TUI's API client,
+// O W, the yt-dlp plugin status and install) asks here.
 func (s *runState) httpsEnabled() bool {
+	if s.webServer != nil && s.webServer.ActualPort() > 0 {
+		return s.webServer.TLSActive()
+	}
 	enabled := false
 	s.configStore.Read(func(c *config.MoomboxConfig) { enabled = c.Network.HTTPSEnabled })
 	return enabled

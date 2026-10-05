@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 
 	tea "charm.land/bubbletea/v2"
@@ -50,12 +49,8 @@ func safeCmdOr(fn func() tea.Msg, onPanic func(text string) tea.Msg) tea.Cmd {
 // apiBaseURL returns the correct scheme + host for local API calls.
 func (a *App) apiBaseURL() string {
 	scheme := "http"
-	if a.configStore != nil {
-		a.configStore.Read(func(c *config.MoomboxConfig) {
-			if c.Network.HTTPSEnabled {
-				scheme = "https"
-			}
-		})
+	if a.httpsActive() {
+		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
 }
@@ -79,12 +74,7 @@ func (t *internalTokenTransport) RoundTrip(req *http.Request) (*http.Response, e
 // verification is skipped since the server uses a self-signed certificate.
 // The client is cached and rebuilt on HTTPS toggle (audit tui.md Finding 3).
 func (a *App) apiClient() *http.Client {
-	httpsEnabled := false
-	if a.configStore != nil {
-		a.configStore.Read(func(c *config.MoomboxConfig) {
-			httpsEnabled = c.Network.HTTPSEnabled
-		})
-	}
+	httpsEnabled := a.httpsActive()
 	if a.cachedClient != nil && a.cachedClientHTTPS == httpsEnabled {
 		return a.cachedClient
 	}

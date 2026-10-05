@@ -560,6 +560,9 @@ type App struct {
 	// webPort reports the port the web server bound (SetWebPort); nil in
 	// tests, which fall back to the configured port.
 	webPort func() int
+	// webHTTPS reports whether the bound web server serves HTTPS
+	// (SetWebHTTPS); nil in tests, where the setting is read instead.
+	webHTTPS func() bool
 
 	// Cached HTTP client for local API calls (avoids re-creating per request).
 	// cachedClientHTTPS records which HTTPSEnabled value the cache was built
@@ -1291,6 +1294,28 @@ func (a *App) updateTerminalTitle() {
 	if title != a.windowTitle {
 		a.windowTitle = title
 	}
+}
+
+// SetWebHTTPS supplies whether the bound web server serves HTTPS. The scheme,
+// like the port, is fixed when the server starts: https_enabled saved without
+// the restart it asks for used to switch the TUI's own API client, O W and
+// the plugin status to https:// against a listener still serving http, so
+// every TUI action failed until the restart.
+func (a *App) SetWebHTTPS(fn func() bool) {
+	a.webHTTPS = fn
+}
+
+// httpsActive reports which scheme the TUI's local calls must use: the bound
+// server's when SetWebHTTPS supplied it, the saved setting otherwise.
+func (a *App) httpsActive() bool {
+	if a.webHTTPS != nil {
+		return a.webHTTPS()
+	}
+	on := false
+	if a.configStore != nil {
+		a.configStore.Read(func(c *config.MoomboxConfig) { on = c.Network.HTTPSEnabled })
+	}
+	return on
 }
 
 // SetWebPort supplies the port the web server actually bound, which can differ

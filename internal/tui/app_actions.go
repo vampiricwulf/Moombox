@@ -532,12 +532,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "O W":
 		scheme := "http"
-		if a.configStore != nil {
-			a.configStore.Read(func(c *config.MoomboxConfig) {
-				if c.Network.HTTPSEnabled {
-					scheme = "https"
-				}
-			})
+		if a.httpsActive() {
+			scheme = "https"
 		}
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))
