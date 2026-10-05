@@ -113,7 +113,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 `cipher.NewGojaResolver(cacheDir, log)` creates the goja cipher resolver (cache directory `%TEMP%/yt-cipher`, a 10-VM LRU keyed by `player.js` URL); `cipher.NewSidecarSolver` and `cipher.NewCompositeSolver` layer the BotGuard sidecar's V8 ejs in front of it. The resolver is wired to `ytService.PlayerAPI.SetCipherSolver()` for the signature timestamp, and the composite solver to the worker, which resolves each chosen format's URL after selection. Uses full AST parsing with regex fallback for extraction.
 
 ### 10. Notification Manager
-`notifications.NewManager(cfg, log)` creates the notification dispatcher. Currently supports Discord webhooks. Sends notifications for: stream found, stream live, download starting, download finished, download error, auth required, trim created, update available.
+`notifications.NewManager(cfg, log)` creates the notification dispatcher. Currently supports Discord webhooks. Sends notifications for: stream found, stream live, download starting, download finished, download error, auth required, trim created, update available. "Stream found" is sent for broadcasts and new VODs only — a backlog VOD is queued silently and announced by its "download starting" when the archive-slots scheduler admits it (`announcesJobFound`, `cmd/moombox/monitor_callbacks.go`), so a deep backfill does not send one notification per catalog VOD at once.
 
 ### 11. Download Worker
 `worker.NewDownloadWorker()` creates the main job processing engine. Internally creates:

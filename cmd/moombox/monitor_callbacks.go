@@ -626,6 +626,16 @@ func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobSta
 	}
 }
 
+// announcesJobFound reports whether creating a job for this disposition sends
+// the "Stream Found" notification. A backlog VOD does not: a deep backfill on
+// an include_non_live_content channel queues one per catalog VOD, and each
+// already announces itself with "YouTube Download Starting" when the
+// archive-slots scheduler admits it (orchestrator.go sends it on every
+// ExecuteWithChat entry) — paced, where the queueing is a burst.
+func announcesJobFound(d monitor.JobDisposition) bool {
+	return d != monitor.DispositionBacklogVOD
+}
+
 // authFailureNotifier is wireMonitorCallbacks' cooldown-guarded notification
 // sender. Threaded into runCookieRecovery as a parameter rather than reached
 // through runState, both because the cooldown map is a local of the wiring
@@ -1465,7 +1475,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// AddJob's OnJobAdded handler (wired below) handles the WS
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
-		if s.notifyMgr.HasTargets() {
+		if announcesJobFound(d) && s.notifyMgr.HasTargets() {
 			notifyStreamFound(s.notifyMgr, job, "", "")
 		}
 	}
