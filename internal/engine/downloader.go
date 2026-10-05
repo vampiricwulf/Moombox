@@ -461,6 +461,12 @@ type SegmentDownloader struct {
 	hlsInitURI     string
 	hlsInitHash    string
 
+	// hlsOutages counts the connectivity outages the HLS loop has waited out
+	// (waitOnline). A stuck segment's retry count is kept per outage, so
+	// failures an outage caused never add up to skipping a segment that was
+	// fine all along. Download-loop goroutine only, like the fields above.
+	hlsOutages int
+
 	// mediaSyncWarned latches the one Warn for a failed media fsync (owner
 	// decision O-G, saveResume) so a volume that has gone read-only mid-
 	// recording does not write a log line every cadence tick for hours.

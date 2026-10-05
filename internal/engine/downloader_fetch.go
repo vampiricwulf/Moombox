@@ -512,7 +512,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 	// d.opts.MaxRetries (defaulted to MaxSegmentRetries in the constructor) —
 	// previously this loop used the constant directly, silently ignoring the
 	// documented DownloaderOptions.MaxRetries knob.
-	for attempt := range d.opts.MaxRetries {
+	for attempt := 0; attempt < d.opts.MaxRetries; attempt++ {
 		if d.isCancelled() {
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, cerr
@@ -583,6 +583,18 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			// attempts can actually claim a refresh. 500ms/1s/2s/4s spans
 			// 7.5s against a 5s cooldown. See forbiddenRefreshAttempts.
 			utils.Sleep(ctx, d.delays.singleGoneRetry<<attempt)
+			continue
+		}
+		// A failure while the device is offline says nothing about the
+		// segment: wait the outage out and try again on the same attempt.
+		// Charged like any other failure, an outage longer than the backoff
+		// below (~50 s) made every in-flight segment of a VOD a gap.
+		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.emitActivity(ActivityReconnecting)
+			if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+				return nil, werr
+			}
+			attempt-- // not charged
 			continue
 		}
 		// Surface the backoff in the progress line — the tracker's grace

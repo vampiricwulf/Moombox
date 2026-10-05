@@ -122,6 +122,7 @@ func (d *SegmentDownloader) waitOnline(ctx context.Context) error {
 		return err
 	}
 	d.lastSegTime.StoreNow()
+	d.hlsOutages++
 	return nil
 }
 
@@ -250,6 +251,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// stream actually ended, or advance past the segment if not.
 	stuckSeq := int64(-1)
 	stuckSeqRetries := 0
+	stuckOutages := 0 // d.hlsOutages when stuckSeq's count began
 	// lastSavedSeq tracks the currentSeq at the last resume-state save so the
 	// per-iteration save can skip no-progress refreshes (see below). -1 forces
 	// the first save.
@@ -580,15 +582,32 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 							"url_prefix", truncateURL(newURL, 120))
 					}
 				}
+				// A failure while the device is offline says nothing about the
+				// segment: wait the outage out and retry it then. Charged to
+				// the stuck count instead, a network that dropped a few times
+				// skipped a segment a VOD can never fetch again.
+				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.emitActivity(ActivityReconnecting)
+					d.logger.Warn("segment fetch failed while device offline, waiting for connectivity",
+						"seq", d.currentSeq.Load())
+					if err := d.waitOnline(ctx); err != nil {
+						return err
+					}
+					segFailed = true
+					break
+				}
 				// Track repeated failures of the same sequence so we can
 				// escalate when a permanently-unavailable segment is
-				// stuck in the playlist.
+				// stuck in the playlist. The count restarts after an
+				// outage (see hlsOutages): a failure the playlist path
+				// caught offline is not one the segment earned.
 				curSeqNow := d.currentSeq.Load()
-				if curSeqNow == stuckSeq {
+				if curSeqNow == stuckSeq && stuckOutages == d.hlsOutages {
 					stuckSeqRetries++
 				} else {
 					stuckSeq = curSeqNow
 					stuckSeqRetries = 1
+					stuckOutages = d.hlsOutages
 				}
 				// Don't skip -- break to re-fetch playlist and retry.
 				// If CDN purged it, gap detection handles it next iteration.
