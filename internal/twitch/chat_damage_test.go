@@ -174,6 +174,107 @@ func TestAPartUnreadableAtStartIsNotOverwritten(t *testing.T) {
 	}
 }
 
+// startOnUnreadPart leaves a 40-message part with no sidecar, and Starts a
+// fresh downloader over it while it cannot be read (the summary reader fails
+// as a sharing violation does). unlock lets it be read again.
+func startOnUnreadPart(t *testing.T) (cd *ChatDownloader, path string, unlock func()) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "chat.json")
+	prev := newTestChatDownloader(t, path)
+	for i := range 40 {
+		prev.addMessage(damageTestMessage("old", i))
+	}
+	if err := prev.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(chatResumePath(path)); err != nil { // no usable sidecar
+		t.Fatal(err)
+	}
+	orig := readChatPartFileSummary
+	t.Cleanup(func() { readChatPartFileSummary = orig })
+	readChatPartFileSummary = func(string) (chatPartFileSummary, error) {
+		return chatPartFileSummary{}, errors.New("read: the file is being used by another process")
+	}
+	cd = newTestChatDownloader(t, path)
+	_ = cd.Start(cancelledContext(t))
+	return cd, path, func() { readChatPartFileSummary = orig }
+}
+
+// rollTestNextPart is the next part's chat path in path's staging dir.
+func rollTestNextPart(t *testing.T, path string) string {
+	t.Helper()
+	next := filepath.Join(filepath.Dir(path), "seg_1", "chat.json")
+	if err := os.MkdirAll(filepath.Dir(next), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return next
+}
+
+// TestARollOverAnUnreadPartDoesNotWriteOverIt: RollFile ignored partUnread.
+// Its drain took the first-write path flushLocked is forbidden for a part
+// Start could not read, so a gap split with 5 messages held wrote them over
+// the 40 the part already had, and cleared the flag. The roll now adopts the
+// part first, and spills the batch beside it while it still cannot be read.
+//
+// Mutants: drop the `len(batch) > 0 && oldUnread` spill arm in RollFile — the
+// part holds 5; drop the adoption before the boundary section — the part
+// whose lock cleared holds 40 and the batch is spilled; drop `|| oldUnread`
+// from closedPath — a roll with nothing pending reports no closed part.
+func TestARollOverAnUnreadPartDoesNotWriteOverIt(t *testing.T) {
+	t.Run("still unreadable", func(t *testing.T) {
+		cd, path, _ := startOnUnreadPart(t)
+		for i := range 5 {
+			cd.addMessage(damageTestMessage("new", i))
+		}
+		if err := cd.flush(); err == nil {
+			t.Fatal("precondition: the flush must hold the batch")
+		}
+		closed := cd.RollFile(rollTestNextPart(t, path), "2026-06-11T11:00:00Z")
+		if closed != path {
+			t.Errorf("RollFile returned %q, want the closed part %q", closed, path)
+		}
+		if d := readDamageTestFile(t, path); len(d.Messages) != 40 {
+			t.Errorf("the unread part holds %d messages after the roll, want its 40", len(d.Messages))
+		}
+		raw, err := os.ReadFile(path + ".lostbatch.json")
+		if err != nil {
+			t.Fatalf("the boundary batch was not spilled: %v", err)
+		}
+		var spilled []TwitchChatMessage
+		if err := json.Unmarshal(raw, &spilled); err != nil || len(spilled) != 5 {
+			t.Errorf("spilled %d messages (err %v), want 5", len(spilled), err)
+		}
+	})
+	t.Run("lock cleared", func(t *testing.T) {
+		cd, path, unlock := startOnUnreadPart(t)
+		for i := range 5 {
+			cd.addMessage(damageTestMessage("new", i))
+		}
+		if err := cd.flush(); err == nil {
+			t.Fatal("precondition: the flush must hold the batch")
+		}
+		unlock()
+		if closed := cd.RollFile(rollTestNextPart(t, path), "2026-06-11T11:00:00Z"); closed != path {
+			t.Errorf("RollFile returned %q, want the closed part %q", closed, path)
+		}
+		if d := readDamageTestFile(t, path); len(d.Messages) != 45 || d.MessageCount != 45 {
+			t.Errorf("closed part holds %d messages (header %d), want the 40 old and the 5 new", len(d.Messages), d.MessageCount)
+		}
+		if _, err := os.Stat(path + ".lostbatch.json"); !os.IsNotExist(err) {
+			t.Errorf("a batch that reached the part was spilled too (stat err %v)", err)
+		}
+		if got := cd.MessageCount(); got != 45 {
+			t.Errorf("MessageCount %d, want 45", got)
+		}
+	})
+	t.Run("nothing pending", func(t *testing.T) {
+		cd, path, _ := startOnUnreadPart(t)
+		if closed := cd.RollFile(rollTestNextPart(t, path), "2026-06-11T11:00:00Z"); closed != path {
+			t.Errorf("RollFile returned %q, want the closed part %q: it holds the part's history", closed, path)
+		}
+	})
+}
+
 // TestAPartAdoptedAtItsFirstFlushKeepsItsClock: a part Start could not read
 // could not give up its recording base either, so the run kept the restart as
 // its base — and the flush that adopted the part once the lock cleared

@@ -241,9 +241,19 @@ func (cd *ChatDownloader) pruneDedup() {
 // survive the roll: IRC reconnect replays must not duplicate across a
 // boundary, and the job-level metric keeps counting.
 //
+// A part Start could not read (partUnread) is adopted first, as the flush
+// would adopt it (adoptUnreadPart). The drain used to ignore the flag and take
+// the first-write path flushLocked is forbidden for such a part, writing the
+// batch over the history it could not see and then clearing the flag: a
+// 40-message part came out holding the 5 of its boundary batch. While the file
+// still cannot be read, the batch is spilled to <path>.lostbatch.json instead
+// and the file is left as it is.
+//
 // Returns the closed file's path, or "" when the old part never produced a
-// file — callers skip enrichment/copy in that case. Safe to call whether or
-// not the downloader is running.
+// file — callers skip enrichment/copy in that case. A part file left unread is
+// one it produced: it holds the part's history, and the part's mux must copy
+// it (or fail and retry) rather than be recorded without it. Safe to call
+// whether or not the downloader is running.
 func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) string {
 	cd.flushMu.Lock()
 	defer cd.flushMu.Unlock()
@@ -251,6 +261,16 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 	var newBaseMs int64
 	if t, err := time.Parse(time.RFC3339, newRecordingStart); err == nil {
 		newBaseMs = t.UnixMilli()
+	}
+
+	// Before the boundary section, while outputPath is still the old part:
+	// the adoption reads and seeds it by that path, and rebases the pending
+	// batch onto the old part's own clock.
+	cd.mu.Lock()
+	oldUnread := cd.partUnread && !cd.flushedToDisk
+	cd.mu.Unlock()
+	if oldUnread {
+		_, oldUnread = cd.adoptUnreadPart()
 	}
 
 	cd.mu.Lock()
@@ -273,10 +293,18 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 	cd.mu.Unlock()
 
 	closedPath := ""
-	if oldFlushed || len(batch) > 0 {
+	if oldFlushed || len(batch) > 0 || oldUnread {
 		closedPath = oldPath
 	}
-	if len(batch) > 0 {
+	if len(batch) > 0 && oldUnread {
+		cd.logger.Error("twitch chat: the closed part still cannot be read; spilling its boundary batch instead of writing over it",
+			"path", oldPath, "messages", len(batch))
+		if dumpErr := dumpLostChatBatch(oldPath, batch); dumpErr != nil {
+			cd.logger.Warn("could not spill lost chat batch to sidecar", "path", oldPath, "err", dumpErr)
+		} else {
+			cd.logger.Info("lost chat batch spilled to sidecar for recovery", "path", oldPath+".lostbatch.json")
+		}
+	} else if len(batch) > 0 {
 		written, err := cd.writeBatch(oldPath, batch, oldCount, oldFlushed, oldBase)
 		if err == nil && written != oldCount {
 			// A salvage rewrite of the closed part: the job total follows the
