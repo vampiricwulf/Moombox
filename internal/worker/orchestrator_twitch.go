@@ -383,6 +383,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 		if vod, ok := twitchChatDl.(*twitch.VodChatDownloader); ok {
 			vod.SetOnProgress(func(count int) { tracker.SetChatCount(count) })
+			vod.SetIsOnline(connIsOnline(o.conn))
 		}
 		// The stream processor wrote "pending"; this is where the capture
 		// actually starts, as the YouTube downloader's OnStart marks it.

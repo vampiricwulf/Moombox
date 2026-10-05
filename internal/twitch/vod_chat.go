@@ -19,6 +19,10 @@ const (
 	vodChatFlushInterval        = 5 * time.Second
 )
 
+// vodChatOnlinePoll is how often a paging loop parked on a connectivity outage
+// re-asks the probe. A variable so tests need not sleep it out.
+var vodChatOnlinePoll = 5 * time.Second
+
 // VodChatDownloader downloads chat messages from a Twitch VOD.
 //
 // **Concurrency contract** (audit twitch.md #1):
@@ -75,6 +79,11 @@ type VodChatDownloader struct {
 	// The IRC path's interruptSession is the same shape.
 	sessionCancelMu sync.Mutex
 	sessionCancel   context.CancelFunc
+
+	// isOnline is the device-connectivity probe SetIsOnline installs (nil =
+	// none): a page fetch that fails while it reports offline waits for the
+	// network instead of spending the consecutive-error budget.
+	isOnline atomic.Pointer[func() bool]
 
 	// wroteFile records that this downloader has successfully written its
 	// chat file at least once — the precondition for reading a missing output
@@ -136,6 +145,39 @@ func NewVodChatDownloader(api *API, opts VodChatOptions, logger interface {
 		dedup:         utils.NewOrderedDedup[string](),
 		logger:        logger,
 	}
+}
+
+// SetIsOnline installs the device-connectivity probe. Without it a page fetch
+// failing through an outage spent the whole consecutive-error budget in about
+// twenty seconds and gave the archive up, while the video beside it waited
+// the outage out. Safe to call before or after Start; nil removes the probe.
+func (vcd *VodChatDownloader) SetIsOnline(fn func() bool) {
+	if fn == nil {
+		vcd.isOnline.Store(nil)
+		return
+	}
+	vcd.isOnline.Store(&fn)
+}
+
+// offline reports whether the installed probe says the device has no network.
+func (vcd *VodChatDownloader) offline() bool {
+	fn := vcd.isOnline.Load()
+	return fn != nil && !(*fn)()
+}
+
+// waitOnline blocks until the probe reports the network back, polling every
+// vodChatOnlinePoll, and reports false when ctx ends first.
+func (vcd *VodChatDownloader) waitOnline(ctx context.Context) bool {
+	t := time.NewTicker(vodChatOnlinePoll)
+	defer t.Stop()
+	for vcd.offline() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
+	return true
 }
 
 // currentAuthToken reads the live OAuth token. Returns "" when no getter was
@@ -215,6 +257,18 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 			if ctx.Err() != nil {
 				vcd.finishInterrupted(contentOffset)
 				return ctx.Err()
+			}
+			// No network is not a fault of the page: wait for it, then ask
+			// for the same page again with the budget untouched.
+			if vcd.offline() {
+				vcd.logger.Warn("vod chat fetch failed while offline; waiting for connectivity", "err", err)
+				if !vcd.waitOnline(ctx) {
+					vcd.finishInterrupted(contentOffset)
+					return ctx.Err()
+				}
+				vcd.logger.Info("connectivity restored; resuming VOD chat download", "vodID", vcd.vodID)
+				consecutiveErrors = 0
+				continue
 			}
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {
