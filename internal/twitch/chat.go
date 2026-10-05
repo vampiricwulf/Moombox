@@ -1128,7 +1128,16 @@ func (cd *ChatDownloader) setPartUnread(v bool) {
 // while the job read "finished". The intact messages are kept, the original
 // bytes are kept beside it as <path>.corrupt, and the counters follow the
 // rewritten file.
+//
+// Under flushMu, like every other write to a part (flushMu → mu, as RollFile
+// takes them). Start runs on its own goroutine while the video loop is going,
+// and a gap split's RollFile used to land between the read of the path and the
+// counter update: the closed part's salvage delta went to the NEW part — its
+// fileCount -2, its header -1 over an array of 1 — while the roll's drain and
+// the part's enrichment could reach the file the salvage was rewriting.
 func (cd *ChatDownloader) repairDamagedPart() {
+	cd.flushMu.Lock()
+	defer cd.flushMu.Unlock()
 	path := cd.currentOutputPath()
 	if path == "" {
 		return

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,6 +172,107 @@ func TestAPartUnreadableAtStartIsNotOverwritten(t *testing.T) {
 	}
 	if got := cd.MessageCount(); got != 41 {
 		t.Errorf("MessageCount %d, want 41", got)
+	}
+}
+
+// warnHookLogger calls hook with every Warn message, so a test can act at the
+// moment a code path announces itself.
+type warnHookLogger struct {
+	testLogger
+	hook func(msg string)
+}
+
+func (l *warnHookLogger) Warn(msg string, args ...any) {
+	if l.hook != nil {
+		l.hook(msg)
+	}
+}
+
+// TestARepairOfAResumedPartAndARollDoNotCross: repairDamagedPart read the
+// part's count, salvaged it without flushMu and then added kept-before to
+// whichever part was current — so a gap split's RollFile landing inside the
+// repair charged the closed part's -2 to the NEW part, whose header then read
+// -1 over an array of 1. The repair now holds flushMu, so the roll waits for
+// it and closes the repaired part.
+//
+// The roll is fired from the repair's own Warn and given 200 ms to finish
+// before the repair goes on: unguarded it finishes at once, guarded it cannot
+// start until the repair is done.
+//
+// Mutant: drop the flushMu.Lock in repairDamagedPart — the new part's
+// fileCount is -2.
+func TestARepairOfAResumedPartAndARollDoNotCross(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+	seed := newTestChatDownloader(t, path)
+	for i := range 5 {
+		seed.addMessage(damageTestMessage("m", i))
+	}
+	if err := seed.flush(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := strings.Index(string(raw), `"m3"`)
+	if cut < 0 {
+		t.Fatalf("no m3 in %s", raw)
+	}
+	if err := os.WriteFile(path, raw[:cut+2], 0o644); err != nil { // torn inside m3
+		t.Fatal(err)
+	}
+	next := rollTestNextPart(t, path)
+
+	lg := &warnHookLogger{}
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		ChannelLogin: "testchan", ChannelDisplay: "TestChan", StreamID: "stream-1",
+		OutputPath: path, StreamStartTime: "2026-06-11T10:00:00Z",
+	}, lg)
+	rolled := make(chan string, 1)
+	var fired atomic.Bool
+	lg.hook = func(msg string) {
+		if !strings.Contains(msg, "resumed part file is damaged") || fired.Swap(true) {
+			return
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("RollFile panicked: %v", r)
+				}
+			}()
+			rolled <- cd.RollFile(next, "2026-06-11T11:00:00Z")
+		}()
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	_ = cd.Start(cancelledContext(t))
+	if !fired.Load() {
+		t.Fatal("precondition: the resume did not repair the part")
+	}
+	if closed := <-rolled; closed != path {
+		t.Fatalf("RollFile closed %q, want %q", closed, path)
+	}
+
+	cd.mu.Lock()
+	fileCount, total := cd.fileCount, cd.totalCount
+	cd.mu.Unlock()
+	if fileCount != 0 || total != 3 {
+		t.Errorf("after the roll fileCount %d, totalCount %d; want 0 for the new part and the 3 the repair kept", fileCount, total)
+	}
+	if d := readDamageTestFile(t, path); len(d.Messages) != 3 || d.MessageCount != 3 {
+		t.Errorf("closed part holds %d messages (header %d), want the 3 intact", len(d.Messages), d.MessageCount)
+	}
+	cd.addMessage(damageTestMessage("n", 0))
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if d := readDamageTestFile(t, next); len(d.Messages) != 1 || d.MessageCount != 1 {
+		t.Errorf("new part holds %d messages under a header of %d, want 1 over 1", len(d.Messages), d.MessageCount)
 	}
 }
 
