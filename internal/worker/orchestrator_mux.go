@@ -257,7 +257,11 @@ func stagedRestartStamp(path string) int64 {
 func stagedAsideRecordings(stagingDir string) []string {
 	var out []string
 	dirs := []string{stagingDir}
-	for _, sd := range stagedSegDirs(stagingDir) {
+	// Every seg_N dir, tombstoned ones included. A tombstone marks a part's
+	// MEDIA as folded into a merge; a recording set aside in that dir is not
+	// merged content, and a scan that skipped the dir made it invisible to
+	// both the aside recovery and every shield that keeps staging for it.
+	for _, sd := range segDirsOf(stagingDir, true) {
 		dirs = append(dirs, sd.dir)
 	}
 	for _, dir := range dirs {
@@ -1652,6 +1656,13 @@ func isMergeTombstoned(dir string) bool {
 // the dir is pending (or has already failed) removal, so treating it as
 // live staging would resurrect superseded content.
 func stagedSegDirs(stagingDir string) []stagedSeg {
+	return segDirsOf(stagingDir, false)
+}
+
+// segDirsOf lists stagingDir's seg_N dirs by index; includeTombstoned also
+// returns the ones a merge has tombstoned (for scans that are not about the
+// parts' media — see stagedAsideRecordings).
+func segDirsOf(stagingDir string, includeTombstoned bool) []stagedSeg {
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
 		return nil
@@ -1666,7 +1677,7 @@ func stagedSegDirs(stagingDir string) []stagedSeg {
 			continue
 		}
 		dir := filepath.Join(stagingDir, e.Name())
-		if isMergeTombstoned(dir) {
+		if !includeTombstoned && isMergeTombstoned(dir) {
 			continue
 		}
 		segDirs = append(segDirs, stagedSeg{idx: n, dir: dir})
