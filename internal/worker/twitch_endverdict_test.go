@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -718,5 +719,86 @@ func TestVariantRefreshFailureLogsTheInnerLoopError(t *testing.T) {
 		t.Errorf("downloadErr = %v, want the error that ended the inner loop (%v) — the operator "+
 			"needs both halves, and neither is logged anywhere else on this path",
 			got, engine.ErrQualityLost)
+	}
+}
+
+// TestTwitchVodDownloadFailureLandsInError: a VOD has no live end to confirm,
+// so latchIfUnconfirmed used to decline every VOD outright — a failed VOD
+// download fell through to finalize, muxed the truncated capture, wrote
+// Finished and let processJob delete the staging with its resume sidecar.
+// It now returns the download error before the Muxing write, so the job
+// lands in Error with staging intact.
+//
+// Mutant: restore the `isVod ||` short-circuit in latchIfUnconfirmed.
+func TestTwitchVodDownloadFailureLandsInError(t *testing.T) {
+	h := newEndVerdictHarness(t, "tw_vod_fail")
+	statuses := h.watchStatuses()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, true, nil)
+
+	if err == nil {
+		t.Fatal("ExecuteTwitch = nil for a VOD whose download failed — it was finalized as Finished")
+	}
+	if seq := statuses(); sawMuxing(seq) {
+		t.Errorf("the failed VOD was advertised Muxing (sequence %v) on its way to Error", seq)
+	}
+}
+
+// TestTwitchVodOutageLandsInError: a connectivity outage mid-VOD used to
+// "finalize what was captured" — mux the partial file, write Finished, and
+// let processJob delete the staging — so the operator was left a silently
+// truncated archive with neither Retry nor Resume on offer. It now ends with
+// an error before the Muxing write, staging intact.
+//
+// Mutant: set outageFinalize instead of vodOutageErr in the VOD outage arm.
+func TestTwitchVodOutageLandsInError(t *testing.T) {
+	inFlight := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".m3u8") {
+			var b strings.Builder
+			b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n")
+			for i := range 20 {
+				fmt.Fprintf(&b, "#EXTINF:2.000,\nseg%d.ts\n", i)
+			}
+			b.WriteString("#EXT-X-ENDLIST\n")
+			w.Write([]byte(b.String()))
+			return
+		}
+		select {
+		case inFlight <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done() // a segment that never arrives until the session is cut
+	}))
+	t.Cleanup(srv.Close)
+
+	h := newEndVerdictHarness(t, "tw_vod_outage")
+	h.variant.URL = srv.URL + "/vod.m3u8"
+	statuses := h.watchStatuses()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, true, nil) }()
+
+	select {
+	case <-inFlight:
+	case <-time.After(30 * time.Second):
+		t.Fatal("no segment fetch began")
+	}
+	h.conn.set(false)
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "connectivity") {
+			t.Fatalf("ExecuteTwitch = %v, want the connectivity error — the outage finalized a truncated VOD", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("ExecuteTwitch did not return after the outage")
+	}
+	if seq := statuses(); sawMuxing(seq) {
+		t.Errorf("the cut-off VOD was advertised Muxing (sequence %v)", seq)
 	}
 }
