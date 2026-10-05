@@ -13,7 +13,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -1029,7 +1029,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 			percent = m.progressOverlay.Percent
 		}
 		pctLabel := fmt.Sprintf(" %.1f%%", percent)
-		barW := min(maxW-labelWidth-runewidth.StringWidth(pctLabel), 30)
+		barW := min(maxW-labelWidth-ansi.StringWidth(pctLabel), 30)
 		if barW < 5 {
 			// Narrow fallback: plain text percentage
 			label := padRight("", labelWidth)
@@ -1092,7 +1092,7 @@ func progressGradient(status string) (color.Color, color.Color) {
 }
 
 func padRight(s string, w int) string {
-	sw := runewidth.StringWidth(s)
+	sw := ansi.StringWidth(s)
 	if sw >= w {
 		return s
 	}
@@ -1185,36 +1185,34 @@ func wrapText(text string, maxW int) []string {
 		words := strings.Fields(paragraph)
 		var line string
 		for _, word := range words {
-			// Split very long words that exceed maxW (match TS char-level break)
-			for runewidth.StringWidth(word) > maxW {
-				var prefix []rune
-				w := 0
-				for _, r := range word {
-					rw := runewidth.RuneWidth(r)
-					if w+rw > maxW {
-						break
-					}
-					prefix = append(prefix, r)
-					w += rw
+			// Split very long words that exceed maxW (match TS char-level
+			// break), in whole graphemes measured the way the renderer
+			// measures them.
+			for ansi.StringWidth(word) > maxW {
+				prefix := truncateWidth(word, maxW, "")
+				if prefix == "" {
+					// The first grapheme is wider than maxW on its own (a
+					// wide one at maxW 1): take it whole rather than loop.
+					prefix = truncateWidth(word, 2, "")
 				}
-				if len(prefix) == 0 {
-					// At least 1 rune to avoid infinite loop
-					runes := []rune(word)
-					prefix = runes[:1]
+				if prefix == "" || !strings.HasPrefix(word, prefix) {
+					// Not a clean prefix of the word (never for plain text):
+					// emit the rest as one line rather than loop.
+					prefix = word
 				}
 				if line != "" {
 					lines = append(lines, line)
 					line = ""
 				}
-				lines = append(lines, string(prefix))
-				word = string([]rune(word)[len(prefix):])
+				lines = append(lines, prefix)
+				word = word[len(prefix):]
 			}
 			if word == "" {
 				continue
 			}
 			if line == "" {
 				line = word
-			} else if runewidth.StringWidth(line+" "+word) <= maxW {
+			} else if ansi.StringWidth(line+" "+word) <= maxW {
 				line += " " + word
 			} else {
 				lines = append(lines, line)

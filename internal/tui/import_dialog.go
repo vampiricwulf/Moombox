@@ -9,7 +9,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ImportDialogModel wraps bubbles/filepicker for browsing and selecting .zip
@@ -239,7 +239,7 @@ func (m *ImportDialogModel) View() string {
 		} else {
 			content.WriteString("  ")
 			content.WriteString(DimStyle.Render(titleLabel))
-			content.WriteString(renderInactiveInput(m.title, contentW-runewidth.StringWidth(titleLabel)-2, ColorGray))
+			content.WriteString(renderInactiveInput(m.title, contentW-ansi.StringWidth(titleLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 
@@ -251,7 +251,7 @@ func (m *ImportDialogModel) View() string {
 		} else {
 			content.WriteString("  ")
 			content.WriteString(DimStyle.Render(channelLabel))
-			content.WriteString(renderInactiveInput(m.channel, contentW-runewidth.StringWidth(channelLabel)-2, ColorGray))
+			content.WriteString(renderInactiveInput(m.channel, contentW-ansi.StringWidth(channelLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 

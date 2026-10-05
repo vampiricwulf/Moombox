@@ -56,8 +56,8 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	}
 
 	// Compute label width from actual suffix widths (truncate plain text
-	// BEFORE assembling with styled parts — truncateString uses runewidth
-	// which miscounts ANSI escape sequences from DimStyle.Render).
+	// BEFORE assembling with styled parts, so the cut lands in the label
+	// and never in the styled suffix).
 	suffixW := 2 + lipgloss.Width(lastUsed) + 2 + lipgloss.Width(ipStr) // "  " + lastUsed + "  " + ipStr
 	maxLabelW := max(m.Width()-2-suffixW, 10)                           // 2 for prefix
 	label := truncateString(ct.Label, maxLabelW)

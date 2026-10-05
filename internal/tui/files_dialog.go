@@ -146,8 +146,8 @@ func (d fileDelegate) renderFile(w io.Writer, m list.Model, index int, f Orphane
 	}
 
 	// Truncate the variable-width path to fit (truncate plain text BEFORE
-	// assembling with styled type badge — truncateString uses runewidth
-	// which miscounts ANSI escape sequences).
+	// assembling with styled type badge, so the cut lands in the path and
+	// never in the badge).
 	fixedW := 2 + 9 + 1 + len(suffix) // prefix + typeTag + space + suffix (all ASCII)
 	pathW := max(m.Width()-fixedW, 5)
 	relPath := truncateString(f.RelPath, pathW)

@@ -12,7 +12,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
@@ -707,7 +706,7 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 	}
 	// Include progress width for active jobs
 	progressText, _ := m.progressCellText(job)
-	progressTextWidth := runewidth.StringWidth(progressText)
+	progressTextWidth := ansi.StringWidth(progressText)
 	tw := max(contentW-selectorWidth-iconWidth-progressTextWidth-platformTagWidth-watchedW, 5)
 	return tw
 }
@@ -1271,7 +1270,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	label := fmt.Sprintf("%s Archived (%d)", icon, count)
 
-	totalRule := max(maxW-runewidth.StringWidth(label)-6, 2)
+	totalRule := max(maxW-ansi.StringWidth(label)-6, 2)
 	ruleLeft := totalRule / 2
 	ruleRight := totalRule - ruleLeft // absorbs odd-width remainder
 
@@ -1289,7 +1288,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	// Pad line to full width BEFORE styling so the background color
 	// extends to the right edge when selected.
-	lineW := runewidth.StringWidth(line)
+	lineW := ansi.StringWidth(line)
 	if lineW < maxW {
 		line += strings.Repeat(" ", maxW-lineW)
 	}
@@ -1325,7 +1324,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 		title = truncateString(title, titleWidth)
 	}
 	// Pad title to fill remaining width (match TS padEndToWidth)
-	tw := runewidth.StringWidth(title)
+	tw := ansi.StringWidth(title)
 	if tw < titleWidth {
 		title += strings.Repeat(" ", titleWidth-tw)
 	}
@@ -1435,5 +1434,29 @@ func formatCountdown(d time.Duration) string {
 // but a future caller passing styled text now gets a correct line instead
 // of a corrupted one.
 func truncateString(s string, maxW int) string {
-	return ansi.Truncate(s, maxW, "…")
+	return truncateWidth(s, maxW, "…")
+}
+
+// truncateWidth is ansi.Truncate held to ansi.StringWidth's count — the count
+// the renderer draws with. The two disagree on keycap sequences ("1️⃣", "#️⃣"):
+// Truncate fits one in a single cell where StringWidth counts two, so a cut
+// keycap title came out a cell wider than asked and the row wrapped. The
+// limit is tightened until the result measures inside maxW; plain text, wide
+// runes and every other emoji are done on the first call.
+func truncateWidth(s string, maxW int, tail string) string {
+	out := ansi.Truncate(s, maxW, tail)
+	for limit := maxW - 1; limit >= 0 && ansi.StringWidth(out) > maxW; limit-- {
+		out = ansi.Truncate(s, limit, tail)
+	}
+	return out
+}
+
+// cutWidth is ansi.Cut held to the same count (see truncateWidth): the cells
+// [left, right) of s, never wider than right-left.
+func cutWidth(s string, left, right int) string {
+	out := ansi.Cut(s, left, right)
+	for r := right - 1; r > left && ansi.StringWidth(out) > right-left; r-- {
+		out = ansi.Cut(s, left, r)
+	}
+	return out
 }

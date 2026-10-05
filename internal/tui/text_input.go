@@ -11,7 +11,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // newSpinner creates a spinner with Moombox styling.
@@ -107,7 +107,7 @@ func validateDecimal(s string) error {
 // renderInactiveInput renders a text value styled but without a cursor.
 func renderInactiveInput(value string, w int, c color.Color) string {
 	display := value
-	if runewidth.StringWidth(display) > w {
+	if ansi.StringWidth(display) > w {
 		display = truncateString(display, w)
 	}
 	return lipgloss.NewStyle().Foreground(c).Render(display)

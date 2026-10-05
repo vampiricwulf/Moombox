@@ -8,7 +8,6 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -95,8 +94,8 @@ func (m *SettingsModel) View() string {
 	// Hints
 	content.WriteString("\n")
 	hintLeft := DimStyle.Render("Esc: Close")
-	hintRight := fitSettingsHint(m.renderHintText(), innerW-runewidth.StringWidth("Esc: Close")-1)
-	hintGap := innerW - runewidth.StringWidth("Esc: Close") - runewidth.StringWidth(hintRight)
+	hintRight := fitSettingsHint(m.renderHintText(), innerW-ansi.StringWidth("Esc: Close")-1)
+	hintGap := innerW - ansi.StringWidth("Esc: Close") - ansi.StringWidth(hintRight)
 	hintGap = max(hintGap, 1)
 	content.WriteString(hintLeft)
 	content.WriteString(strings.Repeat(" ", hintGap))
@@ -165,7 +164,7 @@ func settingsTabStripWidth(start, end int) int {
 		if i > start {
 			n += settingsTabSepW
 		}
-		n += runewidth.StringWidth(sections[i].name)
+		n += ansi.StringWidth(sections[i].name)
 	}
 	if start > 0 {
 		n += settingsTabMarkerW
@@ -223,7 +222,7 @@ var settingsGenericHints = []string{
 func fitSettingsHint(hint string, room int) string {
 	const sep = "  "
 	parts := strings.Split(hint, sep)
-	fits := func() bool { return runewidth.StringWidth(strings.Join(parts, sep)) <= room }
+	fits := func() bool { return ansi.StringWidth(strings.Join(parts, sep)) <= room }
 	for _, generic := range settingsGenericHints {
 		if fits() {
 			break
@@ -388,7 +387,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 			if preview != "" {
 				// One row, as settingsContentHeight budgets: the box would
 				// word-wrap a long preview into rows nothing reserved.
-				lines = append(lines, "  "+DimStyle.Render(ansi.Truncate(preview, max(w-2, 1), "…")))
+				lines = append(lines, "  "+DimStyle.Render(truncateWidth(preview, max(w-2, 1), "…")))
 			}
 		}
 	}
@@ -566,7 +565,7 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 			line += DimStyle.Render(" filter: " + truncateString(terms, 20))
 		}
 
-		lines = append(lines, ansi.Truncate(line, w, "…"))
+		lines = append(lines, truncateWidth(line, w, "…"))
 	}
 
 	return strings.Join(lines, "\n")
@@ -622,7 +621,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		case fieldCycle:
 			value = renderCycleOptions(field.options, val, isFocused)
 		default:
-			valueMaxW := max(w-runewidth.StringWidth(prefix)-padW-2, 5)
+			valueMaxW := max(w-ansi.StringWidth(prefix)-padW-2, 5)
 			if isFocused {
 				m.textInput.SetWidth(valueMaxW)
 				value = m.textInput.View()
@@ -710,7 +709,7 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 		}
 
 		// One row per webhook, as listWindowStart and the mouse map assume.
-		lines = append(lines, ansi.Truncate(line, w, "…"))
+		lines = append(lines, truncateWidth(line, w, "…"))
 	}
 
 	return strings.Join(lines, "\n")
@@ -742,7 +741,7 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 			prefixColor = ColorCyan
 			labelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 		}
-		maxW := max(w-runewidth.StringWidth(prefix)-labelW-2, 10)
+		maxW := max(w-ansi.StringWidth(prefix)-labelW-2, 10)
 		var rendered string
 		if focused {
 			m.textInput.SetWidth(maxW)

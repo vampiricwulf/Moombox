@@ -12,7 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -655,7 +655,7 @@ func (m *SetupWizardModel) updateTextInputWidth() {
 	if m.channelEditField < len(fields) {
 		f := fields[m.channelEditField]
 		prefix := "> " // focused field always has "> " prefix
-		m.textInput.SetWidth(contentW - runewidth.StringWidth(prefix+f.label+": "))
+		m.textInput.SetWidth(contentW - ansi.StringWidth(prefix+f.label+": "))
 	}
 }
 
@@ -1541,7 +1541,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	} else {
 		titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
 		stepRendered := DimStyle.Render("Step 1/2")
-		titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 1/2"), 1)
+		titlePad := max(contentW-ansi.StringWidth("Quick Setup")-ansi.StringWidth("Step 1/2"), 1)
 		lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
 		step1 := lipgloss.NewStyle().Foreground(ColorCyan).Render("[>] 1")
@@ -1660,7 +1660,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	// Header
 	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
 	stepRendered := DimStyle.Render("Step 2/2")
-	titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 2/2"), 1)
+	titlePad := max(contentW-ansi.StringWidth("Quick Setup")-ansi.StringWidth("Step 2/2"), 1)
 	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
 	// Step indicator
@@ -1693,7 +1693,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 		navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
 		finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
 		rightSide := navHint + finishHint
-		gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
+		gap := max(1, contentW-ansi.StringWidth("Esc: Back")-ansi.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
 		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
 	}
 
@@ -1813,7 +1813,7 @@ func (m *SetupWizardModel) viewAdvanced() string {
 			navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
 			finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
 			rightSide := navHint + finishHint
-			gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
+			gap := max(1, contentW-ansi.StringWidth("Esc: Back")-ansi.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
 			lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
 		}
 
@@ -1993,7 +1993,7 @@ func (m *SetupWizardModel) renderChannelEditor(contentW int) []string {
 		} else if isFocused {
 			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+m.textInput.View())
 		} else {
-			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+renderInactiveInput(val, contentW-runewidth.StringWidth(prefix+f.label+": "), ColorWhite))
+			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+renderInactiveInput(val, contentW-ansi.StringWidth(prefix+f.label+": "), ColorWhite))
 		}
 
 		if f.help != "" && isFocused {
@@ -2037,6 +2037,6 @@ func (m *SetupWizardModel) cookieStepFooter(escLabel string, contentW int) strin
 	case m.cookieActive:
 		left, right = "Esc: Cancel", "Enter: Extract cookies"
 	}
-	gap := max(1, contentW-runewidth.StringWidth(left)-runewidth.StringWidth(right))
+	gap := max(1, contentW-ansi.StringWidth(left)-ansi.StringWidth(right))
 	return DimStyle.Render(left) + strings.Repeat(" ", gap) + DimStyle.Render(right)
 }
