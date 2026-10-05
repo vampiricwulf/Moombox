@@ -342,7 +342,7 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
 
 **Twitch path (`processTwitch()`):**
 - VOD jobs (video ID prefix `tw_v`): fetches VOD info and HLS playlist, selects best variant, optionally creates VOD chat downloader
-- Live jobs: checks if channel is live via GQL. If offline and manually added, enters `waitForTwitchLive()` polling loop (15s interval + 5s jitter). If live, fetches HLS master playlist, selects best variant, starts IRC chat downloader
+- Live jobs: checks if channel is live via GQL. If offline and manually added, enters `waitForTwitchLive()` polling loop (15s interval + 5s jitter). If live, fetches HLS master playlist, selects best variant, and constructs the IRC chat downloader (`chat_status = pending`); `ExecuteTwitch` starts it once the download begins
 
 ### DownloadOrchestrator
 
