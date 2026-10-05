@@ -135,7 +135,7 @@ func muxedOutputIsShort(inputSec, outputSec float64) bool {
 // numbers in its message and staging untouched (both cleanup paths only run
 // after a mux that returned nil), so the Mux action can re-run the copy once
 // the input is repaired. Both call sites discard the rejected output first
-// (discardShortMuxOutput) — the footage is in the INPUT, and leaving a short
+// (discardRejectedMuxOutput) — the footage is in the INPUT, and leaving a short
 // file under the archive's name is what the re-mux has to write over.
 //
 // The flag path is deliberately NOT used here: incomplete_tail means "the
@@ -161,7 +161,9 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 		outputSec, longest, longest-outputSec)
 }
 
-// discardShortMuxOutput deletes the output a shortfall verdict just rejected.
+// discardRejectedMuxOutput deletes a muxed output the finalize just rejected —
+// one a shortfall verdict found short, or a part whose chat could not be
+// copied beside it.
 //
 // The alternative is what shipped with ENGINE-9: the truncated .mp4 stayed in
 // the output directory wearing the archive's own name while the row went to
@@ -171,9 +173,9 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 // the INPUT is what holds it, and staging is preserved for exactly that
 // reason. Best-effort: a removal that fails leaves the old situation, which
 // the error message already describes.
-func (o *DownloadOrchestrator) discardShortMuxOutput(jobID, outputFile string) {
+func (o *DownloadOrchestrator) discardRejectedMuxOutput(jobID, outputFile string) {
 	if err := os.Remove(outputFile); err != nil && !os.IsNotExist(err) {
-		o.logger.Warn("could not remove the short muxed output; it stays under the archive's name",
+		o.logger.Warn("could not remove the rejected muxed output; it stays under the archive's name",
 			"output", outputFile, "err", err, "jobID", jobID)
 	}
 }
@@ -828,7 +830,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// the archive.
 	if probeData != nil {
 		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
-			o.discardShortMuxOutput(jobCtx.Job.ID, outputFile)
+			o.discardRejectedMuxOutput(jobCtx.Job.ID, outputFile)
 			return err
 		}
 	}
@@ -1172,7 +1174,16 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
 		if err := copyFile(chatSrc, chatDst); err != nil {
-			o.logger.Warn("failed to copy chat file", "err", err)
+			// The archive has no chat, and the capture in staging is the
+			// only copy: "incomplete" is what keeps it. With no chat_status
+			// written the row read as it was, the staging cleanup saw no
+			// reason to keep anything, and hours of chat went with one Warn
+			// (a full output volume right after a multi-GB mux, an AV lock
+			// outlasting the copy's retries). cleanupStagingAfterMux now
+			// prunes staging down to the capture instead of deleting it.
+			updates["chat_status"] = chatStatusIncomplete
+			o.logger.Error("could not copy the chat capture beside the archive; it is kept in staging",
+				"err", err, "chat", chatSrc, "jobID", jobCtx.Job.ID)
 		} else {
 			updates["chat_file"] = chatDst
 			updates["chat_filename"] = relBase + ".chat.json"
@@ -1450,7 +1461,7 @@ func (o *DownloadOrchestrator) muxSegment(
 	// than beside an unreferenced truncated twin of it.
 	if probeData != nil {
 		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
-			o.discardShortMuxOutput(jobCtx.Job.ID, outputPath)
+			o.discardRejectedMuxOutput(jobCtx.Job.ID, outputPath)
 			return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 		}
 	}
@@ -1507,10 +1518,17 @@ func (o *DownloadOrchestrator) muxSegment(
 		if _, statErr := os.Stat(result.ChatPath); statErr == nil {
 			chatDst := filepath.Join(outputDir, partBase+".chat.json")
 			if copyErr := copyFile(result.ChatPath, chatDst); copyErr != nil {
-				o.logger.Warn("failed to copy part chat file", "err", copyErr, "segment", segIdx)
-			} else {
-				seg.ChatFile = chatDst
+				// Fail the part rather than record it without its chat: a
+				// recorded part's seg_N dir is swept with the rest of staging,
+				// and it held the only copy of this span's chat. Unrecorded,
+				// the part stays unmuxed — shielded, and re-muxed (chat
+				// included) by the finalize's muxUnrecordedSegments or the
+				// Mux action — and the part file goes with it, as a short
+				// part's does, so the retry writes it fresh.
+				o.discardRejectedMuxOutput(jobCtx.Job.ID, outputPath)
+				return nil, fmt.Errorf("copy part %d's chat: %w", segIdx, copyErr)
 			}
+			seg.ChatFile = chatDst
 		}
 	}
 
