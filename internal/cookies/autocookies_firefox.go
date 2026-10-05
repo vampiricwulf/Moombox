@@ -454,6 +454,24 @@ func (s *AutoCookieService) logFirefoxReadStats(stats firefoxReadStats) {
 	if stats.defaulted > 0 {
 		s.logger.Debug("filled in NULL moz_cookies columns", "rows_defaulted", stats.defaulted)
 	}
+	if stats.otherContext > 0 {
+		s.logger.Debug("skipped container and partitioned moz_cookies rows", "rows", stats.otherContext)
+	}
+}
+
+// firefoxCookieContext reports whether a moz_cookies row belongs to the
+// default browsing context, from its originAttributes. A container
+// ("^userContextId=2") is another account's session; a partition key
+// ("^partitionKey=(https,example.com)", Total Cookie Protection) is a cookie
+// a YouTube or Twitch embed set inside some other site. Both used to be read
+// with the rest, and deduplicateAndFormat keeps whichever row of a name comes
+// last — so a container's SAPISID paired with the default context's
+// LOGIN_INFO, and an embed's VISITOR_INFO1_LIVE replaced the real one.
+// First-party isolation ("^firstPartyDomain=youtube.com") is kept: with it
+// on, every cookie carries one.
+func firefoxCookieContext(originAttributes string) bool {
+	return !strings.Contains(originAttributes, "userContextId=") &&
+		!strings.Contains(originAttributes, "partitionKey=")
 }
 
 // readFirefoxCookies extracts the relevant cookies from a Firefox profile
@@ -563,6 +581,7 @@ type firefoxReadStats struct {
 	droppedNoName int   // NULL/empty name — nothing to send, nothing to match
 	droppedNoHost int   // NULL/empty host — no domain to attach the cookie to
 	defaulted     int   // rows where a NULL non-identity column was filled in
+	otherContext  int   // rows from a container or a partitioned third-party context
 }
 
 // unusable is the count of rows this read could not turn into a cookie.
@@ -662,7 +681,15 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 	schemaVersion, schemaKnown := firefoxSchemaVersion(db)
 	stats.schemaVersion, stats.schemaKnown = schemaVersion, schemaKnown
 
-	rows, err := db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure FROM moz_cookies")
+	// originAttributes says which browsing context a row belongs to (see
+	// firefoxCookieContext). Every Firefox Moombox can meet has the column;
+	// a schema without it has no containers either, so it reads as before.
+	hasContext := true
+	rows, err := db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure, originAttributes FROM moz_cookies")
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		hasContext = false
+		rows, err = db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure FROM moz_cookies")
+	}
 	if err != nil {
 		return nil, stats, fmt.Errorf("query cookies: %w", err)
 	}
@@ -682,11 +709,19 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 		// straight into http.cookiejar.Cookie, so it does not guard these
 		// either; parity is not the argument here, not silently losing
 		// credentials is.
-		var name, value, host, cookiePath sql.NullString
+		var name, value, host, cookiePath, originAttributes sql.NullString
 		var expiry, isHttpOnly, isSecure sql.NullInt64
 		stats.rows++
-		if err := rows.Scan(&name, &value, &host, &cookiePath, &expiry, &isHttpOnly, &isSecure); err != nil {
+		dest := []any{&name, &value, &host, &cookiePath, &expiry, &isHttpOnly, &isSecure}
+		if hasContext {
+			dest = append(dest, &originAttributes)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			stats.scanErrors++
+			continue
+		}
+		if !firefoxCookieContext(originAttributes.String) {
+			stats.otherContext++
 			continue
 		}
 
