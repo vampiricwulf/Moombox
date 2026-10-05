@@ -134,6 +134,17 @@ func TestParseTimeToSeconds(t *testing.T) {
 		{"abc", 0, true},
 		{"1:60", 0, true},    // seconds > 59
 		{"1:00:60", 0, true}, // seconds > 59
+		// A fractional second below 60 is on the clock face.
+		{"1:59.5", 119.5, false},
+		{"0:00:59.9", 59.9, false},
+		// ParseFloat's NaN/Inf are not times — in either form.
+		{"NaN", 0, true},
+		{"inf", 0, true},
+		{"-Inf", 0, true},
+		{"1:NaN", 0, true},
+		{"1:00:+Inf", 0, true},
+		// Negative stays a value: the callers refuse it with their own words.
+		{"-5", -5, false},
 	}
 
 	for _, tc := range tests {

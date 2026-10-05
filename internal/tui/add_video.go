@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 
@@ -560,21 +561,26 @@ func (m *AddVideoModel) handleTimestampsStep(key string) (string, string) {
 		m.syncToTextInput()
 		return "", ""
 	case keyEnter:
+		var s, e float64
 		if m.startTimeInput != "" {
-			if _, err := parseTimeToSeconds(m.startTimeInput); err != nil {
+			var err error
+			if s, err = parseTimeToSeconds(m.startTimeInput); err != nil {
 				m.errorMsg = "Invalid start time format"
+				return "", ""
+			}
+			if s < 0 {
+				m.errorMsg = "Start time cannot be negative"
 				return "", ""
 			}
 		}
 		if m.endTimeInput != "" {
-			if _, err := parseTimeToSeconds(m.endTimeInput); err != nil {
+			var err error
+			if e, err = parseTimeToSeconds(m.endTimeInput); err != nil {
 				m.errorMsg = "Invalid end time format"
 				return "", ""
 			}
-		}
-		if m.startTimeInput != "" && m.endTimeInput != "" {
-			s, _ := parseTimeToSeconds(m.startTimeInput)
-			e, _ := parseTimeToSeconds(m.endTimeInput)
+			// A blank start is the beginning of the video, so an end at or
+			// before 0 is as empty a range as one before a typed start.
 			if e <= s {
 				m.errorMsg = "End time must be after start time"
 				return "", ""
@@ -618,11 +624,20 @@ func (m *AddVideoModel) GetSelectedVideoItag() *int { return m.selectedVideoItag
 // GetSelectedAudioItag returns the selected audio itag (nil=auto, -1=none).
 func (m *AddVideoModel) GetSelectedAudioItag() *int { return m.selectedAudioItag }
 
-// GetStartTime returns the start time input.
-func (m *AddVideoModel) GetStartTime() string { return m.startTimeInput }
-
-// GetEndTime returns the end time input.
-func (m *AddVideoModel) GetEndTime() string { return m.endTimeInput }
+// TimeRange returns the validated start and end, in seconds, for the POST
+// body — nil for a blank field. POST /api/jobs decodes both as numbers, so
+// the raw "1:30" the inputs hold was a 400 "invalid request body" for every
+// add with a range. A zero start is no start at all and is left off, as the
+// dashboard leaves it off.
+func (m *AddVideoModel) TimeRange() (start, end *float64) {
+	if s, err := parseTimeToSeconds(m.startTimeInput); err == nil && s > 0 {
+		start = &s
+	}
+	if e, err := parseTimeToSeconds(m.endTimeInput); err == nil && e > 0 {
+		end = &e
+	}
+	return start, end
+}
 
 // SpinnerInit returns the spinner's initial tick command when loading.
 func (m *AddVideoModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
@@ -1123,7 +1138,18 @@ func splitPathSegments(path string) []string {
 	return strings.Split(path, "/")
 }
 
-// parseTimeToSeconds parses HH:MM:SS, MM:SS, or raw seconds to float64.
+// validClockFields reports whether the minutes and seconds of an MM:SS or
+// HH:MM:SS time are on the clock face: whole minutes 0-59 and seconds in
+// [0, 60) — "1:59.5" is a time, and the old `secs > 59` turned it away. Written
+// as a range the value must fall INSIDE so a NaN or ±Inf ("1:NaN") is refused
+// rather than slipping past two comparisons that are both false for it.
+func validClockFields(mins int, secs float64) bool {
+	return mins >= 0 && mins <= 59 && secs >= 0 && secs < 60
+}
+
+// parseTimeToSeconds parses HH:MM:SS, MM:SS, or raw seconds to float64. The
+// result is always finite; a negative one (a raw "-5", or "-1:00:00") is
+// returned as such for the caller to refuse with its own message.
 func parseTimeToSeconds(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1133,7 +1159,16 @@ func parseTimeToSeconds(s string) (float64, error) {
 	parts := strings.Split(s, ":")
 	switch len(parts) {
 	case 1:
-		return strconv.ParseFloat(parts[0], 64)
+		secs, err := strconv.ParseFloat(parts[0], 64)
+		if err != nil {
+			return 0, err
+		}
+		// ParseFloat takes "NaN" and "Inf" — neither is a time, and NaN
+		// slips through every range comparison a caller makes after this.
+		if math.IsNaN(secs) || math.IsInf(secs, 0) {
+			return 0, fmt.Errorf("not a finite number of seconds")
+		}
+		return secs, nil
 	case 2:
 		mins, err := strconv.Atoi(parts[0])
 		if err != nil {
@@ -1143,7 +1178,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
+		if !validClockFields(mins, secs) {
 			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
 		return float64(mins)*60 + secs, nil
@@ -1160,7 +1195,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
+		if !validClockFields(mins, secs) {
 			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
 		return float64(hours)*3600 + float64(mins)*60 + secs, nil

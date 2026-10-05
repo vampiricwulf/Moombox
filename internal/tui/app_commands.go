@@ -116,8 +116,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 	platform := a.addVideo.GetPlatform()
 	videoItag := a.addVideo.GetSelectedVideoItag()
 	audioItag := a.addVideo.GetSelectedAudioItag()
-	startTime := a.addVideo.GetStartTime()
-	endTime := a.addVideo.GetEndTime()
+	startTime, endTime := a.addVideo.TimeRange()
 	baseURL := a.apiBaseURL()
 	client := a.apiClient()
 
@@ -146,11 +145,11 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		if audioItag != nil {
 			body["selectedAudioItag"] = *audioItag
 		}
-		if startTime != "" {
-			body["startTime"] = startTime
+		if startTime != nil {
+			body["startTime"] = *startTime
 		}
-		if endTime != "" {
-			body["endTime"] = endTime
+		if endTime != nil {
+			body["endTime"] = *endTime
 		}
 
 		jsonBody, _ := json.Marshal(body)
