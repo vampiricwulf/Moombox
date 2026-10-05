@@ -31,6 +31,18 @@ var (
 
 const maxFilenameLength = 200
 
+// IsWindowsReservedName reports whether one path component names a Windows
+// device. Windows reserves the device name with ANY extension ("NUL.mp4" is
+// the null device too) and ignores trailing spaces before it, so the check is
+// on the part before the first dot, trailing spaces trimmed, case-folded.
+func IsWindowsReservedName(component string) bool {
+	base := component
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	return windowsReservedNames[strings.ToLower(strings.TrimRight(base, " "))]
+}
+
 // SanitizeForFilename removes characters that are invalid in filenames.
 func SanitizeForFilename(name string) string {
 	result := controlChars.ReplaceAllString(name, "")

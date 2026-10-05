@@ -712,13 +712,20 @@ File permissions: `0o600` (owner read/write only).
 
 | Variable | Source | Sanitization |
 |----------|--------|--------------|
-| `${title}` | Video/stream title | Filesystem-unsafe characters removed; Unicode preserved |
+| `${title}` | Video/stream title | Filesystem-unsafe characters removed; Unicode preserved; cut to 180 bytes on a rune boundary (`templateTitleMaxBytes`) |
 | `${id}` | Video/stream ID | No sanitization (IDs are alphanumeric) |
-| `${channel}` | Channel name | Filesystem-unsafe characters removed; Unicode preserved |
+| `${channel}` | Channel name | Filesystem-unsafe characters removed; Unicode preserved; cut to 200 bytes (`templateChannelMaxBytes`) |
 | `${start_date}` | Stream start time (or now) | Formatted as `YYYYMMDD` |
 | `${start_time}` | Stream start time (or now) | Formatted as `HHMM` |
 
-Sanitization preserves CJK, Japanese kana, and full-width characters via a regex allowlist.
+Sanitization preserves CJK, Japanese kana, and full-width characters via a regex allowlist. Those keep
+three bytes a character, and Linux caps a name at 255 BYTES, so the byte caps are what keep a long
+Japanese title from failing the finalize with ENAMETOOLONG: with the default template a capped title
+leaves room for the id and the longest suffix a job writes beside its archive. No ASCII title reaches
+the cap (YouTube allows 100 characters, Twitch 140). After expansion every path component that names a
+Windows device (`CON`, `NUL`, `COM1`, … with or without an extension — `utils.IsWindowsReservedName`)
+gets a leading underscore, on every platform, so a channel called `CON` no longer makes the
+`${channel}/…` directory impossible to create on Windows.
 
 ### Auto-Hash
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 
@@ -1308,10 +1309,60 @@ func sanitizeTemplateStr(s string) string {
 	return strings.TrimSpace(invalidFSChars.ReplaceAllString(s, ""))
 }
 
+// Byte budgets for the two free-text variables. Linux filesystems cap a name
+// at 255 BYTES, and the CJK the sanitizer keeps is three bytes a character:
+// a 90-character Japanese title made "<title> [<id>].mp4" too long to create,
+// so the finalize failed with ENAMETOOLONG. With the default template a title
+// of templateTitleMaxBytes leaves room for the id and the longest suffix a
+// job writes beside its archive (" - partN", ".restart-<unix ts>-N",
+// ".chat.json"). No ASCII title reaches it — YouTube allows 100 characters,
+// Twitch 140. A channel is normally a directory of its own, so it only needs
+// to fit by itself.
+const (
+	templateTitleMaxBytes   = 180
+	templateChannelMaxBytes = 200
+)
+
+// truncateUTF8 cuts s to at most max bytes on a rune boundary.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(s[:cut])
+}
+
+// guardReservedComponents prefixes "_" to every path component of p that
+// names a Windows device (utils.IsWindowsReservedName) — a channel called
+// "CON" under the default "${channel}/..." layout made MkdirAll fail at every
+// finalize on Windows. Applied on every platform so an archive gets the same
+// name wherever it is written.
+func guardReservedComponents(p string) string {
+	var b strings.Builder
+	start := 0
+	for i := 0; i <= len(p); i++ {
+		if i < len(p) && p[i] != '/' && p[i] != '\\' {
+			continue
+		}
+		if c := p[start:i]; utils.IsWindowsReservedName(c) {
+			b.WriteByte('_')
+		}
+		b.WriteString(p[start:i])
+		if i < len(p) {
+			b.WriteByte(p[i])
+		}
+		start = i + 1
+	}
+	return b.String()
+}
+
 // ResolveTemplate resolves an output template with the given variables.
 func ResolveTemplate(template string, vars TemplateVariables) string {
-	safeTitle := sanitizeTemplateStr(vars.Title)
-	safeChannel := sanitizeTemplateStr(vars.Channel)
+	safeTitle := truncateUTF8(sanitizeTemplateStr(vars.Title), templateTitleMaxBytes)
+	safeChannel := truncateUTF8(sanitizeTemplateStr(vars.Channel), templateChannelMaxBytes)
 
 	now := time.Now()
 	if vars.Date != nil {
@@ -1320,11 +1371,11 @@ func ResolveTemplate(template string, vars TemplateVariables) string {
 		}
 	}
 
-	return strings.NewReplacer(
+	return guardReservedComponents(strings.NewReplacer(
 		"${title}", safeTitle,
 		"${id}", vars.ID,
 		"${channel}", safeChannel,
 		"${start_date}", now.Format("20060102"),
 		"${start_time}", now.Format("1504"),
-	).Replace(template)
+	).Replace(template))
 }
