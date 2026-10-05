@@ -778,3 +778,42 @@ func TestDecapi_ASkippedVODIsArchivedOnceVODsAreTurnedOn(t *testing.T) {
 		t.Errorf("found = %v, want vidNewest01 as a new VOD once VODs are turned on", *found)
 	}
 }
+
+// DECAPI asks every 15 s. A newest video that is neither jobbed nor memoized
+// as terminal — post_live on a channel that does not archive VODs, or one
+// whose probes keep failing — logged its match and its skip at Info every
+// cycle once the skip stopped writing the history row that demoted them. The
+// first sighting still logs at Info; repeats of the same answer at Debug.
+//
+// Mutant: sameAsLastAnswer always false — 2 Info lines per later cycle.
+func TestDecapi_ARepeatedAnswerLogsAtDebug(t *testing.T) {
+	db := newTestDB(t)
+	dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "post_live", Title: "ended stream"}, nil
+	})
+	var records []slog.Record
+	dm.logger = slog.New(recordingHandler{records: &records})
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	body := decapiBody("vidPostLiv1", "ended stream")
+
+	infos := func() int {
+		n := 0
+		for _, r := range records {
+			if r.Level == slog.LevelInfo {
+				n++
+			}
+		}
+		return n
+	}
+	_ = dm.processResponse(context.Background(), body, ch)
+	if infos() == 0 {
+		t.Fatal("the first sighting logged nothing at Info")
+	}
+	records = records[:0]
+	for range 4 {
+		_ = dm.processResponse(context.Background(), body, ch)
+	}
+	if n := infos(); n != 0 {
+		t.Errorf("%d Info lines over 4 repeats of the same answer, want 0", n)
+	}
+}

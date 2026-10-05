@@ -797,7 +797,13 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		return nil
 	}
 
-	if reprobe {
+	// The same newest video as the last answer: DECAPI asks every 15 s, so a
+	// video that is not jobbed and not memoized as terminal — a post_live one
+	// on a channel that does not archive VODs, or one whose probes keep
+	// failing — logged its match and its skip at Info every cycle once the
+	// skip and the give-up stopped writing the history row that demoted them.
+	repeat := dm.sameAsLastAnswer(ch.ID, videoID)
+	if reprobe || repeat {
 		dm.logger.Debug("decapi match found (re-probe)",
 			"videoID", videoID,
 			"title", title,
@@ -819,6 +825,7 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		Tracker:    dm.MetadataTracker,
 		Cooldown:   dm.ProbeCooldown,
 		IsReprobe:  reprobe,
+		Repeat:     repeat,
 		Logger:     dm.logger,
 	})
 	// Record what the probe made of this ID so the next cycle can skip a
@@ -975,6 +982,16 @@ func (dm *DecapiMonitor) noteTerminalMemoOutsideWindow(channelID, videoID string
 	m.outsideWindow = true
 	m.windowDays = windowDays
 	dm.terminalMemo[channelID] = m
+}
+
+// sameAsLastAnswer reports whether videoID is the newest video the channel's
+// last classified DECAPI answer named — recorded whatever the classification,
+// errors included (recordTerminalMemo).
+func (dm *DecapiMonitor) sameAsLastAnswer(channelID, videoID string) bool {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	m, ok := dm.terminalMemo[channelID]
+	return ok && m.videoID == videoID
 }
 
 // noteTerminalMemoNonLiveOff records that the memo recordTerminalMemo just

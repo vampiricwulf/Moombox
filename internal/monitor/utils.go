@@ -214,7 +214,11 @@ type ProcessYouTubeVideoParams struct {
 	Tracker    *MetadataFailureTracker
 	Cooldown   *ProbeCooldown // optional: skips re-probes within the cooldown window
 	IsReprobe  bool           // true if re-checking a previously processed video (logs demoted to Debug)
-	Logger     interface {
+	// Repeat marks a video the caller classified last time as well: the
+	// classification logs are demoted to Debug, as for IsReprobe, but nothing
+	// is skipped as already processed — the video was never jobbed.
+	Repeat bool
+	Logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -498,7 +502,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		// newest video changes, PruneHealth drops the channel, or the process
 		// restarts — never because the refusal ended.
 		deniedLog := p.Logger.Info
-		if p.IsReprobe {
+		if p.IsReprobe || p.Repeat {
 			deniedLog = p.Logger.Debug
 		}
 		deniedLog(fmt.Sprintf("[Monitor] YouTube refused this video (%s); not creating a job: %s (%s)",
@@ -517,7 +521,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 
 	// Classify stream status (demote to Debug for re-probes of finished videos)
 	logInfo := p.Logger.Info
-	if p.IsReprobe {
+	if p.IsReprobe || p.Repeat {
 		logInfo = p.Logger.Debug
 	}
 
