@@ -42,10 +42,15 @@ type jobWithStaging struct {
 	// the details dialog reads .length off this directly.
 	Asides          []worker.Aside `json:"asides"`
 	KeptChatSidecar bool           `json:"keptChatSidecar"`
+	// UnmuxedParts is worker.HasUnmuxedParts for a Finished job: a split part
+	// its finalize could not mux is still in staging, and Mux is offered to
+	// recover it. Always false for any other status, whose Mux gate is
+	// HasSegments.
+	UnmuxedParts bool `json:"unmuxedParts"`
 }
 
 // enrichJob adds computed staging fields to a job response.
-func enrichJob(job *database.Job, stagingBase string) jobWithStaging {
+func enrichJob(db *database.Database, job *database.Job, stagingBase string) jobWithStaging {
 	report := worker.ScanAsides(stagingBase, job.ID)
 	return jobWithStaging{
 		Job:             job,
@@ -53,6 +58,7 @@ func enrichJob(job *database.Job, stagingBase string) jobWithStaging {
 		HasSegments:     worker.HasSegmentFiles(stagingBase, job.ID),
 		Asides:          report.Groups,
 		KeptChatSidecar: report.KeptChatSidecar,
+		UnmuxedParts:    job.Status == database.StatusFinished && worker.HasUnmuxedParts(db, stagingBase, job.ID),
 	}
 }
 
@@ -244,7 +250,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			stagingBase = c.Paths.EffectiveStagingDir()
 		})
 
-		jsonResponse(rw, enrichJob(job, stagingBase))
+		jsonResponse(rw, enrichJob(db, job, stagingBase))
 	})
 
 	// GET /api/jobs/:id/video — range-request video streaming
@@ -1046,18 +1052,21 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		switch job.Status {
-		case database.StatusError, database.StatusCancelled:
-			// OK
-		default:
-			jsonError(rw, "Job cannot be muxed in current state", http.StatusBadRequest)
-			return
-		}
-
 		var stagingBase string
 		store.Read(func(c *config.MoomboxConfig) {
 			stagingBase = c.Paths.EffectiveStagingDir()
 		})
+
+		switch {
+		case job.Status == database.StatusError, job.Status == database.StatusCancelled:
+			// OK
+		case job.Status == database.StatusFinished && worker.HasUnmuxedParts(db, stagingBase, jobID):
+			// A part its finalize could not mux is still in staging — the
+			// recovery cleanupStagingAfterMux names when it keeps the dir.
+		default:
+			jsonError(rw, "Job cannot be muxed in current state", http.StatusBadRequest)
+			return
+		}
 
 		if !worker.HasSegmentFiles(stagingBase, jobID) {
 			jsonError(rw, "No segment files found in staging", http.StatusBadRequest)
@@ -1069,8 +1078,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				// ErrStagingBusy is a conflict, not a fault: a set-aside
 				// recovery holds this job's staging, and the operator can
 				// simply try again in a moment. Error→status mapping only —
-				// the handler's gates above (Error/Cancelled and
-				// HasSegmentFiles) are unchanged.
+				// the status and HasSegmentFiles gates above decide what is
+				// muxable.
 				status := http.StatusInternalServerError
 				if errors.Is(err, worker.ErrStagingBusy) {
 					status = http.StatusConflict

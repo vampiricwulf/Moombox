@@ -865,6 +865,66 @@ func TestJobMuxRejectsActiveState(t *testing.T) {
 	}
 }
 
+// TestJobMuxOffersAFinishedJobsUnmuxedPart: a split job whose finalize could
+// not mux one part still lands Finished, and cleanupStagingAfterMux keeps its
+// staging naming "the Mux action" as the way back — which this route refused
+// for every Finished row, so the footage had no verb and the dir was held until
+// the job was deleted. A Finished row is muxable exactly while a part is still
+// unmuxed, and GET /api/jobs/{id} says so for the details dialog.
+//
+// Mutants: dropping the Finished case — the first request is refused; dropping
+// its HasUnmuxedParts term — the fully-recorded job is accepted.
+func TestJobMuxOffersAFinishedJobsUnmuxedPart(t *testing.T) {
+	f := newJobsFixture(t)
+	stage := func(jobID, sub string) {
+		t.Helper()
+		dir := filepath.Join(f.stagingDir, jobID, sub)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "video.ts"), []byte("staged"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := func(jobID string, idx int) {
+		t.Helper()
+		if err := f.db.AddSegment(&database.Segment{JobID: jobID, SegmentIndex: idx, Quality: "1080p", Filename: "x.mp4"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Part 0 (the root) muxed; part 1 (seg_1) did not.
+	f.addJob(t, "yt_unmuxed", nil)
+	stage("yt_unmuxed", "")
+	stage("yt_unmuxed", "seg_1")
+	record("yt_unmuxed", 0)
+	// Both parts muxed — the staging was kept for some other reason.
+	f.addJob(t, "yt_allmuxed", nil)
+	stage("yt_allmuxed", "")
+	stage("yt_allmuxed", "seg_1")
+	record("yt_allmuxed", 0)
+	record("yt_allmuxed", 1)
+
+	if rec := doRequest(t, f.router, "POST", "/api/jobs/yt_unmuxed/mux", nil); rec.Code != http.StatusOK {
+		t.Errorf("mux a Finished job with an unmuxed part: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(t, f.router, "POST", "/api/jobs/yt_allmuxed/mux", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("mux a Finished job with nothing unmuxed: want 400, got %d", rec.Code)
+	}
+
+	for id, want := range map[string]bool{"yt_unmuxed": true, "yt_allmuxed": false} {
+		rec := doRequest(t, f.router, "GET", "/api/jobs/"+id, nil)
+		var got struct {
+			UnmuxedParts *bool `json:"unmuxedParts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.UnmuxedParts == nil {
+			t.Fatalf("GET %s: no unmuxedParts in %s (%v)", id, rec.Body.String(), err)
+		}
+		if *got.UnmuxedParts != want {
+			t.Errorf("GET %s: unmuxedParts = %v, want %v", id, *got.UnmuxedParts, want)
+		}
+	}
+}
+
 func TestJobMux404(t *testing.T) {
 	f := newJobsFixture(t)
 	rec := doRequest(t, f.router, "POST", "/api/jobs/no-such/mux", nil)

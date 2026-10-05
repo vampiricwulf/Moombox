@@ -227,6 +227,13 @@ func (s *runState) runTUI() {
 		})
 		return worker.HasSegmentFiles(base, jobID)
 	}
+	app.HasUnmuxedParts = func(jobID string) bool {
+		var base string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			base = c.Paths.EffectiveStagingDir()
+		})
+		return worker.HasUnmuxedParts(s.db, base, jobID)
+	}
 	app.JobAsides = func(jobID string) tui.AsideSummary {
 		report, err := s.dlWorker.Asides(jobID)
 		if err != nil {

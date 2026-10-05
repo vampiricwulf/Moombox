@@ -594,6 +594,11 @@ type App struct {
 	OnRecoverAsides func(jobID string) error
 	HasStagingFiles func(jobID string) bool // checks if staging dir has files
 	HasSegmentFiles func(jobID string) bool // checks if staging dir has segment files
+	// HasUnmuxedParts reports whether a Finished job's staging still holds a
+	// split part its finalize could not mux (worker.HasUnmuxedParts) — what
+	// makes A M offer itself on a Finished row. A disk probe like the two
+	// above, run on selection only.
+	HasUnmuxedParts func(jobID string) bool
 	// JobAsides reports a job's set-aside recordings and whether its staging
 	// dir still holds a chat capture. A DISK probe like HasStagingFiles and
 	// HasSegmentFiles beside it, so the same rule applies: it runs on

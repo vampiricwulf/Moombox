@@ -175,6 +175,7 @@ export class JobDetailsController {
       job.hasSegments = enriched.hasSegments;
       job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
       job.keptChatSidecar = !!enriched.keptChatSidecar;
+      job.unmuxedParts = !!enriched.unmuxedParts;
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
         if (job.asides.length > 0) {
@@ -375,7 +376,11 @@ export class JobDetailsController {
     // the details view fetches staging; hide until it is known
     const canResume = canResumeJob(job, { requireKnownStaging: true });
     const canReinit = REINIT_STATUSES.has(job.status);
-    const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
+    // A Finished job is muxable only while a split part its finalize could
+    // not mux is still in staging (the server's unmuxedParts) — the same rule
+    // POST /api/jobs/{id}/mux applies.
+    const canMux = (MUX_STATUSES.has(job.status) && job.hasSegments) ||
+      (job.status === "Finished" && job.unmuxedParts === true);
     const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
@@ -874,8 +879,8 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar fields from
-   * oldJobs onto newJobs.
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts
+   * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
    * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
    */
@@ -896,6 +901,9 @@ export class JobDetailsController {
       }
       if (job.keptChatSidecar === undefined && old.keptChatSidecar !== undefined) {
         job.keptChatSidecar = old.keptChatSidecar;
+      }
+      if (job.unmuxedParts === undefined && old.unmuxedParts !== undefined) {
+        job.unmuxedParts = old.unmuxedParts;
       }
     }
   }

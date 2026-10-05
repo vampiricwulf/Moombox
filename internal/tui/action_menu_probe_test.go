@@ -318,3 +318,45 @@ func TestActionMenuOpenCallsNoProbeSeamAtAll(t *testing.T) {
 		t.Errorf("opening the menu called %d probe callback(s) across %d seam(s), want 0 — every NeedsJob entry's open-time filter must be status-only", probes, seams)
 	}
 }
+
+// A M offers itself on a Finished job only while a split part its finalize
+// could not mux is still in staging (HasUnmuxedParts) — the recovery the
+// staging cleanup names when it keeps the dir, which A M used to refuse for
+// every Finished row. Error/Cancelled keep their HasSegmentFiles rule.
+//
+// Mutants: dropping the Finished case — the unmuxed job is filtered out;
+// dropping its HasUnmuxedParts call — the fully-muxed job is offered.
+func TestMuxChordOffersAFinishedJobsUnmuxedPart(t *testing.T) {
+	a := NewApp()
+	a.HasSegmentFiles = func(string) bool { return true }
+	a.HasUnmuxedParts = func(id string) bool { return id == "unmuxed" }
+	_, mi := findMenuItemIn(t, a.buildMenuItems(), "A M")
+
+	for _, tc := range []struct {
+		job  *database.Job
+		want bool
+	}{
+		{&database.Job{ID: "unmuxed", Status: database.StatusFinished}, true},
+		{&database.Job{ID: "allmuxed", Status: database.StatusFinished}, false},
+		{&database.Job{ID: "err", Status: database.StatusError}, true},
+		{&database.Job{ID: "live", Status: database.StatusLive}, false},
+	} {
+		if got := mi.JobFilter(tc.job); got != tc.want {
+			t.Errorf("A M JobFilter(%s %s) = %v, want %v", tc.job.Status, tc.job.ID, got, tc.want)
+		}
+		if tc.want && !mi.StatusFilter(tc.job) {
+			t.Errorf("A M StatusFilter(%s) = false — the menu would dim an entry its selector offers", tc.job.Status)
+		}
+	}
+}
+
+func findMenuItemIn(t *testing.T, items []ActionMenuItem, chord string) (int, *ActionMenuItem) {
+	t.Helper()
+	for i := range items {
+		if items[i].Chord == chord {
+			return i, &items[i]
+		}
+	}
+	t.Fatalf("%s is not in buildMenuItems", chord)
+	return -1, nil
+}

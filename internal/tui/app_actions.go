@@ -831,15 +831,20 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A M", Label: "Mux Job", HintLabel: "Mux", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no muxable jobs",
 			JobFilter: func(j *database.Job) bool {
-				canMux := j.Status == database.StatusCancelled || j.Status == database.StatusError
-				if canMux && a.HasSegmentFiles != nil {
-					return a.HasSegmentFiles(j.ID)
+				switch j.Status {
+				case database.StatusCancelled, database.StatusError:
+					return a.HasSegmentFiles != nil && a.HasSegmentFiles(j.ID)
+				case database.StatusFinished:
+					// A part its finalize could not mux is still in staging —
+					// the recovery the staging cleanup names when it keeps
+					// the dir (the same rule as POST /api/jobs/{id}/mux).
+					return a.HasUnmuxedParts != nil && a.HasUnmuxedParts(j.ID)
 				}
 				return false
 			},
 			// Status-only twin of the filter above — see A R (CORE-9).
 			StatusFilter: func(j *database.Job) bool {
-				return j.Status == database.StatusCancelled || j.Status == database.StatusError
+				return j.Status == database.StatusCancelled || j.Status == database.StatusError || j.Status == database.StatusFinished
 			}},
 		{Chord: "A S", Label: "Recover Set-aside Recordings", HintLabel: "Recover", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no jobs with set-aside recordings",

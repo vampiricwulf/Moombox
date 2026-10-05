@@ -1103,7 +1103,7 @@ export class MoomboxApp {
       case "initial_state": {
         if (!p) break;
         // Carry the staging fields only GET /api/jobs/:id adds (hasStaging,
-        // hasSegments, asides, keptChatSidecar) across the replace, as
+        // hasSegments, asides, keptChatSidecar, unmuxedParts) across the replace, as
         // jobs_update and job_update do: the snapshot rows are raw, and an
         // open details dialog refreshed from one below lost its Resume and
         // Mux buttons. Not only on reconnect — the hub sends this snapshot
