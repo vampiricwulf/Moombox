@@ -1156,6 +1156,16 @@ func (s *Sidecar) stderrPump() {
 			s.cfg.Logger.Debug("sidecar stderr", "line", line)
 		}
 	}
+	// The scanner stops on a line past its 1 MiB cap. Returning there left
+	// the pipe undrained, and a child that kept writing to stderr blocked on
+	// the full pipe — a wedge only the 90 s request timeout ever noticed.
+	// Keep draining, unread, until the child closes it.
+	if err := scanner.Err(); err != nil {
+		if !s.stopping.Load() {
+			s.cfg.Logger.Warn("sidecar: stderr line too long to log; discarding the rest of its stderr", "err", err)
+		}
+		_, _ = io.Copy(io.Discard, s.stderr)
+	}
 }
 
 // stderrTailLines and stderrTailLineBytes bound what stderrTail keeps.
