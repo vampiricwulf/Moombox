@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -233,6 +234,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 			)
 		}
 	}
+	vcd.adoptExistingFile()
 
 	lastFlush := time.Now()
 
@@ -489,6 +491,35 @@ func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reaso
 		"messages", vcd.MessageCount(),
 	)
 	return fmt.Errorf("vod chat paging stalled at offset %v cursor %q: %s", contentOffset, cursor, reason)
+}
+
+// adoptExistingFile reconciles the run with a chat file already on disk:
+// the dedup learns the IDs of its last chatDedupMax messages and the total
+// rises to its count. The sidecar is saved right AFTER each flush, so a
+// process killed between the two left a file holding pages the sidecar's
+// offset and IDs did not cover; the resumed run re-fetched those pages and
+// appended them a second time, and its header count fell short. The YouTube
+// and Twitch IRC downloaders already re-read the file this way on resume.
+// Nothing on disk is a fresh start; a file that cannot be read is left alone
+// (the flush's own merge fallback deals with it).
+func (vcd *VodChatDownloader) adoptExistingFile() {
+	if vcd.outputPath == "" {
+		return
+	}
+	summary, err := readChatPartFileSummary(vcd.outputPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			vcd.logger.Warn("cannot read the existing VOD chat file; resuming without its message IDs",
+				"vodID", vcd.vodID, "path", vcd.outputPath, "err", err)
+		}
+		return
+	}
+	for _, id := range summary.recentIDs {
+		vcd.dedup.Add(id)
+	}
+	if n := int64(summary.messages); n > vcd.totalCount.Load() {
+		vcd.totalCount.Store(n)
+	}
 }
 
 // finishInterrupted is the exit every path that ends BEFORE the VOD's last
