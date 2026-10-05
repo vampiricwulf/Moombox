@@ -42,7 +42,9 @@ func ArchiveCutoff(now time.Time, hideAgeDays float64) time.Time {
 		return time.Time{}
 	}
 	ns := hideAgeDays * float64(24*time.Hour)
-	if math.IsNaN(ns) || ns > float64(math.MaxInt64) || ns < float64(math.MinInt64) {
+	// >=, not >: float64(math.MaxInt64) rounds UP to 2^63, which is itself
+	// out of int64 range, so a value exactly there must be refused too.
+	if math.IsNaN(ns) || ns >= float64(math.MaxInt64) || ns < float64(math.MinInt64) {
 		return time.Time{}
 	}
 	return now.Add(-time.Duration(ns))

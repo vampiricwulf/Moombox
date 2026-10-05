@@ -56,7 +56,9 @@ func TestArchiveCutoffGuardsNonFiniteThresholds(t *testing.T) {
 		Status:    database.StatusFinished,
 		UpdatedAt: now.Add(-365 * 24 * time.Hour).Format(time.RFC3339),
 	}
-	for _, days := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 1e12, -1e12} {
+	// The last value scales to exactly 2^63 ns — float64(math.MaxInt64) — one
+	// past the int64 range, which the guard once let through (mutant: > for >=).
+	for _, days := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 1e12, -1e12, float64(math.MaxInt64) / float64(24*time.Hour)} {
 		cutoff := ArchiveCutoff(now, days)
 		if !cutoff.IsZero() {
 			t.Errorf("ArchiveCutoff(%v) = %v, want the zero time", days, cutoff)

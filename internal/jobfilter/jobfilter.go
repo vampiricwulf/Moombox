@@ -152,9 +152,18 @@ func parseTerm(raw string) Token {
 	return Token{Kind: KindText, Value: value, Negate: negate, lower: strings.ToLower(value)}
 }
 
+// isJSTrimSpace reports whether String.prototype.trim() strips r: ECMAScript's
+// WhiteSpace and LineTerminator sets. Go's unicode.IsSpace differs from them
+// in exactly two code points — it counts U+0085 (NEL), which JS does not,
+// and not U+FEFF (the BOM), which JS does — so a BOM-prefixed query pasted
+// from a file matched in the dashboard and nothing in the TUI.
+func isJSTrimSpace(r rune) bool {
+	return r == '\uFEFF' || (unicode.IsSpace(r) && r != '\u0085')
+}
+
 // Parse tokenises a query the way web/public/modules/filter-parser.js does.
 func Parse(query string) []Token {
-	trimmed := strings.TrimSpace(query)
+	trimmed := strings.TrimFunc(query, isJSTrimSpace)
 	if trimmed == "" {
 		return nil
 	}

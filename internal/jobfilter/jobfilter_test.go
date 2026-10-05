@@ -399,3 +399,21 @@ func BenchmarkMatch1000(b *testing.B) {
 		}
 	}
 }
+
+// TestParseTrimsLikeJavaScript: the dashboard trims a query with
+// String.prototype.trim(), which strips a leading BOM (U+FEFF) and keeps NEL
+// (U+0085); strings.TrimSpace does the opposite on both, so a BOM-prefixed
+// query matched in the dashboard and nothing in the TUI.
+//
+// Mutant: restore strings.TrimSpace in Parse.
+func TestParseTrimsLikeJavaScript(t *testing.T) {
+	if got := Parse("\uFEFFfoo"); len(got) != 1 || got[0].Value != "foo" {
+		t.Errorf("Parse(BOM+foo) = %+v, want one text token \"foo\"", got)
+	}
+	if got := Parse("\u0085foo"); len(got) != 1 || got[0].Value != "\u0085foo" {
+		t.Errorf("Parse(NEL+foo) = %+v, want NEL kept, as JS trim keeps it", got)
+	}
+	if got := Parse(" \t\u00A0\u3000 "); got != nil {
+		t.Errorf("Parse(whitespace) = %+v, want nil", got)
+	}
+}
