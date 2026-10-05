@@ -175,12 +175,6 @@ func (m *TrimDialogModel) RemoveTrim(trimID string) {
 	}
 }
 
-// StartTime returns the start time input.
-func (m *TrimDialogModel) StartTime() string { return m.startTimeInput }
-
-// EndTime returns the end time input.
-func (m *TrimDialogModel) EndTime() string { return m.endTimeInput }
-
 // ParsedStartSeconds returns the validated start time in seconds.
 func (m *TrimDialogModel) ParsedStartSeconds() float64 { return m.parsedStart }
 
@@ -534,7 +528,7 @@ func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 	case 0:
 		lines = append(lines, DimStyle.Render("Tab: Switch field | Enter: Continue | M: Delete mode | Esc: Cancel"))
 	case 1:
-		lines = append(lines, DimStyle.Render("Enter: Create Trim | Esc: Back"))
+		lines = append(lines, DimStyle.Render("Enter: Create Trim | M: Delete mode | Esc: Back"))
 	case 2:
 		lines = append(lines, DimStyle.Render("Esc: Continue In Background"))
 	}
@@ -551,7 +545,7 @@ func (m *TrimDialogModel) renderDeleteMode(w, _ int) string {
 	if len(m.trims) == 0 {
 		lines = append(lines, DimStyle.Render("No trims available to delete"))
 		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render("M: Create mode | Esc: Close"))
+		lines = append(lines, DimStyle.Render("M/Esc: Create mode"))
 		return strings.Join(lines, "\n")
 	}
 
@@ -599,7 +593,9 @@ func (m *TrimDialogModel) renderDeleteMode(w, _ int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("↑↓: Navigate | Enter: Delete | M: Create mode | Esc: Close"))
+	// Esc returns to create mode (after first cancelling an armed delete),
+	// as M does; it never closes the dialog from here.
+	lines = append(lines, DimStyle.Render("↑↓: Navigate | Enter: Delete | M/Esc: Create mode"))
 
 	return strings.Join(lines, "\n")
 }

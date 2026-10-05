@@ -34,3 +34,25 @@ func TestTrimDeleteResultGoesToTheDialogThatAsked(t *testing.T) {
 		t.Errorf("B's own answer did not reach B's dialog: %q", a.trimDlg.errorMsg)
 	}
 }
+
+// TestTrimDeleteModeFooterMatchesEsc: delete mode's footer said "Esc: Close",
+// but Esc there cancels an armed delete and otherwise returns to create mode —
+// it never closes the dialog.
+//
+// Mutant: restoring "Esc: Close" in either delete-mode footer.
+func TestTrimDeleteModeFooterMatchesEsc(t *testing.T) {
+	for _, trims := range [][]TrimInfo{nil, {{ID: "t1", EndTime: 10, Duration: 10}}} {
+		m := NewTrimDialogModel()
+		m.SetSize(100, 40)
+		m.Open("A", "job A")
+		m.SetTrims(trims)
+		m.HandleKey("m")
+		if view := stripANSI(m.View()); strings.Contains(view, "Esc: Close") || !strings.Contains(view, "Esc: Create mode") {
+			t.Errorf("delete-mode footer (%d trims) misdescribes Esc:\n%s", len(trims), view)
+		}
+		m.HandleKey(keyEsc)
+		if !m.IsVisible() || m.mode != TrimModeCreate {
+			t.Errorf("Esc in delete mode: visible=%v mode=%v, want create mode", m.IsVisible(), m.mode)
+		}
+	}
+}
