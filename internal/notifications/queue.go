@@ -202,7 +202,9 @@ func (q *targetQueue) setEvents(events map[string]bool) {
 //
 // Alias-aware by the same rule and the same eventAliases table as allows, so a
 // target that asked to be pinged for the broader legacy event is still pinged
-// for the more specific one that split from it. Unlike allows, an EMPTY event
+// for the more specific one that split from it — except a close (closeEvents),
+// whose all-clear pings nobody through its alert's entry. Unlike allows, an
+// EMPTY event
 // pings nobody: an empty Event bypasses the delivery filter by design, and
 // carrying that exemption over to the ping would mean any send that forgot its
 // event name mentioned everyone.
@@ -218,7 +220,7 @@ func (q *targetQueue) mentionFor(event string) (string, *AllowedMentions) {
 	// The ok-check matters for the same reason it does in allows: a bare map
 	// miss yields "", and an "" key in the filter would then match every
 	// non-aliased event.
-	if alias, hasAlias := eventAliases[event]; hasAlias && q.mentionEvents[alias] {
+	if alias, hasAlias := eventAliases[event]; hasAlias && !closeEvents[event] && q.mentionEvents[alias] {
 		return q.mention, q.mentionAllowed
 	}
 	return "", nil

@@ -98,6 +98,19 @@ var eventAliases = map[string]string{
 	"sidecar_restored": "sidecar_down",
 }
 
+// closeEvents names the CLOSE entries of eventAliases. A close follows its
+// alert's DELIVERY filter but not its MENTION (mentionFor): a ping exists to
+// get someone to act, and an all-clear asks nothing of anyone. Following the
+// alias there pinged the role for "BotGuard Sidecar Restored" under the
+// default mention set, which holds sidecar_down, and for disk_ok /
+// channel_healthy wherever their alert was mention-eligible. A target that
+// wants a close pinged names it in mention_events itself.
+var closeEvents = map[string]bool{
+	"disk_ok":          true,
+	"channel_healthy":  true,
+	"sidecar_restored": true,
+}
+
 // AliasOf returns the older, broader event a newer key splits from, or "" when
 // the key stands alone. Exported for the vocabulary parity test, which is the
 // only thing outside this package that needs to see the mapping — the filter

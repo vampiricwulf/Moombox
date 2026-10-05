@@ -79,6 +79,7 @@ func TestMentionFor(t *testing.T) {
 	only := []string{"finished"}
 	warnOnly := []string{"disk_warning"}
 	pauseOnly := []string{"connectivity_pause"}
+	healthyOnly := []string{"channel_healthy"}
 
 	for _, tc := range []struct {
 		name  string
@@ -109,12 +110,30 @@ func TestMentionFor(t *testing.T) {
 				"before that retirement must keep pinging on the embed that now carries the pause"},
 		{"empty event never pings", config.NotificationConfig{Mention: "@here"}, "", "",
 			"an empty Event bypasses every filter by design; it must not therefore ping everyone"},
+		// Mutant for the next three: mentionFor following a close's alias.
+		{"close under the default list", config.NotificationConfig{Mention: "@here"}, "sidecar_restored", "",
+			"the default six hold sidecar_down; its all-clear asks nothing of anyone and must not ping"},
+		{"close of a mention-eligible alert", config.NotificationConfig{Mention: "@here", MentionEvents: &warnOnly},
+			"disk_ok", "", "disk_ok is delivered through disk_warning's filter, but not pinged through its mention"},
+		{"close named explicitly", config.NotificationConfig{Mention: "@here", MentionEvents: &healthyOnly},
+			"channel_healthy", "@here", "a target that lists the close itself is pinged for it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got, _ := mk(tc.nc).mentionFor(tc.event); got != tc.want {
 				t.Errorf("mentionFor(%q) = %q, want %q — %s", tc.event, got, tc.want, tc.why)
 			}
 		})
+	}
+}
+
+// closeEvents names entries of eventAliases; one that is not an alias is a
+// close nobody's filter delivers through its alert, and a typo here would
+// leave a real close pinging.
+func TestCloseEventsAreAliasedCloses(t *testing.T) {
+	for e := range closeEvents {
+		if eventAliases[e] == "" {
+			t.Errorf("closeEvents names %q, which eventAliases does not alias", e)
+		}
 	}
 }
 
