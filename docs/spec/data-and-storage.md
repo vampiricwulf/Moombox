@@ -279,7 +279,7 @@ the CDN; each part file is internally gapless):
 |--------|------|-------|
 | id | INTEGER | PRIMARY KEY AUTOINCREMENT |
 | job_id | TEXT | NOT NULL, FK -> jobs(id) ON DELETE CASCADE |
-| segment_index | INTEGER | 0-based ordering within a job; stable across restarts (maps to staging dirs: root = 0, `seg_N` = N). Filenames use `segment_index + 1` as the part number |
+| segment_index | INTEGER | 0-based ordering within a job; stable across restarts (maps to staging dirs: root = 0 unless `seg_0` exists, `seg_N` = N). Filenames use `segment_index + 1` as the part number. A split job whose complete from-the-start download replaces its parts loses its rows: the parts' files stay beside the archive as `.restart-` siblings (`supersedePartsWithVod`, `internal/worker/vod_supersede.go`) |
 | unix_start | INTEGER | Unix timestamp |
 | unix_end | INTEGER | Unix timestamp |
 | quality | TEXT | e.g. "1080p60" |
@@ -1089,6 +1089,8 @@ The motivating case is the image: `cookies.txt` and `config.toml` both live in `
 ### Staging Directory
 
 In-progress downloads write to the staging directory (default: `./staging`). Nothing is written to the output directory until the mux: FFmpeg muxes from staging straight into it, and staging is cleaned up only after that succeeds. This prevents incomplete files from appearing in the final output location.
+
+One job's staging dir holds ONE current recording in its root: the whole-file VOD download sets an earlier live-shape capture aside before it writes (`setAsideLiveShapesForVod`, `internal/worker/staging_shapes.go`), and a VOD run on a job that already split into parts moves part 0's capture into `seg_0` and marks the root as the from-the-start recording's (`vodRootMarkerFile`, `internal/worker/vod_supersede.go`) — `downloading` while it runs, `complete` once nothing is missing from it, which is when it replaces the parts as the archive.
 
 ### Output Template
 

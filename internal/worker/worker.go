@@ -967,6 +967,15 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	} else if w.hasUnmuxedParts(jobID, stagingDir) {
 		w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
 			"path", stagingDir, "jobID", jobID)
+	} else if unused := unusedRootRecording(w.db, jobID, stagingDir); unused != "" {
+		// The staging root holds a recording the finalize did not use: the
+		// from-the-start download beside a job that finalized as parts (one
+		// that did not complete, or one from before the root was claimed for
+		// it), or a second recording beside the one a single-file finalize
+		// muxed. Either can be the longer copy; deleting it here is how a
+		// complete VOD download used to vanish (vod_supersede.go).
+		w.logger.Warn("preserving staging dir: the staging root holds a recording the finalize did not use",
+			"recording", unused, "path", stagingDir, "jobID", jobID)
 	} else if preserveForTail {
 		w.logger.Warn("preserving staging dir: recording tail incomplete; Resume will append the missing segments from the sidecar",
 			"path", stagingDir, "jobID", jobID)

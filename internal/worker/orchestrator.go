@@ -297,6 +297,12 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// not treat the resumed part as a discardable <10s span (the
 		// session-local timer doesn't measure the part's true age).
 		startPartResumed = discoverStagingMedia(strategyCtx.StagingDir) != nil
+	} else if err := o.claimStagingRootForVod(jobCtx); err != nil {
+		// A VOD run records from the start into the staging ROOT. On a job
+		// that already split into parts the root is part 0's, and the
+		// finalize ignored — then deleted — the complete download written
+		// there (vod_supersede.go).
+		return fmt.Errorf("prepare staging for the from-the-start download: %w", err)
 	}
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
@@ -502,6 +508,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// the chat count from then on). Finalize still runs after and
 			// flushes the gaps; Close is idempotent.
 			tracker.Close()
+			// Before Muxing, so a restart mux finds the verdict too: a
+			// split job's parts give way to this recording only when nothing
+			// is missing from it. An incomplete one leaves the parts as the
+			// archive, and Resume comes back here for the tail.
+			if !incomplete {
+				o.markVodRootComplete(jobCtx)
+			}
 			// Muxing now, not after the chat wait below — the live branch
 			// writes it before that wait too, for the same reason. A VOD's chat
 			// replay can page for hours after the media is complete, and a

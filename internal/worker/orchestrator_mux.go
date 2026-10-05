@@ -911,6 +911,18 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// send this replaces.
 	o.sendMuxingStarting(jobCtx)
 
+	// A split job whose from-the-start download completed: that recording
+	// is the archive, and the parts — every one recorded now, by the
+	// recovery above — move aside beside it rather than finalize over it.
+	// The multi-segment path below never looks at root media once part 0 is
+	// recorded, so without this the complete download was ignored and then
+	// deleted with staging.
+	if vodRootState(jobCtx.StagingDir) == vodRootComplete {
+		if err := o.supersedePartsWithVod(jobCtx); err != nil {
+			return fmt.Errorf("supersede the parts with the complete download: %w", err)
+		}
+	}
+
 	// Multi-segment path: if the job has segments (from part splitting),
 	// the individual part .mp4 files are already muxed. We just need to
 	// handle assets (chat, thumbnail, description) and set the job as finished.
@@ -1809,6 +1821,11 @@ type stagedSeg struct {
 // or discoverResumeSegment could capture a live resume INTO a dir whose
 // content the merge has already superseded. The marker file's own content
 // is diagnostic only (a timestamp) — its mere presence is what matters.
+//
+// The merge is not its only writer: supersedePartsWithVod (vod_supersede.go)
+// tombstones every recorded part's dir when a complete from-the-start
+// download replaces the parts, for the same reason — the part rows are gone
+// once it commits, and an untombstoned dir would read as an unmuxed part.
 const mergeTombstoneFile = ".merged-tombstone"
 
 // isMergeTombstoned reports whether dir carries mergeTombstoneFile.
