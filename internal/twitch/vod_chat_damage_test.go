@@ -187,8 +187,15 @@ func TestVodSidecarStaysAtTheLastGoodFlush(t *testing.T) {
 // every flush fail, and the completion path ignored that — the chat was lost
 // while the job read "finished". Start now salvages the file first.
 //
-// Mutant: skip repairDamagedFile — the run's flushes fail and Start reports
-// the failed final flush.
+// The end state alone cannot show where the salvage happened: the first
+// flush's append fallback salvages the same file, so this run comes out whole
+// without the repair at Start too. What only Start's repair does is leave the
+// file intact, its original beside it, before the first page is asked for —
+// which is what decides where the run resumes (see
+// TestAVodSalvageBelowTheSidecarRefetchesWhatTheDamageTook).
+//
+// Mutant: skip repairDamagedFile — the file is still torn, with no .corrupt
+// beside it, when the first page is fetched.
 func TestAVodChatOverADamagedFileIsSalvaged(t *testing.T) {
 	pages := []vodCommentPageSpec{
 		{count: 3, offset: 900, hasNext: true},
@@ -196,6 +203,17 @@ func TestAVodChatOverADamagedFileIsSalvaged(t *testing.T) {
 	}
 	installOffsetAwareVodCommentStub(t, pages)
 	out := filepath.Join(t.TempDir(), "chat.json")
+	stub := twitchHTTPClient.Transport
+	var firstFetch sync.Once
+	repairedBeforePaging := false
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		firstFetch.Do(func() {
+			intact, err := utils.ChatFileEndIntact(out)
+			_, cerr := os.Stat(out + chatCorruptSuffix)
+			repairedBeforePaging = err == nil && intact && cerr == nil
+		})
+		return stub.RoundTrip(req)
+	})}
 	prev := newVodChatForTest(out)
 	for i := range 4 {
 		id := fmt.Sprintf("old%d", i)
@@ -215,6 +233,9 @@ func TestAVodChatOverADamagedFileIsSalvaged(t *testing.T) {
 
 	if err := newVodChatForTest(out).Start(context.Background()); err != nil {
 		t.Fatalf("Start over a damaged file: %v", err)
+	}
+	if !repairedBeforePaging {
+		t.Error("the damaged file was not salvaged before the first page was fetched")
 	}
 	header, ids := readVodChatIDs(t, out)
 	if len(ids) != 10 || header != 10 {
