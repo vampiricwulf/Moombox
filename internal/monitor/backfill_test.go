@@ -1348,3 +1348,80 @@ func TestScanChannel_OrderingViolationDisablesWindowStop(t *testing.T) {
 		t.Errorf("backfilled_at = %q (err %v), want set — natural exhaustion is a clean ending", cb.At, err)
 	}
 }
+
+// A tab's Done flag is clean only for the window it was judged against: the
+// arm-(a) stop ends a tab at THAT window's edge. The cursor did not record
+// the window, so a retry after the config was widened (between the failed
+// scan and its retry, or while the process was down — the in-flight widen
+// restart cannot see either) resumed the shallow tab as done and recorded
+// the channel backfilled to the wider window with the gap never fetched.
+//
+// Mutant: scanChannel resuming any saved cursor — /videos is not refetched
+// and v20d is missing.
+func TestBackfill_ARetryAtAWiderWindowDiscardsTheShallowCursor(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ch := backfillTestCh()
+
+	f1 := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos": {{wantCont: "", page: &TabPage{
+			Items:        []TabItem{coarseItem("v10d", 10*24*time.Hour)},
+			Continuation: "VTOK2",
+		}}},
+		"streams": {{wantCont: "", err: errors.New("browse http 503")}},
+	})
+	bw1 := newTestBackfillWorker(t, db, withTabFetch(f1.fetch), withBackfillNow(now))
+	if err := bw1.scanChannel(context.Background(), ch, ch.ID, 3, false); err == nil {
+		t.Fatal("scan 1 completed despite the failed /streams tab")
+	}
+	if cur := loadTestCursor(t, db, ch.ID); !cur.Tabs["videos"].Done || cur.WindowDays != 3 {
+		t.Fatalf("scan 1 cursor = window %d, videos %+v; want window 3 with /videos done at its edge", cur.WindowDays, cur.Tabs["videos"])
+	}
+
+	f2 := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos": {
+			{wantCont: "", page: &TabPage{Items: []TabItem{coarseItem("v10d", 10*24*time.Hour)}, Continuation: "VTOK2"}},
+			{wantCont: "VTOK2", page: &TabPage{Items: []TabItem{coarseItem("v20d", 20*24*time.Hour), coarseItem("v40d", 40*24*time.Hour)}}},
+		},
+		"streams": emptyTabScript(),
+	})
+	bw2 := newTestBackfillWorker(t, db, withTabFetch(f2.fetch), withBackfillNow(now))
+	if err := bw2.scanChannel(context.Background(), ch, ch.ID, 30, false); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if v20, _ := db.GetFeedItem(ch.ID, "v20d"); v20 == nil {
+		t.Errorf("the 20-day-old /videos item was never fetched (videos fetches = %d)", f2.tabCalls("videos"))
+	}
+	if cb, _ := db.GetChannelBackfill(ch.ID); cb.WindowDays == nil || *cb.WindowDays != 30 {
+		t.Errorf("backfilled window = %v, want 30", cb.WindowDays)
+	}
+}
+
+// A cursor from a WIDER window is still good: its done tabs cover any
+// narrower one, so a retry after narrowing the window resumes them.
+//
+// Mutant: discarding the cursor on any window change — /videos is fetched
+// again and the script reports the unexpected page.
+func TestBackfill_ARetryAtANarrowerWindowKeepsTheCursor(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	ch := backfillTestCh()
+
+	f1 := newScriptedFetcher(t, map[string][]scriptedPage{
+		"videos":  {{wantCont: "", page: &TabPage{Items: []TabItem{coarseItem("v40d", 40*24*time.Hour)}}}},
+		"streams": {{wantCont: "", err: errors.New("browse http 503")}},
+	})
+	bw1 := newTestBackfillWorker(t, db, withTabFetch(f1.fetch), withBackfillNow(now))
+	if err := bw1.scanChannel(context.Background(), ch, ch.ID, 30, false); err == nil {
+		t.Fatal("scan 1 completed despite the failed /streams tab")
+	}
+
+	f2 := newScriptedFetcher(t, map[string][]scriptedPage{"streams": emptyTabScript()})
+	bw2 := newTestBackfillWorker(t, db, withTabFetch(f2.fetch), withBackfillNow(now))
+	if err := bw2.scanChannel(context.Background(), ch, ch.ID, 3, false); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if n := f2.tabCalls("videos"); n != 0 {
+		t.Errorf("videos fetched %d times, want the done tab resumed", n)
+	}
+}

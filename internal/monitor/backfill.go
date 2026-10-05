@@ -70,10 +70,17 @@ type TabPageFetchFunc func(ctx context.Context, channelID, tab, continuation str
 // (spec §11): cleared by completeScan's completion write and by runScan on
 // any cancel — resume applies ONLY to interrupted scans, never cancelled ones.
 //
-//	{"tabs":{"videos":{"continuation":"TOK","next_pos":60},
+//	{"window_days":3,
+//	 "tabs":{"videos":{"continuation":"TOK","next_pos":60},
 //	         "streams":{"done":true}}}
 type backfillCursor struct {
-	Tabs map[string]*backfillTabCursor `json:"tabs"`
+	// WindowDays is the archive window the tabs' Done flags were judged
+	// against: an arm-(a) stop is clean only for that window, so a cursor
+	// from a narrower one is discarded (scanChannel). Absent from cursors
+	// saved before it existed, which therefore read as narrower than any
+	// window.
+	WindowDays int                           `json:"window_days,omitempty"`
+	Tabs       map[string]*backfillTabCursor `json:"tabs"`
 }
 
 // backfillTabCursor is one tab's resume state.
@@ -600,6 +607,22 @@ func (bw *BackfillWorker) scanChannel(ctx context.Context, ch *config.ChannelCon
 	}
 
 	cur := bw.loadCursor(chID)
+	if cur.WindowDays < windowDays && len(cur.Tabs) > 0 {
+		// The interrupted scan ran at a narrower window — the config was
+		// widened between it and this retry, or while the process was down.
+		// Its done tabs stopped at THAT window's edge, and resuming them
+		// would record the channel backfilled to this one with the gap
+		// between the two never fetched. The in-flight widen restart clears
+		// the cursor for the same reason (runScan); this is the case it
+		// cannot see. Restarting is always safe: the upserts are idempotent.
+		bw.logger.Info("backfill cursor is from a narrower window; scanning from page 1",
+			"channel", chID, "cursorWindowDays", cur.WindowDays, "windowDays", windowDays)
+		cur = &backfillCursor{Tabs: map[string]*backfillTabCursor{}}
+	}
+	// A cursor from a wider window stays: its done tabs cover this one. It is
+	// re-stamped with this scan's window because any tab finished from here
+	// on is judged against it.
+	cur.WindowDays = windowDays
 	results := make([]tabResult, 0, len(tabs))
 	for _, tab := range tabs {
 		tc := cur.tab(tab)

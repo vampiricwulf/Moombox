@@ -348,7 +348,7 @@ Capped at 10,000 entries; oldest pruned on insert.
 | backfilled_at | TEXT | RFC3339 — when the full-catalog backfill last completed; NULL = never backfilled (sweep re-queues) |
 | backfilled_window_days | INTEGER | Window depth that backfill covered — a later, wider `archive_window_days` triggers a deeper rescan |
 | backfilled_with_membership | INTEGER | Boolean — whether the membership tab was included; enabling membership later triggers a rescan |
-| backfill_state | TEXT | Resumable scan cursor (JSON); cleared on completion or deliberate restart |
+| backfill_state | TEXT | Resumable scan cursor (JSON: the window its done tabs were judged against, and per-tab continuation / next position / done); cleared on completion or deliberate restart, and discarded by a retry at a wider window |
 | last_rss_ok_at | TEXT | RFC3339 — last successful RSS fetch; the "established channel" gate |
 
 **Schema version:**
