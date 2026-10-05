@@ -58,19 +58,27 @@ var (
 )
 
 // shellExecuteInfo mirrors the Windows SHELLEXECUTEINFOW structure.
+//
+// The string fields are *uint16, not uintptr: runElevated's UTF-16 buffers
+// are Go heap memory, and a uintptr is invisible to the garbage collector.
+// Stored as uintptr, the buffers' last references died once sei was built
+// (unsafe.Pointer's rules keep an object alive only for a conversion written
+// in the Call expression itself, which covers &sei and not the fields inside
+// it), so a collection before or during ShellExecuteExW could free the verb,
+// file or parameters it was reading. Same width, so the layout is unchanged.
 type shellExecuteInfo struct {
 	cbSize       uint32
 	fMask        uint32
 	hwnd         uintptr
-	lpVerb       uintptr
-	lpFile       uintptr
-	lpParameters uintptr
-	lpDirectory  uintptr
+	lpVerb       *uint16
+	lpFile       *uint16
+	lpParameters *uint16
+	lpDirectory  *uint16
 	nShow        int32
 	_pad0        int32 // alignment padding on 64-bit
 	hInstApp     uintptr
 	lpIDList     uintptr
-	lpClass      uintptr
+	lpClass      *uint16
 	hkeyClass    uintptr
 	dwHotKey     uint32
 	_pad1        uint32 // alignment padding on 64-bit
@@ -147,9 +155,9 @@ func runElevated(script string) (uintptr, error) {
 	sei := shellExecuteInfo{
 		cbSize:       uint32(unsafe.Sizeof(shellExecuteInfo{})),
 		fMask:        seeMaskNoCloseProcess,
-		lpVerb:       uintptr(unsafe.Pointer(verb)),
-		lpFile:       uintptr(unsafe.Pointer(file)),
-		lpParameters: uintptr(unsafe.Pointer(params)),
+		lpVerb:       verb,
+		lpFile:       file,
+		lpParameters: params,
 		nShow:        swHide,
 	}
 
