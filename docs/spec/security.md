@@ -515,7 +515,7 @@ For completeness: `internal/web/middleware.go`'s private-range list covers only 
 
 Sliding window per-IP rate limiting, implemented entirely in-memory. Each IP address has an array of request timestamps. When a new request arrives, expired timestamps (outside the window) are filtered out. If the remaining count meets or exceeds the limit, the request is rejected.
 
-The bucket key is the **effective** client IP. Each limiter carries a `ClientIP func(*http.Request) string` hook wired to `EffectiveClientIP`; when it is nil the limiter falls back to the raw peer address. Without the hook, a reverse proxy would collapse every remote client into a single bucket and one attacker could exhaust the login budget for everyone behind it.
+The bucket key is the **effective** client IP. Each limiter carries a `ClientIP func(*http.Request) string` hook wired to `EffectiveClientIP`; when it is nil the limiter falls back to the raw peer address. Without the hook, a reverse proxy would collapse every remote client into a single bucket and one attacker could exhaust the login budget for everyone behind it. A **global IPv6** address is then masked to its `/64` (`bucketKey`, `internal/web/rate_limiter.go`): a subscriber is handed a whole `/64`, so keyed by the full address an attacker could rotate through it for a fresh bucket per request (five scrypt-verified login guesses per address) and churn past the entry cap. LAN IPv6 (ULA, link-local, loopback) and IPv4 stay exact, so devices on one home subnet never share a bucket.
 
 ### Memory Bounds
 
