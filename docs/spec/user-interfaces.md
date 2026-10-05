@@ -301,7 +301,7 @@ The chord system is a three-state finite automaton:
 | Chord | Action | Requires Job | Confirm | Job Filter |
 |-------|--------|:------------:|:-------:|------------|
 | `A A` | Add Video dialog | No | No | — |
-| `A Z` | Import Archive | No | No | — |
+| `A Z` | Import Archive. The upload runs on the API client's transport with its own 30-minute timeout (`importClient`, `internal/tui/app_commands.go`) — the 30 s every other loopback call gets is shorter than a large archive's upload and extraction. | No | No | — |
 | `A R` | Resume Job | Yes | No | YouTube, staging files present, and status is Error, Cancelled, COOKIES?, or Finished with an incomplete tail |
 | `A I` | Reinitialize Job | Yes | No | Status is Error, Cancelled, or COOKIES? |
 | `A M` | Mux Job | Yes | Yes | Status is Cancelled or Error, and segment files are present; or Finished while a split part its finalize could not mux is still in staging (`HasUnmuxedParts`) |
@@ -332,9 +332,9 @@ The chord system is a three-state finite automaton:
 | Chord | Action | Requires Job | Job Filter |
 |-------|--------|:------------:|------------|
 | `O F` | Open Folder (desktop file manager) | Yes | Job has an openable folder |
-| `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
+| `O S` | Open Stream Page (browser) | Yes | Job has a stream URL (`streamURL`, `internal/tui/app_actions.go`) — never an archive import's `imp_` placeholder, whose URL names no video; the dashboard hides it the same way (`isImportPlaceholderId`), and so does the TUI's Details panel |
 | `O W` | Open Web UI (browser) | No | — |
-| `O C` | Copy Stream URL to clipboard. The OSC 52 write (`tea.SetClipboard`) goes out on **every** press, on every platform — it is the only mechanism that reaches the terminal the operator is actually sitting at, which over SSH is not the machine Moombox runs on — and the feedback line reads `Sent to terminal clipboard (OSC 52): <url>`, claiming nothing more, because conhost and tmux-without-`set-clipboard` drop OSC 52 in silence. On a **local Windows console** a `clip.exe` child fed on stdin runs in addition, inside a `tea.Cmd` so a wedged child cannot freeze rendering or input; if it reports that it took the text the line upgrades to `Copied: <url>`. That backup stands down for Windows Terminal (`WT_SESSION`, whose own OSC 52 handling is authoritative) and for any SSH session (`SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT`), where it would write the server's clipboard (`clipboardFeedback` in `internal/tui/app_actions.go`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL |
+| `O C` | Copy Stream URL to clipboard. The OSC 52 write (`tea.SetClipboard`) goes out on **every** press, on every platform — it is the only mechanism that reaches the terminal the operator is actually sitting at, which over SSH is not the machine Moombox runs on — and the feedback line reads `Sent to terminal clipboard (OSC 52): <url>`, claiming nothing more, because conhost and tmux-without-`set-clipboard` drop OSC 52 in silence. On a **local Windows console** a `clip.exe` child fed on stdin runs in addition, inside a `tea.Cmd` so a wedged child cannot freeze rendering or input; if it reports that it took the text the line upgrades to `Copied: <url>`. That backup stands down for Windows Terminal (`WT_SESSION`, whose own OSC 52 handling is authoritative) and for any SSH session (`SSH_CONNECTION`/`SSH_TTY`/`SSH_CLIENT`), where it would write the server's clipboard (`clipboardFeedback` in `internal/tui/app_actions.go`, `osClipboardFallback` in `internal/tui/clipboard_windows.go`). | Yes | Job has a stream URL — the same rule as `O S` |
 | `O G` | Open GitHub Page (browser) | No | — |
 
 **Extras chords (E prefix):**

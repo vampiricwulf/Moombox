@@ -390,8 +390,9 @@ func (m *JobDetailsModel) buildRows() {
 		vidID = j.ID
 	}
 	m.addField(vidIDLabel, vidID)
-	// URL only shown if present
-	if j.URL != "" {
+	// URL only shown if present — and never an import placeholder's, which
+	// names a video that does not exist (the dashboard hides it too).
+	if j.URL != "" && !isImportPlaceholderID(j.VideoID) {
 		m.addFieldLink("Stream URL", j.URL, j.URL) // the dashboard dialog's label
 	}
 	m.addFieldColor("Status", StatusLabel(status), StatusColor(status))

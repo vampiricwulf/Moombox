@@ -226,6 +226,21 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 	}, func(text string) tea.Msg { return fetchFormatsResultMsg{VideoID: videoID, Err: text} })
 }
 
+// importTimeout bounds the whole import exchange. The shared API client's
+// 30 s covers a loopback call that only answers; an import UPLOADS up to
+// 500 MB and the server then extracts up to 2 GB before it responds, so on a
+// slow disk a good import outlived 30 s, was reported "Import failed: context
+// deadline exceeded" while the server finished it, and a retry then hit 409.
+const importTimeout = 30 * time.Minute
+
+// importClient is the API client with importTimeout in place of its own: the
+// same transport (and so the same internal token and TLS handling).
+func importClient(api *http.Client) *http.Client {
+	c := *api
+	c.Timeout = importTimeout
+	return &c
+}
+
 // importFileCmd reads a ZIP file and uploads it to the import API.
 func (a *App) importFileCmd(path string) tea.Cmd {
 	title := a.importDlg.GetImportTitle()
@@ -257,7 +272,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}
 
-		resp, err := client.Do(req)
+		resp, err := importClient(client).Do(req)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -640,13 +641,32 @@ func canOpenFolder(j *database.Job) bool {
 	return false
 }
 
-// canOpenStream returns true if the job has a stream URL to open.
+// canOpenStream returns true if the job has a stream URL to open — exactly
+// when streamURL has one, so the menu never offers O S / O C for a job the
+// chord then answers "No stream URL available" for.
 func canOpenStream(j *database.Job) bool {
-	return j.URL != "" || j.VideoID != ""
+	return streamURL(j) != ""
 }
 
-// streamURL returns the stream page URL for a job, or "" if unavailable.
+// importPlaceholderRe matches the stand-in id an archive import mints when the
+// zip carries no YouTube id: "imp_" and randomHex(4)'s eight lowercase hex
+// digits (internal/web/routes/import_routes.go). The dashboard's twin is
+// isImportPlaceholderId in web/public/modules/utils.js.
+var importPlaceholderRe = regexp.MustCompile(`^imp_[0-9a-f]{8}$`)
+
+// isImportPlaceholderID reports whether id is an import's stand-in. Such a
+// job's URL is built from it and names a video that does not exist.
+func isImportPlaceholderID(id string) bool {
+	return importPlaceholderRe.MatchString(id)
+}
+
+// streamURL returns the stream page URL for a job, or "" if unavailable —
+// including for an import's placeholder id, whose URL the dashboard hides
+// for the same reason: it opens (or copies) a page for no video at all.
 func streamURL(j *database.Job) string {
+	if isImportPlaceholderID(j.VideoID) {
+		return ""
+	}
 	if j.URL != "" {
 		return j.URL
 	}
