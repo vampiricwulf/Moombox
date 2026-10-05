@@ -254,19 +254,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		}
 
 		// Read optional chat metadata for videoId/title/channel
-		type chatMeta struct {
-			VideoID     string `json:"videoId"`
-			VideoTitle  string `json:"videoTitle"`
-			ChannelName string `json:"channelName"`
-		}
-		var meta chatMeta
+		var meta importChatMeta
 		if chatFile != nil {
 			if rc, err := chatFile.Open(); err == nil {
-				data, readErr := io.ReadAll(rc)
+				meta = readImportChatMeta(rc)
 				rc.Close()
-				if readErr == nil {
-					json.Unmarshal(data, &meta)
-				}
 			}
 		}
 
@@ -516,4 +508,91 @@ const importTempPrefix = "moombox-import-"
 // import runs for a day, so the age floor never touches one in flight.
 func CleanupOldImportTemp() (removed int, err error) {
 	return utils.RemoveStaleTempEntries(24*time.Hour, importTempPrefix)
+}
+
+// importChatMeta is what an import reads out of a chat archive's header.
+type importChatMeta struct {
+	VideoID     string
+	VideoTitle  string
+	ChannelName string
+}
+
+// readImportChatMeta reads the top-level videoId, videoTitle and channelName
+// strings of a chat archive as a stream. The whole file used to be read into
+// memory and unmarshalled for these three strings, and a long stream's chat
+// runs to hundreds of MB. Moombox writes them ahead of the messages, so the
+// read normally stops before reaching them; any value in between is skipped
+// token by token, never held. A file that is not a JSON object, or ends early,
+// yields whatever was found before that.
+func readImportChatMeta(r io.Reader) importChatMeta {
+	var meta importChatMeta
+	dec := json.NewDecoder(r)
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return meta
+	}
+	fields := map[string]*string{
+		"videoId":     &meta.VideoID,
+		"videoTitle":  &meta.VideoTitle,
+		"channelName": &meta.ChannelName,
+	}
+	for found := 0; found < len(fields) && dec.More(); {
+		t, err := dec.Token()
+		if err != nil {
+			return meta
+		}
+		key, _ := t.(string)
+		if dst, ok := fields[key]; ok {
+			if v, err := dec.Token(); err == nil {
+				if str, isStr := v.(string); isStr {
+					*dst = str
+					found++
+					continue
+				}
+				if d, isDelim := v.(json.Delim); isDelim && !skipJSONContainer(dec, d) {
+					return meta
+				}
+				continue
+			}
+			return meta
+		}
+		if !skipJSONValue(dec) {
+			return meta
+		}
+	}
+	return meta
+}
+
+// skipJSONValue consumes the next value, however deeply nested, one token at
+// a time. It reports false when the stream ends or breaks.
+func skipJSONValue(dec *json.Decoder) bool {
+	t, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	if d, ok := t.(json.Delim); ok {
+		return skipJSONContainer(dec, d)
+	}
+	return true
+}
+
+// skipJSONContainer consumes the rest of the object or array whose opening
+// delimiter open was just read.
+func skipJSONContainer(dec *json.Decoder, open json.Delim) bool {
+	if open != '{' && open != '[' {
+		return true
+	}
+	for depth := 1; depth > 0; {
+		t, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if d, ok := t.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				depth++
+			} else {
+				depth--
+			}
+		}
+	}
+	return true
 }
