@@ -147,33 +147,6 @@ func resolveManifestlessStream(
 	return resolved, retry, nil
 }
 
-// pickAlternateVodFormat picks the next-best video or audio format from
-// the pool, excluding the previously-chosen itag. Used as the
-// re-selection hedge in DownloadVod when cipher resolution fails on
-// the primary chosen format. Picks by bitrate as a simple "next-best"
-// heuristic — ranking-aware re-selection would mean refactoring
-// SelectBestFormats to accept an exclusion set, which isn't worth the
-// surface area for what should be a cold path.
-func pickAlternateVodFormat(pool []youtube.Format, isVideo bool, excludeItag int) *youtube.Format {
-	var best *youtube.Format
-	for i := range pool {
-		f := &pool[i]
-		if f.Itag == excludeItag || f.URL == "" {
-			continue
-		}
-		if isVideo && !f.IsVideo() {
-			continue
-		}
-		if !isVideo && !f.IsAudio() {
-			continue
-		}
-		if best == nil || f.Bitrate > best.Bitrate {
-			best = f
-		}
-	}
-	return best
-}
-
 // resolveFormatURL is the non-itag-lookup variant for strategies that
 // already hold the chosen *youtube.Format (e.g. VOD).
 func resolveFormatURL(
