@@ -62,9 +62,8 @@ type Supervisor struct {
 	// OOM-abort this ladder exists for — makes every attempt "succeed", so a
 	// counter reset per outage would pin the process to the first rung and
 	// respawn Node every few seconds for the rest of a 24/7 run.
-	lastAttempt int           // rung index of the last SUCCESSFUL restart
-	lastRung    time.Duration // the delay that preceded that restart
-	lastUp      time.Time     // when it came back; zero before the first restart
+	lastAttempt int       // rung index of the last SUCCESSFUL restart
+	lastUp      time.Time // when it came back; zero before the first restart
 	// sleep and now are test seams. Production leaves them as sleepCtx and
 	// time.Now.
 	sleep func(ctx context.Context, d time.Duration)
@@ -142,16 +141,22 @@ func (s *Supervisor) Run(ctx context.Context) {
 // nextRung is the ladder rung the coming outage starts on.
 //
 // The counter carries across outages while the child is FLAPPING, and resets
-// only once a child has stayed up longer than the rung it came back on: that
+// only once a child has stayed up longer than the ladder's longest rung: that
 // is a healthy child which later had an unrelated death, and making it wait
 // out the previous outage's ceiling would keep a working install down for five
 // minutes over a one-off crash. "Stayed up" is measured from the successful
-// restart to this death, against that restart's own rung.
+// restart to this death.
+//
+// Against the ceiling, not the rung the child came back on. That rung is 5 s
+// on the first step, shorter than a cold mint, so a child that died on its
+// first mint — seconds after coming up, the V8 OOM-abort this ladder exists
+// for — always read as healthy: Node was respawned every ~11 s for the rest of
+// the run, each outage too short for the sidecar_down alert to ever fire.
 func (s *Supervisor) nextRung() int {
 	if s.lastUp.IsZero() {
 		return 0 // first outage of the process
 	}
-	if s.now().Sub(s.lastUp) > s.lastRung {
+	if s.now().Sub(s.lastUp) > s.cfg.Backoff[len(s.cfg.Backoff)-1] {
 		return 0
 	}
 	return s.lastAttempt + 1
@@ -187,7 +192,6 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttemp
 		}
 
 		s.lastAttempt = attempt
-		s.lastRung = rung
 		s.lastUp = s.now()
 
 		n := s.restarts.Add(1)
