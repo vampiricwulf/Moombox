@@ -1408,6 +1408,16 @@ export class MoomboxApp {
         this.updates.updateVersionIndicator();
         break;
 
+      case "update_cleared":
+        // The pending release was skipped or pulled. Only the release this
+        // page is showing: a clear racing a newly-found one names the older
+        // tag.
+        if (this.updates.available?.tagName === p?.tagName) {
+          this.updates.available = null;
+          this.updates.updateVersionIndicator();
+        }
+        break;
+
       case "connectivity":
         this.handleConnectivityChange(p);
         break;

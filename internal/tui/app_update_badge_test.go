@@ -34,7 +34,7 @@ func newBadgeApp(t *testing.T) *App {
 // TestUpdateStatusMsgEmptyClearsBadge: the periodic-check channel carries an
 // UpdateStatusMsg with a Version to LIGHT the badge, and one with an empty
 // Version to clear it. The cleared message is what a Web-side
-// POST /api/update/dismiss sends (cmd/moombox/routes_wiring.go OnDismissed) so
+// POST /api/update/dismiss sends (cmd/moombox/routes_wiring.go OnCleared) so
 // the dashboard's dismiss is not contradicted by a TUI still advertising the
 // release — and it carries the TAG that was skipped.
 func TestUpdateStatusMsgEmptyClearsBadge(t *testing.T) {
@@ -129,5 +129,20 @@ func TestAnAppliedUpdateClearsTheBadge(t *testing.T) {
 	}
 	if strings.Contains(app.details.View(), "Update!") {
 		t.Error("the details header must not render the update glyph after the update is applied")
+	}
+}
+
+// R V answering "Already up to date" means a release this TUI still offers
+// was pulled: its download no longer exists, and R U would fetch a dead
+// asset.
+//
+// Mutant: the up-to-date branch leaving updateAvailable set.
+func TestAnUpToDateCheckClearsTheBadge(t *testing.T) {
+	app := newBadgeApp(t)
+	lightBadge(t, app, "v9.9.9")
+
+	app.Update(updateCheckResultMsg{})
+	if app.updateAvailable != nil || app.details.updateInfo != nil {
+		t.Errorf("an up-to-date check left the pulled release offered: %#v", app.updateAvailable)
 	}
 }

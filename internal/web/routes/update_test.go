@@ -231,16 +231,16 @@ func TestUpdateDismissSkipsVersionAndClearsSharedInfo(t *testing.T) {
 	}
 }
 
-// TestUpdateDismissNotifiesOnDismissed: the dismiss route reports the tag it
-// skipped through OnDismissed so the other UI (the TUI's badge) can drop the
+// TestUpdateDismissNotifiesOnCleared: the dismiss route reports the tag it
+// skipped through OnCleared so the other UI (the TUI's badge) can drop the
 // release too — the Web hides its own indicator from SharedUpdateInfo, but the
 // TUI holds its own copy and would otherwise keep advertising a version the
 // operator already dismissed.
-func TestUpdateDismissNotifiesOnDismissed(t *testing.T) {
+func TestUpdateDismissNotifiesOnCleared(t *testing.T) {
 	var got []string
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
-		Version:     "2.6.0-test",
-		OnDismissed: func(tag string) { got = append(got, tag) },
+		Version:   "2.6.0-test",
+		OnCleared: func(tag string) { got = append(got, tag) },
 	})
 	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
 
@@ -252,17 +252,17 @@ func TestUpdateDismissNotifiesOnDismissed(t *testing.T) {
 		t.Fatalf("dismiss: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	if len(got) != 1 || got[0] != "v9.9.9" {
-		t.Fatalf(`OnDismissed calls: want ["v9.9.9"], got %q`, got)
+		t.Fatalf(`OnCleared calls: want ["v9.9.9"], got %q`, got)
 	}
 }
 
-// TestUpdateDismissWithoutPendingSkipsOnDismissed: nothing was skipped, so
+// TestUpdateDismissWithoutPendingSkipsOnCleared: nothing was skipped, so
 // nothing is announced — a 400 must not clear a badge that is still valid.
-func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
+func TestUpdateDismissWithoutPendingSkipsOnCleared(t *testing.T) {
 	called := false
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
-		Version:     "2.6.0-test",
-		OnDismissed: func(string) { called = true },
+		Version:   "2.6.0-test",
+		OnCleared: func(string) { called = true },
 	})
 
 	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
@@ -273,13 +273,13 @@ func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
 		t.Fatalf("dismiss with no pending update: want 400, got %d", rec.Code)
 	}
 	if called {
-		t.Error("OnDismissed must not fire when there was nothing to dismiss")
+		t.Error("OnCleared must not fire when there was nothing to dismiss")
 	}
 }
 
 // TestUpdateDismissConfigSaveFailureDoesNotNotify: the skip is not persisted,
 // so nothing may act as if it were. The 500 tells the dashboard the release is
-// still pending, and OnDismissed must stay silent — firing it would put out the
+// still pending, and OnCleared must stay silent — firing it would put out the
 // TUI's badge for a version that will be offered again on the next launch,
 // which is worse than the failure it is reporting.
 func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
@@ -297,8 +297,8 @@ func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
 	called := false
 	r := chi.NewRouter()
 	UpdateRoutes(r, &UpdateRouteDeps{
-		Version:     "2.6.0-test",
-		OnDismissed: func(string) { called = true },
+		Version:   "2.6.0-test",
+		OnCleared: func(string) { called = true },
 	}, store)
 	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
 
@@ -310,7 +310,7 @@ func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
 		t.Fatalf("dismiss with an unwritable config: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	if called {
-		t.Error("OnDismissed fired although the skip was never persisted")
+		t.Error("OnCleared fired although the skip was never persisted")
 	}
 	// And the release is still pending, so the dashboard keeps showing it.
 	if SharedUpdateInfo.Load() == nil {
@@ -578,6 +578,53 @@ func TestUpdateApplyRefusesALANPeerWithALoopbackOrigin(t *testing.T) {
 		}
 		if got := updateApplyOriginAllowed(req); got != tc.want {
 			t.Errorf("peer %s origin %q: allowed = %v, want %v", tc.peer, tc.origin, got, tc.want)
+		}
+	}
+}
+
+// A check that finds nothing newer than the running version means the pending
+// release was pulled from GitHub: the badge offered an update whose download
+// no longer exists, and apply would fetch a dead asset. The check withdraws
+// it and announces the tag through OnCleared, so the TUI and every open
+// dashboard drop their own copies. With nothing pending, nothing is
+// announced.
+//
+// Mutants: the check route leaving SharedUpdateInfo alone on an up-to-date
+// answer, and announcing a clear when nothing was pending.
+func TestUpdateCheckUpToDateWithdrawsThePendingRelease(t *testing.T) {
+	orig := checkForUpdate
+	t.Cleanup(func() { checkForUpdate = orig })
+	checkForUpdate = func(*updater.Updater, context.Context) (*updater.ReleaseInfo, error) { return nil, nil }
+
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	for _, pending := range []bool{true, false} {
+		var cleared []string
+		r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+			Updater:   upd,
+			Version:   "2.6.0-test",
+			OnCleared: func(tag string) { cleared = append(cleared, tag) },
+		})
+		if pending {
+			SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+		}
+
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/update/check", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("check: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+		}
+		if SharedUpdateInfo.Load() != nil {
+			t.Errorf("pending=%v: SharedUpdateInfo still set after an up-to-date check", pending)
+		}
+		want := []string(nil)
+		if pending {
+			want = []string{"v9.9.9"}
+		}
+		if strings.Join(cleared, ",") != strings.Join(want, ",") {
+			t.Errorf("pending=%v: OnCleared calls = %q, want %q", pending, cleared, want)
 		}
 	}
 }

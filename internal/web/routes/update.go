@@ -94,11 +94,13 @@ type UpdateRouteDeps struct {
 	Version   string
 	OnRestart func()
 	OnFound   func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
-	// OnDismissed runs after a dismiss is persisted, carrying the tag that
-	// was skipped. The Web hides its own indicator from SharedUpdateInfo,
-	// but the TUI holds a separate copy of the pending release — this is
-	// how it learns to drop the badge. Optional.
-	OnDismissed func(tag string)
+	// OnCleared runs when the pending release is withdrawn, carrying its
+	// tag: after a dismiss is persisted, or when a check found nothing newer
+	// than the running version (ClearPendingUpdate). The Web reads
+	// SharedUpdateInfo on its next load, but an open dashboard and the TUI
+	// each hold a separate copy of the pending release — this is how they
+	// learn to drop the badge. Optional.
+	OnCleared func(tag string)
 	// Logger records why a check, apply or verify failed. Optional.
 	Logger interface {
 		Debug(msg string, args ...any)
@@ -141,6 +143,24 @@ func DismissUpdate(store *config.Store, tag string) error {
 	return nil
 }
 
+// ClearPendingUpdate withdraws the pending release after a check found
+// nothing newer than the running version — the release it named was pulled
+// from GitHub, so the badge offered an update whose download no longer
+// exists. Returns the withdrawn tag, "" when nothing was pending.
+// CompareAndSwap for the reason DismissUpdate gives: a release found while
+// this ran must survive.
+func ClearPendingUpdate() string {
+	pending := SharedUpdateInfo.Load()
+	if pending == nil || !SharedUpdateInfo.CompareAndSwap(pending, nil) {
+		return ""
+	}
+	return pending.TagName
+}
+
+// checkForUpdate is (*updater.Updater).CheckForUpdate, a seam for the test
+// that needs a check to answer without reaching GitHub.
+var checkForUpdate = (*updater.Updater).CheckForUpdate
+
 // UpdateRoutes registers the update check/apply/dismiss API endpoints. The
 // Store carries the cfg + lock + savePath; /api/update/dismiss records the
 // pending tag as Updates.SkippedVersion through DismissUpdate, which persists
@@ -179,7 +199,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
-		release, err := deps.Updater.CheckForUpdate(r.Context())
+		release, err := checkForUpdate(deps.Updater, r.Context())
 		if err != nil {
 			// The cause, not a bare "check failed": the updater's own
 			// wording ("GitHub API rate limit exceeded (HTTP 403) — try
@@ -206,6 +226,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			resp["releaseNotes"] = release.ReleaseNotes
 			resp["releaseNotesHtml"] = release.ReleaseNotesHtml
 			resp["publishedAt"] = release.PublishedAt
+		} else if tag := ClearPendingUpdate(); tag != "" && deps.OnCleared != nil {
+			deps.OnCleared(tag)
 		}
 
 		jsonResponse(w, resp)
@@ -332,8 +354,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
-		if deps.OnDismissed != nil {
-			deps.OnDismissed(pending.TagName)
+		if deps.OnCleared != nil {
+			deps.OnCleared(pending.TagName)
 		}
 		jsonResponse(w, map[string]any{"success": true, "skipped": pending.TagName})
 	})

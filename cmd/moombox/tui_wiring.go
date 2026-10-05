@@ -466,6 +466,9 @@ func (s *runState) runTUI() {
 				return nil, err
 			}
 			if release == nil {
+				if tag := routes.ClearPendingUpdate(); tag != "" {
+					announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
+				}
 				return nil, nil
 			}
 			routes.SharedUpdateInfo.Store(release)

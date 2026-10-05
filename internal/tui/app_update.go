@@ -352,6 +352,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.details.updateInfo = msg.Info
 			a.setFeedback(fmt.Sprintf("Update available: %s — R N for notes, R U to install", msg.Info.TagName))
 		} else {
+			// Nothing newer than the running version: a release this TUI
+			// still offers was pulled, and its download no longer exists.
+			a.updateAvailable = nil
+			a.details.updateInfo = nil
 			a.setFeedback("Already up to date")
 		}
 		return a, nil

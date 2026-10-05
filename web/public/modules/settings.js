@@ -369,6 +369,10 @@ export class SettingsController {
         } else {
           result.textContent = "Up to date";
           result.style.color = "var(--sl-color-neutral-600)";
+          // Nothing newer than the running version: a pending release this
+          // page still offers was pulled, and its download no longer exists.
+          this.app._updateAvailable = null;
+          this.app.updateVersionIndicator();
         }
       } catch {
         result.textContent = "Check failed";

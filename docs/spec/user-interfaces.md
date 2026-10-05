@@ -600,6 +600,8 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
 | `backfill_status` | `{ channel, tab, pages, state }` | Feed-history backfill scan progress per channel (`state`: scanning / error / done / idle). Active scans are also seeded via `initial_state`. |
+| `update_available` | Release info (`version`, `tagName`, `releaseNotes`, `releaseNotesHtml`, `publishedAt`, …) | A check found a release newer than the running version |
+| `update_cleared` | `{ tagName }` | The pending release was withdrawn: skipped (`POST /api/update/dismiss`), or a check found nothing newer than the running version, so the release was pulled. A dashboard drops its badge only when the tag names the release it shows — a clear racing a newly-found release names the older tag |
 | `pong` | Empty | Response to client `ping` messages |
 
 ### Client-to-Server Message Types

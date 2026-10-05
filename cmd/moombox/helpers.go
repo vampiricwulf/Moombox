@@ -178,6 +178,26 @@ func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), 
 	}
 }
 
+// announceUpdateCleared tells both UIs that the pending release tagged tag is
+// withdrawn — skipped, or found to be no newer than the running version — so
+// they drop the badge their own copy of it lights.
+//
+// The TAG travels with the clear, as an UpdateStatusMsg with an empty Version
+// for the TUI and an update_cleared event for the dashboards. Each holds its
+// own copy of the pending release and drops it only when the clear names the
+// release it is showing — otherwise a clear racing a newly-found release would
+// blank the badge for an update that is still there. This is the ONLY
+// producer of either, so the tag is always set.
+func announceUpdateCleared(wsHub *web.WebSocketHub, tuiCh chan<- tui.UpdateStatusMsg, tag string) {
+	if wsHub != nil {
+		wsHub.Broadcast("update_cleared", map[string]string{"tagName": tag})
+	}
+	select {
+	case tuiCh <- tui.UpdateStatusMsg{TagName: tag}:
+	default:
+	}
+}
+
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
 //
 // configStore is re-read AFTER the network check so a "Skip this version" /
@@ -206,7 +226,12 @@ func checkAndBroadcastUpdate(
 		return
 	}
 	if release == nil {
-		return // already up to date
+		// Already up to date — and so a release still pending names one that
+		// was pulled.
+		if tag := routes.ClearPendingUpdate(); tag != "" {
+			announceUpdateCleared(wsHub, tuiCh, tag)
+		}
+		return
 	}
 
 	var enabled bool
