@@ -282,15 +282,17 @@ func (m *SettingsModel) handleCycleClick(fd fieldDef, relX int, labelWidth int) 
 
 // handleToggleClick determines if Yes or No was clicked and sets it directly.
 func (m *SettingsModel) handleToggleClick(fd fieldDef, relX int, labelWidth int) {
-	// Prefix is 2 chars, label padded to labelWidth+2, then "Yes / No"
+	// Prefix is 2 chars, label padded to labelWidth+2, then renderToggle's
+	// "[Yes] / No" or "Yes / [No]" — the selected half is bracketed, so the
+	// "Yes" half's width depends on the current value.
 	valueX := relX - 2 - labelWidth - 2
 	if valueX < 0 {
 		return
 	}
-	// "Yes" is 3 chars, " / " is 3 chars, "No" is 2 chars
-	if valueX < 3 {
+	yesW := toggleYesWidth(m.values[fd.key])
+	if valueX < yesW {
 		m.values[fd.key] = "Yes"
-	} else if valueX >= 6 {
+	} else if valueX >= yesW+len(" / ") {
 		m.values[fd.key] = "No"
 	}
 	m.recheckDirty()

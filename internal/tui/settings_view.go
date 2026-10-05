@@ -454,11 +454,24 @@ func fieldInfoRows(sec settingsSection, w int) int {
 	return rows
 }
 
+// renderToggle shows both choices with the selected one bracketed, as
+// renderCycleOptions does. Colour and the faint unselected half used to be the
+// whole signal, and neither survives a NO_COLOR terminal, a colour-blind
+// reader or a pasted screenshot: "Yes / No" read the same either way.
+// toggleYesWidth is the click geometry that follows from it.
 func renderToggle(value string) string {
 	if value == "Yes" {
-		return lipgloss.NewStyle().Foreground(ColorGreen).Render("Yes") + DimStyle.Render(" / No")
+		return lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("[Yes]") + DimStyle.Render(" / No")
 	}
-	return DimStyle.Render("Yes / ") + lipgloss.NewStyle().Foreground(ColorRed).Render("No")
+	return DimStyle.Render("Yes / ") + lipgloss.NewStyle().Foreground(ColorRed).Bold(true).Render("[No]")
+}
+
+// toggleYesWidth is how many columns renderToggle(value) gives its "Yes" half.
+func toggleYesWidth(value string) int {
+	if value == "Yes" {
+		return len("[Yes]")
+	}
+	return len("Yes")
 }
 
 // renderCycleOptions shows every option, the selected one bracketed, when
