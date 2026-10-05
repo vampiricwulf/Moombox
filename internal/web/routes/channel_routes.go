@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -16,45 +17,29 @@ import (
 // ChannelRoutes registers channel-related API routes. The Store carries
 // the cfg pointer + lock; SaveLocked persists to disk under the same lock
 // so a rollback can restore the in-memory channel slice if the save fails.
-// rl bounds POST /api/resolve-channel (a youtube.com fetch with retries per
-// call); nil leaves it unbounded.
+// rl bounds POST /api/resolve-channel and the URL-resolving branch of POST
+// /api/config/channels (each a youtube.com fetch with retries per call); nil
+// leaves them unbounded.
 func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl *web.RateLimiter) {
 	mu := store.RWMutex()
 	cfg := store.Config()
 
-	// POST /api/config/channels
-	r.Post("/api/config/channels", func(rw http.ResponseWriter, req *http.Request) {
-		var channel config.ChannelConfig
-		if err := json.NewDecoder(req.Body).Decode(&channel); err != nil {
-			jsonError(rw, "invalid channel config", http.StatusBadRequest)
-			return
-		}
-
-		channel.ID = strings.TrimSpace(channel.ID)
-		if channel.ID == "" {
-			jsonError(rw, "channel ID required", http.StatusBadRequest)
-			return
-		}
-
-		// Safety net: if the ID looks like a URL, try to resolve it
-		if utils.LooksLikeURL(channel.ID) {
-			resolved, err := utils.ResolveChannelInput(req.Context(), channel.ID)
-			if err == nil && resolved != nil {
-				channel.ID = resolved.ID
-				if channel.Name == "" && resolved.Name != "" {
-					channel.Name = resolved.Name
-				}
-				if resolved.Platform != "" {
-					channel.Platform = resolved.Platform
-				}
-			}
-		}
+	// saveChannel validates and upserts one channel — POST
+	// /api/config/channels once its ID is final.
+	saveChannel := func(rw http.ResponseWriter, channel config.ChannelConfig) {
 		// PUT /api/config's rule for the same field. The monitors treat any
 		// platform that is not "twitch" as YouTube, so an unknown one was
 		// accepted here, polled as a YouTube channel, and then made every
 		// later full-form save 400 on a field the operator never touched.
 		if !validChannelPlatform(channel.Platform) {
 			jsonError(rw, "platform must be youtube or twitch", http.StatusBadRequest)
+			return
+		}
+		// The overrides Save's Validate refuses — refused here by name
+		// instead of failing the save into a bare 500.
+		if fieldErrs := config.ChannelOverrideErrors(channel); fieldErrs != nil {
+			msgs := slices.Sorted(maps.Values(fieldErrs))
+			jsonError(rw, strings.Join(msgs, "; "), http.StatusBadRequest)
 			return
 		}
 
@@ -94,6 +79,51 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		}
 
 		jsonResponse(rw, map[string]any{"success": true, "channel": channel})
+	}
+
+	// POST /api/config/channels
+	r.Post("/api/config/channels", func(rw http.ResponseWriter, req *http.Request) {
+		var channel config.ChannelConfig
+		if err := json.NewDecoder(req.Body).Decode(&channel); err != nil {
+			jsonError(rw, "invalid channel config", http.StatusBadRequest)
+			return
+		}
+
+		channel.ID = strings.TrimSpace(channel.ID)
+		if channel.ID == "" {
+			jsonError(rw, "channel ID required", http.StatusBadRequest)
+			return
+		}
+
+		// Safety net: an ID that looks like a URL is resolved first. That is
+		// a youtube.com fetch with retries — the reason POST
+		// /api/resolve-channel is rate limited — so it rides the same
+		// limiter here; a plain ID (every enable/disable toggle posts one)
+		// does not. A URL that does not resolve is refused rather than
+		// stored: the monitor would poll channel_id=https://… forever.
+		if utils.LooksLikeURL(channel.ID) {
+			limitedBy(rl)(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				resolved, err := utils.ResolveChannelInput(req.Context(), channel.ID)
+				if err != nil {
+					jsonError(rw, "failed to resolve channel", http.StatusUnprocessableEntity)
+					return
+				}
+				if resolved == nil {
+					jsonError(rw, "not a YouTube or Twitch channel URL", http.StatusBadRequest)
+					return
+				}
+				channel.ID = resolved.ID
+				if channel.Name == "" && resolved.Name != "" {
+					channel.Name = resolved.Name
+				}
+				if resolved.Platform != "" {
+					channel.Platform = resolved.Platform
+				}
+				saveChannel(rw, channel)
+			})).ServeHTTP(rw, req)
+			return
+		}
+		saveChannel(rw, channel)
 	})
 
 	// DELETE /api/config/channels/:id

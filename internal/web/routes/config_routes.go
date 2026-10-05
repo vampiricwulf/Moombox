@@ -496,8 +496,17 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		// the decode fails, so without a 400 here one type-mismatched field
 		// in one entry silently drops the whole channels update behind a 200
 		// (the stored list stays as it was; the operator's edit vanishes).
-		if _, decErrs := decodeConfigEntries[config.ChannelConfig]("channels", chs); decErrs != nil {
+		if entries, decErrs := decodeConfigEntries[config.ChannelConfig]("channels", chs); decErrs != nil {
 			maps.Copy(errs, decErrs)
+		} else {
+			// Every entry decoded, so entries[i] is chs[i]. The overrides
+			// Save's Validate would refuse — a 500 with the field's name
+			// lost, had they got that far.
+			for i, ch := range entries {
+				for field, msg := range config.ChannelOverrideErrors(ch) {
+					errs[fmt.Sprintf("channels[%d].%s", i, field)] = msg
+				}
+			}
 		}
 		seen := make(map[string]bool, len(chs))
 		for i, raw := range chs {

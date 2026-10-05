@@ -975,13 +975,13 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				ch.QualityPreference = ""
 			}
 		}
-		if ch.ArchiveWindowDays != nil && (*ch.ArchiveWindowDays < 1 || *ch.ArchiveWindowDays > 3650) {
+		if ch.ArchiveWindowDays != nil && !channelWindowInRange(*ch.ArchiveWindowDays) {
 			fail("channel %q archive_window_days %d out of range 1..3650", ch.Name, *ch.ArchiveWindowDays)
 			if !reportOnly {
 				ch.ArchiveWindowDays = nil // clear override → falls back to global
 			}
 		}
-		if ch.ArchiveSlots != nil && (*ch.ArchiveSlots < 1 || *ch.ArchiveSlots > 100) {
+		if ch.ArchiveSlots != nil && !channelSlotsInRange(*ch.ArchiveSlots) {
 			fail("channel %q archive_slots %d out of range 1..100", ch.Name, *ch.ArchiveSlots)
 			if !reportOnly {
 				ch.ArchiveSlots = nil
@@ -1042,6 +1042,41 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	return errs
+}
+
+// channelWindowInRange and channelSlotsInRange are the per-channel
+// archive_window_days / archive_slots bounds, shared by Validate and
+// ChannelOverrideErrors so the file loader and the web writers cannot drift.
+func channelWindowInRange(days int) bool { return days >= 1 && days <= 3650 }
+func channelSlotsInRange(slots int) bool { return slots >= 1 && slots <= 100 }
+
+// ChannelOverrideErrors returns, keyed by JSON field name, each per-channel
+// override Validate refuses: an unknown quality_preference, or an
+// archive_window_days / archive_slots outside 1..3650 / 1..100. nil when the
+// entry is sound.
+//
+// For the web writers — PUT /api/config's channels[] and POST
+// /api/config/channels — to answer 400 naming the field. Without it they
+// accepted the value, Save's Validate then refused the config, and the
+// cause was lost in a bare 500 "failed to save config".
+func ChannelOverrideErrors(ch ChannelConfig) map[string]string {
+	var errs map[string]string
+	add := func(field, msg string) {
+		if errs == nil {
+			errs = map[string]string{}
+		}
+		errs[field] = msg
+	}
+	if ch.QualityPreference != "" && !validQualityPreferences[ch.QualityPreference] {
+		add("quality_preference", fmt.Sprintf("unknown quality_preference %q", ch.QualityPreference))
+	}
+	if ch.ArchiveWindowDays != nil && !channelWindowInRange(*ch.ArchiveWindowDays) {
+		add("archive_window_days", "archive_window_days must be between 1 and 3650")
+	}
+	if ch.ArchiveSlots != nil && !channelSlotsInRange(*ch.ArchiveSlots) {
+		add("archive_slots", "archive_slots must be between 1 and 100")
+	}
 	return errs
 }
 
