@@ -282,7 +282,9 @@ type CookiesConfig struct {
 	// platform with broken credentials, not an unconfigured one. Nothing
 	// automatic ever prunes it — the automatic writers only add — and the
 	// sole removal path is an operator replacing the list through
-	// PUT /api/config. Treat as read-only-from-config.
+	// PUT /api/config. Treat as read-only-from-config. Its auth-loss consumer
+	// (RefreshService.SetExpectedPlatforms) reads it at boot only, so a
+	// removal changes that seed from the next boot.
 	Platforms []string `toml:"platforms,omitempty" json:"platforms,omitempty"`
 
 	// ActivePlatforms is the user's explicit override. Takes precedence
