@@ -102,6 +102,9 @@ export class StatsController {
     el.appendChild(this._createCard("Twitch Storage", formatBytes(byPlat.twitch || 0)));
     el.appendChild(this._createCard("Finished", formatBytes(byStat.finished || 0), "stat-finished"));
     el.appendChild(this._createCard("Error", formatBytes(byStat.error || 0), "stat-error"));
+    // Total Recorded counts cancelled jobs' files too; without this card the
+    // breakdown did not add up to it.
+    el.appendChild(this._createCard("Cancelled", formatBytes(byStat.cancelled || 0)));
   }
 
   renderActivity(activity) {

@@ -21,20 +21,20 @@ import (
 const statsDialogMaxWidth = 76
 
 // statsDialogFullHeight is the shortest terminal that fits the overlay with
-// its blank spacers: 23 content lines + 2 border rows, and View's boxH takes
+// its blank spacers: 24 content lines + 2 border rows, and View's boxH takes
 // m.height-4. Below it the spacers go — lipgloss.Height only pads, and Bubble
 // Tea v2 drops overflow from the TOP, so a box taller than the terminal loses
 // its border and title rather than its footer.
-const statsDialogFullHeight = 27
+const statsDialogFullHeight = 28
 
 // statsDialogCompactHeight is the shortest terminal the spacer-less box fits:
-// 21 content lines + 2 border rows. Below it — down to the TUI's 20-row floor —
-// the key hint moves up onto the title line, and the blank line above it and
-// the Uptime row (the one figure the Web Stats tab does not show) go: 18
-// lines, a 20-row box.
-const statsDialogCompactHeight = 23
+// 22 content lines + 2 border rows. Below it — down to the TUI's 20-row floor —
+// the key hint moves up onto the title line, the blank line above it and the
+// Uptime row (the one figure the Web Stats tab does not show) go, and the
+// three by-status sizes share one line: 17 lines, a 19-row box.
+const statsDialogCompactHeight = 24
 
-// StatsDialogModel is the E T overlay: the Web Stats tab's disk bar, six
+// StatsDialogModel is the E T overlay: the Web Stats tab's disk bar, seven
 // storage figures, seven activity figures and uptime, from the same
 // stats.Snapshot the /api/stats handler renders.
 //
@@ -151,7 +151,7 @@ func (m *StatsDialogModel) View() string {
 	case m.errorMsg != "":
 		fmt.Fprintf(&b, "  %s\n", ErrorStyle.Render(m.errorMsg))
 	default:
-		m.writeStorage(&b)
+		m.writeStorage(&b, tight)
 		if spaced {
 			b.WriteString("\n")
 		}
@@ -180,7 +180,7 @@ func (m *StatsDialogModel) View() string {
 // writeStorage is the Web Stats tab's Storage card, flattened to rows: the
 // disk bar, the Web's two labels under it (used of total, free and the
 // percentage) folded onto one line, then the six size figures.
-func (m *StatsDialogModel) writeStorage(b *strings.Builder) {
+func (m *StatsDialogModel) writeStorage(b *strings.Builder, tight bool) {
 	d := m.snap.Disk
 	fmt.Fprintf(b, "%s\n", HeaderStyle.Render("Storage"))
 
@@ -205,8 +205,23 @@ func (m *StatsDialogModel) writeStorage(b *strings.Builder) {
 		{"Total Jobs", groupThousands(int64(m.snap.JobCount))},
 		{"YouTube Storage", utils.FormatFileSize(m.snap.SizeByPlatform["youtube"])},
 		{"Twitch Storage", utils.FormatFileSize(m.snap.SizeByPlatform["twitch"])},
-		{"Finished", utils.FormatFileSize(m.snap.SizeByStatus["finished"])},
-		{"Error", utils.FormatFileSize(m.snap.SizeByStatus["error"])},
+	})
+	// By status. Cancelled is the one Total Recorded counts that the
+	// breakdown used to leave out, so Finished + Error did not add up to it
+	// whenever a cancelled job kept its file. In the tight layout the three
+	// share one line — at its widest "Finished 999.9GB · Error 999.9GB ·
+	// Cancelled 999.9GB" still fits the 60-column floor's box.
+	finished := utils.FormatFileSize(m.snap.SizeByStatus["finished"])
+	errored := utils.FormatFileSize(m.snap.SizeByStatus["error"])
+	cancelled := utils.FormatFileSize(m.snap.SizeByStatus["cancelled"])
+	if tight {
+		fmt.Fprintf(b, "  Finished %s · Error %s · Cancelled %s\n", finished, errored, cancelled)
+		return
+	}
+	writeStatRows(b, [][2]string{
+		{"Finished", finished},
+		{"Error", errored},
+		{"Cancelled", cancelled},
 	})
 }
 
