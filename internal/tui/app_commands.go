@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -658,7 +660,45 @@ func openBrowser(url string) {
 	// Windows needs explorer.exe with a forced-quoted command line so the
 	// browser escapes the launcher's Job Object AND query-string URLs
 	// survive explorer's legacy argument parser.
-	_ = openBrowserCmd(url).Start()
+	cmd := openBrowserCmd(url)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	releaseOpener(runtime.GOOS, openerProcess{cmd})
+}
+
+// opener is the half of a started opener command releaseOpener uses: an
+// interface so both arms can be tested without opening a browser.
+type opener interface {
+	Wait() error
+	Release() error
+}
+
+// openerProcess adapts *exec.Cmd to opener.
+type openerProcess struct{ cmd *exec.Cmd }
+
+func (p openerProcess) Wait() error    { return p.cmd.Wait() }
+func (p openerProcess) Release() error { return p.cmd.Process.Release() }
+
+// releaseOpener hands a started opener back to the OS — the rule
+// web.StartDetached applies to the dashboard's opens, which the import fence
+// keeps this package from calling. On Windows it releases the process handle:
+// there is nothing to reap, and each O B / O G press leaked one for the life
+// of the process. Elsewhere it reaps the child in a goroutine, since an
+// unwaited child stays a zombie until Moombox exits.
+func releaseOpener(goos string, p opener) {
+	if goos == "windows" {
+		_ = p.Release()
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				_ = r // nothing to report to: a backstop, as in web.detachStarted
+			}
+		}()
+		_ = p.Wait()
+	}()
 }
 
 // newImportRequest builds the archive-import POST. The metadata headers are
