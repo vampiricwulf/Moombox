@@ -3,6 +3,7 @@ package disk
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -13,14 +14,33 @@ var (
 )
 
 // GetDiskSpace returns disk space information for the volume containing path.
+//
+// It asks about the deepest existing directory on the path, not the drive
+// root: GetDiskFreeSpaceExW accepts any directory and answers for the volume
+// that directory is on, so a recordings disk mounted into C:\Recordings
+// reports its own space. Querying C:\ reported the C: volume's instead, and
+// the low-space alert never fired for the disk actually filling up. A path
+// that does not exist yet answers for the nearest existing ancestor, ending at
+// the root as before.
 func GetDiskSpace(path string) (*DiskSpace, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("disk: resolve path: %w", err)
 	}
+	// An unrepresentable path is an error, not a reason to try its parent.
+	if _, err := syscall.UTF16PtrFromString(abs); err != nil {
+		return nil, fmt.Errorf("disk: utf16 convert: %w", err)
+	}
+	return queryNearestDirectory(abs, freeSpace)
+}
 
-	root := filepath.VolumeName(abs) + `\`
-	rootPtr, err := syscall.UTF16PtrFromString(root)
+// freeSpace queries the volume dir is on.
+func freeSpace(dir string) (*DiskSpace, error) {
+	// A UNC directory must end in a backslash, and any other may.
+	if !strings.HasSuffix(dir, `\`) {
+		dir += `\`
+	}
+	dirPtr, err := syscall.UTF16PtrFromString(dir)
 	if err != nil {
 		return nil, fmt.Errorf("disk: utf16 convert: %w", err)
 	}
@@ -33,13 +53,13 @@ func GetDiskSpace(path string) (*DiskSpace, error) {
 	// not the raw filesystem state. Audit reports/small-packages.md.
 	var freeBytesAvailable, totalBytes, totalFreeBytes uint64
 	ret, _, callErr := getDiskFreeSpaceExW.Call(
-		uintptr(unsafe.Pointer(rootPtr)),
+		uintptr(unsafe.Pointer(dirPtr)),
 		uintptr(unsafe.Pointer(&freeBytesAvailable)),
 		uintptr(unsafe.Pointer(&totalBytes)),
 		uintptr(unsafe.Pointer(&totalFreeBytes)),
 	)
 	if ret == 0 {
-		return nil, fmt.Errorf("disk: GetDiskFreeSpaceExW: %w", callErr)
+		return nil, fmt.Errorf("disk: GetDiskFreeSpaceExW %q: %w", dir, callErr)
 	}
 
 	var usedPct float64

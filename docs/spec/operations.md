@@ -721,7 +721,7 @@ type DiskSpace struct {
 }
 ```
 
-On Windows the path is resolved to an absolute path, then the volume root is extracted (`filepath.VolumeName(abs) + "\"`).
+On Windows the path is resolved to an absolute path and the deepest existing directory on it is queried (`queryNearestDirectory`, walking up to the drive root only while a level fails): `GetDiskFreeSpaceExW` answers for the volume a directory is on, so a recordings disk mounted into a folder such as `C:\Recordings` reports its own space. Querying the drive root, as it used to, reported `C:`'s, and the low-space alert never fired for the disk actually filling up.
 
 ### Thresholds
 
