@@ -99,3 +99,28 @@ func TestSettingsListRowsStayOneRowWide(t *testing.T) {
 		}
 	}
 }
+
+// TestNetworkPasswordHintOnlyWhereTheKeyWorks: the Network footer advertised
+// "`: Set pw" on every row, but ` and ~ reach a text or number field as typed
+// characters — on Port the backtick was refused by the digit filter, on the
+// TLS cert path it was inserted into the path. The hint now appears exactly
+// on the rows where ` opens the password editor.
+//
+// Mutant: dropping the ftype condition — the hint is back on Port.
+func TestNetworkPasswordHintOnlyWhereTheKeyWorks(t *testing.T) {
+	m := newSettingsModelForSave(t)
+	m.SetSize(100, 30)
+	m.sectionIndex = sectionIndexByName(t, "Network")
+	for i, fd := range sections[m.sectionIndex].fields {
+		m.fieldIndex = i
+		m.secMode = securityStatus
+		opens := fd.ftype != fieldText && fd.ftype != fieldNumber
+		if got := strings.Contains(m.renderHintText(), "pw"); got != opens {
+			t.Errorf("%s: footer offers the password key = %v, want %v", fd.label, got, opens)
+		}
+		m.HandleKey("`")
+		if got := m.secMode != securityStatus; got != opens {
+			t.Errorf("%s: ` opened the password editor = %v, want %v", fd.label, got, opens)
+		}
+	}
+}

@@ -254,7 +254,10 @@ func (m *SettingsModel) renderHintText() string {
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			hint = "\u2190/\u2192: Toggle  " + hint
 		}
-		if sec.name == "Network" {
+		// ` and ~ reach a text or number field as typed characters (a
+		// cert path can hold a ~), so the password editor opens from the
+		// other rows only — and only those rows advertise it.
+		if sec.name == "Network" && field.ftype != fieldText && field.ftype != fieldNumber {
 			if m.hasPassword() {
 				hint += "  `: Change pw  ~: Remove pw"
 			} else {
@@ -910,9 +913,10 @@ func (m *SettingsModel) renderSecurityCompact(w int) string {
 	}
 	lines = append(lines, "  Password: "+status)
 
-	actionLine := DimStyle.Render("  `: Set password")
+	// From a toggle row: on a text or number row the keys type themselves.
+	actionLine := DimStyle.Render("  `: Set password (from a toggle row)")
 	if m.hasPassword() {
-		actionLine = DimStyle.Render("  `: Change  ~: Remove")
+		actionLine = DimStyle.Render("  `: Change  ~: Remove (from a toggle row)")
 	}
 	lines = append(lines, actionLine)
 
