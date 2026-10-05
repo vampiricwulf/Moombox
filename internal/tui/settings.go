@@ -189,7 +189,7 @@ var sections = []settingsSection{
 			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt (requires restart)", nil},
 			{"active_youtube", "YouTube cookies", fieldToggle, nil, "YouTube cookie indicator in status bar", nil},
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar", nil},
-			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer + one browser retry on auth failure; R F imports either way (requires restart)", nil},
+			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer (requires restart) + one browser retry on auth failure (applies now); R F imports either way", nil},
 			{"acquisition", "Cookie source", fieldCycle, []string{"auto", "profile"}, "how a refresh gets cookies: auto = launch a browser when one is available, else read the profile; profile = never launch, read browser_profile_dir read-only (also allows a real browser's profile dir, which auto refuses). Takes effect immediately.", nil},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data (requires restart)", nil},
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
