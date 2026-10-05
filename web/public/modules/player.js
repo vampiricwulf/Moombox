@@ -2491,15 +2491,25 @@ export class PlayerController {
     const video = document.getElementById("player-video");
 
     // Periodic save every 10 seconds
+    //
+    // Watched is checked FIRST, and a tick that marks the job watched saves
+    // no position: marking watched clears resume_position on the server, but
+    // the PUT and the POST ride separate connections, so a PUT dispatched in
+    // the same tick could land second and leave a watched job offering
+    // "Resume from" its end.
     this._watchSaveInterval = setInterval(() => {
       if (!video || video.paused || document.hidden) return;
+      if (this._checkWatched(jobId, video)) return;
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
       this._saveResumePosition(jobId, pos);
-      this._checkWatched(jobId, video);
     }, 10000);
 
-    // Save on pause
+    // Save on pause — except the pause the media fires as the recording
+    // ends, for the same reason: `ended` follows it and marks the job
+    // watched (onSegmentEnded), and this PUT could land after that POST.
     this._onPauseSave = () => {
+      const lastPart = !this._seg.active || this._seg.segIdx === this._seg.segments.length - 1;
+      if (video.ended && lastPart) return;
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
       this._saveResumePosition(jobId, pos);
     };
@@ -2553,8 +2563,9 @@ export class PlayerController {
     this.app._updateJobResumePosition(jobId, position);
   }
 
+  /** Mark the job watched once playback is near the end; true when it did. */
   _checkWatched(jobId, video) {
-    if (this._watchedTriggered) return;
+    if (this._watchedTriggered) return false;
 
     let currentPos, totalDuration;
     if (this._seg.active) {
@@ -2567,7 +2578,7 @@ export class PlayerController {
       totalDuration = (jobLen && jobLen > 0) ? jobLen : video.duration;
     }
 
-    if (!totalDuration || !isFinite(totalDuration)) return;
+    if (!totalDuration || !isFinite(totalDuration)) return false;
 
     const withinThreshold =
       (totalDuration > 60 && totalDuration - currentPos <= 30) ||
@@ -2577,7 +2588,9 @@ export class PlayerController {
       this._watchedTriggered = true;
       this._clearWatchTracking();
       fetch(`/api/jobs/${jobId}/watched`, { method: "POST" }).catch(() => {});
+      return true;
     }
+    return false;
   }
 
   /**

@@ -1139,6 +1139,33 @@ test("an unreachable server says the video list failed to load", { skip }, async
     `toasts: ${JSON.stringify(h.app.toasts)}`);
 });
 
+// Marking a job watched clears its resume position on the server, but the
+// resume PUT and the watched POST ride separate connections, so a PUT sent in
+// the same breath could land second and leave a watched job offering "Resume
+// from" its end. Mutants: save before checking watched in the interval; drop
+// the ended guard from the pause save.
+test("marking a job watched sends no resume position alongside it", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j2", { lengthSeconds: 100 })], watchState: {} });
+  await h.selectJob("j2");
+  h.video.paused = false;
+  h.video.currentTime = 96;
+  h.advance(10_000); // the interval's tick crosses the watched threshold
+  const calls = h.fetchLog.filter((c) => c.url.includes("resume-position") || c.url.includes("/watched"))
+    .map((c) => `${c.method} ${c.url}`);
+  assert.deepEqual(calls, ["POST /api/jobs/j2/watched"]);
+});
+
+test("the end-of-media pause saves no resume position", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j3", { lengthSeconds: 100 })], watchState: {} });
+  await h.selectJob("j3");
+  h.player._startWatchTracking("j3");
+  h.video.currentTime = 100;
+  h.video.ended = true;
+  h.video.dispatchEvent(new h.window.Event("pause"));
+  assert.equal(h.fetchLog.filter((c) => c.url.includes("resume-position")).length, 0,
+    "the pause that precedes `ended` must not save a position the watched POST is about to clear");
+});
+
 // ── 19. Player review can-wait pins (Arc J, Task 12 / J15) ──────────────────
 // #23 (Space is inert under the resume dialog) is already covered by test 17
 // above ("player shortcuts are ignored while the resume overlay is up") and
