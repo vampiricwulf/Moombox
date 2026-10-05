@@ -392,3 +392,24 @@ func TestDescriptionExcerptIsRuneSafeAndBounded(t *testing.T) {
 		t.Errorf("Description = %q — a string already under the budget was altered", got)
 	}
 }
+
+// A finish whose recording is knowingly short is Warning-coloured with a Tail
+// field — and its description used to read "Successfully archived" all the
+// same, the wording the colour change was made to retire.
+//
+// Mutant: the description chosen without IncompleteTail — "Successfully".
+func TestAnIncompleteFinishDoesNotSaySuccessfully(t *testing.T) {
+	f := ytFacts()
+	_, desc, ntype, _, _ := DownloadFinished(f, []Part{{File: "a.mp4"}})
+	if !strings.HasPrefix(desc, "Successfully archived") || ntype != TypeSuccess {
+		t.Fatalf("a whole archive reads %q (%v)", desc, ntype)
+	}
+	f.IncompleteTail = true
+	_, desc, ntype, _, _ = DownloadFinished(f, []Part{{File: "a.mp4"}})
+	if strings.Contains(desc, "Successfully") {
+		t.Errorf("an archive with its end missing reads %q", desc)
+	}
+	if ntype != TypeWarning {
+		t.Errorf("type = %v, want Warning", ntype)
+	}
+}

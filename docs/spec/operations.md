@@ -505,7 +505,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `rescheduled` | Stream scheduled start time changed |
 | `downloading` | Download begins or resumes |
 | `muxing` | FFmpeg mux step begins — for every mux, including a manual one (`A M` / `POST /api/jobs/{id}/mux`), and for both finalize shapes, single-file and multi-part (quality/gap-split). The multi-part path used to return before the send and silently skip it |
-| `finished` | Job completed successfully. Warning-coloured rather than Success when the row carries `incomplete_tail` — the recording is knowingly short and Resume appends the rest — and the embed also reports an incomplete chat capture and any set-aside recordings still waiting in staging |
+| `finished` | Job completed successfully. Warning-coloured rather than Success when the row carries `incomplete_tail` — the recording is knowingly short and Resume appends the rest; the description then reads "Archived with its end missing" instead of "Successfully archived" — and the embed also reports an incomplete chat capture and any set-aside recordings still waiting in staging |
 | `error` | Job failed. The embed names the stage (`mux` or `download`, read off the error prefixes the orchestrator writes — `mux…`, `no media files to mux`, `create output dir`) and whether staging survived, which is the Retry-versus-Resume distinction: Retry deletes staging, Resume preserves it |
 | `cancelled` | Job cancelled by user |
 | `auth` | Any credential problem — cookies expired, member-only content, refresh failure, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
