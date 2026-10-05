@@ -561,7 +561,10 @@ lifecycle event rewrites it in place with
 carries the new event's own title, description and fields plus two more: a
 **Status** field naming the current state, and a **History** field of
 `<t:unix:R> State` lines, one per state that reached this target, clamped to the
-field budget by dropping the OLDEST lines.
+field budget by dropping the OLDEST lines. Each line — and every embed's own
+timestamp, in either mode — is dated when the event happened (`Embed.At`,
+stamped by `Manager.Send`), not when the target delivered it: after a Discord
+backlog every line used to read the delivery time.
 
 The lifecycle set is `found`, `added`, `scheduled`, `rescheduled`,
 `downloading`, `quality_split`, `gap_split`, `connectivity_resume`,

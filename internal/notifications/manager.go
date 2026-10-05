@@ -877,6 +877,7 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// allocation per send buys the guarantee that what is delivered is what
 	// was asked for.
 	msg := One(title, description, ntype.Color(), append([]Field(nil), fields...), opts)
+	msg.Embeds[0].At = time.Now() // when it happened, whenever a target delivers it
 	for _, q := range targets {
 		if !q.allows(opts.Event) {
 			continue

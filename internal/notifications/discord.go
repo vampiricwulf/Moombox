@@ -202,7 +202,7 @@ func toDiscordEmbed(e Embed) discordEmbed {
 		Description: e.Description,
 		Color:       e.Color,
 		Footer:      &discordFooter{Text: footerText(opts)},
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Timestamp:   e.eventTime().UTC().Format(time.RFC3339),
 	}
 
 	if opts.URL != "" {

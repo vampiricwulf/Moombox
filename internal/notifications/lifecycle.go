@@ -515,7 +515,7 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 
 	tr := m.tracker()
 	e := msg.Embeds[0]
-	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, time.Now())
+	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, e.eventTime())
 	// The ping is per MESSAGE (content + allowed_mentions), so it is carried
 	// over from the queued Message, not rebuilt from the embed. An EditOnly
 	// close carries none: its report is suppressed, and the role text would

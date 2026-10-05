@@ -1,5 +1,7 @@
 package notifications
 
+import "time"
+
 // Embed is one embed's worth of a message: exactly what Manager.Send used to
 // hand a sender as five positional arguments. Opts is per embed because
 // Discord's title URL, author line, thumbnail, image and footer are all
@@ -13,6 +15,20 @@ type Embed struct {
 	Color       int
 	Fields      []Field
 	Opts        SendOptions
+	// At is when the event happened: Manager.Send stamps it as it queues the
+	// embed. The embed's timestamp and its lifecycle History line read it, so
+	// a target that delivers late — a Discord backlog, a long 429 — still
+	// dates each state by when it happened, not by when it went out. Zero
+	// (an embed built outside Send) means "now".
+	At time.Time
+}
+
+// eventTime is e.At, or now for an embed nothing stamped.
+func (e Embed) eventTime() time.Time {
+	if e.At.IsZero() {
+		return time.Now()
+	}
+	return e.At
 }
 
 // Message is one Discord webhook POST: its embeds, and the single content
