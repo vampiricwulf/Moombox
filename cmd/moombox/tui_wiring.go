@@ -168,9 +168,7 @@ func (s *runState) runTUI() {
 		// Job creation is handled via HTTP POST in addVideoCmd; this is just for logging
 		s.log.Info("Add video from TUI", slog.String("url", url))
 	}
-	app.OnCancelJob = func(jobID string) {
-		s.dlWorker.CancelJob(jobID)
-	}
+	app.OnCancelJob = s.cancelJobFromTUI
 	app.OnDeleteJob = func(jobID string) {
 		job, err := s.db.GetJob(jobID)
 		if err != nil || job == nil {

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TestCLIAddedFactsGainsAThumbnailAndChannel is audit row #23/#24: the CLI add
@@ -132,4 +135,37 @@ func TestNotifyStreamFoundIsOneEmbedForBothMonitors(t *testing.T) {
 			t.Error("the Twitch find has no channel-page link")
 		}
 	})
+}
+
+// A cancel that flags an actively processing run leaves "Job Cancelled" to
+// that run; a job no run holds — parked in COOKIES?, Queued for an archive
+// slot — has nobody to send it. The Web's cancel route sends it itself; the
+// TUI's sent nothing for the same cancel.
+//
+// Mutant: cancelJobFromTUI without the send — no cancelled notification.
+func TestATUICancelOfAJobNoRunHoldsIsAnnounced(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rec := notificationtest.New()
+	s := &runState{
+		db:        db,
+		notifyMgr: rec,
+		dlWorker:  worker.NewDownloadWorker(db, nil, config.Defaults(), sweepTestLogger{}, &worker.DownloadWorkerDeps{Notifier: rec}),
+	}
+	for _, st := range []database.JobStatus{database.StatusCookies, database.StatusQueued} {
+		id := "job-" + string(st)
+		if ok, err := db.AddJob(&database.Job{ID: id, VideoID: id, Title: "t", ChannelName: "Chan", Platform: "youtube", Status: st}); err != nil || !ok {
+			t.Fatalf("AddJob: %v", err)
+		}
+		s.cancelJobFromTUI(id)
+		if j, _ := db.GetJob(id); j == nil || j.Status != database.StatusCancelled {
+			t.Errorf("%s: row = %+v, want Cancelled", st, j)
+		}
+	}
+	if got := len(rec.ByEvent("cancelled")); got != 2 {
+		t.Errorf("cancelled notifications = %d, want 2", got)
+	}
 }
