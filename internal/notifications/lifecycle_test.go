@@ -863,3 +863,47 @@ func TestNoStoreStillEdits(t *testing.T) {
 		t.Errorf("methods = %s,%s,%s — want POST,PATCH,PATCH", calls[0].Method, calls[1].Method, calls[2].Method)
 	}
 }
+
+// TestTerminalEventDoesNotRecreateAGoneMessage: a terminal event edits the
+// lifecycle message and posts its own embed, and by ruling never CREATES a
+// lifecycle message. When the operator had deleted that message mid-download,
+// the PATCH's "Unknown Message" fell through to the create path: Discord got
+// a new "Failed" lifecycle message AND the separate Job Failed embed — two
+// posts for one failure — and the stored id became a terminal-look message
+// that a later Retry would go on editing.
+//
+// Mutant: dropping the AlsoSeparate arm — the wire carries a second POST and
+// the stored id is the new message's.
+func TestTerminalEventDoesNotRecreateAGoneMessage(t *testing.T) {
+	f := newFakeDiscord(t, func(_ int, r recordedReq, rw http.ResponseWriter) {
+		if r.Method == http.MethodPatch {
+			rw.WriteHeader(http.StatusNotFound)
+			io.WriteString(rw, `{"message":"Unknown Message","code":10008}`)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusOK)
+		io.WriteString(rw, `{"id":"NEW777"}`)
+	})
+	st := newMemStore()
+	key := targetMsgKey(f.URL())
+	st.rows["yt_1"] = map[string]string{key: "STALE111"}
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	tgt := notificationTarget{sender: &DiscordWebhook{URL: f.URL()}, mode: ModeEdit, msgKey: key}
+
+	if err := m.dispatchOne(tgt, One("Job Failed", "d", TypeError.Color(), nil,
+		SendOptions{Event: "error", JobID: "yt_1"}), false); err != nil {
+		t.Fatalf("dispatchOne: %v", err)
+	}
+	var seq []string
+	for _, c := range f.calls() {
+		seq = append(seq, c.Method+"?"+c.Query)
+	}
+	if len(seq) != 2 || seq[0] != http.MethodPatch+"?" || seq[1] != http.MethodPost+"?" {
+		t.Errorf("wire = %v, want the PATCH and then only the separate POST", seq)
+	}
+	if id := st.NotificationMsgs("yt_1")[key]; id == "NEW777" {
+		t.Error("the terminal event's separate post was stored as the job's lifecycle message")
+	}
+}

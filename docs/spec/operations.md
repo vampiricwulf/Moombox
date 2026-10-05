@@ -608,7 +608,10 @@ other send: the owner's ruling caps a graceful shutdown at 15 s, and one
 lifecycle edit's retry ladder could spend all of it.
 
 **When the message is gone.** A PATCH answered `404` with `Unknown Message`
-(code 10008) makes the notifier post a new message and overwrite the stored id.
+(code 10008) makes the notifier post a new message and overwrite the stored id
+— except for a terminal event (`error`, `cancelled`), which never creates a
+lifecycle message: the stored id is forgotten and the event's separate embed,
+posted next as always, is the whole report.
 A `404` naming `Unknown Webhook` (10015) is not that — the webhook itself was
 revoked, and it stays a permanent failure.
 

@@ -530,9 +530,19 @@ func (m *Manager) postOrPatch(edit editableSender, tr *lifecycleTracker, jobID, 
 		if !errors.Is(err, ErrUnknownMessage) {
 			return err
 		}
+		tr.forget(jobID, msgKey)
+		if plan.AlsoSeparate {
+			// A terminal event never CREATES a lifecycle message
+			// (terminalLifecycleEvents): its separate embed, which dispatchOne
+			// posts next, is the whole report. Re-posting here sent two
+			// messages for one failure and stored a terminal-look message as
+			// the one a later Retry would go on editing.
+			m.logger.Info("lifecycle message is gone — the terminal event's own post stands in for it",
+				"jobID", jobID, "event", event)
+			return nil
+		}
 		m.logger.Info("lifecycle message is gone — posting a new one",
 			"jobID", jobID, "event", event)
-		tr.forget(jobID, msgKey)
 		// fall through to the create path
 	}
 	var (
