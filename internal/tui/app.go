@@ -438,6 +438,11 @@ type App struct {
 	// Progress
 	progressStore *ProgressStore
 	statusMap     map[string]database.JobStatus // track last-known status per job
+	// jobVersions is the newest database.Job.Version applied per job. Writers
+	// notify after releasing the database lock, so two of a job's updates
+	// can arrive in the opposite order to their writes; the older is dropped
+	// (see staleJobUpdate) rather than put back over the newer.
+	jobVersions map[string]uint64
 
 	// Layout
 	focusedPanel FocusPanel
@@ -769,6 +774,7 @@ func NewApp() *App {
 		releaseNotesPopup: newReleaseNotesOverlay(),
 		progressStore:     ps,
 		statusMap:         make(map[string]database.JobStatus),
+		jobVersions:       make(map[string]uint64),
 		isDark:            true, // default to dark; updated by BackgroundColorMsg
 	}
 }

@@ -126,6 +126,11 @@ type Database struct {
 	jobsChangeMu        sync.Mutex
 	jobsChangeDelivered uint64
 
+	// jobWriteVersion is the last Job.Version handed out; incremented under
+	// db.mu by every UpdateJobFields and AddJob read-back, so versions follow
+	// write order.
+	jobWriteVersion uint64
+
 	// Prepared statements
 	stmtGetJob *sql.Stmt
 	// preparedStmts tracks every *sql.Stmt prepared via prepareStmt so Close
@@ -413,6 +418,10 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	// see consistent state. TUI + WebSocket need all fields; UpdateJobFields
 	// only wrote a subset, so a SELECT is required.
 	job, scanErr := scanJob(db.stmtGetJob.QueryRowContext(db.getCtx(), id))
+	if scanErr == nil {
+		db.jobWriteVersion++
+		job.Version = db.jobWriteVersion
+	}
 	db.mu.Unlock() // Release BEFORE notify so subscribers can call back into Database without deadlocking. Audit C1.
 
 	if scanErr != nil {

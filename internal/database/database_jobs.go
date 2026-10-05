@@ -68,6 +68,8 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		if gaps, gErr := db.getGaps(job.ID); gErr == nil {
 			stored.Gaps = gaps
 		}
+		db.jobWriteVersion++
+		stored.Version = db.jobWriteVersion
 		added = stored
 	}
 

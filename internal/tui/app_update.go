@@ -1288,8 +1288,27 @@ func isProgressTerminal(s database.JobStatus) bool {
 	return isCompletedStatus(s) || s == database.StatusError || s == database.StatusCookies
 }
 
+// staleJobUpdate reports whether job is an older write than one already
+// applied for it. A row with no version (0: read rather than written) makes
+// no claim and is never stale.
+func (a *App) staleJobUpdate(job *database.Job) bool {
+	return job.Version != 0 && job.Version <= a.jobVersions[job.ID]
+}
+
+// noteJobVersion records job's version as seen, so an older write arriving
+// later is dropped.
+func (a *App) noteJobVersion(job *database.Job) {
+	if job.Version > a.jobVersions[job.ID] {
+		a.jobVersions[job.ID] = job.Version
+	}
+}
+
 func (a *App) handleJobUpdate(ev *database.JobChange) {
 	job := ev.Job
+	if a.staleJobUpdate(job) {
+		return
+	}
+	a.noteJobVersion(job)
 
 	// Progress store: terminal rows are DELETED rather than written, on every
 	// update and not only on the transition. The old code Set unconditionally
@@ -1372,6 +1391,9 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 		return
 	}
 	job := ev.Job
+	// Never dropped, however old: the row has to exist. An update that
+	// overtook it found no row to apply to, so nothing newer is lost.
+	a.noteJobVersion(job)
 
 	// Existing app already has data → user has used the app before; the
 	// new-job arrival is enough to dismiss the newcomer hint (matches
@@ -1422,6 +1444,7 @@ func (a *App) handleJobDeleted(ev *database.JobDeleted) {
 	}
 	a.progressStore.Delete(ev.JobID)
 	delete(a.statusMap, ev.JobID)
+	delete(a.jobVersions, ev.JobID)
 	a.taskList.RemoveJob(ev.JobID)
 	a.statusBar.SetJobs(a.taskList.Jobs())
 	a.actionMenu.SetJobs(a.taskList.Jobs())

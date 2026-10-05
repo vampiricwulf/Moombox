@@ -56,6 +56,17 @@ const (
 
 // Job is the primary data model for a download job.
 type Job struct {
+	// Version is the write that produced this copy of the row: a number
+	// drawn under db.mu by UpdateJobFields and AddJob, so a larger one is a
+	// later state. Both notify AFTER releasing the lock, so two writers can
+	// reach subscribers in the opposite order to their writes — a progress
+	// tick read back before a Muxing write, delivered after it, put the row
+	// back to Downloading on every dashboard. Subscribers that keep a copy
+	// (the WebSocket hub, the TUI) drop a row older than one they hold.
+	// Zero on rows read any other way (GetJob, GetAllJobs): no claim either
+	// way. Not serialised.
+	Version uint64 `json:"-"`
+
 	ID          string    `json:"id"`
 	VideoID     string    `json:"videoId"`
 	URL         string    `json:"url"`
@@ -174,6 +185,10 @@ type Job struct {
 	// Segments (loaded via join, for multi-segment quality-split jobs)
 	Segments []Segment `json:"segments,omitempty"`
 }
+
+// JobVersion reports the job's ID and write Version — the pair a subscriber
+// that keeps a copy needs to drop a stale delivery (see Version).
+func (j *Job) JobVersion() (string, uint64) { return j.ID, j.Version }
 
 // IsTerminal returns true if the job status is a terminal state.
 func (j *Job) IsTerminal() bool {

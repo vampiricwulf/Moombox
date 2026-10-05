@@ -67,3 +67,31 @@ func TestJobAddedCarriesTheStoredRow(t *testing.T) {
 		t.Errorf("JobAdded gaps = %+v, want the stored gap with its id", got.Gaps)
 	}
 }
+
+// TestWriteVersionsFollowWriteOrder: every UpdateJobFields and AddJob read-back
+// carries a Version drawn under the write lock, so a later write always has a
+// larger one — what lets a subscriber drop an older row that reached it last.
+// A plain read makes no claim (0).
+//
+// Mutant: stamping the version outside the lock or not at all — the order or
+// the non-zero checks fail.
+func TestWriteVersionsFollowWriteOrder(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var added uint64
+	defer db.OnJobAdded(func(e *JobAdded) { added = e.Job.Version })()
+	if _, err := db.AddJob(&Job{ID: "j1", VideoID: "j1", URL: "u", Status: StatusUpcoming}); err != nil {
+		t.Fatal(err)
+	}
+	a := db.UpdateJobFields("j1", map[string]any{"status": StatusDownloading})
+	b := db.UpdateJobFields("j1", map[string]any{"status": StatusMuxing})
+	if added == 0 || a == nil || b == nil || !(added < a.Version && a.Version < b.Version) {
+		t.Errorf("versions added=%d then %v then %v, want strictly increasing and non-zero", added, a, b)
+	}
+	if got, _ := db.GetJob("j1"); got == nil || got.Version != 0 {
+		t.Errorf("a plain read carries version %v, want 0", got)
+	}
+}

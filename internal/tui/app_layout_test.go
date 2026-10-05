@@ -13,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestFeedbackColorChordMessages exercises the chord-prefix branch of
@@ -527,5 +528,34 @@ func TestShiftTabCyclesFocusBackwards(t *testing.T) {
 		if app.focusedPanel != want {
 			t.Fatalf("Shift-Tab focused %v, want %v", app.focusedPanel, want)
 		}
+	}
+}
+
+// TestTUIDropsAJobUpdateOlderThanOneApplied: writers notify after releasing
+// the database lock, so a job's updates can arrive out of write order, and
+// the older one, applied last, put a stale row (Downloading during a mux)
+// back on the task list. The newest version wins — except that a JobAdded is
+// never dropped, so one overtaken by its job's first update is still added.
+//
+// Mutants: dropping the stale check — the list shows Downloading; dropping a
+// stale JobAdded — the overtaken add is lost.
+func TestTUIDropsAJobUpdateOlderThanOneApplied(t *testing.T) {
+	app := NewApp()
+	app.width, app.height = 100, 30
+	app.recalcLayout()
+	row := func(id string, st database.JobStatus, v uint64) *database.Job {
+		return &database.Job{ID: id, VideoID: id, Title: id, Platform: "youtube", Status: st, Version: v}
+	}
+	app.handleJobAdded(&database.JobAdded{Job: row("j", database.StatusUpcoming, 1)})
+	app.handleJobUpdate(&database.JobChange{Job: row("j", database.StatusMuxing, 7), Changes: []string{"status"}})
+	app.handleJobUpdate(&database.JobChange{Job: row("j", database.StatusDownloading, 6), Changes: []string{"status"}})
+	if got := app.taskList.GetJobByID("j"); got == nil || got.Status != database.StatusMuxing {
+		t.Errorf("task list holds %v, want the newer Muxing row", got)
+	}
+
+	app.handleJobUpdate(&database.JobChange{Job: row("k", database.StatusDownloading, 9), Changes: []string{"status"}})
+	app.handleJobAdded(&database.JobAdded{Job: row("k", database.StatusUpcoming, 8)})
+	if app.taskList.GetJobByID("k") == nil {
+		t.Error("a JobAdded overtaken by the job's first update was never added")
 	}
 }

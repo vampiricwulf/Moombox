@@ -76,7 +76,14 @@ type jobProgressFrame struct {
 	TotalAudioSeq     *int               `json:"totalAudioSeq"`
 	TotalChatMessages *int               `json:"totalChatMessages"`
 	UpdatedAt         string             `json:"updatedAt"`
+
+	// version is the write that produced the row (database.Job.Version),
+	// for the hub's stale-frame check. Not part of the wire frame.
+	version uint64
 }
+
+// JobVersion lets the WebSocket hub drop a frame older than one it has sent.
+func (f jobProgressFrame) JobVersion() (string, uint64) { return f.ID, f.version }
 
 // newJobProgressFrame projects the mutable fields out of a job row.
 //
@@ -97,6 +104,7 @@ func newJobProgressFrame(job *database.Job) jobProgressFrame {
 		TotalVideoSeq:     job.TotalVideoSeq,
 		TotalAudioSeq:     job.TotalAudioSeq,
 		TotalChatMessages: job.TotalChatMessages,
+		version:           job.Version,
 		UpdatedAt:         job.UpdatedAt,
 	}
 }
