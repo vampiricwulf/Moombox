@@ -1660,3 +1660,26 @@ func TestJobCreateRejectsMalformedIDs(t *testing.T) {
 		t.Errorf("valid YouTube ID: want 201, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 }
+
+// TestJobCreateStoresTheCanonicalYouTubeURL: a url sent beside a videoId was
+// stored verbatim, unparsed, and both UIs offer the job URL as a link — a LAN
+// client could plant a file:// or phishing URL on a real job.
+//
+// Mutant: restore `url := body.URL` for the YouTube branch.
+func TestJobCreateStoresTheCanonicalYouTubeURL(t *testing.T) {
+	f := newJobsFixture(t)
+	rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{
+		"videoId": "dQw4w9WgXcQ",
+		"url":     "file:///C:/Windows/System32/cmd.exe",
+	})
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	got, _ := f.db.GetJob("dQw4w9WgXcQ")
+	if got == nil {
+		t.Fatal("job not created")
+	}
+	if got.URL != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
+		t.Errorf("stored URL = %q, want the canonical watch URL", got.URL)
+	}
+}

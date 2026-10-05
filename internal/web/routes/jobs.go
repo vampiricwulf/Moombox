@@ -791,11 +791,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// YouTube job creation
-		url := body.URL
-		if url == "" {
-			url = "https://www.youtube.com/watch?v=" + videoID
-		}
+		// YouTube job creation. The stored URL is always the canonical one for
+		// the validated ID, as the Twitch branch above builds its own: a
+		// body.URL sent beside a videoId was stored verbatim, unparsed, and
+		// both UIs offer it as a link (the TUI's details hyperlink, O C) — so
+		// a LAN client could plant a file:// or phishing URL on a real job.
+		url := "https://www.youtube.com/watch?v=" + videoID
 
 		// Check for duplicate
 		if active, _ := db.HasActiveJob(videoID); active {
@@ -1270,9 +1271,23 @@ func extractVideoIDFromURL(url string) string {
 }
 
 // FormatRoutesDeps holds dependencies for format routes.
+// limitedBy returns rl's middleware, or a pass-through when rl is nil (a
+// test, or a wiring that has no limiter), so a route can opt in with
+// r.With(limitedBy(rl)) whatever its caller passed.
+func limitedBy(rl *web.RateLimiter) func(http.Handler) http.Handler {
+	if rl == nil {
+		return func(h http.Handler) http.Handler { return h }
+	}
+	return rl.Middleware
+}
+
 type FormatRoutesDeps struct {
 	DB *database.Database
-	YT interface {
+	// RateLimit bounds the route: each call is a YouTube extraction, and an
+	// unbounded caller could get the operator's IP rate-limited or
+	// bot-flagged, breaking the monitors. Optional.
+	RateLimit *web.RateLimiter
+	YT        interface {
 		GetFormats(ctx context.Context, videoID string) (map[string]any, error)
 	}
 	// Logger records why an extraction failed; the response carries only
@@ -1288,7 +1303,7 @@ type FormatRoutesDeps struct {
 // FormatRoutes registers format-related API routes.
 func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 	// GET /api/formats/:videoId
-	r.Get("/api/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(limitedBy(deps.RateLimit)).Get("/api/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
 		videoID := chi.URLParam(req, "videoId")
 		if !utils.IsVideoID(videoID) {
 			jsonError(rw, "invalid video ID", http.StatusBadRequest)

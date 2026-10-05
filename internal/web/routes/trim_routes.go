@@ -9,13 +9,16 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TrimRoutes registers trim-related API routes.
-func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService) {
+// rl bounds trim creation (an FFmpeg process per call); nil leaves it
+// unbounded.
+func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService, rl *web.RateLimiter) {
 	// POST /api/jobs/:id/trims
-	r.Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(limitedBy(rl)).Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, ok := loadJob(rw, db, jobID)
 		if !ok {

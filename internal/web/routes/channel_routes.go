@@ -10,12 +10,15 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // ChannelRoutes registers channel-related API routes. The Store carries
 // the cfg pointer + lock; SaveLocked persists to disk under the same lock
 // so a rollback can restore the in-memory channel slice if the save fails.
-func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
+// rl bounds POST /api/resolve-channel (a youtube.com fetch with retries per
+// call); nil leaves it unbounded.
+func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl *web.RateLimiter) {
 	mu := store.RWMutex()
 	cfg := store.Config()
 
@@ -200,7 +203,7 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
 	})
 
 	// POST /api/resolve-channel
-	r.Post("/api/resolve-channel", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(limitedBy(rl)).Post("/api/resolve-channel", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Input string `json:"input"`
 		}

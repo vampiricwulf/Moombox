@@ -42,7 +42,7 @@ func newTrimFixture(t *testing.T) *trimFixture {
 	trimSvc := worker.NewTrimService(db, "ffmpeg-not-used-in-tests", silentLogger{})
 
 	r := chi.NewRouter()
-	TrimRoutes(r, db, trimSvc)
+	TrimRoutes(r, db, trimSvc, nil)
 	return &trimFixture{router: r, db: db, trimSvc: trimSvc}
 }
 

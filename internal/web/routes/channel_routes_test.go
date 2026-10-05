@@ -30,7 +30,7 @@ func newChannelRoutesFixture(t *testing.T) *channelRoutesFixture {
 
 	r := chi.NewRouter()
 	f := &channelRoutesFixture{router: r, store: store}
-	ChannelRoutes(r, store, func() { f.channelChange.Add(1) })
+	ChannelRoutes(r, store, func() { f.channelChange.Add(1) }, nil)
 	return f
 }
 

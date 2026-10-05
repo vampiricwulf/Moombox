@@ -27,9 +27,10 @@ func (s *runState) wireRoutes() func() {
 		s.notifyMgr,
 	)
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
-		DB:     s.db,
-		YT:     &ytFormatAdapter{svc: s.ytService, store: s.configStore},
-		Logger: s.log,
+		DB:        s.db,
+		YT:        &ytFormatAdapter{svc: s.ytService, store: s.configStore},
+		Logger:    s.log,
+		RateLimit: s.apiRL,
 	})
 	routes.StatusRoute(s.r, &routes.StatusRouteDeps{
 		Version:            version,
@@ -104,7 +105,7 @@ func (s *runState) wireRoutes() func() {
 			s.backfillRescan()
 		}
 	}})
-	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
+	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors, s.apiRL)
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,
 		Store:  s.configStore,
@@ -114,7 +115,7 @@ func (s *runState) wireRoutes() func() {
 		DB:     s.db,
 		Logger: s.log,
 	})
-	routes.TrimRoutes(s.r, s.db, s.trimSvc)
+	routes.TrimRoutes(s.r, s.db, s.trimSvc, s.apiRL)
 	routes.StatsRoutes(s.r, &routes.StatsRouteDeps{
 		DB:     s.db,
 		Worker: s.dlWorker,
