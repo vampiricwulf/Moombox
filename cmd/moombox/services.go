@@ -501,13 +501,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))
 	}
 
-	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
-	// no silent clamp — see config.SegmentWorkers doc). Past
-	// SegmentWorkersWarnThreshold, warn: a large simultaneous fan-out to
-	// YouTube is the kind of traffic shape that attracts bot detection.
-	if sw := cfg.Downloader.SegmentWorkers; sw > config.SegmentWorkersWarnThreshold {
-		log.Warn(fmt.Sprintf("downloader.segment_workers %d is high — a large simultaneous fan-out to YouTube raises bot-detection risk; reduce it if downloads start returning 403", sw))
-	}
+	s.warnSegmentWorkers(cfg.Downloader.SegmentWorkers)
 
 	// Apply Go runtime soft memory limit. SetMemoryLimit is a SOFT cap:
 	// Go's GC runs more aggressively as the heap approaches the limit, but

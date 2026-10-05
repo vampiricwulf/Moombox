@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"runtime/debug"
 
@@ -59,6 +60,22 @@ func (s *runState) applyFfmpegPath(path string) {
 	if s.log != nil {
 		s.log.Debug("ffmpeg path re-applied", slog.String("path", path))
 	}
+}
+
+// warnSegmentWorkers logs the bot-detection warning for a segment_workers
+// above config.SegmentWorkersWarnThreshold. segment_workers has no upper
+// limit by design (DECISIONS: owner-mandated, no silent clamp — see
+// config.SegmentWorkers doc), and a large simultaneous fan-out to YouTube is
+// the kind of traffic shape that attracts bot detection. Reached from boot,
+// the config PUT (OnSegmentWorkersChange, on a change) and the TUI save, the
+// way applyReorderBudget's clamp warning is: the example config and the spec
+// promise that values above the threshold are logged, and a runtime save
+// used to log nothing until the next boot.
+func (s *runState) warnSegmentWorkers(n int) {
+	if s.log == nil || n <= config.SegmentWorkersWarnThreshold {
+		return
+	}
+	s.log.Warn(fmt.Sprintf("downloader.segment_workers %d is high — a large simultaneous fan-out to YouTube raises bot-detection risk; reduce it if downloads start returning 403", n))
 }
 
 // applyReorderBudget re-applies the two downloader reorder ceilings

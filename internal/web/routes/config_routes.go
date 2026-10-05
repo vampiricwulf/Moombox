@@ -79,6 +79,9 @@ type ConfigRoutesCallbacks struct {
 	// disk gauge and alerts take a reading against the new settings now
 	// rather than at the next ~6-minute check.
 	OnDiskSettingsChange func()
+	// OnSegmentWorkersChange is called with the new downloader.segment_workers
+	// when it changes, for the high-value warning boot logs.
+	OnSegmentWorkersChange func(n int)
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -1174,6 +1177,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldIntervals := monitorIntervalsOf(cfg)
 		oldYTActive, oldTWActive := config.GetActivePlatforms(cfg)
 		oldDisk := diskSettingsOf(cfg)
+		oldSegWorkers := cfg.Downloader.SegmentWorkers
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1204,6 +1208,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newIntervals := monitorIntervalsOf(cfg)
 		newYTActive, newTWActive := config.GetActivePlatforms(cfg)
 		newDisk := diskSettingsOf(cfg)
+		newSegWorkers := cfg.Downloader.SegmentWorkers
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1234,6 +1239,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if newDisk != oldDisk && callbacks.OnDiskSettingsChange != nil {
 				callbacks.OnDiskSettingsChange()
+			}
+			if newSegWorkers != oldSegWorkers && callbacks.OnSegmentWorkersChange != nil {
+				callbacks.OnSegmentWorkersChange(newSegWorkers)
 			}
 			// public_url lives in [network], not [notifications], but the
 			// notification manager is its only consumer — it reads the base
