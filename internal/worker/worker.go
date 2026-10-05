@@ -936,7 +936,7 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
 			"path", stagingDir, "jobID", jobID)
 	} else if preserveForTail {
-		w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
+		w.logger.Warn("preserving staging dir: recording tail incomplete; Resume will append the missing segments from the sidecar",
 			"path", stagingDir, "jobID", jobID)
 	} else if preserveForChat {
 		// Keep the chat capture, drop everything else: the media in here

@@ -138,7 +138,7 @@ All entries use identity mapping (Go key name == SQLite column name). `notificat
 ```go
 db.UpdateJobFields(jobID, map[string]any{
     "status":   database.StatusDownloading,
-    "progress": "V:1234 A:5678 C:900",
+    "progress": "(V: 1234/1300 A: 1234/1300 C: 900)",
     "percent":  42.5,
 })
 ```

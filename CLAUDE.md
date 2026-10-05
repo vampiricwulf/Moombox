@@ -91,7 +91,7 @@ Anonymous interface repeated in every struct — intentional for loose coupling.
 ```go
 db.UpdateJobFields(jobID, map[string]any{
     "status":   database.StatusDownloading,
-    "progress": "V:1234 A:1234 C:5678",
+    "progress": "(V: 1234/1300 A: 1234/1300 C: 5678)",
 })
 ```
 Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers. Returns `*Job`.

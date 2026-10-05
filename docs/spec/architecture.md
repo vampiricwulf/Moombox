@@ -553,7 +553,7 @@ The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Q
 The `ProgressTracker` aggregates progress from video, audio, and chat downloaders and persists to the database:
 
 - Update throttling: one report per `downloader.progress_interval_ms` (16ms by default), with gap rows flushed to the database at most once a second (the job row is written on every report). The TUI's own progress tick is finer — 8ms, one per frame at its 120 fps renderer — so the engine's gate, not the tick, is what bounds the rate
-- Progress string format: `"V:1234 A:5678 C:900"` (video seq, audio seq, chat messages)
+- Progress string format (`buildProgressString`, `internal/worker/progress.go`): `"(V: 1234/1300 A: 1234/1300 C: 900)"` for a DASH pair (segment / head per stream, the `/head` part only once it is known, chat messages last and only once there are some); `"Seq: 1234 C: 900"` for a single HLS stream; `"V:95.3% C: 900"` for a byte-ranged VOD. A YouTube VOD that completes writes `"V:100% A:100% C: 900"`, and one finalized behind head writes the DASH shape with its real counts instead (`incompleteProgressString`, `internal/worker/orchestrator.go`). While a download waits on something, the line is that wait instead (`activityMessage`, e.g. `"Verifying stream ended... (2m 10s)"`)
 - Speed calculation: bytes/second averaged over a 5 s sliding window (`speedAvgWindow`); the earlier EMA over report-cadence deltas jittered with each segment's arrival
 - ETA calculation: based on elapsed time and progress percentage
 - VOD progress: percentage-based (from chunked download byte position)
@@ -800,7 +800,7 @@ The primary data model. See `internal/database/types.go` for the complete struct
 - `VideoID` (string): Platform-specific video identifier.
 - `Platform` (string): `"youtube"` or `"twitch"`.
 - `Status` (JobStatus): Current lifecycle status.
-- `Progress` (string): Human-readable progress (e.g., `"V:1234 A:5678 C:900"`).
+- `Progress` (string): Human-readable progress (e.g., `"(V: 1234/1300 A: 1234/1300 C: 900)"`; the shapes are listed under ProgressTracker above).
 - `Percent` (float64): 0-100 for VOD downloads.
 - `IsVod` (bool): True for VOD/non-live downloads.
 - `ManuallyAdded` (bool): True if added via CLI or UI (vs. monitor discovery).

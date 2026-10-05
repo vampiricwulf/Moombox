@@ -655,7 +655,7 @@ SQLite in WAL mode, single connection (`SetMaxOpenConns(1)`), 5-second busy time
 ```go
 db.UpdateJobFields(jobID, map[string]any{
     "status":   database.StatusDownloading,
-    "progress": "V:1234 A:1234 C:5678",
+    "progress": "(V: 1234/1300 A: 1234/1300 C: 5678)",
 })
 ```
 Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 51-entry whitelist over `jobs` columns; `notification_msgs` is deliberately absent — `UpdateNotificationMsgs` is its only writer). Auto-updates `updated_at`. Triggers `OnJobUpdate` and `OnJobChange` subscribers after write. Returns the updated `*Job`.

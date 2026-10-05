@@ -88,7 +88,7 @@ Beyond basic usability (covered by priority 4), the UIs should feel polished and
 
 What this means in practice:
 - Status bars in both UIs show connection state, disk space, monitor status, cookie validity, and update availability.
-- Progress strings show segment counts for video, audio, and chat (e.g., `V:1234 A:1234 C:5678`).
+- Progress strings show segment counts for video, audio, and chat (e.g., `(V: 1234/1300 A: 1234/1300 C: 5678)`).
 - Error messages include context about what went wrong and, where possible, what the user can do about it.
 - The TUI uses Charmbracelet's styling ecosystem (lipgloss) for consistent, attractive terminal rendering.
 - The Web UI uses Shoelace components for a consistent, modern look without a heavy framework.
