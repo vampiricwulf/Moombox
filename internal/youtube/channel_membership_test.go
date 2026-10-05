@@ -265,6 +265,14 @@ func TestItemAgeTruncatedLowerBound(t *testing.T) {
 	if got := itemAge(live); got != 0 {
 		t.Fatalf("live badge must short-circuit to 0, got %v", got)
 	}
+	// And without any recognised badge: "Started streaming" is the live
+	// item's own wording, so badge DOM churn cannot rank a live stream by
+	// its elapsed time below a VOD streamed an hour ago.
+	// Mutant: drop the "Started streaming" arm — this returns 2h.
+	unbadged := map[string]any{"publishedTimeText": map[string]any{"simpleText": "Started streaming 2 hours ago"}}
+	if got := itemAge(unbadged); got != 0 {
+		t.Fatalf("an unbadged live item must still rank as now, got %v", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
