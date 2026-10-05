@@ -27,7 +27,7 @@ type Snapshot struct {
 
 	TotalSize      int64            // finished + error + cancelled bytes
 	JobCount       int              // every job, so it equals the per-platform counts summed
-	SizeByPlatform map[string]int64 // "youtube", "twitch"
+	SizeByPlatform map[string]int64 // "youtube", "twitch" — the same three statuses, so they sum to TotalSize
 	SizeByStatus   map[string]int64 // "finished", "error", "cancelled"
 
 	TotalFinished     int

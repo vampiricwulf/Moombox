@@ -853,12 +853,19 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') AND status IN ('%s', '%s', '%s') THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform = 'twitch' AND status IN ('%s', '%s', '%s') THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN length_seconds ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN total_chat_messages ELSE 0 END), 0)
 		FROM jobs`,
 		StatusFinished, StatusDownloading, StatusLive, StatusMuxing, StatusError, StatusCancelled, StatusQueued,
+		StatusFinished, StatusError, StatusCancelled,
+		// The per-platform sizes count the same three statuses the per-status
+		// ones do, so the two cards always add up to Total Recorded. They
+		// summed every row, and a Finished incomplete-tail job being Resumed
+		// keeps its file_size while Downloading — the platforms then
+		// outweighed the total for the length of the resume.
+		StatusFinished, StatusError, StatusCancelled,
 		StatusFinished, StatusError, StatusCancelled,
 		StatusFinished, StatusFinished,
 	)

@@ -58,7 +58,9 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 		{"f3", "twitch", StatusFinished, 50},
 		{"e1", "youtube", StatusError, 10},
 		{"c1", "youtube", StatusCancelled, 5},
-		{"a1", "youtube", StatusDownloading, 0},
+		// A Finished incomplete-tail job being Resumed keeps its file_size
+		// while it is Downloading again.
+		{"a1", "youtube", StatusDownloading, 1000},
 		{"a2", "twitch", StatusLive, 0},
 		{"m1", "youtube", StatusMuxing, 0},
 		{"u1", "youtube", StatusUpcoming, 0},
@@ -120,6 +122,14 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 	}
 	if stats.CancelledSize != 5 {
 		t.Errorf("CancelledSize: want 5, got %d", stats.CancelledSize)
+	}
+	// The platform sizes count the same settled statuses, so the Stats tab's
+	// two cards add up to its Total Recorded — the resuming a1 is in neither.
+	if stats.YouTubeSize != 315 || stats.TwitchSize != 50 {
+		t.Errorf("platform sizes: want youtube 315 and twitch 50, got %d and %d", stats.YouTubeSize, stats.TwitchSize)
+	}
+	if settled := stats.FinishedSize + stats.ErrorSize + stats.CancelledSize; stats.YouTubeSize+stats.TwitchSize != settled {
+		t.Errorf("platform sizes sum to %d, the settled total is %d", stats.YouTubeSize+stats.TwitchSize, settled)
 	}
 }
 
