@@ -208,7 +208,7 @@ var sections = []settingsSection{
 	{
 		name: "Updates",
 		fields: []fieldDef{
-			{"auto_check_updates", "Auto-check updates", fieldToggle, nil, "check GitHub on startup + daily", nil},
+			{"auto_check_updates", "Auto-check updates", fieldToggle, nil, "check GitHub on startup + daily; turning it on checks within a minute", nil},
 		},
 	},
 	{

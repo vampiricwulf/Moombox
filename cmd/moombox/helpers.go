@@ -129,6 +129,53 @@ func storePathFor(flagPath string, cfg *config.MoomboxConfig) string {
 	return filepath.Join(cwd, "config.toml")
 }
 
+// updateCheckTiming is runUpdateCheckLoop's schedule.
+type updateCheckTiming struct {
+	initialDelay time.Duration // before the boot check, so it does not slow startup
+	period       time.Duration // between scheduled checks
+	poll         time.Duration // how often the toggle is re-read for a false→true flip
+}
+
+// runUpdateCheckLoop runs the auto-update check: once shortly after boot, then
+// every period, each only while enabled() — re-read every time, so disabling
+// the toggle (the settings, or the dismiss route) stops an armed schedule
+// without a restart. It also re-reads the toggle every poll and checks at
+// once when it has turned ON: enabling it at runtime used to do nothing until
+// the next daily tick, up to a day later. Polling the store rather than
+// wiring a callback covers every writer of the flag — both settings UIs, the
+// setup wizard and the dismiss route. Returns when ctx ends.
+func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), t updateCheckTiming) {
+	select {
+	case <-time.After(t.initialDelay):
+	case <-ctx.Done():
+		return
+	}
+	wasEnabled := enabled()
+	if wasEnabled {
+		check()
+	}
+	ticker := time.NewTicker(t.period)
+	defer ticker.Stop()
+	poll := time.NewTicker(t.poll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if wasEnabled = enabled(); wasEnabled {
+				check()
+			}
+		case <-poll.C:
+			on := enabled()
+			if on && !wasEnabled {
+				check()
+			}
+			wasEnabled = on
+		}
+	}
+}
+
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
 //
 // configStore is re-read AFTER the network check so a "Skip this version" /

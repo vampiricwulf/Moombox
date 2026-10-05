@@ -581,6 +581,12 @@ Warn per key, and the next save leaves them out of the file.
 |-------|------|---------|----------|
 | AutoCheckUpdates | bool | true | `auto_check_updates` |
 
+`runUpdateCheckLoop` (`cmd/moombox/helpers.go`) checks GitHub shortly after boot and then daily, each time
+only while the flag is on — re-read on every check, so turning it off stops the schedule without a
+restart. It also re-reads the flag every minute and checks at once when it has turned ON, so enabling it
+at runtime no longer waits up to a day; reading the store covers every writer (both settings UIs, the
+setup wizard, the update banner's dismiss).
+
 #### [memory]
 
 Bounds steady-state memory for the Go process and the embedded BotGuard sidecar. See `docs/spec/operations.md` "Memory Limits" for the full design rationale and tuning guide.

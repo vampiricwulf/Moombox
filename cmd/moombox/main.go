@@ -612,12 +612,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 	}
 
-	// Auto-update check: initial check + daily ticker. The goroutine runs
-	// whenever the updater exists and re-reads auto_check_updates on EVERY
-	// iteration — previously the flag was consulted once at boot, so
-	// disabling checks (the dismiss route / settings toggle) couldn't stop
-	// an armed ticker until restart, and enabling the toggle did nothing
-	// without one.
+	// Auto-update check: initial check + daily ticker, plus a check within a
+	// minute of the toggle turning on (runUpdateCheckLoop). The goroutine runs
+	// whenever the updater exists and re-reads auto_check_updates every time
+	// — previously the flag was consulted once at boot, so disabling checks
+	// (the dismiss route / settings toggle) couldn't stop an armed ticker
+	// until restart.
 	if upd != nil {
 		go func() {
 			defer func() {
@@ -635,29 +635,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// One notification per pending version, not one per tick —
 			// state lives here because this goroutine is the only caller.
 			var lastNotifiedTag string
-
-			// Initial check (slight delay to avoid slowing startup)
-			select {
-			case <-time.After(5 * time.Second):
-			case <-ctx.Done():
-				return
-			}
-			if checkEnabled() {
+			runUpdateCheckLoop(ctx, checkEnabled, func() {
 				checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-			}
-
-			ticker := time.NewTicker(24 * time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if checkEnabled() {
-						checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-					}
-				}
-			}
+			}, updateCheckTiming{initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute})
 		}()
 	}
 
