@@ -33,6 +33,9 @@ func fastChatDelays() chatDelays {
 		keepaliveIdle:     60 * time.Millisecond,
 		keepalivePongWait: 30 * time.Millisecond,
 		keepaliveCheck:    20 * time.Millisecond,
+		reconnectBase:     time.Millisecond,
+		reconnectCap:      5 * time.Millisecond,
+		exhaustedRetry:    10 * time.Millisecond,
 	}
 }
 
@@ -45,6 +48,9 @@ func TestDefaultChatDelaysMatchConstants(t *testing.T) {
 		keepalivePongWait: ircKeepalivePongWait,
 		keepaliveCheck:    ircKeepaliveCheck,
 		resumeSaveFloor:   ircResumeSaveFloor,
+		reconnectBase:     ircReconnectBase,
+		reconnectCap:      ircReconnectCap,
+		exhaustedRetry:    ircExhaustedRetry,
 	}
 	if got := defaultChatDelays(); got != want {
 		t.Fatalf("defaultChatDelays() = %+v, want %+v", got, want)
@@ -54,6 +60,9 @@ func TestDefaultChatDelaysMatchConstants(t *testing.T) {
 		"keepalivePongWait": {want.keepalivePongWait, 10 * time.Second},
 		"keepaliveCheck":    {want.keepaliveCheck, 15 * time.Second},
 		"resumeSaveFloor":   {want.resumeSaveFloor, 5 * time.Second},
+		"reconnectBase":     {want.reconnectBase, time.Second},
+		"reconnectCap":      {want.reconnectCap, 30 * time.Second},
+		"exhaustedRetry":    {want.exhaustedRetry, 2 * time.Minute},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %v, want %v (production timing must not move in this arc)",

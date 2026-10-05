@@ -17,6 +17,9 @@ type chatDelays struct {
 	keepalivePongWait time.Duration // ircKeepalivePongWait — how long an answer may take
 	keepaliveCheck    time.Duration // ircKeepaliveCheck — how often the two above are evaluated
 	resumeSaveFloor   time.Duration // ircResumeSaveFloor — minimum gap between resume-sidecar writes
+	reconnectBase     time.Duration // ircReconnectBase — first step of the reconnect backoff
+	reconnectCap      time.Duration // ircReconnectCap — the backoff's ceiling
+	exhaustedRetry    time.Duration // ircExhaustedRetry — the cadence once the reconnect budget is spent
 }
 
 // defaultChatDelays returns production timing.
@@ -26,5 +29,8 @@ func defaultChatDelays() chatDelays {
 		keepalivePongWait: ircKeepalivePongWait,
 		keepaliveCheck:    ircKeepaliveCheck,
 		resumeSaveFloor:   ircResumeSaveFloor,
+		reconnectBase:     ircReconnectBase,
+		reconnectCap:      ircReconnectCap,
+		exhaustedRetry:    ircExhaustedRetry,
 	}
 }

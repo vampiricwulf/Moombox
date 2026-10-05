@@ -61,6 +61,17 @@ const (
 	// written every flush regardless. The DEFERRED final save on stop
 	// (Start's exit path) is deliberately NOT throttled.
 	ircResumeSaveFloor = 5 * time.Second
+	// ircReconnectBase and ircReconnectCap shape Start's backoff between
+	// failed sessions: base × 2^attempts, capped (2 s, 4 s, … 30 s).
+	ircReconnectBase = time.Second
+	ircReconnectCap  = 30 * time.Second
+	// ircExhaustedRetry is the pause between attempts once the reconnect
+	// budget (maxReconnects in Start) is spent. Spending it used to end chat
+	// capture for the rest of the job — a four-minute Twitch IRC outage, the
+	// video unaffected, cost hours of chat on a marathon stream, and nothing
+	// relaunched it outside a connectivity outage. Past the budget the loop
+	// keeps trying at this slow cadence for as long as the job runs.
+	ircExhaustedRetry = 2 * time.Minute
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
 	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
 	// while this proves the IRC layer behind it is still serving us.
@@ -1353,7 +1364,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	// reconnectAttempts is reset after any session that stayed connected for
 	// longer than reconnectResetUptime. Long-running (8+ hour) streams
 	// previously exhausted the counter on sparse network hiccups and then
-	// gave up chat for the remainder of the stream.
+	// gave up chat for the remainder of the stream. The loop no longer gives
+	// up at all: past maxReconnects it retries every ircExhaustedRetry until
+	// Stop or ctx ends it, so "exhausting the budget" — which the comments
+	// on the uncharged reconnect kinds still guard against — now costs up to
+	// two minutes of chat per drop instead of the rest of the job.
 	const (
 		maxReconnects        = 10
 		reconnectResetUptime = 5 * time.Minute
@@ -1366,16 +1381,24 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	// wire now, not after thirty seconds.
 	immediate := false
 
-	for reconnectAttempts <= maxReconnects {
+	for {
 		if ctx.Err() != nil || !cd.IsRunning() {
 			return nil
 		}
 
 		if reconnectAttempts > 0 && !immediate {
-			// Exponential backoff: 1000 * 2^attempts, capped at 30s (matches TypeScript)
+			// Exponential backoff: base × 2^attempts, capped (matches
+			// TypeScript) — then, once the budget is spent, the slow cadence
+			// for as long as the job runs (see ircExhaustedRetry).
 			shift := min(reconnectAttempts, 15) // cap shift to prevent overflow
-			delayMs := min(1000*(1<<shift), 30000)
-			delay := time.Duration(delayMs) * time.Millisecond
+			delay := min(cd.delays.reconnectBase*time.Duration(1<<shift), cd.delays.reconnectCap)
+			if reconnectAttempts > maxReconnects {
+				delay = cd.delays.exhaustedRetry
+				if reconnectAttempts == maxReconnects+1 {
+					cd.logger.Warn("twitch IRC keeps failing; retrying at a slow cadence for as long as the stream is captured",
+						"channel", cd.channelLogin, "failedReconnects", maxReconnects, "every", delay)
+				}
+			}
 			cd.logger.Info("reconnecting to twitch IRC",
 				"channel", cd.channelLogin, "attempt", reconnectAttempts, "max", maxReconnects, "delay", delay)
 			cd.flush() // Save state before reconnect
@@ -1513,8 +1536,6 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		reconnectAttempts++
 		cd.logger.Warn("IRC session error, will reconnect", "err", err, "channel", cd.channelLogin)
 	}
-
-	return fmt.Errorf("exceeded max IRC reconnects for %s", cd.channelLogin)
 }
 
 func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
