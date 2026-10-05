@@ -127,3 +127,21 @@ test("Enter on a focused button does not also open the focused job's details", a
   await h.flush();
   assert.ok(dlg._calls.includes("show"), "Enter with no control focused no longer opens the details");
 });
+
+// A same-status update that moves a row within its group — a renamed title, a
+// completed row's newer updatedAt — was patched in place: the card kept its
+// old position while Arrow navigation and Enter index the re-sorted list.
+//
+// Mutant: the _sortKey branch removed — the DOM stays [a, z].
+test("a renamed job moves to its sorted place, where navigation will look for it", async () => {
+  const h = await boot();
+  const a = live({ id: "a", videoId: "va", title: "Alpha" });
+  const z = live({ id: "z", videoId: "vz", title: "Zulu" });
+  h.app.jobs = [a, z];
+  h.app.renderJobs();
+  const dom = () => [...h.el("jobs-container").querySelectorAll(".video-item")].map((c) => c.dataset.jobId);
+  assert.deepEqual(dom(), ["a", "z"]);
+  h.app.handleMessage({ type: "job_update", payload: { ...a, title: "Zzz renamed" } });
+  await h.flush();
+  assert.deepEqual(dom(), ["z", "a"]);
+});

@@ -15,6 +15,12 @@ import { JobDetailsController } from "./modules/job-details.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
+// TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
+const TASK_STATUS_PRIORITY = {
+  "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
+  "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
+};
+
 export class MoomboxApp {
   constructor() {
     this.ws = null;
@@ -1216,6 +1222,13 @@ export class MoomboxApp {
             // already covers — so archive evaluation stays off the per-tick
             // path instead of running an O(n) scan on every progress update.
             this._evaluateArchiveBoundary();
+          } else if (this._sortKey(oldJob) !== this._sortKey(updatedJob)) {
+            // Same status but a new place in it — a renamed title, or a
+            // completed row's newer updatedAt. Patched in place, the card
+            // kept its old position while Arrow navigation and Enter index
+            // the re-sorted list, so the highlight landed on the wrong row.
+            this.renderJobs();
+            this.stats.updateActiveIndicator(this.jobs);
           } else {
             this.updateJobCard(updatedJob);
             this.stats.updateActiveIndicator(this.jobs);
@@ -3227,11 +3240,14 @@ export class MoomboxApp {
 
   // ===== Search/Filter =====
 
+  // _sortKey is what _sortJobs orders a row by within its status: updatedAt
+  // for the completed statuses, the title for everything else.
+  _sortKey(job) {
+    return (TASK_STATUS_PRIORITY[job.status] ?? 99) >= 7 ? job.updatedAt : job.title;
+  }
+
   _sortJobs(jobs) {
-    const STATUS_PRIORITY = {
-      "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
-      "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
-    };
+    const STATUS_PRIORITY = TASK_STATUS_PRIORITY;
     return [...jobs].sort((a, b) => {
       const pa = STATUS_PRIORITY[a.status] ?? 99;
       const pb = STATUS_PRIORITY[b.status] ?? 99;
