@@ -586,6 +586,14 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		if len(state.RecentIDs) > 0 {
 			cd.dedup.Restore(state.RecentIDs)
 		}
+		// The mark is the file's, like the count and the epoch: everything
+		// below it is already on disk. A run that starts on a replay token
+		// (the page flipped while no run was polling) pages the archive from
+		// the top, and only the mark keeps what the live half committed from
+		// being appended again — the 5000-ID window cannot span the archive.
+		if state.ReplayHighWaterUsec != nil {
+			cd.replayHighWaterUsec, cd.hasReplayHighWater = *state.ReplayHighWaterUsec, true
+		}
 		// Cross-check that the chat file actually exists on disk — guards
 		// against the case where the resume sidecar survived but the chat
 		// file was deleted/moved out from under us. Without this, the next
@@ -1449,6 +1457,10 @@ type chatFileAdoptionSummary struct {
 	streamStartTime string
 	messages        int
 	ids             []string
+	// maxUsec / hasUsec: the highest timestampUsec in the file, which seeds
+	// the replay high-water mark exactly as the sidecar's saved one does.
+	maxUsec int64
+	hasUsec bool
 }
 
 // chatFileReadBuffer sizes the reader the summary streams a chat file through.
@@ -1548,10 +1560,11 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 		return fmt.Errorf("parse chat messages: not an array")
 	}
 	for dec.More() {
-		// id only: the decoder skips every other field without materialising
-		// it, so a 2 KB message costs nothing but the scan.
+		// id and timestamp only: the decoder skips every other field without
+		// materialising it, so a 2 KB message costs nothing but the scan.
 		var msg struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			TimestampUsec string `json:"timestampUsec"`
 		}
 		if err := dec.Decode(&msg); err != nil {
 			return fmt.Errorf("parse chat messages: %w", err)
@@ -1559,6 +1572,10 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 		summary.messages++
 		if msg.ID != "" {
 			summary.ids = append(summary.ids, msg.ID)
+		}
+		if usec, perr := strconv.ParseInt(msg.TimestampUsec, 10, 64); perr == nil &&
+			(!summary.hasUsec || usec > summary.maxUsec) {
+			summary.maxUsec, summary.hasUsec = usec, true
 		}
 	}
 	if _, err := dec.Token(); err != nil { // the array's ']'
@@ -1737,6 +1754,13 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 	for _, id := range summary.ids {
 		cd.dedup.Add(id)
 	}
+	// And the replay high-water mark, as a sidecar resume restores it: a run
+	// on a replay token pages the archive from the top, and everything up to
+	// the file's newest message is already in it. The same far-future guard
+	// processBatch applies to a live batch applies to the file's.
+	if summary.hasUsec && summary.maxUsec <= time.Now().Add(replayMarkFutureSlack).UnixMicro() {
+		cd.replayHighWaterUsec, cd.hasReplayHighWater = summary.maxUsec, true
+	}
 	return adopted
 }
 
@@ -1829,6 +1853,11 @@ func (cd *ChatDownloader) saveResume() {
 		RecentIDs:     recentIDs,
 		StreamStartMs: cd.streamStartMs,
 		Mode:          resumeModeFor(cd.opts.IsLiveOrUpcoming),
+	}
+	// Loop-goroutine state, and saveResume runs on the loop goroutine.
+	if cd.hasReplayHighWater {
+		mark := cd.replayHighWaterUsec
+		state.ReplayHighWaterUsec = &mark
 	}
 	cd.mu.Unlock()
 
