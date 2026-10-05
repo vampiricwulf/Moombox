@@ -3175,7 +3175,11 @@ export class MoomboxApp {
           }
           break;
         case "Enter":
-          if (isTasksActive && this.focusedJobIndex >= 0) {
+          // Enter on a focused control belongs to that control: a Shoelace
+          // button does not preventDefault it, so Enter on Add Video, a
+          // card's Delete icon or the theme toggle ALSO opened the
+          // keyboard-focused job's details (over the control's own dialog).
+          if (isTasksActive && this.focusedJobIndex >= 0 && !this._enterFromControl(e)) {
             const filtered = this.filterBar.getFilteredJobs();
             const sorted = this._sortJobs(filtered);
             const job = sorted[this.focusedJobIndex];
@@ -3722,6 +3726,14 @@ export class MoomboxApp {
       const hasWatch = canWatch || canUnwatch;
       divider.style.display = (hasStandard && hasWatch) ? "" : "none";
     }
+  }
+
+  // _enterFromControl reports whether a keydown came from a control that
+  // handles Enter itself — a button of any kind, a link, a form field.
+  _enterFromControl(e) {
+    const path = typeof e.composedPath === "function" ? e.composedPath() : [e.target];
+    return path.some((el) => el instanceof Element && el.matches(
+      "button, a[href], input, select, textarea, sl-button, sl-icon-button, sl-checkbox, sl-switch, sl-select, sl-input, sl-dropdown, sl-menu-item, [role=button], [role=menuitem]"));
   }
 
   // _currentJob is the row this tab holds for id now — the active list, then

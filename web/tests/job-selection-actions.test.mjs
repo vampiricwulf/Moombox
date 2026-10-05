@@ -104,3 +104,26 @@ test("a single cancel does not reach a job that finished while the confirm was o
   await h.flush();
   assert.deepEqual(h.fetchLog.filter((c) => c.url.endsWith("/cancel")).map((c) => c.url), []);
 });
+
+// Enter on a focused control belongs to that control. A Shoelace button does
+// not preventDefault the key, so once Arrow navigation had focused a job, Enter
+// on Add Video (or a card's Delete icon) ALSO opened that job's details.
+//
+// Mutant: the _enterFromControl check removed — the details dialog opens.
+test("Enter on a focused button does not also open the focused job's details", async () => {
+  const h = await boot();
+  h.app.jobs = [fin(), live()];
+  h.app.renderJobs();
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  assert.equal(h.app.focusedJobIndex, 0);
+  const dlg = h.el("details-dialog");
+  dlg._calls = [];
+
+  h.el("add-video-btn").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true }));
+  await h.flush();
+  assert.ok(!dlg._calls.includes("show"), "Enter on Add Video opened the job's details");
+
+  h.document.body.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await h.flush();
+  assert.ok(dlg._calls.includes("show"), "Enter with no control focused no longer opens the details");
+});
