@@ -791,12 +791,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}
 	cipherSolver := cipher.NewCompositeSolver(sidecarCipher, gojaSolver)
 
-	// Wire goja resolver for GetSts (signature timestamp lookup, not part of
-	// the cipher.Solver interface) and the composite Solver for sig/n decryption.
-	// Sig flows through the sidecar's V8 ejs; n falls back to goja if the sidecar
-	// is unavailable.
+	// Wire the goja resolver for GetSts (signature timestamp lookup). The
+	// composite Solver does sig/n decryption on the worker side
+	// (RoutedCipherSolver below): sig flows through the sidecar's V8 ejs, and
+	// n falls back to goja if the sidecar is unavailable.
 	ytService.PlayerAPI.SetCipherSolver(gojaSolver)
-	ytService.PlayerAPI.SetCipher(cipherSolver)
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)

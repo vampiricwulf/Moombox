@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
-
-	"github.com/vampiricwulf/Moombox/internal/cipher"
 )
 
 // VideoIDMismatchError reports a player response whose videoDetails.videoId is
@@ -623,92 +621,6 @@ func countCollapsibleRenditions(formats []Format) int {
 		seen[f.Itag] = true
 	}
 	return collapsible
-}
-
-// decryptNParam decrypts the n-parameter in a URL to avoid throttling.
-// On any failure it returns the raw URL unchanged, so callers that prefer
-// a best-effort behaviour (manifest/VOD refreshers) can keep using it. For
-// the parser's own format list, use decryptNParamStrict, which signals
-// failure so the caller can drop the format.
-//
-// Uses string replacement to preserve original URL parameter order —
-// Go's url.Values.Encode() sorts parameters alphabetically, which breaks
-// YouTube's URL signature verification and causes HTTP 403.
-func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string) string {
-	out, _ := p.decryptNParamStrict(ctx, rawURL, playerURL)
-	if out == "" {
-		return rawURL
-	}
-	return out
-}
-
-// decryptNParamStrict is like decryptNParam but returns (newURL, true) only
-// when the URL either had no n-param to decrypt or the decryption succeeded.
-// When the URL has an n-param but decryption fails (solver unavailable,
-// Goja error, etc.) it returns ("", false) so the caller can drop the
-// format. Keeping a throttled URL in the pool would just 403 at the CDN
-// and waste retries.
-func (p *PlayerAPI) decryptNParamStrict(ctx context.Context, rawURL, playerURL string) (string, bool) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", false
-	}
-
-	// Extract the raw (percent-encoded) n-param for accurate string matching.
-	rawN, nParam := cipher.RawQueryParam(u.RawQuery, "n")
-	if rawN == "" || nParam == "" {
-		// No n-param to decrypt — URL is already usable.
-		return rawURL, true
-	}
-
-	decryptedN, err := p.decryptN(ctx, playerURL, nParam)
-	if err != nil {
-		p.logger.Warn("[PlayerApi] N-param decryption failed", slog.String("error", err.Error()))
-		return "", false
-	}
-
-	// Replace the first occurrence of n=<value> that is a proper query parameter
-	// to avoid false-matching within other parameter values.
-	// url.QueryEscape on decryptedN is a no-op today — n-param values are
-	// drawn from a URL-safe alphabet (alphanumeric + '-_'). Kept for safety
-	// in case YouTube ever widens that alphabet to include reserved chars.
-	for _, prefix := range []string{"?", "&"} {
-		old := prefix + "n=" + rawN
-		if strings.Contains(rawURL, old) {
-			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(decryptedN), 1), true
-		}
-	}
-	// The decrypt succeeded but the n= token wasn't in a recognisable
-	// query position — treat as pass-through.
-	return rawURL, true
-}
-
-// DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
-func (p *PlayerAPI) DecryptDashManifestUrl(ctx context.Context, dashURL, playerURL string) string {
-	if playerURL == "" || !p.hasCipher() {
-		return dashURL
-	}
-	return p.decryptNParam(ctx, dashURL, playerURL)
-}
-
-// DecryptNParamInUrl decrypts the n-parameter in any URL.
-// Handles both path-based /n/{value}/ format and query string ?n= format.
-func (p *PlayerAPI) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL string) string {
-	if playerURL == "" || !p.hasCipher() {
-		return rawURL
-	}
-
-	// Check for n parameter in path: /n/{encrypted_value}/
-	if m := pathNParamRe.FindStringSubmatch(rawURL); m != nil {
-		encryptedN := m[1]
-		decryptedN, err := p.decryptN(ctx, playerURL, encryptedN)
-		if err == nil && decryptedN != encryptedN {
-			return strings.Replace(rawURL, "/n/"+encryptedN+"/", "/n/"+decryptedN+"/", 1)
-		}
-	}
-
-	// Also check query string n param
-	return p.decryptNParam(ctx, rawURL, playerURL)
 }
 
 // isUpcomingFromPlayability returns true when YouTube's playabilityStatus

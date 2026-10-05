@@ -8,7 +8,7 @@ This document provides a comprehensive, implementation-level reference for every
 
 These are hard rules that govern all platform service integrations:
 
-- **YouTube uses multi-client Innertube fallback.** The authenticated request order is: WEB_EMBEDDED (format/DASH contributor) then TV_DOWNGRADED (best format coverage, and the playability authority) then WEB (DASH manifest) then WEB_CREATOR (member content) then the cookieless chain VISIONOS → ANDROID_VR (last resort). The public request order drops WEB_CREATOR. WEB_EMBEDDED, TV_DOWNGRADED and WEB are always tried; WEB_CREATOR and the cookieless chain are conditional fallbacks (tried only when earlier clients return members-only, login-required, or no formats — and never at all while TV reports an upcoming stream with `PlayabilityOK`, which is a waiting room rather than a format problem).
+- **YouTube uses multi-client Innertube fallback.** The authenticated request order is: WEB_EMBEDDED (format/DASH contributor) then TV_DOWNGRADED (best format coverage, and the playability authority) then WEB (DASH manifest) then WEB_CREATOR (member content) then the cookieless chain VISIONOS → ANDROID_VR (last resort). The public request order is TV_DOWNGRADED, then the cookieless chain, with WEB_EMBEDDED only for age-restricted content (see §Public Fallback Flow). On the authenticated path WEB_EMBEDDED, TV_DOWNGRADED and WEB are always tried; WEB_CREATOR and the cookieless chain are conditional fallbacks (tried only when earlier clients return members-only, login-required, or no formats — and never at all while TV reports an upcoming stream with `PlayabilityOK`, which is a waiting room rather than a format problem).
 - **Format priority is lexicographic.** For video, across five dimensions: resolution (higher wins) > FPS (prefer60fps setting) > codec score (higher wins) > bitrate (higher wins — yt-dlp's `size`/`br` sort prefers the higher-quality / Premium stream at the same res/fps/codec) > auth level (lower preferred). For audio, across four: audio track identity (`audioTrackScore` — original > default > unlabelled > descriptive, the clean rendition ahead of its DRC twin) > codec score (higher wins) > bitrate (higher wins) > auth level (lower preferred). This ordering is absolute and implemented in `SelectBestFormats`.
 - **Twitch uses GQL API with SHA256 persisted query hashing (version 1).** All structured queries (stream metadata, video metadata, VOD comments) use persisted queries with hardcoded SHA256 hashes. Access token queries use inline GraphQL. The Client-ID header (`kimne78kx3ncx6brgo4mv6wki5h1ko`) is required on every GQL request.
 - **BotGuard has a triple cache with auto-eviction.** Session cache (6-hour TTL, keyed by contentBinding), minter cache (dynamic TTL from Google's API, a single entry under `defaultMinterKey` — one minter serves every content binding — auto-evicted via `time.AfterFunc`), and inflight dedup (concurrent requests for the same key wait on a shared channel). Minters hold live Goja VMs that must be explicitly shut down on eviction.
@@ -156,7 +156,7 @@ All client configs are defined in `internal/constants/constants.go`:
 
 #### Public Fallback Flow
 
-`GetVideoInfoPublic` follows the same pattern but without cookies:
+`GetVideoInfoPublic` follows the same pattern for a jar that holds no complete logged-in session (`HasAuthCookies` false). It is not cookieless: only the watch page is fetched without cookies. The Innertube calls below build their headers through `Auth.GenerateAPIHeaders`, which attaches whatever YouTube cookies the jar holds, and a `SAPISIDHASH` Authorization when SAPISID is present — so a half-cleared jar (SAPISID kept, LOGIN_INFO gone) sends its remaining credentials alongside the anonymous watch page's visitor data. Only the cookieless chain (step 3) is credential-free.
 
 1. Fetch watch page (no cookies) and extract ytcfg + player response.
 2. Try TV_DOWNGRADED (public, with STS). A TV failure — an HTTP error or a substituted response alike — is logged and the cascade carries on with an empty result, the authenticated path's shape exactly. It used to return TV's error (or the watch-page parse) with VISIONOS and ANDROID_VR never asked.
@@ -204,7 +204,7 @@ Parsing (`parseMembershipTab`):
 - Extracts `ytInitialData` via a brace-depth scan that respects string literals (`extractYtInitialDataInto`) — robust on the megabyte-scale channel payload where a non-greedy regex under/over-matches. Handles both `var ytInitialData = {…}` and `window["ytInitialData"] = {…}` forms. Candidates are iterated rather than first-matched (`FindJSONObjectCandidate`, `internal/utils/jsoncandidates.go`), so a forged assignment that scans but is empty or is not JSON is skipped instead of denying the real document. The consumer's own typed decode IS the acceptance test — the caller passes it in, and only the emptiness half of the old predicate (`utils.IsNonEmptyJSONBody`) runs ahead of it — so the literal is no longer `json.Valid`-scanned once and decoded again.
 - Locates the membership tab by the stable `tabIdentifier` `TAB_ID_SPONSORSHIPS` (YouTube localizes the visible title), and only when that tab is the SELECTED one — a non-member's fallback page reports `(nil, false)` and is never deep-parsed. The large tab body stays a `json.RawMessage` until then, so the common non-member case is near-zero allocation.
 - Walks the selected tab for video IDs across both the current `lockupViewModel` (`contentId`) and classic `videoRenderer`/`gridVideoRenderer` layouts (YouTube A/B-serves both), deduping by video ID.
-- Estimates each item's recency (`itemAge`): a live badge or an item with no recognizable timestamp yields Age 0 ("now"), while a "Streamed N &lt;unit&gt; ago" text marks a past VOD ranked by that age. The monitor seeds the feed-history store's `published` estimate from this Age — a dated item is stored `coarse` at (now − Age), an ageless item is stored `assumed` at the current cycle time — so live/upcoming members items always land inside the archive window and get probed. Keying on the ABSENCE of a past-time signal (rather than the presence of a live badge) keeps live/upcoming catching robust to YouTube's badge DOM churn.
+- Estimates each item's recency (`itemAge`): a live badge, a live item's own "Started streaming N ago" wording (badge or not), or an item with no recognizable timestamp yields Age 0 ("now"), while a "Streamed N &lt;unit&gt; ago" text marks a past VOD ranked by that age. The monitor seeds the feed-history store's `published` estimate from this Age — a dated item is stored `coarse` at (now − Age), an ageless item is stored `assumed` at the current cycle time — so live/upcoming members items always land inside the archive window and get probed. Keying on the ABSENCE of a past-time signal (rather than the presence of a live badge) keeps live/upcoming catching robust to YouTube's badge DOM churn.
 
 ### Watch Page Parsing
 
@@ -325,26 +325,16 @@ The `parsePlayabilityStatus` function classifies the video's accessibility:
 
 The two age rows sit above the status switch because the shapes they catch are spread across `AGE_CHECK_REQUIRED`, `UNPLAYABLE` and `LOGIN_REQUIRED`. They sit below the upcoming rows because a waiting room is not an error, and they exclude `OK` for the same reason: a response YouTube says is playable is not an error either, and `checkPlayability` aborts the job on every non-`ok` verdict — with the notification suppressed for `age_restricted`, so an `OK` response reclassified this way would end a downloadable stream in silence. Both exclusions are conditions in the code, not merely row order, so the table reads the same whichever way it is scanned. They port yt-dlp's `_is_agegated` (`_video.py:2894-2904`), whose own consumers only ever append clients (`_video.py:3157-3175`) rather than override a playability verdict; the reason substrings are the load-bearing half, since upstream's lower-case status entries are substring-matched against the raw upper-case `status` and so only ever match through the reason. The verdict matters because the web_embedded age bypass gates literally on `age_restricted`.
 
-### N-Parameter Decryption
+### N-Parameter and Signature Decryption
 
-YouTube applies download throttling to streams served without the n-parameter being decrypted. The `decryptNParam` method:
+Extraction does not solve ciphers: the parser keeps each format's raw URL and, for a `signatureCipher` entry, its encrypted signature, and `PlayerAPI` holds the goja resolver only for `GetSts` (the signature timestamp a player request carries). The chosen format is resolved after selection, by the worker, through `cipher.ResolveFormatURL` (`internal/cipher/decrypt.go`) — so only the formats actually downloaded pay for solving.
 
-1. Parses the URL to extract the `n` query parameter value.
-2. Calls `cipherSolver.GetSolvers(ctx, playerURL)` to get the compiled cipher VM.
-3. Invokes `solvers.DecryptN(nParam)` to execute the JavaScript decryption function.
-4. Replaces `n=<encrypted>` with `n=<decrypted>` in the raw URL string using `strings.Replace`. This preserves the original URL parameter order -- Go's `url.Values.Encode()` sorts parameters alphabetically, which breaks YouTube's URL signature verification.
+`ResolveFormatURL` hands `RoutedResolveURL` the stream URL, the player URL and any encrypted signature:
 
-The `DecryptNParamInUrl` method additionally handles path-based n-parameters (`/n/{encrypted_value}/`) by matching with regex `"/n/([a-zA-Z0-9_-]{10,})/"` and replacing the path segment.
+1. **Signature** (when present): solved by the routed solver (the sidecar's V8 ejs). If that fails the whole URL falls back to the goja resolver, which also handles n, so the two are never partially applied. The decrypted value is appended as `{sp}={sig}` (`sp` defaults to `signature`).
+2. **n-parameter**: solved by the routed solver, falling back to goja for that parameter alone. The encrypted value is swapped for the decrypted one by string replacement in the raw URL, which keeps the original parameter order — `url.Values.Encode()` sorts parameters alphabetically, and a reordered URL fails YouTube's signature check with HTTP 403. A failed n solve is a deliberate degrade, not an error: an encrypted n still serves, only throttled, so it is logged and the URL is used as is.
 
-### Signature Decryption
-
-For formats that include a `signatureCipher` field instead of a direct URL, the `decryptSignatureCipher` method:
-
-1. URL-decodes the `signatureCipher` string to extract: `url` (stream base URL), `s` (encrypted signature), `sp` (signature parameter name, defaults to "signature").
-2. Gets the cipher solvers from the cache/compiler.
-3. Calls `solvers.DecryptSig(encSig)` to decrypt the signature.
-4. Appends the decrypted signature to the stream URL as `{sp}={decryptedSig}`.
-5. Does NOT decrypt the n-parameter here -- the caller always calls `decryptNParam` separately. Doing both would cause double-decryption and HTTP 403 errors.
+Manifest and refreshed URLs that are not a parsed format go through `RoutedDecryptNInURL`, which also handles the path-encoded form (`/n/{value}/`, at least 10 characters).
 
 ---
 

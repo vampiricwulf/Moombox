@@ -655,7 +655,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
-// GetVideoInfoPublic fetches video info without authentication.
+// GetVideoInfoPublic fetches video info for a jar with no complete logged-in
+// session. Only the watch page is fetched without cookies: the Innertube
+// calls build their headers through Auth.GenerateAPIHeaders, which attaches
+// whatever YouTube cookies the jar still holds (a half-cleared jar keeps
+// SAPISID), and only the cookieless chain is credential-free.
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state — see GetVideoInfoAuthenticated.
 	ctx = withExtractionState(ctx)
