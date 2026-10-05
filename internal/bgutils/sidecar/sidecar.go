@@ -240,6 +240,13 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	if s.cmd != nil {
 		return errors.New("sidecar: already started")
 	}
+	// A start whose context has already ended is over before it begins. It
+	// used to extract, spawn Node and only then see the cancelled handshake,
+	// spending the 2 s teardown grace of a quitting process's shutdown budget
+	// on a child nobody would use.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	cacheDir, err := s.resolveCacheDir()
 	if err != nil {
@@ -249,6 +256,9 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 
 	if err := extractIfNeeded(cacheDir); err != nil {
 		return fmt.Errorf("extract sidecar payload: %w", err)
+	}
+	if err := ctx.Err(); err != nil { // extraction can take seconds
+		return err
 	}
 
 	nodeExe := filepath.Join(cacheDir, nodeBinaryName())

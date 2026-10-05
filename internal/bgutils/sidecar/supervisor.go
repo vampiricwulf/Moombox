@@ -177,6 +177,9 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttemp
 		startCtx, cancel := context.WithTimeout(ctx, s.cfg.StartTimeout)
 		err := s.cfg.Restart(startCtx)
 		cancel()
+		if err != nil && ctx.Err() != nil {
+			return false // the process is shutting down; nothing failed
+		}
 		if err != nil {
 			// ErrStopped is not transient: shutdown.go called Stop, the handle
 			// is terminal, and climbing the ladder against it would keep this
