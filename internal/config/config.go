@@ -1326,9 +1326,27 @@ func sanitizeTemplateStr(s string) string {
 // ".chat.json"). No ASCII title reaches it — YouTube allows 100 characters,
 // Twitch 140. A channel is normally a directory of its own, so it only needs
 // to fit by itself.
+//
+// Those caps fit the default layout only. A template that puts both variables
+// in one component ("${channel} - ${title} [${id}]") could still resolve past
+// 255 bytes, so ResolveTemplate also fits every component it produces
+// (fitTemplateComponents): a directory to a whole name, the archive's own
+// name to templateStemMaxBytes.
 const (
 	templateTitleMaxBytes   = 180
 	templateChannelMaxBytes = 200
+
+	// templateNameMaxBytes is a filesystem name: a directory component.
+	templateNameMaxBytes = 255
+	// templateStemMaxBytes is the archive's own name, the last component. A
+	// job writes suffixes beside it, the longest being
+	// " - part999.restart-<unix ts>-99.chat.json" (42 bytes); this leaves
+	// room for it, and is what the default template comes to at the caps
+	// above with an 18-byte Twitch id.
+	templateStemMaxBytes = templateNameMaxBytes - 45
+	// templateFreeTextFloorBytes is as far as fitting a component shrinks a
+	// title or a channel; past it the component itself is cut.
+	templateFreeTextFloorBytes = 30
 )
 
 // truncateUTF8 cuts s to at most max bytes on a rune boundary.
@@ -1384,11 +1402,116 @@ func ResolveTemplate(template string, vars TemplateVariables) string {
 		}
 	}
 
-	return guardReservedComponents(strings.NewReplacer(
-		"${title}", safeTitle,
-		"${id}", vars.ID,
-		"${channel}", safeChannel,
-		"${start_date}", now.Format("20060102"),
-		"${start_time}", now.Format("1504"),
-	).Replace(template))
+	resolve := func(title, channel string) string {
+		return strings.NewReplacer(
+			"${title}", title,
+			"${id}", vars.ID,
+			"${channel}", channel,
+			"${start_date}", now.Format("20060102"),
+			"${start_time}", now.Format("1504"),
+		).Replace(template)
+	}
+	return guardReservedComponents(fitTemplateComponents(template, safeTitle, safeChannel, resolve))
+}
+
+// splitTemplatePath splits a template, or a path resolved from one, into its
+// components. The sanitized values carry no separator, so a template and its
+// resolution split into the same number of components, in the same order.
+// Empty components ("a//b", a leading "/") are dropped, as is one whose
+// value resolved empty — the count check in fitTemplateComponents covers that.
+func splitTemplatePath(p string) []string {
+	return strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+}
+
+// fitTemplateComponents resolves the template and shrinks title and channel —
+// only where they appear, and the longer one first — until every component
+// fits (templateNameMaxBytes, templateStemMaxBytes for the last). The literal
+// text and the id are never shrunk, so a name keeps the id that tells two
+// archives apart. A component that still does not fit once both are at
+// templateFreeTextFloorBytes (a template of long literals) is cut on a rune
+// boundary as a last resort.
+func fitTemplateComponents(template, title, channel string, resolve func(title, channel string) string) string {
+	tmplParts := splitTemplatePath(template)
+	for {
+		parts := splitTemplatePath(resolve(title, channel))
+		if len(parts) != len(tmplParts) {
+			break // a component resolved empty; the cut below still applies
+		}
+		shrunk := false
+		for i, part := range parts {
+			over := len(part) - componentBudget(i, len(parts))
+			if over <= 0 {
+				continue
+			}
+			hasTitle := strings.Contains(tmplParts[i], "${title}")
+			hasChannel := strings.Contains(tmplParts[i], "${channel}")
+			shrinkTitle := hasTitle && len(title) > templateFreeTextFloorBytes
+			shrinkChannel := hasChannel && len(channel) > templateFreeTextFloorBytes
+			switch {
+			case shrinkTitle && shrinkChannel && len(title) >= len(channel):
+				title = shrinkFreeText(title, over, len(channel))
+			case shrinkTitle && shrinkChannel:
+				channel = shrinkFreeText(channel, over, len(title))
+			case shrinkTitle:
+				title = shrinkFreeText(title, over, 0)
+			case shrinkChannel:
+				channel = shrinkFreeText(channel, over, 0)
+			default:
+				continue // nothing here can shrink; the cut handles it
+			}
+			shrunk = true
+			break
+		}
+		if !shrunk {
+			break
+		}
+	}
+	return cutTemplateComponents(resolve(title, channel))
+}
+
+// shrinkFreeText cuts s by over bytes, but no shorter than other — the
+// free-text value sharing its component, so the two end up level instead of
+// one being cut away for the other — and never below
+// templateFreeTextFloorBytes. Once s is level with other, it gives up half the
+// overflow and the other value the rest on the next pass.
+func shrinkFreeText(s string, over, other int) string {
+	target := len(s) - over
+	if len(s) > other {
+		target = max(target, other)
+	} else {
+		target = len(s) - (over+1)/2
+	}
+	return truncateUTF8(s, max(templateFreeTextFloorBytes, target))
+}
+
+// componentBudget is the byte budget of component i of n.
+func componentBudget(i, n int) int {
+	if i == n-1 {
+		return templateStemMaxBytes
+	}
+	return templateNameMaxBytes
+}
+
+// cutTemplateComponents cuts any component of p still over its budget,
+// keeping the separators as written.
+func cutTemplateComponents(p string) string {
+	n := len(splitTemplatePath(p))
+	var b strings.Builder
+	start, idx := 0, 0
+	for i := 0; i <= len(p); i++ {
+		if i < len(p) && p[i] != '/' && p[i] != '\\' {
+			continue
+		}
+		c := p[start:i]
+		if c != "" {
+			c = truncateUTF8(c, componentBudget(idx, n))
+			idx++
+		}
+		b.WriteString(c)
+		if i < len(p) {
+			b.WriteByte(p[i])
+		}
+		start = i + 1
+	}
+	return b.String()
 }

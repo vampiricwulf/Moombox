@@ -54,3 +54,52 @@ func TestResolveTemplateGuardsWindowsDeviceNames(t *testing.T) {
 		}
 	}
 }
+
+// The title and channel caps fit the default layout only. A template that
+// puts both in one component — "${channel} - ${title} [${id}]" — resolved to
+// about 400 bytes and the finalize failed with ENAMETOOLONG. Each component
+// now fits: the free text shrinks, level between the two, and the id stays.
+//
+// Mutants: fitTemplateComponents returning the plain resolution (the name is
+// over); shrinkFreeText ignoring the other value (the channel is cut to the
+// floor while the title keeps 150 bytes).
+func TestResolveTemplateFitsEveryComponent(t *testing.T) {
+	channel := strings.Repeat("c", 200)
+	title := strings.Repeat("あ", 60) // 180 bytes
+	const id = "tw_123456789012345"
+	got := ResolveTemplate("${channel} - ${title} [${id}]", TemplateVariables{Channel: channel, Title: title, ID: id})
+	if len(got) > templateStemMaxBytes {
+		t.Errorf("resolved to %d bytes, over the %d an archive name may use", len(got), templateStemMaxBytes)
+	}
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, " ["+id+"]") {
+		t.Errorf("resolved %q — the cut must fall on a rune boundary and keep the id", got)
+	}
+	gotChannel, rest, _ := strings.Cut(got, " - ")
+	gotTitle := strings.TrimSuffix(rest, " ["+id+"]")
+	if d := len(gotChannel) - len(gotTitle); d < -3 || d > 3 {
+		t.Errorf("channel %d bytes, title %d — the two should end up level", len(gotChannel), len(gotTitle))
+	}
+
+	// A directory gets a whole name.
+	dir := ResolveTemplate("${channel} ${channel}/${title}", TemplateVariables{Channel: channel, Title: "t"})
+	first, last, _ := strings.Cut(dir, "/")
+	if len(first) > templateNameMaxBytes || last != "t" {
+		t.Errorf("directory %d bytes, file %q — want at most %d and the title untouched", len(first), last, templateNameMaxBytes)
+	}
+
+	// Literal text cannot shrink, so as a last resort the component is cut.
+	if got := ResolveTemplate(strings.Repeat("x", 300), TemplateVariables{}); len(got) != templateStemMaxBytes {
+		t.Errorf("a 300-byte literal name resolved to %d bytes, want %d", len(got), templateStemMaxBytes)
+	}
+}
+
+// The default layout at its caps — a 180-byte title, an 18-byte Twitch id —
+// is the budget the suffix reserve was sized against, and resolves untouched.
+func TestTheDefaultTemplateAtItsCapsIsNotShrunk(t *testing.T) {
+	title := strings.Repeat("あ", 60)
+	got := ResolveTemplate(Defaults().Downloader.OutputTemplate,
+		TemplateVariables{Channel: strings.Repeat("c", 200), Title: title, ID: "tw_123456789012345"})
+	if !strings.Contains(got, " "+title+" [") {
+		t.Errorf("the default template shrank a title at the cap: %q", got)
+	}
+}

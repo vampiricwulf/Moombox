@@ -741,7 +741,15 @@ Sanitization preserves CJK, Japanese kana, and full-width characters via a regex
 three bytes a character, and Linux caps a name at 255 BYTES, so the byte caps are what keep a long
 Japanese title from failing the finalize with ENAMETOOLONG: with the default template a capped title
 leaves room for the id and the longest suffix a job writes beside its archive. No ASCII title reaches
-the cap (YouTube allows 100 characters, Twitch 140). After expansion every path component that names a
+the cap (YouTube allows 100 characters, Twitch 140). Those caps fit the default layout only, so the
+expansion is also fitted per path component (`fitTemplateComponents`, `internal/config/config.go`): a
+directory to 255 bytes and the archive's own name to `templateStemMaxBytes` (210 — the default template at
+the caps with an 18-byte Twitch id, leaving room for the 42-byte longest suffix). A component over its
+budget shrinks `${title}` and `${channel}` where they appear, levelling the two rather than cutting one
+away, down to 30 bytes each; literal text and `${id}` never shrink, so a name keeps the id that tells two
+archives apart, and only a component still over once both are at that floor (long literal text) is cut
+on a rune boundary. A custom `${channel} - ${title} [${id}]` used to resolve to about 400 bytes and fail
+the finalize. After expansion every path component that names a
 Windows device (`CON`, `NUL`, `COM1`, … with or without an extension — `utils.IsWindowsReservedName`)
 gets a leading underscore, on every platform, so a channel called `CON` no longer makes the
 `${channel}/…` directory impossible to create on Windows.
