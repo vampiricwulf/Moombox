@@ -1613,9 +1613,20 @@ func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	return data, resp.StatusCode, err
 }
 
+// inFlightWait is how long Stop waits for in-flight jobs to finish before it
+// cancels their muxes.
+const inFlightWait = 10 * time.Second
+
 // muxCancelGrace is how long Stop waits for FFmpeg to die after the mux root
 // is cancelled, before giving up and exiting anyway.
 const muxCancelGrace = 2 * time.Second
+
+// StopBudget is the longest Stop can take: the in-flight wait plus the grace
+// after mux cancellation. A caller's force-exit backstop must outlast it, or
+// the process exits before Stop reaches CancelMuxes and FFmpeg is left
+// writing into a staging dir the restarted child re-muxes with -y (owner
+// decision O-E).
+const StopBudget = inFlightWait + muxCancelGrace
 
 // Stop signals the worker to stop processing new jobs and waits for in-flight
 // jobs to finish (up to 10 seconds) so downloads aren't interrupted mid-write.
@@ -1642,7 +1653,7 @@ func (w *DownloadWorker) Stop() {
 	select {
 	case <-done:
 		w.logger.Info("download worker: all in-flight jobs finished")
-	case <-time.After(10 * time.Second):
+	case <-time.After(inFlightWait):
 		// Owner decision O-E: the jobs still running at this point are almost
 		// always draining a mux, and exiting now would leave FFmpeg writing
 		// into a staging dir the restarted child re-muxes with -y. Cancel the

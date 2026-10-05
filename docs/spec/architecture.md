@@ -49,10 +49,10 @@ Called from: `routes.SetupRoutes` (setup wizard completion), `routes.UpdateRoute
 
 **Shutdown sequence** (`shutdown()` in `cmd/moombox/shutdown.go`; every stop is wrapped in `stopService` panic isolation, and SPEC.md's Shutdown Sequence section carries the same list):
 1. Context cancellation propagates to all services; the TUI quits (if running)
-2. A 10-second force-exit timer is armed FIRST — if graceful shutdown stalls it closes the rate limiters, database and log itself and exits (code 42 when a restart was requested, else 0, so the launcher does not treat a slow quit as a crash)
+2. A 15-second force-exit timer (`forceExitAfter` — the worker's 12-second stop budget, `worker.StopBudget`, plus a 3-second margin) is armed FIRST — if graceful shutdown stalls it closes the rate limiters, database and log itself and exits (code 42 when a restart was requested, else 0, so the launcher does not treat a slow quit as a crash)
 3. Notifications switch to single-attempt mode
 4. Monitors stop (Twitch, DECAPI, Feed)
-5. Download worker stops (waits up to 10 seconds for in-flight jobs to save state)
+5. Download worker stops (waits up to 10 seconds for in-flight jobs to save state, then cancels in-flight muxes and gives FFmpeg 2 seconds to die). The force-exit must outlast this whole budget: its clock starts first, and a backstop no longer than the worker's wait would exit before `CancelMuxes` ran
 6. In-flight notifications are flushed
 7. Cookie refresh and auto-cookie services stop
 8. PotProvider is cleaned up and the BotGuard sidecar is stopped (when running)

@@ -144,7 +144,7 @@ type runState struct {
 
 	// --- Close-once wrappers ---
 	// sync.Once-guarded so both the orderly deferred shutdown and the
-	// 10-second force-exit timer can invoke them safely.
+	// force-exit timer can invoke them safely.
 	closeLog      func()
 	closeDB       func()
 	closeLimiters func()

@@ -4,15 +4,27 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
+
+// forceExitAfter is the shutdown backstop. It must outlast the worker's whole
+// Stop (worker.StopBudget: the in-flight wait, then mux cancellation and its
+// grace) plus the monitor stops ahead of it. Its clock starts first, so a
+// backstop equal to the worker's own wait fired before Stop reached
+// CancelMuxes, and FFmpeg outlived the process writing into staging the
+// restarted child re-muxes with -y — the very thing owner decision O-E
+// cancels muxes to prevent. The margin covers the steps ahead of the worker
+// and lets the ones after it start.
+const forceExitAfter = worker.StopBudget + 3*time.Second
 
 // shutdown runs the orderly stop sequence after run()'s main event loop
 // exits (either via Ctrl-C / SIGTERM, TUI quit, or triggerRestart). Order
 // is consumers-first so producers keep firing into live consumers until the
 // consumers drain: monitors → worker → notifications → cookie refresh →
 // PO-token provider → web server → log/DB unsubscribe → database. A
-// 10-second force-exit timer closes rate limiters, the database and the
-// logger and exits as a backstop — with exitCodeRestart when a restart is
+// force-exit timer (forceExitAfter) closes rate limiters, the database and
+// the logger and exits as a backstop — with exitCodeRestart when a restart is
 // pending, else 0 (see the timer for why never 1). Every individual stop is
 // isolated with panic recovery so one failing service does not block the
 // others.
@@ -22,16 +34,16 @@ import (
 func (s *runState) shutdown() bool {
 	s.log.Info("Shutdown signal received, shutting down gracefully...")
 
-	// 10-second force-exit timer. closeLimiters / closeDB / closeLog must run
-	// here too because os.Exit skips remaining defers; all are sync.Once-
-	// guarded so the concurrently-running deferred cleanup doesn't
+	// Force-exit timer (forceExitAfter). closeLimiters / closeDB / closeLog
+	// must run here too because os.Exit skips remaining defers; all are
+	// sync.Once-guarded so the concurrently-running deferred cleanup doesn't
 	// double-close. The exit CODE must honor restartRequested: this backstop
-	// fires routinely (worker stop alone can legitimately take its full 10s
-	// while a background segment mux drains), and exiting 1 during an
+	// fires routinely (worker stop alone can legitimately take its whole
+	// budget while a background segment mux drains), and exiting 1 during an
 	// update/config restart makes the launcher terminate instead of
 	// respawning — turning a self-update into a daemon outage with the new
 	// binary already swapped on disk but never started.
-	forceExit := time.AfterFunc(10*time.Second, func() {
+	forceExit := time.AfterFunc(forceExitAfter, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "force-exit handler panic: %v\n", r)
@@ -45,7 +57,7 @@ func (s *runState) shutdown() bool {
 			os.Exit(exitCodeRestart)
 		}
 		// Exit 0, not 1: this backstop fires routinely on slow-but-USER-
-		// INTENDED shutdowns (worker stop legitimately eats its full 10s
+		// INTENDED shutdowns (worker stop legitimately eats its whole budget
 		// draining a segment mux). The launcher's crash supervision treats
 		// abnormal codes from a long-lived child as crashes and respawns —
 		// exiting 1 here would resurrect a daemon the user just quit.
@@ -66,8 +78,8 @@ func (s *runState) shutdown() bool {
 	}
 
 	// Single-attempt notifications from here on. The force-exit above fires
-	// 10 s from now and routinely does (a worker stop can legitimately spend
-	// the whole window draining a segment mux), so the three-attempt ladder
+	// forceExitAfter from now and routinely does (a worker stop can
+	// legitimately spend most of the window draining a segment mux), so the three-attempt ladder
 	// with its 2 s + 5 s backoff cannot finish — an embed emitted during the
 	// stop would be retried into a process that is already gone. One attempt
 	// is what fits; operations.md documents the cap rather than promising a

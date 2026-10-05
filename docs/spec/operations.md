@@ -422,10 +422,10 @@ Each service stop is wrapped in `stopService(name, fn)` which provides:
 
 ### Force-Exit Timer
 
-A 10-second `time.AfterFunc` timer starts at shutdown entry. If graceful shutdown has not completed within 10 seconds, the timer fires:
+A `time.AfterFunc` timer (`forceExitAfter`, 15 seconds) starts at shutdown entry. It is the download worker's whole stop budget (`worker.StopBudget`: a 10-second wait for in-flight jobs, then mux cancellation and a 2-second grace) plus a 3-second margin — it must outlast that budget, because its clock starts first and a shorter backstop would exit before the worker cancelled its muxes, leaving FFmpeg writing into staging the restarted child re-muxes with `-y`. If graceful shutdown has not completed in time, the timer fires:
 1. Logs `"Graceful shutdown timed out, forcing exit"`
-2. Calls `log.Close()` to flush buffered logs
-3. Calls `os.Exit(1)`
+2. Closes the rate limiters, the database (final WAL checkpoint) and the log (flushing buffered lines)
+3. Exits with code 42 when a restart was requested, else 0 — never 1, which the launcher would treat as a crash and respawn a daemon the user just quit
 
 After graceful shutdown completes, if `restartRequested` is true, the child process exits with code 42 (triggering launcher respawn). Otherwise, it exits with code 0.
 
@@ -684,7 +684,7 @@ The window is separate-mode only: an edit-mode target's `found` embed IS the job
 - **Hot-reload:** notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. The diff is on the resolved webhook URL: a target that is still configured keeps its goroutine, its queued backlog and its learned rate bucket; a removed one finishes its in-flight delivery and exits, discarding the rest with one Warn naming the count. No restart required.
 - **Delivery mode:** per target, `separate` (default) or `edit` — see **Delivery Modes** above. Hot-reloads with the rest of the notifications array; no restart.
 - **Save-time validation:** webhook URLs are validated at save (web `validateConfigUpdates` + TUI editor) via `notifications.ValidateURL`; `POST /api/notifications/test {url}` sends a single-attempt test embed (used by the web Test buttons and the TUI `T` action, including for unsaved URLs). Both `discord.com` and the legacy `discordapp.com` host are accepted; the latter is canonicalised, so the two spellings of one webhook collapse to one target.
-- **Graceful shutdown:** `BeginShutdown` switches every target to single-attempt delivery, then `Wait` drains the queues — see the Shutdown Sequence above for the 10-second cap that actually bounds it. That single attempt's own rate-bucket wait is capped at 2s (`shutdownBucketWaitCap`), not the Rate bucket bullet's normal 30s: a wait that long could outrun the force-exit on its own, or starve every item still behind it in that target's queue.
+- **Graceful shutdown:** `BeginShutdown` switches every target to single-attempt delivery, then `Wait` drains the queues — see the Shutdown Sequence above for the force-exit cap that actually bounds it. That single attempt's own rate-bucket wait is capped at 2s (`shutdownBucketWaitCap`), not the Rate bucket bullet's normal 30s: a wait that long could outrun the force-exit on its own, or starve every item still behind it in that target's queue.
 - **Embed format:** Discord rich embeds with title, description, color (by notification type), optional fields, an author line (channel name, avatar, channel page), thumbnail, image, footer (`Moombox · {platform} · {job id}`, or just `Moombox`), and an ISO 8601 timestamp. A mention, when a target is configured for one, rides the message `content` with a matching `allowed_mentions` — embeds never mention on their own.
 
 ### Notification Type Colors

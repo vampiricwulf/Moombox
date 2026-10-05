@@ -788,7 +788,7 @@ The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v24 b
 
 **Crash recovery:** If `readPump` observes stdout EOF (parent's view of child death), it calls `markUnhealthy("stdout EOF")` which atomically flips `s.healthy` to false and drains every pending request channel with an error. `markUnhealthy` then hands the reason to `Config.OnUnhealthy`, which is how the supervisor learns the child is gone; `IsHealthy()` stays false until a restart succeeds. See **Supervision** below.
 
-**Graceful shutdown:** `Sidecar.Stop()` is bounded at ~3 s total — 1 s for the JSON-RPC `shutdown` round-trip + 2 s for the process to exit on its own + Kill on timeout. The bound stays well under `cmd/moombox/shutdown.go`'s 10-s force-exit budget so a hung sidecar can't starve web-server / DB-close / pump-drain shutdown steps.
+**Graceful shutdown:** `Sidecar.Stop()` is bounded at ~3 s total — 1 s for the JSON-RPC `shutdown` round-trip + 2 s for the process to exit on its own + Kill on timeout. The bound stays well under `cmd/moombox/shutdown.go`'s 15-s force-exit budget so a hung sidecar can't starve web-server / DB-close / pump-drain shutdown steps.
 
 ### IPC protocol
 

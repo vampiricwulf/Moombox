@@ -47,7 +47,7 @@ What this means in practice:
 - The launcher/supervisor pattern (parent process respawns child on exit code 42) provides process-level recovery. Even if the application crashes entirely, the launcher brings it back.
 - Authentication uses a multi-client fallback chain. If one Innertube client fails, the system tries the next. If cookies expire, the system degrades to unauthenticated access rather than stopping entirely.
 - Network errors trigger retries with exponential backoff rather than immediate failure.
-- The shutdown sequence uses a 10-second force-exit timer. If graceful shutdown stalls, the process terminates anyway rather than hanging indefinitely.
+- The shutdown sequence uses a 15-second force-exit timer. If graceful shutdown stalls, the process terminates anyway rather than hanging indefinitely.
 
 ### 3. Resource Efficiency
 

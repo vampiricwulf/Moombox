@@ -99,7 +99,7 @@ Moombox uses a launcher/supervisor pattern controlled by the `_MOOMBOX_CHILD` en
 
 - **With `_MOOMBOX_CHILD=1`** — The process runs the full application stack. When a restart is needed (config change, update applied, setup wizard completion, or API request), `triggerRestart(source)` sets an atomic flag, cancels the main context, and optionally quits the TUI. The `run()` function returns `true`, and `main()` calls `os.Exit(42)`.
 
-- **Shutdown** — Context cancellation propagates to all services. A 10-second force-exit timer (`time.AfterFunc`) ensures the process terminates even if a service hangs. Shutdown order is: monitors, download worker, notifications flush, cookie services, PO token cleanup, web server, event subscribers, database close.
+- **Shutdown** — Context cancellation propagates to all services. A 15-second force-exit timer (`time.AfterFunc`) ensures the process terminates even if a service hangs. Shutdown order is: monitors, download worker, notifications flush, cookie services, PO token cleanup, web server, event subscribers, database close.
 
 ### Service Initialization Order
 
@@ -847,16 +847,18 @@ The `CreateNoWindow` flag (0x08000000) on Windows prevents a console window flas
 
 When the main context is cancelled (Ctrl+C, SIGTERM, or restart trigger):
 
-1. 10-second force-exit timer starts
-2. Stop TwitchMonitor, DecapiMonitor, FeedMonitor
-3. Stop DownloadWorker (waits for active downloads to save resume state)
-4. Flush pending notifications
-5. Stop CookieRefresh and AutoCookieService
-6. Cleanup PotProvider (evict VMs)
-7. Stop WebServer (graceful HTTP shutdown)
-8. Unsubscribe log and DB event forwarders
-9. Close Database (flush WAL)
-10. Return restart flag to `main()`
+1. 15-second force-exit timer starts (it must outlast the worker's 12-second stop budget — see `forceExitAfter` in `cmd/moombox/shutdown.go`)
+2. Notifications switch to single-attempt delivery
+3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor
+4. Stop DownloadWorker (waits up to 10 s for active downloads to save resume state, then cancels in-flight muxes)
+5. Flush pending notifications
+6. Stop CookieRefresh and AutoCookieService
+7. Cleanup PotProvider (evict VMs)
+8. Stop the BotGuard sidecar (when running)
+9. Stop WebServer (graceful HTTP shutdown)
+10. Unsubscribe log and DB event forwarders
+11. Close Database (flush WAL)
+12. Return restart flag to `main()`
 
 Each service stop is wrapped in panic isolation via `stopService()`.
 

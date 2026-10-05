@@ -154,7 +154,7 @@ Moombox uses an environment variable (`_MOOMBOX_CHILD`) to implement a launcher/
 - **Without the variable** — the process acts as a launcher: it spawns itself as a child process and monitors it. If the child exits with code 42, the launcher respawns it (picking up any new binary from self-updates).
 - **With the variable** — the process runs the full application stack.
 
-This pattern enables graceful restarts for configuration changes, self-updates, and recovery. All restart triggers (config change, update, setup wizard, API request) exit with code 42 via `triggerRestart()`. A 10-second force-exit timer ensures the process never hangs during shutdown.
+This pattern enables graceful restarts for configuration changes, self-updates, and recovery. All restart triggers (config change, update, setup wizard, API request) exit with code 42 via `triggerRestart()`. A 15-second force-exit timer ensures the process never hangs during shutdown.
 
 ### Self-Update Flow
 
