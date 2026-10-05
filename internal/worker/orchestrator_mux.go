@@ -226,7 +226,11 @@ func stagedRestartAsides(dir string) []string {
 		if e.IsDir() || !engine.IsStagedRestartPath(e.Name()) {
 			continue
 		}
-		asides = append(asides, filepath.Join(dir, e.Name()))
+		p := filepath.Join(dir, e.Name())
+		if fileExists(p + asideRecoveredMarker) {
+			continue // already muxed; only its removal failed
+		}
+		asides = append(asides, p)
 	}
 	sort.SliceStable(asides, func(i, j int) bool {
 		return stagedRestartStamp(asides[i]) < stagedRestartStamp(asides[j])
@@ -550,6 +554,7 @@ func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool
 // chat capture a preserved staging dir is still holding has to land beside
 // something.
 func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase string) []string {
+	o.removeRecoveredAsides(jobCtx)
 	groups := groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir))
 	if len(groups) == 0 {
 		return nil
@@ -597,8 +602,17 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
 		recovered = append(recovered, out)
 		for _, p := range g.files {
-			if err := os.Remove(p); err != nil {
-				o.logger.Warn("could not remove a recovered set-aside recording", "aside", p, "err", err, "jobID", jobCtx.Job.ID)
+			if err := removeAsideFile(p); err != nil {
+				// Left as it was, the next finalize or recovery found the
+				// aside again and muxed it a second time, to "-2". The marker
+				// takes it out of every aside scan; removeRecoveredAsides
+				// retries the removal on the next pass.
+				o.logger.Warn("could not remove a recovered set-aside recording; marking it recovered", "aside", p, "err", err, "jobID", jobCtx.Job.ID)
+				if mErr := os.WriteFile(p+asideRecoveredMarker, []byte(out), 0o644); mErr != nil {
+					o.logger.Warn("could not mark the set-aside recording recovered either; the next recovery muxes it again",
+						"aside", p, "err", mErr, "jobID", jobCtx.Job.ID)
+				}
+				continue
 			}
 			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
 				o.logger.Warn("could not remove a recovered aside's resume sidecar", "sidecar", engine.StagedRestartSidecar(p), "err", err, "jobID", jobCtx.Job.ID)
@@ -606,6 +620,44 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		}
 	}
 	return recovered
+}
+
+// asideRecoveredMarker, appended to an aside's path, names the file written
+// beside an aside whose recovery succeeded but whose removal failed (a
+// Windows handle on it). It holds the sibling the aside was recovered to.
+const asideRecoveredMarker = ".recovered"
+
+// removeAsideFile is os.Remove, a variable so a test can make an aside's
+// removal fail the way a Windows handle does.
+var removeAsideFile = os.Remove
+
+// removeRecoveredAsides retries the removal of every aside a previous pass
+// recovered but could not delete, taking its resume twin and marker with it.
+func (o *DownloadOrchestrator) removeRecoveredAsides(jobCtx *JobContext) {
+	dirs := []string{jobCtx.StagingDir}
+	for _, sd := range segDirsOf(jobCtx.StagingDir, true) {
+		dirs = append(dirs, sd.dir)
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name, ok := strings.CutSuffix(e.Name(), asideRecoveredMarker)
+			if !ok || e.IsDir() || !engine.IsStagedRestartPath(name) {
+				continue
+			}
+			p := filepath.Join(dir, name)
+			if err := removeAsideFile(p); err != nil && !os.IsNotExist(err) {
+				continue // still held; the marker keeps it out of the scans
+			}
+			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("could not remove a recovered aside's resume sidecar", "sidecar", engine.StagedRestartSidecar(p), "err", err, "jobID", jobCtx.Job.ID)
+			}
+			os.Remove(p + asideRecoveredMarker)
+		}
+	}
 }
 
 // copyKeptChatSidecar puts the chat capture a preserved staging dir is still
