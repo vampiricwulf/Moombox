@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -520,6 +521,23 @@ func writeAutoRollbackMarker(exePath string, exitCode int, kept bool) {
 		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", markerPath, err)
 	}
 	fmt.Fprint(os.Stderr, "\n"+msg)
+}
+
+// sweptFailedReleaseNote is appended to an announced marker that names the
+// kept failed release at failedPath when that file is gone. The boot that
+// announces the marker has already passed the first-successful-boot milestone,
+// whose CleanupOldBinary sweeps <exe>.failed — by design, since the restored
+// binary has just proved it starts and the file was kept only for the case
+// where it would not. Without the note the announcement says the release was
+// "KEPT at" a path this same boot deleted.
+func sweptFailedReleaseNote(marker, failedPath string) string {
+	if !strings.Contains(marker, failedPath) {
+		return ""
+	}
+	if _, err := os.Stat(failedPath); err == nil {
+		return ""
+	}
+	return "\n(" + failedPath + " has since been removed: this binary started successfully, so the release kept for a failed restart is no longer needed.)"
 }
 
 // preserveUpdateRollback runs when the first boot of a freshly-applied

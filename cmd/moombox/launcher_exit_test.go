@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,5 +49,31 @@ func TestClassifyChildExit(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: classifyChildExit = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestSweptFailedReleaseNote: the boot that announces an auto-rollback marker
+// has already swept <exe>.failed at its first-successful-boot milestone, so a
+// marker saying the release was "KEPT at" that path needs a note saying it is
+// gone — and only then.
+//
+// Mutant: drop the os.Stat check — the note is appended while the file still
+// exists.
+func TestSweptFailedReleaseNote(t *testing.T) {
+	dir := t.TempDir()
+	failed := filepath.Join(dir, "moombox.failed")
+	marker := "The failed release was KEPT at:\n  " + failed + "\n"
+
+	if note := sweptFailedReleaseNote(marker, failed); !strings.Contains(note, "has since been removed") {
+		t.Errorf("note for a swept release = %q, want it to say the file was removed", note)
+	}
+	if err := os.WriteFile(failed, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if note := sweptFailedReleaseNote(marker, failed); note != "" {
+		t.Errorf("note while the release is still there = %q, want none", note)
+	}
+	if note := sweptFailedReleaseNote("The failed release could not be kept aside and was REMOVED.", filepath.Join(dir, "gone.failed")); note != "" {
+		t.Errorf("note for a marker that names no kept release = %q, want none", note)
 	}
 }
