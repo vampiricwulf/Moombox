@@ -507,9 +507,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// download failed while nothing said the broadcast was over. Finalizing
 	// there marked the job Finished and processJob then deleted the staging
 	// dir — with the resume sidecar in it (sweep-2 ENGINE-7). Returning the
-	// error instead leaves the job in Error with staging intact, which is
-	// what a Retry or a monitor re-enqueue needs. Not "resumable": /resume
-	// refuses every non-YouTube job.
+	// error instead leaves the job in Error with staging intact, so Mux can
+	// still archive what was captured. Nothing continues the capture from
+	// there — /resume refuses every non-YouTube job, Retry starts over with
+	// fresh staging and the monitor recovers offline flaps only — which is
+	// why the in-loop variant refresh retries before taking this exit.
 	var unconfirmedEndErr error
 
 	// vodOutageErr is a VOD's connectivity-outage exit (see the session
@@ -642,6 +644,16 @@ sessionLoop:
 
 				// Re-fetch master playlist FIRST to determine if quality actually changed.
 				newVariant, fetchErr := refreshBestVariant(ctx)
+				if fetchErr != nil && !isGap && !isInitChange {
+					// Nothing else carries this capture on: the exit below
+					// leaves the job in Error, and neither Retry (it wipes
+					// staging) nor the monitor (it recovers offline flaps
+					// only) continues it. A usher 5xx or a token blip
+					// outlasts a single request often enough to be worth
+					// riding out — footage the window drops meanwhile is
+					// recorded as a gap split once the successor starts.
+					newVariant, fetchErr = o.retryVariantRefresh(ctx, refreshBestVariant, fetchErr, jobCtx.Job.ID)
+				}
 				if fetchErr != nil {
 					if isGap || isInitChange {
 						// Refresh failing right after a gap (or an init-segment
@@ -684,6 +696,9 @@ sessionLoop:
 					// refresh. Logged beside fetchErr because the pair is the
 					// whole story of why this job is about to stop, and
 					// neither half is logged anywhere else on this path.
+					if ctx.Err() != nil {
+						break // an outage or a shutdown mid-retry, not a verdict
+					}
 					o.logger.Error("failed to refresh Twitch variants",
 						"err", fetchErr, "downloadErr", dlErr, "jobID", jobCtx.Job.ID)
 					if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
@@ -1419,6 +1434,39 @@ func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, varia
 	}
 	return false, nil, lastErr
 }
+
+// retryVariantRefresh retries a master-playlist refresh that failed inside
+// the download loop with err, pausing longer before each attempt
+// (liveRefreshAttempts tries in all, counting the one that already failed),
+// and returns the last error when none succeeds. It gives up at once when
+// ctx ends — an outage or a shutdown is the session loop's to handle.
+func (o *DownloadOrchestrator) retryVariantRefresh(ctx context.Context,
+	refresh func(context.Context) (*twitch.TwitchHLSVariant, error), err error, jobID string) (*twitch.TwitchHLSVariant, error) {
+	for attempt := 1; attempt < liveRefreshAttempts; attempt++ {
+		o.logger.Warn("Twitch variant refresh failed, retrying",
+			"attempt", attempt, "of", liveRefreshAttempts, "err", err, "jobID", jobID)
+		if sleepErr := utils.Sleep(ctx, time.Duration(attempt)*liveRefreshRetryDelay); sleepErr != nil {
+			return nil, sleepErr
+		}
+		var best *twitch.TwitchHLSVariant
+		if best, err = refresh(ctx); err == nil {
+			o.logger.Info("Twitch variant refresh recovered", "attempt", attempt+1, "jobID", jobID)
+			return best, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
+// liveRefreshAttempts bounds retryVariantRefresh: with liveRefreshRetryDelay
+// steps of 10 s the last attempt lands about 100 s after the first failure.
+const liveRefreshAttempts = 5
+
+// liveRefreshRetryDelay is retryVariantRefresh's backoff step: the n-th retry
+// waits n steps. A variable so tests need not sleep it out.
+var liveRefreshRetryDelay = 10 * time.Second
 
 // postOutageRefreshAttempts is how many times the recovery tries the master
 // playlist once the broadcast is confirmed live again — the same settling

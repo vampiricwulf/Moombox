@@ -390,11 +390,14 @@ var errUsher = errors.New("usher 503")
 // CheckStreamFn is called once instead of twice.
 func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_live")
+	fastRefreshRetries(t)
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
 		h.checks.Add(1)
 		return true, nil // live at the engine's consult AND at the re-verify
 	}
+	var refreshes atomic.Int32
 	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		refreshes.Add(1)
 		return nil, errUsher
 	}
 
@@ -412,6 +415,9 @@ func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 	if got := h.checks.Load(); got != 2 {
 		t.Errorf("CheckStreamFn calls = %d, want 2 (the engine's 404 consult and the refresh "+
 			"site's re-verify)", got)
+	}
+	if got := refreshes.Load(); got != liveRefreshAttempts {
+		t.Errorf("the refresh was tried %d times before the job gave up, want %d", got, liveRefreshAttempts)
 	}
 	if sawMuxing(seq) {
 		t.Errorf("status sequence = %v — the refresh-failure exit returns an error, so it must not "+
@@ -434,6 +440,7 @@ func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 // and Muxing never appears.
 func TestVariantRefreshFailureOnAnEndedBroadcastFinalizes(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_ended")
+	fastRefreshRetries(t)
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
 		return h.checks.Add(1) == 1, nil // live at the consult, over at the re-verify
 	}
@@ -696,6 +703,7 @@ func (l *fieldCaptureLogger) field(msg, key string) (any, bool) {
 // what separates this from a wording change.
 func TestVariantRefreshFailureLogsTheInnerLoopError(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_log")
+	fastRefreshRetries(t)
 	log := &fieldCaptureLogger{}
 	h.o.logger = log
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
