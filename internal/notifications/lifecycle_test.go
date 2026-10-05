@@ -578,7 +578,7 @@ func TestPatch404RePostFailureForgetsTheID(t *testing.T) {
 
 // TestShutdownEditIsSingleAttempt: after the queue reports it is shutting down,
 // an edit-mode lifecycle event makes exactly ONE request even against a 502 —
-// the owner's 10 s force-exit cap must not be spent on a retry ladder.
+// the owner's 15 s force-exit cap must not be spent on a retry ladder.
 func TestShutdownEditIsSingleAttempt(t *testing.T) {
 	f := newFakeDiscord(t, func(_ int, _ recordedReq, rw http.ResponseWriter) {
 		rw.WriteHeader(http.StatusBadGateway)

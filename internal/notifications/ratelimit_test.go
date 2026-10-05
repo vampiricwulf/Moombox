@@ -195,7 +195,7 @@ func TestA429DoesNotAlsoArmTheBucketSleep(t *testing.T) {
 // TestSendOnceHonoursTheBucketOnlyWithinTheShutdownCap is the ruling on this
 // task's review. SendOnce is the shutdown path, and the bucket it reads belongs
 // to the target's persistent *DiscordWebhook — so an alert spike just before
-// the user quits can leave it armed for seconds. The process force-exits 10s
+// the user quits can leave it armed for seconds. The process force-exits 15s
 // in: a window that closes soon is still worth waiting out, but one further
 // away than shutdownBucketWaitCap is not, because the 429 that follows an
 // immediate post drops the item exactly as the wait would have, without
@@ -260,7 +260,7 @@ func TestSendOnceHonoursTheBucketOnlyWithinTheShutdownCap(t *testing.T) {
 			t.Fatal("SendOnce against a 429: want an error, got nil")
 		}
 		if elapsed > 100*time.Millisecond {
-			t.Errorf("SendOnce took %v — a 3s window is past the %v cap and must not be slept (the 10s force-exit would eat it)", elapsed, shutdownBucketWaitCap)
+			t.Errorf("SendOnce took %v — a 3s window is past the %v cap and must not be slept (the 15s force-exit would eat it)", elapsed, shutdownBucketWaitCap)
 		}
 		if got := hits(); got != 1 {
 			t.Errorf("server saw %d requests, want exactly 1", got)

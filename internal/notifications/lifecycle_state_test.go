@@ -553,7 +553,7 @@ func TestModeFlipMidJob(t *testing.T) {
 
 // TestShutdownFlushIsSingleAttempt: the whole path, not just dispatchOne —
 // after BeginShutdown a queued lifecycle edit against a wedged Discord makes
-// ONE request, so the owner's 10 s force-exit cap survives an edit-mode job.
+// ONE request, so the owner's 15 s force-exit cap survives an edit-mode job.
 //
 // The one test that legitimately ends the manager, so the single trailing
 // m.Wait() stays — every other test here drains instead, because Wait is

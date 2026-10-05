@@ -893,7 +893,7 @@ Two install-wide behaviours sit beside the per-entry keys. `network.public_url`,
 
 **Discord embed format:** Title, description, colored sidebar (type-specific), fields (inline key-value pairs), optional URL link, an author line (channel name + avatar + channel page), an optional thumbnail and full-width image, and a footer (`Moombox · {platform} · {job id}`). When a target is configured for one, the MESSAGE — not the embed — also carries a mention in `content` with a matching `allowed_mentions`; embeds never mention on their own. Every string is clamped to Discord's limits on a rune boundary before it is sent.
 
-Dispatch is queued, not fire-and-forget: `Manager.Send()` returns immediately after appending to each matching target's bounded FIFO, and one goroutine per target delivers in order. `BeginShutdown()` switches to single-attempt delivery and `Wait()` drains the queues, both called during shutdown; the process's 10-second force-exit is what actually bounds the drain.
+Dispatch is queued, not fire-and-forget: `Manager.Send()` returns immediately after appending to each matching target's bounded FIFO, and one goroutine per target delivers in order. `BeginShutdown()` switches to single-attempt delivery and `Wait()` drains the queues, both called during shutdown; the process's 15-second force-exit is what actually bounds the drain.
 
 ---
 

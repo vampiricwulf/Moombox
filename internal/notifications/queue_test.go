@@ -543,7 +543,7 @@ var errDeliveryFailed = errors.New("discord is down")
 // not evaporated — but the flush ENQUEUES, and the drain goroutine can pop
 // what it enqueued immediately. Storing shuttingDown after the flush therefore
 // leaves a window in which deliver reads false and the flushed batch takes
-// the full 2 s + 5 s retry ladder, inside the process's 10 s force-exit.
+// the full 2 s + 5 s retry ladder, inside the process's 15 s force-exit.
 //
 // THE MUTANT: moving m.shuttingDown.Store(true) back below the flush loop.
 // With one embed the window is a single enqueue and the drain goroutine loses

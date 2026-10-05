@@ -133,7 +133,7 @@ func (d *DiscordWebhook) patchMessage(messageID string, body []byte) error {
 
 // postWaitOnce and patchMessageOnce are the shutdown twins of the two above:
 // ONE attempt, no backoff, no Retry-After sleep. The owner's ruling caps a
-// graceful shutdown at 10 s, and a single edit-mode job running the full
+// graceful shutdown at 15 s, and a single edit-mode job running the full
 // three-attempt loop could spend all of it — the same reason SendOnce exists
 // beside Send. The queue selects these while it is shutting down.
 func (d *DiscordWebhook) postWaitOnce(body []byte) (string, error) {

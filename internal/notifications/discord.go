@@ -41,7 +41,7 @@ const (
 	discordMaxSleepTotal = 30 * time.Second
 	// shutdownBucketWaitCap bounds how long a SINGLE-attempt send (SendOnce —
 	// in practice the shutdown path) will wait out a known-empty rate bucket.
-	// The process force-exits 10s into shutdown, so honouring a window a full
+	// The process force-exits 15s into shutdown, so honouring a window a full
 	// discordRetryAfterCap away would lose the embed to os.Exit AND starve
 	// every item behind it in that target's FIFO queue. Past this cap SendOnce
 	// posts immediately and lets the 429 drop the item: the same outcome as
@@ -276,7 +276,7 @@ func buildPayload(msg Message) ([]byte, error) {
 //
 // Two callers: SendTest, where an interactive settings flow wants the
 // immediate outcome (surfacing a 429 beats sleeping through its Retry-After),
-// and the per-target queue during shutdown, where the 10s force-exit leaves no
+// and the per-target queue during shutdown, where the 15s force-exit leaves no
 // room for the ladder.
 //
 // A known-empty rate bucket is therefore honoured only when it refills within

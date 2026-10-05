@@ -334,7 +334,7 @@ type notificationTarget struct {
 // sender is one delivery destination.
 //
 // Send runs the full retry ladder; SendOnce makes exactly one attempt — used
-// during shutdown (the 10s force-exit cannot accommodate a 2s+5s ladder) and by
+// during shutdown (the 15s force-exit cannot accommodate a 2s+5s ladder) and by
 // SendTest, where an interactive caller wants the immediate outcome.
 // Both take a whole Message — one POST, one to ten embeds — because Discord's
 // content, allowed_mentions and 6000-character total are all per MESSAGE.
@@ -831,7 +831,7 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 
 // BeginShutdown puts every target into single-attempt mode.
 //
-// Owner ruling: the 10s force-exit (cmd/moombox/shutdown.go) stays, and a
+// Owner ruling: the 15s force-exit (cmd/moombox/shutdown.go) stays, and a
 // worker stop ahead of it can legitimately spend the whole window, so a
 // three-attempt ladder with a 2s+5s backoff simply does not fit. One attempt
 // per embed is what can be delivered, and operations.md says so rather than
@@ -843,7 +843,7 @@ func (m *Manager) BeginShutdown() {
 	// The flag goes FIRST. A flushed batch is enqueued like any other item and
 	// the drain goroutine can pop it the instant it lands; storing the flag
 	// afterwards leaves a window in which that pop reads false and spends the
-	// 2 s + 5 s retry ladder inside the process's 10 s force-exit.
+	// 2 s + 5 s retry ladder inside the process's 15 s force-exit.
 	m.shuttingDown.Store(true)
 
 	// A window open when shutdown begins is delivered, not evaporated. Flushed
@@ -882,7 +882,7 @@ func (m *Manager) effectiveWaitTimeout() time.Duration {
 // **Single-call**: after Wait returns, every queue is closed and later Sends
 // are dropped with a Warn. The graceful-shutdown sequence in cmd/moombox stops
 // the worker — the dominant Send caller — before invoking Wait, so this is the
-// correct ordering. In practice the process's own 10 s force-exit, not this
+// correct ordering. In practice the process's own 15 s force-exit, not this
 // timeout, is what bounds the drain; BeginShutdown is what makes the attempts
 // fit inside it.
 func (m *Manager) Wait() {

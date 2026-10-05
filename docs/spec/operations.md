@@ -411,7 +411,7 @@ Shutdown is triggered by context cancellation (from signal handler, restart trig
 
 1. **Stop monitors** — TwitchMonitor, DecapiMonitor, FeedMonitor (prevents new job creation)
 2. **Stop download worker** — Waits for active downloads to save state (resume files)
-3. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 10-second force-exit, not `Wait`'s 30-second timeout: step 2 can legitimately spend the whole window draining a segment mux, so the drain gets 0–10 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
+3. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 15-second force-exit, not `Wait`'s 30-second timeout: step 2 can legitimately spend 12 of those seconds (`worker.StopBudget`) waiting out in-flight jobs and their muxes, so the drain gets whatever is left — as little as 3 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
 4. **Stop cookie services** — CookieRefresh, AutoCookies
 5. **Cleanup PO token provider** — Releases Goja VMs
 6. **Stop web server** — Closes HTTP listener and WebSocket connections
@@ -604,7 +604,7 @@ the persisted id is what survives, so a Retry after a release re-reads the row
 once and keeps editing the same message.
 
 **During shutdown** every request on this path is single-attempt, like every
-other send: the owner's ruling caps a graceful shutdown at 10 s, and one
+other send: the owner's ruling caps a graceful shutdown at 15 s, and one
 lifecycle edit's retry ladder could spend all of it.
 
 **When the message is gone.** A PATCH answered `404` with `Unknown Message`

@@ -222,7 +222,7 @@ func TestEditPathSharesTheRetrySchedule(t *testing.T) {
 }
 
 // TestEditOnceVariantsMakeExactlyOneRequest: the shutdown twins must never
-// retry. The owner's ruling caps a graceful shutdown at 10 s; one lifecycle
+// retry. The owner's ruling caps a graceful shutdown at 15 s; one lifecycle
 // edit running the 2 s/5 s ladder against a wedged Discord would spend it.
 //
 // MUTANT: point either Once variant at d.deliver instead of d.do — the 502

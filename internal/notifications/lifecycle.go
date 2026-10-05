@@ -452,7 +452,7 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 // It runs ON the per-target sender goroutine, so a job's states can never
 // reorder and a PATCH can never overtake the POST that created its message.
 // once is the queue's shutting-down flag: when set, every request on this path
-// is single-attempt, because the owner's 10 s force-exit cap must not be spent
+// is single-attempt, because the owner's 15 s force-exit cap must not be spent
 // on one lifecycle edit's retry ladder.
 func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) error {
 	// A batched message is several jobs' embeds in one POST and by ruling

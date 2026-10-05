@@ -262,7 +262,7 @@ func (q *targetQueue) dispatchFor(msg Message) error {
 	return d(msg, once)
 }
 
-// pending is the queue depth, for tests and for the discard report.
+// pending is the queue depth. Test-facing: pop reads len(q.items) itself.
 func (q *targetQueue) pending() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -449,7 +449,7 @@ func (q *targetQueue) deliver(it queued) {
 			q.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
 		}
 	}()
-	// Owner ruling: shutdown sends are single-attempt and the 10s force-exit
+	// Owner ruling: shutdown sends are single-attempt and the 15s force-exit
 	// stays — dispatch carries the flag through to the edit path too, because
 	// a 2s+5s retry ladder cannot finish inside a window the worker stop may
 	// already have spent.
