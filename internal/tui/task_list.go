@@ -1173,12 +1173,15 @@ func (m *TaskListModel) renderHeader(w int) string {
 	// Scroll range display
 	var scrollFull, scrollShort string
 	total := len(m.list.Items())
-	contentH := m.contentHeight()
-	if total > contentH {
-		perPage := m.list.Paginator.PerPage
-		if perPage <= 0 {
-			perPage = contentH
-		}
+	// Measured against the page the list actually shows: with the search
+	// box open it pages at one row less than contentHeight (applyListSize),
+	// and a list exactly one row longer than that lost its range indicator
+	// while the cursor sat on a second page.
+	perPage := m.list.Paginator.PerPage
+	if perPage <= 0 {
+		perPage = m.contentHeight()
+	}
+	if total > perPage {
 		start := m.list.Paginator.Page*perPage + 1
 		end := min(start+perPage-1, total)
 		scrollFull = fmt.Sprintf("[%d-%d/%d]", start, end, total)

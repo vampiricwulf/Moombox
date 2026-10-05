@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestTaskListEmptyStateFitsThePanel: the empty states render outside the
@@ -41,5 +43,27 @@ func TestTaskListEmptyStateNamesTheAddChord(t *testing.T) {
 	m.SetSize(80, 24)
 	if view := m.View(); !strings.Contains(view, "A A to add a video") {
 		t.Errorf("empty state does not name A A:\n%s", view)
+	}
+}
+
+// TestTaskListRangeIndicatorWhileSearching: with the search box open the list
+// pages at one row less than the panel's content height, so a list exactly as
+// long as that height spans two pages — and the [a-b/n] indicator, which
+// compared against the content height, vanished while the cursor sat on the
+// second page.
+//
+// Mutant: comparing against contentHeight() again — no indicator.
+func TestTaskListRangeIndicatorWhileSearching(t *testing.T) {
+	m := NewTaskListModel()
+	m.SetSize(40, 13) // 10 content rows; 9 while searching
+	var jobs []*database.Job
+	for i := range 10 {
+		jobs = append(jobs, &database.Job{ID: fmt.Sprintf("j%02d", i), Title: fmt.Sprintf("job %d", i), Status: database.StatusFinished, Platform: "youtube"})
+	}
+	m.SetJobs(jobs)
+	m.StartSearch()
+	m.list.Select(9)
+	if view := stripANSI(m.View()); !strings.Contains(view, "/10]") {
+		t.Errorf("no range indicator on the second page while searching:\n%s", view)
 	}
 }
