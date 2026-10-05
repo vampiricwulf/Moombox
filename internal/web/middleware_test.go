@@ -680,6 +680,35 @@ func TestCSRFMiddleware(t *testing.T) {
 			path:          "/invalidate_caches",
 			wantStatus:    http.StatusNoContent,
 		},
+		// A browser always sends Origin on a POST, so the POT exemption holds
+		// only for a caller that names no origin (yt-dlp, curl). Exempt by
+		// path alone, a page in the operator's browser could POST to
+		// 127.0.0.1 cross-site and drop the PO-token caches at will.
+		// Mutant: the exemption without the Origin/Referer test — 204.
+		{
+			name:          "POT /invalidate_caches from a cross-site page rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/invalidate_caches",
+			headers:       map[string]string{"Origin": "https://evil.example"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "POT /get_pot from a cross-site page rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/get_pot",
+			headers:       map[string]string{"Origin": "https://evil.example"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "POT /invalidate_it with a cross-site Referer rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/invalidate_it",
+			headers:       map[string]string{"Referer": "https://evil.example/page"},
+			wantStatus:    http.StatusForbidden,
+		},
 		{
 			name:          "InternalToken header bypasses CSRF on mutating request",
 			networkAccess: "localhost",

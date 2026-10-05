@@ -134,12 +134,19 @@ func CSRFMiddleware(store *config.Store, internalToken string, logger interface 
 				return
 			}
 
-			// Exempt loopback-only POT provider endpoints from CSRF.
-			// These are called by yt-dlp (Python scripts) which don't send
-			// Origin/Referer headers. The routes themselves enforce LoopbackOnly,
-			// so CSRF protection is redundant.
+			// Exempt the loopback-only POT provider endpoints from CSRF — for
+			// a caller that names no origin at all. They are called by yt-dlp
+			// (Python scripts), which send neither Origin nor Referer, and the
+			// routes themselves enforce LoopbackOnly. A browser always sends
+			// Origin on a POST (Fetch spec, no-cors included), so a request
+			// that carries one comes from a page and takes the origin check
+			// below like any other: exempt by path alone, a page open in the
+			// operator's browser could POST to 127.0.0.1 cross-site — drop the
+			// PO-token caches at will (both invalidate routes are unthrottled)
+			// or spend the 10/min /get_pot budget the yt-dlp plugin shares.
 			p := r.URL.Path
-			if p == "/get_pot" || p == "/invalidate_caches" || p == "/invalidate_it" {
+			if (p == "/get_pot" || p == "/invalidate_caches" || p == "/invalidate_it") &&
+				r.Header.Get("Origin") == "" && r.Header.Get("Referer") == "" {
 				next.ServeHTTP(w, r)
 				return
 			}
