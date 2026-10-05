@@ -460,8 +460,11 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 			}, sp.logger)
 			result.TwitchVodChatDl = vodChatDl
 
+			// "pending" until ExecuteTwitch starts it (startChat writes
+			// "downloading"): a VOD still has the download-slot wait ahead of
+			// it, and the chat was shown downloading through all of it.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "downloading",
+				"chat_status": "pending",
 			})
 		}
 	} else {
@@ -644,8 +647,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
+			// "pending" until ExecuteTwitch starts it — see the VOD twin.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "downloading",
+				"chat_status": "pending",
 			})
 		}
 	}

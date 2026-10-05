@@ -373,6 +373,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if vod, ok := twitchChatDl.(*twitch.VodChatDownloader); ok {
 			vod.SetOnProgress(func(count int) { tracker.SetChatCount(count) })
 		}
+		// The stream processor wrote "pending"; this is where the capture
+		// actually starts, as the YouTube downloader's OnStart marks it.
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+			"chat_status": "downloading",
+		})
 		done := make(chan struct{})
 		chatDone = done
 		go func() {

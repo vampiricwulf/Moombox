@@ -1120,9 +1120,13 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 		// wrote one — landed on top of the retry's fresh status. Nothing
 		// re-enqueues a user-cancelled job, so I2's reason for freeing the
 		// slot first does not apply here.
-		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status": database.StatusCancelled,
-		})
+		updates := map[string]any{"status": database.StatusCancelled}
+		if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil {
+			if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
+				updates["chat_status"] = cs
+			}
+		}
+		w.db.UpdateJobFields(job.ID, updates)
 	}
 
 	// Free the queue slot — before the notification, symmetric with
@@ -1141,6 +1145,25 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 		// the same ctx), and there is nothing left to write.
 		w.logger.Info("job interrupted (shutdown or row deleted), leaving its state as is", "jobID", job.ID)
 	}
+}
+
+// cancelledChatStatus settles the chat_status a user cancel leaves behind.
+// Neither orchestrator's cancel arm records a chat verdict — it stops the
+// downloader and returns, and on a shutdown that is right, since the row keeps
+// its state and the capture resumes on the next start. A user cancel is
+// terminal, though, and both UIs render the value verbatim, so a Cancelled job
+// went on showing its chat as "downloading" (or "pending") indefinitely. A
+// capture that was running stopped short — "incomplete", the same verdict a
+// cut-off capture gets everywhere else; one that never started has nothing to
+// report. A settled verdict is left as it is (ok false).
+func cancelledChatStatus(current string) (string, bool) {
+	switch current {
+	case "downloading":
+		return chatStatusIncomplete, true
+	case "pending":
+		return "", true
+	}
+	return "", false
 }
 
 func isTerminalStatus(status database.JobStatus) bool {
