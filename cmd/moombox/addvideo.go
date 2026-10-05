@@ -136,7 +136,11 @@ func addVideo(input, configPath string) {
 			os.Exit(1)
 		}
 		if added {
-			fmt.Printf("Added Twitch %s %s to queue.\n", tw.Type, jobID)
+			kind := "channel"
+			if tw.Type == utils.TwitchVOD {
+				kind = "VOD"
+			}
+			fmt.Printf("Added Twitch %s %s to queue.\n", kind, jobID)
 			login := ""
 			if tw.Type != utils.TwitchVOD {
 				login = tw.Value
