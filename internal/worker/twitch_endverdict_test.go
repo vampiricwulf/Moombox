@@ -412,9 +412,10 @@ func TestVariantRefreshFailureOnALiveBroadcastLandsInError(t *testing.T) {
 			"on a broadcast the consult just confirmed LIVE must land the job in Error, never "+
 			"Finished", err, errUsher)
 	}
-	if got := h.checks.Load(); got != 2 {
-		t.Errorf("CheckStreamFn calls = %d, want 2 (the engine's 404 consult and the refresh "+
-			"site's re-verify)", got)
+	// The engine's 404 consult, one before each retry's pause (still live,
+	// so the schedule runs out), and the refresh site's re-verify.
+	if got, want := h.checks.Load(), int32(2+liveRefreshAttempts-1); got != want {
+		t.Errorf("CheckStreamFn calls = %d, want %d", got, want)
 	}
 	if got := refreshes.Load(); got != liveRefreshAttempts {
 		t.Errorf("the refresh was tried %d times before the job gave up, want %d", got, liveRefreshAttempts)
@@ -442,9 +443,11 @@ func TestVariantRefreshFailureOnAnEndedBroadcastFinalizes(t *testing.T) {
 	h := newEndVerdictHarness(t, "tw_refresh_ended")
 	fastRefreshRetries(t)
 	h.variant.CheckStreamFn = func(context.Context) (bool, error) {
-		return h.checks.Add(1) == 1, nil // live at the consult, over at the re-verify
+		return h.checks.Add(1) == 1, nil // live at the consult, over at the next look
 	}
+	var refreshes atomic.Int32
 	h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+		refreshes.Add(1)
 		return nil, errUsher
 	}
 
@@ -464,6 +467,12 @@ func TestVariantRefreshFailureOnAnEndedBroadcastFinalizes(t *testing.T) {
 	if !sawMuxing(seq) {
 		t.Errorf("status sequence = %v — a confirmed end takes the finalize path, which flips the "+
 			"row to Muxing", seq)
+	}
+	// The retry checks the stream before each pause, so an ended broadcast
+	// is not refreshed again. Mutant: retryVariantRefresh without its end
+	// check — the whole schedule of refreshes runs first.
+	if got := refreshes.Load(); got != 1 {
+		t.Errorf("the variant refresh ran %d times for a broadcast already over, want 1", got)
 	}
 }
 

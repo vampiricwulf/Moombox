@@ -645,6 +645,7 @@ sessionLoop:
 
 				// Re-fetch master playlist FIRST to determine if quality actually changed.
 				newVariant, fetchErr := refreshBestVariant(ctx)
+				confirmedOver := false
 				if fetchErr != nil && !isGap && !isInitChange {
 					// Nothing else carries this capture on: the exit below
 					// leaves the job in Error, and neither Retry (it wipes
@@ -653,7 +654,14 @@ sessionLoop:
 					// outlasts a single request often enough to be worth
 					// riding out — footage the window drops meanwhile is
 					// recorded as a gap split once the successor starts.
-					newVariant, fetchErr = o.retryVariantRefresh(ctx, refreshBestVariant, fetchErr, jobCtx.Job.ID)
+					newVariant, confirmedOver, fetchErr = o.retryVariantRefresh(ctx, refreshBestVariant, fetchErr,
+						func(c context.Context) bool {
+							if variant.CheckStreamFn == nil {
+								return false
+							}
+							live, err := variant.CheckStreamFn(c)
+							return err == nil && !live
+						}, jobCtx.Job.ID)
 				}
 				if fetchErr != nil {
 					if isGap || isInitChange {
@@ -702,7 +710,12 @@ sessionLoop:
 					}
 					o.logger.Error("failed to refresh Twitch variants",
 						"err", fetchErr, "downloadErr", dlErr, "jobID", jobCtx.Job.ID)
-					if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
+					if confirmedOver {
+						// The retry's own status check already confirmed the
+						// end; a second one would only delay the finalize.
+						o.logger.Info("Twitch broadcast confirmed over during the variant refresh retries; finalizing captured parts",
+							"jobID", jobCtx.Job.ID)
+					} else if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
 						o.logger.Info("Twitch broadcast confirmed over after the failed variant refresh; finalizing captured parts",
 							"jobID", jobCtx.Job.ID)
 					}
@@ -1422,25 +1435,32 @@ func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, varia
 // the download loop with err, pausing longer before each attempt
 // (liveRefreshAttempts tries in all, counting the one that already failed),
 // and returns the last error when none succeeds. It gives up at once when
-// ctx ends — an outage or a shutdown is the session loop's to handle.
+// ctx ends — an outage or a shutdown is the session loop's to handle — and
+// when ended (nil-safe) confirms the broadcast over before a pause: a
+// variant list that is gone because the stream ended is the commonest way
+// here, and riding out the whole schedule only held an ended capture in
+// Downloading for another ~100 s. confirmedOver reports that exit.
 func (o *DownloadOrchestrator) retryVariantRefresh(ctx context.Context,
-	refresh func(context.Context) (*twitch.TwitchHLSVariant, error), err error, jobID string) (*twitch.TwitchHLSVariant, error) {
+	refresh func(context.Context) (*twitch.TwitchHLSVariant, error), err error,
+	ended func(context.Context) bool, jobID string) (best *twitch.TwitchHLSVariant, confirmedOver bool, _ error) {
 	for attempt := 1; attempt < liveRefreshAttempts; attempt++ {
+		if ended != nil && ended(ctx) {
+			return nil, true, err
+		}
 		o.logger.Warn("Twitch variant refresh failed, retrying",
 			"attempt", attempt, "of", liveRefreshAttempts, "err", err, "jobID", jobID)
 		if sleepErr := utils.Sleep(ctx, time.Duration(attempt)*liveRefreshRetryDelay); sleepErr != nil {
-			return nil, sleepErr
+			return nil, false, sleepErr
 		}
-		var best *twitch.TwitchHLSVariant
 		if best, err = refresh(ctx); err == nil {
 			o.logger.Info("Twitch variant refresh recovered", "attempt", attempt+1, "jobID", jobID)
-			return best, nil
+			return best, false, nil
 		}
 		if ctx.Err() != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return nil, err
+	return nil, false, err
 }
 
 // liveRefreshAttempts bounds retryVariantRefresh: with liveRefreshRetryDelay
