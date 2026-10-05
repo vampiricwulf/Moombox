@@ -157,3 +157,51 @@ func TestYouTubeVodFlipsToMuxingBeforeItsChatWait(t *testing.T) {
 		t.Error("the VOD chat wait no longer follows the VOD branch's Muxing write")
 	}
 }
+
+// TestYouTubeLiveFlipsToMuxingBeforeItsChatWait is the live twin of the VOD
+// pin above. The engine clears a live capture's resume sidecar the moment it
+// sees the stream end, and the live chat wait (up to chatWaitTimeout) came
+// before muxAndFinalize's Muxing write — so a restart in between found the
+// row Downloading, re-probed a stream now post-live, set the complete
+// recording aside and downloaded it again from the start.
+//
+// Mutant: dropping the live branch's Muxing write — the row stays
+// Downloading through the chat wait.
+func TestYouTubeLiveFlipsToMuxingBeforeItsChatWait(t *testing.T) {
+	fset := token.NewFileSet()
+	src, err := os.ReadFile("orchestrator.go")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	file, err := parser.ParseFile(fset, "orchestrator.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var liveBranch ast.Node
+	ast.Inspect(file, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok || liveBranch != nil {
+			return true
+		}
+		if id, ok := ifs.Cond.(*ast.Ident); !ok || id.Name != "isVod" || ifs.Else == nil {
+			return true
+		}
+		elseBody := string(src[fset.Position(ifs.Else.Pos()).Offset:fset.Position(ifs.Else.End()).Offset])
+		if strings.Contains(elseBody, "runLiveStreamDownload(") {
+			liveBranch = ifs.Else
+		}
+		return true
+	})
+	if liveBranch == nil {
+		t.Fatal("no `if isVod { ... } else { ... }` whose else calls runLiveStreamDownload in orchestrator.go")
+	}
+	body := string(src[fset.Position(liveBranch.Pos()).Offset:fset.Position(liveBranch.End()).Offset])
+	if !strings.Contains(body, `"status": database.StatusMuxing`) {
+		t.Error("the YouTube live branch no longer writes Muxing once its media is complete — a " +
+			"restart during the chat wait then re-downloads the whole recording")
+	}
+	if wait := strings.Index(string(src), "chatDl.MarkStreamEnded()"); wait < 0 ||
+		wait < fset.Position(liveBranch.End()).Offset {
+		t.Error("the live chat wait no longer follows the live branch's Muxing write")
+	}
+}

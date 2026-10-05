@@ -499,7 +499,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// flushes the gaps; Close is idempotent.
 			tracker.Close()
 			// Muxing now, not after the chat wait below — the live branch
-			// writes it before its own wait for the same reason. A VOD's chat
+			// writes it before that wait too, for the same reason. A VOD's chat
 			// replay can page for hours after the media is complete, and a
 			// restart in that window found the row still Downloading,
 			// re-probed it and downloaded the whole recording again (setting
@@ -544,6 +544,17 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// and is never overwritten by a flag write.
 		if err == nil {
 			o.finalizeIncompleteTail(jobCtx.Job.ID, result, waitedForResume)
+			// Muxing now, as the VOD branch does and for the same reason: the
+			// engine cleared the resume sidecar the moment it saw the stream
+			// end, and the chat wait below can hold this row for minutes. A
+			// restart in that window found it still Downloading, re-probed a
+			// stream now post-live, set the complete recording aside and
+			// downloaded it again from the start. As Muxing,
+			// enqueueExistingJobs re-muxes it from staging (muxOnRestart) — or,
+			// for an incomplete tail, sends it back through the refresh loop.
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"status": database.StatusMuxing,
+			})
 		}
 	}
 
