@@ -348,6 +348,7 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 
 - **Parent process** (no `_MOOMBOX_CHILD` in environment): Runs `launchAndSupervise()`. Spawns itself as a child process with `_MOOMBOX_CHILD=1` and waits.
 - **Child process** (`_MOOMBOX_CHILD=1`): Runs the full application service stack.
+- **Stop forwarding** (`forwardStop`, `cmd/moombox/launcher.go`): the single-instance lock lives in the launcher, so a SIGTERM to the launcher's PID is passed on to the child (killed only if it cannot be signalled) instead of leaving it running unlocked. On Windows the launcher records the stop and sends nothing: Go raises SIGTERM there only for the console close, logoff and shutdown events, which reach every process on the console, so the child already has its own and is shutting down gracefully inside Windows' grace period. Signalling cannot deliver SIGTERM on Windows, and the `Kill` fallback the launcher used to take was `TerminateProcess` milliseconds into that shutdown.
 
 **Parent behavior on child exit** (the `switch` in `launchAndSupervise`, `cmd/moombox/launcher.go`, in this order):
 - Exit code 42 (`exitCodeRestart`): Respawn the child (loop continues). If `<exe>.old` exists (from an

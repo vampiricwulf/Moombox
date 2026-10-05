@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -51,9 +52,9 @@ func launchAndSupervise() {
 	// plain `kill <launcher-pid>` (the PID a user sees for the foreground
 	// process) killed only the launcher, the child would keep running —
 	// and writing to the database — while the lock is released, letting a
-	// second instance start against the same DB. Windows has no SIGTERM
-	// delivery for console apps, so the fallback there is Kill; outright
-	// TerminateProcess on the launcher remains uninterceptable.
+	// second instance start against the same DB. On Windows the launcher
+	// does not signal at all: see forwardStop. Outright TerminateProcess on
+	// the launcher remains uninterceptable.
 	var child atomic.Pointer[os.Process]
 	// starting is true while the main loop is mid-launch (cmd.Start in flight,
 	// child not yet stored). The forwarder uses it to distinguish "genuinely no
@@ -67,9 +68,7 @@ func launchAndSupervise() {
 	var terminating atomic.Bool
 	forward := func(p *os.Process) {
 		terminating.Store(true)
-		if err := p.Signal(syscall.SIGTERM); err != nil {
-			_ = p.Kill()
-		}
+		forwardStop(runtime.GOOS, p)
 	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
@@ -285,6 +284,36 @@ const (
 	childPostUpdateFailure                        // a fresh update's first boot failed: roll back or preserve
 	childCrash                                    // count the crash and respawn with backoff
 )
+
+// stoppable is the part of *os.Process forwardStop drives, so a test can
+// record what it would have done to a child.
+type stoppable interface {
+	Signal(os.Signal) error
+	Kill() error
+}
+
+// forwardStop hands the launcher's SIGTERM on to the child.
+//
+// On Windows it does nothing. Go delivers SIGTERM there only for the console
+// close, logoff and shutdown events, which Windows sends to every process
+// attached to the console — the child shares the launcher's, so it already
+// has the same event and has begun its own graceful shutdown (worker drain,
+// resume sidecars, WAL checkpoint) inside the grace period Windows allows.
+// os.Process.Signal cannot deliver SIGTERM on Windows, and the Kill fallback
+// it used to take was TerminateProcess: the recorder died milliseconds into
+// that shutdown. The launcher only records the stop (terminating) and waits
+// for the child to exit.
+//
+// Elsewhere SIGTERM reaches only the PID it was sent to, so the launcher
+// passes it on, killing the child only when it cannot be signalled.
+func forwardStop(goos string, p stoppable) {
+	if goos == "windows" {
+		return
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		_ = p.Kill()
+	}
+}
 
 // classifyChildExit decides what one child exit means. Pure, so the order of
 // the rules below — which is the whole policy — is testable.
