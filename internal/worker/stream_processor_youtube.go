@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -448,6 +449,29 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 // between the primary probe path and the auth-probe-unclear fallback
 // (audit reports/worker.md F55).
 func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+	// The playability verdict the initial Process acts on, re-read on the
+	// go-live fetch — but only its credential cases, and only when the fetch
+	// came back with no formats to download. A members-only job whose cookies
+	// died during a long wait (or whose wall went up mid-wait) used to go on
+	// from here to "no download strategy available": a plain Error with no
+	// "Authentication Required" alert, which the credential-recovery sweep —
+	// it resumes COOKIES? rows only — never looked at again.
+	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && probeFormatCount(fullInfo) == 0 &&
+		(errors.Is(sentinel, ErrCookiesRequired) || errors.Is(sentinel, ErrNotAMember)) {
+		sp.logger.Warn("playability check failed at go-live",
+			"videoID", job.VideoID,
+			"playability", string(fullInfo.PlayabilityError),
+			"sessionAuth", string(fullInfo.SessionAuth),
+			"reason", errMsg)
+		sp.stopEarlyChat(chatDl)
+		return &StreamProcessResult{
+			VideoInfo:      fullInfo,
+			ShouldDownload: false,
+			Error:          errMsg,
+			ErrSentinel:    sentinel,
+		}
+	}
+
 	isVod := fullInfo.StreamStatus == youtube.StreamVOD || fullInfo.StreamStatus == youtube.StreamPostLive
 
 	if !isVod {
