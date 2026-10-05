@@ -61,6 +61,14 @@ type ConfigRoutesCallbacks struct {
 	// OnChannelChange is called when channels are added, updated, or removed,
 	// so monitors can re-evaluate their channel lists immediately.
 	OnChannelChange func()
+	// OnMonitorIntervalChange is called when a monitor check interval
+	// (feed_check_interval, decapi_check_interval, twitch_check_interval)
+	// changes. Each monitor reads its interval only when it arms the next
+	// cycle, so without it the timer already armed kept the old delay — up
+	// to a day for the feed — while the TUI's save, which kicks the
+	// monitors, applied the same change at once. Not called when the save
+	// also carried channels: OnChannelChange kicks them already.
+	OnMonitorIntervalChange func()
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -80,6 +88,24 @@ type ConfigRoutesCallbacks struct {
 	// whole saved DownloaderConfig because the two keys are reconciled
 	// against each other (see config.DownloaderConfig.ReorderLimitBytes).
 	OnReorderBudgetChange func(d config.DownloaderConfig)
+}
+
+// monitorIntervals is the comparable form of the three monitor check
+// intervals; an unset override reads as -1.
+type monitorIntervals struct {
+	feed           float64
+	decapi, twitch int
+}
+
+func monitorIntervalsOf(cfg *config.MoomboxConfig) monitorIntervals {
+	iv := monitorIntervals{feed: cfg.Monitors.FeedCheckInterval.Value, decapi: -1, twitch: -1}
+	if p := cfg.Monitors.DecapiCheckInterval; p != nil {
+		iv.decapi = *p
+	}
+	if p := cfg.Monitors.TwitchCheckInterval; p != nil {
+		iv.twitch = *p
+	}
+	return iv
 }
 
 // pathFieldError returns the per-field error for a user-supplied path value,
@@ -1125,6 +1151,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldReorderPerJob := cfg.Downloader.ReorderBufferMB
 		oldReorderBudget := cfg.Downloader.ReorderBudgetMB
 		oldPublicURL := cfg.Network.PublicURL
+		oldIntervals := monitorIntervalsOf(cfg)
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1152,6 +1179,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newReorderPerJob := cfg.Downloader.ReorderBufferMB
 		newReorderBudget := cfg.Downloader.ReorderBudgetMB
 		newPublicURL := cfg.Network.PublicURL
+		newIntervals := monitorIntervalsOf(cfg)
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1170,8 +1198,12 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			if newHideAge != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
 				callbacks.OnHideFinishedAgeChanged()
 			}
-			if _, hasChannels := updates["channels"]; hasChannels && callbacks.OnChannelChange != nil {
+			_, hasChannels := updates["channels"]
+			if hasChannels && callbacks.OnChannelChange != nil {
 				callbacks.OnChannelChange()
+			}
+			if !hasChannels && newIntervals != oldIntervals && callbacks.OnMonitorIntervalChange != nil {
+				callbacks.OnMonitorIntervalChange()
 			}
 			// public_url lives in [network], not [notifications], but the
 			// notification manager is its only consumer — it reads the base
