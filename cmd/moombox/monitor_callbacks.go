@@ -1518,6 +1518,11 @@ func (s *runState) wireMonitorCallbacks() {
 		// History fires for EVERY disposition — it is what makes
 		// HasProcessed mean "a job was created" (spec §10/§15).
 		s.db.AddToHistory(videoID)
+		// Announced BEFORE the worker is handed the job: each target delivers
+		// in queue order, and an edit-mode target's "Found" queued behind the
+		// worker's first event would edit the message it created back to
+		// "Found" until the next event, possibly hours later.
+		announceYouTubeJobFound(s.notifyMgr, job, d)
 		if enqueueNow {
 			s.dlWorker.EnqueueJob(videoID)
 		} else {
@@ -1529,7 +1534,6 @@ func (s *runState) wireMonitorCallbacks() {
 		// AddJob's OnJobAdded handler (wired below) handles the WS
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
-		announceYouTubeJobFound(s.notifyMgr, job, d)
 	}
 
 	// Monitor -> Worker: create jobs for found videos. Panic recovery
@@ -1603,13 +1607,14 @@ func (s *runState) wireMonitorCallbacks() {
 		// live, manifesting as a false "twitch channel is offline" error).
 		s.dlWorker.StashTwitchStreamInfo(info)
 		s.db.AddToHistory(jobID)
+		// Announced before the enqueue, as on the YouTube path.
+		if s.notifyMgr.HasTargets() {
+			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
+		}
 		s.dlWorker.EnqueueJob(jobID)
 		// Same as the YouTube path — AddJob's OnJobAdded handler
 		// broadcasts the new job; no explicit BroadcastJobsUpdate
 		// needed. DECISIONS #21 consumer migration.
-		if s.notifyMgr.HasTargets() {
-			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
-		}
 	}
 
 	s.twitchMon.OnStreamRecover = func(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, jobID string) {

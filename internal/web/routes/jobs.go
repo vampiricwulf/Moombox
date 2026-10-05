@@ -791,11 +791,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				jsonError(rw, "job already exists", http.StatusConflict)
 				return
 			}
-			if w != nil {
-				w.EnqueueJob(job.ID)
-			}
+			// Announced before the enqueue (see the YouTube add below).
 			if notifier != nil {
 				notifier.Send(notifications.JobAdded(worker.NotifyFacts(job)))
+			}
+			if w != nil {
+				w.EnqueueJob(job.ID)
 			}
 			// Content-Type must be set before the explicit WriteHeader —
 			// headers set afterwards are silently dropped for non-gzip
@@ -866,10 +867,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		if w != nil {
-			w.EnqueueJob(job.ID)
-		}
-
+		// "Added" is queued BEFORE the worker is handed the job: each target
+		// delivers in queue order, and an edit-mode target's "Added" queued
+		// behind the worker's first event would edit the message that event
+		// created back to "Added" until the next one.
 		if notifier != nil {
 			facts := worker.NotifyFacts(job)
 			if body.SelectedVideoItag != nil {
@@ -908,6 +909,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				facts.TimeRange = rangeValue
 			}
 			notifier.Send(notifications.JobAdded(facts))
+		}
+
+		if w != nil {
+			w.EnqueueJob(job.ID)
 		}
 
 		// Set before WriteHeader — see the Twitch-create path above.
