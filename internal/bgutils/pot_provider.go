@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,13 @@ type inflightEntry struct {
 	// mint since (see cacheGen).
 	gen uint64
 }
+
+// errSidecarDown answers a mint while the configured sidecar is down. There
+// is no goja fallback in sidecar mode: BotGuard's timing check rejects the
+// in-process path, so it mints no PO token in practice, and running it cost
+// every request during an outage seconds to minutes of doomed work and three
+// Google round trips, serialised behind one lock.
+var errSidecarDown = errors.New("BotGuard sidecar unavailable — no PO token until it is back up")
 
 // bypassInflightSuffix keys a bypassCache mint apart from an ordinary one
 // for the same binding: a caller that must not get the cached minter's token
@@ -57,7 +65,7 @@ type PotProvider struct {
 	// a token of the old minter; it is still returned to the callers that
 	// joined it, but not cached over what came after. Guarded by mu.
 	cacheGen uint64
-	// minterCreatingMu serialises minter creation across goroutines
+	// minterCreating serialises minter creation across goroutines
 	// that all see "no minter". Without it, two goroutines requesting
 	// different bindings on a fresh process would each start a
 	// BotGuard VM and the second one's would be replaced + leaked.
@@ -65,9 +73,14 @@ type PotProvider struct {
 	// while holding pp.mu — that would deadlock against the
 	// minter-eviction AfterFunc which acquires pp.mu under the same
 	// lock-ordering. CRIT-2.
-	minterCreatingMu sync.Mutex
-	config           *BgConfig
-	logger           interface {
+	//
+	// A one-slot channel rather than a sync.Mutex so a waiter can give up on
+	// its own deadline: the holder's BotGuard run takes seconds to minutes,
+	// and every caller behind it used to wait it out whatever its context
+	// said. Made by NewPotProvider.
+	minterCreating chan struct{}
+	config         *BgConfig
+	logger         interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -170,18 +183,32 @@ func NewPotProvider(config *BgConfig, logger interface {
 		config.RequestKey = DefaultRequestKey
 	}
 	return &PotProvider{
-		sessionCache: make(map[string]*SessionData),
-		minterCache:  make(map[string]*TokenMinter),
-		inflight:     make(map[string]*inflightEntry),
-		config:       config,
-		logger:       logger,
+		sessionCache:   make(map[string]*SessionData),
+		minterCache:    make(map[string]*TokenMinter),
+		inflight:       make(map[string]*inflightEntry),
+		minterCreating: make(chan struct{}, 1),
+		config:         config,
+		logger:         logger,
 	}
 }
 
-// SetSidecar attaches a started BotGuard sidecar to the provider. Call once
-// after the subprocess handshake succeeds in cmd/moombox/services.go.
-// Passing nil reverts to the goja-only path (useful for tests that want to
-// exercise the fallback).
+// lockMinterCreation takes the minter-creation lock, or gives up when ctx
+// ends first. The returned func releases it.
+func (pp *PotProvider) lockMinterCreation(ctx context.Context) (func(), error) {
+	select {
+	case pp.minterCreating <- struct{}{}:
+		return func() { <-pp.minterCreating }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// SetSidecar attaches the BotGuard sidecar to the provider, which puts it in
+// sidecar mode: every mint goes to the sidecar, and while it is down a mint
+// fails at once (errSidecarDown) instead of falling to goja. cmd/moombox
+// attaches the handle whenever [bgutils] use_sidecar is on, started or not —
+// the supervisor brings a failed first start up later. Passing nil reverts to
+// the goja-only path ([bgutils] use_sidecar = false, and tests).
 func (pp *PotProvider) SetSidecar(s *sidecar.Sidecar) {
 	pp.mu.Lock()
 	pp.sidecar = s
@@ -361,7 +388,9 @@ func (pp *PotProvider) InvalidateCaches() {
 	}
 	pp.mintersInvalidated.Add(uint64(len(toCleanup)))
 
-	if sc != nil {
+	// A child that is down has no caches; the one the supervisor brings up
+	// starts empty.
+	if sc != nil && sc.IsHealthy() {
 		// Bound the sidecar IPC by 5s so a hung child can't wedge an
 		// operator-driven invalidate.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -392,7 +421,7 @@ func (pp *PotProvider) InvalidateIntegrityTokens() {
 	}
 	pp.mintersInvalidated.Add(uint64(len(toCleanup)))
 
-	if sc != nil {
+	if sc != nil && sc.IsHealthy() { // see InvalidateCaches
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := sc.InvalidateIT(ctx); err != nil {
@@ -468,15 +497,19 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	// Sidecar path: a real Node + V8 + JSDOM subprocess that passes
 	// BotGuard's timing fingerprint and returns real integrity tokens.
 	// Bypasses the goja minterCache entirely (the sidecar maintains its
-	// own internal minter cache, ~6h TTL). On any sidecar error we fall
-	// through to the goja path so token generation never goes dark.
+	// own internal minter cache, ~6h TTL). A sidecar that is attached but
+	// down, or a sidecar mint that fails, is the answer: see errSidecarDown
+	// for why there is no goja fallback in sidecar mode.
 	// challenge (non-fresh: no freshMinter flag) is only consulted by the
 	// sidecar when IT has no valid cached minter of its own — see
 	// Sidecar.GeneratePlayerPoToken.
 	pp.mu.Lock()
 	sc := pp.sidecar
 	pp.mu.Unlock()
-	if sc != nil && sc.IsHealthy() {
+	if sc != nil && !sc.IsHealthy() {
+		return nil, errSidecarDown
+	}
+	if sc != nil {
 		bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
 		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix, "bypassCache", bypassCache)
 		// bypassCache must reach the sidecar too, or the caller's explicit
@@ -502,7 +535,8 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 			}, nil
 		}
 		pp.sidecarMintsErr.Add(1)
-		pp.logger.Warn("[PotProvider] sidecar mint failed; falling through to goja", "err", err)
+		pp.logger.Warn("[PotProvider] sidecar mint failed", "err", err)
+		return nil, fmt.Errorf("sidecar mint: %w", err)
 	}
 
 	// The goja fallback can't consume a challenge-sourced minter today
@@ -526,12 +560,15 @@ func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding s
 	// Goja fallback path. Serialize minter creation across goroutines:
 	// every "first request" goroutine sees an empty minterCache and
 	// would otherwise race to spin up a BotGuard VM, with the losers
-	// being replaced + leaked. Holding minterCreatingMu through the
+	// being replaced + leaked. Holding minterCreating through the
 	// (potentially seconds-long) VM init is acceptable because the
 	// alternative — duplicate BotGuard runs — is exactly what CRIT-2 is
 	// here to prevent.
-	pp.minterCreatingMu.Lock()
-	defer pp.minterCreatingMu.Unlock()
+	unlock, err := pp.lockMinterCreation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	// Re-check the cache under the creation lock. Another goroutine may
 	// have just stored a minter while we waited.
@@ -631,7 +668,7 @@ func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding s
 //     nobody else can reach would just pin its ~1-3MB goja VM to the heap
 //     for up to ~6h with nothing left to free it early.
 //
-// No minterCreatingMu either: that lock only serializes writers to the
+// No minterCreating either: that lock only serializes writers to the
 // shared minterCache, which this path never touches, so concurrent
 // ephemeral mints (rare — GVS mints once per job start) don't need to
 // queue behind each other or behind an unrelated cache-populating mint.
@@ -694,14 +731,19 @@ func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, contentBinding, c
 	pp.mu.Lock()
 	sc := pp.sidecar
 	pp.mu.Unlock()
-	if sc != nil && sc.IsHealthy() {
+	if sc != nil {
+		// Sidecar mode: no goja fallback (see errSidecarDown).
+		if !sc.IsHealthy() {
+			return GvsMint{}, errSidecarDown
+		}
 		res, err := sc.GenerateGvsPoToken(ctx, contentBinding, challenge)
 		if err == nil {
 			pp.sidecarMintsHit.Add(1)
 			return GvsMint{PoToken: res.PoToken, MinterSource: res.MinterSource, MinterFresh: res.MinterFresh, ViaSidecar: true}, nil
 		}
 		pp.sidecarMintsErr.Add(1)
-		pp.logger.Warn("[PotProvider] sidecar GVS mint failed; falling through to goja", "err", err)
+		pp.logger.Warn("[PotProvider] sidecar GVS mint failed", "err", err)
+		return GvsMint{}, fmt.Errorf("sidecar GVS mint: %w", err)
 	}
 	session, err := func() (s *SessionData, e error) {
 		defer func() {
@@ -753,8 +795,11 @@ func (pp *PotProvider) proactiveRefreshMinter(original *TokenMinter) {
 	// can't race with a fresh GeneratePoToken trying to bootstrap a
 	// missing minter (which would happen if eviction fired between the
 	// cache check above and the swap below).
-	pp.minterCreatingMu.Lock()
-	defer pp.minterCreatingMu.Unlock()
+	unlock, err := pp.lockMinterCreation(refreshCtx)
+	if err != nil {
+		return // the eviction AfterFunc still fires at ttl
+	}
+	defer unlock()
 
 	// Re-check under the creation lock — another goroutine may have
 	// already replaced the minter while we waited.

@@ -779,7 +779,7 @@ The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v24 b
                   └────────────────────────────────────────┘
 ```
 
-`PotProvider.generateAndMint` branches on `pp.sidecar != nil && pp.sidecar.IsHealthy()`. On success, it caches the result in the session cache and returns. On any sidecar error, it logs a warning and falls through to the legacy goja-only path so token generation never goes completely dark.
+`PotProvider.generateAndMint` (and `GenerateGvsPoToken`) branch on `pp.sidecar != nil` — sidecar mode, which `cmd/moombox` enters by attaching the handle whenever `[bgutils] use_sidecar` is on, before the first start, so a failed first start is an outage like any other. On success the result is cached in the session cache and returned. While the sidecar is down a mint fails at once with `errSidecarDown`, and a sidecar mint that errors is returned as that error: there is no goja fallback in sidecar mode. It used to fall through to the in-process path, which mints no PO token in practice (step 5 below), so every request during an outage paid seconds to minutes of doomed BotGuard work and three Google round trips, serialised behind the minter-creation lock.
 
 ### Sidecar lifecycle (`internal/bgutils/sidecar/`)
 
@@ -828,7 +828,7 @@ Lives at the repo root (peer to `cmd/`, `internal/`, `web/`). Production node_mo
 
 ### Goja fallback path
 
-When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR `Sidecar.IsHealthy()` returns false mid-flight, `PotProvider.generateAndMint` falls through to the in-process flow:
+When `[bgutils] use_sidecar = false` in config (no sidecar attached), `PotProvider.generateAndMint` runs the in-process flow. Minter creation is serialised by a one-slot lock (`lockMinterCreation`) that a waiter gives up on when its own context ends, rather than waiting out the holder's whole BotGuard run:
 
 1. **Fetch Challenge** (`challenge.go`):
    - POST to `https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create` (primary) or `https://www.youtube.com/api/jnn/v1/Create` (fallback, controlled by `config.UseYouTubeAPI`).
@@ -879,7 +879,7 @@ When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR 
 - **TTL**: Dynamic, set by Google's `estimatedTtlSecs` in the GenerateIT response.
 - **Content**: `TokenMinter` struct with `MintFunc` (closure over Goja VM), `ExpiresAt`, and `Cleanup` function.
 - **Auto-eviction**: `time.AfterFunc(ttl, ...)` schedules exact-TTL cleanup. A second `time.AfterFunc(ttl - minterRefreshLead, ...)` fires 5 minutes before expiry to proactively regenerate the minter so user-facing calls don't pay the 2-10s BotGuard cost (FRESH-2 audit fix). When either AfterFunc fires, it acquires `pp.mu`, checks that the cached minter is still the same instance (pointer comparison), removes / replaces, then calls `Cleanup()` outside the lock to shut down the Goja VM.
-- **Sidecar interaction**: Effectively unused under sidecar mode. The sidecar maintains its own internal minter cache inside the Node process; `PotProvider`'s minter cache is populated only when the sidecar path fails and the goja path generates a minter.
+- **Sidecar interaction**: Effectively unused under sidecar mode. The sidecar maintains its own internal minter cache inside the Node process; `PotProvider`'s minter cache is populated only on the goja-only path (`use_sidecar = false`).
 - **VM lifetime**: The `Cleanup` function is critical. The minter's `MintFunc` is a closure over the Goja runtime state. Calling `Cleanup()` shuts down the VM, invalidating the closure. This is why minter eviction is the only correct place to call it. `cleanupExpired` returns the slice of evicted minters and the caller (`GeneratePoToken`) runs `safeCleanup` outside `pp.mu` — holding the lock across `m.Cleanup()` could deadlock against a concurrent `mintPoToken` (CRIT-6 audit fix; same anti-pattern that was previously fixed in `InvalidateCaches` / `InvalidateIntegrityTokens`).
 
 #### Inflight Dedup

@@ -741,6 +741,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// handle is a no-op, and main.go's memory log already gates on
 		// IsHealthy().
 		s.bgSidecar = bgSidecar
+		// Attached before the first start, for the same reason: it is what
+		// puts PotProvider in sidecar mode, where a mint during an outage
+		// fails at once instead of running the in-process BotGuard pass that
+		// mints nothing — and a failed first start is an outage like any
+		// other.
+		potProvider.SetSidecar(bgSidecar)
 
 		sCtx, sCancel := context.WithTimeout(s.ctx, 60*time.Second)
 		startErr := bgSidecar.Start(sCtx)
@@ -755,7 +761,6 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// sig are unavailable until a child comes up.
 			sup.Notify("initial start failed: " + startErr.Error())
 		} else {
-			potProvider.SetSidecar(bgSidecar)
 			sidecar.PublishHealth(sidecar.Health{Healthy: true, Since: time.Now()})
 			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
 		}
