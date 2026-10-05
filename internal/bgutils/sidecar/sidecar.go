@@ -10,7 +10,7 @@
 // Lifecycle:
 //
 //	s := sidecar.New(sidecar.Config{Logger: log})
-//	if err := s.Start(ctx); err != nil { /* fall back to goja */ }
+//	if err := s.Start(ctx); err != nil { /* outage: the supervisor retries */ }
 //	defer s.Stop()
 //
 //	token, err := s.GeneratePoToken(ctx, contentBinding)
@@ -216,8 +216,9 @@ func New(cfg Config) *Sidecar {
 // subprocess pinned to a Windows Job Object, and waits for the sidecar
 // to emit a `ready` notification on stdout signaling that server.js has
 // finished its synchronous init (jsdom module load + JSDOM construction).
-// Returns an error if extraction, launch, or the ready handshake fails;
-// the caller should fall back to the goja path on error.
+// Returns an error if extraction, launch, or the ready handshake fails.
+// A failed start is an outage like a crash: PotProvider answers mints with
+// errSidecarDown and the Supervisor retries on its ladder.
 func (s *Sidecar) Start(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()

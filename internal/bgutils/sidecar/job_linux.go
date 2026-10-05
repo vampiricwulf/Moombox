@@ -33,8 +33,8 @@ func (j *processJob) close()                   {}
 // Caveat: Pdeathsig fires when the spawning THREAD exits, and Go can in
 // principle retire that thread while the process lives — which would kill
 // the sidecar spuriously. If that ever happens, readPump sees stdout EOF,
-// marks the sidecar unhealthy, and callers fall back to the goja path: a
-// degraded-but-safe outcome, strictly better than orphan accumulation.
+// marks the sidecar unhealthy, and the Supervisor restarts it: a brief
+// outage, strictly better than orphan accumulation.
 func configureCmdSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 }

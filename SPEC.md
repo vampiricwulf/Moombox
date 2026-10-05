@@ -396,13 +396,13 @@ The DOM shim is ~1500 lines of JavaScript (test.50–test.55 milestone work). It
 
 ### BotGuard / PO Tokens
 
-YouTube requires Proof of Origin (PO) tokens for certain requests, particularly for premium-quality formats and live streams. Moombox runs BotGuard via an **embedded Node.js sidecar** that produces real integrity tokens. The in-process goja path still runs when the sidecar is off or down, but BotGuard's timing check rejects it, so it mints no PO token: without the sidecar, PO-token-gated formats are unavailable.
+YouTube requires Proof of Origin (PO) tokens for certain requests, particularly for premium-quality formats and live streams. Moombox runs BotGuard via an **embedded Node.js sidecar** that produces real integrity tokens. The in-process goja path runs only when the sidecar is turned off (`[bgutils] use_sidecar = false`), and BotGuard's timing check rejects it, so it mints no PO token; while a configured sidecar is down a mint fails at once. Either way, without the sidecar PO-token-gated formats are unavailable.
 
-**Architecture (sidecar primary, goja fallback):**
+**Architecture (sidecar, or goja when the sidecar is turned off):**
 
 1. **Sidecar path (preferred)** — A bundled Node.js v24 binary plus `bgutils-js` + JSDOM are extracted from `go:embed`'d blobs to `%LOCALAPPDATA%/Moombox/sidecar/` on first launch (~38 MB embed: ~34 MB gzipped node.exe + ~4 MB tarball of production node_modules + src/server.js). Moombox spawns the subprocess pinned to a Windows Job Object (so the child dies with the parent), pipes JSON-RPC requests over stdin/stdout, and consumes real PO tokens. First mint hits Google's WAA endpoint in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs.
 
-2. **Goja fallback path** — When the sidecar is disabled (`[bgutils] use_sidecar = false` in config), fails to start, or dies mid-flight, `PotProvider` falls through to the legacy in-process flow:
+2. **Goja path** — Only when the sidecar is disabled (`[bgutils] use_sidecar = false` in config, so no sidecar is attached) does `PotProvider` run the legacy in-process flow. A configured sidecar that fails to start or dies mid-flight does not fall through to it: a mint fails at once (`errSidecarDown`) until the supervisor brings the sidecar back.
    1. Fetch challenge (POST to `jnn-pa.googleapis.com` or YouTube fallback)
    2. Load BotGuard interpreter JavaScript
    3. Execute the interpreter in a Goja VM with full DOM shims (real-class hierarchy: `EventTarget`, `Node`, `Element`, `Document`, `Window`, `CSSStyleDeclaration`, `URL`, `AbortController`, `DOMTokenList`)

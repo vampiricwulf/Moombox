@@ -666,15 +666,15 @@ func (pp *PotProvider) gojaGenerateAndMint(ctx context.Context, contentBinding s
 // gojaGenerateEphemeralMint builds a standalone minter for exactly one mint
 // under the goja fallback and tears it down immediately afterward — used by
 // gojaGenerateAndMint's bypassCache=true branch (today, that's
-// GenerateGvsPoToken's fresh-minter-per-GVS-mint policy on a sidecar-down
-// goja fallback). It deliberately never writes to pp.minterCache and never
+// GenerateGvsPoToken's fresh-minter-per-GVS-mint policy when no sidecar is
+// attached). It deliberately never writes to pp.minterCache and never
 // schedules refresh/eviction timers:
 //
 //   - Writing to minterCache here would replace (and safeCleanup) the
 //     long-lived (~6h) minter the player-API / GeneratePoToken path
-//     depends on every time the sidecar happens to be down for a GVS
-//     mint — the exact churn the single-minter design exists to prevent —
-//     and could race a concurrent GeneratePoToken call that already read
+//     depends on at every GVS mint — the exact churn the single-minter
+//     design exists to prevent — and could race a concurrent
+//     GeneratePoToken call that already read
 //     the old minter pointer and is mid-mint against it when this
 //     goroutine's safeCleanup shuts that VM down underneath it.
 //   - Scheduling refresh/eviction time.AfterFunc timers against a minter
@@ -694,8 +694,8 @@ func (pp *PotProvider) gojaGenerateEphemeralMint(ctx context.Context, contentBin
 	}
 	defer pp.safeCleanup(minter, "ephemeral bypass-cache mint")
 	// Counted like any other minter creation: these are full BotGuard runs,
-	// and leaving them out made a sidecar-down GVS storm — the case where
-	// this path fires most — invisible in PotStats.
+	// and leaving them out made a GVS storm without the sidecar — the case
+	// where this path fires most — invisible in PotStats.
 	pp.mintersCreated.Add(1)
 
 	pp.logger.Debug("[PotProvider] minted ephemeral bypass-cache minter (goja fallback)")
@@ -722,13 +722,13 @@ type GvsMint struct {
 // (upstream 495a47f's preference order); the expensive BotGuard
 // regeneration is deduplicated inside the sidecar (server.js's
 // minterInflight map, ordered by its serializeChain), so no provider-side
-// inflight entry is needed. On the goja fallback (sidecar unavailable),
-// gojaGenerateAndMint's bypassCache=true routes to
-// gojaGenerateEphemeralMint, which builds its
-// own fresh goja minter (challenge ignored — today's session-incoherent
-// goja-fallback limitation) and safeCleanups it before returning, so a
-// sidecar-down GVS mint can never evict or race the long-lived (~6h)
-// minter the player-API / GeneratePoToken path depends on.
+// inflight entry is needed. On the goja path (no sidecar attached:
+// [bgutils] use_sidecar = false), gojaGenerateAndMint's bypassCache=true
+// routes to gojaGenerateEphemeralMint, which builds its own fresh goja
+// minter (challenge ignored — today's session-incoherent goja-path
+// limitation) and safeCleanups it before returning, so a GVS mint can
+// never evict or race the long-lived (~6h) minter the player-API /
+// GeneratePoToken path depends on.
 //
 // If POT-enforced media (premieres) still 403s with challenge-sourced
 // minters, the next suspect is datasync-ID binding: yt-dlp binds GVS

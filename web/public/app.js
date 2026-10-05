@@ -852,7 +852,7 @@ export class MoomboxApp {
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
     // The BotGuard sidecar is an ALERT, not a status: while it is down,
     // signature-ciphered formats cannot be resolved at all (sig has no
-    // fallback) and PO tokens fall to the goja path, which errors. It carries
+    // fallback) and a PO token mint fails at once (no goja fallback). It carries
     // no action — the supervisor is already retrying and there is nothing for
     // the operator to click.
     if (this.sidecarHealthy === false)

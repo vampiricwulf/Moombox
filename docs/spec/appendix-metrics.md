@@ -66,7 +66,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | chat/ | ~3,030 | 3 | 16 | YouTube live chat downloader (polling + batching) |
 | utils/ | ~2,590 | 26 | 24 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap |
 | config/ | ~2,490 | 7 | 8 | TOML config, FlexDuration, channel terms, migrations |
-| bgutils/ | ~2,050 | 6 | 5 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja fallback) |
+| bgutils/ | ~2,050 | 6 | 5 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja path) |
 | bgutils/sidecar/ | ~1,880 | 7 | 6 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
 | goja/ | ~1,470 | 5 | 11 | JS runtime shims (minimal DOM, timers, encoding) |
 | cookies/dpapi/ | ~1,100 | 6 | 7 | Windows DPAPI decryption for browser cookie stores |

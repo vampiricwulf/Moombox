@@ -194,7 +194,7 @@ internal/jobfilter  (2 files, ~470)    -- the dashboard's filter language (Parse
 internal/cookies    (35 files, ~15,870) -- jar, refresh, auto-cookie (Firefox/Chromium)
 internal/youtube    (13 files, ~6,710) -- Service, PlayerAPI, Auth, watch page, format selector
 internal/twitch    (14 files, ~6,410)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
-internal/bgutils   (6 files, ~2,050)   -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
+internal/bgutils   (6 files, ~2,050)   -- PO token: PotProvider + WebPoClient (sidecar; goja when it is turned off)
 internal/bgutils/sidecar (7 files,~1,880) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
 internal/bgutils/embed   (4 files)      -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
 internal/cipher     (13 files, ~3,110) -- YouTube signature cipher: AST + regex, 10-VM LRU
@@ -613,7 +613,7 @@ The TUI uses non-blocking channel sends to prevent the event loop from blocking:
 
 ### BotGuard Triple Cache
 
-The PO token system uses three in-process cache layers to minimize expensive BotGuard operations. Caches are agnostic to which path (sidecar primary, goja fallback) produced the token:
+The PO token system uses three in-process cache layers to minimize expensive BotGuard operations. Caches are agnostic to which path (the sidecar, or goja when the sidecar is turned off) produced the token:
 
 1. **Session cache (6h TTL):** Caches the complete PO token for a given content binding. Avoids both the sidecar IPC and the goja flow entirely on hits. Single source of truth for "is this token still fresh."
 2. **Minter cache (dynamic TTL, single-minter design):** Caches the compiled BotGuard "minter" which can stamp multiple tokens. TTL comes from the BotGuard challenge response. Effectively unused under sidecar mode (the sidecar maintains its own internal minter cache inside the Node process). Populated only when the sidecar fails and the goja path generates a minter. CRIT-2 audit fix: ONE minter under `defaultMinterKey="default"` serves every binding for its TTL — the per-binding cache that pre-existed wasted a BotGuard run on every new content binding. FRESH-2 audit fix: a `time.AfterFunc` 5min before expiry proactively regenerates so user-facing calls don't pay the 2-10s BotGuard cost.
