@@ -323,8 +323,9 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 			}
 			sp.logger.Info("not a stream but downloading as VOD",
 				"videoID", job.VideoID, "reason", reason)
+			// No status, as vodStatusUpdates writes none: the download-slot
+			// wait is still ahead.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"status": database.StatusDownloading,
 				"is_vod": true,
 			})
 			return &StreamProcessResult{
@@ -357,6 +358,29 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 			Error:          fmt.Sprintf("unhandled status: %s", info.StreamStatus),
 		}, nil
 	}
+}
+
+// RefreshVodInfo re-extracts a VOD's player response for a download that is
+// starting long after Process extracted it — the download-slot wait sits
+// between the two, and googlevideo format URLs expire (vodInfoStale). The
+// same full fetch and playability verdict Process applies, so a video that
+// went private or members-only while it queued fails the way it would have
+// failed up front. A stream no longer classified as finished is refused
+// rather than downloaded with the whole-file or post-live strategy.
+func (sp *StreamProcessor) RefreshVodInfo(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error) {
+	info, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+	if err != nil {
+		return nil, fmt.Errorf("full fetch failed: %w", err)
+	}
+	if errMsg, sentinel := sp.checkPlayability(info); errMsg != "" {
+		res := &StreamProcessResult{Error: errMsg, ErrSentinel: sentinel}
+		return nil, res.AsError()
+	}
+	switch info.StreamStatus {
+	case youtube.StreamVOD, youtube.StreamPostLive, youtube.StreamNotAStream:
+		return info, nil
+	}
+	return nil, fmt.Errorf("stream status changed to %s while the download waited for a slot", info.StreamStatus)
 }
 
 // checkPlayability returns an error string and an optional sentinel for
@@ -452,9 +476,15 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 // post-live. A job created Upcoming still carries the SCHEDULED start; for a
 // finished stream YouTube's ScheduledStartTime is the actual start the replay
 // chat offsets count from, so it is refreshed here (review 2026-09-03, T-F4).
+//
+// No status. A VOD still has the download-slot wait ahead of it, which can
+// last hours behind a busy pool, and writing Downloading here showed every
+// queued VOD as downloading through all of it. ExecuteWithChat writes
+// Downloading once the slot is held; until then the row keeps the status it
+// came in with and processJob's progress line says what it is waiting for
+// (vodSlotWaitProgress).
 func vodStatusUpdates(job *database.Job, info *youtube.VideoInfo) map[string]any {
 	updates := map[string]any{
-		"status": database.StatusDownloading,
 		"is_vod": true,
 	}
 	if info != nil && info.ScheduledStartTime != "" && info.ScheduledStartTime != job.StreamStartTime {

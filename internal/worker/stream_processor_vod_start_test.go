@@ -11,12 +11,16 @@ import (
 // as a VOD (live capture never ran), the replay chat offsets count from the
 // ACTUAL start that YouTube now reports in ScheduledStartTime — the row must
 // follow or the player biases the chat late by the late-start delta.
+//
+// It also pins that the update writes NO status: the VOD's download-slot wait
+// is still ahead, and Downloading here showed every queued VOD as downloading
+// (mutant: put "status": StatusDownloading back).
 func TestVodStatusUpdatesRefreshesStaleStart(t *testing.T) {
 	job := &database.Job{ID: "j", StreamStartTime: "2026-06-11T10:00:00Z"}
 	info := &youtube.VideoInfo{ScheduledStartTime: "2026-06-11T10:12:00Z"}
 	u := vodStatusUpdates(job, info)
-	if u["status"] != database.StatusDownloading || u["is_vod"] != true {
-		t.Errorf("status/is_vod = %v/%v", u["status"], u["is_vod"])
+	if _, ok := u["status"]; ok || u["is_vod"] != true {
+		t.Errorf("status/is_vod = %v/%v, want no status (the slot wait is still ahead) and is_vod", u["status"], u["is_vod"])
 	}
 	if u["stream_start_time"] != "2026-06-11T10:12:00Z" {
 		t.Errorf("stream_start_time = %v, want the actual start", u["stream_start_time"])

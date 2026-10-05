@@ -402,6 +402,8 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 **Normal flow:** `Upcoming` -> `Live` -> `Downloading` -> `Muxing` -> `Finished`
 
+A VOD skips `Live`, and stays at the status it came in with (`Upcoming` for a fresh one) while it queues for a download slot — its progress line says so — until `ExecuteWithChat` writes `Downloading` with the slot held.
+
 **Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`.
 
 **Error paths:** Any status -> `Error`, `Cancelled`, or `COOKIES?`

@@ -253,6 +253,13 @@ type DownloadWorker struct {
 	// which the sweep resolves permissively.
 	CurrentCredentialIdentity func(platform string) string
 
+	// processStreamFn and refreshVodInfoFn replace streamProc.Process and
+	// streamProc.RefreshVodInfo when set — a test seam, since youtube.Service
+	// has none of its own. nil in production (processStream,
+	// refreshVodInfo).
+	processStreamFn  func(ctx context.Context, job *database.Job) (*StreamProcessResult, error)
+	refreshVodInfoFn func(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error)
+
 	// CookieFileInUse returns the cookie file the running services read and
 	// write (the jar's path). cookies.cookie_file is restart-required, so after
 	// a save without the restart the setting names a file nothing touches, and
@@ -639,9 +646,21 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 // guard is needed: ReleaseDownloadSlot and Complete are both keyed by
 // holdingDlSlot, so a never-acquired broadcast's release calls are no-ops.
 // Returns false only when ctx was cancelled while waiting.
+//
+// A VOD that has to queue says so in its progress line for the length of the
+// wait (vodSlotWaitProgress), and the line is cleared however the wait ends —
+// left behind, a cancelled row would go on claiming it was queueing. One that
+// finds a slot free writes nothing.
 func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, isVod bool) bool {
 	if !isVod {
 		return true
+	}
+	if w.queue.TryAcquireDownloadSlot(jobID) {
+		return true
+	}
+	if w.db != nil { // nil only in a zero-value test worker
+		w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitProgress})
+		defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
 	}
 	return w.queue.AcquireDownloadSlot(ctx, jobID)
 }
@@ -755,7 +774,11 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	w.logger.Info("processing job", "jobID", jobID, "videoID", job.VideoID)
 
 	// Process stream (probe, wait for live, etc.)
-	result, err := w.streamProc.Process(ctx, job)
+	result, err := w.processStream(ctx, job)
+	// When the format URLs were extracted, near enough: for a VOD, Process
+	// returns straight after its fetch. refreshStaleVodInfo measures the slot
+	// waits below from here.
+	extractedAt := time.Now()
 	if err != nil {
 		if ctx.Err() != nil {
 			w.handleCancellation(job)
@@ -821,6 +844,19 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
 		// Only ctx cancellation ends that wait.
 		w.handleCancellation(job)
+		return
+	}
+
+	// Both waits are over. A VOD's format URLs were extracted before them,
+	// and a googlevideo URL lives ~6 h: one that queued longer than that
+	// failed its first request with a 403 that nothing retried. Re-extract a
+	// stale one now that the download is really starting.
+	if err := w.refreshStaleVodInfo(ctx, job, result, extractedAt); err != nil {
+		if ctx.Err() != nil {
+			w.handleCancellation(job)
+			return
+		}
+		w.setJobError(job, err)
 		return
 	}
 

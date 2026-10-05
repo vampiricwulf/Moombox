@@ -271,28 +271,9 @@ func (q *JobQueue) releaseLifecycleSlotLocked(jobID string) {
 // Returns true if the slot was acquired, false if the context was cancelled.
 func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 	for {
-		q.mu.Lock()
-		if q.activeDownloads < q.maxDownloads {
-			q.activeDownloads++
-			q.holdingDlSlot[jobID] = true
-			stillFree := q.activeDownloads < q.maxDownloads
-			q.mu.Unlock()
-			// Cascade the wakeup: dlNotify has capacity 1, so two releases in
-			// quick succession collapse into one signal — without this forward,
-			// one waiter would take one slot while a second waiter slept next
-			// to a free slot until the NEXT release (potentially hours on live
-			// streams). Each successful acquirer re-signals while capacity
-			// remains so every free slot finds its waiter.
-			if stillFree {
-				select {
-				case q.dlNotify <- struct{}{}:
-				default:
-				}
-			}
+		if q.TryAcquireDownloadSlot(jobID) {
 			return true
 		}
-		q.mu.Unlock()
-
 		select {
 		case <-ctx.Done():
 			return false
@@ -300,6 +281,35 @@ func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 			continue
 		}
 	}
+}
+
+// TryAcquireDownloadSlot takes a download slot for the job when one is free
+// and reports whether it did, without waiting. AcquireDownloadSlot is this in
+// a loop; the worker calls it first so it can tell the operator a VOD is
+// queueing for a slot only when it actually is.
+func (q *JobQueue) TryAcquireDownloadSlot(jobID string) bool {
+	q.mu.Lock()
+	if q.activeDownloads >= q.maxDownloads {
+		q.mu.Unlock()
+		return false
+	}
+	q.activeDownloads++
+	q.holdingDlSlot[jobID] = true
+	stillFree := q.activeDownloads < q.maxDownloads
+	q.mu.Unlock()
+	// Cascade the wakeup: dlNotify has capacity 1, so two releases in
+	// quick succession collapse into one signal — without this forward,
+	// one waiter would take one slot while a second waiter slept next
+	// to a free slot until the NEXT release (potentially hours on live
+	// streams). Each successful acquirer re-signals while capacity
+	// remains so every free slot finds its waiter.
+	if stillFree {
+		select {
+		case q.dlNotify <- struct{}{}:
+		default:
+		}
+	}
+	return true
 }
 
 // ReleaseDownloadSlot frees the download slot for a job without cancelling its context.
