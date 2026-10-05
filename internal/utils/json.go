@@ -76,6 +76,24 @@ func ReplaceMessageCount(header string, count int) string {
 	return header[:numStart] + padded + header[pos:]
 }
 
+// parseMessageCount reads the messageCount value ReplaceMessageCount writes.
+func parseMessageCount(header string) (int, bool) {
+	mcStart := strings.Index(header, `"messageCount":`)
+	if mcStart < 0 {
+		return 0, false
+	}
+	pos := mcStart + len(`"messageCount":`)
+	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
+		pos++
+	}
+	numStart := pos
+	for pos < len(header) && header[pos] >= '0' && header[pos] <= '9' {
+		pos++
+	}
+	n, err := strconv.Atoi(header[numStart:pos])
+	return n, err == nil
+}
+
 // ReplaceQuotedField replaces a JSON string value in a header buffer.
 // Finds `"key": "old_value"` and replaces with `"key": "new_value"`.
 //

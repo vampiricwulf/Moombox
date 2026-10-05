@@ -50,16 +50,14 @@ const (
 	// fsync. The sidecar only ever carries the dedup window a reconnect replay
 	// can overlap, so a save that is at most five seconds behind the file
 	// costs a count that is short by the messages written in the unsaved
-	// window: restoreResumeState seeds fileCount/totalCount straight from
-	// that stale sidecar and sets flushedToDisk, which makes Start skip
-	// adoptExistingPartFile — the only path that re-counts the file — so the
-	// deficit persists in that part's header count until the next part roll,
-	// AND in the job's chat total for the life of the job: totalCount is
-	// cumulative, survives RollFile by design, is never re-derived, and is
-	// what MessageCount() reports as the job's total_chat_messages. No
-	// message is lost; the file itself is
-	// written every flush regardless. The DEFERRED final save on stop
-	// (Start's exit path) is deliberately NOT throttled.
+	// window. restoreResumeState makes that up from the part file's header
+	// count, which every flush refreshes — without it the deficit persisted
+	// in that part's header count until the next part roll, AND in the job's
+	// chat total for the life of the job (totalCount is cumulative, survives
+	// RollFile by design, and is what MessageCount() reports as the job's
+	// total_chat_messages). No message is lost; the file itself is written
+	// every flush regardless. The DEFERRED final save on stop (Start's exit
+	// path) is deliberately NOT throttled.
 	ircResumeSaveFloor = 5 * time.Second
 	// ircReconnectBase and ircReconnectCap shape Start's backoff between
 	// failed sessions: base × 2^attempts, capped (2 s, 4 s, … 30 s).
@@ -766,23 +764,34 @@ func (cd *ChatDownloader) saveResumeStateThrottled() bool {
 // the new, never-written part) — blindly marking it flushed would route the
 // first flush onto the append path against a missing file, which fails,
 // merge-fails, and retries forever: the part's chat would never reach disk.
+//
+// The part file's own header count corrects the sidecar's. The sidecar is
+// saved at most every ircResumeSaveFloor, the header on every flush, so after
+// a crash the sidecar can be short by the messages flushed in its unsaved
+// window — a deficit that used to persist in the part's header and in the
+// job's cumulative total for the life of the job. Only the header is read
+// (1 KB), never the file, so an ordinary resume stays as cheap as before.
 func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 	fileExists := false
+	unsaved := 0
 	if path := cd.currentOutputPath(); path != "" {
 		if _, err := os.Stat(path); err == nil {
 			fileExists = true
+			if n, ok := utils.ReadChatFileMessageCount(path); ok && n > state.MessageCount {
+				unsaved = n - state.MessageCount
+			}
 		}
 	}
 
 	cd.mu.Lock()
 	if fileExists {
-		cd.fileCount = state.MessageCount
+		cd.fileCount = state.MessageCount + unsaved
 		cd.flushedToDisk = true
 	} else {
 		cd.fileCount = 0
 		cd.flushedToDisk = false
 	}
-	cd.totalCount = max(state.TotalCount, state.MessageCount)
+	cd.totalCount = max(state.TotalCount, state.MessageCount) + unsaved
 	cd.lastTimestampMs = state.LastTimestampMs
 	cd.dedup.Restore(state.RecentIDs)
 	cd.mu.Unlock()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -246,6 +247,21 @@ func UpdateChatFileHeaderFields(path string, count int) error {
 	defer f.Close()
 
 	return writeHeaderFieldsToOpenFile(f, info.Size(), count)
+}
+
+// ReadChatFileMessageCount returns the messageCount in a chat file's JSON
+// header, reading only the first 1 KB — the header AppendChatMessages refreshes
+// (and fsyncs) on every append, so it is never behind the file it heads.
+// ok is false when the file cannot be read or carries no count.
+func ReadChatFileMessageCount(path string) (count int, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	buf := make([]byte, 1024)
+	n, _ := io.ReadFull(f, buf)
+	return parseMessageCount(string(buf[:n]))
 }
 
 // writeHeaderFieldsToOpenFile rewrites messageCount + downloadedAt in the JSON
