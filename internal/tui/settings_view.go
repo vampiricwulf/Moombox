@@ -371,7 +371,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		case fieldToggle:
 			value = renderToggle(m.values[fd.key])
 		case fieldCycle:
-			value = renderCycleOptions(fd.options, m.values[fd.key], selected)
+			value = renderCycleOptions(fd.options, m.values[fd.key], selected, max(w-len(prefix)-padWidth, 5))
 		default:
 			valueMaxW := max(w-len(prefix)-padWidth, 5)
 			if selected {
@@ -461,20 +461,32 @@ func renderToggle(value string) string {
 	return DimStyle.Render("Yes / ") + lipgloss.NewStyle().Foreground(ColorRed).Render("No")
 }
 
-func renderCycleOptions(options []string, selected string, focused bool) string {
+// renderCycleOptions shows every option, the selected one bracketed, when
+// that fits maxW columns; otherwise only the selected one, between dim ‹ › so
+// the row still reads as a choice. Every field is budgeted one row: the full
+// list wrapped — at the 60-column floor "[localhost] / lan / external" left
+// "external" alone on the next row, and a channel's fifteen-option quality
+// preference wrapped at any width.
+func renderCycleOptions(options []string, selected string, focused bool, maxW int) string {
+	selStyle := lipgloss.NewStyle().Foreground(ColorWhite).Bold(true)
+	if focused {
+		selStyle = selStyle.Foreground(ColorCyan)
+	}
 	var parts []string
+	sel := selected
 	for _, opt := range options {
 		if strings.EqualFold(opt, selected) {
-			color := ColorWhite
-			if focused {
-				color = ColorCyan
-			}
-			parts = append(parts, lipgloss.NewStyle().Foreground(color).Bold(true).Render("["+opt+"]"))
+			sel = opt
+			parts = append(parts, selStyle.Render("["+opt+"]"))
 		} else {
 			parts = append(parts, DimStyle.Render(opt))
 		}
 	}
-	return strings.Join(parts, DimStyle.Render(" / "))
+	full := strings.Join(parts, DimStyle.Render(" / "))
+	if ansi.StringWidth(full) <= maxW {
+		return full
+	}
+	return DimStyle.Render("‹ ") + selStyle.Render("["+truncateWidth(sel, max(maxW-6, 1), "…")+"]") + DimStyle.Render(" ›")
 }
 
 // listWindowStart returns the first rendered index for a list capped at
@@ -622,7 +634,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		case fieldToggle:
 			value = renderToggle(val)
 		case fieldCycle:
-			value = renderCycleOptions(field.options, val, isFocused)
+			value = renderCycleOptions(field.options, val, isFocused, max(w-ansi.StringWidth(prefix)-padW-2, 5))
 		default:
 			valueMaxW := max(w-ansi.StringWidth(prefix)-padW-2, 5)
 			if isFocused {
