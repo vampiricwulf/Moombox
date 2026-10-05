@@ -330,6 +330,7 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 	if len(batch) > 0 && oldUnread {
 		cd.logger.Error("twitch chat: the closed part still cannot be read; spilling its boundary batch instead of writing over it",
 			"path", oldPath, "messages", len(batch))
+		cd.noteRollUnwritten(len(batch))
 		if dumpErr := dumpLostChatBatch(oldPath, batch); dumpErr != nil {
 			cd.logger.Warn("could not spill lost chat batch to sidecar", "path", oldPath, "err", dumpErr)
 		} else {
@@ -347,6 +348,7 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 		if err != nil {
 			cd.logger.Error("final drain of rolled chat part failed; boundary batch lost",
 				"path", oldPath, "messages", len(batch), "err", err)
+			cd.noteRollUnwritten(len(batch))
 			// Spill the un-writable batch to a sidecar so the messages are
 			// recoverable rather than only logged. Best-effort: a failure here
 			// just leaves the log line as the only record.
@@ -384,6 +386,17 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 			"closed", filepath.Base(closedPath), "next", filepath.Base(newOutputPath))
 	}
 	return closedPath
+}
+
+// noteRollUnwritten records n boundary-batch messages RollFile could not write
+// to the part it closed. They are in no part file, so they leave the job total
+// — which follows what the files hold, as flushLocked's salvage arm does — and
+// they make the capture incomplete at the stream's end (Start).
+func (cd *ChatDownloader) noteRollUnwritten(n int) {
+	cd.mu.Lock()
+	cd.rollUnwritten += n
+	cd.totalCount = max(cd.totalCount-n, 0)
+	cd.mu.Unlock()
 }
 
 // resolveEmotesCached resolves third-party emotes (7TV/BTTV/FFZ) once per

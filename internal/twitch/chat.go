@@ -315,6 +315,7 @@ type ChatDownloader struct {
 	streamEnded      bool  // set by MarkStreamEnded — distinguishes drain from interruption
 	totalCount       int   // cumulative across all part files (job-level metric)
 	fileCount        int   // messages belonging to the CURRENT part file (header count)
+	rollUnwritten    int   // boundary messages RollFile could not write to the part it closed (job-level; sidecar-carried like totalCount)
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
 	// partUnread records that the part file existed at Start but could not be
@@ -732,6 +733,7 @@ func (cd *ChatDownloader) saveResumeState() {
 	state := ChatResumeState{
 		MessageCount:    max(cd.fileCount-pending, 0),
 		TotalCount:      max(cd.totalCount-pending, 0),
+		RollUnwritten:   cd.rollUnwritten,
 		LastTimestampMs: cd.lastTimestampMs,
 		Timestamp:       time.Now().UnixMilli(),
 		StreamID:        cd.streamID,
@@ -810,6 +812,7 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 		// rest of the job.
 		cd.totalCount = max(cd.totalCount-state.MessageCount, 0)
 	}
+	cd.rollUnwritten = max(cd.rollUnwritten, state.RollUnwritten)
 	cd.lastTimestampMs = state.LastTimestampMs
 	cd.dedup.Restore(state.RecentIDs)
 	cd.mu.Unlock()
@@ -1518,6 +1521,18 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 				retErr = fmt.Errorf("twitch chat: final flush failed, %d messages not written to %s: %w", len(pending), path, flushErr)
 			}
 			return
+		}
+
+		// A part roll that could not write its boundary batch spilled it
+		// beside the closed part. The capture is short by those messages, so
+		// it must not read "finished": that verdict let the staging cleanup
+		// delete the spill with the part's dir. Incomplete keeps it
+		// (keepOnlyChatCapture keeps every chat.json.* file at any depth).
+		cd.mu.Lock()
+		unwritten := cd.rollUnwritten
+		cd.mu.Unlock()
+		if unwritten > 0 && retErr == nil {
+			retErr = fmt.Errorf("twitch chat: %d messages could not be written to their part at a part boundary; see the part's chat.json.lostbatch.json", unwritten)
 		}
 
 		// Stream-over drain: clear resume state

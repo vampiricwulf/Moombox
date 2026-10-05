@@ -576,3 +576,101 @@ func TestARollWithNothingPendingSalvagesATornClosedPart(t *testing.T) {
 		t.Errorf("the salvaged part holds %d messages, want the 3 intact ones", got)
 	}
 }
+
+// TestABoundarySpillMakesTheCaptureIncomplete: a roll that could not write its
+// boundary batch spilled it beside the closed part and said nothing more, so
+// the stream ended "finished" and the staging cleanup deleted the spill with
+// the part's dir. The spilled messages now leave the job total (it follows
+// what the part files hold) and Start reports the capture incomplete at the
+// stream's end — also after a restart, through the sidecar.
+//
+// Mutants: drop either noteRollUnwritten call in RollFile; drop the
+// rollUnwritten check in Start's stream-end path; drop RollUnwritten from
+// saveResumeState or restoreResumeState; drop the totalCount subtraction.
+func TestABoundarySpillMakesTheCaptureIncomplete(t *testing.T) {
+	endStream := func(t *testing.T, cd *ChatDownloader) error {
+		t.Helper()
+		cd.mu.Lock()
+		cd.streamEnded = true
+		cd.mu.Unlock()
+		return cd.Start(cancelledContext(t))
+	}
+	wantIncomplete := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "part boundary") {
+			t.Errorf("Start at the stream's end = %v, want the boundary spill reported", err)
+		}
+	}
+
+	t.Run("unread part", func(t *testing.T) {
+		cd, path, _ := startOnUnreadPart(t)
+		for i := range 5 {
+			cd.addMessage(damageTestMessage("new", i))
+		}
+		_ = cd.flush() // held: the part cannot be read
+		before := cd.MessageCount()
+		next := rollTestNextPart(t, path)
+		cd.RollFile(next, "2026-06-11T11:00:00Z")
+		if got := cd.MessageCount(); got != before-5 {
+			t.Errorf("MessageCount %d after spilling 5, want %d", got, before-5)
+		}
+		cd.addMessage(damageTestMessage("n", 0))
+		if err := cd.flush(); err != nil {
+			t.Fatal(err)
+		}
+		wantIncomplete(t, endStream(t, cd))
+	})
+
+	t.Run("drain fails", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "seg_0", "chat.json")
+		cd := newTestChatDownloader(t, path)
+		_ = cd.Start(cancelledContext(t)) // nothing there yet: not an unread part
+		for i := range 3 {
+			cd.addMessage(damageTestMessage("m", i))
+		}
+		// A file where the part's dir belongs: the drain cannot create it.
+		if err := os.WriteFile(filepath.Dir(path), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		next := filepath.Join(root, "seg_1", "chat.json")
+		if err := os.MkdirAll(filepath.Dir(next), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cd.RollFile(next, "2026-06-11T11:00:00Z")
+		if got := cd.MessageCount(); got != 0 {
+			t.Errorf("MessageCount %d after the only 3 were spilled, want 0", got)
+		}
+		wantIncomplete(t, endStream(t, cd))
+	})
+
+	t.Run("across a restart", func(t *testing.T) {
+		cd, path, _ := startOnUnreadPart(t)
+		for i := range 5 {
+			cd.addMessage(damageTestMessage("new", i))
+		}
+		_ = cd.flush()
+		next := rollTestNextPart(t, path)
+		cd.RollFile(next, "2026-06-11T11:00:00Z")
+		cd.addMessage(damageTestMessage("n", 0))
+		if err := cd.flush(); err != nil {
+			t.Fatal(err)
+		}
+		cd.saveResumeState()
+
+		resumed := newTestChatDownloader(t, next)
+		_ = resumed.Start(cancelledContext(t))
+		wantIncomplete(t, endStream(t, resumed))
+	})
+
+	t.Run("no spill", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "chat.json")
+		cd := newTestChatDownloader(t, path)
+		_ = cd.Start(cancelledContext(t))
+		cd.addMessage(damageTestMessage("m", 0))
+		cd.RollFile(rollTestNextPart(t, path), "2026-06-11T11:00:00Z")
+		if err := endStream(t, cd); err != nil {
+			t.Errorf("a clean roll's stream end = %v, want nil", err)
+		}
+	})
+}
