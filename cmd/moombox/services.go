@@ -641,12 +641,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 				}
 				detected, source := detectCookiePlatforms(meta, jar)
 				if len(detected) > 0 {
-					saveErr := s.configStore.Update(func(c *config.MoomboxConfig) {
+					// UpdateIfLoaded, not Update: on a first run this save
+					// would create config.toml and mark it loaded, and a
+					// cookies.txt already beside the binary then skipped
+					// both setup wizards. The wizard's own save records
+					// the platforms instead.
+					applied, saveErr := s.configStore.UpdateIfLoaded(func(c *config.MoomboxConfig) {
 						c.Cookies.Platforms = detected
 					})
-					if saveErr != nil {
+					switch {
+					case saveErr != nil:
 						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
-					} else {
+					case applied:
 						log.Info("Detected cookie platforms from cookie file",
 							slog.Any("platforms", detected), slog.String("source", source))
 					}
@@ -1191,11 +1197,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// During first-run setup, the config file doesn't exist yet. Don't
 		// create it prematurely — the setup wizard's POST /api/setup/complete
 		// will save everything (including platforms) when the user finishes.
+		// UpdateIfLoaded: returning early from an Update closure still SAVES
+		// (Update saves whatever the closure did, nothing included), which
+		// created config.toml mid-setup and marked it loaded.
 		var platforms []string
-		err := s.configStore.Update(func(c *config.MoomboxConfig) {
-			if !c.ConfigLoaded {
-				return
-			}
+		_, err := s.configStore.UpdateIfLoaded(func(c *config.MoomboxConfig) {
 			existing := make(map[string]bool)
 			for _, p := range c.Cookies.Platforms {
 				existing[p] = true

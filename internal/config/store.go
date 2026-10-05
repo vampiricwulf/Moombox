@@ -123,6 +123,27 @@ func (s *Store) Update(fn func(*MoomboxConfig)) error {
 	return nil
 }
 
+// UpdateIfLoaded is Update for the writers that must not run before the
+// operator has a config file: background bookkeeping (detected or verified
+// cookie platforms) that would otherwise be the first Save. Save marks the
+// config loaded, and both setup wizards key off that flag, so a first run
+// whose bookkeeping saved first skipped setup entirely. Returning early from
+// an Update closure does not help: Update saves whatever the closure did,
+// nothing included. During a first run fn is not called, nothing is saved,
+// and applied is false.
+func (s *Store) UpdateIfLoaded(fn func(*MoomboxConfig)) (applied bool, err error) {
+	s.mu.Lock()
+	loaded := s.cfg.ConfigLoaded
+	s.mu.Unlock()
+	if !loaded {
+		return false, nil
+	}
+	// ConfigLoaded never goes back to false, so the gap between this check
+	// and Update's own lock can only let a write through that would have
+	// landed a moment later anyway.
+	return true, s.Update(fn)
+}
+
 // SetSavePath installs or overrides the path used by Update for auto-save.
 // Useful when the path is negotiated after NewStore (first-run wizard,
 // test harnesses). Stored via atomic.Pointer so SavePath() can read it
