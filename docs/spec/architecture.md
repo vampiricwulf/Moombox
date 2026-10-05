@@ -260,10 +260,10 @@ JobQueue.Dequeue (highest-priority pending job; no lifecycle gate)
 StreamProcessor.Process (probe status, wait for live, start early chat)
     |
     v
-JobQueue.AcquireLifecycleSlot (blocks until a lifecycle slot is free, max 100)
+JobQueue.AcquireDownloadSlot (VODs only; blocks until a slot is free, default max 10)
     |
     v
-JobQueue.AcquireDownloadSlot (VODs only; blocks until a slot is free, default max 10)
+JobQueue.AcquireLifecycleSlot (blocks until a lifecycle slot is free, max 100)
     |
     v
 DownloadOrchestrator.ExecuteWithChat (strategy selection, parallel download + chat)
@@ -506,6 +506,7 @@ The `JobQueue` implements a two-tier concurrency model:
 - Gates how many jobs can be in the DOWNLOAD half of the pipeline simultaneously — downloading plus muxing, which is exactly what `LifecycleCount()` reports
 - The slot is claimed at the download decision, not at dequeue: `processJob` calls `AcquireLifecycleSlot` in `internal/worker/queue.go` only once `StreamProcessor.Process` has answered "should download", and every exit path from there releases it through the deferred `Complete` (owner decision O-F)
 - Stream probing and the wait for a stream to go live therefore run slot-free. They used to hold a slot for the whole wait — hours to days for an `Upcoming` job or a manually-added offline Twitch channel — and at 100 waiters a newly live stream was never started at all
+- A VOD takes its download slot FIRST and only then the lifecycle slot, so one queueing for the download pool holds no lifecycle slot. The other order let enough admitted backlog (Σ `archive_slots` across channels) fill the lifecycle pool with VODs that were merely waiting, and a live broadcast — which never waits on the download pool — blocked behind them and lost footage
 - A wait that outlasts `lifecycleWaitWarnAfter` in `internal/worker/queue.go` (30 s) logs one line, once per wait, naming the job and the slots held: at the cap the symptom is a capture that simply does not start, and until that line existed nothing explained it
 
 **Download tier (configurable, default 10 slots):**

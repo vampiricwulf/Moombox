@@ -769,25 +769,31 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
-	// Lifecycle slot (owner decision O-F): claimed HERE, once stream
-	// processing has decided this job downloads, and never earlier. Dequeue
-	// used to claim it, which meant every Upcoming job and every
-	// manually-added offline Twitch channel held one of the 100 for its whole
-	// wait — and a job stream processing then DECLINED (disabled channel,
-	// filter, duplicate) held one it never used. Every exit path from here on
-	// runs through the deferred queue.Complete above, which releases it.
-	if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
-		// Only ctx cancellation ends that wait.
+	// Download slot first — for VODs, blocks until one is available;
+	// broadcasts pass through ungated (see acquireDownloadSlot). BEFORE the
+	// lifecycle slot, not after it: a VOD that took its lifecycle slot and
+	// then parked on the download pool held one of the 100 for nothing, so
+	// enough admitted backlog (Σ archive_slots across channels) filled the
+	// lifecycle pool with VODs that were merely queueing, and a live
+	// broadcast — which never waits on the download pool — blocked behind
+	// them and lost footage. A VOD now waits holding nothing that a broadcast
+	// needs.
+	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
+		// Context cancelled while waiting for download slot
 		w.handleCancellation(job)
 		return
 	}
 
-	// Acquire download slot — for VODs, blocks until a slot is available;
-	// broadcasts pass through ungated (see acquireDownloadSlot). The lifecycle
-	// slot above bounds the whole download half; this one bounds the VOD pool
-	// inside it.
-	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
-		// Context cancelled while waiting for download slot
+	// Lifecycle slot (owner decision O-F): claimed HERE, once stream
+	// processing has decided this job downloads, and never earlier. Dequeue
+	// used to claim it, which meant every Upcoming job and every
+	// manually-added offline Twitch channel held one of the 100 for its whole
+	// wait — and a job stream processing then refused held one it never used.
+	// It bounds the whole download half; the download slot above bounds the
+	// VOD pool. Every exit path from here on runs through the deferred
+	// queue.Complete above, which releases both.
+	if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
+		// Only ctx cancellation ends that wait.
 		w.handleCancellation(job)
 		return
 	}

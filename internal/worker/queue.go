@@ -192,11 +192,11 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 
 // AcquireLifecycleSlot blocks until one of the maxLifecycle slots is free,
 // then claims it for jobID. Called once stream processing has decided the job
-// will actually download (owner decision O-F), so the cap now bounds
-// CONCURRENT DOWNLOADS rather than concurrent waits — a limit no realistic
-// install approaches, which is the point: the wait phase is unbounded except
-// by per-job goroutine cost. Returns false if ctx is cancelled first — which
-// is what makes Stop prompt: a parked job must not hold shutdown open.
+// will actually download (owner decision O-F), and for a VOD only once it
+// holds its download slot, so the cap bounds the jobs actually downloading or
+// muxing rather than the ones waiting — the wait phase is unbounded except by
+// per-job goroutine cost. Returns false if ctx is cancelled first — which is
+// what makes Stop prompt: a parked job must not hold shutdown open.
 //
 // A wait that outlasts lifecycleWarnAfter logs ONE line naming the job and how
 // many slots are held. Once per wait, not once per wakeup: at the cap every

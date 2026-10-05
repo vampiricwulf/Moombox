@@ -258,7 +258,7 @@ Priority ordering: Live=1 (highest), Upcoming/Downloading=0, Error=-1 (lowest). 
 **processJob flow** (DownloadWorker.processJob, runs in a goroutine per job):
 1. Fetch job from database, verify it is still in a processable state
 2. Call StreamProcessor.Process() — probes, waits for live, handles auth, holding no slot
-3. If result says "should download": acquire the lifecycle slot (blocks if all 100 are in use), then the download slot
+3. If result says "should download": acquire the download slot (VODs only; a broadcast passes through), then the lifecycle slot (blocks if all 100 are in use) — in that order, so a VOD queueing for the download pool holds no lifecycle slot a live broadcast needs
 4. Run DownloadOrchestrator.ExecuteWithChat()
 5. Release the download slot — done inside the orchestrator before muxing, and for a VOD earlier still, before the chat wait (`resolveVodChatOutcome`); `processJob` itself never releases it
 6. Update job status to Finished or Error
