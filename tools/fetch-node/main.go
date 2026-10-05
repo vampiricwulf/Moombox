@@ -127,6 +127,16 @@ func run() error {
 	wantStamp := versionStamp()
 
 	if blobsUpToDate(embedDir, wantStamp) {
+		// The blobs match, but version.txt is tracked and can drift from the
+		// manifest on its own (a bad merge, a hand edit). It is the sidecar's
+		// on-disk cache-invalidation key, so repair it here rather than
+		// reporting "up to date" over a wrong one forever.
+		if cur, err := os.ReadFile(versionPath); err != nil || string(cur) != wantStamp+"\n" {
+			if err := os.WriteFile(versionPath, []byte(wantStamp+"\n"), 0o644); err != nil {
+				return fmt.Errorf("write version.txt: %w", err)
+			}
+			fmt.Println("fetch-node: version.txt did not match the manifest — rewritten")
+		}
 		fmt.Printf("fetch-node: already up to date (%s)\n", wantStamp)
 		return nil
 	}
