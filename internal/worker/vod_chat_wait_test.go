@@ -467,7 +467,9 @@ func TestYouTubeVodChatWaitRoutesThroughResolveVodChatOutcome(t *testing.T) {
 			t.Fatalf("ReadFile %s: %v", file, err)
 		}
 		text := string(src)
-		if !strings.Contains(text, "o.resolveVodChatOutcome(ctx,") {
+		// orchestrator_twitch.go waits on its finalize session (finalCtx), the
+		// one an offline transition cannot cancel.
+		if !strings.Contains(text, "o.resolveVodChatOutcome(ctx,") && !strings.Contains(text, "o.resolveVodChatOutcome(finalCtx,") {
 			t.Errorf("%s's chat wait no longer routes a VOD through resolveVodChatOutcome — the "+
 				"slot is then held through the wait and a chat-heavy VOD is still cut at two "+
 				"minutes", file)

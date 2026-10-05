@@ -23,16 +23,7 @@ import (
 // segment, and signals the first segment request.
 func liveTwitchWindow(t *testing.T) (*httptest.Server, <-chan struct{}) {
 	t.Helper()
-	ffmpegPath, _ := requireFFmpegTools(t)
-	segPath := filepath.Join(t.TempDir(), "seg.ts")
-	if out, err := exec.Command(ffmpegPath, "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=5:duration=1",
-		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-f", "mpegts", segPath).CombinedOutput(); err != nil {
-		t.Fatalf("make segment: %v\n%s", err, out)
-	}
-	ts, err := os.ReadFile(segPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ts := oneSecondTS(t)
 	start := time.Now()
 	var reqs atomic.Int32
 	first := make(chan struct{}, 1)
@@ -57,6 +48,22 @@ func liveTwitchWindow(t *testing.T) (*httptest.Server, <-chan struct{}) {
 	}))
 	t.Cleanup(srv.Close)
 	return srv, first
+}
+
+// oneSecondTS renders a real one-second MPEG-TS segment.
+func oneSecondTS(t *testing.T) []byte {
+	t.Helper()
+	ffmpegPath, _ := requireFFmpegTools(t)
+	segPath := filepath.Join(t.TempDir(), "seg.ts")
+	if out, err := exec.Command(ffmpegPath, "-nostdin", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=5:duration=1",
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-f", "mpegts", segPath).CombinedOutput(); err != nil {
+		t.Fatalf("make segment: %v\n%s", err, out)
+	}
+	ts, err := os.ReadFile(segPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
 }
 
 // outageThenRecover runs ExecuteTwitch on a broadcast that stays live, cuts

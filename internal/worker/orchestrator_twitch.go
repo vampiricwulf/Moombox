@@ -97,9 +97,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// below then waits for restoration and resumes the SAME job instead of
 	// finalizing it (one job per broadcast).
 	var offlineCancelled atomic.Bool
+	// finalizing switches the offline cancel off once the session loop is
+	// over: muxing and the chat drain need no network, and a blip there used
+	// to cancel the final mux — a complete recording landing in Error, a
+	// split job finishing without its last part.
+	var finalizing atomic.Bool
 	if o.conn != nil {
 		unregisterConn := o.conn.OnStateChange(func(online bool) {
-			if !online {
+			if !online && !finalizing.Load() {
 				offlineCancelled.Store(true)
 				callCancel()
 			}
@@ -1077,7 +1082,15 @@ sessionLoop:
 	// able to reach this FFmpeg (owner decision O-E). context.Background()
 	// here used to survive the child's exit and keep writing into a staging
 	// dir the respawned child re-muxes with -y.
-	muxCtx := ctx
+	// The finalize runs on a session of its own: only a user cancel or the
+	// job's own context (shutdown, deletion) can end it, never an offline
+	// transition (finalizing, above) — it needs no network. The fresh
+	// session is what covers the moment between the session loop's exit and
+	// the flag: an offline cancel landing there cancelled the loop's session,
+	// which nothing below uses.
+	finalizing.Store(true)
+	finalCtx, _ := newSession()
+	muxCtx := finalCtx
 	if outageFinalize {
 		muxCtx = o.muxRoot()
 	}
@@ -1112,7 +1125,7 @@ sessionLoop:
 		// path keeps the two-minute cut.
 		var outcome error
 		if isVod {
-			outcome = o.resolveVodChatOutcome(ctx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
+			outcome = o.resolveVodChatOutcome(finalCtx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
 		} else {
 			outcome = o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, chatShutdownGrace)
 		}
