@@ -529,82 +529,9 @@ The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives th
 
 ### API Route Catalog
 
-All API routes use the `/api/` prefix (no version). Non-API routes exist for POT provider compatibility and health checks.
+All API routes use the `/api/` prefix (no version). Non-API routes exist for POT provider compatibility and health checks (`/ping`, `/minter_cache`, `/get_pot`, `/invalidate_caches`, `/invalidate_it` — all but `/ping` loopback-only and CSRF-exempt).
 
-**Jobs:**
-- `GET /api/jobs` — List all active jobs
-- `GET /api/jobs/archived` — List archived (old finished) jobs
-- `GET /api/jobs/{id}` — Get single job
-- `POST /api/jobs` — Create new job (add video/stream)
-- `POST /api/jobs/{id}/cancel` — Cancel a job
-- `POST /api/jobs/{id}/retry` — Retry a failed job
-- `DELETE /api/jobs/{id}` — Delete a job and its files
-- `GET /api/jobs/{id}/video` — Stream video file (supports Range)
-- `GET /api/jobs/{id}/segments` — List multi-segment recordings
-- `GET /api/jobs/{id}/segments/{index}/video` — Stream specific segment
-- `GET /api/jobs/{id}/segments/{index}/chat` — Get one part's chat (multi-part Twitch)
-- `GET /api/jobs/{id}/chat` — Get chat data
-- `GET /api/jobs/{id}/trims` — List trim clips
-- `POST /api/jobs/{id}/trims` — Create trim clip
-- `DELETE /api/jobs/{id}/trims/{trimId}` — Delete trim clip
-- `GET /api/jobs/{id}/logs` — Get per-job log lines
-
-**Formats:**
-- `GET /api/formats/{videoId}` — Fetch available formats for a video
-
-**Status & Config:**
-- `GET /api/status` — Server status (version, uptime, cookie status, monitor timers)
-- `GET /api/config` — Get current config
-- `PUT /api/config` — Update config
-- `POST /api/config/channels` — Add monitored channel
-- `DELETE /api/config/channels/{id}` — Remove monitored channel
-- `POST /api/resolve-channel` — Resolve channel URL to ID/name
-
-**Auth:**
-- `GET /api/auth/status` — Auth state (public)
-- `POST /api/auth/login` — Login (rate limited: 5/60s)
-- `POST /api/auth/logout` — Logout
-- `GET /api/client-tokens` — List persistent client tokens
-- `DELETE /api/client-tokens/{id}` — Revoke client token
-
-**Cookies:**
-- `POST /api/cookies/recheck` — Force cookie auth recheck
-- `POST /api/cookies/auto-refresh` — Trigger browser cookie refresh
-- `POST /api/cookies/auto-setup/start` — Start auto-cookie browser setup (loopback only; `platform` must be `youtube` or `twitch`)
-- `POST /api/cookies/auto-setup/finish` — Complete auto-cookie setup (loopback only)
-- `POST /api/cookies/auto-setup/cancel` — Cancel auto-cookie setup (loopback only)
-- `POST /api/cookies/auto-setup/abandon` — Abandon auto-cookie setup (loopback only; the dashboard's unload beacon — closes the setup, opens nothing)
-- `GET /api/cookies/auto-status` — Auto-cookie service status
-
-**Updates:**
-- `GET /api/update/status` — Current update info
-- `POST /api/update/check` — Check for updates
-- `POST /api/update/apply` — Apply pending update
-- `POST /api/update/verify` — Verify binary signature
-- `POST /api/update/dismiss` — Dismiss update notification
-
-**Setup & System:**
-- `GET /api/setup/status` — First-run wizard state
-- `POST /api/setup/complete` — Complete first-run setup
-- `GET /api/logs` — Recent log lines
-- `POST /api/restart` — Restart application (any client allowed by `network_access` + auth; not loopback-restricted, unlike `/api/update/apply`)
-- `POST /api/import` — Import zip archive
-- `GET /api/stats` — Statistics data
-- `GET /api/ffmpeg/check` — Check FFmpeg availability
-- `GET /api/ffmpeg/install-options` — FFmpeg install methods
-- `GET /api/files/orphaned` — List orphaned files
-- `DELETE /api/files/orphaned` — Delete orphaned files
-- `GET /api/history/orphaned` — List orphaned processing-history rows (no matching job; block re-discovery until removed)
-- `DELETE /api/history/orphaned` — Remove given history video IDs to unblock re-discovery
-- `GET /api/ytdlp-plugin/status` — yt-dlp plugin status
-- `POST /api/ytdlp-plugin/install` — Install yt-dlp POT plugin
-
-**Non-API routes:**
-- `GET /ping` — Health check (POT provider compatibility)
-- `GET /minter_cache` — Minter cache status (POT provider compatibility)
-- `POST /get_pot` — Generate PO token (loopback only, CSRF exempt)
-- `POST /invalidate_caches` — Invalidate POT caches (loopback only, CSRF exempt)
-- `POST /invalidate_it` — Invalidate integrity token (loopback only, CSRF exempt)
+The complete catalog — every route, its body, its answers and its rate limit — is [REST API Routes — Complete Catalog](docs/spec/user-interfaces.md#rest-api-routes--complete-catalog) in `docs/spec/user-interfaces.md`. It is the one copy: `internal/web/routes/route_table_parity_test.go` fails when it and the router's registrations drift apart in either direction, which a second hand-kept list here could not promise (the one that stood here had fallen behind by more than a dozen routes, and said `DELETE /api/jobs/{id}` deletes files, which it never has).
 
 ### TUI Backend Communication
 

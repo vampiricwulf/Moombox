@@ -296,3 +296,34 @@ func TestFFmpegPathMustNameFFmpeg(t *testing.T) {
 	f.store.Update(func(c *config.MoomboxConfig) { c.Paths.FfmpegPath = "/opt/legacy/ffmpeg-7" })
 	putConfig(t, f, map[string]any{"paths": map[string]any{"ffmpeg_path": "/opt/legacy/ffmpeg-7"}})
 }
+
+// A path that answers -version but cannot be SAVED is not a 200 "valid": the
+// setup step writes the path into its cached config on that answer, because
+// the server saved it — and the live muxers never got it either — so the UI
+// and the disk disagreed with nothing on screen saying so.
+//
+// Mutant: logging the save failure and answering valid:true again.
+func TestFFmpegCheckRouteReportsAFailedSave(t *testing.T) {
+	real, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not on PATH — this route only saves a path that answers -version")
+	}
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := config.NewStore(config.Defaults(), filepath.Join(notADir, "config.toml"))
+	r := chi.NewRouter()
+	FFmpegRoutes(r, &FFmpegDeps{Store: store, Logger: ffmpegTestLogger{}})
+
+	body, _ := json.Marshal(map[string]string{"path": real})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/ffmpeg/check", bytes.NewReader(body)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("a valid path whose save failed: %d %s, want 500", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"valid":true`) {
+		t.Errorf("the failed save still answered valid: %s", rec.Body.String())
+	}
+}

@@ -221,6 +221,12 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		if valid {
 			if err := applyValidatedFfmpegPath(store, path, deps.OnFfmpegPathChange); err != nil {
 				deps.Logger.Error("Failed to save ffmpeg path to config", "error", err.Error())
+				// Not a 200 "valid": the setup step writes the path into its
+				// cached config on that answer because the server saved it —
+				// and the live mux/trim never got it either — so the UI and
+				// the disk would disagree with nothing on screen saying so.
+				jsonError(rw, "FFmpeg works at that path, but it could not be saved to the config", http.StatusInternalServerError)
+				return
 			}
 		}
 

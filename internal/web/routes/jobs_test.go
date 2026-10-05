@@ -1050,6 +1050,27 @@ func TestJobCreateRejectsEndBeforeStart(t *testing.T) {
 	}
 }
 
+// The trim route's rule for the same fields: a negative start and an end at
+// or before 0 select nothing. POST /api/jobs checked only end <= start, so
+// {startTime:-5, endTime:10} was stored as a job's range.
+//
+// Mutant: dropping either new check.
+func TestJobCreateRejectsANegativeStartOrNonPositiveEnd(t *testing.T) {
+	f := newJobsFixture(t)
+	for _, body := range []map[string]any{
+		{"videoId": "abcd1234567", "startTime": -5.0, "endTime": 10.0},
+		{"videoId": "abcd1234568", "endTime": 0.0},
+		{"videoId": "abcd1234569", "endTime": -1.0},
+	} {
+		if rec := doRequest(t, f.router, "POST", "/api/jobs", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%v: want 400, got %d (%s)", body, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"videoId": "abcd123456a", "startTime": 0.0, "endTime": 10.0}); rec.Code >= 400 {
+		t.Errorf("a range from 0: %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestJobCreateRejectsPathTraversal(t *testing.T) {
 	f := newJobsFixture(t)
 	rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{

@@ -343,10 +343,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// Resolve path. ThumbnailFile is stored as filepath.Join(outputDir,
-		// filenameBase+ext) — usually that's already an absolute path
-		// (outputDir is absolute on Windows), but we handle relative
-		// inputs by joining with outputDir.
+		// outputDir is the containment root the resolved path is checked
+		// against below; how ThumbnailFile itself resolves follows.
 		outputDir := resolveOutputDir(job, store)
 
 		// ThumbnailFile is stored as filepath.Join(outputDir, basename+ext)
@@ -651,6 +649,17 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		if body.SelectedVideoItag != nil && body.SelectedAudioItag != nil &&
 			*body.SelectedVideoItag == -1 && *body.SelectedAudioItag == -1 {
 			jsonError(rw, "cannot skip both video and audio", http.StatusBadRequest)
+			return
+		}
+		// The trim route's rule for the same fields: a range starts at or
+		// after the beginning of the video, and an end at or before it
+		// selects nothing (a blank start being 0, as both UIs send it).
+		if body.StartTime != nil && *body.StartTime < 0 {
+			jsonError(rw, "start time must not be negative", http.StatusBadRequest)
+			return
+		}
+		if body.EndTime != nil && *body.EndTime <= 0 {
+			jsonError(rw, "end time must be greater than 0", http.StatusBadRequest)
 			return
 		}
 		if body.StartTime != nil && body.EndTime != nil && *body.EndTime <= *body.StartTime {
