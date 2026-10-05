@@ -63,7 +63,7 @@ func TestNotePassCompletedWithNoHookIsSafe(t *testing.T) {
 //
 // The two, and why each is here rather than calling CheckNow itself:
 //
-//	StartPeriodicRefresh  the 30-minute browser refresh
+//	periodicTick          the 30-minute browser refresh's tick (StartPeriodicRefresh)
 //	StartProfileSeed      the one-shot import at boot, ~15 s in
 //
 // They are the only two credential-writing paths whose caller lives INSIDE this
@@ -77,7 +77,7 @@ func TestNotePassCompletedWithNoHookIsSafe(t *testing.T) {
 // PAIRED WITH TestNotePassCompletedIsGatedOnRanAtEverySite — this half proves
 // the call exists, that one proves it is still gated. Neither covers the other.
 func TestNotePassCompletedHasExactlyItsTwoWritingCallers(t *testing.T) {
-	want := []string{"StartPeriodicRefresh", "StartProfileSeed"} // sorted
+	want := []string{"StartProfileSeed", "periodicTick"} // sorted
 	got := callersOf(t, "notePassCompleted")
 
 	if len(got) == 0 {

@@ -536,7 +536,20 @@ func (rs *RefreshService) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				rs.doRefresh(ctx)
+				// Its own recover: the goroutine's sits outside this loop and
+				// would END it, so one panic — in the pass or in any callback
+				// it fans out to (OnAuthChange, OnRecoveryNeeded,
+				// OnAuthRecovered, OnCredentialsChanged) — would stop the
+				// session refresh and all auth-loss detection for the life of
+				// the process. This way it costs one tick.
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							rs.logger.Error("cookie refresh tick panic", "panic", r)
+						}
+					}()
+					rs.doRefresh(ctx)
+				}()
 			}
 		}
 	}()

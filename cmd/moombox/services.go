@@ -189,11 +189,12 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // a panic here costs ONE TICK and not the timer — cannot be driven from inside
 // initServices, and `go build` proves only that the join compiles.
 //
-// WHY ITS OWN RECOVER, when the caller is already a goroutine that has one. The
-// periodic goroutine's recover sits OUTSIDE its `for` loop
+// WHY ITS OWN RECOVER, when the caller already has one. The periodic
+// goroutine's own recover sits OUTSIDE its `for` loop
 // (AutoCookieService.StartPeriodicRefresh), so it does not resume the loop — it
-// ends it. Anything that panics on the way through this hook therefore stops
-// the 30-minute browser refresh for the life of the process. Before Arc 10 the
+// ends it. Each tick now runs under a per-tick recover too (runPeriodicTick),
+// but this one keeps the cost of a re-check panic to the re-check and keeps the
+// hook safe whoever calls it. Before Arc 10 the
 // only thing on that goroutine was refreshCookiesDetailed; this hook adds the
 // whole of RefreshService.refresh — jar.Reload, two HTTP round-trips,
 // updateCookieFile, and the OnAuthChange / OnRecoveryNeeded /

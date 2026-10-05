@@ -152,9 +152,10 @@ func TestCheckNowFnRunsTheServicesCheck(t *testing.T) {
 // call either: it runs the whole of RefreshService.refresh, including the
 // OnCredentialsChanged fan-out into the worker's Twitch chat registry.
 //
-// The mutation: dropping the recover. The panic then unwinds past the hook,
-// out of notePassCompleted, out of the tick, and past the goroutine's recover,
-// which returns instead of looping.
+// The mutation: dropping the recover. The panic then unwinds past the hook and
+// out of notePassCompleted, costing the rest of that tick (runPeriodicTick's
+// per-tick recover now stops it there, short of the goroutine's recover,
+// which would return instead of looping).
 func TestPostRefreshRecheckHookSurvivesAPanic(t *testing.T) {
 	log := &recheckLogger{}
 	ran := 0

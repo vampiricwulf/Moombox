@@ -213,78 +213,95 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !s.periodicRefreshHasSource() {
-					s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
-						"profile_dir", s.profileDir)
-					continue
-				}
-				// THE RULE, at its second automatic site: a browser-free import
-				// runs only when there is no cookies.txt to lose.
-				//
-				// Scoped to a tick that would BE a browser-free import, and the
-				// scope is load-bearing. Refreshing a LIVE cookies.txt through a
-				// headless browser is what this timer is for, so a host with a
-				// browser must keep doing exactly that. Only the browserless
-				// pass is an import, and an import over an existing cookie file
-				// is the thing the owner ruled out: nothing between two ticks
-				// changes a mounted profile, so it re-reads identical bytes over
-				// credentials that may be working — browserless because no
-				// browser resolves, or because cookies.acquisition = "profile"
-				// makes the pass an import regardless of the host. The second is
-				// the desktop case, where the profile IS the operator's real one
-				// and a scheduled re-read over live credentials is precisely what
-				// this rule refuses.
-				//
-				// gateExempt to match the pass this tick would actually run —
-				// asking with a different policy could answer "browser" here
-				// and "no browser" three lines down.
-				if s.refreshBrowser(gateExempt) == nil || s.resolvedAcquisition() == AcquisitionProfile {
-					if v := s.automaticImportGuard(); v != autoImportOK {
-						s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
-							"may only run when there is nothing to lose", "reason", v.String())
-						continue
-					}
-				}
-				if s.shouldSkipPeriodicRefresh(interval) {
-					s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs or recent refresh")
-					continue
-				}
-				s.logger.Debug("periodic auto-cookie refresh triggered")
-				refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
-				// Detailed, not the bool wrapper: only the full result carries
-				// Ran, and Ran is what decides whether anything was written.
-				result, err := s.refreshCookiesDetailed(refreshCtx, gateExempt)
-				cancel()
-				ok := result.AnyVerified()
-				if err != nil {
-					s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
-				} else if ok {
-					// Debug, and deliberately not "succeeded": RefreshCookies
-					// has just logged the one line that knows whether this pass
-					// RENEWED the credentials or merely found the previous ones
-					// still alive — at Info when it did, at Warn when it did
-					// not. Repeating "succeeded" here would contradict the
-					// second case and put the false claim back a line later.
-					s.logger.Debug("periodic auto-cookie refresh tick finished with authenticated cookies on disk")
-				}
-				// AFTER the verdict above, not before it. The hook may run a
-				// full in-process re-check — two validate round-trips, ~30 s at
-				// the client timeout — and everything RefreshService.refresh
-				// logs on the way lands in between. Firing it first buried this
-				// tick's own "failed"/"finished" line half a minute down the log,
-				// underneath output about a different pass.
-				//
-				// Gated on Ran, NOT on success. A pass that ran and failed still
-				// rewrote cookies.txt — a browser refresh that produced a
-				// new-but-dead pair moves the credential fingerprint exactly as a
-				// working one does — so firing on success only would leave the
-				// Twitch auth mark keyed to a pair that is no longer on disk. A
-				// DECLINED pass (seven refreshDeclined() exits) wrote nothing, so
-				// there is nothing to re-read.
-				if result.Ran {
-					s.notePassCompleted()
-				}
+				s.runPeriodicTick(ctx, interval)
 			}
 		}
 	}()
+}
+
+// runPeriodicTick runs one tick under its own recover, so a panic costs that
+// tick and not the timer: the goroutine's recover above sits outside the loop
+// and would end it, stopping the browser refresh for the life of the process.
+func (s *AutoCookieService) runPeriodicTick(ctx context.Context, interval time.Duration) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in periodic cookie refresh tick", "panic", fmt.Sprintf("%v", r))
+		}
+	}()
+	s.periodicTick(ctx, interval)
+}
+
+// periodicTick is one tick of StartPeriodicRefresh's timer.
+func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Duration) {
+	if !s.periodicRefreshHasSource() {
+		s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
+			"profile_dir", s.profileDir)
+		return
+	}
+	// THE RULE, at its second automatic site: a browser-free import
+	// runs only when there is no cookies.txt to lose.
+	//
+	// Scoped to a tick that would BE a browser-free import, and the
+	// scope is load-bearing. Refreshing a LIVE cookies.txt through a
+	// headless browser is what this timer is for, so a host with a
+	// browser must keep doing exactly that. Only the browserless
+	// pass is an import, and an import over an existing cookie file
+	// is the thing the owner ruled out: nothing between two ticks
+	// changes a mounted profile, so it re-reads identical bytes over
+	// credentials that may be working — browserless because no
+	// browser resolves, or because cookies.acquisition = "profile"
+	// makes the pass an import regardless of the host. The second is
+	// the desktop case, where the profile IS the operator's real one
+	// and a scheduled re-read over live credentials is precisely what
+	// this rule refuses.
+	//
+	// gateExempt to match the pass this tick would actually run —
+	// asking with a different policy could answer "browser" here
+	// and "no browser" three lines down.
+	if s.refreshBrowser(gateExempt) == nil || s.resolvedAcquisition() == AcquisitionProfile {
+		if v := s.automaticImportGuard(); v != autoImportOK {
+			s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
+				"may only run when there is nothing to lose", "reason", v.String())
+			return
+		}
+	}
+	if s.shouldSkipPeriodicRefresh(interval) {
+		s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs or recent refresh")
+		return
+	}
+	s.logger.Debug("periodic auto-cookie refresh triggered")
+	refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
+	// Detailed, not the bool wrapper: only the full result carries
+	// Ran, and Ran is what decides whether anything was written.
+	result, err := s.refreshCookiesDetailed(refreshCtx, gateExempt)
+	cancel()
+	ok := result.AnyVerified()
+	if err != nil {
+		s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
+	} else if ok {
+		// Debug, and deliberately not "succeeded": RefreshCookies
+		// has just logged the one line that knows whether this pass
+		// RENEWED the credentials or merely found the previous ones
+		// still alive — at Info when it did, at Warn when it did
+		// not. Repeating "succeeded" here would contradict the
+		// second case and put the false claim back a line later.
+		s.logger.Debug("periodic auto-cookie refresh tick finished with authenticated cookies on disk")
+	}
+	// AFTER the verdict above, not before it. The hook may run a
+	// full in-process re-check — two validate round-trips, ~30 s at
+	// the client timeout — and everything RefreshService.refresh
+	// logs on the way lands in between. Firing it first buried this
+	// tick's own "failed"/"finished" line half a minute down the log,
+	// underneath output about a different pass.
+	//
+	// Gated on Ran, NOT on success. A pass that ran and failed still
+	// rewrote cookies.txt — a browser refresh that produced a
+	// new-but-dead pair moves the credential fingerprint exactly as a
+	// working one does — so firing on success only would leave the
+	// Twitch auth mark keyed to a pair that is no longer on disk. A
+	// DECLINED pass (seven refreshDeclined() exits) wrote nothing, so
+	// there is nothing to re-read.
+	if result.Ran {
+		s.notePassCompleted()
+	}
 }
