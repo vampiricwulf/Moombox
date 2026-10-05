@@ -484,9 +484,13 @@ func (m *SettingsModel) settingsContentHeight() int {
 			previewRows++
 		}
 	}
+	// The focused field's help line is one of the eight rows below; a long
+	// one wraps (up to ~170 characters of help at 50-odd columns), and those
+	// extra rows used to push the header off the top of the screen.
+	infoRows := fieldInfoRows(sections[m.sectionIndex], m.settingsInnerWidth()) - 1
 	if sections[m.sectionIndex].name == "Network" {
 		// Network reserves 4 extra lines for the compact security block.
-		return max(h-12-buttonLine-previewRows, 1)
+		return max(h-12-buttonLine-previewRows-infoRows, 1)
 	}
-	return max(h-8-buttonLine-previewRows, 1)
+	return max(h-8-buttonLine-previewRows-infoRows, 1)
 }

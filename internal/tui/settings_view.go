@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -25,8 +26,7 @@ func (m *SettingsModel) View() string {
 		return m.renderRestartOverlay()
 	}
 
-	boxW := min(max(m.width-4, 40), m.width)
-	innerW := boxW - 4
+	innerW := m.settingsInnerWidth()
 	h := max(m.height-2, 10)
 
 	var content strings.Builder
@@ -105,7 +105,7 @@ func (m *SettingsModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(boxW - 2).
+		Width(innerW + 2).
 		Height(h + 2).
 		Render(content.String())
 
@@ -386,7 +386,9 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		if fd.previewFn != nil {
 			preview := fd.previewFn(m.values[fd.key])
 			if preview != "" {
-				lines = append(lines, "  "+DimStyle.Render(preview))
+				// One row, as settingsContentHeight budgets: the box would
+				// word-wrap a long preview into rows nothing reserved.
+				lines = append(lines, "  "+DimStyle.Render(ansi.Truncate(preview, max(w-2, 1), "…")))
 			}
 		}
 	}
@@ -411,11 +413,43 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		}
 
 		if len(infoParts) > 0 {
-			lines = append(lines, DimStyle.Render(strings.Join(infoParts, "  ")))
+			// Wrapped here rather than by the box, so the rows it takes are
+			// rows settingsContentHeight reserved (fieldInfoRows) and the
+			// button row's mouse offset counts them.
+			info := DimStyle.Render(strings.Join(infoParts, "  "))
+			lines = append(lines, strings.Split(ansi.Wrap(info, w, ""), "\n")...)
 		}
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// settingsInnerWidth is the content width View() lays the box out at.
+func (m *SettingsModel) settingsInnerWidth() int {
+	boxW := min(max(m.width-4, 40), m.width)
+	return boxW - 4
+}
+
+// fieldInfoRows is how many rows the focused-field info line can take in this
+// section at width w: the longest help text in it, with the longer of its two
+// status tags, wrapped the way renderFields wraps it. The worst case over the
+// section rather than the focused field's own, so the field window does not
+// resize under the operator as the focus moves. At least one row — the one the
+// budget always held.
+func fieldInfoRows(sec settingsSection, w int) int {
+	rows := 1
+	for _, fd := range sec.fields {
+		tag := "[modified]"
+		if restartRequiredKeys[fd.key] {
+			tag = "[restart required]"
+		}
+		text := tag
+		if fd.help != "" {
+			text = fd.help + "  " + tag
+		}
+		rows = max(rows, strings.Count(ansi.Wrap(text, max(w, 1), ""), "\n")+1)
+	}
+	return rows
 }
 
 func renderToggle(value string) string {
