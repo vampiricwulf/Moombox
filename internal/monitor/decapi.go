@@ -112,7 +112,8 @@ type decapiTerminalMemo struct {
 // decapiTerminalStatus reports whether a classification can no longer change.
 // Only "vod" and "not_a_stream" qualify: "upcoming" becomes "live" becomes
 // "vod", and "post_live" is the transitional state that becomes "vod". This is
-// the same terminal set the feed walk refuses to re-probe (walk.go:95-107).
+// the same terminal set the feed walk refuses to re-probe (walk.go, the status
+// switch in walk).
 func decapiTerminalStatus(status string) bool {
 	return status == "vod" || status == "not_a_stream"
 }

@@ -598,7 +598,24 @@ func resumeOnRedetect(existing *database.Job, disposition monitor.JobDisposition
 	if !stagingExists {
 		return false
 	}
-	return now.Sub(lastAutoResume) >= 5*time.Minute
+	return now.Sub(lastAutoResume) >= autoResumeCooldown
+}
+
+// autoResumeCooldown is the least time between two auto-resumes of one job
+// (resumeOnRedetect).
+const autoResumeCooldown = 5 * time.Minute
+
+// recordAutoResume notes an auto-resume of videoID at now, first dropping the
+// entries whose cooldown has run out: an expired entry decides nothing a
+// missing one would not, and the map is keyed by every job ever auto-resumed
+// for the life of the process.
+func recordAutoResume(last map[string]time.Time, videoID string, now time.Time) {
+	for id, at := range last {
+		if now.Sub(at) >= autoResumeCooldown {
+			delete(last, id)
+		}
+	}
+	last[videoID] = now
 }
 
 // jobCreationForDisposition maps a monitor.JobDisposition to the created
@@ -1316,13 +1333,13 @@ func (s *runState) wireMonitorCallbacks() {
 		// the verdict it now returns is unreachable.
 		//
 		// This value reaches FOUR consumers via membershipActive()
-		// (internal/monitor/feed.go:645). Widening was checked against all
-		// four, not just the first:
+		// (internal/monitor/feed.go). Widening was checked against all four,
+		// not just the first:
 		//
-		//	feed.go:513     the discovery arm — upserts only videos it finds
-		//	walk.go:90      skips membership-source rows when inactive
-		//	walk.go:247     same-cycle escalation to the authed probe
-		//	archive.go:131  skips membership-source rows when inactive
+		//	feed.go checkChannel   the discovery arm — upserts only videos it finds
+		//	walk.go walk           skips membership-source rows when inactive
+		//	walk.go probeRow       same-cycle escalation to the authed probe
+		//	archive.go archive     skips membership-source rows when inactive
 		//
 		// None writes durable state for a dead session: a refusal is
 		// OutcomeDenied, applyProbe runs only on OutcomeProbed, and archive's
@@ -1334,11 +1351,11 @@ func (s *runState) wireMonitorCallbacks() {
 		// There IS a real cost, in two parts, and the second is the larger.
 		//
 		// Per membership ROW: with a half-cleared session those rows are no
-		// longer parked at walk.go:90 / archive.go:131, so each burns one
-		// refused authenticated probe per cycle, and walk.go:247's same-cycle
+		// longer parked by walk's and archive's gates, so each burns one
+		// refused authenticated probe per cycle, and probeRow's same-cycle
 		// escalation fires too.
 		//
-		// Per membership CHANNEL: the discovery arm at feed.go:513 now also runs,
+		// Per membership CHANNEL: checkChannel's discovery arm now also runs,
 		// so every feed cycle pays a full authenticated /channel/<id>/membership
 		// page fetch and parse — the ~1MB payload FetchMembershipVideos
 		// describes, capped by utils.MaxFetchBodySize at 50MB
@@ -1436,9 +1453,10 @@ func (s *runState) wireMonitorCallbacks() {
 			}
 
 			resumeMu.Lock()
-			shouldResume := resumeOnRedetect(existing, d, stagingExists, lastAutoResume[videoID], time.Now())
+			resumeAt := time.Now()
+			shouldResume := resumeOnRedetect(existing, d, stagingExists, lastAutoResume[videoID], resumeAt)
 			if shouldResume {
-				lastAutoResume[videoID] = time.Now()
+				recordAutoResume(lastAutoResume, videoID, resumeAt)
 			}
 			resumeMu.Unlock()
 			if !shouldResume {

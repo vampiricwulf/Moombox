@@ -147,3 +147,26 @@ func TestOutageAlert(t *testing.T) {
 		}
 	}
 }
+
+// The auto-resume cooldown map gains an entry per job ever auto-resumed and
+// was never pruned. An expired entry decides nothing a missing one would not,
+// so recording a resume drops them.
+//
+// Mutant: recordAutoResume without the sweep — the stale entry stays.
+func TestRecordAutoResumeDropsExpiredEntries(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	last := map[string]time.Time{
+		"stale": now.Add(-autoResumeCooldown),
+		"fresh": now.Add(-time.Minute),
+	}
+	recordAutoResume(last, "new", now)
+	if _, ok := last["stale"]; ok {
+		t.Error("an entry whose cooldown has run out was kept")
+	}
+	if _, ok := last["fresh"]; !ok {
+		t.Error("an entry still inside its cooldown was dropped")
+	}
+	if !last["new"].Equal(now) {
+		t.Errorf("new = %v, want %v", last["new"], now)
+	}
+}
