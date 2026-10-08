@@ -218,7 +218,7 @@ func ipAllowedByNetworkAccess(store *config.Store, r *http.Request) bool {
 	case "external", "public":
 		return true
 	case "lan":
-		return isLoopback(ip) || isPrivateIP(ip)
+		return isLocalIPFor(ip, networkAccess)
 	default: // "localhost" or unset
 		return isLoopback(ip)
 	}
@@ -313,7 +313,7 @@ func externalHostRefused(store *config.Store, r *http.Request) bool {
 	if networkAccess != "external" && networkAccess != "public" {
 		return false
 	}
-	if ip := EffectiveClientIP(store, r); !isLoopback(ip) && !isPrivateIP(ip) {
+	if ip := EffectiveClientIP(store, r); !isLocalIPFor(ip, networkAccess) {
 		return false
 	}
 	host := effectiveRequestHost(store, r)
@@ -519,7 +519,7 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publ
 		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
 			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
 	case "lan":
-		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname) ||
+		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIPFor(hostname, networkAccess) ||
 			hostInSANs(hostname, identity, false)) &&
 			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
 	case "external", "public":
@@ -901,9 +901,48 @@ func mustParseCIDR(s string) *net.IPNet {
 	return n
 }
 
-// isLocalIP returns true for loopback or private IP addresses.
-func isLocalIP(ipStr string) bool {
-	return isLoopback(ipStr) || isPrivateIP(ipStr)
+// sharedAddressSpace is 100.64.0.0/10 (RFC 6598), the carrier-grade-NAT range
+// Tailscale numbers its nodes from. Private on lan only — see isPrivateIPFor.
+// (Tailscale's IPv6 addresses, fd7a:115c:a1e0::/48, are inside fc00::/7 and
+// were private already.)
+var sharedAddressSpace = mustParseCIDR("100.64.0.0/10")
+
+// isPrivateIPFor is isPrivateIP as a network_access mode reads it: on lan the
+// shared address space counts as private too, so a tailnet client passes the
+// IP gate, the origin and host checks, and the auth waiver exactly as a LAN
+// client does.
+//
+// lan only, because the same range is what some ISPs hand their customers: on
+// a host behind such an ISP's NAT, its other customers can arrive from it. On
+// lan that is the operator's choice of boundary — the mode trusts whatever
+// network the host sits on. On external/public it would be a password waived
+// for strangers, so there a 100.64.0.0/10 peer is a public one and keeps the
+// password.
+func isPrivateIPFor(ipStr, networkAccess string) bool {
+	if isPrivateIP(ipStr) {
+		return true
+	}
+	if networkAccess != "lan" {
+		return false
+	}
+	ip := net.ParseIP(ipStr)
+	return ip != nil && sharedAddressSpace.Contains(ip)
+}
+
+// isLocalIPFor reports whether ipStr is a peer the network_access mode trusts
+// as local — loopback, or private as isPrivateIPFor reads it for that mode.
+// These are the peers every auth waiver skips the password for.
+func isLocalIPFor(ipStr, networkAccess string) bool {
+	return isLoopback(ipStr) || isPrivateIPFor(ipStr, networkAccess)
+}
+
+// isLocalPeer is isLocalIPFor under the stored network_access mode.
+func isLocalPeer(store *config.Store, ipStr string) bool {
+	var networkAccess string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+	})
+	return isLocalIPFor(ipStr, networkAccess)
 }
 
 // IsLoopbackRequest returns true if the request is from a loopback address.
@@ -913,10 +952,11 @@ func IsLoopbackRequest(r *http.Request) bool {
 
 // IsLocalOrPrivateRequest returns true if the request's effective client IP
 // (X-Forwarded-For-aware when the direct peer is a trusted proxy) is loopback
-// or private. Used by auth endpoints to match the server's AuthMiddleware
-// trust policy, which allows both loopback and private clients.
+// or private — 100.64.0.0/10 included on lan (isPrivateIPFor). Used by auth
+// endpoints to match the server's AuthMiddleware trust policy, which allows
+// both loopback and private clients.
 func IsLocalOrPrivateRequest(store *config.Store, r *http.Request) bool {
-	return isLocalIP(EffectiveClientIP(store, r))
+	return isLocalPeer(store, EffectiveClientIP(store, r))
 }
 
 // shouldSkipCompression returns true for paths where compression should be

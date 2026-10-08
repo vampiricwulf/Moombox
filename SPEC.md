@@ -683,7 +683,7 @@ This section is about DASHBOARD authentication — who may use the web UI and th
 
 The `network_access` config field controls who can connect:
 - `localhost` — Only loopback (127.0.0.1, ::1)
-- `lan` — Loopback + private IP ranges (10.x, 172.16-31.x, 192.168.x)
+- `lan` — Loopback + private IP ranges (10.x, 172.16-31.x, 192.168.x, fc00::/7, link-local), plus — on this mode only — Tailscale's 100.64.0.0/10
 - `external` — All IPs
 - `public` — All IPs; a config-file-only synonym for `external` marking a deployment behind an authenticating reverse proxy. Not offered in any dropdown and rejected as an API input value.
 

@@ -226,12 +226,15 @@ Moombox. VPN clients arrive with those addresses, so they pass the
 `lan` filter as if they were on the LAN. No open ports, no password to
 manage, and network membership is the authentication.
 
-**Tailscale is the exception.** Its `100.x.y.z` addresses come from the
-carrier-grade-NAT range (`100.64.0.0/10`), which the `lan` filter does
-not treat as private — the same range some ISPs give their customers, so
-trusting it would also trust strangers on such an ISP. A tailnet client
-is therefore refused under `lan`; use option 2 or 3 below, with a
-password, to reach Moombox over Tailscale.
+**Tailscale works the same way.** Its `100.x.y.z` addresses come from
+the carrier-grade-NAT range (`100.64.0.0/10`), which the `lan` filter
+treats as private, so tailnet clients pass it and can open the dashboard
+at the host's `100.x.y.z` address. That trust is `lan`-only: the same
+range is what some ISPs hand their customers, so if the Moombox host
+itself sits behind such an ISP's NAT, its other customers could reach it
+under `lan` too — use Tailscale's ACLs or a host firewall if that
+applies. Under `external`/`public` a `100.x.y.z` client is treated as
+an internet client and is asked for the password.
 
 ### 2. Reverse proxy with HTTPS
 

@@ -90,6 +90,12 @@ type WebSocketHub struct {
 	// nil falls back to the raw peer address.
 	ClientIP func(*http.Request) string
 
+	// LocalPeer reports whether that IP is one the network_access mode
+	// trusts as local — the peers AuthMiddleware waives (isLocalIPFor, which
+	// counts 100.64.0.0/10 on lan). Set by NewServer; nil falls back to the
+	// mode-free loopback-or-private test.
+	LocalPeer func(ip string) bool
+
 	// OriginCheck decides whether an upgrade's Origin header is acceptable,
 	// and returns the authority it was compared against so the refusal log
 	// line can name the pair the decision actually used (fix-round-1 item 7 —
@@ -186,7 +192,11 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		if hub.ClientIP != nil {
 			ip = hub.ClientIP(r)
 		}
-		if !isLoopback(ip) && !isPrivateIP(ip) {
+		local := isLoopback(ip) || isPrivateIP(ip)
+		if hub.LocalPeer != nil {
+			local = hub.LocalPeer(ip)
+		}
+		if !local {
 			if !hub.AuthCheck(r) {
 				hub.logger.Debug("websocket upgrade rejected: auth required", "ip", ip)
 				http.Error(w, "Authentication required", http.StatusUnauthorized)

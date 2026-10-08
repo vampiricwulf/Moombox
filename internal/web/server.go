@@ -101,6 +101,8 @@ func NewServer(store *config.Store, logger interface {
 	// resolve the same effective client IP as the middleware chain, or a
 	// trusted reverse proxy would re-open the auth bypass there.
 	s.ws.ClientIP = func(r *http.Request) string { return EffectiveClientIP(store, r) }
+	// ...and class it by the same mode-aware rule AuthMiddleware waives by.
+	s.ws.LocalPeer = func(ip string) bool { return isLocalPeer(store, ip) }
 
 	// ...and the same Origin decision: before this the upgrade read r.Host
 	// only and wildcarded the port, so a Host-rewriting reverse proxy loaded
@@ -177,18 +179,20 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := EffectiveClientIP(s.configStore, r)
 
-		// Loopback and private IPs skip auth
-		if isLoopback(ip) || isPrivateIP(ip) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// No auth required if not configured
 		var networkAccess, passwordHash string
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			networkAccess = c.Network.NetworkAccess
 			passwordHash = c.Network.PasswordHash
 		})
+
+		// Loopback and private IPs skip auth (100.64.0.0/10 is private on
+		// lan only — isPrivateIPFor)
+		if isLocalIPFor(ip, networkAccess) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// No auth required if not configured
 		if !IsAuthRequired(networkAccess, passwordHash) {
 			next.ServeHTTP(w, r)
 			return
