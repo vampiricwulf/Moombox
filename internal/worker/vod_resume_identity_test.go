@@ -114,7 +114,7 @@ func TestVodResumeChecksTheRendition(t *testing.T) {
 			audio251 := 251
 			job.Config.MaxVideoResolution = 1080
 			job.Job.SelectedAudioItag = &audio251
-			res1, err := DownloadVod(ctx, job, info, stubCipherSolver{}, nil, nil)
+			res1, err := DownloadVod(ctx, job, info, stubCipherSolver{}, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -136,7 +136,7 @@ func TestVodResumeChecksTheRendition(t *testing.T) {
 			srv.mu.Unlock()
 			job.Config.MaxVideoResolution = tc.resumeCap
 			job.Job.SelectedAudioItag = &tc.audioItag
-			res2, err := DownloadVod(ctx, job, info, stubCipherSolver{}, nil, nil)
+			res2, err := DownloadVod(ctx, job, info, stubCipherSolver{}, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

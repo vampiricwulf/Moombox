@@ -80,7 +80,7 @@ func potMintLine(logs *captureLogger) map[string]any {
 
 func runVodPot(t *testing.T, job *JobContext, info *youtube.VideoInfo, pot *bgutils.PotProvider) *DownloadResult {
 	t.Helper()
-	res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, pot)
+	res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, pot, nil)
 	if err != nil {
 		t.Fatalf("DownloadVod = %v, want nil", err)
 	}
@@ -309,7 +309,7 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 		info.Formats[1].EncryptedSig = "broken"
 		w, h, fps := 854, 480, 30
 		info.Formats = append(info.Formats, youtube.Format{Itag: 244, URL: "http://127.0.0.1:1/videoplayback?itag=244", MimeType: `video/webm; codecs="vp9"`, Bitrate: 800_000, Width: &w, Height: &h, Fps: &fps, Source: "tv_public"})
-		res, err := DownloadVod(context.Background(), job, info, failingSigSolver{}, nil, &bgutils.PotProvider{})
+		res, err := DownloadVod(context.Background(), job, info, failingSigSolver{}, nil, &bgutils.PotProvider{}, nil)
 		if err != nil {
 			t.Fatalf("DownloadVod = %v, want nil", err)
 		}
@@ -324,7 +324,7 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 	t.Run("only web-family formats is an error naming the GVS token", func(t *testing.T) {
 		fakeVodMint(t, "", mintErr)
 		job, _ := vodPotJob(t)
-		res, err := DownloadVod(context.Background(), job, vodPotInfo("web_creator", "web_creator"), stubCipherSolver{}, nil, &bgutils.PotProvider{})
+		res, err := DownloadVod(context.Background(), job, vodPotInfo("web_creator", "web_creator"), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
 		if err == nil {
 			t.Fatalf("DownloadVod = %+v, nil — want an error", res)
 		}
@@ -647,7 +647,7 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		rxErr := errors.New("visionos 403")
 		calls := fakeCookieless(t, nil, rxErr)
 		job, logs := reextractJob(t)
-		res, err := DownloadVod(context.Background(), job, incidentInfo(), stubCipherSolver{}, nil, &bgutils.PotProvider{})
+		res, err := DownloadVod(context.Background(), job, incidentInfo(), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
 		if err == nil {
 			t.Fatalf("DownloadVod = %+v, nil — want the terminal error", res)
 		}
@@ -669,7 +669,7 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		job, logs := reextractJob(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		res, err := DownloadVod(ctx, job, incidentInfo(), stubCipherSolver{}, nil, &bgutils.PotProvider{})
+		res, err := DownloadVod(ctx, job, incidentInfo(), stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
 		if err == nil {
 			t.Fatalf("DownloadVod = %+v, nil — want the terminal error", res)
 		}
@@ -735,7 +735,7 @@ func TestDownloadVodMissingPotReextractsCookieless(t *testing.T) {
 		info := incidentInfo()
 		calls := fakeCookieless(t, []youtube.Format{cookielessCopy(info.Formats[1])}, nil)
 		job, _ := reextractJob(t)
-		res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{})
+		res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, nil)
 		if err != nil {
 			t.Fatalf("DownloadVod = %v, want the audio-only fallback", err)
 		}

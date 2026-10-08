@@ -71,7 +71,7 @@ func TestWholeFileVodSetsAsideEarlierLiveCapture(t *testing.T) {
 
 	body := append([]byte("\x00\x00\x00\x18ftypdash"), make([]byte, 1000)...)
 	srv := serveWholeFile(t, body)
-	res, err := DownloadVod(context.Background(), job, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil)
+	res, err := DownloadVod(context.Background(), job, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("DownloadVod: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestRestartMuxAfterWholeFileVodArchivesTheVod(t *testing.T) {
 
 	job, _ := db.GetJob("j-vodshape")
 	jobCtx := w.buildJobContext(job)
-	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil)
+	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("DownloadVod: %v", err)
 	}

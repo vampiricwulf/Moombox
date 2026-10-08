@@ -914,12 +914,29 @@ func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
 // not a bare attempt count. A 416 and a cancellation are handed back as they
 // came — the caller classifies the first by status and the second by
 // errors.Is.
+//
+// Two kinds of failure are not charged against those attempts, as on the
+// segmented path (fetchSegmentWithRetry):
+//
+//   - a 403 or 410 asks OnCredentialRefresh for a fresh URL
+//     (refreshDirectURL) and retries the chunk on it, at most
+//     directRefreshAttempts times per chunk. A googlevideo URL lives about six
+//     hours, so a long transfer outlived it and the job used to end on a bare
+//     "HTTP 403" after one attempt;
+//   - a failure while IsOnline reports the device offline waits the outage
+//     out and retries. Before a failure with no complete answer is charged
+//     as the LAST attempt, the monitor is given the time it needs to call an
+//     outage (awaitOutageVerdict): a reset or refused connection or a DNS
+//     miss fails at once, so the ladder ran out in three seconds, well inside
+//     the two polls the monitor takes to notice — an outage longer than that
+//     failed the job.
 func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end int64) ([]byte, int, error) {
 	var (
 		lastErr    error
 		lastStatus int
+		refreshes  int
 	)
-	for attempt := range MaxChunkRetries {
+	for attempt := 0; attempt < MaxChunkRetries; attempt++ {
 		if d.isCancelled() || ctx.Err() != nil {
 			return nil, 0, d.cancelErr(ctx)
 		}
@@ -933,11 +950,46 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 			return nil, status, err
 		}
 
+		if status == http.StatusForbidden || status == http.StatusGone {
+			if d.opts.OnCredentialRefresh == nil || refreshes >= directRefreshAttempts {
+				return nil, status, fmt.Errorf("chunk download failed: %w", err)
+			}
+			refreshes++
+			if rerr := d.refreshDirectURL(status); rerr != nil {
+				return nil, status, fmt.Errorf("chunk download failed: %w; %w", err, rerr)
+			}
+			attempt-- // not charged: the next attempt is on the fresh URL
+			continue
+		}
+
+		// A failure below 300 got no complete answer: no response at all
+		// (status 0), or a 2xx whose body broke off mid-read — a reset, an
+		// unexpected EOF, the idle stall. That is the link failing, not the
+		// origin refusing, and it is retried like one; with its 206 it used to
+		// fall through to the immediate failure below, so one connection
+		// dropped mid-chunk ended the job. A 206 that starts at the wrong
+		// offset (fetchChunk) rides the same ladder, as fetchChunk intends.
+		incomplete := status < 300
+
 		// Retry on 5xx or network errors with exponential backoff (capped at
 		// 60s). Skip the backoff after the final attempt — no fetch follows,
 		// so it only delays the already-decided failure.
-		if status >= 500 || status == 0 {
+		if status >= 500 || incomplete {
 			lastErr, lastStatus = err, status
+			if d.opts.IsOnline != nil {
+				offline := !d.opts.IsOnline()
+				if !offline && incomplete && attempt == MaxChunkRetries-1 {
+					offline = d.awaitOutageVerdict(ctx)
+				}
+				if offline {
+					d.emitActivity(ActivityReconnecting)
+					if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+						return nil, 0, d.cancelErr(ctx)
+					}
+					attempt-- // not charged: the failure says nothing about the chunk
+					continue
+				}
+			}
 			if attempt < MaxChunkRetries-1 {
 				delay := time.Duration(1<<uint(attempt)) * d.delays.atEdgeBackoffUnit
 				delay = min(delay, 60*d.delays.atEdgeBackoffUnit)
@@ -949,7 +1001,36 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 		return nil, status, fmt.Errorf("chunk download failed: %w", err)
 	}
 
+	// A cancel that landed during the last attempt or the outage verdict is
+	// still a cancel, not a chunk that failed: the loop-top check never runs
+	// again, and the verdict wait can hold the loop for seconds.
+	if err := d.cancelErr(ctx); err != nil {
+		return nil, 0, err
+	}
 	return nil, lastStatus, fmt.Errorf("chunk download failed after %d attempts: %w", MaxChunkRetries, lastErr)
+}
+
+// awaitOutageVerdict gives the connectivity monitor the time it needs to call
+// an outage — three of its polls (connectivityPollInterval): it goes offline
+// on its second failed poll, and a poll on a dead network spends a few seconds
+// in its own probe — and reports whether it did. Only a chunk about to be
+// charged its last attempt for a failure with no complete answer asks, so a
+// link that is down is waited out instead of failing the job, while one the
+// monitor still calls up gives up as before, one window later. A cancel ends
+// the wait as "no verdict", and fetchChunkWithRetry returns the cancel.
+func (d *SegmentDownloader) awaitOutageVerdict(ctx context.Context) bool {
+	deadline := time.Now().Add(3 * d.delays.connectivityPoll)
+	for {
+		if !d.opts.IsOnline() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if utils.Sleep(ctx, d.delays.atEdgeBackoffUnit) != nil {
+			return false
+		}
+	}
 }
 
 // fetchChunk downloads a single byte range from the direct URL.

@@ -26,7 +26,9 @@ var errEmptyGvsToken = errors.New("PO token generator returned an empty token")
 // goja resolver used as the n-fallback path. Both are accepted (rather
 // than only routedSolver) so the wiring stays consistent with the
 // other YouTube strategies — the orchestrator passes whatever it has.
-func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
+// isOnline is the connectivity check the downloaders wait an outage out on,
+// as on the live strategies; nil disables the wait.
+func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	// pool is the format list selection, cipher re-selection and the
 	// alternate picker all draw from. It is the caller's slice until a
 	// missing_pot degrade swaps in a filtered COPY — never filtered in place.
@@ -173,29 +175,33 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// what the engine fetches.
 	if result.HasVideo && result.VideoPath != "" && videoResolved != "" {
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:        videoResolved,
-			OutputFile:     result.VideoPath,
-			StartSeq:       0,
-			EndSeq:         0, // Single file download
-			IsDirectURL:    true,
-			StreamID:       vodStreamID(job.Job.VideoID, result.VideoFormat),
-			SegmentWorkers: job.Config.SegmentWorkers,
-			PoToken:        videoPoToken,
-			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			BaseURL:             videoResolved,
+			OutputFile:          result.VideoPath,
+			StartSeq:            0,
+			EndSeq:              0, // Single file download
+			IsDirectURL:         true,
+			StreamID:            vodStreamID(job.Job.VideoID, result.VideoFormat),
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			PoToken:             videoPoToken,
+			IsOnline:            isOnline,
+			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.VideoFormat, routedSolver, cipherSolver, potProvider, "VOD video"),
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		})
 	}
 
 	if result.HasAudio && result.AudioPath != "" && audioResolved != "" {
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:        audioResolved,
-			OutputFile:     result.AudioPath,
-			StartSeq:       0,
-			EndSeq:         0,
-			IsDirectURL:    true,
-			StreamID:       vodStreamID(job.Job.VideoID, result.AudioFormat),
-			SegmentWorkers: job.Config.SegmentWorkers,
-			PoToken:        audioPoToken,
-			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			BaseURL:             audioResolved,
+			OutputFile:          result.AudioPath,
+			StartSeq:            0,
+			EndSeq:              0,
+			IsDirectURL:         true,
+			StreamID:            vodStreamID(job.Job.VideoID, result.AudioFormat),
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			PoToken:             audioPoToken,
+			IsOnline:            isOnline,
+			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.AudioFormat, routedSolver, cipherSolver, potProvider, "VOD audio"),
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 		})
 	}
 

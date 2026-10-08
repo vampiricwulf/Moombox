@@ -38,9 +38,10 @@ type StrategyDeps struct {
 	// All YouTube strategies use it when non-nil.
 	PotProvider *bgutils.PotProvider
 
-	// IsOnline is the connectivity check used by manifest-fetching
-	// strategies (DASH, HLS) to bail out early during an offline blip.
-	// VOD doesn't poll for connectivity.
+	// IsOnline is the connectivity check every YouTube strategy hands its
+	// downloaders, so a fetch that fails during an outage waits it out
+	// instead of being charged; the manifest-fetching strategies (DASH,
+	// HLS) also bail out early on it during an offline blip.
 	IsOnline func() bool
 }
 
@@ -127,7 +128,7 @@ func (manifestlessDashStrategyT) Kind() string { return "manifestless_dash" }
 func (hlsStrategyT) Kind() string              { return "hls" }
 
 func (vodStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
-	return DownloadVod(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider)
+	return DownloadVod(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
 }
 
 func (dashStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
@@ -626,8 +627,8 @@ var fetchCookielessFormats = (*youtube.Service).CookielessFormats
 // It reads the SETUP pool: on the VOD path a missing_pot swap replaces an
 // itag's winner with its token-free shadow in a filtered copy only, so this
 // would still name the winner's client for a stream riding the shadow's URL.
-// DownloadVod wires no OnCredentialRefresh, so no caller reaches that shape;
-// a VOD refresh, if ever added, must be handed the served format's Source.
+// The VOD refresh (refreshVodURL) is therefore handed the served format
+// itself and never asks this.
 func formatSourceByItag(formats []youtube.Format, itag int) string {
 	for i := range formats {
 		if formats[i].Itag == itag {

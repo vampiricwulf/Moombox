@@ -307,6 +307,10 @@ type DownloaderOptions struct {
 	// git history, e.g. `git show aedc162^:docs/superpowers/plans/2026-08-15-live-403-credential-recovery.md`).
 	// Optional; nil disables recovery, restoring
 	// the previous behaviour exactly.
+	//
+	// The whole-file path (IsDirectURL) calls it too, on a chunk answered
+	// 403 or 410 — its URL expired mid-transfer — and accepts only a URL
+	// naming the same file (refreshDirectURL in downloader_direct.go).
 	OnCredentialRefresh func() (baseURL string, poToken string)
 	Logger              DownloaderLogger
 	// SegmentWorkers is how many segments this download fetches

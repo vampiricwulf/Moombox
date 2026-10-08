@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -207,6 +208,45 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		})
 	}
 
+	return nil
+}
+
+// directRefreshAttempts bounds the URL refreshes one chunk may ask for after a
+// 403 or 410: one for the URL that expired, and one more for a refresh whose
+// URL the origin still refused (a token the refresh could not re-mint, say).
+// A third refusal of the same chunk is not an expiry, and the error stands.
+const directRefreshAttempts = 2
+
+// refreshDirectURL answers a 403 or 410 on a whole-file chunk — the
+// whole-file twin of the segmented paths' refreshCredentials. It asks
+// OnCredentialRefresh for a fresh URL and token and installs whatever comes
+// back for the retry.
+//
+// A fresh URL must name the same file. The partial on disk is a prefix of ONE
+// rendition, and a URL for another — a re-extraction whose pool moved —
+// would append it mid-file: the splice resumeIdentityMismatch refuses at
+// Start. Its fingerprint (streamIdentity) must match the current URL's, and a
+// mismatch is an error, which keeps the sidecar for a Resume that selects
+// from scratch. Nothing returned at all is an error too: retrying the URL
+// that was just refused only spends the attempt. No cooldown, unlike
+// refreshCredentials — this path fetches one chunk at a time, and
+// directRefreshAttempts bounds it per chunk.
+func (d *SegmentDownloader) refreshDirectURL(status int) error {
+	freshURL, freshToken := d.opts.OnCredentialRefresh()
+	if freshURL == "" && freshToken == "" {
+		return errors.New("the URL refresh returned nothing")
+	}
+	if freshURL != "" {
+		if was, now := streamIdentity(d.getBaseURL()), streamIdentity(freshURL); was != now {
+			d.logger.Warn("[Downloader] Refreshed whole-file URL names a different stream — refusing it",
+				"status", status, "currentIdentity", was, "freshIdentity", now)
+			return fmt.Errorf("the refreshed URL names a different stream (%q, not %q) — refusing to append it", now, was)
+		}
+		d.SetBaseURL(freshURL)
+	}
+	d.SetPoToken(freshToken)
+	d.logger.Info("[Downloader] Whole-file URL refreshed after a refused chunk",
+		"status", status, "newURL", freshURL != "", "newToken", freshToken != "")
 	return nil
 }
 
