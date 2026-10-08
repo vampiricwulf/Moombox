@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -351,17 +352,50 @@ func TestCalculateETASegmentBased(t *testing.T) {
 	}
 }
 
-// TestCalculateETAVODBytesBased exercises the VOD bytes-based ETA
-// branch. bytesTotal/elapsed = 1GB/30s = ~33MB/s; remaining 1GB / 33MB/s = ~30s.
-func TestCalculateETAVODBytesBased(t *testing.T) {
-	pt := newTestProgressTracker()
-	pt.startTime = time.Now().Add(-30 * time.Second)
-	pt.vodTotalBytes = 2 << 30 // 2 GB total
-	pt.bytesTotal = 1 << 30    // 1 GB done
+// TestCalculateETAVODCountsOnlyThisSessionsBytes pins the whole-file VOD
+// ETA on a resumed run, driven through the real OnProgress callbacks. The
+// session starts 30 s after the tracker (probing, slot handoff) with video at
+// 600/1000 MB and audio at 100/200 MB — both inherited from disk — and ten
+// seconds later each stream has moved 40 MB: 8 MB/s against 420 MB still to
+// fetch, 52.5 s. The old formula divided the video total minus every byte
+// either stream had ever written by that sum over the tracker's age, and
+// showed a few seconds.
+//
+// Mutant: pinning no base (moved() returns latest) — the inherited 700 MB
+// reads as session speed, "5s". Mutant: dropping the audio stream's
+// noteVodBytesLocked — video alone, "1m 30s". Mutant: measuring from
+// pt.startTime instead of vodSessionStart — 40 s of clock, "3m 30s".
+func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
+	pt := NewProgressTracker(nil, "eta-vod", nopProgressLogger{}, 24*time.Hour) // gate every DB write
+	t.Cleanup(pt.Close)
+	clk := &fakeClock{t: pt.startTime}
+	pt.mu.Lock()
+	pt.now = clk.now
+	pt.mu.Unlock()
 
+	newDl := func() *engine.SegmentDownloader {
+		return engine.NewSegmentDownloader(engine.DownloaderOptions{BaseURL: "http://unused/", OutputFile: os.DevNull, IsDirectURL: true})
+	}
+	video, audio := newDl(), newDl()
+	pt.AttachVideoDownloader(video)
+	pt.AttachAudioDownloader(audio)
+	const mb = int64(1 << 20)
+	event := func(dl *engine.SegmentDownloader, bytes, total int64) {
+		dl.OnProgress(engine.DownloadProgress{Bytes: bytes * mb, TotalBytes: total * mb, Percent: float64(bytes) / float64(total) * 100})
+	}
+
+	clk.advance(30 * time.Second)
+	event(video, 600, 1000)
+	event(audio, 100, 200)
+	clk.advance(10 * time.Second)
+	event(video, 640, 1000)
+	event(audio, 140, 200)
+
+	pt.mu.Lock()
 	got := pt.calculateETA()
-	if got == "" {
-		t.Errorf("ETA VOD-bytes: want non-empty, got empty")
+	pt.mu.Unlock()
+	if got != "52s" {
+		t.Errorf("calculateETA() = %q, want %q (80 MB moved in 10 s, 420 MB left)", got, "52s")
 	}
 }
 
