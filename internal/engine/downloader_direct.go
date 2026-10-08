@@ -79,11 +79,38 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		return d.runDirectDownloadFallback(ctx)
 	}
 
+	// A resumed partial is a prefix of ONE file, and the probe has just said
+	// how long the file behind this URL is. A total that differs from the one
+	// the sidecar was saved against — or that the partial already overruns —
+	// is a different file: a different rendition the selection picked this
+	// time, or a re-encode under the same itag. Appending to it was the
+	// splice the identity check alone could not catch on a URL without
+	// `clen`. Start it over, the way an identity mismatch in Start does for
+	// this path.
+	if staged := d.bytesWritten.Load(); staged > 0 {
+		reason := ""
+		switch {
+		case d.directTotalSize > 0 && totalSize != d.directTotalSize:
+			reason = fmt.Sprintf("probed size %d is not the %d the resume state was saved against — a different file",
+				totalSize, d.directTotalSize)
+		case staged > totalSize:
+			reason = fmt.Sprintf("%d bytes staged but the probed size is %d — a different file", staged, totalSize)
+		}
+		if reason != "" {
+			if err := d.discardStagedMedia(reason); err != nil {
+				return err
+			}
+		}
+	}
+	d.directTotalSize = totalSize
+
 	// Chunked download with 5MB Range requests. Resume from the byte position
 	// Start() restored: on a resumed run it loaded a valid resume sidecar,
-	// validated identity (itag-bearing googlevideo URL) and file size, and
-	// truncated the output to the fsync'd offset + opened O_APPEND — so
-	// continuing from d.bytesWritten appends cleanly. A hard crash that lost
+	// validated identity (the caller's StreamID, then the URL's itag/clen
+	// fingerprint) and file size, and truncated the output to the fsync'd
+	// offset + opened O_APPEND, and the block above has held the partial to
+	// the probed total — so continuing from d.bytesWritten appends cleanly
+	// to the same file. A hard crash that lost
 	// the file's tail fails Start's size check and restarts fresh, so this
 	// can never splice a torn tail. Fresh runs start at 0 (bytesWritten==0).
 	offset := d.bytesWritten.Load()

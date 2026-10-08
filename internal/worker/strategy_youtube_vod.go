@@ -178,6 +178,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			StartSeq:       0,
 			EndSeq:         0, // Single file download
 			IsDirectURL:    true,
+			StreamID:       vodStreamID(job.Job.VideoID, result.VideoFormat),
 			SegmentWorkers: job.Config.SegmentWorkers,
 			PoToken:        videoPoToken,
 			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
@@ -191,6 +192,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			StartSeq:       0,
 			EndSeq:         0,
 			IsDirectURL:    true,
+			StreamID:       vodStreamID(job.Job.VideoID, result.AudioFormat),
 			SegmentWorkers: job.Config.SegmentWorkers,
 			PoToken:        audioPoToken,
 			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),

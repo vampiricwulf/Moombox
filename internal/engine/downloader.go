@@ -233,7 +233,10 @@ type DownloaderOptions struct {
 	// belongs to a different broadcast and is discarded. Essential for
 	// platforms whose media URLs carry no extractable identity (Twitch
 	// weaver URLs) — without it, a job resumed after the channel started a
-	// NEW broadcast would splice the new stream into the old recording.
+	// NEW broadcast would splice the new stream into the old recording. The
+	// YouTube whole-file VOD path sets one per stream (video, itag, clen):
+	// every rendition stages to the same file name, so a resume whose format
+	// selection moved would otherwise append one rendition to another.
 	StreamID string
 	// StopOnGap makes the HLS live loop return ErrGapDetected instead of
 	// skipping forward when the playlist has moved past the next needed
@@ -460,6 +463,13 @@ type SegmentDownloader struct {
 	hlsInitWritten bool
 	hlsInitURI     string
 	hlsInitHash    string
+
+	// directTotalSize is the whole-file download's total as last probed —
+	// restored from the sidecar on a resume, then checked against and
+	// replaced by runDirectDownload's own probe — and persisted by
+	// saveResume (ResumeState.TotalSize). Download-loop goroutine only, like
+	// the fields above.
+	directTotalSize int64
 
 	// hlsOutages counts the connectivity outages the HLS loop has waited out
 	// (waitOnline). A stuck segment's retry count is kept per outage, so
@@ -864,6 +874,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 			d.hlsInitWritten = state.InitWritten
 			d.hlsInitURI = state.InitURI
 			d.hlsInitHash = state.InitHash
+			d.directTotalSize = state.TotalSize
 			resuming = true
 		}
 	}

@@ -18,7 +18,7 @@ These are hard rules. An AI assisting with Moombox development must follow them 
 - **Schema migrations are versioned, idempotent, and forward-only.** Currently at v20 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `log_max_files` are deleted.
-- **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, and stream ID. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation is what used to truncate hours of recording on every daemon restart.
+- **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, stream ID and, for a whole-file download, the probed total size. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation is what used to truncate hours of recording on every daemon restart.
 - **Chat files use incremental append, not full rewrite.** After the first flush, new messages are appended by seeking to the closing `]` bracket, truncating there, and writing new messages plus the closing structure. The `messageCount` field in the JSON header is padded to 20 characters so it can be updated in-place without shifting the rest of the file.
 
 ---
@@ -1136,14 +1136,22 @@ the file with fragments that reference a different `moov`.
 
 1. Identity, in precedence order: (a) when both the saved state and the
    current options carry an explicit `StreamID` (Twitch broadcast/VOD id), a
-   mismatch discards the state; (b) otherwise YouTube URL fingerprinting
-   (`videoID/itag` extracted from either URL shape) — differing or mixed
+   mismatch discards the state — the YouTube whole-file VOD path sets one
+   per stream (video, itag, `clen`; `vodStreamID`,
+   `internal/worker/strategy_youtube_vod_wiring.go`), since every rendition
+   stages to the same `video.mp4` / `audio.m4a`; (b) otherwise YouTube URL
+   fingerprinting (`videoID/itag` from the path or query shape, or a finished
+   VOD's `id=o-…` URL read as its itag plus `clen`) — differing or mixed
    fingerprints discard; (c) when NEITHER URL carries an extractable
    identity (Twitch weaver URLs), the state is TRUSTED — raw URL equality
    has no signal there and rejecting on it used to truncate hours of
    recording on every restart.
 2. Output file must exist and be at least as large as `BytesWritten`; states
-   older than 7 days (`maxResumeStateAge`) are discarded.
+   older than 7 days (`maxResumeStateAge`) are discarded. A whole-file
+   download is then held to its file once the probe answers: a total other
+   than the recorded `TotalSize`, or a partial longer than the file, means a
+   different file, and `runDirectDownload` starts over
+   (`internal/engine/downloader_direct.go`).
 3. If validation fails, the resume file is discarded — but the staged
    bytes are not. NO caller truncates them. The shared no-truncate guard in
    `Start` (`internal/engine/downloader.go`) runs whenever the engine could

@@ -28,8 +28,17 @@ var streamIdentityPathRe = regexp.MustCompile(`/id/([\w-]+)\.\d+(?:~[^/]*)?/itag
 var streamIdentityQueryIDRe = regexp.MustCompile(`[?&]id=([\w-]+)\.\d+`)
 var streamIdentityQueryItagRe = regexp.MustCompile(`[?&]itag=(\d+)`)
 
+// streamIdentityWholeFileIDRe / streamIdentityQueryClenRe recognise a
+// finished VOD's whole-file format URL: its id is an opaque `o-…` token with
+// no `.N` stream suffix, so the query-style pattern above never matched it and
+// every whole-file resume compared "" with "" — trusted, whatever rendition the
+// sidecar was written for. What names the rendition there is the itag and
+// `clen`, the file's exact byte length.
+var streamIdentityWholeFileIDRe = regexp.MustCompile(`[?&]id=o-[\w-]+`)
+var streamIdentityQueryClenRe = regexp.MustCompile(`[?&]clen=(\d+)`)
+
 // streamIdentity returns the videoID + itag fingerprint for a YouTube media
-// URL, or "" when neither URL shape matches. Two URLs with the same
+// URL, or "" when no URL shape matches. Two URLs with the same
 // fingerprint refer to the same logical stream variant even when every
 // other path or query component has rotated (expire, ei, ip, ns, n, sig,
 // pot, mt, mh, …).
@@ -39,6 +48,12 @@ var streamIdentityQueryItagRe = regexp.MustCompile(`[?&]itag=(\d+)`)
 // The fallback exists because the format pool URLs straight out of
 // streamingData.adaptiveFormats[] are query-style, while
 // engine.ParseDash output for manifest-driven streams is path-style.
+//
+// A finished VOD's whole-file URL is the third shape: `id=o-…` carries no
+// videoID to read, so its fingerprint is the itag plus `clen` when the URL
+// states one. The `o-` token itself is left out — nothing promises it is the
+// same across two extractions of one video, and a fingerprint that rotated
+// would refuse every resume.
 func streamIdentity(rawURL string) string {
 	if m := streamIdentityPathRe.FindStringSubmatch(rawURL); m != nil {
 		return m[1] + "/" + m[2]
@@ -47,6 +62,13 @@ func streamIdentity(rawURL string) string {
 	itagMatch := streamIdentityQueryItagRe.FindStringSubmatch(rawURL)
 	if idMatch != nil && itagMatch != nil {
 		return idMatch[1] + "/" + itagMatch[1]
+	}
+	if itagMatch != nil && streamIdentityWholeFileIDRe.MatchString(rawURL) {
+		identity := "itag=" + itagMatch[1]
+		if clen := streamIdentityQueryClenRe.FindStringSubmatch(rawURL); clen != nil {
+			identity += "&clen=" + clen[1]
+		}
+		return identity
 	}
 	return ""
 }
@@ -58,9 +80,9 @@ func streamIdentity(rawURL string) string {
 //     takes precedence when both sides carry one — a mismatch means the
 //     saved state is another broadcast's, and appending would splice two
 //     streams into one file.
-//  2. URL fingerprinting: YouTube media URLs embed videoID+itag, compared
-//     via streamIdentity. Mixed shapes (exactly one side extracts) are a
-//     conservative mismatch.
+//  2. URL fingerprinting: YouTube media URLs embed videoID+itag (a finished
+//     VOD's whole-file URL, itag+clen), compared via streamIdentity. Mixed
+//     shapes (exactly one side extracts) are a conservative mismatch.
 //  3. When NEITHER URL carries an extractable identity (e.g. Twitch weaver
 //     URLs, whose session token rotates every master-playlist fetch), URL
 //     equality has no signal — NOT a mismatch; the caller's file-size and
@@ -111,6 +133,12 @@ type ResumeState struct {
 	InitWritten bool   `json:"initWritten,omitempty"`
 	InitURI     string `json:"initUri,omitempty"`
 	InitHash    string `json:"initHash,omitempty"`
+	// TotalSize is the whole-file download's probed total — the size of the
+	// file BytesWritten is a prefix of. A resume whose own probe answers a
+	// different total is a different file, and runDirectDownload starts it
+	// over rather than append to the old one's prefix. Zero in legacy
+	// sidecars and on every segmented path.
+	TotalSize int64 `json:"totalSize,omitempty"`
 }
 
 func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
@@ -184,6 +212,7 @@ func (d *SegmentDownloader) saveResume() {
 		InitWritten:  d.hlsInitWritten,
 		InitURI:      d.hlsInitURI,
 		InitHash:     d.hlsInitHash,
+		TotalSize:    d.directTotalSize,
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
