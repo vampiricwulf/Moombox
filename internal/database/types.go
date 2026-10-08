@@ -114,9 +114,22 @@ type Job struct {
 	// Gaps
 	Gaps []Gap `json:"gaps,omitempty"`
 	// Twitch
-	TwitchQuality    string `json:"twitchQuality,omitempty"`
-	TwitchCategory   string `json:"twitchCategory,omitempty"`
-	ChannelAvatarURL string `json:"channelAvatarUrl,omitempty"`
+	//
+	// TwitchQuality is the variant the capture is actually recording, by its
+	// playlist name ("chunked", "720p60"): written when the capture starts and
+	// again whenever a split moves it to another variant. Both UIs show it as
+	// "Quality". It is NOT the preference and nothing selects from it — it used
+	// to be both, set to the preference at creation and read back as one by
+	// the next selection after the stream start had overwritten it.
+	TwitchQuality string `json:"twitchQuality,omitempty"`
+	// TwitchQualityPreference is the quality the job was created to record —
+	// the channel's quality_preference, or the manual add's — "best" when none
+	// was named. Written once at creation (schema v21 backfilled older rows)
+	// and never overwritten; the ONLY preference any Twitch variant selection
+	// is handed. Empty only on YouTube rows.
+	TwitchQualityPreference string `json:"twitchQualityPreference,omitempty"`
+	TwitchCategory          string `json:"twitchCategory,omitempty"`
+	ChannelAvatarURL        string `json:"channelAvatarUrl,omitempty"`
 	// Recheck tracking
 	LastRecheckAt string `json:"lastRecheckAt,omitempty"`
 	// Advanced options

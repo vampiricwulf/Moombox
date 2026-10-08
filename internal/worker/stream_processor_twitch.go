@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -67,7 +68,8 @@ func sameBroadcastStart(knownStartISO, currentStartISO string) bool {
 }
 
 // selectTwitchVariant is the selection a Twitch capture starts on, live and
-// VOD alike: the job's quality preference under the downloader's
+// VOD alike: the job's twitch_quality_preference — never twitch_quality, which
+// names the variant an earlier run recorded (D-T9) — under the downloader's
 // max_video_resolution and prefer_60fps, both read fresh from the config. The
 // re-selections that follow during the capture (the quality probe, every
 // downloader restart) make the same call through TwitchVariantInfo.selectFrom,
@@ -84,7 +86,28 @@ func (sp *StreamProcessor) selectTwitchVariant(variants []twitch.TwitchHLSVarian
 		maxRes = c.Downloader.MaxVideoResolution
 		prefer60fps = c.Downloader.Prefer60fps
 	})
-	return twitch.SelectBestVariant(variants, job.TwitchQuality, maxRes, prefer60fps)
+	return twitch.SelectBestVariant(variants, job.TwitchQualityPreference, maxRes, prefer60fps)
+}
+
+// startTwitchVariant selects the variant a capture starts on and records it:
+// twitch_quality is written with the pick's playlist name in the same write
+// as the caller's extra fields (the live start's Live status). Returns nil,
+// writing nothing, when no variant fits.
+//
+// twitch_quality is the variant being recorded and nothing else (D-T9): the
+// selection never reads it back, and every split that moves the capture to
+// another variant writes it again (ExecuteTwitch's recordVariant). A VOD start
+// used to write nothing, so its row went on showing the preference it was
+// created with as its "Quality".
+func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job, extra map[string]any) *twitch.TwitchHLSVariant {
+	variant := sp.selectTwitchVariant(variants, job)
+	if variant == nil {
+		return nil
+	}
+	fields := map[string]any{"twitch_quality": variant.Name}
+	maps.Copy(fields, extra)
+	sp.db.UpdateJobFields(job.ID, fields)
+	return variant
 }
 
 // twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
@@ -428,7 +451,7 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		vodStagingDir = c.Paths.StagingDirectory
 	})
 
-	variant := sp.selectTwitchVariant(variants, job)
+	variant := sp.startTwitchVariant(variants, job, nil)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "no suitable HLS quality found for VOD"}, nil
 	}
@@ -625,7 +648,10 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		liveStagingBase = c.Paths.StagingDirectory
 	})
 
-	variant := sp.selectTwitchVariant(variants, job)
+	variant := sp.startTwitchVariant(variants, job, map[string]any{
+		"status": database.StatusLive,
+		"is_vod": false,
+	})
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
 	}
@@ -633,12 +659,6 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	sp.logger.Info("twitch live stream ready",
 		"channel", login, "quality", variant.Name,
 		"resolution", fmt.Sprintf("%dx%d", variant.Width, variant.Height))
-
-	sp.db.UpdateJobFields(job.ID, map[string]any{
-		"status":         database.StatusLive,
-		"is_vod":         false,
-		"twitch_quality": variant.Name,
-	})
 
 	// Start Twitch IRC chat downloader if chat recording is enabled
 	var twitchChatDl *twitch.ChatDownloader

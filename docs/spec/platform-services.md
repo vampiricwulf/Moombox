@@ -503,7 +503,7 @@ Variant naming: if `VideoGroup` is set, use it as the name. Otherwise, construct
 
 #### Variant Selection Algorithm
 
-`SelectBestVariant` in `hls.go` selects a variant given a quality preference string, the max resolution and `prefer_60fps`:
+`SelectBestVariant` in `hls.go` selects a variant given a quality preference string, the max resolution and `prefer_60fps`. The preference is always the job's `twitch_quality_preference` (owner decision D-T9; `docs/spec/data-and-storage.md` has the column), at the capture start and at every re-selection during it. It used to be `twitch_quality` at the start — a column the stream start overwrote with the picked variant's name, so a restarted job re-selected by "chunked" or "720p60" instead of by what it was created to record — and `quality_preference` at the re-selections. `twitch_quality` is now only the variant being recorded, rewritten whenever a split moves the capture to another one. Pinned by `TestTwitchSelectionReadsOnlyThePreference` and `TestTwitchQualitySplitRecordsTheNewVariant` (`internal/worker/twitch_quality_preference_test.go`).
 
 1. **Audio-only**: If `qualityPref == "audio_only"`, find a variant with "audio_only" in its name. Fall back to the last variant (lowest quality).
 2. **Filter**: Remove all audio_only variants from the candidate list.

@@ -15,7 +15,7 @@ These are hard rules. An AI assisting with Moombox development must follow them 
 - **Job writes are synchronous; there is no batching.** `UpdateJobFields` executes its `UPDATE` immediately under `db.mu`, re-reads the row in the same critical section, releases the lock and then notifies subscribers. There is no update channel, writer goroutine or coalescing window — the only goroutine the package starts is the `OnJobsChange` fan-out — so when nothing is being written, nothing runs and the database performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
 - **FlexDuration parses config values in each field's own unit.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` days; in `probe_cooldown` seconds. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the field's unit.
-- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v20 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
+- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v21 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `log_max_files` are deleted.
 - **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, stream ID and, for a whole-file download, the probed total size. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation is what used to truncate hours of recording on every daemon restart.
@@ -131,7 +131,7 @@ start_time, end_time, quality_preference, watched, resume_position, chat_offset,
 auto_retry_count, queue_priority, incomplete_tail, park_reason, park_identity
 ```
 
-All entries use identity mapping (Go key name == SQLite column name). `notification_msgs` is absent on purpose: `UpdateNotificationMsgs` writes it.
+All entries use identity mapping (Go key name == SQLite column name). `notification_msgs` is absent on purpose: `UpdateNotificationMsgs` writes it. So is `twitch_quality_preference`: it is written once, at insert, and the absence is what keeps any `UpdateJobFields` call from overwriting it (`TestFieldToColumnCoverage` lists it as set-at-insert).
 
 **Usage example:**
 
@@ -223,7 +223,8 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | chat_file | TEXT | NULL | Absolute path (added v2) |
 | thumbnail_file | TEXT | NULL | Absolute path (added v3) |
 | description_file | TEXT | NULL | Absolute path (added v3) |
-| twitch_quality | TEXT | NULL | e.g. "1080p60" |
+| twitch_quality | TEXT | NULL | The variant the capture is recording, by its playlist name ("chunked", "720p60"): written at the capture start, live and VOD (`StreamProcessor.startTwitchVariant`), and again whenever a split moves the capture to another variant (`recordVariant` in `ExecuteTwitch`). Empty until a capture starts. Both UIs show it as "Quality". Nothing selects from it — until D-T9 it was ALSO the preference: set to it at creation, overwritten at the stream start, and read back as the preference by the next selection |
+| twitch_quality_preference | TEXT | NOT NULL, '' | The quality a Twitch job was created to record (added v21, owner decision D-T9): the channel's or the manual add's `quality_preference`, `"best"` when none was named. Written once at insert by the Twitch monitor (`newTwitchStreamJob`, `cmd/moombox/monitor_callbacks.go`), the Web add and `moombox add` (`cliTwitchQualityPreference`, `cmd/moombox/addvideo.go`); never overwritten; the ONLY preference any Twitch variant selection is handed. `''` on YouTube rows, and on a Twitch row only before the startup backfill (`BackfillTwitchQualityPreferences`, `internal/worker/twitch_quality_preference.go`) has filled it |
 | twitch_category | TEXT | NULL | |
 | channel_avatar_url | TEXT | NULL | |
 | selected_video_itag | INTEGER | NULL | YouTube itag, -1 = audio-only |
@@ -383,6 +384,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v18 | Added `park_reason TEXT NOT NULL DEFAULT ''` column to `jobs`: records WHY a job parked at `COOKIES?` so the credential-recovery sweeps can tell a dead-cookie park from a not-a-member one. No backfill — nothing on a pre-v18 row says retroactively which it was, so they keep `''` and therefore their existing resume behavior |
 | v19 | Added `park_identity TEXT NOT NULL DEFAULT ''` column to `jobs`: the account fingerprint a membership park was refused under, so a credential sweep can tell a real account change from a session rotation. No backfill — the value is a fingerprint of credentials as they were at park time and cannot be reconstructed afterwards |
 | v20 | Added `notification_msgs TEXT` (nullable) to `jobs`: the per-target Discord message ids an edit-mode notification target rewrites in place. No backfill — an id exists only once a message has been posted, and there is nothing to reconstruct for jobs that predate the column |
+| v21 | Added `twitch_quality_preference TEXT NOT NULL DEFAULT ''` to `jobs` (D-T9): the Twitch preference gets a column of its own and `twitch_quality` becomes the recorded variant alone. The backfill needs the configured channels, which this package never reads, so it runs at startup instead (`BackfillTwitchQualityPreferences`, called from `cmd/moombox/services.go` right after `database.Open`): each Twitch row with an empty value takes its own `quality_preference` when it recorded one, else its channel's current `quality_preference` while the channel is still configured, else `"best"` (a VOD is never matched to a channel). Silent — no `updated_at` bump, no subscriber — and a no-op on every start after the first, since every new Twitch row is written non-empty |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 

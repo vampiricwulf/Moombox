@@ -41,15 +41,19 @@ type TwitchVariantInfo struct {
 	// For quality monitoring: re-fetches the master playlist and selects the best variant.
 	// Set by the worker for live streams so the orchestrator can detect quality changes.
 	FetchVariantsFn func(ctx context.Context) ([]twitch.TwitchHLSVariant, error)
-	QualityPref     string // from channel config, e.g. "1080p60" or "best"
+	QualityPref     string // the job's twitch_quality_preference, e.g. "1080p60" or "best"
 	MaxResolution   int    // from global config
 	Prefer60fps     bool   // from global config (prefer_60fps)
 }
 
 // newTwitchVariantInfo builds the variant a Twitch capture runs on from the
 // one the stream processor selected, carrying the selection inputs every
-// re-selection during the capture repeats (selectFrom) — the job's preference
-// and the job context's snapshot of max_video_resolution and prefer_60fps.
+// re-selection during the capture repeats (selectFrom) — the job's
+// twitch_quality_preference and the job context's snapshot of
+// max_video_resolution and prefer_60fps. It read quality_preference until D-T9
+// gave the Twitch preference a column of its own, while the capture start read
+// twitch_quality: two columns for one input, which agreed only until the
+// stream start overwrote one of them.
 // The live-only closures are the caller's to wire.
 func newTwitchVariantInfo(job *database.Job, v *twitch.TwitchHLSVariant, cfg *JobConfig) *TwitchVariantInfo {
 	return &TwitchVariantInfo{
@@ -58,7 +62,7 @@ func newTwitchVariantInfo(job *database.Job, v *twitch.TwitchHLSVariant, cfg *Jo
 		Width:         v.Width,
 		Height:        v.Height,
 		FPS:           v.FPS,
-		QualityPref:   job.QualityPreference,
+		QualityPref:   job.TwitchQualityPreference,
 		MaxResolution: cfg.MaxVideoResolution,
 		Prefer60fps:   cfg.Prefer60fps,
 	}
@@ -365,6 +369,21 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// variant refresh fails (typically because the broadcast just ended:
 	// Usher refuses, but the final playlist window still serves the tail).
 	currentVariantURL := variant.URL
+
+	// recordVariant keeps twitch_quality naming the variant the capture is
+	// recording (D-T9). The stream processor wrote the start's pick; every
+	// adoption of a refreshed variant below — a quality split, a gap or
+	// init-change split, a same-quality restart, a post-outage resume — goes
+	// through here, and only a different name is written. A quality split
+	// used to leave the row naming the variant the job had split away from.
+	recordedVariant := variant.Name
+	recordVariant := func(v *twitch.TwitchHLSVariant) {
+		if v.Name == recordedVariant {
+			return
+		}
+		recordedVariant = v.Name
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"twitch_quality": v.Name})
+	}
 
 	videoDl, videoPath := createDownloader(currentVariantURL, curStagingDir, -1, false)
 
@@ -780,6 +799,7 @@ sessionLoop:
 					}
 					currentQuality = newQuality
 					currentVariantURL = newVariant.URL
+					recordVariant(newVariant)
 					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
@@ -818,6 +838,7 @@ sessionLoop:
 					}
 					currentQuality = newQuality
 					currentVariantURL = newVariant.URL
+					recordVariant(newVariant)
 					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
@@ -833,6 +854,7 @@ sessionLoop:
 						"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 
 					currentVariantURL = newVariant.URL
+					recordVariant(newVariant)
 					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, videoDl.CurrentSeq(), true)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
@@ -870,6 +892,7 @@ sessionLoop:
 				}
 				currentQuality = newQuality
 				currentVariantURL = newVariant.URL
+				recordVariant(newVariant)
 				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, forceSeq)
 				tracker.AttachVideoDownloader(videoDl)
 				drainQualityCh()
@@ -1033,6 +1056,7 @@ sessionLoop:
 		// (short outage, playlist still covers our position: zero loss, no
 		// split) and ErrGapDetected (the inner loop splits to a new part).
 		currentVariantURL = newVariant.URL
+		recordVariant(newVariant)
 		videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, -1, false)
 		tracker.AttachVideoDownloader(videoDl)
 		drainQualityCh()

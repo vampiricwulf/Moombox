@@ -12,6 +12,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // printUsage is flag.Usage: the daemon's flags and the add subcommand.
@@ -121,16 +122,17 @@ func addVideo(input, configPath string) {
 		}
 
 		job := &database.Job{
-			ID:            jobID,
-			VideoID:       jobID,
-			URL:           jobURL,
-			Title:         "Manual Add",
-			ChannelName:   channelName,
-			Platform:      "twitch",
-			Status:        database.StatusUpcoming,
-			ManuallyAdded: true,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			ID:                      jobID,
+			VideoID:                 jobID,
+			URL:                     jobURL,
+			Title:                   "Manual Add",
+			ChannelName:             channelName,
+			Platform:                "twitch",
+			Status:                  database.StatusUpcoming,
+			ManuallyAdded:           true,
+			TwitchQualityPreference: cliTwitchQualityPreference(cfg.Channels, tw),
+			CreatedAt:               now,
+			UpdatedAt:               now,
 		}
 		added, err := db.AddJob(job)
 		if err != nil {
@@ -190,6 +192,19 @@ func addVideo(input, configPath string) {
 	// 500ms sleep with a deterministic flush so we do not lose notifications
 	// when a webhook is slow and do not linger when they are fast.
 	notifyMgr.Wait()
+}
+
+// cliTwitchQualityPreference is the twitch_quality_preference `moombox add`
+// writes on a Twitch job, the one write that column ever gets (D-T9). The
+// command takes no quality flag, so a live channel the config holds records
+// that channel's quality_preference — what the monitor records for the same
+// broadcast — and a VOD, or a channel the config does not hold, records
+// "best". The row used to carry no preference at all.
+func cliTwitchQualityPreference(channels []config.ChannelConfig, tw *utils.TwitchTarget) string {
+	if tw == nil || tw.Type == utils.TwitchVOD {
+		return worker.TwitchJobQualityPreference("")
+	}
+	return worker.TwitchChannelQualityPreference(channels, tw.Value)
 }
 
 // cliNotifyLogger is the notification manager's logger in `moombox add`: its

@@ -1206,6 +1206,38 @@ func membershipConfirmedNonMember(verdict youtube.SessionAuthState, hasAccess bo
 	return verdict == youtube.SessionAuthLoggedIn && !hasAccess
 }
 
+// newTwitchStreamJob is the row the Twitch monitor creates for a broadcast it
+// found on a configured channel: immediately Live (GQL just confirmed it), and
+// carrying the channel's quality_preference as its twitch_quality_preference —
+// the one write that column ever gets (D-T9). twitch_quality is left empty:
+// it names the variant the capture records, and nothing is recording yet.
+// quality_preference is still written beside it, as on every row.
+func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, outputDir string, now time.Time) *database.Job {
+	stamp := now.UTC().Format(time.RFC3339)
+	title := info.ChannelDisplayName + " — " + info.Title
+	if info.Title == "" {
+		title = info.ChannelDisplayName + " — " + stamp
+	}
+	return &database.Job{
+		ID:                      twitch.BuildJobID(info.StreamID, false),
+		VideoID:                 info.StreamID,
+		URL:                     "https://twitch.tv/" + info.ChannelLogin,
+		Title:                   title,
+		ChannelName:             info.ChannelDisplayName,
+		Platform:                "twitch",
+		Status:                  database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
+		ThumbnailURL:            info.ThumbnailURL,
+		ChannelAvatarURL:        info.ProfileImageURL,
+		TwitchCategory:          info.GameCategory,
+		TwitchQualityPreference: worker.TwitchJobQualityPreference(ch.QualityPreference),
+		QualityPreference:       ch.QualityPreference,
+		StreamStartTime:         info.StartedAt,
+		OutputDirectory:         outputDir,
+		CreatedAt:               stamp,
+		UpdatedAt:               stamp,
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -1573,32 +1605,7 @@ func (s *runState) wireMonitorCallbacks() {
 		jobID := twitch.BuildJobID(info.StreamID, false)
 		s.log.Info("Stream found by Twitch monitor", slog.String("jobID", jobID), slog.String("title", info.Title))
 
-		outputDir := resolveOutputDir(ch, s.configStore)
-
-		now := time.Now().UTC().Format(time.RFC3339)
-		title := info.ChannelDisplayName + " — " + info.Title
-		if info.Title == "" {
-			title = info.ChannelDisplayName + " — " + time.Now().UTC().Format(time.RFC3339)
-		}
-
-		job := &database.Job{
-			ID:                jobID,
-			VideoID:           info.StreamID,
-			URL:               "https://twitch.tv/" + info.ChannelLogin,
-			Title:             title,
-			ChannelName:       info.ChannelDisplayName,
-			Platform:          "twitch",
-			Status:            database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
-			ThumbnailURL:      info.ThumbnailURL,
-			ChannelAvatarURL:  info.ProfileImageURL,
-			TwitchCategory:    info.GameCategory,
-			TwitchQuality:     ch.QualityPreference,
-			QualityPreference: ch.QualityPreference,
-			StreamStartTime:   info.StartedAt,
-			OutputDirectory:   outputDir,
-			CreatedAt:         now,
-			UpdatedAt:         now,
-		}
+		job := newTwitchStreamJob(info, ch, resolveOutputDir(ch, s.configStore), time.Now())
 		added, err := s.db.AddJob(job)
 		if err != nil {
 			s.log.Error("Failed to add Twitch job", slog.String("error", err.Error()))
