@@ -75,6 +75,12 @@ type HlsSegment struct {
 	// the ad's init and back within one window, and attributing the ad's init
 	// to content segments would corrupt the recording.
 	MapURI string
+	// ProgramDateTime is the wall-clock time of the segment's first frame:
+	// its own #EXT-X-PROGRAM-DATE-TIME, or the last one seen advanced by the
+	// durations in between (RFC 8216 §4.3.2.6) — the same clock the ad
+	// classification above reads. Zero when the playlist carries no PDT tags
+	// (YouTube HLS, an old capture). See DownloaderOptions.OnFirstSegment.
+	ProgramDateTime time.Time
 }
 
 // HlsPlaylist represents a parsed HLS media playlist.
@@ -641,10 +647,11 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 				}
 			}
 			segment := HlsSegment{
-				Duration: segDur,
-				URL:      resolveURL(baseURL, line),
-				IsAd:     inAdRange(adRanges, curDate),
-				MapURI:   curMapURI,
+				Duration:        segDur,
+				URL:             resolveURL(baseURL, line),
+				IsAd:            inAdRange(adRanges, curDate),
+				MapURI:          curMapURI,
+				ProgramDateTime: curDate,
 			}
 			playlist.Segments = append(playlist.Segments, segment)
 			if !curDate.IsZero() {

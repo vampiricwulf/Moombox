@@ -59,17 +59,53 @@ var appendChatMessages = utils.AppendChatMessages[TwitchChatMessage]
 
 // flush writes pending messages to the current part file, serialized with
 // every other write to it by flushMu. A non-nil return means some are still
-// pending because the write failed.
+// pending because the write failed. A part still waiting for its video's
+// first segment (baseAwaitPath) keeps its messages pending instead, up to
+// ircPartBaseWait; see holdForPartBaseLocked.
 func (cd *ChatDownloader) flush() error {
 	cd.flushMu.Lock()
 	defer cd.flushMu.Unlock()
-	return cd.flushLocked()
+	return cd.flushLocked(false)
+}
+
+// flushFinal is the flush Start's exit makes: nothing comes after it, so a
+// part still waiting for its base is written against the provisional one.
+func (cd *ChatDownloader) flushFinal() error {
+	cd.flushMu.Lock()
+	defer cd.flushMu.Unlock()
+	return cd.flushLocked(true)
+}
+
+// holdForPartBaseLocked reports whether the current part's messages must stay
+// pending because its offset base is still provisional — the part is waiting
+// for its video's first segment (AwaitPartBase) and has no file yet, so
+// writing now would put a header and offsets on disk against a base that is
+// about to move, and one file must keep one epoch. Past ircPartBaseWait, or on
+// the final flush, the wait is given up and the local-clock base stands: a
+// video that has not produced a first segment by then may never produce one,
+// and the chat must reach disk regardless. Caller holds cd.mu.
+func (cd *ChatDownloader) holdForPartBaseLocked(final bool) bool {
+	if cd.baseAwaitPath == "" || cd.baseAwaitPath != cd.outputPath || cd.flushedToDisk || cd.partUnread {
+		return false
+	}
+	if !final && time.Since(cd.baseAwaitSince) < cd.delays.partBaseWait {
+		return true
+	}
+	cd.baseAwaitPath = ""
+	cd.logger.Info("twitch chat: no first-segment time from the part's video; keeping the local-clock base",
+		"channel", cd.channelLogin, "path", cd.outputPath, "waited", time.Since(cd.baseAwaitSince).Round(time.Second))
+	return false
 }
 
 // flushLocked writes pending messages to the current part file. Caller must
-// hold flushMu. A non-nil return means the batch is still pending.
-func (cd *ChatDownloader) flushLocked() error {
+// hold flushMu. A non-nil return means the batch is still pending. final is
+// flushFinal's: see holdForPartBaseLocked.
+func (cd *ChatDownloader) flushLocked(final bool) error {
 	cd.mu.Lock()
+	if cd.holdForPartBaseLocked(final) {
+		cd.mu.Unlock()
+		return nil
+	}
 	snapshotLen := len(cd.messages)
 	msgs := make([]TwitchChatMessage, snapshotLen)
 	copy(msgs, cd.messages)
@@ -238,7 +274,12 @@ func (cd *ChatDownloader) writeFullChatFileTo(path string, msgs []TwitchChatMess
 		Messages:           msgs,
 	}
 	if startMs > 0 {
-		chatData.RecordingStartTime = time.UnixMilli(startMs).UTC().Format(time.RFC3339)
+		// RFC3339Nano, not RFC3339: a base from the first segment's program
+		// date-time (SettlePartBase) carries milliseconds, and a header that
+		// dropped them would hand a resumed part (adoptPartRecordingBase) a
+		// base up to a second off the one its offsets were computed against.
+		// A whole-second base prints exactly as RFC3339 did.
+		chatData.RecordingStartTime = time.UnixMilli(startMs).UTC().Format(time.RFC3339Nano)
 	}
 	return utils.WriteChatFileAtomic(path, &chatData)
 }
@@ -286,6 +327,19 @@ func (cd *ChatDownloader) pruneDedup() {
 // it (or fail and retry) rather than be recorded without it. Safe to call
 // whether or not the downloader is running.
 func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) string {
+	return cd.rollFile(newOutputPath, newRecordingStart, false)
+}
+
+// RollFileAwaitingBase is RollFile for a part whose video starts a fresh file:
+// newRecordingStart is only the PROVISIONAL base, and the new part waits for
+// its video's first segment to supply the real one (SettlePartBase) — in the
+// same critical section as the swap, so no flush can write the new part
+// against the provisional base in between.
+func (cd *ChatDownloader) RollFileAwaitingBase(newOutputPath, newRecordingStart string) string {
+	return cd.rollFile(newOutputPath, newRecordingStart, true)
+}
+
+func (cd *ChatDownloader) rollFile(newOutputPath, newRecordingStart string, awaitBase bool) string {
 	cd.flushMu.Lock()
 	defer cd.flushMu.Unlock()
 
@@ -321,7 +375,19 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 	if newBaseMs > 0 {
 		cd.recordingStartMs.Store(newBaseMs)
 	}
+	// A closed part still waiting for its video's first segment is drained
+	// below against its provisional base, which is now its base for good.
+	oldAwaited := cd.baseAwaitPath == oldPath
+	cd.baseAwaitPath = ""
+	if awaitBase {
+		cd.baseAwaitPath = newOutputPath
+		cd.baseAwaitSince = time.Now()
+	}
 	cd.mu.Unlock()
+	if oldAwaited && len(batch) > 0 {
+		cd.logger.Info("twitch chat: part closed before its video reported a first segment; keeping its local-clock base",
+			"channel", cd.channelLogin, "path", oldPath)
+	}
 
 	closedPath := ""
 	if oldFlushed || len(batch) > 0 || oldUnread {
@@ -386,6 +452,71 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 			"closed", filepath.Base(closedPath), "next", filepath.Base(newOutputPath))
 	}
 	return closedPath
+}
+
+// AwaitPartBase marks the current part's offset base PROVISIONAL: the local
+// clock at the part's start, standing in until the part's video reports the
+// program date-time of the first segment it writes (SettlePartBase). Until
+// then the periodic flush holds the part's messages, so the part file's header
+// is written once, with the base its offsets were computed against (owner
+// decision D-T8). For the job's first part — RollFileAwaitingBase is the same
+// mark for every later one — and called before Start.
+//
+// A part that already has a file keeps that file's base whatever arrives
+// later, the "one file, one epoch" rule adoptPartRecordingBase states, so the
+// mark is ignored for one, and a part Start then finds on disk drops it.
+func (cd *ChatDownloader) AwaitPartBase() {
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	if cd.outputPath == "" || cd.flushedToDisk || cd.partUnread {
+		return
+	}
+	cd.baseAwaitPath = cd.outputPath
+	cd.baseAwaitSince = time.Now()
+}
+
+// SettlePartBase gives the part at path the base its video reported: the
+// #EXT-X-PROGRAM-DATE-TIME of the first segment written into the part's video
+// file (engine.DownloaderOptions.OnFirstSegment). That segment is the part's
+// first frame, so pinning offsets to it lines chat up with the video, where the
+// local clock at the roll put every message late by however far behind the
+// live edge the downloader joined the playlist window.
+//
+// The messages captured while the part waited were offset against the
+// provisional base; they are rebased onto the reported one under cd.mu, the
+// lock addMessage computes offsets under, exactly as adoptUnreadPart rebases a
+// held batch onto an adopted file's base — so the ones held and the ones still
+// to come share one clock, and the first write puts that clock in the header.
+//
+// A zero time — the playlist carries no program date-times — ends the wait on
+// the provisional base, today's local-clock behaviour. A report for any part
+// other than the one waiting is ignored: a late report from a downloader that
+// has since been replaced, a part already rolled away, a part whose wait ran
+// out, or one whose file is already on disk (one file, one epoch).
+func (cd *ChatDownloader) SettlePartBase(path string, programDateTime time.Time) {
+	cd.mu.Lock()
+	if path == "" || cd.baseAwaitPath != path || cd.outputPath != path || cd.flushedToDisk || cd.partUnread {
+		cd.mu.Unlock()
+		return
+	}
+	cd.baseAwaitPath = ""
+	if programDateTime.IsZero() {
+		cd.mu.Unlock()
+		cd.logger.Debug("twitch chat: the part's playlist carries no program date-time; keeping the local-clock base",
+			"channel", cd.channelLogin, "path", path)
+		return
+	}
+	provisional := cd.recordingStartMs.Load()
+	base := programDateTime.UnixMilli()
+	cd.recordingStartMs.Store(base)
+	for i := range cd.messages {
+		cd.messages[i].OffsetMs = cd.messages[i].TimestampMs - base
+	}
+	held := len(cd.messages)
+	cd.mu.Unlock()
+	cd.logger.Info("twitch chat: part base set from its first segment's program date-time",
+		"channel", cd.channelLogin, "path", path, "baseMs", base,
+		"shiftMs", provisional-base, "heldMessages", held)
 }
 
 // noteRollUnwritten records n boundary-batch messages RollFile could not write

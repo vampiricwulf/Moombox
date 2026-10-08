@@ -20,6 +20,7 @@ type chatDelays struct {
 	reconnectBase     time.Duration // ircReconnectBase — first step of the reconnect backoff
 	reconnectCap      time.Duration // ircReconnectCap — the backoff's ceiling
 	exhaustedRetry    time.Duration // ircExhaustedRetry — the cadence once the reconnect budget is spent
+	partBaseWait      time.Duration // ircPartBaseWait — how long a part's chat waits for its video's first segment
 }
 
 // defaultChatDelays returns production timing.
@@ -32,5 +33,6 @@ func defaultChatDelays() chatDelays {
 		reconnectBase:     ircReconnectBase,
 		reconnectCap:      ircReconnectCap,
 		exhaustedRetry:    ircExhaustedRetry,
+		partBaseWait:      ircPartBaseWait,
 	}
 }

@@ -296,6 +296,17 @@ type DownloaderOptions struct {
 	InterruptionTimeout time.Duration
 	CheckStreamStatus   func(ctx context.Context) (bool, error) // Returns true if stream ended
 	IsOnline            func() bool                             // Returns false if device has no internet
+	// OnFirstSegment is called once, from the HLS live loop, when this
+	// downloader writes the first media segment into an output file it
+	// started EMPTY — never on a resume or an append, whose file already
+	// began at some earlier segment. It is handed that segment's
+	// #EXT-X-PROGRAM-DATE-TIME (HlsSegment.ProgramDateTime), or the zero time
+	// when the playlist carries none. That segment is the file's first frame,
+	// so its wall-clock time is the moment the file's timeline starts: Twitch
+	// pins each part's chat offsets to it (D-T8). Stitched-ad segments are
+	// skipped, not written, so the first CONTENT segment is the one reported.
+	// Optional; runs on the download goroutine, so it must not block.
+	OnFirstSegment func(programDateTime time.Time)
 	// OnCredentialRefresh is called when segments 403 while the downloader is
 	// still behind the live head — i.e. the segments demonstrably exist and
 	// our credentials, not the stream, are the problem. The callback should
@@ -474,6 +485,11 @@ type SegmentDownloader struct {
 	// saveResume (ResumeState.TotalSize). Download-loop goroutine only, like
 	// the fields above.
 	directTotalSize int64
+
+	// reportFirstSegment arms the one OnFirstSegment call: set by Start when
+	// it opens the output file fresh (not resuming), cleared by the first
+	// media write. Download-loop goroutine only, like the fields above.
+	reportFirstSegment bool
 
 	// hlsOutages counts the connectivity outages the HLS loop has waited out
 	// (waitOnline). A stuck segment's retry count is kept per outage, so
@@ -1001,6 +1017,10 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	} else {
 		flags |= os.O_TRUNC
 	}
+	// A file opened O_TRUNC starts at whatever segment is written first, and
+	// OnFirstSegment reports that segment's wall-clock time. A resumed or
+	// appended file started long before this downloader existed.
+	d.reportFirstSegment = !resuming
 
 	d.outputFile, err = os.OpenFile(d.opts.OutputFile, flags, 0o644)
 	if err != nil {

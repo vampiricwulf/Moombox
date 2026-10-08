@@ -273,15 +273,34 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 	}()
 
+	// irc is the live IRC chat downloader when present (nil for VOD chat or
+	// chat-off) — per-part chat rolling below is live-IRC only. Direct
+	// concrete assertion per audit reports/worker.md Finding 59.
+	irc, _ := twitchChatDl.(*twitch.ChatDownloader)
+
+	chatPathFor := func(stagingDir string) string { return filepath.Join(stagingDir, "chat.json") }
+
 	// Helper to create the HLS downloader for a variant — the single
 	// construction point for the engine options, so per-field drift between
 	// branches can't happen. startSeq -1 means "resume state / playlist
 	// window decides"; forceStartSeq passes an exact orchestrator-captured
 	// position (same-quality recovery appends from oldSeq; gap splits seed
 	// the next part from CurrentSeq so nothing already written re-downloads).
+	//
+	// The live IRC chat's part base is pinned here too (D-T8): a downloader
+	// that starts its part's video file reports the program date-time of the
+	// first segment it writes, and that is the part's chat base — the chat
+	// file of the SAME part directory, so a late report from a downloader
+	// since replaced can only reach the part it belonged to.
 	createDownloader := func(variantURL, stagingDir string, startSeq int, forceStartSeq bool) (*engine.SegmentDownloader, string) {
 		videoPath := filepath.Join(stagingDir, "video_stream")
+		var onFirstSegment func(time.Time)
+		if irc != nil {
+			partChat := chatPathFor(stagingDir)
+			onFirstSegment = func(pdt time.Time) { irc.SettlePartBase(partChat, pdt) }
+		}
 		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{
+			OnFirstSegment: onFirstSegment,
 			BaseURL:        variantURL,
 			OutputFile:     videoPath,
 			StartSeq:       startSeq,
@@ -393,11 +412,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	defer tracker.Close()
 	tracker.AttachVideoDownloader(videoDl)
 
-	// irc is the live IRC chat downloader when present (nil for VOD chat or
-	// chat-off) — per-part chat rolling below is live-IRC only. Direct
-	// concrete assertion per audit reports/worker.md Finding 59.
-	irc, _ := twitchChatDl.(*twitch.ChatDownloader)
-
 	// Register the live IRC downloader so a Twitch credential change can reach
 	// it MID-JOB (Arc 10 R5). Until now this object was reachable only through
 	// this goroutine's call stack.
@@ -415,8 +429,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		unregisterChat := o.twitchChats.add(irc)
 		defer unregisterChat()
 	}
-
-	chatPathFor := func(stagingDir string) string { return filepath.Join(stagingDir, "chat.json") }
 
 	// startChat launches (or relaunches, after an outage killed the IRC
 	// reconnect loop) the chat downloader. Runs on parentCtx so a session
@@ -461,7 +473,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	}
 	if twitchChatDl != nil {
 		if irc != nil {
-			// Recording start time for IRC chat offset calculation (matches TS).
+			// Recording start time for IRC chat offset calculation (matches
+			// TS) — provisional for a part whose video starts fresh, below.
 			irc.SetRecordingStartTime(time.Now().UTC().Format(time.RFC3339))
 			// A job resumed into a later part keeps chat aligned with video:
 			// redirect chat output (created at the staging root by the stream
@@ -469,6 +482,16 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			// resume state, so it continues that part's file.
 			if curStagingDir != jobCtx.StagingDir {
 				irc.RollFile(chatPathFor(curStagingDir), time.Now().UTC().Format(time.RFC3339))
+			}
+			// A part with no staged video starts its file with the first
+			// segment the downloader writes, and that segment's program
+			// date-time becomes the chat's base (D-T8): the local clock here
+			// is later than the part's first frame by however far behind the
+			// live edge the playlist window starts. A RESUMED part's video
+			// started long ago and reports nothing; its chat keeps the base
+			// its file was written with (adoptPartRecordingBase).
+			if !partResumed {
+				irc.AwaitPartBase()
 			}
 		}
 		startChat()
@@ -516,7 +539,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		var closedChat string
 		var enrich func(context.Context)
 		if irc != nil && nextDir != curStagingDir {
-			closedChat = irc.RollFile(chatPathFor(nextDir), time.Now().UTC().Format(time.RFC3339))
+			// The next part's video always starts a fresh file, so its chat
+			// waits for that file's first segment (D-T8).
+			closedChat = irc.RollFileAwaitingBase(chatPathFor(nextDir), time.Now().UTC().Format(time.RFC3339))
 			if closedChat != "" {
 				closed := closedChat
 				enrich = func(c context.Context) { irc.EnrichFile(c, closed) }

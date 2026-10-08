@@ -733,6 +733,12 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
 			d.lastSegTime.StoreNow()
+			if d.reportFirstSegment {
+				d.reportFirstSegment = false
+				if d.opts.OnFirstSegment != nil {
+					d.opts.OnFirstSegment(seg.ProgramDateTime)
+				}
+			}
 
 			if d.OnProgress != nil {
 				// Seq reports the just-WRITTEN sequence — the same convention

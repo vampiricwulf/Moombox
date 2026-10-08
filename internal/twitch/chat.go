@@ -71,6 +71,14 @@ const (
 	// keeps trying at this slow cadence for as long as the job runs; Stop,
 	// MarkStreamEnded and RetryNow cut a wait short (see wake).
 	ircExhaustedRetry = 2 * time.Minute
+	// ircPartBaseWait bounds how long a part's chat waits for its video to
+	// report the first segment's #EXT-X-PROGRAM-DATE-TIME (AwaitPartBase,
+	// SettlePartBase) before the provisional local-clock base stands and the
+	// held messages are written against it. The report normally lands within
+	// a playlist round trip of the part's start; the bound only matters when
+	// the video cannot get a first segment at all, and it caps what a crash
+	// during the wait could lose to the messages of this one window.
+	ircPartBaseWait = 60 * time.Second
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
 	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
 	// while this proves the IRC layer behind it is still serving us.
@@ -302,6 +310,16 @@ type ChatDownloader struct {
 	// some LATER session, turning a genuine refusal into an unbounded retry
 	// loop on credentials Twitch will not take.
 	reauthPending atomic.Bool
+	// baseAwaitPath names the part whose recordingStartMs is still
+	// PROVISIONAL — the local clock at the part's start — because its video
+	// has yet to report the first segment's program date-time (AwaitPartBase,
+	// RollFileAwaitingBase, SettlePartBase). While it equals outputPath and
+	// the part has no file yet, the periodic flush holds the part's messages
+	// rather than write a header whose base is about to move. "" when no part
+	// is waiting. baseAwaitSince is when the wait began (ircPartBaseWait).
+	// Guarded by cd.mu.
+	baseAwaitPath  string
+	baseAwaitSince time.Time
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -468,7 +486,9 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 }
 
 // SetRecordingStartTime sets the recording start time for offset calculation.
-// Should be called before Start() when the actual recording begins.
+// Should be called before Start() when the actual recording begins. For a part
+// whose video starts fresh it is only the fallback: AwaitPartBase holds the
+// part until the video's first segment reports the real base (SettlePartBase).
 func (cd *ChatDownloader) SetRecordingStartTime(isoString string) {
 	if t, err := time.Parse(time.RFC3339, isoString); err == nil {
 		cd.recordingStartMs.Store(t.UnixMilli())
@@ -825,8 +845,11 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 //
 // The file, not the run. The orchestrator hands every session time.Now() as
 // the recording start — SetRecordingStartTime, and the RollFile that redirects
-// a resumed job into the part it left off in — which is right for a part that
-// begins now and wrong for one that began hours ago. The resumed part's VIDEO
+// a resumed job into the part it left off in — which is close for a part that
+// begins now (and only provisional there: such a part waits for its video's
+// first segment to report the real base, SettlePartBase) and wrong for one
+// that began hours ago. A resumed part's video reports no first segment, so
+// nothing but this function can correct its base. The resumed part's VIDEO
 // is appended to (the engine reopens video_stream O_APPEND at the resume
 // sidecar's byte position, and the part is muxed with a derived start rather
 // than the restart time), so the part's timeline still starts where it always
@@ -1475,7 +1498,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		cd.running = false
 		streamEnded := cd.streamEnded
 		cd.mu.Unlock()
-		flushErr := cd.flush()
+		flushErr := cd.flushFinal()
 
 		if panicked {
 			// Don't clear resume state on panic — allow resume on restart.
