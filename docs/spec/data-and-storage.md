@@ -145,13 +145,15 @@ db.UpdateJobFields(jobID, map[string]any{
 
 There is no full-row `UpdateJob()` counterpart: `UpdateJobFields` is the only job writer, synchronous and immediate, and it triggers subscribers directly once `db.mu` is released.
 
+**Conditional writes.** Two forms of it apply only while the row's status allows, and report whether they did: `UpdateJobFieldsIf(id, expected, fields)` while the status is still `expected` — a compare-and-set — and `UpdateJobFieldsUnless(id, unwanted, fields)` while it is anything but `unwanted` (`internal/database/database.go`). The condition is ANDed into the same `UPDATE` (`updateJobFieldsWhere`, the machinery all three share), so nothing can land between the check and the write. A write that did not apply touches nothing: no `updated_at`, no read-back, no subscriber — and no `OnJobDeleted` for a row that is gone either, since the delete fired its own. They exist for a transition decided on a status read earlier, which, written unconditionally, overwrote whatever landed in between: the backlog scheduler's `Queued` → `Upcoming` admission is `UpdateJobFieldsIf(..., Queued, ...)`, and the worker's failure write (`setJobError`) and its backlog requeue write with `UpdateJobFieldsUnless(..., Cancelled, ...)` — all three used to turn an operator's Cancel that landed between the read and the write into a download, an Error or a requeue.
+
 ### Pub/Sub System
 
 Six callback types (`internal/database/database_subscribers.go`):
 
 | Callback | Signature | Trigger |
 |----------|-----------|---------|
-| `OnJobUpdate` | `func(*Job)` | After every `UpdateJobFields` write |
+| `OnJobUpdate` | `func(*Job)` | After every `UpdateJobFields` write, and every `UpdateJobFieldsIf` / `UpdateJobFieldsUnless` write that applied |
 | `OnJobChange` | `func(*JobChange)` | Same moment as `OnJobUpdate`; the event carries the full job plus the list of columns written |
 | `OnJobAdded` | `func(*JobAdded)` | After `AddJob` |
 | `OnJobDeleted` | `func(*JobDeleted)` | After `DeleteJob`, and from `UpdateJobFields` when the row is gone at read-back |

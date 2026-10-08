@@ -1486,12 +1486,23 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	if reason == database.ParkReasonMembership && w.CurrentCredentialIdentity != nil {
 		identity = w.CurrentCredentialIdentity(job.Platform)
 	}
-	w.db.UpdateJobFields(job.ID, map[string]any{
+	// Never over an operator's Cancel. processJob reads its context before
+	// it comes here, and a Cancel that lands after that read — CancelJob
+	// cancels the run and writes Cancelled — was overwritten by this write:
+	// the job showed Error, sent Job Failed, and the Job Cancelled the cancel
+	// route had left to this run (the run was flagged) was never sent. The
+	// operator's verdict stands, and the run ends as a cancelled one.
+	if !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
 		"status":        status,
 		"error":         errMsg,
 		"park_reason":   reason,
 		"park_identity": identity,
-	})
+	}) {
+		w.logger.Info("job failure not recorded: the job was cancelled (or deleted) as it failed",
+			"jobID", job.ID, "err", errMsg)
+		w.handleCancellation(job)
+		return
+	}
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do

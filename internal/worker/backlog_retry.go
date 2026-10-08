@@ -98,10 +98,16 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 	delay := backlogRetryBackoff << (attempt - 1)
 	w.queue.ReleaseSlots(job.ID)
 	w.scheduler.holdUntil(job.ID, time.Now().Add(delay))
-	w.db.UpdateJobFields(job.ID, map[string]any{
+	// Never over an operator's Cancel, which the scheduler would then have
+	// admitted again — the job downloading after all. Not requeued, the
+	// failure goes to setJobError, which leaves the Cancel standing too.
+	if !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
 		"status": database.StatusQueued,
 		"error":  "",
-	})
+	}) {
+		w.scheduler.unhold(job.ID)
+		return false, err
+	}
 	w.logger.Warn(what,
 		"jobID", job.ID, "attempt", attempt, "of", backlogRetryLimit, "retryIn", delay, "err", err)
 	return true, nil

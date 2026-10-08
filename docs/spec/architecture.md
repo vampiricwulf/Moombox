@@ -554,6 +554,7 @@ The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Q
 - Single goroutine, woken by `Wake()` (backlog-job creation, job completion, a cookie repair that returns parked backlog to `Queued`) or the worker's 60s heartbeat; wake signals coalesce through a capacity-1 channel
 - One admission sweep per wake: for each channel with `Queued` rows, admit `archive_slots − in-flight backlog jobs`, newest `published` first
 - Admission writes `status = Upcoming` durably FIRST (the in-flight count observes the DB), then enqueues in the JobQueue — a crash between the two steps self-heals because startup recovery re-enqueues `Upcoming` rows
+- The admission write is a compare-and-set on `Queued` (`UpdateJobFieldsIf`, `internal/database/database.go`). Written unconditionally, it overwrote an operator's Cancel that landed between `NextQueuedJobs` and the write, and the cancelled job downloaded after all. A row that left `Queued` in that window is not admitted and takes no slot: the next row the query returned gets it, or the next sweep does — not a re-query or a `Wake`, which a database that cannot write would turn into a spin. The worker's own failure writes take the same care: `setJobError` and the backlog requeue write with `UpdateJobFieldsUnless(..., Cancelled, ...)`, and a failure that finds the row Cancelled ends the run as a cancelled one (`handleCancellation`, so the Job Cancelled notification the cancel route left to the run is sent) instead of turning it into Error or back into `Queued`
 - `resolveSlots` is injected by `cmd/moombox` against the live config store, so per-channel `archive_slots` overrides hot-reload
 - A **disabled** channel resolves to 0 slots, so disabling it PAUSES its queued backlog (owner decision O-J, 2026-09-17). Every discovery path already reads `enabled = false` as a pause — the feed, DECAPI and Twitch monitors skip the channel, and the backfill keeps it in `active` while never scanning it — and the resolver was the one place that did not, so a disabled channel went on starting downloads M at a time. In-flight jobs are untouched: they have already left `Queued`, and this number is an admission budget rather than a kill switch. A channel with **no config entry at all** still gets the global default, so a removed channel's leftover `Queued` rows are not stranded.
 - **No admissions during an outage.** A sweep admits nothing while the connectivity monitor (`Scheduler.conn`, the worker's `Connectivity`) reports offline, and `Run` subscribes to its `OnStateChange` so the moment it reports online again is a wake. An admission made offline is a backlog VOD sent to fail its first fetch, and each one that failed freed its slot for the next: a channel's whole `Queued` backlog drained into Error in the minutes the network was down, and the archive pass never re-creates a video it has history for
@@ -602,6 +603,8 @@ There is one job writer and it is synchronous. `UpdateJobFields()` (`internal/da
 2. Re-reads the full job row through the prepared `stmtGetJob` in the same critical section (subscribers need all fields)
 3. Releases `db.mu` BEFORE notifying, so a subscriber may call back into the database without deadlocking
 4. Notifies `OnJobUpdate` and `OnJobChange` subscribers synchronously on the caller's goroutine; if the row vanished between the write and the read-back, fires `OnJobDeleted` instead
+
+Its two conditional forms, `UpdateJobFieldsIf` and `UpdateJobFieldsUnless` (`internal/database/database.go`), are the same writer with a status condition ANDed into the `UPDATE`: a write the condition refuses stops after step 1 and reports false (see [data-and-storage.md](data-and-storage.md), Conditional writes).
 
 The only goroutine the package ever starts is the `OnJobsChange` fan-out (`dispatchJobsChange`), used by the two bulk writers. Write amplification during a download is bounded upstream, not here: `ProgressTracker` (`internal/worker/progress.go`) reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms default) and flushes gap rows at most once a second, and every other `UpdateJobFields` caller is event-driven. When nothing is being written, nothing runs.
 
@@ -796,7 +799,7 @@ cookiesStatusError(err)  ->  StatusCookies      // errors.Is against ErrCookiesR
                                                 //   twitch.ErrTwitchAuthExpired, twitch.ErrSubscriberOnly
 anything else            ->  StatusError
 ```
-Cancellation never reaches `setJobError`: `handleCancellation` asks the queue whether the user cancelled (`WasCancelled`) and writes `Cancelled`, or leaves the status untouched on a shutdown so the job resumes on restart. The error's text becomes the job's `error` column, and `park_reason`/`park_identity` are written on every error transition so the credential sweeps can tell a dead-cookie park from a membership one.
+Cancellation is not an error class: `handleCancellation` asks the queue whether the user cancelled (`WasCancelled`) and writes `Cancelled`, or leaves the status untouched on a shutdown so the job resumes on restart. A Cancel that lands after `processJob` last read its context reaches `setJobError` all the same, with the failure the run was already returning; its write (`UpdateJobFieldsUnless(..., Cancelled, ...)`) does not apply over the `Cancelled` row, and it hands the run to `handleCancellation` instead of recording Error or sending Job Failed. The error's text becomes the job's `error` column, and `park_reason`/`park_identity` are written on every error transition so the credential sweeps can tell a dead-cookie park from a membership one.
 
 ### Notification and Recovery Suppression
 
@@ -834,6 +837,7 @@ Key methods:
 - `GetJob(id) -> (*Job, error)`: Single job with gaps, trims, segments loaded.
 - `GetAllJobs() -> ([]*Job, error)`: All jobs ordered by `updated_at DESC`.
 - `UpdateJobFields(jobID, map[string]any)`: Dynamic partial update with auto `updated_at`. Triggers subscribers.
+- `UpdateJobFieldsIf(jobID, expected, map[string]any) -> bool` / `UpdateJobFieldsUnless(jobID, unwanted, map[string]any) -> bool`: The same write, applied only while the row's status is `expected` (a compare-and-set) or is not `unwanted`; reports whether it applied, and triggers subscribers only when it did.
 - `DeleteJob(id) -> error`: Hard delete with cascading gap/trim/segment cleanup.
 - `OnJobUpdate(fn) -> unsubscribe` / `OnJobChange(fn) -> unsubscribe`: Subscribe to per-job update events; the latter also receives the list of columns written.
 - `OnJobAdded(fn)` / `OnJobDeleted(fn)` / `OnTrimsChanged(fn) -> unsubscribe`: Lifecycle events of `AddJob`, `DeleteJob` and `AddTrim`/`DeleteTrim`.

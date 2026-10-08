@@ -96,6 +96,8 @@ db.UpdateJobFields(jobID, map[string]any{
 ```
 Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers. Returns `*Job`.
 
+A status transition decided on a status read earlier must not be written unconditionally — it overwrites whatever landed in between (an operator's Cancel). Use `db.UpdateJobFieldsIf(jobID, expected, fields)` (applies only while the status is still `expected`) or `db.UpdateJobFieldsUnless(jobID, unwanted, fields)` (only while it is not `unwanted`); both return whether the write applied, and notify subscribers only when it did.
+
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
 Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler, which admits none while offline or while the output volume is at or past `disk_critical_percent` (live/upcoming and newly published content never waits in `Queued`); a backlog VOD parked in `COOKIES?` returns to `Queued` (when its feed row still exists), not `Upcoming`, so a cookie repair re-admits it through the same pacing.

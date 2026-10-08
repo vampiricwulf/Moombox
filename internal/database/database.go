@@ -363,8 +363,46 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 // would otherwise emit duplicate writes — e.g. a status set to its current
 // value — should dedupe at the call site (audit reports/database.md U6).
 func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
+	job, _ := db.updateJobFieldsWhere(id, fields, "", nil)
+	return job
+}
+
+// UpdateJobFieldsIf is UpdateJobFields as a compare-and-set on the row's
+// status: the write applies only while the row's status is still expected,
+// and reports whether it did. A transition decided on a status read earlier
+// — the backlog scheduler's Queued → Upcoming admission — would otherwise
+// write over whatever landed between the read and the write: an operator's
+// Cancel, which the admission then turned back into a download.
+//
+// The check and the write are one UPDATE statement, so nothing can land
+// between them. updated_at and the OnJobUpdate / OnJobChange subscribers move
+// only when the write applied; a row whose status had moved on is left
+// exactly as it is, and so is a row that no longer exists (no
+// notifyJobDeleted either — the delete fired its own).
+func (db *Database) UpdateJobFieldsIf(id string, expected JobStatus, fields map[string]any) bool {
+	_, applied := db.updateJobFieldsWhere(id, fields, "status=?", []any{expected})
+	return applied
+}
+
+// UpdateJobFieldsUnless is UpdateJobFieldsIf's complement: the write applies
+// only while the row's status is NOT unwanted. For a write whose caller knows
+// the one status it must not overwrite rather than the one it expects — the
+// worker recording a job's failure must not turn an operator's Cancelled
+// into Error, whatever status the run itself had reached.
+func (db *Database) UpdateJobFieldsUnless(id string, unwanted JobStatus, fields map[string]any) bool {
+	_, applied := db.updateJobFieldsWhere(id, fields, "status<>?", []any{unwanted})
+	return applied
+}
+
+// updateJobFieldsWhere is the dynamic SET machinery behind UpdateJobFields
+// and its two conditional forms. cond, when not empty, is ANDed to the
+// statement's WHERE id=? with condArgs as its arguments, and a statement it
+// matched no row for reports false and touches nothing else. Unconditional,
+// it behaves exactly as UpdateJobFields always has, and reports whether the
+// statement ran.
+func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond string, condArgs []any) (*Job, bool) {
 	if len(fields) == 0 {
-		return nil
+		return nil, false
 	}
 
 	db.mu.Lock()
@@ -386,7 +424,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 
 	if len(setClauses) == 0 {
 		db.mu.Unlock()
-		return nil
+		return nil, false
 	}
 
 	// Always update updated_at
@@ -395,13 +433,26 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	args = append(args, id)
 
 	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id=?"
-	_, err := db.db.ExecContext(db.getCtx(), query, args...)
+	if cond != "" {
+		query += " AND " + cond
+		args = append(args, condArgs...)
+	}
+	res, err := db.db.ExecContext(db.getCtx(), query, args...)
 	if err != nil {
 		db.mu.Unlock()
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields failed", "jobID", id, "err", err)
 		}
-		return nil
+		return nil, false
+	}
+	if cond != "" {
+		// A driver that cannot say how many rows changed is read as a
+		// match: the read-back below then publishes the row as it really
+		// is, the same assumption updateSingleColumnSilent makes.
+		if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+			db.mu.Unlock()
+			return nil, false
+		}
 	}
 
 	// Capture the schema column names that were actually written so
@@ -446,11 +497,11 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 			// is a real failure operators need to see.
 			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
 		}
-		return nil
+		return nil, true
 	}
 
 	db.notifyJobUpdate(job, changes)
-	return job
+	return job, true
 }
 
 // silentColumns is the whitelist of columns that may be updated via

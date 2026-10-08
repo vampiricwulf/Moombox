@@ -23,9 +23,10 @@ type jobEnqueuer interface {
 type Scheduler struct {
 	db    *database.Database
 	queue jobEnqueuer
-	// updateJob is the durable-write primitive (production:
-	// db.UpdateJobFields). Injected so tests can spy on admission ordering.
-	updateJob func(jobID string, fields map[string]any)
+	// updateJob is the admission's durable write, reporting whether it
+	// applied (production: db.UpdateJobFieldsIf on Queued). Injected so
+	// tests can spy on admission ordering.
+	updateJob func(jobID string, fields map[string]any) bool
 	// resolveSlots maps a channel_id to its archive_slots M. Injected by the
 	// host (cmd/moombox) against the live config store — see
 	// DownloadWorker.SetArchiveSlotsResolver.
@@ -69,8 +70,11 @@ func newScheduler(db *database.Database, queue jobEnqueuer, log logger) *Schedul
 	return &Scheduler{
 		db:    db,
 		queue: queue,
-		updateJob: func(jobID string, fields map[string]any) {
-			db.UpdateJobFields(jobID, fields)
+		// A compare-and-set on Queued: sweep read the row Queued, and an
+		// operator's Cancel can land before this write — which, written
+		// unconditionally, turned the Cancelled row back into a download.
+		updateJob: func(jobID string, fields map[string]any) bool {
+			return db.UpdateJobFieldsIf(jobID, database.StatusQueued, fields)
 		},
 		wake: make(chan struct{}, 1),
 		log:  log,
@@ -85,6 +89,13 @@ func (s *Scheduler) holdUntil(jobID string, until time.Time) {
 		s.holds = map[string]time.Time{}
 	}
 	s.holds[jobID] = until
+}
+
+// unhold drops jobID's hold: the requeue it was placed for did not happen.
+func (s *Scheduler) unhold(jobID string) {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	delete(s.holds, jobID)
 }
 
 // held reports whether jobID is still held at now, forgetting a hold that
@@ -281,14 +292,23 @@ func (s *Scheduler) sweep() {
 			if s.held(id, now) {
 				continue
 			}
-			admitted++
 			// 1. durable FIRST — this is what the M count observes; Enqueue
 			//    touches no DB row, so without this write M counts 0 forever
 			//    and every tick over-admits. Upcoming is what creators write
 			//    for "created, awaiting processing" and ShouldProcess accepts
 			//    it, so a crash between the two steps is self-healing:
 			//    enqueueExistingJobs re-enqueues the row on restart.
-			s.updateJob(id, map[string]any{"status": database.StatusUpcoming})
+			//    Only while the row is still Queued: one that left it since
+			//    NextQueuedJobs read it (a Cancel) is not admitted and takes
+			//    no slot. The next row in line gets it — in this sweep when
+			//    the query returned one past it, else in the next sweep.
+			//    Not a re-query or a Wake here: a write that fails for any
+			//    other reason (a database that cannot write) would spin.
+			if !s.updateJob(id, map[string]any{"status": database.StatusUpcoming}) {
+				s.log.Info("scheduler: backlog job left Queued before its admission; not admitted", "jobID", id, "channel", ch)
+				continue
+			}
+			admitted++
 			// 2. hand to JobQueue
 			s.queue.Enqueue(id, database.StatusUpcoming)
 			s.log.Info("scheduler: admitted backlog job", "jobID", id, "channel", ch)
