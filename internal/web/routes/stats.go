@@ -28,7 +28,7 @@ var SharedDiskStatus atomic.Pointer[DiskStatus]
 
 // ComputeWarnLevel returns "ok", "warn", or "critical" for a given usage percent.
 func ComputeWarnLevel(usedPct float64, cfg *config.MoomboxConfig) string {
-	if cfg.Disk.CriticalPercent > 0 && usedPct >= float64(cfg.Disk.CriticalPercent) {
+	if cfg.Disk.AtCritical(usedPct) {
 		return "critical"
 	}
 	if cfg.Disk.WarnPercent > 0 && usedPct >= float64(cfg.Disk.WarnPercent) {

@@ -745,7 +745,7 @@ behaviour.
 Upcoming -> Live -> Downloading -> Muxing -> Finished
 ```
 
-A backlog VOD (found by a channel's history scan) waits in `Queued` until the channel's archive slots admit it to `Upcoming`; live and newly published content never waits there.
+A backlog VOD (found by a channel's history scan) waits in `Queued` until the channel's archive slots admit it to `Upcoming`; live and newly published content never waits there. Nothing is admitted while the output drive is at or past its critical disk threshold (`disk_critical_percent`, default 95%) — the backlog resumes within a minute of space being freed.
 
 Special states: `Error`, `Cancelled`, `COOKIES?` (credentials needed — cookies expired or missing, a sign-in wall, or a membership the account does not hold; resumes on its own once the credentials check out, or for a membership refusal once the cookie file carries a different account)
 

@@ -42,6 +42,18 @@ type Scheduler struct {
 	// moment it reports online.
 	conn Connectivity
 
+	// readDisk reads the volume the jobs write to against the disk_critical
+	// threshold (DownloadWorker.readOutputDisk; nil: never full). An
+	// admission while it reads critical is a backlog VOD sent to download
+	// onto a disk that is filling, so sweep admits nothing then, and reads
+	// again on every sweep after — the heartbeat's included, which is what
+	// notices the space coming back.
+	readDisk func() (diskReading, error)
+	// diskHeld is the gate's state as the last reading left it, so the
+	// close and the reopen are each logged once. Touched only by sweep,
+	// which only Run's goroutine calls.
+	diskHeld bool
+
 	// holds are the backlog jobs a transient pre-download failure returned
 	// to Queued (DownloadWorker.requeueBacklogAfterTransientFailure), each
 	// with the time before which sweep must not admit it again. In memory:
@@ -96,6 +108,39 @@ func (s *Scheduler) heldCount() int {
 	s.holdMu.Lock()
 	defer s.holdMu.Unlock()
 	return len(s.holds)
+}
+
+// diskGateClosed reports whether backlog admission must wait for disk space:
+// the volume the jobs write to is at or past the disk_critical threshold. The
+// gate's close and its reopen are each logged once, not once per sweep.
+//
+// A reading that fails leaves the gate as the last good one left it — the
+// disk alerts freeze on their last good reading the same way, and say so
+// themselves — so a volume that went offline while full does not reopen
+// admission, and one that was fine is not held on no evidence.
+func (s *Scheduler) diskGateClosed() bool {
+	if s.readDisk == nil {
+		return false
+	}
+	r, err := s.readDisk()
+	if err != nil {
+		s.log.Debug("scheduler: disk space reading failed; the backlog disk gate stays as it was",
+			"dir", r.dir, "held", s.diskHeld, "err", err)
+		return s.diskHeld
+	}
+	if r.critical != s.diskHeld {
+		s.diskHeld = r.critical
+		freeGB := fmt.Sprintf("%.1f", float64(r.free)/(1<<30))
+		usedPct := fmt.Sprintf("%.1f", r.usedPct)
+		if r.critical {
+			s.log.Warn("scheduler: disk at the critical threshold; backlog VODs wait in Queued until space is freed (live and manually added jobs are not held)",
+				"dir", r.dir, "usedPct", usedPct, "freeGB", freeGB)
+		} else {
+			s.log.Info("scheduler: disk below the critical threshold again; backlog admission resumes",
+				"dir", r.dir, "usedPct", usedPct, "freeGB", freeGB)
+		}
+	}
+	return r.critical
 }
 
 // Wake signals the scheduler that backlog state changed (a Queued job was
@@ -163,7 +208,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 				case <-time.After(heartbeatInterval):
 					// Safety net: catches slots freed by paths that don't
 					// Wake (e.g. user-driven MuxJob finishing, CancelJob on
-					// a never-dequeued row).
+					// a never-dequeued row). Also the disk gate's recheck:
+					// nothing signals space being freed, so a backlog held
+					// on a full disk resumes within one heartbeat of it.
 				}
 				s.sweep()
 			}
@@ -200,6 +247,11 @@ func (s *Scheduler) sweep() {
 	channels, err := s.db.QueuedChannels()
 	if err != nil {
 		s.log.Error("scheduler: QueuedChannels failed", "err", err)
+		return
+	}
+	// No admissions onto a full disk either. Read only when there is a
+	// backlog to admit: an idle install pays no disk query per heartbeat.
+	if len(channels) > 0 && s.diskGateClosed() {
 		return
 	}
 	now := time.Now()

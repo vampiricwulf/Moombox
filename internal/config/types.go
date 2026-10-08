@@ -366,6 +366,15 @@ type DiskConfig struct {
 	CriticalPercent int `toml:"disk_critical_percent" json:"disk_critical_percent"`
 }
 
+// AtCritical reports whether usedPct has reached the critical threshold: AT
+// OR ABOVE it, and never while the threshold is 0. One rule for its two
+// readers — the disk alerts' level (routes.ComputeWarnLevel) and the backlog
+// scheduler's admission gate (internal/worker) — so the gate closes on exactly
+// the reading that sends disk_critical.
+func (d DiskConfig) AtCritical(usedPct float64) bool {
+	return d.CriticalPercent > 0 && usedPct >= float64(d.CriticalPercent)
+}
+
 // UpdatesConfig holds auto-update settings.
 type UpdatesConfig struct {
 	AutoCheckUpdates bool `toml:"auto_check_updates" json:"auto_check_updates"`

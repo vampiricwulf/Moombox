@@ -16,6 +16,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -273,6 +274,10 @@ type DownloadWorker struct {
 	processStreamFn  func(ctx context.Context, job *database.Job) (*StreamProcessResult, error)
 	refreshVodInfoFn func(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error)
 
+	// diskSpace replaces disk.GetDiskSpace in readOutputDisk when set — a
+	// test seam standing in a volume of any fullness. nil in production.
+	diskSpace func(path string) (*disk.DiskSpace, error)
+
 	// CookieFileInUse returns the cookie file the running services read and
 	// write (the jar's path). cookies.cookie_file is restart-required, so after
 	// a save without the restart the setting names a file nothing touches, and
@@ -365,7 +370,7 @@ func NewDownloadWorker(
 	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
 	orchestrator.twitchChats = twitchChats
 
-	return &DownloadWorker{
+	w := &DownloadWorker{
 		db:           db,
 		yt:           yt,
 		tw:           tw,
@@ -379,6 +384,11 @@ func NewDownloadWorker(
 		logger:       logger,
 		notifyJob:    make(chan struct{}, 1),
 	}
+	// The scheduler reads the disk through the worker, which holds the
+	// config: the output directory and the critical threshold both follow a
+	// Settings save without a restart.
+	sched.readDisk = w.readOutputDisk
+	return w
 }
 
 // Start begins the worker loop, processing jobs from the queue.
