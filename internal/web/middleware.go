@@ -268,8 +268,10 @@ func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 			})
 			host := effectiveRequestHost(store, r)
 			if networkAccess != "external" && networkAccess != "public" && host != "" {
+				// The Host is compared with itself here, so the port rule in
+				// isAllowedOrigin always holds and public_url cannot matter.
 				scheme := effectiveRequestScheme(r)
-				if !isAllowedOrigin(scheme+"://"+host, networkAccess, host, scheme, identityHosts()) {
+				if !isAllowedOrigin(scheme+"://"+host, networkAccess, host, scheme, "", identityHosts()) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusForbidden)
 					w.Write([]byte(`{"error":"Forbidden: unrecognized host — open the dashboard by IP address or localhost"}`))
@@ -387,12 +389,13 @@ func RefuseCrossSite(next http.Handler) http.Handler {
 // Returns the authority the origin was compared against as well, so a refusal
 // can name the pair without recomputing it.
 func originAllowed(store *config.Store, r *http.Request, origin string) (bool, string) {
-	var networkAccess string
+	var networkAccess, publicURL string
 	store.Read(func(c *config.MoomboxConfig) {
 		networkAccess = c.Network.NetworkAccess
+		publicURL = c.Network.PublicURL
 	})
 	host := effectiveRequestHost(store, r)
-	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), identityHosts()), host
+	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), publicURL, identityHosts()), host
 }
 
 // clipForLog bounds a header value the CLIENT chose before it reaches the log
@@ -466,14 +469,23 @@ func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 // Uses proper URL parsing instead of substring matching.
 //
 // effectiveHost / effectiveScheme describe the request the origin arrived on
-// (see effectiveRequestHost / effectiveRequestScheme). They are consulted ONLY
-// by the external/public arm: those two policies have no IP class left to test
+// (see effectiveRequestHost / effectiveRequestScheme). On external/public they
+// decide the whole question: those two policies have no IP class left to test
 // an origin against — every address is admissible — so the only meaningful
 // question is whether the page that issued the request was served by THIS
 // deployment. Answering "yes, always" (the pre-sweep behaviour) let any page a
 // LAN browser had open drive the dashboard cross-origin WITH credentials,
 // because AuthMiddleware waives loopback and private peers regardless of mode:
 // POST /api/restart, DELETE /api/jobs/{id}, PUT /api/config (sweep T1-6).
+//
+// On localhost/lan (and the unset default) they supply the PORT half of the
+// answer (originPortServed). The IP-class test names a machine, not a
+// program, so before it a page any other service on a trusted address served
+// — a dev server on 127.0.0.1:3000, a router or NAS admin page on the LAN —
+// passed CSRF, was echoed by CORS with credentials, and opened the socket. The
+// origin's port must now be the one this request was addressed to, or the
+// port of network.public_url (publicURL), which is what a LAN client of a
+// proxied or port-forwarded install types.
 //
 // identity is the certificate-attested host list (identityHosts). On
 // external/public it is an ADDITIONAL requirement, never a substitute:
@@ -489,8 +501,9 @@ func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 // localhost and lan keep their IP-class rules and gain identity as a pure
 // WIDENING: both arms reject every DNS name, and the WebSocket upgrade now
 // routes through this function, so without it an install holding a real
-// certificate for "dash.lan" would lose the socket it has today.
-func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme string, identity []string) bool {
+// certificate for "dash.lan" would lose the socket it has today. The port rule
+// holds for that widening too.
+func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publicURL string, identity []string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -503,10 +516,12 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 
 	switch networkAccess {
 	case "localhost":
-		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
+		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
 	case "lan":
-		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname) ||
-			hostInSANs(hostname, identity, false)
+		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname) ||
+			hostInSANs(hostname, identity, false)) &&
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
 	case "external", "public":
 		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
 			return false
@@ -516,8 +531,38 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 		}
 		return hostInSANs(hostname, identity, true)
 	default:
-		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
+		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
 	}
+}
+
+// originPortServed reports whether an origin's port is one this deployment
+// answers on: the port the request was addressed to (effectiveHost, so a
+// trusted proxy's X-Forwarded-Host counts here exactly as it does on
+// external/public), or the port of network.public_url.
+//
+// The first comparison is sameSiteOrigin's port rule (samePort): exact once
+// either side writes a port, each defaulted from its own scheme, and two
+// portless authorities equal — a TLS-terminating proxy on 443 that forwards
+// the browser's portless Host while Moombox itself sees plain HTTP is the case
+// that leniency exists for. public_url is the operator's own statement of
+// scheme and port, so it is defaulted and compared with no leniency:
+// "https://10.0.0.5" admits 443 and nothing else.
+func originPortServed(u *url.URL, effectiveHost, effectiveScheme, publicURL string) bool {
+	_, oPort := splitAuthority(u.Host)
+	_, rPort := splitAuthority(effectiveHost)
+	if samePort(oPort, u.Scheme, rPort, effectiveScheme) {
+		return true
+	}
+	if publicURL == "" {
+		return false
+	}
+	p, err := url.Parse(publicURL)
+	if err != nil || p.Host == "" {
+		return false
+	}
+	_, pPort := splitAuthority(p.Host)
+	return defaultedPort(oPort, u.Scheme) == defaultedPort(pPort, p.Scheme)
 }
 
 // effectiveRequestHost returns the authority this server answers as, for the
@@ -618,10 +663,17 @@ func sameSiteOrigin(origin, effectiveHost, effectiveScheme string) bool {
 	if oHost == "" || rHost == "" || oHost != rHost {
 		return false
 	}
+	return samePort(oPort, u.Scheme, rPort, effectiveScheme)
+}
+
+// samePort is sameSiteOrigin's port rule, shared with originPortServed: two
+// portless authorities match, and once either side writes a port both are
+// defaulted from their OWN scheme and compared exactly.
+func samePort(oPort, oScheme, rPort, rScheme string) bool {
 	if oPort == "" && rPort == "" {
 		return true
 	}
-	return defaultedPort(oPort, u.Scheme) == defaultedPort(rPort, effectiveScheme)
+	return defaultedPort(oPort, oScheme) == defaultedPort(rPort, rScheme)
 }
 
 // ExtractIP gets the client's real IP from the request.

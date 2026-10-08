@@ -207,6 +207,14 @@ the hostname lifts this for that name.) On `external` and `public` the
 same holds for clients on this machine or your LAN — the ones that skip
 the password — with the host of `network.public_url` admitted as well.
 
+On `localhost` and `lan` the dashboard also trusts only pages served on
+**its own port**: a page another program serves from the same address
+on a different port (a dev server on `127.0.0.1:3000`, a router's admin
+page) cannot drive it. A reverse proxy listening on another port keeps
+working when it is listed in `trusted_proxies` and sets
+`X-Forwarded-Host`; otherwise set `network.public_url` to the address
+you type into the browser, whose port is admitted as well.
+
 To reach the dashboard from outside that boundary, pick one of these —
 strongest first.
 

@@ -92,16 +92,21 @@ type NetworkConfig struct {
 	// ("https://moombox.example.com", or "http://192.168.1.10:774" on a LAN).
 	// Empty means unset, which is the default and the pre-2.8.9 behaviour.
 	//
-	// Its only consumer is the notification manager: when set, a job embed's
+	// The notification manager is its main consumer: when set, a job embed's
 	// TITLE links to {public_url}/#job=<id> (the dashboard opens that job's
-	// details) and the platform page moves to the embed's author line. Moombox
-	// never binds to it, never validates that it reaches this process, and
-	// never redirects to it — it is a string the operator knows and Moombox
-	// does not (a reverse proxy, a tunnel, a port forward).
+	// details) and the platform page moves to the embed's author line. The web
+	// server's origin checks read it as the operator's word for the address a
+	// browser types: on external/public its host is a name a local peer may
+	// address the dashboard by, and on localhost/lan its port is one an Origin
+	// may name (internal/web/middleware.go). Moombox never binds to it, never
+	// validates that it reaches this process, and never redirects to it — it
+	// is a string the operator knows and Moombox does not (a reverse proxy, a
+	// tunnel, a port forward).
 	//
 	// Validated as an absolute http(s) URL with a host, no query, no fragment
 	// and no userinfo; a trailing slash is trimmed on the way in because the
-	// manager appends "/#job=". Hot-reloadable — read at send time.
+	// manager appends "/#job=". Hot-reloadable — read at send time and per
+	// request.
 	PublicURL string `toml:"public_url,omitempty" json:"public_url,omitempty"`
 }
 

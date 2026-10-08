@@ -82,8 +82,8 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - Origin validation uses `url.Parse` for proper URL parsing — no substring matching.
 
 **Origin allowance rules by network_access level:**
-- `localhost`: Only loopback IPs and `localhost`.
-- `lan`: Loopback + `localhost` + private IPs.
+- `localhost`: Only loopback IPs and `localhost` — on the port the dashboard is served on (the port rule below).
+- `lan`: Loopback + `localhost` + private IPs — on the port the dashboard is served on (the port rule below).
 - `external` / `public`: **Only an origin that names the request's own host.** The Origin (or Referer)
   authority is compared against `r.Host` — or against `X-Forwarded-Host` when the direct peer is listed
   in `network.trusted_proxies`, the same trust rule `EffectiveClientIP` applies. Hosts must match; ports
@@ -129,7 +129,29 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   Configure the proxy to set the header; do not rely on its absence.
 - Default (unset): Same as `localhost`.
 
-**Source:** `CORSMiddleware` and `isAllowedOrigin` in `internal/web/middleware.go`.
+**The port rule on `localhost` / `lan` (and the unset default).** The IP class names a machine, not
+a program: until 2026-10 a loopback or private origin was trusted on ANY port, so a page any other
+service on a trusted address served — a dev server on `127.0.0.1:3000`, a router or NAS admin page
+on the LAN — passed CSRF, was echoed by CORS with credentials, and opened the WebSocket. The origin
+(or Referer) must now ALSO name a port this deployment answers on (`originPortServed`): the port the
+request was addressed to — the effective host's, so `X-Forwarded-Host` from a proxy listed in
+`network.trusted_proxies` still decides, exactly as on `external`/`public` — or the port of
+`network.public_url`. The request-port comparison is `sameSiteOrigin`'s own (`samePort`): exact once
+either side writes a port, each defaulted from its own scheme, and two portless authorities equal, so
+a TLS-terminating proxy on 443 that forwards the browser's portless `Host` while Moombox sees plain
+HTTP keeps working. `public_url` is the operator's statement of scheme and port and is compared
+defaulted, with no such leniency — `https://192.168.1.5` admits 443 and nothing else. Only the port is
+added: the origin's host is still judged by IP class, so `http://localhost:774` and
+`http://127.0.0.1:774` are interchangeable against a dashboard on `:774`. The certificate-SAN
+widening is held to the same port. The dashboard's own fetches and socket, the TUI (internal token,
+no Origin), the yt-dlp plugin (no Origin) and a trusted reverse proxy that sets `X-Forwarded-Host`
+are unaffected; a proxy on another port that sets no `X-Forwarded-Host` needs `network.public_url`
+to name the address the browser types. `HostGateMiddleware` compares the `Host` with itself, so the
+rule is a no-op there. Pinned by the D-S7 rows of `TestIsAllowedOrigin`,
+`TestCSRFHoldsALocalOriginToTheServedPort` (`internal/web/middleware_test.go`) and
+`TestWebSocketUpgradeHoldsALoopbackOriginToItsPort` (`internal/web/websocket_origin_test.go`).
+
+**Source:** `CORSMiddleware`, `isAllowedOrigin` and `originPortServed` in `internal/web/middleware.go`.
 
 ### 5. SecurityHeaders
 
@@ -152,7 +174,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 1. **Safe methods pass through.** GET, HEAD, and OPTIONS requests are never subject to CSRF validation. The three GET routes whose handler acts rather than reads — `GET /api/formats/{videoId}` (a YouTube extraction with the operator's cookies), `GET /api/ffmpeg/check` (spawns the configured ffmpeg) and `GET /api/update/release-notes` (fetches from GitHub) — are wrapped in `RefuseCrossSite` instead, which answers `403 Forbidden: cross-site request` when the browser marks the request `Sec-Fetch-Site: cross-site`: an `<img>` on any page open in the operator's browser could otherwise fire them at a loopback dashboard and spend the format picker's shared limiter budget (the refusal runs ahead of that limiter). Only browsers set the header, and only on a request another site's page started, so the dashboard's own fetches (`same-origin`), a second local dashboard (`same-site` — ports do not split a site), a typed URL (`none`) and every non-browser client pass. Reads are deliberately left unwrapped: no CORS is granted, so another site cannot see the answer, and an embedded thumbnail or a linked recording stays usable.
 2. **Loopback-only routes are exempt — for a caller that names no origin.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that send neither Origin nor Referer, and are protected by `LoopbackOnly` at the route level. A request to them that DOES carry an Origin or Referer takes the normal check: a browser always sends Origin on a POST, no-cors included, and `LoopbackOnly` does not stop a page open in the operator's own browser from POSTing to `127.0.0.1` cross-site. Exempt by path alone, such a page could drop the PO-token caches at will (both invalidate routes are unthrottled) or spend the 10/min `/get_pot` budget the yt-dlp plugin shares.
 3. **Internal token bypass.** If the request includes an `X-Internal-Token` header whose value matches the server's startup-generated token (compared with `crypto/subtle.ConstantTimeCompare`), the request passes through. This is safe because browsers cannot set custom headers on cross-origin requests without a CORS preflight, which the server does not grant to untrusted origins.
-4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test, either spelling passes.
+4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test plus the port rule, either spelling passes — on the port the request reached.
 5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`. A refusal logs exactly one `CSRF: origin refused` line naming the origin and the authority it was compared against, both clipped by `clipForLog` (`internal/web/middleware.go`) before they reach the dashboard's log panel.
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
@@ -217,7 +239,8 @@ Moombox uses Origin/Referer header validation rather than CSRF tokens. This deci
 3. The only clients that legitimately omit `Origin` are same-process clients (TUI), which authenticate via the internal token.
 
 That equivalence now holds on every policy. On `localhost` and `lan`, `isAllowedOrigin`
-(`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins.
+(`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins,
+and only on the port the request was addressed to or `network.public_url`'s (the port rule, § 4. CORSMiddleware).
 On `external` / `public` there is no IP class left to test (every address is admissible), so the check
 becomes `sameSiteOrigin`: the origin must name the host the request was addressed to. Before the
 2026-09-15 sweep that arm returned true for **every** parseable origin and `CSRFMiddleware` enforced
@@ -261,7 +284,7 @@ A mutating request that reaches the Origin check with neither an `Origin` nor a 
 
 There is no localhost/LAN exemption. An earlier version allowed missing-Origin requests from local and LAN clients, which let any local process or same-origin browser tab call `/api/restart`, `/api/auth/set-password`, or `/api/jobs/{id}/open-folder` with no proof of browser context. That bypass was removed (audit `reports/web.md` C-1/C-5/C-8) and **must not be reintroduced.**
 
-The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level) called with no Origin and no Referer. Non-browser local CLIs must therefore send the internal token, or set `Origin` to the **same authority the request's own `Host` carries** — the rule step 4 above states in full (under `localhost` / `lan` the check is an IP-class test, so either spelling of loopback passes; under `external` / `public` the origin must name the request's own host exactly).
+The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level) called with no Origin and no Referer. Non-browser local CLIs must therefore send the internal token, or set `Origin` to the **same authority the request's own `Host` carries** — the rule step 4 above states in full (under `localhost` / `lan` the check is an IP-class test plus the port rule, so either spelling of loopback passes on the port the request reached; under `external` / `public` the origin must name the request's own host exactly).
 
 ---
 

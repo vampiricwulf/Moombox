@@ -105,6 +105,30 @@ func TestWebSocketUpgradeSharesTheOriginDecision(t *testing.T) {
 	})
 }
 
+// TestWebSocketUpgradeHoldsALoopbackOriginToItsPort pins D-S7 on the socket:
+// on lan (and localhost) a loopback or private origin is held to the port the
+// upgrade was addressed to, so a page another local service serves cannot
+// open the live stream.
+//
+// THE MUTANT: drop `&& originPortServed(...)` from isAllowedOrigin's lan arm —
+// the first row answers 101.
+func TestWebSocketUpgradeHoldsALoopbackOriginToItsPort(t *testing.T) {
+	srv := wsOriginFixture(t, "lan", nil)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	_, port, _ := strings.Cut(host, ":")
+
+	other := "1"
+	if port == other {
+		other = "2"
+	}
+	if got := upgradeStatus(t, srv, "", "http://127.0.0.1:"+other, nil); got != http.StatusForbidden {
+		t.Fatalf("status %d, want 403 — a loopback page on another port is another program", got)
+	}
+	if got := upgradeStatus(t, srv, "", "http://localhost:"+port, nil); got != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101 — the dashboard's own port, by either loopback spelling", got)
+	}
+}
+
 // THE MUTANT: leave OriginCheck nil in NewServer — every test above still
 // passes (they wire the hook themselves) while the real server refuses every
 // browser upgrade.
@@ -205,7 +229,10 @@ func TestWebSocketUpgradeRefusalLogsTheEffectiveHost(t *testing.T) {
 func TestWebSocketUpgradeReachesTheCertificateSANWidening(t *testing.T) {
 	useIdentityCert(t, certWatcherFor(t, "dash.lan", []string{"dash.lan"}, nil))
 	srv := wsOriginFixture(t, "lan", nil)
-	if got := upgradeStatus(t, srv, "", "https://dash.lan", nil); got != http.StatusSwitchingProtocols {
+	// Addressed by the name, portless, the way a browser on :443 in front of
+	// a TLS-terminating proxy sends it — the port rule holds, so the name
+	// alone decides.
+	if got := upgradeStatus(t, srv, "dash.lan", "https://dash.lan", nil); got != http.StatusSwitchingProtocols {
 		t.Fatalf("status %d, want 101 — a literal certificate-attested SAN must widen the lan upgrade too", got)
 	}
 }
