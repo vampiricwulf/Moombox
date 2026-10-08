@@ -157,6 +157,12 @@ type JobContext struct {
 	// made, and only ever read through the pointer the orchestrator hands to
 	// muxAndFinalize.
 	ChatStatus string
+	// CapturedMux marks the operator's Mux of a job that was not already
+	// muxing — an Error, Cancelled or parked row, set by MuxJob. What is
+	// staged may be all there is, so the muxing embed does not claim the
+	// download completed. A boot re-mux of an interrupted Muxing row leaves
+	// it false: that download did complete.
+	CapturedMux bool
 }
 
 // JobConfig holds per-job configuration derived from the global config.
@@ -2143,6 +2149,13 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		return err
 	}
 
+	// Read before the Muxing write below overwrites it: a row already Muxing
+	// is a boot re-mux of a download that completed; anything else is the
+	// operator muxing whatever was captured (JobContext.CapturedMux).
+	capturedMux := true
+	if prior, _ := w.db.GetJob(jobID); prior != nil && prior.Status == database.StatusMuxing {
+		capturedMux = false
+	}
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status": database.StatusMuxing,
 	})
@@ -2207,6 +2220,7 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		}
 
 		jobCtx := w.buildJobContext(job)
+		jobCtx.CapturedMux = capturedMux
 
 		// This mux takes the same download slot a queued job takes: a boot
 		// that finds N interrupted Muxing rows would otherwise start N

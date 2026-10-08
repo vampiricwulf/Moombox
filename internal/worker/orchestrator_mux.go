@@ -868,8 +868,15 @@ func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 	// the dashboard deep link, which needs JobID and Author both, would not
 	// apply.
 	f := NotifyFacts(job)
+	// The operator's Mux of a failed or cancelled job muxes what was
+	// captured, which may stop short of the end: "Download complete" was
+	// wrong there.
+	desc := "Download complete, muxing: %s"
+	if jobCtx.CapturedMux {
+		desc = "Muxing the captured media: %s"
+	}
 	o.notifier.Send("Muxing Starting",
-		fmt.Sprintf("Download complete, muxing: %s", notifications.EscapeMarkdown(job.Title)),
+		fmt.Sprintf(desc, notifications.EscapeMarkdown(job.Title)),
 		notifications.TypeMuxing,
 		fb.Build(),
 		notifications.SendOptions{
