@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	// backlogRetryLimit bounds how many times one backlog job goes back to
-	// Queued after a transient pre-download failure before the failure is
-	// taken at its word and the job ends in Error. A video that is really
-	// gone answers the same way every time, and must still reach Error.
+	// backlogRetryLimit bounds how many times in a row one backlog job goes
+	// back to Queued — after a transient pre-download failure or a download
+	// that ran out of disk — before the failure is taken at its word and the
+	// job ends in Error. A video that is really gone answers the same way
+	// every time, and must still reach Error.
 	backlogRetryLimit = 3
 	// backlogRetryBackoff is the first retry's delay; each later one doubles
 	// it (5, 10, 20 minutes), so the budget spans about half an hour — past
@@ -35,21 +36,55 @@ const (
 // offline, but a monitor calls an outage some seconds in, and not every
 // failure that will pass is an outage.
 //
+// Transient is classifyProbeErr's verdict — network, timeout, 429/5xx and
+// everything it cannot place; a definitive refusal (a 404, a playability
+// verdict) is not retried. Which jobs qualify is requeueBacklog's rule.
+func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, err error) (bool, error) {
+	if classifyProbeErr(err) != classNetwork {
+		return false, err
+	}
+	return w.requeueBacklog(job, err, "backlog VOD's pre-download fetch failed; back to Queued for a retry")
+}
+
+// requeueBacklogAfterDiskFull is the same retry for a backlog VOD whose
+// download — or the mux after it — failed because the disk is full
+// (isDiskFull). The scheduler admits no backlog while the volume reads at
+// or past disk_critical_percent, but a VOD admitted below it can still fill
+// what is left, and a full disk is something the operator fixes: ending the
+// job in Error left it there after they had, with nothing to retry it. Held
+// for the backoff, and then for as long as the disk gate stays closed.
+//
+// Staging is kept. A whole-file VOD resumes from its last resume
+// checkpoint; one whose MUX ran out of space downloads again, since a
+// completed download clears its resume state.
+func (w *DownloadWorker) requeueBacklogAfterDiskFull(job *database.Job, err error) (bool, error) {
+	if !isDiskFull(err) {
+		return false, err
+	}
+	return w.requeueBacklog(job, err, "backlog VOD ran out of disk space; back to Queued for a retry")
+}
+
+// requeueBacklog is the requeue both of the above make, once their own
+// predicate has called the failure worth retrying.
+//
 // Backlog only, and only where Queued can be left again: CookieResumeStatus —
 // the rule a cookie repair's re-queue follows — answers Queued for a
 // queue_priority 1 job whose feed_items partner exists, and nothing else. A
 // broadcast or a manually added video fails visibly, as before, rather than
 // waiting in a state the operator did not put it in; a backlog row with no
 // partner would never come out of Queued, since the scheduler admits through
-// that join. Transient is classifyProbeErr's verdict — network, timeout,
-// 429/5xx and everything it cannot place; a definitive refusal (a 404, a
-// playability verdict) is not retried.
+// that join.
+//
+// The budget counts the job's runs that ended back in Queued, of either
+// kind, and only a run that ends some other way resets it
+// (forgetBacklogRetries) — not a fetch that succeeds, since a download that
+// then runs out of disk follows one every time.
 //
 // The hold is placed BEFORE the status write, so no sweep can see the row
 // Queued and unheld; the slots are released before it, so the next download
 // does not wait for this run's exit.
-func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, err error) (bool, error) {
-	if classifyProbeErr(err) != classNetwork || w.scheduler == nil {
+func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what string) (bool, error) {
+	if w.scheduler == nil {
 		return false, err
 	}
 	if status, perr := CookieResumeStatus(w.db, job); perr != nil || status != database.StatusQueued {
@@ -67,13 +102,13 @@ func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, 
 		"status": database.StatusQueued,
 		"error":  "",
 	})
-	w.logger.Warn("backlog VOD's pre-download fetch failed; back to Queued for a retry",
+	w.logger.Warn(what,
 		"jobID", job.ID, "attempt", attempt, "of", backlogRetryLimit, "retryIn", delay, "err", err)
 	return true, nil
 }
 
-// noteBacklogRetry counts one more consecutive transient failure for jobID
-// and returns the count.
+// noteBacklogRetry counts one more consecutive requeue for jobID and returns
+// the count.
 func (w *DownloadWorker) noteBacklogRetry(jobID string) int {
 	w.backlogRetryMu.Lock()
 	defer w.backlogRetryMu.Unlock()
@@ -84,8 +119,9 @@ func (w *DownloadWorker) noteBacklogRetry(jobID string) int {
 	return w.backlogRetries[jobID]
 }
 
-// forgetBacklogRetries resets jobID's count: its fetch succeeded, or its
-// budget is spent and it is ending in Error.
+// forgetBacklogRetries resets jobID's count: a run of it ended other than
+// back in Queued — its download finished, it ended in Error or COOKIES?, or
+// it was cancelled — or its budget is spent and it is ending in Error.
 func (w *DownloadWorker) forgetBacklogRetries(jobID string) {
 	w.backlogRetryMu.Lock()
 	defer w.backlogRetryMu.Unlock()

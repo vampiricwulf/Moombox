@@ -770,6 +770,8 @@ Disk space information is included in the `GET /api/status` response and display
 
 The critical level is also the one thing that holds on its own. While the output directory's volume is at or past `disk_critical_percent`, the backlog scheduler admits no backlog VOD — they wait in `Queued` (`Scheduler.diskGateClosed`, `internal/worker/scheduler.go`). It reads the same volume against the same rule as the alerts (`DownloadWorker.readOutputDisk`, `internal/worker/disk_gate.go`; `DiskConfig.AtCritical`, `internal/config/types.go`), but fresh on every sweep that has a backlog to admit rather than on the six-minute cadence above, and with no recovery margin: the first sweep that reads below the threshold — at most one 60 s heartbeat after space is freed — admits again. The log says once when admission stops and once when it resumes. Live, upcoming and manually added jobs are never held, nor is a backlog VOD already admitted. A reading that fails leaves admission as the last good reading left it.
 
+A backlog VOD admitted below the threshold can still fill what is left. One whose download or mux fails for want of space (`isDiskFull`, `internal/worker/disk_full.go`) goes back to `Queued` rather than to Error — held for 5, then 10, then 20 minutes, and after that for as long as the gate above stays closed — and ends in Error, saying it gave up, only on its fourth run in a row to end that way (`requeueBacklogAfterDiskFull`, `internal/worker/backlog_retry.go`). Its staging is kept. A broadcast or a manually added video that runs out of space still ends in Error.
+
 ---
 
 ## Status and Diagnostics Endpoints

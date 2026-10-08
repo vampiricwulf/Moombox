@@ -814,7 +814,6 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		}
 		return
 	}
-	w.forgetBacklogRetries(job.ID)
 
 	if !result.ShouldDownload {
 		if errors.Is(result.ErrSentinel, ErrCancelled) {
@@ -977,10 +976,16 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			w.handleCancellation(job)
 			return
 		}
-		w.setJobError(job, dlErr)
+		// A backlog VOD that ran out of disk waits in Queued for the space
+		// instead of ending in Error (requeueBacklogAfterDiskFull).
+		requeued, err := w.requeueBacklogAfterDiskFull(job, dlErr)
+		if !requeued {
+			w.setJobError(job, err)
+		}
 		return
 	}
 
+	w.forgetBacklogRetries(job.ID)
 	w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
 }
 
@@ -1238,6 +1243,7 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	// Free the slots — before the notification, symmetric with setJobError.
 	// The run itself ends at processJob's deferred Complete.
 	w.queue.ReleaseSlots(job.ID)
+	w.forgetBacklogRetries(job.ID) // nor does this run end back in Queued
 
 	if userCancelled {
 		w.logger.Info("job cancelled by user", "jobID", job.ID)
@@ -1455,6 +1461,8 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// resume below) waits for that exit through afterJobExit instead of
 	// starting a second run beside this one.
 	w.queue.ReleaseSlots(job.ID)
+	// This run ends out of Queued, so a backlog retry streak is over.
+	w.forgetBacklogRetries(job.ID)
 
 	errMsg := err.Error()
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
