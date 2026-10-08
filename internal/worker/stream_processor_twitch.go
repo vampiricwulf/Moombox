@@ -66,6 +66,27 @@ func sameBroadcastStart(knownStartISO, currentStartISO string) bool {
 	return diff <= time.Minute && diff >= -time.Minute
 }
 
+// selectTwitchVariant is the selection a Twitch capture starts on, live and
+// VOD alike: the job's quality preference under the downloader's
+// max_video_resolution and prefer_60fps, both read fresh from the config. The
+// re-selections that follow during the capture (the quality probe, every
+// downloader restart) make the same call through TwitchVariantInfo.selectFrom,
+// with the same three inputs — processJob copies them across in
+// newTwitchVariantInfo.
+//
+// prefer_60fps was read by every YouTube selector and by no Twitch one, so a
+// channel whose source is 60 fps was archived at 60 fps whatever the setting
+// said (D-Y2).
+func (sp *StreamProcessor) selectTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job) *twitch.TwitchHLSVariant {
+	var maxRes int
+	var prefer60fps bool
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		maxRes = c.Downloader.MaxVideoResolution
+		prefer60fps = c.Downloader.Prefer60fps
+	})
+	return twitch.SelectBestVariant(variants, job.TwitchQuality, maxRes, prefer60fps)
+}
+
 // twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
 // twitch.ErrTwitchAuthExpired or twitch.ErrSubscriberOnly so VOD/HLS
 // errors that lost their wrap via %v formatting still get classified as
@@ -400,16 +421,14 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		}, nil
 	}
 
-	var vodMaxRes int
 	var vodDownloadChat bool
 	var vodStagingDir string
 	sp.readConfig(func(c *config.MoomboxConfig) {
-		vodMaxRes = c.Downloader.MaxVideoResolution
 		vodDownloadChat = c.Downloader.DownloadChat
 		vodStagingDir = c.Paths.StagingDirectory
 	})
 
-	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, vodMaxRes)
+	variant := sp.selectTwitchVariant(variants, job)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "no suitable HLS quality found for VOD"}, nil
 	}
@@ -599,16 +618,14 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		return nil, fmt.Errorf("twitch HLS: %w", err)
 	}
 
-	var liveMaxRes int
 	var liveDownloadChat bool
 	var liveStagingBase string
 	sp.readConfig(func(c *config.MoomboxConfig) {
-		liveMaxRes = c.Downloader.MaxVideoResolution
 		liveDownloadChat = c.Downloader.DownloadChat
 		liveStagingBase = c.Paths.StagingDirectory
 	})
 
-	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, liveMaxRes)
+	variant := sp.selectTwitchVariant(variants, job)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
 	}

@@ -121,9 +121,9 @@ func videoCodecFamily(codecs string) string {
 // HEVC 2 > H.264 1, with an ABSENT family at 0.
 //
 // A pre-enhanced playlist lists only H.264 renditions, so every rendition ties
-// at 1 and the SOURCE flag then the bandwidth decide — playlist order is the
-// last rung now, not the first. A CODECS-less playlist (an older capture, a
-// fixture) ties the same way one rank lower.
+// at 1 and the frame rate, the SOURCE flag and then the bandwidth decide —
+// playlist order is the last rung now, not the first. A CODECS-less playlist
+// (an older capture, a fixture) ties the same way one rank lower.
 func codecRank(family string) int {
 	switch family {
 	case "av01":
@@ -137,20 +137,47 @@ func codecRank(family string) int {
 	}
 }
 
+// preferredFrameRate reports whether a rendition's frame rate is the one
+// prefer_60fps asks for: 50 fps and up when it is on, a known rate of 31 and
+// below when it is off. The thresholds are the YouTube selectors' own
+// (fpsPreference in internal/worker/format_utils.go), so one setting means one
+// thing on both platforms; Twitch's NTSC rates (59.94, 29.97) fall on the
+// sides they are named for.
+//
+// The rate is the playlist's FRAME-RATE attribute, which ParseHLSMasterPlaylist
+// reads into FPS — Twitch sends it on every rendition, live and VOD. A
+// rendition without one (FPS 0) is preferred under neither setting, as an
+// unknown rate is on the YouTube side, so it ties with the other unknowns and
+// loses to a rendition whose rate is known to match.
+func preferredFrameRate(fps float64, prefer60fps bool) bool {
+	if prefer60fps {
+		return fps >= 50
+	}
+	return fps > 0 && fps <= 31
+}
+
 // rankAtChosenSize returns the best variant among those whose CapDimension
 // equals size, or nil when none does.
 //
-// Ruling R2: size first (the R1 rule resolved it), then the video family
-// AV1 > HEVC > H.264 > absent, then a SOURCE rendition over a transcode, then
-// the higher bandwidth. Ties keep the earlier variant, so two truly
-// indistinguishable renditions still resolve in playlist order.
+// Ruling R2, as amended by D-Y2: size first (the R1 rule resolved it), then
+// the video family AV1 > HEVC > H.264 > absent, then the frame rate
+// prefer60fps asks for (preferredFrameRate), then a SOURCE rendition over a
+// transcode, then the higher bandwidth. Ties keep the earlier variant, so two
+// truly indistinguishable renditions still resolve in playlist order.
 //
 // This replaces selectSourceVariant, which only ever looked at IsSource
 // variants and ranked them by codec then pixel area. Two things moved: the
 // codec now outranks the source flag (an enhanced AV1 rendition is the better
 // archive even when Twitch does not flag it chunked), and pixel area is gone
 // because the chosen size has already fixed the short edge.
-func rankAtChosenSize(variants []TwitchHLSVariant, size int) *TwitchHLSVariant {
+//
+// The frame-rate rung sits ABOVE the source flag, which is the point of it: a
+// Twitch source is whatever the broadcaster sends, so a 1080p60 source beside
+// a 1080p30 transcode is the common shape, and with prefer_60fps off the
+// source flag used to win it every time — the setting was read by every
+// YouTube selector and by none of these. It sits BELOW the codec: an AV1
+// 30 fps rendition is still the better archive than an H.264 60 fps one.
+func rankAtChosenSize(variants []TwitchHLSVariant, size int, prefer60fps bool) *TwitchHLSVariant {
 	best := -1
 	for i := range variants {
 		if utils.CapDimension(variants[i].Width, variants[i].Height) != size {
@@ -163,6 +190,14 @@ func rankAtChosenSize(variants []TwitchHLSVariant, size int) *TwitchHLSVariant {
 		cur, cand := codecRank(variants[best].VideoCodec), codecRank(variants[i].VideoCodec)
 		if cand != cur {
 			if cand > cur {
+				best = i
+			}
+			continue
+		}
+		curRate := preferredFrameRate(variants[best].FPS, prefer60fps)
+		candRate := preferredFrameRate(variants[i].FPS, prefer60fps)
+		if candRate != curRate {
+			if candRate {
 				best = i
 			}
 			continue
@@ -185,13 +220,18 @@ func rankAtChosenSize(variants []TwitchHLSVariant, size int) *TwitchHLSVariant {
 
 // SelectBestVariant selects the best HLS variant based on preferences.
 //
+// maxResolution and prefer60fps are the downloader settings
+// max_video_resolution and prefer_60fps. prefer60fps decides only among the
+// renditions of the chosen size (rankAtChosenSize): a height named in
+// qualityPref is matched first, as before.
+//
 // The returned pointer may point into either the caller-owned `variants`
 // slice OR an internal filtered slice (audio_only-stripped, then optionally
 // resolution-capped). Callers MUST treat the return value as read-only:
 // mutating it has undefined effect on the caller's `variants`. Go's escape
 // analysis keeps the underlying array live for the pointer's lifetime, so
 // the read path is safe. Audit-finding #26.
-func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResolution int) *TwitchHLSVariant {
+func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResolution int, prefer60fps bool) *TwitchHLSVariant {
 	if len(variants) == 0 {
 		return nil
 	}
@@ -277,9 +317,10 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 		}
 	}
 
-	// Rank the chosen size: codec, then source, then bandwidth (ruling R2).
+	// Rank the chosen size: codec, then frame rate, then source, then
+	// bandwidth (ruling R2, amended by D-Y2).
 	if haveCapSize {
-		if best := rankAtChosenSize(filtered, capSize); best != nil {
+		if best := rankAtChosenSize(filtered, capSize, prefer60fps); best != nil {
 			return best
 		}
 	}

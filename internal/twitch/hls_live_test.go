@@ -130,7 +130,7 @@ func TestLiveTwitchMasterPlaylistParses(t *testing.T) {
 	t.Logf("variants=%d codec families=%v enhanced=%v",
 		len(variants), families, families["av01"]+families["hevc"] > 0)
 
-	if best := SelectBestVariant(variants, "best", 0); best == nil {
+	if best := SelectBestVariant(variants, "best", 0, true); best == nil {
 		t.Error("SelectBestVariant returned nil for a real live playlist")
 	} else {
 		t.Logf("selected: %s %dx%d fps=%.0f codec=%q source=%v",

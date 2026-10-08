@@ -906,21 +906,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	jobCtx := w.buildJobContext(job)
 
 	// Route to platform-specific orchestrator
-	var maxRes int
-	w.readConfig(func(c *config.MoomboxConfig) {
-		maxRes = c.Downloader.MaxVideoResolution
-	})
 	var dlErr error
 	if job.Platform == "twitch" && result.TwitchVariant != nil {
-		variant := &TwitchVariantInfo{
-			URL:           result.TwitchVariant.URL,
-			Name:          result.TwitchVariant.Name,
-			Width:         result.TwitchVariant.Width,
-			Height:        result.TwitchVariant.Height,
-			FPS:           result.TwitchVariant.FPS,
-			QualityPref:   job.QualityPreference,
-			MaxResolution: maxRes,
-		}
+		variant := newTwitchVariantInfo(job, result.TwitchVariant, jobCtx.Config)
 		// Stable broadcast identity for engine resume validation: the live
 		// stream ID when known, else the job's video/VOD ID.
 		if result.TwitchStreamInfo != nil && result.TwitchStreamInfo.StreamID != "" {

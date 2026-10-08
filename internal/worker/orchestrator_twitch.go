@@ -43,6 +43,33 @@ type TwitchVariantInfo struct {
 	FetchVariantsFn func(ctx context.Context) ([]twitch.TwitchHLSVariant, error)
 	QualityPref     string // from channel config, e.g. "1080p60" or "best"
 	MaxResolution   int    // from global config
+	Prefer60fps     bool   // from global config (prefer_60fps)
+}
+
+// newTwitchVariantInfo builds the variant a Twitch capture runs on from the
+// one the stream processor selected, carrying the selection inputs every
+// re-selection during the capture repeats (selectFrom) — the job's preference
+// and the job context's snapshot of max_video_resolution and prefer_60fps.
+// The live-only closures are the caller's to wire.
+func newTwitchVariantInfo(job *database.Job, v *twitch.TwitchHLSVariant, cfg *JobConfig) *TwitchVariantInfo {
+	return &TwitchVariantInfo{
+		URL:           v.URL,
+		Name:          v.Name,
+		Width:         v.Width,
+		Height:        v.Height,
+		FPS:           v.FPS,
+		QualityPref:   job.QualityPreference,
+		MaxResolution: cfg.MaxVideoResolution,
+		Prefer60fps:   cfg.Prefer60fps,
+	}
+}
+
+// selectFrom picks this capture's variant out of a fresh master playlist, by
+// the same rule and the same inputs the capture started on — the quality
+// probe and refreshBestVariant both call it, so a re-selection cannot drift
+// from the first selection on any of the three.
+func (v *TwitchVariantInfo) selectFrom(variants []twitch.TwitchHLSVariant) *twitch.TwitchHLSVariant {
+	return twitch.SelectBestVariant(variants, v.QualityPref, v.MaxResolution, v.Prefer60fps)
 }
 
 // ExecuteTwitch runs the Twitch download pipeline (B3).
@@ -298,7 +325,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if err != nil {
 			return nil, err
 		}
-		best := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+		best := variant.selectFrom(variants)
 		if best == nil {
 			return nil, fmt.Errorf("no suitable Twitch variant")
 		}
@@ -1241,7 +1268,7 @@ func (o *DownloadOrchestrator) buildTwitchProbeFn(variant *TwitchVariantInfo) fu
 			return nil, err
 		}
 
-		best := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+		best := variant.selectFrom(variants)
 		if best == nil {
 			return nil, fmt.Errorf("no variant found")
 		}

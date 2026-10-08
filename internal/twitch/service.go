@@ -118,8 +118,8 @@ func (s *Service) GetVodHLSPlaylist(ctx context.Context, vodID string) ([]Twitch
 }
 
 // SelectBestVariant selects the best HLS variant based on preferences.
-func (s *Service) SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResolution int) *TwitchHLSVariant {
-	return SelectBestVariant(variants, qualityPref, maxResolution)
+func (s *Service) SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResolution int, prefer60fps bool) *TwitchHLSVariant {
+	return SelectBestVariant(variants, qualityPref, maxResolution, prefer60fps)
 }
 
 // HasAuthToken returns true if a Twitch auth token is available.
