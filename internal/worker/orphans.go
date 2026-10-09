@@ -534,7 +534,7 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// before the two walks became one). A job's files there are still
 		// owned: the known check below runs for every directory.
 		absPath, _ := filepath.Abs(path)
-		inTrimDir := owners.trimDirs[normalizePath(filepath.Dir(absPath))]
+		inTrimDir := owners.isTrimDir(filepath.Dir(absPath))
 		ext := strings.ToLower(filepath.Ext(path))
 		isMedia := ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".ts"
 		isThumbnail := ext == ".jpg" || ext == ".webp" || ext == ".png"
@@ -544,25 +544,22 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 			return nil
 		}
 
-		if _, owned := owners.files[normalizePath(absPath)]; owned {
-			return nil // Referenced by a job or a trim
+		// Referenced by a job or a trim, in either spelling — the delete's own
+		// rule (ownerOf). A recovered set-aside recording
+		// (<stem>.restart-<ts>[-N].<ext>) is captured footage the finalize
+		// muxed out of staging, and it is deliberately NOT a segment row —
+		// which made it unreferenced by construction, and so a one-click
+		// deletion from the Files tab the moment it was written (fix round 1,
+		// Important 1). It belongs to the archive whose stem it carries: owned
+		// here while that archive is known, and otherwise folded into the
+		// archive's own entry below rather than offered as a row of its own.
+		if owner, _ := owners.ownerOf(absPath); owner != "" {
+			return nil
 		}
 		if outputClaimOwner(absPath) != "" {
 			return nil // Being written by a finalize that has not named it yet
 		}
-
-		// A recovered set-aside recording (<stem>.restart-<ts>[-N].<ext>) is
-		// captured footage the finalize muxed out of staging, and it is
-		// deliberately NOT a segment row — which made it unreferenced by
-		// construction, and so a one-click deletion from the Files tab the
-		// moment it was written (fix round 1, Important 1). It belongs to the
-		// archive whose stem it carries: owned while that archive is known,
-		// and otherwise folded into the archive's own entry rather than
-		// offered as a row of its own.
 		if stemPath, ok := asideSiblingStem(absPath); ok {
-			if _, owned := owners.stems[stemPath]; owned {
-				return nil // its job still has the archive this belongs to
-			}
 			group := siblingsByStem[stemPath]
 			if group == nil {
 				group = &orphanedSiblings{dir: filepath.Dir(absPath)}
@@ -738,9 +735,11 @@ func jobFileLocations(job *database.Job, absOutputDir string) []string {
 
 // outputOwners is what the job and trim rows own in the output tree — the one
 // rule the sweep lists by (scanOutputOrphans) and the delete re-checks by
-// (orphanOwner), so a path the sweep would not list now is a path the delete
-// refuses now. Keys are normalizePath spellings; a value names the row as
-// NotOrphanError.Owner spells it.
+// (orphanOwner): both ask ownerOf, so a path the sweep would not list now is a
+// path the delete refuses now. Keys are normalizePath spellings, each row path
+// in two: as the row spells it, and through its directory's canonical
+// spelling (spellings); a value names the row as NotOrphanError.Owner spells
+// it. Not safe for concurrent use: spellings fills its cache as it goes.
 type outputOwners struct {
 	// files is every file a row names: a job's columns and parts
 	// (jobFileLocations), and every place a trim row can resolve to
@@ -752,28 +751,71 @@ type outputOwners struct {
 	// or description to carry a split job's stem its siblings were offered as
 	// strays (pinnedPartLocation names them after the parts' base).
 	stems map[string]string
+	// dirs is every directory holding a file in files, and every directory
+	// above it: deleting one takes that file along.
+	dirs map[string]string
 	// trimDirs is every directory the trim service writes into: "trim"
 	// beside a job's output and each of its parts (trimDirsOf), and the
 	// directory each trim row resolves to. An unowned file there is a trim —
 	// a clip whose row DeleteTrim removed (it leaves the file for the sweep),
 	// or an encode that died.
 	trimDirs map[string]bool
+	// canon caches canonicalDir by normalised directory, so each distinct
+	// directory is resolved once however many rows and walked files sit in it.
+	canon map[string]string
 }
 
 // newOutputOwners builds outputOwners from rows already read: every job with
 // its parts, and every trim. A path two rows name keeps the first, a job's
 // ahead of a trim's.
+//
+// Each row path is indexed in its canonical spelling as well as its own. The
+// rows store whatever spelling the configuration had when they were written —
+// a per-channel output_directory spelled through a link into the global tree,
+// a global directory since respelled from a link to its target, a symlinked
+// or junctioned output directory — while the walk and a delete request can
+// name the same file another way. With the rows in their stored spelling
+// alone, the sweep listed such a file (a Finished job's archive, thumbnail,
+// description) and the delete refused it as "Refresh the list.", so the list
+// could never be cleared; and a request naming a channel's directory, or a
+// recovered set-aside recording, by its real path matched no row and was
+// deleted with the archives in it.
 func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutputDir string) *outputOwners {
-	o := &outputOwners{files: map[string]string{}, stems: map[string]string{}, trimDirs: map[string]bool{}}
+	o := &outputOwners{
+		files: map[string]string{}, stems: map[string]string{}, dirs: map[string]string{},
+		trimDirs: map[string]bool{}, canon: map[string]string{},
+	}
 	first := func(m map[string]string, k, owner string) {
 		if _, ok := m[k]; !ok {
 			m[k] = owner
 		}
 	}
 	own := func(p, owner string) {
-		n := normalizePath(p)
-		first(o.files, n, owner)
-		first(o.stems, strings.TrimSuffix(n, filepath.Ext(n)), owner)
+		for _, n := range o.spellings(p) {
+			first(o.files, n, owner)
+			first(o.stems, strings.TrimSuffix(n, filepath.Ext(n)), owner)
+			// Up from the file until a directory already holds an owner:
+			// every one above that does too.
+			for d := filepath.Dir(n); ; d = filepath.Dir(d) {
+				if _, ok := o.dirs[d]; ok {
+					break
+				}
+				o.dirs[d] = owner
+				if filepath.Dir(d) == d {
+					break
+				}
+			}
+		}
+	}
+	ownStem := func(p, owner string) {
+		for _, n := range o.spellings(p) {
+			first(o.stems, n, owner)
+		}
+	}
+	trimDir := func(dir string) {
+		for _, n := range o.spellings(dir) {
+			o.trimDirs[n] = true
+		}
 	}
 	jobsByID := make(map[string]*database.Job, len(jobs))
 	for _, job := range jobs {
@@ -785,70 +827,80 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 		for _, seg := range job.Segments {
 			for _, p := range rowAbsoluteLocations(job, seg.FilePath, absOutputDir) {
 				if dir, base, ok := recordedArchiveLocation(p); ok {
-					first(o.stems, normalizePath(filepath.Join(dir, base)), owner)
+					ownStem(filepath.Join(dir, base), owner)
 				}
 			}
 		}
 		for _, dir := range trimDirsOf(job, absOutputDir) {
-			o.trimDirs[normalizePath(dir)] = true
+			trimDir(dir)
 		}
 	}
 	for _, tr := range trims {
 		owner := "a trim of job " + tr.JobID
 		for _, p := range trimFileLocations(tr, jobsByID[tr.JobID], absOutputDir) {
 			own(p, owner)
-			o.trimDirs[normalizePath(filepath.Dir(p))] = true
+			trimDir(filepath.Dir(p))
 		}
 	}
 	return o
 }
 
+// spellings returns p's normalised spelling and, when it differs, the one
+// through its directory's canonical spelling (canonicalDir: symlinks,
+// junctions, 8.3 short names; a missing directory through its deepest
+// existing ancestor). The last element is kept as it is: deleting a link
+// removes the link, never what it points at, so a link is its own entry. The
+// rows' paths and the paths asked about go through the same function, so
+// whichever spelling each side uses, they meet in the canonical one.
+func (o *outputOwners) spellings(p string) []string {
+	n := normalizePath(p)
+	dir := filepath.Dir(n)
+	c, ok := o.canon[dir]
+	if !ok {
+		c = normalizePath(canonicalDir(dir))
+		o.canon[dir] = c
+	}
+	if c == dir {
+		return []string{n}
+	}
+	return []string{n, filepath.Join(c, filepath.Base(n))}
+}
+
+// isTrimDir reports whether dir, in either spelling, is one the trim service
+// writes into.
+func (o *outputOwners) isTrimDir(dir string) bool {
+	for _, n := range o.spellings(dir) {
+		if o.trimDirs[n] {
+			return true
+		}
+	}
+	return false
+}
+
 // ownerOf returns the row that owns absPath and how it owns it, or "" when no
-// row does. The path is matched in its own spelling and its canonical one, as
-// DeleteOrphanedFile's containment check compares them:
+// row does. The path is matched in both its spellings against the rows' (see
+// spellings):
 //
-//   - a row names the file — in its stored spelling, or through a linked
-//     directory whose canonical spelling is the path's (only the rows carrying
-//     the path's name are resolved, since every spelling ends in it);
+//   - a row names the file;
 //   - it is a recovered set-aside recording named after a file a row names;
 //   - it is a directory holding a file a row names, which deleting it would
 //     take along. The sweep never lists a directory under the output tree, so
 //     only a request built by hand can name one.
+//
+// The sweep asks it of every file it walks and the delete of every path it is
+// given, so the two cannot disagree about a row.
 func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
-	spellings := []string{absPath}
-	if real, err := utils.CanonicalPath(absPath); err == nil && normalizePath(real) != normalizePath(absPath) {
-		spellings = append(spellings, real)
-	}
-	targets := make(map[string]bool, len(spellings))
-	names := make(map[string]bool, len(spellings))
-	for _, s := range spellings {
-		n := normalizePath(s)
-		targets[n] = true
-		names[filepath.Base(n)] = true
-	}
-
-	for _, s := range spellings {
-		if row, ok := o.files[normalizePath(s)]; ok {
+	for _, n := range o.spellings(absPath) {
+		if row, ok := o.files[n]; ok {
 			return row, "names it"
 		}
-	}
-	for f, row := range o.files {
-		if names[filepath.Base(f)] && targets[normalizePath(canonicalDir(f))] {
-			return row, "names it"
-		}
-	}
-	for _, s := range spellings {
-		if stem, ok := asideSiblingStem(s); ok {
+		if stem, ok := asideSiblingStem(n); ok {
 			if row, ok := o.stems[stem]; ok {
 				return row, "names its archive"
 			}
 		}
-	}
-	for f, row := range o.files {
-		for t := range targets {
-			if strings.HasPrefix(f, t+string(filepath.Separator)) {
-				return row, "names a file in it"
-			}
+		if row, ok := o.dirs[n]; ok {
+			return row, "names a file in it"
 		}
 	}
 	return "", ""
