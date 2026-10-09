@@ -205,19 +205,23 @@ func (l *jobRefreshLogger) Warn(msg string, args ...any) {
 // worker.CookieRefreshSkipped now, which the worker leaves parked without the
 // advice (TestHeldProfileSkipIsNotCalledAFailedRefresh in internal/worker).
 //
-// The two RefreshUnknown rows are the same defect in another shape: a pass
-// that declined, or ran and could not tell, concluded nothing about the
-// cookies, and the worker still followed it with the advice to replace them.
-// They answer worker.CookieRefreshUnconfirmed now, which the worker logs as
-// "could not confirm — the job stays parked" (TestUnfailedRefreshOutcomesAre
-// NotCalledFailures in internal/worker). A pass that found no credentials at
-// all is a conclusive failure and keeps NotRestored.
+// The RefreshUnknown row of a pass that ran is the same defect in another
+// shape: it could not tell, concluded nothing about the cookies, and the
+// worker still followed it with the advice to replace them. It answers
+// worker.CookieRefreshUnconfirmed now, which the worker logs as "could not
+// confirm — the job stays parked" (TestUnfailedRefreshOutcomesAreNotCalled
+// Failures in internal/worker). A pass that found no credentials at all is a
+// conclusive failure and keeps NotRestored, and so does a pass that declined
+// to run: the owner ruling of 2026-10-09 names the refresh that RAN, and one
+// way to decline is a jar left with no auth cookie at all, which the pass
+// that pruned it reported as a failure.
 //
 // Mutants (checked): the error arm answering CookieRefreshNotRestored instead
 // of cookieRefreshErrorLine's outcome — the held row fails; the report's ok
 // not mapped to CookieRefreshRestored — the verified row fails; the
-// RefreshUnknown mapping removed — both unknown rows fail; that mapping made
-// unconditional — the rejected and no-credentials rows fail.
+// RefreshUnknown mapping removed — the could-not-tell row fails; that mapping
+// made unconditional — the rejected and no-credentials rows fail; its Ran
+// condition dropped — the declined row fails.
 func TestJobCookieRefreshOutcome(t *testing.T) {
 	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
 	verified := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshOK, YouTubeStored: true}
@@ -244,8 +248,8 @@ func TestJobCookieRefreshOutcome(t *testing.T) {
 			worker.CookieRefreshNotRestored, "automatic cookie refresh ran and cookies.txt now holds no credentials for this platform"},
 		{"a pass that could not tell is unconfirmed", couldNotTell, nil,
 			worker.CookieRefreshUnconfirmed, "automatic cookie refresh ran but could not establish whether these cookies work"},
-		{"a declined pass is unconfirmed", declined, nil,
-			worker.CookieRefreshUnconfirmed, "automatic cookie refresh declined to run, so nothing was learned about these cookies"},
+		{"a declined pass keeps the failure line", declined, nil,
+			worker.CookieRefreshNotRestored, "automatic cookie refresh declined to run, so nothing was learned about these cookies"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -173,10 +173,17 @@ func jobCookieRefreshOutcome(log interface {
 	if report.ok {
 		return worker.CookieRefreshRestored
 	}
-	// Unknown — declined, or ran and could not tell — concluded nothing about
-	// the cookies, and the line above says so. Answered as a failure, it was
+	// A pass that RAN and could not tell concluded nothing about the
+	// cookies, and the line above says so. Answered as a failure, it was
 	// followed by the worker's advice to replace cookies nothing had judged.
-	if result.Verdict(platform) == cookies.RefreshUnknown {
+	// A pass that declined (Ran false: setup in progress, a refresh already
+	// in flight, nothing to refresh) is Unknown too, but it did not run, and
+	// the owner ruling of 2026-10-09 that split this line out names only the
+	// pass that ran: a declined pass keeps the failure line. One way to decline is a jar with no auth cookie for
+	// any platform, the dead state the pass that pruned it called a failure;
+	// answered as unconfirmed, the jobs parked after it read that same state
+	// as "R C / Recheck will tell" and lost the advice to replace the file.
+	if result.Ran && result.Verdict(platform) == cookies.RefreshUnknown {
 		return worker.CookieRefreshUnconfirmed
 	}
 	return worker.CookieRefreshNotRestored

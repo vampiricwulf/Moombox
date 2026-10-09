@@ -256,8 +256,8 @@ type DownloadWorker struct {
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns CookieRefreshRestored if THE NAMED PLATFORM ended
 	// up authenticated, CookieRefreshSkipped if the refresh was skipped for a
-	// reason the callback has logged, CookieRefreshUnconfirmed if it could not
-	// establish whether the platform's cookies work, CookieRefreshOff if
+	// reason the callback has logged, CookieRefreshUnconfirmed if it ran and
+	// could not establish whether the platform's cookies work, CookieRefreshOff if
 	// automatic refresh is turned off, and CookieRefreshNotRestored otherwise.
 	//
 	// The platform argument is not decoration. Without it the callback could
@@ -1857,7 +1857,7 @@ type CookieRefreshOutcome int
 const (
 	// CookieRefreshNotRestored: the refresh failed — the platform's
 	// credentials were checked and refused, or there are none, or the pass
-	// errored. The zero value, so an answer nobody chose leaves the job parked
+	// declined to run or errored. The zero value, so an answer nobody chose leaves the job parked
 	// with the advice to replace the cookie file.
 	CookieRefreshNotRestored CookieRefreshOutcome = iota
 	// CookieRefreshRestored: the named platform ended up authenticated, so
@@ -1868,10 +1868,10 @@ const (
 	// (cookies.ErrProfileInUse). Nothing judged the cookies, so the job stays
 	// parked without the advice to replace them.
 	CookieRefreshSkipped
-	// CookieRefreshUnconfirmed: the pass ended without establishing whether
-	// the platform's cookies work (cookies.RefreshUnknown — it could not reach
-	// the service or make the check, or declined to run). Nothing judged the
-	// cookies, so the job stays parked, and a recheck says whether they work.
+	// CookieRefreshUnconfirmed: the pass ran and ended without establishing
+	// whether the platform's cookies work (cookies.RefreshUnknown — it could
+	// not reach the service or make the check). Nothing judged the cookies, so
+	// the job stays parked, and a recheck says whether they work.
 	CookieRefreshUnconfirmed
 	// CookieRefreshOff: cookies.auto_enabled is off, so nothing was attempted.
 	// The job stays parked; replacing the cookie file or turning the refresh
