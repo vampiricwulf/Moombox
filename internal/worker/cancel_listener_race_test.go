@@ -11,10 +11,11 @@ import (
 // activity loop, a route — while muxAndFinalize replaces jobCtx.Job with a
 // fresh read, so a listener reading jobCtx.Job raced it (the race detector
 // caught it under TestTwitchVodRidesOutAnOutage). The listeners compare
-// against an ID read before subscribing. CI runs this package without -race,
-// so the rule is pinned by source. The same holds for the goroutines nothing
-// waits for before the mux: the Twitch thumbnail prefetch and both chat
-// goroutines (whose panic path logged jobCtx.Job.ID).
+// against an ID read before subscribing. CI's race step covers this package,
+// but the detector reports a race only on an interleaving the run actually
+// exercises, so the rule is pinned by source as well. The same holds for the
+// goroutines nothing waits for before the mux: the Twitch thumbnail prefetch
+// and both chat goroutines (whose panic path logged jobCtx.Job.ID).
 //
 // Mutants: compare against jobCtx.Job.ID inside either listener again; read
 // jobCtx.Job inside the thumbnail goroutine again.
