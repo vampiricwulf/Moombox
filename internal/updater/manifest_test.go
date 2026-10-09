@@ -117,9 +117,11 @@ func (sr *signedRelease) release(version, tag string) *ReleaseInfo {
 //   - ApplyUpdate without verifiedManifestEntry (or one returning no error
 //     for an empty ManifestURL) — "no manifest";
 //   - the manifest's signature not verified — "stranger's key";
-//   - the version comparison dropped from entryFor — "older release's
-//     manifest replayed";
+//   - the version comparison dropped from entryFor — "this tag, another
+//     version" (the "older release's manifest replayed" row differs in tag
+//     as well, so the tag comparison alone refuses it);
 //   - the tag comparison dropped — "another tag";
+//   - both dropped — "older release's manifest replayed";
 //   - the newer-than-running check dropped — "not newer";
 //   - the asset-name check dropped — "names another platform's asset";
 //   - verifyFileSHA256 not called — "another platform's binary";
@@ -176,6 +178,11 @@ func TestApplyUpdateBindsTheBinaryToTheSignedManifest(t *testing.T) {
 
 	t.Run("an older release's manifest replayed with its binary", func(t *testing.T) {
 		sr := newSignedRelease(t, older, manifestJSON(t, platformManifest(t, "1.5.0", "v1.5.0", older)), nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "not the release being applied", 0)
+	})
+
+	t.Run("a manifest for this tag that names another version", func(t *testing.T) {
+		sr := newSignedRelease(t, binary, manifestJSON(t, platformManifest(t, "1.5.0", "v2.0.0", binary)), nil)
 		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "not the release being applied", 0)
 	})
 

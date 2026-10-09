@@ -736,7 +736,7 @@ A binary's signature says only that the key signed those bytes. A validly signed
 5. it has an entry for the running `GOOS/GOARCH`, naming the asset the updater downloads there;
 6. the downloaded binary's own signature verifies, AND its SHA-256 equals that entry's.
 
-The manifest is fetched first, so a release it refuses costs no binary download. Pinned by `TestApplyUpdateBindsTheBinaryToTheSignedManifest` (`internal/updater/manifest_test.go`), which serves real signatures for each refusal: no manifest, a stranger's key, an older release's manifest and binary replayed, another tag, not newer, no entry, another platform's asset name, another platform's validly signed binary, an oversized manifest. `TestReleaseWorkflowPublishesTheSignedManifest` (`cmd/sign/main_test.go`) ties `release.yml`'s upload list and dry-run draft check to the asset names.
+The manifest is fetched first, so a release it refuses costs no binary download. Pinned by `TestApplyUpdateBindsTheBinaryToTheSignedManifest` (`internal/updater/manifest_test.go`), which serves real signatures for each refusal: no manifest, a stranger's key, an older release's manifest and binary replayed, this tag under another version, another tag, not newer, no entry, another platform's asset name, another platform's validly signed binary, an oversized manifest. `TestReleaseWorkflowPublishesTheSignedManifest` (`cmd/sign/main_test.go`) ties `release.yml`'s upload list and dry-run draft check to the asset names.
 
 **Not covered:** whoever holds the signing key can sign any manifest. `VerifyCurrentSignature` (`POST /api/update/verify`, `R S`) still checks only the running binary's `.sig`.
 
