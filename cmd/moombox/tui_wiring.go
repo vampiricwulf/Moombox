@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,22 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
+
+// trimFailureText is what the TUI shows for a Trim Video that failed — on the
+// trim dialog's error line, or on the feedback row when the dialog was
+// dismissed — split the way the Web trim route splits it: a refusal the
+// operator can act on (the job's state, the range, a trim already running)
+// as written, and anything else as one fixed line, its detail left to the
+// log line OnCreateTrim writes beside it. Written whole, an FFmpeg failure
+// carried the stderr tail its error keeps — up to 500 bytes over several
+// lines — and the dialog grew past a 24-row terminal, pushing the frame's top
+// rows off the screen.
+func trimFailureText(err error) string {
+	if refused, ok := errors.AsType[*worker.TrimRefusedError](err); ok {
+		return refused.Reason
+	}
+	return "Could not create the trim; the log has the reason"
+}
 
 // cookieBadgeFor projects one platform's AuthStatus triple onto the status-bar
 // tier. Shared by both platforms rather than written twice: the two arms had
@@ -297,8 +314,8 @@ func (s *runState) runTUI() {
 		}
 		record, err := s.trimSvc.CreateTrim(context.Background(), job, startSec, endSec, onProgress)
 		if err != nil {
-			s.log.Error("Failed to create trim", slog.String("error", err.Error()))
-			return "", err.Error()
+			s.log.Error("Failed to create trim", slog.String("jobID", jobID), slog.String("error", err.Error()))
+			return "", trimFailureText(err)
 		}
 		return record.Filename, ""
 	}
