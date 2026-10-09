@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -618,4 +619,115 @@ func TestNewDownloadWorkerSharesTheTrimService(t *testing.T) {
 	if w.orchestrator.trims != r.ts {
 		t.Errorf("the orchestrator's trim service is %p, want the one handed in (%p)", w.orchestrator.trims, r.ts)
 	}
+}
+
+// TestPostDownloadTrimThatCannotRunSaysSo: trim_error is documented as sent
+// for a post-download trim that did not produce its file for any reason, but
+// postDownloadTrim returned in silence when the trim could not run at all —
+// a start at or past the end of the recording with no end given, a length
+// it could not know, a row no longer Finished, a row it could not read — and
+// the trim the job asked for simply never appeared. Each now sends Trim
+// Failed with a reason the user can act on; only a job deleted first sends
+// nothing, since whoever deleted it wants none of it.
+//
+// Mutants: return without failPostDownloadTrim at the past-the-end check, the
+// unknown-length case or the read failure — that case sends nothing; restore
+// the `freshJob.Status != database.StatusFinished` early return — the row no
+// longer Finished sends nothing; drop failPostDownloadTrim's deleted-job
+// check — the job deleted while its trim ran is told; send at the
+// deleted-row return — the job deleted before its trim is told.
+func TestPostDownloadTrimThatCannotRunSaysSo(t *testing.T) {
+	ffmpeg, gate := gatedFFmpeg(t)
+	touch(t, gate, "gate")
+	for _, tc := range []struct {
+		name     string
+		start    float64
+		alter    func(t *testing.T, r *trimRig)
+		sends    bool
+		inReason string
+	}{
+		{name: "start past the end", start: 700, sends: true, inReason: "700s"},
+		{name: "start at the end", start: 600, sends: true, inReason: "600s"},
+		{name: "length unknown", start: 60, sends: true, inReason: "length is unknown",
+			alter: func(t *testing.T, r *trimRig) {
+				r.db.UpdateJobFields(r.job.ID, map[string]any{"length_seconds": nil})
+			}},
+		{name: "row no longer Finished", start: 60, sends: true, inReason: "finished",
+			alter: func(t *testing.T, r *trimRig) {
+				r.db.UpdateJobFields(r.job.ID, map[string]any{"status": database.StatusError})
+			}},
+		{name: "row unreadable", start: 60, sends: true, inReason: "read the job",
+			alter: func(t *testing.T, r *trimRig) { r.db.Close() }},
+		{name: "job deleted", start: 60, sends: false,
+			alter: func(t *testing.T, r *trimRig) {
+				if err := r.db.DeleteJob(r.job.ID); err != nil {
+					t.Fatal(err)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTrimRig(t, ffmpeg)
+			o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, trims: r.ts}
+			if tc.alter != nil {
+				tc.alter(t, r)
+			}
+			job := *r.job
+			job.StartTime = &tc.start
+			o.postDownloadTrim(t.Context(), &job)
+
+			calls := r.rec.ByEvent("trim_error")
+			if !tc.sends {
+				if len(calls) != 0 {
+					t.Errorf("trim_error sent %d times for a job deleted before its trim", len(calls))
+				}
+				return
+			}
+			if len(calls) != 1 {
+				t.Fatalf("a post-download trim that could not run: trim_error sent %d times, want 1", len(calls))
+			}
+			reason := ""
+			for _, f := range calls[0].Fields {
+				if f.Name == "Error" {
+					reason = f.Value
+				}
+			}
+			if !strings.Contains(reason, tc.inReason) {
+				t.Errorf("Trim Failed says %q, want it to mention %q", reason, tc.inReason)
+			}
+			if got := r.files(t); len(got) != 0 {
+				t.Errorf("trim/ holds %v", got)
+			}
+		})
+	}
+
+	// Deleted while its trim ran: processJob cancels a job's context when its
+	// row is deleted (OnJobDeleted), and the trim that stops is not told.
+	t.Run("job deleted while its trim ran", func(t *testing.T) {
+		ffmpeg, _ := gatedFFmpeg(t) // the gate never opens
+		r := newTrimRig(t, ffmpeg)
+		o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, trims: r.ts}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		start := 60.0
+		job := *r.job
+		job.StartTime = &start
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			o.postDownloadTrim(ctx, &job)
+		}()
+		waitFor(t, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+		if err := r.db.DeleteJob(r.job.ID); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the post-download trim outlived its job's context")
+		}
+		if n := len(r.rec.ByEvent("trim_error")); n != 0 {
+			t.Errorf("trim_error sent %d times for a job deleted while its trim ran", n)
+		}
+	})
 }

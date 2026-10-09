@@ -682,9 +682,7 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 	if o.trims == nil {
 		// Unreachable from cmd/moombox, which always hands the worker its
 		// trim service; a worker built without one says so, not nothing.
-		err := errors.New("no trim service to run the trim")
-		o.logger.Error("post-download trim failed", "err", err, "jobID", job.ID)
-		o.sendTrimFailed(job, err)
+		o.failPostDownloadTrim(job, errors.New("no trim service to run the trim"))
 		return
 	}
 	startSec := 0.0
@@ -694,25 +692,40 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 	// Re-fetch job FIRST: muxAndFinalize set output_file and probed
 	// length_seconds after jobCtx.Job was last refreshed, so for a live
 	// recording with only StartTime set, the stale row would compute
-	// endSec == 0 and silently skip the requested trim.
-	freshJob, _ := o.db.GetJob(job.ID)
-	if freshJob == nil || freshJob.Status != database.StatusFinished {
+	// endSec == 0 and skip the requested trim.
+	freshJob, err := o.db.GetJob(job.ID)
+	if err != nil {
+		o.failPostDownloadTrim(job, fmt.Errorf("read the job: %w", err))
 		return
 	}
-	endSec := 0.0
-	if job.EndTime != nil {
-		endSec = *job.EndTime
-	} else if freshJob.LengthSeconds != nil {
-		endSec = float64(*freshJob.LengthSeconds)
+	if freshJob == nil {
+		o.logger.Info("post-download trim skipped: the job was deleted", "jobID", job.ID)
+		return
 	}
-	if endSec <= startSec {
+	// Every way out from here that makes no trim says so. A start past the
+	// end of the recording, an unknown length or a row no longer Finished
+	// used to return in silence, and the trim the job asked for simply never
+	// appeared. A row no longer Finished, and an end given at or before the
+	// start, the service refuses with its own reason, sent below.
+	var endSec float64
+	switch {
+	case job.EndTime != nil:
+		endSec = *job.EndTime
+	case freshJob.LengthSeconds != nil && *freshJob.LengthSeconds > 0:
+		endSec = float64(*freshJob.LengthSeconds)
+		if endSec <= startSec {
+			o.failPostDownloadTrim(job, refuseTrim("start time (%s) is at or past the end of the recording (%s)",
+				trimSeconds(startSec), trimSeconds(endSec)))
+			return
+		}
+	default:
+		o.failPostDownloadTrim(job, refuseTrim("the recording's length is unknown, so a trim with no end time cannot be made"))
 		return
 	}
 	_, trimErr := o.trims.CreateTrim(ctx, freshJob, startSec, endSec, nil)
 	if trimErr == nil {
 		return
 	}
-	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
 	// The service sends Trim Failed itself for a trim that broke. A refusal
 	// (the range the job asked for, or a trim of the job already running) it
 	// leaves to its caller to answer, and a run cut short — by this context,
@@ -722,8 +735,23 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 	// trim, as before.
 	_, refused := errors.AsType[*TrimRefusedError](trimErr)
 	if refused || errors.Is(trimErr, errTrimInterrupted) {
-		o.sendTrimFailed(job, trimErr)
+		o.failPostDownloadTrim(job, trimErr)
+		return
 	}
+	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
+}
+
+// failPostDownloadTrim logs a post-download trim that made no file and sends
+// Trim Failed for it — unless the job is gone: a job deleted before its trim
+// ran, or while it ran (its context is cancelled, so the trim stops), is one
+// whoever deleted it wants none of.
+func (o *DownloadOrchestrator) failPostDownloadTrim(job *database.Job, trimErr error) {
+	if fresh, err := o.db.GetJob(job.ID); err == nil && fresh == nil {
+		o.logger.Info("post-download trim dropped: the job was deleted", "jobID", job.ID, "err", trimErr)
+		return
+	}
+	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
+	o.sendTrimFailed(job, trimErr)
 }
 
 // sendTrimFailed is the "Trim Failed" embed for a post-download trim that did
