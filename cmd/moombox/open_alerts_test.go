@@ -166,11 +166,22 @@ func TestDiskAlertOpenAcrossARestartGetsItsClose(t *testing.T) {
 	}
 }
 
-// diskGateSpy counts RestoreDiskHold calls: the backlog scheduler's half of
-// restoreDiskGate.
-type diskGateSpy struct{ holds int }
+// diskGateSpy counts RestoreDiskHold calls and keeps the recorder
+// RecordDiskHold hands it: the backlog scheduler's half of restoreDiskGate.
+type diskGateSpy struct {
+	holds  int
+	record func(held bool)
+}
 
-func (g *diskGateSpy) RestoreDiskHold() { g.holds++ }
+// RestoreDiskHold reports the hold it seeds, as worker.Scheduler's does.
+func (g *diskGateSpy) RestoreDiskHold() {
+	g.holds++
+	if g.record != nil {
+		g.record(true)
+	}
+}
+
+func (g *diskGateSpy) RecordDiskHold(record func(held bool)) { g.record = record }
 
 // TestDiskGateStartsClosedOnARestoredCritical: a disk_critical alert open
 // when the process stops starts the next process's backlog disk gate closed,
@@ -212,6 +223,66 @@ func TestDiskGateStartsClosedOnARestoredCritical(t *testing.T) {
 					gate.holds, tc.want, restart(t, path).snapshot().Disk)
 			}
 		})
+	}
+}
+
+// TestDiskGateHeldAcrossARestartStartsClosed: the gate's own hold outlives a
+// restart, beside the open alerts. Restored from the disk_critical alert's
+// level alone, a gate that closed on a reading the alerts never took — it
+// reads on every sweep, they about every six minutes — started the next
+// process open, and admitted backlog at 94% against 95 inside the margin the
+// last process was holding. The hold the gate records is restored on its
+// own, the reopen it records clears it, and a hold the restore seeds from the
+// alert is written back too.
+//
+// Mutants: restore on the alert's level only (drop the DiskGateHeld term) —
+// the recorded hold starts the next gate open; drop the recorder from
+// restoreDiskGate — nothing is recorded, and the same; leave DiskGateHeld out
+// of snapshot — restoreDiskGate never sees it; install the recorder after the
+// restore — the hold restored from the alert is not written back.
+func TestDiskGateHeldAcrossARestartStartsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), openAlertsFileName)
+
+	// The stopped process's alerts last read a warning; its gate then read
+	// the volume full, between two of their readings.
+	alerts := newDiskAlerts(notificationtest.New(), &nopLogger{})
+	alerts.restoreFrom(restart(t, path))
+	alerts.setThresholds(90, 95)
+	alerts.onReading(diskReading("warn", 94), "./output", time.Now())
+	first := &diskGateSpy{}
+	restoreDiskGate(restart(t, path), first)
+	if first.holds != 0 || first.record == nil {
+		t.Fatalf("first start: holds %d, recorder set %v — want an open gate that records its hold", first.holds, first.record != nil)
+	}
+	first.record(true)
+
+	second := &diskGateSpy{}
+	restoreDiskGate(restart(t, path), second)
+	if second.holds != 1 {
+		t.Fatalf("RestoreDiskHold calls = %d after a restart with the gate held, want 1", second.holds)
+	}
+	second.record(false) // the first reading clear of the threshold
+
+	third := &diskGateSpy{}
+	restoreDiskGate(restart(t, path), third)
+	if third.holds != 0 {
+		t.Errorf("RestoreDiskHold calls = %d after the gate reopened, want 0", third.holds)
+	}
+
+	// A hold restored from an open disk_critical alert is the gate's own from
+	// then on: written back, it outlasts the alert's own close.
+	path = filepath.Join(t.TempDir(), openAlertsFileName)
+	critical := newDiskAlerts(notificationtest.New(), &nopLogger{})
+	critical.restoreFrom(restart(t, path))
+	critical.setThresholds(90, 95)
+	critical.onReading(diskReading("critical", 96), "./output", time.Now())
+	fromAlert := &diskGateSpy{}
+	restoreDiskGate(restart(t, path), fromAlert)
+	if fromAlert.holds != 1 {
+		t.Fatalf("RestoreDiskHold calls = %d with disk_critical open, want 1", fromAlert.holds)
+	}
+	if !restart(t, path).snapshot().DiskGateHeld {
+		t.Error("the hold restored from the alert was not written back: it would end with the alert, not with the gate's own reopen")
 	}
 }
 

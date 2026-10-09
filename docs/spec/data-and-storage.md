@@ -515,7 +515,7 @@ Warn per key, and the next save leaves them out of the file.
 | StagingDirectory | string | "./staging" | `staging_directory` |
 | FfmpegPath | string | "" | `ffmpeg_path` |
 
-`database_path` also places `open-alerts.json`, the notifications sent and not yet closed, in the same directory (`openAlertsPath`, `cmd/moombox/open_alerts.go`; see operations.md, Event Types), so a volume or a moved install carries both.
+`database_path` also places `open-alerts.json`, the notifications sent and not yet closed and the backlog disk gate's hold, in the same directory (`openAlertsPath`, `cmd/moombox/open_alerts.go`; see operations.md, Event Types), so a volume or a moved install carries both.
 
 `ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims, muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
 

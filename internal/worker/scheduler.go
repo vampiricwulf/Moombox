@@ -56,6 +56,10 @@ type Scheduler struct {
 	// the reopen once each. Seeded before Start by RestoreDiskHold, and
 	// touched after that only by sweep, which only Run's goroutine calls.
 	diskHeld bool
+	// recordDiskHold is told diskHeld each time it changes, and when
+	// RestoreDiskHold seeds it (RecordDiskHold; nil: memory only). Set
+	// before Start, like the seed.
+	recordDiskHold func(held bool)
 
 	// holds are the backlog jobs a transient pre-download failure returned
 	// to Queued (DownloadWorker.requeueBacklogAfterTransientFailure), each
@@ -156,6 +160,7 @@ func (s *Scheduler) diskGateClosed() bool {
 	}
 	if closed != s.diskHeld {
 		s.diskHeld = closed
+		s.reportDiskHold()
 		freeGB := fmt.Sprintf("%.1f", float64(r.free)/(1<<30))
 		usedPct := fmt.Sprintf("%.1f", r.usedPct)
 		if closed {
@@ -171,19 +176,39 @@ func (s *Scheduler) diskGateClosed() bool {
 }
 
 // RestoreDiskHold starts the backlog disk gate closed, for a host whose
-// previous process left a disk_critical alert open (cmd/moombox). The gate
-// keeps its close in memory, and a new process's gate started open: it read
-// a volume still inside the recovery margin — 94% against a threshold of 95
-// — as neither critical nor clear, kept the open state it started with, and
-// its first sweep admitted backlog onto the disk the last run had stopped
-// admitting to, while the restored alert held critical on the same reading.
-// The first reading clear of the threshold reopens it, as it reopens any
-// close. Call it before the worker starts: Run's goroutine owns the gate
-// from then on.
+// previous process left it closed, or left a disk_critical alert open
+// (cmd/moombox). The gate keeps its close in memory, and a new process's gate
+// started open: it read a volume still inside the recovery margin — 94%
+// against a threshold of 95 — as neither critical nor clear, kept the open
+// state it started with, and its first sweep admitted backlog onto the disk
+// the last run had stopped admitting to. The first reading clear of the
+// threshold reopens it, as it reopens any close. The seeded hold is reported
+// like any other (RecordDiskHold). Call it before the worker starts: Run's
+// goroutine owns the gate from then on.
 func (s *Scheduler) RestoreDiskHold() {
 	s.diskHeld = true
-	s.log.Warn("scheduler: a disk_critical alert was still open when the last run stopped; backlog VODs wait in Queued until usage falls marginPoints below the critical threshold (live and manually added jobs are not held)",
+	s.reportDiskHold()
+	s.log.Warn("scheduler: the last run stopped with the backlog disk gate closed or a disk_critical alert open; backlog VODs wait in Queued until usage falls marginPoints below the critical threshold (live and manually added jobs are not held)",
 		"marginPoints", config.DiskRecoveryMargin)
+}
+
+// RecordDiskHold has the gate report whether it is holding backlog admission
+// for disk space: on every close and every reopen, and when RestoreDiskHold
+// seeds a hold. cmd/moombox persists it beside the open alerts, for the next
+// process's RestoreDiskHold. The gate reads the disk on every sweep while the
+// alerts read it about every six minutes, so the alert's saved level alone
+// missed a close the alerts never read — and the next process started open
+// inside the margin. Call it before the worker starts, as RestoreDiskHold:
+// record is called from Run's goroutine from then on.
+func (s *Scheduler) RecordDiskHold(record func(held bool)) {
+	s.recordDiskHold = record
+}
+
+// reportDiskHold tells the recorder RecordDiskHold set what diskHeld is now.
+func (s *Scheduler) reportDiskHold() {
+	if s.recordDiskHold != nil {
+		s.recordDiskHold(s.diskHeld)
+	}
 }
 
 // Wake signals the scheduler that backlog state changed (a Queued job was

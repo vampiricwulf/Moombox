@@ -97,15 +97,28 @@ func (d *diskAlerts) restoreFrom(st *openAlerts) {
 }
 
 // restoreDiskGate starts the backlog admission gate closed when the previous
-// process left a disk_critical alert open. The gate closes and reopens on the
+// process left it closed, or left a disk_critical alert open, and has the gate
+// record its hold in st from then on. The gate closes and reopens on the
 // alert's own rules (config.DiskConfig.AtCritical, ClearOfCritical) but keeps
-// its close in memory only, so a restart — an update, a crash, Stop/Start —
-// opened it again: at 94% against 95 the new gate admitted backlog while the
-// restored alert held critical on the same reading. Seeded from the alert's
-// persisted level, the two still agree after the restart, and the first
-// reading clear of the threshold ends both. Called before the worker starts.
-func restoreDiskGate(st *openAlerts, gate interface{ RestoreDiskHold() }) {
-	if open := st.snapshot().Disk; open != nil && open.Level == "critical" {
+// its close in memory, so a restart — an update, a crash, Stop/Start — opened
+// it again: at 94% against 95 the new gate admitted backlog while the
+// restored alert held critical on the same reading. The alert's level alone
+// does not cover it either: the gate reads the disk on every sweep, the
+// alerts about every six minutes, so a gate that closed on a reading the
+// alerts never took restarted open inside the margin all the same. Its own
+// hold is persisted beside the alerts (openAlertsDoc.DiskGateHeld), and either
+// one starts it closed; the first reading clear of the threshold ends both.
+// Called before the worker starts, recorder first, so a hold the restore
+// itself seeds is written too.
+func restoreDiskGate(st *openAlerts, gate interface {
+	RestoreDiskHold()
+	RecordDiskHold(record func(held bool))
+}) {
+	gate.RecordDiskHold(func(held bool) {
+		st.update(func(d *openAlertsDoc) { d.DiskGateHeld = held })
+	})
+	doc := st.snapshot()
+	if doc.DiskGateHeld || (doc.Disk != nil && doc.Disk.Level == "critical") {
 		gate.RestoreDiskHold()
 	}
 }

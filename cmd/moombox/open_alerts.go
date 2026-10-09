@@ -24,7 +24,8 @@ func openAlertsPath(databasePath string) string {
 }
 
 // openAlertsDoc is the file's whole content: every alert that has been sent
-// and whose close has not, one field per family.
+// and whose close has not, one field per family — and the backlog disk gate's
+// hold, which is not an alert but must outlive a restart the same way.
 type openAlertsDoc struct {
 	// Disk is the disk family (diskAlerts): an open space warning or
 	// critical, and an open "Disk Monitoring Failed". Nil when neither is.
@@ -38,6 +39,12 @@ type openAlertsDoc struct {
 	// (withAuthFailureCooldown) — the stamp is both the open record and the
 	// 30-minute repeat cooldown, so it carries the time.
 	Auth map[string]time.Time `json:"auth,omitempty"`
+	// DiskGateHeld is the backlog scheduler's full-disk admission gate,
+	// closed (worker.Scheduler.RecordDiskHold, restoreDiskGate). The gate
+	// reads the disk on its own sweeps, the alerts about every six minutes,
+	// so it can close on a reading the alerts never took; Disk's level alone
+	// then restored it open.
+	DiskGateHeld bool `json:"diskGateHeld,omitempty"`
 }
 
 // openDiskAlert is diskAlerts' open state.
@@ -155,7 +162,7 @@ func (a *openAlerts) snapshot() openAlertsDoc {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	d := openAlertsDoc{SidecarDown: a.doc.SidecarDown}
+	d := openAlertsDoc{SidecarDown: a.doc.SidecarDown, DiskGateHeld: a.doc.DiskGateHeld}
 	if a.doc.Disk != nil {
 		disk := *a.doc.Disk
 		d.Disk = &disk

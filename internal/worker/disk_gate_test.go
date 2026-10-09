@@ -2,6 +2,7 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -219,7 +220,8 @@ func TestSchedulerClosedDiskGateReadsWithoutBacklog(t *testing.T) {
 }
 
 // TestSchedulerRestoredDiskHoldKeepsTheGateClosed: a process whose previous
-// run left a disk_critical alert open starts its gate closed
+// run left its gate closed, or a disk_critical alert open, starts its gate
+// closed
 // (RestoreDiskHold), so the margin holds across a restart. The gate keeps its
 // close in memory, and a new process's gate started open: its first sweep
 // read 94% against 95 as neither critical nor clear, kept the open state, and
@@ -245,7 +247,7 @@ func TestSchedulerRestoredDiskHoldKeepsTheGateClosed(t *testing.T) {
 	if n := log.enqueueCount(); n != 2 {
 		t.Errorf("admitted %d at 93.0%%, 2 points below the threshold, want 2", n)
 	}
-	if n := lg.count("WARN", "disk_critical alert was still open"); n != 1 {
+	if n := lg.count("WARN", "the last run stopped with the backlog disk gate closed"); n != 1 {
 		t.Errorf("restored-hold warnings = %d, want 1", n)
 	}
 	if n := lg.count("INFO", "backlog admission resumes"); n != 1 {
@@ -369,5 +371,43 @@ func TestWorkerWiresTheDiskGate(t *testing.T) {
 	w.scheduler.sweep()
 	if row, _ := db.GetJob("wired_a"); row.Status != database.StatusUpcoming {
 		t.Errorf("status = %s once the volume had room, want Upcoming", row.Status)
+	}
+}
+
+// TestSchedulerReportsItsDiskHold: the gate reports its hold to the recorder
+// cmd/moombox persists beside the open alerts — on the close, on the reopen,
+// and on the hold RestoreDiskHold seeds — and on nothing else. Restored from
+// the disk_critical alert's saved level alone, a gate that closed on a reading
+// the alerts never took (it reads on every sweep, they about every six
+// minutes) started the next process open inside the margin.
+//
+// Mutants: drop the report from diskGateClosed's transition — no hold is
+// recorded; report on every reading (outside the transition) — the readings
+// that change nothing are recorded too; drop it from RestoreDiskHold — the
+// seeded hold is not.
+func TestSchedulerReportsItsDiskHold(t *testing.T) {
+	s, db, _ := testSchedulerSetup(t, 1)
+	d := &fakeDisk{used: 50}
+	s.readDisk = d.read
+	var got []bool
+	s.RecordDiskHold(func(held bool) { got = append(got, held) })
+	queueBacklog(t, db, "UC_record", "record_a", "record_b", "record_c")
+	s.resolveSlots = func(string) int { return 0 } // read the disk, admit nothing
+
+	d.used = 96
+	s.sweep() // closes
+	d.used = 94
+	s.sweep() // inside the margin: held, unchanged
+	d.err = errors.New("volume gone")
+	s.sweep() // a failed reading: unchanged
+	d.err = nil
+	d.used = 92
+	s.sweep() // reopens
+	s.sweep() // still open
+	s.RestoreDiskHold()
+
+	want := []bool{true, false, true}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("recorded holds = %v, want %v (close, reopen, restore)", got, want)
 	}
 }
