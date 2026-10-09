@@ -361,8 +361,8 @@ func TestCalculateETASegmentBased(t *testing.T) {
 // either stream had ever written by that sum over the tracker's age, and
 // showed a few seconds.
 //
-// Mutant: pinning no base (moved() returns latest) — the inherited 700 MB
-// reads as session speed, "5s". Mutant: dropping the audio stream's
+// Mutant: the first event counting its offset as moved — the inherited
+// 700 MB reads as session speed, "5s". Mutant: dropping the audio stream's
 // noteVodBytesLocked — video alone, "1m 30s". Mutant: measuring from
 // pt.startTime instead of vodSessionStart — 40 s of clock, "3m 30s".
 func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
@@ -396,6 +396,66 @@ func TestCalculateETAVODCountsOnlyThisSessionsBytes(t *testing.T) {
 	pt.mu.Unlock()
 	if got != "52s" {
 		t.Errorf("calculateETA() = %q, want %q (80 MB moved in 10 s, 420 MB left)", got, "52s")
+	}
+}
+
+// TestVODProgressFollowsTheStreamingHandoff is W20-26: a whole-file VOD whose
+// chunked loop hands its transfer to the streaming fallback on a mid-download
+// 200 goes on reporting progress from the fallback's events, which carry
+// bytes but no total and no percent. The chunked loop reports 5 MB and then
+// 25 MB of 100 MB ten seconds apart; the fallback 50 MB and 75 MB at the same
+// pace — 70 MB moved in 30 s against 25 MB left, ten seconds. The ETA read
+// only the chunked events, so it froze the offset at 25 MB while the clock
+// ran on and climbed to "1m 52s"; the progress line stayed at "V:25.0%". A
+// restart from byte 0 (the fallback discarding a partial the origin would
+// not resume) then moves nothing, and the rate counts on from there.
+//
+// Mutants: noteVodBytesLocked ignoring events without a total — the ETA at
+// 75 MB reads "1m 52s"; not reading the percent off the stream for them —
+// the line stays "V:25.0%"; overwriting the total with an event's 0 — no ETA
+// at all; counting a restart's drop as movement (`p.Bytes > s.latest` →
+// `true`) — the rate goes negative and the ETA after the restart is wrong.
+func TestVODProgressFollowsTheStreamingHandoff(t *testing.T) {
+	pt := NewProgressTracker(nil, "eta-handoff", nopProgressLogger{}, 24*time.Hour) // gate every DB write
+	t.Cleanup(pt.Close)
+	clk := &fakeClock{t: pt.startTime}
+	pt.mu.Lock()
+	pt.now = clk.now
+	pt.mu.Unlock()
+
+	video := engine.NewSegmentDownloader(engine.DownloaderOptions{BaseURL: "http://unused/", OutputFile: os.DevNull, IsDirectURL: true})
+	pt.AttachVideoDownloader(video)
+	const mb = int64(1 << 20)
+	chunked := func(bytes int64) {
+		video.OnProgress(engine.DownloadProgress{Bytes: bytes * mb, TotalBytes: 100 * mb, Percent: float64(bytes)})
+	}
+	streamed := func(bytes int64) {
+		video.OnProgress(engine.DownloadProgress{Bytes: bytes * mb})
+	}
+	read := func() (eta, line string) {
+		pt.mu.Lock()
+		defer pt.mu.Unlock()
+		return pt.calculateETA(), pt.buildProgressString()
+	}
+
+	chunked(5)
+	clk.advance(10 * time.Second)
+	chunked(25)
+	clk.advance(10 * time.Second)
+	streamed(50)
+	clk.advance(10 * time.Second)
+	streamed(75)
+	if eta, line := read(); eta != "10s" || line != "V:75.0%" {
+		t.Errorf("after the handoff: ETA %q, line %q; want \"10s\" and \"V:75.0%%\" (70 MB in 30 s, 25 MB left)", eta, line)
+	}
+
+	// The fallback restarts the file: 2 MB, then 12 MB ten seconds on. 80 MB
+	// moved in 40 s against 88 MB left: 44 s.
+	streamed(2)
+	clk.advance(10 * time.Second)
+	streamed(12)
+	if eta, line := read(); eta != "44s" || line != "V:12.0%" {
+		t.Errorf("after a restart: ETA %q, line %q; want \"44s\" and \"V:12.0%%\" (80 MB in 40 s, 88 MB left)", eta, line)
 	}
 }
 
