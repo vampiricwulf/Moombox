@@ -256,7 +256,9 @@ type DownloadWorker struct {
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns CookieRefreshRestored if THE NAMED PLATFORM ended
 	// up authenticated, CookieRefreshSkipped if the refresh was skipped for a
-	// reason the callback has logged, and CookieRefreshNotRestored otherwise.
+	// reason the callback has logged, CookieRefreshUnconfirmed if it could not
+	// establish whether the platform's cookies work, CookieRefreshOff if
+	// automatic refresh is turned off, and CookieRefreshNotRestored otherwise.
 	//
 	// The platform argument is not decoration. Without it the callback could
 	// only answer "did any platform end up authenticated", so a healthy Twitch
@@ -1849,9 +1851,10 @@ func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, editOnl
 type CookieRefreshOutcome int
 
 const (
-	// CookieRefreshNotRestored: the platform did not end up authenticated —
-	// the refresh is off, declined, failed, or could not tell. The zero value,
-	// so an answer nobody chose leaves the job parked with the advice.
+	// CookieRefreshNotRestored: the refresh failed — the platform's
+	// credentials were checked and refused, or there are none, or the pass
+	// errored. The zero value, so an answer nobody chose leaves the job parked
+	// with the advice to replace the cookie file.
 	CookieRefreshNotRestored CookieRefreshOutcome = iota
 	// CookieRefreshRestored: the named platform ended up authenticated, so
 	// the job is retried.
@@ -1861,6 +1864,15 @@ const (
 	// (cookies.ErrProfileInUse). Nothing judged the cookies, so the job stays
 	// parked without the advice to replace them.
 	CookieRefreshSkipped
+	// CookieRefreshUnconfirmed: the pass ended without establishing whether
+	// the platform's cookies work (cookies.RefreshUnknown — it could not reach
+	// the service or make the check, or declined to run). Nothing judged the
+	// cookies, so the job stays parked, and a recheck says whether they work.
+	CookieRefreshUnconfirmed
+	// CookieRefreshOff: cookies.auto_enabled is off, so nothing was attempted.
+	// The job stays parked; replacing the cookie file or turning the refresh
+	// on is the way out.
+	CookieRefreshOff
 )
 
 // attemptCookieRefresh runs (or deliberately declines to run) the automatic
@@ -1996,12 +2008,36 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		return
 	}
 
+	if outcome == CookieRefreshUnconfirmed {
+		// The callback's line above says the pass could not establish
+		// whether the cookies work. They may be fine — most of the ways here
+		// leave the session healthy — so this does not follow it with the
+		// advice to replace them, as it once did for every outcome but a
+		// restore. Info, as the skip's line is: nothing was rejected, and a
+		// recheck answers the question this pass could not.
+		w.logger.Info("auto cookie refresh could not confirm the cookies — the job stays parked; R C / Recheck will tell",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"platform", job.Platform)
+		return
+	}
+
 	var cookieFile string
 	if w.CookieFileInUse != nil {
 		cookieFile = w.CookieFileInUse()
 	}
 	if cookieFile == "" {
 		w.readConfig(func(c *config.MoomboxConfig) { cookieFile = c.Cookies.CookieFile })
+	}
+	if outcome == CookieRefreshOff {
+		// Nothing was attempted, so "failed" was the wrong word for it; the
+		// two ways out are the operator's, which is why this stays a Warn.
+		w.logger.Warn("automatic cookie refresh is off — replace the cookie file or turn it on in Settings",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"cookieFile", cookieFile,
+			"setting", "cookies.auto_enabled")
+		return
 	}
 	if cookieFile == "" {
 		w.logger.Warn("auto cookie refresh failed — no cookie file is configured",

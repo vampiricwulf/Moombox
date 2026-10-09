@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
@@ -204,13 +205,26 @@ func (l *jobRefreshLogger) Warn(msg string, args ...any) {
 // worker.CookieRefreshSkipped now, which the worker leaves parked without the
 // advice (TestHeldProfileSkipIsNotCalledAFailedRefresh in internal/worker).
 //
+// The two RefreshUnknown rows are the same defect in another shape: a pass
+// that declined, or ran and could not tell, concluded nothing about the
+// cookies, and the worker still followed it with the advice to replace them.
+// They answer worker.CookieRefreshUnconfirmed now, which the worker logs as
+// "could not confirm — the job stays parked" (TestUnfailedRefreshOutcomesAre
+// NotCalledFailures in internal/worker). A pass that found no credentials at
+// all is a conclusive failure and keeps NotRestored.
+//
 // Mutants (checked): the error arm answering CookieRefreshNotRestored instead
 // of cookieRefreshErrorLine's outcome — the held row fails; the report's ok
-// not mapped to CookieRefreshRestored — the verified row fails.
+// not mapped to CookieRefreshRestored — the verified row fails; the
+// RefreshUnknown mapping removed — both unknown rows fail; that mapping made
+// unconditional — the rejected and no-credentials rows fail.
 func TestJobCookieRefreshOutcome(t *testing.T) {
 	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
 	verified := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshOK, YouTubeStored: true}
 	rejected := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed, YouTubeStored: true}
+	noCredentials := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed}
+	couldNotTell := cookies.RefreshResult{Ran: true}
+	declined := cookies.RefreshResult{}
 
 	cases := []struct {
 		name     string
@@ -226,6 +240,12 @@ func TestJobCookieRefreshOutcome(t *testing.T) {
 		{"a verified platform is restored", verified, nil, worker.CookieRefreshRestored, ""},
 		{"rejected credentials are not a restore", rejected, nil,
 			worker.CookieRefreshNotRestored, "automatic cookie refresh ran and the credentials are still rejected"},
+		{"no credentials at all is a failure", noCredentials, nil,
+			worker.CookieRefreshNotRestored, "automatic cookie refresh ran and cookies.txt now holds no credentials for this platform"},
+		{"a pass that could not tell is unconfirmed", couldNotTell, nil,
+			worker.CookieRefreshUnconfirmed, "automatic cookie refresh ran but could not establish whether these cookies work"},
+		{"a declined pass is unconfirmed", declined, nil,
+			worker.CookieRefreshUnconfirmed, "automatic cookie refresh declined to run, so nothing was learned about these cookies"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,5 +260,38 @@ func TestJobCookieRefreshOutcome(t *testing.T) {
 				t.Errorf("logged %q, want one line starting %q", log.warns, tc.wantWarn)
 			}
 		})
+	}
+}
+
+// TestJobCookieRefreshDisabled: with cookies.auto_enabled off — the default —
+// the closure attempts nothing, says so, and answered the worker the way a
+// failed refresh does, so the worker's next line was "auto cookie refresh
+// failed — the cookie file has to be replaced by hand" for a refresh nobody
+// ran. It answers worker.CookieRefreshOff now, which the worker logs as
+// "automatic cookie refresh is off — replace the cookie file or turn it on
+// in Settings". The second half pins the call: the closure itself needs the
+// whole construction graph, so its off branch is read from the source, the
+// way the other wiring pins in this package read theirs.
+//
+// Mutants (checked): jobCookieRefreshDisabled answering CookieRefreshNotRestored
+// — the outcome check fails; the closure's off branch returning
+// CookieRefreshNotRestored itself again — the source pin fails.
+func TestJobCookieRefreshDisabled(t *testing.T) {
+	log := &jobRefreshLogger{}
+	if got := jobCookieRefreshDisabled(log); got != worker.CookieRefreshOff {
+		t.Errorf("outcome %v, want CookieRefreshOff", got)
+	}
+	const want = "automatic cookie refresh is disabled — nothing was attempted setting=cookies.auto_enabled = false"
+	if len(log.warns) != 1 || !strings.HasPrefix(log.warns[0], want) {
+		t.Errorf("logged %q, want one line starting %q", log.warns, want)
+	}
+
+	src, err := os.ReadFile("services.go")
+	if err != nil {
+		t.Fatalf("read services.go: %v", err)
+	}
+	const branch = "\t\tif !autoEnabled {\n\t\t\treturn jobCookieRefreshDisabled(log)\n\t\t}\n"
+	if !strings.Contains(string(src), branch) {
+		t.Errorf("the OnCookieRefreshNeeded closure's auto_enabled=false branch is not\n%s— the worker would not be told the refresh is off", branch)
 	}
 }

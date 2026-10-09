@@ -173,7 +173,35 @@ func jobCookieRefreshOutcome(log interface {
 	if report.ok {
 		return worker.CookieRefreshRestored
 	}
+	// Unknown — declined, or ran and could not tell — concluded nothing about
+	// the cookies, and the line above says so. Answered as a failure, it was
+	// followed by the worker's advice to replace cookies nothing had judged.
+	if result.Verdict(platform) == cookies.RefreshUnknown {
+		return worker.CookieRefreshUnconfirmed
+	}
 	return worker.CookieRefreshNotRestored
+}
+
+// jobCookieRefreshDisabled is the OnCookieRefreshNeeded closure's answer when
+// cookies.auto_enabled is off: it says nothing was attempted and tells the
+// worker the refresh is off, which the worker then logs as the way out
+// (replace the file, or turn the refresh on) rather than as a failed refresh.
+// auto_enabled defaults to false, so this is the COMMON path, not an edge
+// case.
+func jobCookieRefreshDisabled(log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) worker.CookieRefreshOutcome {
+	// Previously a silent `return false`. That silence is why a field log
+	// read "attempting automatic cookie refresh..." immediately followed by
+	// "auto cookie refresh failed" — nothing had in fact been attempted, and
+	// no line said so.
+	log.Warn("automatic cookie refresh is disabled — nothing was attempted",
+		slog.String("setting", "cookies.auto_enabled = false"),
+		slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
+	return worker.CookieRefreshOff
 }
 
 // twitchAuthLossHook wraps the platform-mark call in the goroutine its caller
@@ -1382,15 +1410,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			autoEnabled = c.Cookies.AutoEnabled
 		})
 		if !autoEnabled {
-			// Previously a silent `return false`. That silence is why a field
-			// log read "attempting automatic cookie refresh..." immediately
-			// followed by "auto cookie refresh failed" — nothing had in fact
-			// been attempted, and no line said so. auto_enabled defaults to
-			// false, so this is the COMMON path, not an edge case.
-			log.Warn("automatic cookie refresh is disabled — nothing was attempted",
-				slog.String("setting", "cookies.auto_enabled = false"),
-				slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
-			return worker.CookieRefreshNotRestored
+			return jobCookieRefreshDisabled(log)
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
