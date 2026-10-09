@@ -16,6 +16,7 @@ import (
 // carrying FileRoutes beside the jobs fixture's own, and decodes the answer.
 func deleteOrphans(t *testing.T, f *jobsFixture, paths ...string) (int, struct {
 	Error   string              `json:"error"`
+	Stale   int                 `json:"stale"`
 	Deleted []string            `json:"deleted"`
 	Errors  []map[string]string `json:"errors"`
 }) {
@@ -27,6 +28,7 @@ func deleteOrphans(t *testing.T, f *jobsFixture, paths ...string) (int, struct {
 	f.router.ServeHTTP(rec, req)
 	var out struct {
 		Error   string              `json:"error"`
+		Stale   int                 `json:"stale"`
 		Deleted []string            `json:"deleted"`
 		Errors  []map[string]string `json:"errors"`
 	}
@@ -54,6 +56,9 @@ func deleteOrphans(t *testing.T, f *jobsFixture, paths ...string) (int, struct {
 //   - the stale case answered through jsonResponse (200): the status is wrong.
 //   - the top-level error left off the 409: the dashboard has nothing to say.
 //   - the count message for several stale paths replaced by the first one's.
+//   - stale left off the 409, or counting every refusal: the dashboard
+//     cannot tell the stale refusals from the paths that failed for another
+//     reason, and hid those or miscounted them.
 func TestDeleteOrphanedAnswers409ForAPathThatIsNoLongerAnOrphan(t *testing.T) {
 	f := newJobsFixture(t)
 	FileRoutes(f.router, &FileRoutesDeps{DB: f.db, Store: f.store, Logger: silentLogger{}})
@@ -87,6 +92,9 @@ func TestDeleteOrphanedAnswers409ForAPathThatIsNoLongerAnOrphan(t *testing.T) {
 	if len(got.Errors) != 1 || got.Errors[0]["path"] != archive || got.Errors[0]["error"] != want {
 		t.Errorf("errors = %v, want the archive named with %q", got.Errors, want)
 	}
+	if got.Stale != 1 {
+		t.Errorf("stale = %d, want 1", got.Stale)
+	}
 	if _, err := os.Stat(archive); err != nil {
 		t.Errorf("the archive its row names is gone: %v", err)
 	}
@@ -100,8 +108,17 @@ func TestDeleteOrphanedAnswers409ForAPathThatIsNoLongerAnOrphan(t *testing.T) {
 		t.Fatal("UpdateJobFields(chat_file) failed")
 	}
 	code, got = deleteOrphans(t, f, archive, chat)
-	if code != http.StatusConflict || got.Error != "2 of these are no longer orphans. Refresh the list." {
-		t.Errorf("two stale paths answered %d %q, want 409 and a count", code, got.Error)
+	if code != http.StatusConflict || got.Error != "2 of these are no longer orphans. Refresh the list." || got.Stale != 2 {
+		t.Errorf("two stale paths answered %d %q stale=%d, want 409, a count and stale=2", code, got.Error, got.Stale)
+	}
+
+	// A stale path beside one refused for another reason (removed by hand
+	// since the list was read): errors names both, stale counts only the one.
+	gone := filepath.Join(f.outputDir, "Chan", "already-gone.mp4")
+	code, got = deleteOrphans(t, f, archive, gone)
+	if code != http.StatusConflict || got.Error != want || got.Stale != 1 || len(got.Errors) != 2 {
+		t.Errorf("a stale path beside a failed one answered %d %q stale=%d errors=%v, want 409, the stale message, stale=1 and both named",
+			code, got.Error, got.Stale, got.Errors)
 	}
 
 	// Nothing stale: 200, no top-level error, other refusals as before.

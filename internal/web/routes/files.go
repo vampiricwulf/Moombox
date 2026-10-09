@@ -54,8 +54,11 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 	// a finalize is writing it, its job needs its staging — means the list the
 	// request came from is stale, which is a conflict with the server's state
 	// rather than a failure: the answer is 409, the same {deleted, errors}
-	// body plus an error telling the operator to refresh the list. Any other
-	// refusal keeps the 200 and its fixed "failed to delete file".
+	// body plus an error telling the operator to refresh the list and stale,
+	// how many of errors are those refusals — the rest failed for another
+	// reason, which the dashboard's Delete All counts beside the message
+	// rather than letting the 409 hide them. Any other refusal keeps the 200
+	// and its fixed "failed to delete file".
 	r.Delete("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Paths []string `json:"paths"`
@@ -105,6 +108,7 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 				msg = fmt.Sprintf("%d of these are no longer orphans. Refresh the list.", len(stale))
 			}
 			result["error"] = msg
+			result["stale"] = len(stale)
 			// Content-Type before the explicit WriteHeader — headers set after
 			// it are dropped.
 			rw.Header().Set("Content-Type", "application/json")

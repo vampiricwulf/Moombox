@@ -72,6 +72,7 @@ test("a delete refused as no longer an orphan toasts the server's message", { sk
         status: 409,
         body: {
           error: stale,
+          stale: 1,
           deleted: body.paths.filter((p) => !p.endsWith("abc123")),
           errors: [{ path: "/data/staging/abc123", error: stale }],
         },
@@ -95,4 +96,53 @@ test("a delete refused as no longer an orphan toasts the server's message", { sk
   await h.flush();
   assert.equal(said().at(-1), `Deleted 1. ${stale}`);
   assert.equal(h.toasts().at(-1).variant, "warning");
+});
+
+// A Delete All whose 409 also carries paths refused for another reason (one
+// removed by hand since the list was read, one that cannot be unlinked):
+// the toast said only the stale message, so those failures went unmentioned
+// where a 200 would have counted them ("Deleted 0, 2 errors") and the
+// terminal names each one. The route says how many of errors are stale
+// refusals; the rest are counted after the message.
+//
+// Mutants:
+//   - the 409 branch without the count of the others: neither failure is
+//     mentioned.
+//   - the count taken from every entry of errors, stale ones included: it
+//     says three.
+test("a Delete All 409 counts the paths that failed for another reason", { skip }, async () => {
+  const stale = "No longer an orphan: job abc123 names it now. Refresh the list.";
+  const answer = (failed) => harness.response({
+    status: 409,
+    body: {
+      error: stale,
+      stale: 1,
+      deleted: [],
+      errors: [
+        { path: "/data/staging/abc123", error: stale },
+        ...failed.map((rel) => ({ path: `/data/staging/${rel}`, error: "failed to delete file" })),
+      ],
+    },
+  });
+  let failed = ["def456", "ghi789"];
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/files/orphaned": () => [],
+      "DELETE /api/files/orphaned": () => answer(failed),
+    },
+  });
+  h.app.showConfirm = async () => true;
+  const said = () => h.toasts().map((t) => t.textContent);
+
+  h.app.files._orphanedFiles = [file("abc123"), file("def456"), file("ghi789")];
+  await h.app.files.deleteAllOrphanedFiles();
+  await h.flush();
+  assert.equal(said().at(-1), `Deleted 0. ${stale} 2 others failed.`);
+  assert.equal(h.toasts().at(-1).variant, "warning");
+
+  failed = ["def456"];
+  h.app.files._orphanedFiles = [file("abc123"), file("def456")];
+  await h.app.files.deleteAllOrphanedFiles();
+  await h.flush();
+  assert.equal(said().at(-1), `Deleted 0. ${stale} 1 other failed.`);
 });

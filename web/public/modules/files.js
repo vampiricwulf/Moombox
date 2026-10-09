@@ -179,7 +179,12 @@ export class FilesController {
       const count = result.deleted ? result.deleted.length : 0;
       const errCount = result.errors ? result.errors.length : 0;
       if (resp.status === 409) {
-        this.app.showToast(`Deleted ${count}. ${result.error || "Some are no longer orphans. Refresh the list."}`, "warning");
+        // errors holds the stale refusals and any that failed for another
+        // reason; the message speaks only for the first kind, so the others
+        // are counted after it (a 409 has at least one stale refusal).
+        const other = errCount - (Number.isInteger(result.stale) ? result.stale : 1);
+        const others = other > 0 ? ` ${other} other${other === 1 ? "" : "s"} failed.` : "";
+        this.app.showToast(`Deleted ${count}. ${result.error || "Some are no longer orphans. Refresh the list."}${others}`, "warning");
       } else if (errCount > 0) {
         this.app.showToast(`Deleted ${count}, ${errCount} errors`, "warning");
       } else {
