@@ -314,6 +314,123 @@ func TestSupersededRootIsNeverReadAsPartZero(t *testing.T) {
 	}
 }
 
+// TestIncompleteVodDownloadLeavesThePartsTheArchive pins the gate that keeps
+// a truncated from-the-start download from replacing a split job's parts.
+// settleVodDownload is ExecuteWithChat's VOD verdict; the incomplete result
+// is a real engine downloader that finalized with its tail missing (during an
+// interruption — the incomplete finish this package can build without a
+// googlevideo stand-in; the gate does not ask why the tail is missing). The
+// root marker must stay downloading, the finalize after it (the Mux action's
+// muxFromStaging) must keep the parts as the archive, and the cleanup must
+// keep the 2 s download in staging for Resume. The control is the same
+// verdict on a download with nothing missing, which marks the root complete.
+//
+// Mutants: call markVodRootComplete unconditionally in settleVodDownload —
+// the 2 s download supersedes the 4 s and 3 s parts as the archive; drop the
+// call — the control's root is never marked complete (and
+// TestSplitJobVodDownloadSupersedesParts finalizes as the parts). Calling
+// finalizeIncompleteTail in its place at ExecuteWithChat's VOD branch fails
+// TestSplitJobVodDownloadSupersedesParts the same way.
+func TestIncompleteVodDownloadLeavesThePartsTheArchive(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	jobCtx, _ := splitJobFixture(t, w, db, ffmpegPath, "j-short")
+	root := jobCtx.StagingDir
+	o := w.orchestrator
+	if err := o.claimStagingRootForVod(jobCtx); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	writeMuxFixture(t, ffmpegPath, filepath.Join(root, "video.mp4"), 2) // the tail never came
+
+	incomplete, _, _, _, _ := o.settleVodDownload(jobCtx, &DownloadResult{VideoDownloader: newInterruptedTestDownloader(t)})
+	if !incomplete {
+		t.Fatal("precondition: the interrupted downloader's finish did not read as incomplete")
+	}
+	if got := vodRootState(root); got != vodRootDownloading {
+		t.Errorf("marker = %q after an incomplete download, want %q", got, vodRootDownloading)
+	}
+
+	if err := o.muxFromStaging(context.Background(), jobCtx); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	w.cleanupStagingAfterMux("j-short", root)
+
+	// The parts finalize as they would have without the download: merged
+	// (same format) into one 7 s archive under the plain name.
+	if segs, _ := db.GetSegments("j-short"); len(segs) == 0 {
+		t.Errorf("no part rows left: the job is no longer its parts")
+	}
+	fresh, _ := db.GetJob("j-short")
+	if p := o.runFFprobe(context.Background(), fresh.OutputFile); p == nil || p.DurationSec < 6 {
+		t.Errorf("archive %s probes %+v, want the 7 s of parts, not the 2 s download", fresh.OutputFile, p)
+	}
+	if got := restartSiblingDurations(t, o, jobCtx.OutputDir); len(got) != 0 {
+		t.Errorf("parts moved beside the archive as siblings (%v s): the truncated download superseded them", got)
+	}
+	if !fileExists(filepath.Join(root, "video.mp4")) {
+		t.Errorf("the truncated download is gone from staging; Resume has nothing to append the tail to")
+	}
+
+	// The control: nothing missing, so the root is marked for the supersede.
+	staging2, _ := muxFixtureJob(t, w, db, "j-whole")
+	if err := db.AddSegment(&database.Segment{JobID: "j-whole", SegmentIndex: 0, Filename: "x - part1.mp4"}); err != nil {
+		t.Fatal(err)
+	}
+	job2, _ := db.GetJob("j-whole")
+	jobCtx2 := w.buildJobContext(job2)
+	if err := o.claimStagingRootForVod(jobCtx2); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if incomplete, _, _, _, _ := o.settleVodDownload(jobCtx2, &DownloadResult{}); incomplete {
+		t.Fatal("precondition: a result with no downloader behind read as incomplete")
+	}
+	if got := vodRootState(staging2); got != vodRootComplete {
+		t.Errorf("marker = %q after a complete download, want %q", got, vodRootComplete)
+	}
+}
+
+// TestSupersedeLeavesANeverMuxedPartShielded pins the other guard: the
+// supersede tombstones only the parts that have a row. A part the finalize's
+// recovery could not mux (seg_1's capture is not media FFmpeg can read) has
+// none, and its dir must stay an untombstoned part — hidden behind a
+// tombstone, hasUnmuxedSegmentParts stops seeing it and the cleanup deletes
+// its only footage with staging. The supersede itself still goes ahead.
+//
+// Mutant: tombstone every seg dir, recorded or not — seg_1 is tombstoned and
+// its capture deleted with staging.
+func TestSupersedeLeavesANeverMuxedPartShielded(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	jobCtx, _ := splitJobFixture(t, w, db, ffmpegPath, "j-unmuxable")
+	root := jobCtx.StagingDir
+	junk := filepath.Join(root, "seg_1", "video_stream")
+	if err := os.WriteFile(junk, []byte("\x00\x00\x00\x18ftypdash not media FFmpeg can read"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o := w.orchestrator
+	if err := o.claimStagingRootForVod(jobCtx); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	writeMuxFixture(t, ffmpegPath, filepath.Join(root, "video.mp4"), 12)
+	o.markVodRootComplete(jobCtx)
+
+	if err := o.muxFromStaging(context.Background(), jobCtx); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	w.cleanupStagingAfterMux("j-unmuxable", root)
+
+	fresh, _ := db.GetJob("j-unmuxable")
+	if p := o.runFFprobe(context.Background(), fresh.OutputFile); p == nil || p.DurationSec < 11 {
+		t.Fatalf("archive %s probes %+v, want the complete 12 s download", fresh.OutputFile, p)
+	}
+	if isMergeTombstoned(filepath.Join(root, "seg_1")) {
+		t.Errorf("the never-muxed part's staging was tombstoned")
+	}
+	if !fileExists(junk) {
+		t.Errorf("the never-muxed part's only capture was deleted with staging")
+	}
+}
+
 // TestCleanupKeepsRootRecordingTheFinalizeDidNotUse pins the cleanup shield:
 // a job that finalized as parts keeps its staging when the root holds a
 // from-the-start recording — a claimed root, or the whole-file pair no part is

@@ -476,10 +476,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		var incomplete bool
 		var vSeq, vHead, aSeq, aHead int
 		if err == nil {
-			// false: the VOD refresh loop never takes the live loop's
-			// wait-for-resume branch — that evidence only applies to
-			// runLiveStreamDownload's own call site below.
-			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, false)
+			// The incomplete_tail flag and, on a split job's claimed root,
+			// whether the download may supersede the parts — one verdict,
+			// written before the Muxing status below so a restart mux finds
+			// it too.
+			incomplete, vSeq, vHead, aSeq, aHead = o.settleVodDownload(jobCtx, result)
 		}
 
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
@@ -508,13 +509,6 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// the chat count from then on). Finalize still runs after and
 			// flushes the gaps; Close is idempotent.
 			tracker.Close()
-			// Before Muxing, so a restart mux finds the verdict too: a
-			// split job's parts give way to this recording only when nothing
-			// is missing from it. An incomplete one leaves the parts as the
-			// archive, and Resume comes back here for the tail.
-			if !incomplete {
-				o.markVodRootComplete(jobCtx)
-			}
 			// Muxing now, not after the chat wait below — the live branch
 			// writes it before that wait too, for the same reason. A VOD's chat
 			// replay can page for hours after the media is complete, and a

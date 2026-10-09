@@ -144,6 +144,26 @@ func (o *DownloadOrchestrator) markVodRootComplete(jobCtx *JobContext) {
 	}
 }
 
+// settleVodDownload is a finished VOD download's verdict, which
+// ExecuteWithChat writes before the Muxing status so a restart mux finds it
+// too: the incomplete_tail flag (finalizeIncompleteTail — false for the
+// worker-waited evidence, because the VOD refresh loop never takes the live
+// loop's wait-for-resume branch) and, on a root a split job's run claimed,
+// whether the download may now supersede the parts. Only one with nothing
+// missing may (markVodRootComplete). An incomplete one leaves the marker at
+// downloading, so the finalize keeps the parts as the archive and the
+// cleanup keeps the download in staging (unusedRootRecording) for Resume to
+// come back to for the tail; marked complete, the truncated download would
+// replace the parts as the archive. One function, so the flag and the
+// marker are read off the same verdict.
+func (o *DownloadOrchestrator) settleVodDownload(jobCtx *JobContext, result *DownloadResult) (incomplete bool, vSeq, vHead, aSeq, aHead int) {
+	incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, false)
+	if !incomplete {
+		o.markVodRootComplete(jobCtx)
+	}
+	return incomplete, vSeq, vHead, aSeq, aHead
+}
+
 // supersedePartsWithVod retires a split job's parts in favour of the complete
 // from-the-start recording in the staging root, which the single-file
 // finalize then muxes as the archive.
