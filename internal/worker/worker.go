@@ -1278,7 +1278,7 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 	for _, s := range segs {
 		recorded[s.SegmentIndex] = true
 	}
-	if segDirs[0].idx != 0 && !recorded[0] && discoverStagingMedia(stagingDir) != nil {
+	if rootIsPartZero(stagingDir) && !recorded[0] && discoverStagingMedia(stagingDir) != nil {
 		return true // root is part 0 and it was never recorded
 	}
 	for _, sd := range segDirs {

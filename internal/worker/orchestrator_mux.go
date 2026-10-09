@@ -1876,8 +1876,9 @@ func isMergeTombstoned(dir string) bool {
 // (muxUnrecordedSegments, hasUnmuxedPartsForJob) all build on it; if they
 // ever disagreed, a resumed job could append into a dir that recovery
 // attributes to an already-muxed part. The staging ROOT is part index 0
-// unless seg_0 exists (a short-skipped root span); that rule lives at the
-// call sites.
+// unless seg_0 exists (a short-skipped root span, or the dir a VOD run
+// claimed the root from); that rule is rootIsPartZero's, which the call
+// sites ask — never this list, which can leave a seg_0 out.
 //
 // A tombstoned dir (isMergeTombstoned) is skipped entirely — it never
 // appears in the returned slice at all, for any of the three consumers
@@ -1886,6 +1887,24 @@ func isMergeTombstoned(dir string) bool {
 // live staging would resurrect superseded content.
 func stagedSegDirs(stagingDir string) []stagedSeg {
 	return segDirsOf(stagingDir, false)
+}
+
+// rootIsPartZero reports whether a split job's staging ROOT is part index 0:
+// it is unless a seg_0 dir exists. Asked of the dir itself, because
+// stagedSegDirs skips a tombstoned seg_0 — and supersedePartsWithVod
+// tombstones it (part 0 is a recorded part) at exactly the moment the root
+// comes to hold the complete from-the-start download that
+// claimStagingRootForVod created seg_0 to keep from ever being read as part
+// 0. Read through the filtered list, any untombstoned part dir left beside it
+// (an empty seg_N a split created before its first segment, or one whose
+// media FFmpeg cannot read) made that download an unmuxed part 0 again: the
+// staging was kept, the Mux action offered, and each Mux wrote the whole VOD
+// as a part that the supersede then moved beside the archive as one more
+// full-length sibling. A merge never tombstones seg_0: it folds a run's LATER
+// parts into its first.
+func rootIsPartZero(stagingDir string) bool {
+	info, err := os.Stat(filepath.Join(stagingDir, "seg_0"))
+	return err != nil || !info.IsDir()
 }
 
 // segDirsOf lists stagingDir's seg_N dirs by index; includeTombstoned also
@@ -1939,8 +1958,9 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 	}
 
 	// Root staging files are segment 0 — unless seg_0 exists, in which case
-	// the root data was a short segment the pipeline deliberately skipped.
-	if segDirs[0].idx != 0 && !recorded[0] && discoverStagingMedia(jobCtx.StagingDir) != nil {
+	// the root data was a short segment the pipeline deliberately skipped, or
+	// the from-the-start download a VOD run claimed the root for.
+	if rootIsPartZero(jobCtx.StagingDir) && !recorded[0] && discoverStagingMedia(jobCtx.StagingDir) != nil {
 		segDirs = append([]stagedSeg{{idx: 0, dir: jobCtx.StagingDir}}, segDirs...)
 	}
 

@@ -213,6 +213,9 @@ func (o *DownloadOrchestrator) supersedePartsWithVod(jobCtx *JobContext) error {
 	for _, s := range segments {
 		recorded[s.SegmentIndex] = true
 	}
+	// seg_0 is tombstoned with the rest, and still keeps the root from
+	// reading as part 0: rootIsPartZero asks whether the dir exists, not
+	// whether it is a live part.
 	stamp := []byte(time.Now().UTC().Format(time.RFC3339))
 	for _, sd := range stagedSegDirs(jobCtx.StagingDir) {
 		if !recorded[sd.idx] {

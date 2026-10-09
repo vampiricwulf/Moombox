@@ -238,6 +238,82 @@ func TestSupersedePartsIsReentrant(t *testing.T) {
 	}
 }
 
+// TestSupersededRootIsNeverReadAsPartZero is W20-19: the supersede tombstones
+// seg_0 with the other recorded parts, and a part dir that never got a row —
+// an empty seg_2 a split created before its first segment, or one whose media
+// FFmpeg cannot read — survives the finalize untombstoned. The complete VOD
+// in the root must still not read as an unmuxed part 0: not to the cleanup,
+// which reclaims the staging when nothing else in it needs keeping, and not
+// to a Mux of the unreadable part, which must not write the whole VOD out as
+// one more full-length sibling.
+//
+// Mutants: hasUnmuxedSegmentParts back on stagedSegDirs' first index — the
+// empty case's staging is kept for an "unmuxed part 0"; muxUnrecordedSegments
+// back on it — the Mux muxes the root as part 0 and the supersede moves that
+// 12 s copy beside the archive.
+func TestSupersededRootIsNeverReadAsPartZero(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		seg2       []byte // nil: an empty seg_2; else seg_2/video_stream's bytes
+		wantKept   bool
+		muxOffered bool
+	}{
+		{"empty part dir left by an interrupted split", nil, false, false},
+		{"part dir whose media FFmpeg cannot read", []byte("\x00\x00\x00\x18ftypdash not really media"), true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ffmpegPath, _ := requireFFmpegTools(t)
+			w, db := testWorkerSetup(t)
+			jobCtx, _ := splitJobFixture(t, w, db, ffmpegPath, "j-tomb")
+			root := jobCtx.StagingDir
+			if err := os.MkdirAll(filepath.Join(root, "seg_2"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.seg2 != nil {
+				if err := os.WriteFile(filepath.Join(root, "seg_2", "video_stream"), tc.seg2, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			full := filepath.Join(t.TempDir(), "full.mp4")
+			writeMuxFixture(t, ffmpegPath, full, 12)
+			body, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := serveWholeFile(t, body)
+
+			o := NewDownloadOrchestrator(db, nil, ffmpegPath, discardLogger{}, nil, stubCipherSolver{}, nil, nil, nil)
+			if err := o.ExecuteWithChat(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), true, nil); err != nil {
+				t.Fatalf("ExecuteWithChat: %v", err)
+			}
+			w.cleanupStagingAfterMux("j-tomb", root)
+
+			_, statErr := os.Stat(root)
+			if kept := statErr == nil; kept != tc.wantKept {
+				t.Errorf("staging kept = %v, want %v (root media %+v)", kept, tc.wantKept, discoverStagingMedia(root))
+			}
+			stagingBase := filepath.Dir(root)
+			if got := HasUnmuxedParts(db, stagingBase, "j-tomb"); got != tc.muxOffered {
+				t.Fatalf("HasUnmuxedParts = %v, want %v", got, tc.muxOffered)
+			}
+			if tc.muxOffered {
+				if err := w.MuxJob("j-tomb"); err != nil {
+					t.Fatalf("MuxJob: %v", err)
+				}
+				w.wg.Wait()
+			}
+
+			if got := restartSiblingDurations(t, o, jobCtx.OutputDir); len(got) != 2 || got[0] != 3 || got[1] != 4 {
+				t.Errorf("siblings beside the archive probe %v s, want only the superseded parts [3 4] — no copy of the VOD", got)
+			}
+			fresh, _ := db.GetJob("j-tomb")
+			if p := o.runFFprobe(context.Background(), fresh.OutputFile); p == nil || p.DurationSec < 11 {
+				t.Errorf("archive %s probes %+v, want the complete 12 s download", fresh.OutputFile, p)
+			}
+		})
+	}
+}
+
 // TestCleanupKeepsRootRecordingTheFinalizeDidNotUse pins the cleanup shield:
 // a job that finalized as parts keeps its staging when the root holds a
 // from-the-start recording — a claimed root, or the whole-file pair no part is
