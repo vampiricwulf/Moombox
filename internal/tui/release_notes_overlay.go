@@ -234,11 +234,21 @@ func (o *releaseNotesOverlay) renderBody(width int) string {
 // must wrap exactly as they did, with no hang.
 const releaseNotesListMark = "\uE000"
 
+// releaseNotesQuoteMark tags the end of a blockquote's bar the same way:
+// U+E001, appended to the "│ " glamour starts every line of a quote with, so
+// wrapReleaseNotes can repeat the bar on every row the line wraps to — as
+// glamour's own wrap did — and removes it before anything is shown. A rune of
+// its own rather than the list mark, because a list inside a quote carries
+// both on one line, and the bar is repeated where a bullet is not.
+const releaseNotesQuoteMark = "\uE001"
+
 // releaseNotesStyle is glamour's standard dark or light style with the list
 // mark added to every list-item prefix: the bullet, the enumeration's ". ",
-// and a task item's two checkboxes, which glamour draws in the bullet's place.
-// A copy: those are values inside the StyleConfig, so the package-level config
-// glamour's other users read is untouched.
+// and a task item's two checkboxes, which glamour draws in the bullet's place;
+// and the quote mark added to the blockquote's bar. A copy: those are values
+// inside the StyleConfig, so the package-level config glamour's other users
+// read is untouched — the bar is a *string the copy shares with it, so it is
+// replaced by a new string, never written through.
 func releaseNotesStyle(dark bool) gansi.StyleConfig {
 	cfg := styles.LightStyleConfig
 	if dark {
@@ -248,6 +258,12 @@ func releaseNotesStyle(dark bool) gansi.StyleConfig {
 	cfg.Enumeration.BlockPrefix += releaseNotesListMark
 	cfg.Task.Ticked += releaseNotesListMark
 	cfg.Task.Unticked += releaseNotesListMark
+	bar := " " // what glamour indents a quote with when a style names no bar
+	if cfg.BlockQuote.IndentToken != nil {
+		bar = *cfg.BlockQuote.IndentToken
+	}
+	bar += releaseNotesQuoteMark
+	cfg.BlockQuote.IndentToken = &bar
 	return cfg
 }
 
@@ -267,46 +283,126 @@ func releaseNotesStyle(dark bool) gansi.StyleConfig {
 //     keeps, and it starts each later line at the item's BULLET column with
 //     no mark; that line is moved under the item's text and hangs there too.
 //     See releaseNotesItem for how a line is told to be one;
+//   - a blockquote's line continues after its BAR, and every row repeats the
+//     bar, as glamour's own wrap did ("  │ " down the whole quote). Behind
+//     the bar the quote's lines follow these same rules, so a list in a quote
+//     hangs under its text with the bar in front; see wrapReleaseNotesQuote;
 //   - everything else continues at the margin glamour indented the block by,
 //     the run of plain spaces ahead of the line's first escape sequence. That
 //     is where glamour's own wrap put it: a heading or paragraph continues at
 //     its first column, and a code line at the document margin rather than
 //     under the code, exactly as before.
 func wrapReleaseNotes(rendered string, limit int) string {
-	lines := strings.Split(rendered, "\n")
+	return strings.Join(wrapReleaseNotesLines(strings.Split(rendered, "\n"), limit), "\n")
+}
+
+// releaseNotesUnmark removes both marks from a line before it is shown.
+var releaseNotesUnmark = strings.NewReplacer(releaseNotesListMark, "", releaseNotesQuoteMark, "")
+
+// wrapReleaseNotesLines is wrapReleaseNotes over lines already split, returning
+// the rows. A blockquote's lines come back through it without their bar, as a
+// document of their own.
+func wrapReleaseNotesLines(lines []string, limit int) []string {
 	out := make([]string, 0, len(lines))
 	var open []releaseNotesItem // the items a line may still belong to, outermost first
-	for _, line := range lines {
+	// owner closes the items a line starting at visible column indent has
+	// left — every one whose bullet sits deeper — and reports the text column
+	// of the item it starts at the bullet column of: the column the line
+	// belongs under.
+	owner := func(indent int) (text int, ok bool) {
+		for len(open) > 0 && open[len(open)-1].bullet > indent {
+			open = open[:len(open)-1]
+		}
+		// Not when the text column leaves no room: hangingWrap drops such a
+		// hang, and the spaces added for it would stay on the first row, past
+		// the edge. The line keeps glamour's indent, as the item's first line
+		// keeps its bullet.
+		if n := len(open); n > 0 && open[n-1].bullet == indent && open[n-1].text < limit {
+			return open[n-1].text, true
+		}
+		return 0, false
+	}
+	for j := 0; j < len(lines); j++ {
+		line := lines[j]
 		hang := len(line) - len(strings.TrimLeft(line, " "))
 		visible := ansi.Strip(line)
 		indent := len(visible) - len(strings.TrimLeft(visible, " "))
-		switch i := strings.Index(line, releaseNotesListMark); {
+		i := strings.Index(line, releaseNotesListMark)
+		switch q := strings.Index(line, releaseNotesQuoteMark); {
+		case q >= 0 && (i < 0 || q < i):
+			// A blockquote, as far as glamour starts lines with this same
+			// bar: its blank lines and the blocks nested in it included.
+			bar := line[:q+len(releaseNotesQuoteMark)]
+			end := j + 1
+			for end < len(lines) && strings.HasPrefix(lines[end], bar) {
+				end++
+			}
+			shift := 0
+			if text, ok := owner(indent); ok {
+				shift = text - indent
+			}
+			out = append(out, wrapReleaseNotesQuote(lines[j:end], len(bar), shift, limit)...)
+			j = end - 1
+			continue
 		case i >= 0:
 			hang = ansi.StringWidth(line[:i])
 			open = append(open, releaseNotesItem{bullet: indent, text: hang})
-			line = strings.ReplaceAll(line, releaseNotesListMark, "")
+			line = releaseNotesUnmark.Replace(line)
 		case strings.TrimSpace(visible) == "":
 			// Glamour closes every list with a blank line, and every block
 			// after one opens past it.
 			open = open[:0]
 		default:
-			for len(open) > 0 && open[len(open)-1].bullet > indent {
-				open = open[:len(open)-1]
-			}
-			// Not when the text column leaves no room: hangingWrap drops
-			// such a hang, and the spaces added here would stay on the
-			// first row, past the edge. The line keeps glamour's indent, as
-			// the item's first line keeps its bullet.
-			if n := len(open); n > 0 && open[n-1].bullet == indent && open[n-1].text < limit {
+			if text, ok := owner(indent); ok {
 				// TruncateLeft drops glamour's indent cells, styled or not,
 				// and keeps their escape sequences.
-				hang = open[n-1].text
+				hang = text
 				line = strings.Repeat(" ", hang) + ansi.TruncateLeft(line, indent, "")
 			}
 		}
 		out = append(out, hangingWrap(line, hang, limit)...)
 	}
-	return strings.Join(out, "\n")
+	return out
+}
+
+// wrapReleaseNotesQuote wraps one blockquote: lines that all open with the same
+// bar, barLen bytes of it, the quote mark last. Each line loses its bar, the
+// rest is wrapped by wrapReleaseNotesLines as a document of its own — narrower
+// by the bar, with list items of its own, so a list in the quote hangs as one
+// outside it does and a nested quote repeats its own bar — and EVERY row comes
+// back with the bar in front. Glamour's own wrap repeated it on every row
+// ("  │ …"), which is how a reader tells where a quote ends; the margin rule
+// alone started each row after a line's first at the document margin, with
+// no bar at all.
+//
+// shift moves the bar under the text of the list item the quote sits in:
+// glamour starts it at the item's BULLET column, as it does the item's later
+// source lines, and those move under the text too.
+//
+// A bar that leaves no room for text (a box narrower than the bar) is dropped,
+// shift and all: each line wraps whole from the left edge, as hangingWrap
+// drops a hang, so the narrowest overlay still never spills.
+func wrapReleaseNotesQuote(lines []string, barLen, shift, limit int) []string {
+	bar := strings.Repeat(" ", shift) + lines[0][:barLen-len(releaseNotesQuoteMark)]
+	width := ansi.StringWidth(bar)
+	if width >= limit {
+		var out []string
+		for _, line := range lines {
+			out = append(out, hangingWrap(releaseNotesUnmark.Replace(line), 0, limit)...)
+		}
+		return out
+	}
+	inner := make([]string, len(lines))
+	for k, line := range lines {
+		inner[k] = line[barLen:]
+	}
+	rows := wrapReleaseNotesLines(inner, limit-width)
+	for k, row := range rows {
+		// The bar leaves its style open — the mark sits inside the span — and
+		// a wrapped row need not open one of its own before its text.
+		rows[k] = bar + ansi.ResetStyle + row
+	}
+	return rows
 }
 
 // releaseNotesItem is a list item a later unmarked line may still belong to:
