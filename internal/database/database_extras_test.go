@@ -359,6 +359,71 @@ func TestAddToHistoryDeduplicates(t *testing.T) {
 	}
 }
 
+// TestHistoryCapEvictsTheOldestRows fills history to the cap with rows dated
+// in the past, one minute apart, then records three more. The cap must drop
+// the three oldest and keep everything else: the rows just recorded are the
+// archive pass's only guard against re-creating the jobs they were recorded
+// for, so a prune that took them would answer HasProcessed=false for videos
+// that were just jobbed.
+//
+// MUTANTS: ORDER BY added_at DESC in pruneHistory (the new rows go, the oldest
+// stay); an off-by-one cap (historyCap+1 or -1 in the LIMIT: the count is
+// wrong); dropping the pruneHistory call from AddToHistory (the count grows).
+func TestHistoryCapEvictsTheOldestRows(t *testing.T) {
+	t.Parallel()
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	seed := func(i int) string { return fmt.Sprintf("seed%05d", i) }
+	tx, err := db.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range historyCap {
+		if _, err := tx.Exec(`INSERT INTO history (video_id, added_at) VALUES (?, ?)`,
+			seed(i), base.Add(time.Duration(i)*time.Minute).Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := []string{"fresh-a", "fresh-b", "fresh-c"}
+	for _, id := range fresh {
+		if err := db.AddToHistory(id); err != nil {
+			t.Fatalf("AddToHistory(%s): %v", id, err)
+		}
+	}
+
+	var n int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM history`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != historyCap {
+		t.Errorf("history holds %d rows, want the cap %d", n, historyCap)
+	}
+	for _, id := range fresh {
+		if ok, err := db.HasProcessed(id); err != nil || !ok {
+			t.Errorf("HasProcessed(%s) = %v, %v: the row just recorded was evicted by the cap", id, ok, err)
+		}
+	}
+	for i := range len(fresh) {
+		if ok, _ := db.HasProcessed(seed(i)); ok {
+			t.Errorf("%s, among the %d oldest rows, survived the cap", seed(i), len(fresh))
+		}
+	}
+	for _, i := range []int{len(fresh), historyCap - 1} {
+		if ok, _ := db.HasProcessed(seed(i)); !ok {
+			t.Errorf("%s was evicted, but only the %d oldest rows should go", seed(i), len(fresh))
+		}
+	}
+}
+
 // --- Concurrent writers/readers (race smoke) ---
 
 func TestConcurrentReadsAndWrites(t *testing.T) {
