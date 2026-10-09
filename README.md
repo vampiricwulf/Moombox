@@ -232,9 +232,10 @@ treats as private, so tailnet clients pass it and can open the dashboard
 at the host's `100.x.y.z` address. That trust is `lan`-only: the same
 range is what some ISPs hand their customers, so if the Moombox host
 itself sits behind such an ISP's NAT, its other customers could reach it
-under `lan` too — use Tailscale's ACLs or a host firewall if that
-applies. Under `external`/`public` a `100.x.y.z` client is treated as
-an internet client and is asked for the password.
+under `lan` too. If that applies, let only the tailnet interface reach
+the port with a host firewall — Tailscale's own ACLs cannot see traffic
+that never entered the tailnet. Under `external`/`public` a `100.x.y.z`
+client is treated as an internet client and is asked for the password.
 
 ### 2. Reverse proxy with HTTPS
 
