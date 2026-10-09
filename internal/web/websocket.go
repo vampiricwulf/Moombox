@@ -66,15 +66,18 @@ type WebSocketHub struct {
 	clients map[*wsClient]struct{}
 	closed  bool
 
-	// jobVersions is the newest write version broadcast per job (see
-	// jobVersioned), and jobRowSent marks the jobs a job_update has been
-	// broadcast for since their last job_deleted. Both are guarded by
-	// jobVerMu — which is held across the check AND the enqueue, so two job
-	// frames can never reach the clients in the opposite order to their
-	// writes.
-	jobVerMu    sync.Mutex
-	jobVersions map[string]uint64
-	jobRowSent  map[string]bool
+	// jobVersions is the newest write version broadcast per job, in either
+	// frame (see jobVersioned); jobRowVersions is the newest a job_update
+	// carried, and has an entry only once one has been broadcast since the
+	// job's last job_deleted; jobLastTick is the job_progress frame sent at
+	// jobVersions while it is newer than every job_update. All three are
+	// guarded by jobVerMu — which is held across the check AND the enqueue,
+	// so two job frames can never reach the clients in the opposite order to
+	// their writes.
+	jobVerMu       sync.Mutex
+	jobVersions    map[string]uint64
+	jobRowVersions map[string]uint64
+	jobLastTick    map[string]any
 
 	// Initial state provider (set by main.go)
 	InitialState InitialStateProvider
@@ -158,10 +161,11 @@ func NewWebSocketHub(logger interface {
 	Error(msg string, args ...any)
 }) *WebSocketHub {
 	return &WebSocketHub{
-		clients:     make(map[*wsClient]struct{}),
-		jobVersions: make(map[string]uint64),
-		jobRowSent:  make(map[string]bool),
-		logger:      logger,
+		clients:        make(map[*wsClient]struct{}),
+		jobVersions:    make(map[string]uint64),
+		jobRowVersions: make(map[string]uint64),
+		jobLastTick:    make(map[string]any),
+		logger:         logger,
 	}
 }
 
@@ -776,18 +780,30 @@ type jobVersioned interface {
 }
 
 // broadcastJobFrame broadcasts a job frame unless the hub has already sent a
-// LATER write of the same job. The database notifies after releasing its lock,
-// so two writers' frames can arrive here in the opposite order to their
+// LATER write of what it carries. The database notifies after releasing its
+// lock, so two writers' frames can arrive here in the opposite order to their
 // writes; the older one, sent last, put a stale row on every tab — a progress
 // tick read back before a Muxing write, landing after it, showed the job
 // Downloading for the whole mux. A frame with no version (0, or a payload that
 // carries none) is always sent.
 //
-// One exception: the first job_update for a job is always sent, however old.
-// Clients add a row only from a job_update (a job_progress for a row they do
-// not hold is dropped), so dropping the row that introduces the job — a
-// JobAdded overtaken by the job's first progress tick — would leave it off
-// every tab until the next full resync.
+// What "later" means differs by frame. A job_progress carries the progress
+// columns and the status, which every frame carries, so it is dropped behind
+// any later frame. A job_update carries the whole row, and a later
+// job_progress restates none of the rest of it: a title or twitch_quality
+// write whose frame the next tick overtook (the tick read back after the
+// write, so its row held the new value, but its frame does not carry it) was
+// dropped, and the write never reached any tab. So a job_update is dropped
+// only behind a later job_update. One that is older than a tick already sent
+// takes the clients' progress columns and status back to its own write, so
+// that tick's frame is sent again after it, and the clients hold the newest
+// of every column.
+//
+// The first job_update for a job is always sent, however old: clients add a
+// row only from a job_update (a job_progress for a row they do not hold is
+// dropped), so dropping the row that introduces the job — a JobAdded overtaken
+// by the job's first progress tick — would leave it off every tab until the
+// next full resync.
 func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 	v, ok := data.(jobVersioned)
 	if !ok {
@@ -801,15 +817,26 @@ func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 	}
 	hub.jobVerMu.Lock()
 	defer hub.jobVerMu.Unlock()
-	introduces := msgType == "job_update" && !hub.jobRowSent[id]
-	if version <= hub.jobVersions[id] && !introduces {
+	if msgType != "job_update" {
+		if version <= hub.jobVersions[id] {
+			return
+		}
+		hub.jobVersions[id] = version
+		hub.jobLastTick[id] = data
+		hub.Broadcast(msgType, data)
 		return
 	}
-	hub.jobVersions[id] = max(hub.jobVersions[id], version)
-	if msgType == "job_update" {
-		hub.jobRowSent[id] = true
+	if rowVersion, sent := hub.jobRowVersions[id]; sent && version <= rowVersion {
+		return
 	}
+	hub.jobRowVersions[id] = version
 	hub.Broadcast(msgType, data)
+	if version > hub.jobVersions[id] {
+		hub.jobVersions[id] = version
+		delete(hub.jobLastTick, id)
+	} else if tick, ok := hub.jobLastTick[id]; ok {
+		hub.Broadcast("job_progress", tick)
+	}
 }
 
 // BroadcastJobProgress sends the slim per-tick frame: only the fields a
@@ -835,7 +862,8 @@ func (hub *WebSocketHub) BroadcastJobsUpdate(data any) {
 func (hub *WebSocketHub) BroadcastJobDeleted(jobID string) {
 	hub.jobVerMu.Lock()
 	delete(hub.jobVersions, jobID)
-	delete(hub.jobRowSent, jobID)
+	delete(hub.jobRowVersions, jobID)
+	delete(hub.jobLastTick, jobID)
 	hub.jobVerMu.Unlock()
 	hub.Broadcast("job_deleted", map[string]any{"id": jobID})
 }

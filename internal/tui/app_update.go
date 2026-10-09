@@ -1318,55 +1318,101 @@ func isProgressTerminal(s database.JobStatus) bool {
 	return isCompletedStatus(s) || s == database.StatusError || s == database.StatusCookies
 }
 
-// staleJobUpdate reports whether job is an older write than one already
-// applied for it. A row with no version (0: read rather than written) makes
-// no claim and is never stale.
-func (a *App) staleJobUpdate(job *database.Job) bool {
-	return job.Version != 0 && job.Version <= a.jobVersions[job.ID]
+// appliedJobVersions is the newest database.Job.Version applied for one job,
+// held apart for its two stores. row is the write whose Job the task list
+// holds; progress is the write whose progress columns the progress store
+// holds, a tick's or a whole row's, so it is never below row.
+//
+// They are apart because a tick is applied to the progress store alone. One
+// number for both let a tick that overtook a write — the write's event
+// reaching the TUI after the next tick's, though the tick's row already held
+// it — mark the write stale: the tick does not replace the held row, the
+// write was dropped, and a quality split's twitch_quality or a rename stayed
+// off the row until a resync.
+type appliedJobVersions struct {
+	row      uint64
+	progress uint64
 }
 
-// noteJobVersion records job's version as seen, so an older write arriving
-// later is dropped.
-func (a *App) noteJobVersion(job *database.Job) {
-	if job.Version > a.jobVersions[job.ID] {
-		a.jobVersions[job.ID] = job.Version
+// staleJobUpdate reports whether job is an older write than one already
+// applied to the store it would update: for a progress tick, the progress
+// store, and for any other write, the held row. A newer tick says nothing
+// about the title, quality or anything else a tick does not write, so it
+// never makes a write stale. A row with no version (0: read rather than
+// written) makes no claim and is never stale.
+func (a *App) staleJobUpdate(job *database.Job, tick bool) bool {
+	if job.Version == 0 {
+		return false
 	}
+	applied := a.jobVersions[job.ID]
+	if tick {
+		return job.Version <= applied.progress
+	}
+	return job.Version <= applied.row
+}
+
+// noteJobVersion records job's version as applied: to the progress store
+// always, as every Job carries the progress columns, and to the row unless
+// it is a tick's. It reports whether the progress columns were the newest
+// yet, so an older write that still replaces the row leaves the progress
+// store with the newer tick's values.
+func (a *App) noteJobVersion(job *database.Job, tick bool) (progressFresh bool) {
+	if job.Version == 0 {
+		return true
+	}
+	applied := a.jobVersions[job.ID]
+	if !tick && job.Version > applied.row {
+		applied.row = job.Version
+	}
+	progressFresh = job.Version > applied.progress
+	if progressFresh {
+		applied.progress = job.Version
+	}
+	a.jobVersions[job.ID] = applied
+	return progressFresh
 }
 
 func (a *App) handleJobUpdate(ev *database.JobChange) {
 	job := ev.Job
-	if a.staleJobUpdate(job) {
+	tick := !hasDisplayChange(ev.Changes)
+	if a.staleJobUpdate(job, tick) {
 		return
 	}
-	a.noteJobVersion(job)
+	progressFresh := a.noteJobVersion(job, tick)
 
 	// Progress store: terminal rows are DELETED rather than written, on every
 	// update and not only on the transition. The old code Set unconditionally
 	// and deleted only when the status changed, so any later write to an
 	// already-terminal row (A W's watched toggle, a filename fixup) resurrected
 	// the entry that the transition had just dropped.
-	if isProgressTerminal(job.Status) {
-		a.progressStore.Delete(job.ID)
-	} else {
-		a.progressStore.Set(job.ID, &ProgressData{
-			Progress:          job.Progress,
-			Percent:           job.Percent,
-			Speed:             job.Speed,
-			ETA:               job.ETA,
-			LastVideoSeq:      job.LastVideoSeq,
-			LastAudioSeq:      job.LastAudioSeq,
-			TotalVideoSeq:     job.TotalVideoSeq,
-			TotalAudioSeq:     job.TotalAudioSeq,
-			TotalChatMessages: job.TotalChatMessages,
-			ChatStatus:        job.ChatStatus,
-		})
+	//
+	// Left alone by a write older than a tick already applied: the tick's
+	// progress columns are the newer ones, and the write still replaces the
+	// row below.
+	if progressFresh {
+		if isProgressTerminal(job.Status) {
+			a.progressStore.Delete(job.ID)
+		} else {
+			a.progressStore.Set(job.ID, &ProgressData{
+				Progress:          job.Progress,
+				Percent:           job.Percent,
+				Speed:             job.Speed,
+				ETA:               job.ETA,
+				LastVideoSeq:      job.LastVideoSeq,
+				LastAudioSeq:      job.LastAudioSeq,
+				TotalVideoSeq:     job.TotalVideoSeq,
+				TotalAudioSeq:     job.TotalAudioSeq,
+				TotalChatMessages: job.TotalChatMessages,
+				ChatStatus:        job.ChatStatus,
+			})
+		}
 	}
 
 	// Replace the held row and rebuild the task-list row + detail panel for
 	// every change but a progress tick. Ticks (~60/sec per download) flow
 	// through progressStore, need no list rebuild, and carry a row without
 	// its child rows (hasDisplayChange).
-	if hasDisplayChange(ev.Changes) {
+	if !tick {
 		a.taskList.UpdateJob(job)
 		// Re-tally the status bar. UpdateJob replaces the element in the
 		// slice the bar's jobs ALIAS (TaskListModel.Jobs returns the live
@@ -1424,7 +1470,7 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 	job := ev.Job
 	// Never dropped, however old: the row has to exist. An update that
 	// overtook it found no row to apply to, so nothing newer is lost.
-	a.noteJobVersion(job)
+	a.noteJobVersion(job, false)
 
 	// Existing app already has data → user has used the app before; the
 	// new-job arrival is enough to dismiss the newcomer hint (matches
