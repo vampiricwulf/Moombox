@@ -78,7 +78,8 @@ func (w *DownloadWorker) requeueBacklogAfterDiskFull(job *database.Job, err erro
 // The budget counts the job's runs that ended back in Queued, of either
 // kind, and only a run that ends some other way resets it
 // (forgetBacklogRetries) — not a fetch that succeeds, since a download that
-// then runs out of disk follows one every time.
+// then runs out of disk follows one every time — or an operator's verb that
+// takes the job out of the loop (endBacklogStreak).
 //
 // The hold is placed BEFORE the status write, so no sweep can see the row
 // Queued and unheld; the slots are released before it, so the next download
@@ -135,4 +136,20 @@ func (w *DownloadWorker) forgetBacklogRetries(jobID string) {
 	w.backlogRetryMu.Lock()
 	defer w.backlogRetryMu.Unlock()
 	delete(w.backlogRetries, jobID)
+}
+
+// endBacklogStreak ends jobID's retry streak from outside a run: its count
+// and its hold both go. A job waiting in Queued for its backoff or for disk
+// space has no run to end it, so an operator's Cancel there — and a Retry or
+// Resume after it — kept the count: the retried job's first failure that
+// went back to Queued was counted on top of the old streak, and after three
+// requeues it ended in Error, "gave up after 3 retries", without one retry of
+// its own. CancelJob, the two restart verbs and a deleted row call it; a
+// hold left behind would also widen every sweep's NextQueuedJobs for a row
+// that is no longer Queued.
+func (w *DownloadWorker) endBacklogStreak(jobID string) {
+	w.forgetBacklogRetries(jobID)
+	if w.scheduler != nil {
+		w.scheduler.unhold(jobID)
+	}
 }

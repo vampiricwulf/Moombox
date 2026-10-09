@@ -260,10 +260,11 @@ type DownloadWorker struct {
 	// which the sweep resolves permissively.
 	CurrentCredentialIdentity func(platform string) string
 
-	// backlogRetries counts each backlog job's consecutive transient
-	// pre-download failures (requeueBacklogAfterTransientFailure). In memory,
-	// like the scheduler's holds: a restart grants a fresh budget, which still
-	// ends a permanently broken video in Error. Lazily allocated.
+	// backlogRetries counts each backlog job's consecutive runs that went
+	// back to Queued (requeueBacklog). In memory, like the scheduler's holds:
+	// a restart grants a fresh budget, which still ends a permanently broken
+	// video in Error, and so do an operator's Cancel, Retry and Resume
+	// (endBacklogStreak). Lazily allocated.
 	backlogRetryMu sync.Mutex
 	backlogRetries map[string]int
 
@@ -388,6 +389,13 @@ func NewDownloadWorker(
 	// config: the output directory and the critical threshold both follow a
 	// Settings save without a restart.
 	sched.readDisk = w.readOutputDisk
+	// A deleted row takes its backlog retry streak with it. The id is the
+	// video id, so a backlog rescan can create the row again, and it would
+	// have inherited the old count and hold. For the worker's lifetime,
+	// which is the process's.
+	if db != nil {
+		db.OnJobDeleted(func(ev *database.JobDeleted) { w.endBacklogStreak(ev.JobID) })
+	}
 	return w
 }
 
@@ -532,6 +540,7 @@ func (w *DownloadWorker) CancelJob(jobID string) bool {
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status": database.StatusCancelled,
 	})
+	w.endBacklogStreak(jobID)
 	return flagged
 }
 
@@ -1943,6 +1952,8 @@ func (w *DownloadWorker) ReauthenticateTwitchChats() int {
 // "suppress retry-failure notifications" guard in setJobError must not apply.
 func (w *DownloadWorker) ResumeJob(jobID string) {
 	w.afterJobExit(jobID, "resume", func() {
+		// A fresh backlog retry budget too, whatever ended the last run.
+		w.endBacklogStreak(jobID)
 		w.db.UpdateJobFields(jobID, map[string]any{
 			"status":           database.StatusDownloading,
 			"error":            "",
@@ -2041,6 +2052,9 @@ func (w *DownloadWorker) reinitializeNow(jobID string) {
 	// files, silently discarding the freshly-downloaded media. (AutoReinit
 	// deliberately does NOT do this — see that method.)
 	w.clearJobParts(jobID)
+
+	// The backlog retry budget is in memory, not a column: a fresh one too.
+	w.endBacklogStreak(jobID)
 
 	// Clear all non-input fields. auto_retry_count resets here because
 	// user-driven reinit grants the job a fresh budget; auto-recovery
