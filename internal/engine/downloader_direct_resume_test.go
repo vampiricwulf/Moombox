@@ -285,3 +285,99 @@ func TestDirectChunkedLoopShortOriginIsAnError(t *testing.T) {
 		})
 	}
 }
+
+// TestDirectHandoffHoldsTheFallbackToTheProbedTotal pins W20-22 and its
+// sibling: after a mid-download 200 hands the chunked loop's transfer to the
+// streaming fallback, the fallback is held to the total the probe stated. The
+// origin answers the probe with a 20 MB total, the chunks at 0 and 5 MB with
+// 206, the chunk at 10 MB with 200 (the Range ignored), and the fallback's
+// `bytes=10485760-` as each row says:
+//
+//   - a 416 naming no total: the short origin the chunked loop reads a 416
+//     below its total as, an error that keeps the sidecar (730c208 — it used
+//     to read as "already complete" and finish 10 MB of a 20 MB file);
+//   - a 206 of 10–15 MB, stating the total or `*`: the fallback asks for the
+//     rest from 15 MB and finishes the file. It used to take the body's end
+//     for the file's and finish 15 MB of it;
+//   - an empty 206: the short origin again, never an endless re-ask.
+//
+// Mutants: dropping the short-answer check after streamDirectOnce's read loop
+// — both 206 rows finish short, and the empty row too; `total =
+// d.directTotalSize` → `total = 0` there — the `*` row finishes short;
+// dropping the `staged == streamedFrom` arm — the empty row asks again until
+// the test's deadline; dropping runDirectDownloadFallback's
+// errDirectRestToCome `continue` — both 206 rows end on that error; dropping
+// the 416 arm's `total = d.directTotalSize` (730c208) — the 416 row reads as
+// complete.
+func TestDirectHandoffHoldsTheFallbackToTheProbedTotal(t *testing.T) {
+	body := make([]byte, 4*DownloadChunkSize)
+	copy(body, "\x00\x00\x00\x18ftypdash")
+	for i := 16; i < len(body); i++ {
+		body[i] = byte(i % 251)
+	}
+	cut := int64(2 * DownloadChunkSize)
+	partEnd := cut + DownloadChunkSize - 1
+	part := func(totalField string) func(w http.ResponseWriter) {
+		return func(w http.ResponseWriter) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%s", cut, partEnd, totalField))
+			w.Header().Set("Content-Length", strconv.FormatInt(partEnd-cut+1, 10))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(body[cut : partEnd+1])
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		openAt   func(w http.ResponseWriter)
+		wantFull bool
+	}{
+		{"a 416 naming no total", func(w http.ResponseWriter) { w.WriteHeader(http.StatusRequestedRangeNotSatisfiable) }, false},
+		{"a short 206 stating the total", part(strconv.Itoa(len(body))), true},
+		{"a short 206 stating no total", part("*"), true},
+		{"an empty 206", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", cut, partEnd, len(body)))
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusPartialContent)
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			full := serveRangeFile(body)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Header.Get("Range") {
+				case fmt.Sprintf("bytes=%d-%d", cut, partEnd): // the chunk: Range ignored
+					w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+					w.WriteHeader(http.StatusOK)
+					w.Write(body)
+				case fmt.Sprintf("bytes=%d-", cut): // the fallback's resume Range
+					tc.openAt(w)
+				default:
+					full(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			out := filepath.Join(t.TempDir(), "video.mp4")
+			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
+			d.delays = fastDelays()
+			d.directResumeIntervalOverride = DownloadChunkSize // a checkpoint exists before the cut
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			err := d.Start(ctx)
+			got, _ := os.ReadFile(out)
+			if tc.wantFull {
+				if err != nil {
+					t.Fatalf("Start = %v, want the rest asked for and the file finished", err)
+				}
+				if string(got) != string(body) {
+					t.Errorf("output is %d bytes, want the whole %d-byte file", len(got), len(body))
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "short of its probed size") {
+				t.Fatalf("Start = %v over %d of %d bytes, want the short-origin error", err, len(got), len(body))
+			}
+			if _, statErr := os.Stat(out + ".resume.json"); statErr != nil {
+				t.Errorf("resume sidecar gone after a short origin (stat err = %v); it must survive for a Resume", statErr)
+			}
+		})
+	}
+}

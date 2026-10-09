@@ -249,6 +249,12 @@ func directShortFileError(answer string, offset, totalSize int64) error {
 		answer, offset, totalSize)
 }
 
+// errDirectRestToCome is streamDirectOnce's word that its 206 ended cleanly
+// short of the file's total after moving the file on, so
+// runDirectDownloadFallback asks for the rest from the new offset. It never
+// leaves the fallback.
+var errDirectRestToCome = errors.New("the answer ended before the file did")
+
 // differentFileReason says why staged bytes cannot be a prefix of a file whose
 // origin, asked by source, states it is total bytes long — or "" when they can
 // be, or when nothing is staged. A total that differs from the one the sidecar
@@ -339,8 +345,11 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 //     outage, waits it out. One dropped connection ended the job, however
 //     much of the file had streamed.
 //
-// Anything else returns as it did, a failure the monitor does not call an
-// outage among them.
+// A 206 that ends cleanly short of the file's total, having moved it on, is
+// asked for the rest from the new offset (errDirectRestToCome), as the
+// chunked loop asks for its next chunk after a short one. Anything else
+// returns as it did, a failure the monitor does not call an outage among
+// them.
 func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
 	refreshes := 0
 	for {
@@ -348,6 +357,9 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 		status, linkFailed, err := d.streamDirectOnce(parent)
 		if err == nil {
 			return nil
+		}
+		if errors.Is(err, errDirectRestToCome) {
+			continue
 		}
 		if d.bytesWritten.Load() != before {
 			refreshes = 0 // a refusal after progress is a new expiry
@@ -416,6 +428,11 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	defer resp.Body.Close()
 	status := resp.StatusCode
 
+	// The length the file has, by a 206's own word or failing that the
+	// recorded total: a 206 whose body ends short of it did not deliver the
+	// rest of the file (below). A 200 is held to its Content-Length by
+	// net/http itself.
+	var total int64
 	switch status {
 	case http.StatusPartialContent:
 		// Range honoured — but ONLY if the body really starts where we asked.
@@ -444,6 +461,10 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 			// survive for the next attempt.
 			return status, false, fmt.Errorf("origin answered Range %d with Content-Range start %d (header %q)",
 				offset, start, resp.Header.Get("Content-Range"))
+		}
+		total = d.directTotalSize
+		if stated, known := parseContentRangeTotal(resp.Header); known {
+			total = stated
 		}
 	case http.StatusOK:
 		if offset > 0 {
@@ -497,7 +518,8 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	// Without these saves the fallback streamed gigabytes with nothing on disk
 	// describing them, so an interruption cost the whole partial — the chunked
 	// loop's 50 MB cadence, applied to the path that has no chunks.
-	lastSavedOffset := d.bytesWritten.Load()
+	streamedFrom := d.bytesWritten.Load()
+	lastSavedOffset := streamedFrom
 	resumeInterval := d.directResumeIntervalBytes()
 	for {
 		// The CALLER's context, not the derived one: an idle stall is a
@@ -535,6 +557,20 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 		if readErr != nil {
 			return status, true, idleFetchError(ctx, idle, fmt.Errorf("read: %w", readErr))
 		}
+	}
+
+	// A 206 that ended cleanly short of the file's total was taken for the
+	// whole file: the sidecar was cleared and the truncated file finished as
+	// the archive — after a mid-download 200 handed the chunked loop's
+	// transfer here, past the probed total it knew. One that moved the file
+	// on is asked for the rest (errDirectRestToCome); one that brought
+	// nothing is the short origin the chunked loop reads an empty 206 as, an
+	// error that keeps the sidecar.
+	if staged := d.bytesWritten.Load(); total > 0 && staged < total {
+		if staged == streamedFrom {
+			return status, false, directShortFileError("a 206 that brought nothing", staged, total)
+		}
+		return status, false, errDirectRestToCome
 	}
 
 	// Fully downloaded — clear the resume sidecar, exactly as the chunked
