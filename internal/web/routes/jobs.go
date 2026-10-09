@@ -1276,7 +1276,6 @@ var (
 	// VOD/clip URLs are deliberately NOT matched here — callers without a
 	// videoId get an error instead of a wrong job type.
 	twitchURLRe = regexp.MustCompile(`(?:^|/)(?:www\.|m\.)?twitch\.tv/([a-zA-Z0-9_]+)(?:[/?#]|$)`)
-	bracketIDRe = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
 	// twitchIDRe is a Twitch login or a numeric VOD ID: the character class
 	// twitchURLRe captures, at Twitch's 25-character login limit.
 	twitchIDRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,25}$`)

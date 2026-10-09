@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -241,17 +242,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		videoExt := filepath.Ext(videoFilename)
 		videoBasename := strings.TrimSuffix(videoFilename, videoExt)
 
-		// Try to extract video ID from [XXXXXXXXXXX] pattern. The title a
-		// filename yields is the name WITHOUT it: the output name appends
-		// " [id]" itself, and keeping it doubled the id in both the title and
-		// the file ("video [id] [id].mp4").
-		idMatch := bracketIDRe.FindStringSubmatch(videoBasename)
-		videoID := ""
-		nameTitle := videoBasename
-		if idMatch != nil {
-			videoID = idMatch[1]
-			nameTitle = strings.Join(strings.Fields(strings.Replace(videoBasename, idMatch[0], "", 1)), " ")
-		}
+		// The id the file name carries, and the title it yields: the name
+		// WITHOUT that id, since the output name appends " [id]" itself and
+		// keeping it doubled the id in both the title and the file
+		// ("video [id] [id].mp4").
+		videoID, nameTitle := importNameID(videoBasename)
 
 		// Read optional chat metadata for videoId/title/channel
 		var meta importChatMeta
@@ -269,9 +264,8 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		// output filename below. filepath.Join CLEANS what it joins, so an id
 		// beginning "/.." promotes the following ".." elements to real path
 		// segments and walks out of imports/ — and os.Create truncates
-		// whatever it lands on. The bracket-regex path (bracketIDRe) is
-		// already constrained to the same shape; this is the path that was
-		// not. An id that fails the check falls back to the generated one
+		// whatever it lands on. The file-name path (importNameIDRe) only
+		// takes path-safe id shapes; this is the path that was not. An id that fails the check falls back to the generated one
 		// rather than failing the import: O-AA chose "imports everything"
 		// over "surfaces bad archives".
 		if videoID == "" && utils.IsVideoID(meta.VideoID) {
@@ -489,6 +483,27 @@ func zipEntryName(f *zip.File) string {
 		return s
 	}
 	return strings.ToValidUTF8(f.Name, "\uFFFD")
+}
+
+// importNameIDRe is a bracketed id in an archive's file name: a YouTube video
+// id, or the "imp_" placeholder an earlier import minted (randomHex(4), the
+// shape the dashboard's isImportPlaceholderId and the TUI's
+// isImportPlaceholderID read), so re-importing an imported archive keeps its
+// id. Every shape is path-safe — the id is interpolated into the output name.
+var importNameIDRe = regexp.MustCompile(`\[(imp_[0-9a-f]{8}|[a-zA-Z0-9_-]{11})\]`)
+
+// importNameID returns the id a file name's stem carries and the stem without
+// it. The id is the LAST bracketed one: Moombox ("${title} [${id}]") and
+// yt-dlp ("%(title)s [%(id)s]") both append it, and a title can carry a
+// bracketed tag of the same shape ("[Holo-Live3D] Concert [dQw4w9WgXcQ]") —
+// the first match took the tag for the id.
+func importNameID(stem string) (id, rest string) {
+	all := importNameIDRe.FindAllStringSubmatchIndex(stem, -1)
+	if len(all) == 0 {
+		return "", stem
+	}
+	m := all[len(all)-1]
+	return stem[m[2]:m[3]], strings.Join(strings.Fields(stem[:m[0]]+" "+stem[m[1]:]), " ")
 }
 
 // randomHex returns n random bytes as a hex string.
