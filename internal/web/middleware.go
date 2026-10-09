@@ -123,7 +123,9 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // same-origin mutating requests (Fetch spec). A non-browser client that
 // mutates must set Origin to the server's base URL or use the
 // InternalToken. `moombox add` is not one: it writes the database directly
-// and makes no HTTP request. The yt-dlp plugin's loopback POT routes are
+// and never calls this server's API, so there is no request here for it to
+// put an Origin on — its only HTTP traffic is the "Job Added" notification
+// to the configured webhooks. The yt-dlp plugin's loopback POT routes are
 // exempted below.
 func CSRFMiddleware(store *config.Store, internalToken string, logger interface {
 	Warn(msg string, args ...any)
