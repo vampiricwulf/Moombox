@@ -54,11 +54,13 @@ func goCancelAfter(t *testing.T, d time.Duration, cancel context.CancelFunc) fun
 	}
 }
 
-// fetchSite is one of the five places the engine reports a connectivity
-// failure from (reportFetchFailure, downloader_fetch.go:230/:531/:577/:655 and
-// eviction_probe.go:129). call drives exactly one of them to its error return
-// and asserts the call failed where the signature exposes that; probeFileSize
-// returns only a size, so its row asserts 0 instead.
+// fetchSite is one of the six places the engine reports a connectivity
+// failure from (reportFetchFailure: fetchSegment, probeHeadAt, probeFileSize
+// and fetchChunk in downloader_fetch.go, streamDirectOnce in
+// downloader_direct.go, and eviction_probe.go's ProbeSegmentAvailable). call
+// drives exactly one of them to its error return and asserts the call failed
+// where the signature exposes that; probeFileSize returns no error, so its
+// row asserts a 0 size instead.
 type fetchSite struct {
 	name string
 	call func(t *testing.T, ctx context.Context, d *SegmentDownloader)
@@ -76,13 +78,18 @@ var engineFetchSites = []fetchSite{
 		}
 	}},
 	{"probeFileSize", func(t *testing.T, ctx context.Context, d *SegmentDownloader) {
-		if size := d.probeFileSize(ctx); size != 0 {
+		if size, _ := d.probeFileSize(ctx); size != 0 {
 			t.Fatalf("probeFileSize = %d, want 0 on a request that never answered", size)
 		}
 	}},
 	{"fetchChunk", func(t *testing.T, ctx context.Context, d *SegmentDownloader) {
 		if _, _, err := d.fetchChunk(ctx, 0, 1023); err == nil {
 			t.Fatal("fetchChunk returned nil error")
+		}
+	}},
+	{"streamDirectOnce", func(t *testing.T, ctx context.Context, d *SegmentDownloader) {
+		if _, _, err := d.streamDirectOnce(ctx); err == nil {
+			t.Fatal("streamDirectOnce returned nil error")
 		}
 	}},
 	{"ProbeSegmentAvailable", func(t *testing.T, ctx context.Context, d *SegmentDownloader) {
@@ -103,7 +110,7 @@ func newFetchSiteDownloader(t *testing.T, srvURL string) *SegmentDownloader {
 	})
 }
 
-// TestEveryFetchSiteIgnoresACallerCancel pins T4-35 across all five sites: a
+// TestEveryFetchSiteIgnoresACallerCancel pins T4-35 across all six sites: a
 // shutdown, a quality split or a superseded refresh cancels the download
 // context, the in-flight request dies with it, and that is a decision Moombox
 // made — not evidence about the network. Counting it drags the connectivity
@@ -114,7 +121,7 @@ func newFetchSiteDownloader(t *testing.T, srvURL string) *SegmentDownloader {
 // hardcoded 10 s timeout, well past this test, so the parent cancel is the
 // only thing that can finish them — which is exactly the guard under test.
 //
-// Mutant this kills: reporting unconditionally at any one of the five sites
+// Mutant this kills: reporting unconditionally at any one of the six sites
 // (that row's fails becomes 1). It does NOT discriminate a guard on parent
 // from a guard on the SHADOWED derived ctx: cancelling parent finishes both.
 // TestFetchSegmentDerivedTimeoutIsAConnectivityFailure below is what kills
@@ -146,7 +153,7 @@ func TestEveryFetchSiteIgnoresACallerCancel(t *testing.T) {
 	}
 }
 
-// TestEveryFetchSiteReportsATransportError is the other half across all five
+// TestEveryFetchSiteReportsATransportError is the other half across all six
 // sites: with a perfectly healthy caller context, a request that dies on the
 // wire IS network evidence and must still be reported.
 //
@@ -154,7 +161,7 @@ func TestEveryFetchSiteIgnoresACallerCancel(t *testing.T) {
 // at the client and happens instantly — long before any derived deadline — so
 // each site's own context is still alive when it reports.
 //
-// Mutant this kills: suppressing every error outright at any of the five
+// Mutant this kills: suppressing every error outright at any of the six
 // sites (that row's fails drops to 0), which is what a guard written against
 // the wrong condition would do.
 //

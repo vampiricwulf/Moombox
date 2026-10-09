@@ -38,7 +38,7 @@ func TestProbeFileSizeRetriesBeforeFallback(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
 	d.delays = fastDelays()
 
-	if got := d.probeFileSizeWithRetry(context.Background()); got != 4096 {
+	if got, _ := d.probeFileSizeWithRetry(context.Background()); got != 4096 {
 		t.Fatalf("probeFileSizeWithRetry = %d, want 4096 after one transient failure (calls=%d)", got, calls.Load())
 	}
 }
@@ -250,7 +250,7 @@ func TestProbeFileSizeDrainIsBounded(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
-	if got := d.probeFileSize(context.Background()); got != 4096 {
+	if got, _ := d.probeFileSize(context.Background()); got != 4096 {
 		t.Fatalf("probeFileSize = %d, want 4096", got)
 	}
 	// Give the server goroutine a moment to notice the closed body.

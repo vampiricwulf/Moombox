@@ -847,14 +847,17 @@ func parseContentRangeTotal(h http.Header) (int64, bool) {
 }
 
 // probeFileSize discovers the total file size using a Range: bytes=0-0 request.
-// Returns 0 if the server doesn't support Range requests or the size is unknown.
+// Returns 0 if the server doesn't support Range requests or the size is
+// unknown, with the status the probe was answered with — 0 when it got no
+// answer at all — so probeFileSizeWithRetry can tell a refused URL and a dead
+// link from a server that does not do Range.
 //
 // Status check happens before body drain: if the server ignores Range and
 // returns 200 OK with the full file, we close without reading. The legacy
 // behavior unconditionally io.Copy'd the body to io.Discard first, which on
 // a non-Range-supporting CDN meant pulling a multi-GB VOD just to throw it
 // away (audit reports/engine.md Finding 14).
-func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
+func (d *SegmentDownloader) probeFileSize(parent context.Context) (int64, int) {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
@@ -863,7 +866,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	// then 403s the first real chunk (VOD 403 fix, 2026-09-29).
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", "bytes=0-0")
@@ -871,7 +874,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return 0
+		return 0, 0
 	}
 	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
@@ -880,7 +883,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 		// Server doesn't honor Range. Don't drain the body — it could be
 		// multiple GB and we have no use for it. The connection is sacrificed
 		// (no keep-alive reuse) but that's cheaper than the bandwidth.
-		return 0
+		return 0, resp.StatusCode
 	}
 
 	// 1-byte body; safe to drain so the connection can be reused for the
@@ -895,11 +898,11 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 		sizeStr := contentRange[idx+1:]
 		if sizeStr != "*" {
 			size, _ := strconv.ParseInt(sizeStr, 10, 64)
-			return size
+			return size, resp.StatusCode
 		}
 	}
 
-	return 0
+	return 0, resp.StatusCode
 }
 
 // probeFileSizeWithRetry re-asks for the file size before the caller gives up
@@ -913,23 +916,70 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 // once per download. It also triples the body sacrificed to a non-Range
 // origin — measured at ~1 MB across the three probes, against ~330 KB for
 // one — which is nothing beside the multi-GB VOD that follows.
-func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
+//
+// Two answers are not charged against those attempts, as on the chunked loop
+// (fetchChunkWithRetry):
+//
+//   - a 403 or 410 asks OnCredentialRefresh for a fresh URL
+//     (refreshDirectURL) and probes again on it, at most
+//     directRefreshAttempts times. A URL that expired before the first
+//     request — a VOD whose extraction outlived its URLs on the way here —
+//     spent the three attempts on its 403 and fell through to the streaming
+//     fallback, which had no refresh of its own then;
+//   - no answer at all while IsOnline reports the device offline waits the
+//     outage out, and the last attempt first gives the monitor the time it
+//     needs to call one (awaitOutageVerdict). An outage as the download
+//     started sent it to the fallback, whose one request then failed the job.
+//
+// The error ends the download as the chunked loop's would, sidecar kept: a
+// refresh the probe could not use (another stream, or nothing returned), a
+// URL still refused once the refreshes are spent, or a cancel. Without
+// OnCredentialRefresh a refusal is charged like any other answer, as before.
+func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) (int64, error) {
 	const attempts = 3
-	for i := range attempts {
-		if size := d.probeFileSize(ctx); size > 0 {
-			return size
+	refreshes := 0
+	for i := 0; i < attempts; i++ {
+		size, status := d.probeFileSize(ctx)
+		if size > 0 {
+			return size, nil
 		}
-		if d.isCancelled() || ctx.Err() != nil {
-			return 0
+		if err := d.cancelErr(ctx); err != nil {
+			return 0, err
+		}
+		if (status == http.StatusForbidden || status == http.StatusGone) && d.opts.OnCredentialRefresh != nil {
+			if refreshes >= directRefreshAttempts {
+				return 0, fmt.Errorf("size probe refused: HTTP %d", status)
+			}
+			refreshes++
+			if err := d.refreshDirectURL(status); err != nil {
+				return 0, fmt.Errorf("size probe refused: HTTP %d; %w", status, err)
+			}
+			i-- // not charged: the next probe is on the fresh URL
+			continue
+		}
+		if status == 0 && d.opts.IsOnline != nil {
+			offline := !d.opts.IsOnline()
+			if !offline && i == attempts-1 {
+				offline = d.awaitOutageVerdict(ctx)
+			}
+			if offline {
+				d.emitActivity(ActivityReconnecting)
+				if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+					return 0, d.cancelErr(ctx)
+				}
+				i-- // not charged: the failure says nothing about Range support
+				continue
+			}
 		}
 		if i < attempts-1 {
-			d.logger.Debug("[Downloader] Range probe returned no size; retrying", "attempt", i+1)
+			d.logger.Debug("[Downloader] Range probe returned no size; retrying", "attempt", i+1, "status", status)
 			if err := utils.Sleep(ctx, d.delays.genericRetry<<i); err != nil {
-				return 0
+				return 0, d.cancelErr(ctx)
 			}
 		}
 	}
-	return 0
+	// A cancel that landed during the outage verdict is still a cancel.
+	return 0, d.cancelErr(ctx)
 }
 
 // fetchChunkWithRetry downloads a byte range with exponential backoff retry.

@@ -71,7 +71,10 @@ func (d *SegmentDownloader) directResumeIntervalBytes() int64 {
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// Probe total file size via Range: bytes=0-0, retried so one transient
 	// failure cannot route a resumable download into the streaming fallback.
-	totalSize := d.probeFileSizeWithRetry(ctx)
+	totalSize, err := d.probeFileSizeWithRetry(ctx)
+	if err != nil {
+		return err
+	}
 
 	if totalSize <= 0 {
 		// The server really does not support Range requests — stream it.
@@ -321,12 +324,74 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 // Without it an outage that failed the probe let a resume append one file's
 // tail to another's checkpoint, or finish a partial longer than the file.
 //
+// A refused or broken request is answered as the chunked loop answers one
+// (fetchChunkWithRetry), and asked again from wherever the file stands —
+// the resume Range above makes that free:
+//
+//   - a 403 or 410 asks OnCredentialRefresh for a fresh URL
+//     (refreshDirectURL), at most directRefreshAttempts times without a byte
+//     written between them. A probe that failed sends a download here, and a
+//     mid-download 200 hands one here; a URL that expired on the way ended
+//     the job on its 403;
+//   - a request that got no complete answer — none at all, or a body that
+//     broke off — while IsOnline reports the device offline, or once the
+//     monitor, given the time it needs (awaitOutageVerdict), calls an
+//     outage, waits it out. One dropped connection ended the job, however
+//     much of the file had streamed.
+//
+// Anything else returns as it did, a failure the monitor does not call an
+// outage among them.
+func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
+	refreshes := 0
+	for {
+		before := d.bytesWritten.Load()
+		status, linkFailed, err := d.streamDirectOnce(parent)
+		if err == nil {
+			return nil
+		}
+		if d.bytesWritten.Load() != before {
+			refreshes = 0 // a refusal after progress is a new expiry
+		}
+		switch {
+		case status == http.StatusForbidden || status == http.StatusGone:
+			if d.opts.OnCredentialRefresh == nil || refreshes >= directRefreshAttempts {
+				return err
+			}
+			refreshes++
+			if rerr := d.refreshDirectURL(status); rerr != nil {
+				return fmt.Errorf("%w; %w", err, rerr)
+			}
+		case linkFailed && d.opts.IsOnline != nil:
+			if d.opts.IsOnline() && !d.awaitOutageVerdict(parent) {
+				// A cancel that ended the verdict wait is still a cancel.
+				if cerr := d.cancelErr(parent); cerr != nil {
+					return cerr
+				}
+				return err
+			}
+			d.emitActivity(ActivityReconnecting)
+			if werr := waitForConnectivity(parent, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+				return d.cancelErr(parent)
+			}
+		default:
+			return err
+		}
+	}
+}
+
+// streamDirectOnce is one request of runDirectDownloadFallback: it asks for
+// the file from the resume offset and streams the answer to disk. It returns
+// the status the request was answered with (0 when it got no answer) and
+// whether it failed for want of a complete answer — no response at all, or a
+// body that broke off mid-read — which is the link failing, not the origin
+// refusing.
+//
 // The whole transfer runs under the same read-progress (idle) deadline the
 // segment and chunk fetches use. It is the only bound this GET has: the
 // client-level Timeout that used to cap it went away with ENGINE-4, and a
 // total deadline is the wrong shape anyway for a multi-GB VOD streamed in one
 // response.
-func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
+func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool, error) {
 	idle := SegmentTimeout
 	ctx, idleTimer, cancel := withReadProgressDeadline(parent, idle)
 	defer cancel()
@@ -334,7 +399,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 	offset := d.bytesWritten.Load()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return 0, false, fmt.Errorf("create request: %w", err)
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	if offset > 0 {
@@ -343,12 +408,15 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		return idleFetchError(ctx, idle, fmt.Errorf("download: %w", redactPoToken(err)))
+		reportFetchFailure(parent, "engine/fetch")
+		return 0, true, idleFetchError(ctx, idle, fmt.Errorf("download: %w", redactPoToken(err)))
 	}
+	reportSuccess("engine/fetch")
 	resp.Body = &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}
 	defer resp.Body.Close()
+	status := resp.StatusCode
 
-	switch resp.StatusCode {
+	switch status {
 	case http.StatusPartialContent:
 		// Range honoured — but ONLY if the body really starts where we asked.
 		// This is the one path that meets a 206 with no known total size, so
@@ -369,22 +437,22 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			// Same shape as the 200 below — the origin restarted from the
 			// top and labelled it honestly, so the staged bytes must go.
 			if derr := d.discardStagedMedia("206 Content-Range starts at byte 0, not the resume offset"); derr != nil {
-				return derr
+				return status, false, derr
 			}
 		default:
 			// Nothing written yet, so the staged bytes and the sidecar both
 			// survive for the next attempt.
-			return fmt.Errorf("origin answered Range %d with Content-Range start %d (header %q)",
+			return status, false, fmt.Errorf("origin answered Range %d with Content-Range start %d (header %q)",
 				offset, start, resp.Header.Get("Content-Range"))
 		}
 	case http.StatusOK:
 		if offset > 0 {
 			if derr := d.discardStagedMedia("server answered 200 to the resume Range — the body starts at byte 0"); derr != nil {
-				return derr
+				return status, false, derr
 			}
 		}
 	default:
-		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
+		if status == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
 			// The resume offset is at or past EOF — complete only if the
 			// staged bytes are the whole file. The total a 416 may state
 			// (`bytes */<total>`) is held to the partial first, as a 206's
@@ -404,22 +472,22 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 				total = d.directTotalSize
 			}
 			if total > 0 && total != offset {
-				return directShortFileError("416 Range Not Satisfiable", offset, total)
+				return status, false, directShortFileError("416 Range Not Satisfiable", offset, total)
 			}
 			d.logger.Info("[Downloader] Resume offset is at or past EOF — staged file is already complete",
 				"offset", offset)
 			d.ClearResume()
-			return nil
+			return status, false, nil
 		}
 		// Read partial body for diagnostics
 		bodySnippet := make([]byte, 1024)
 		n, _ := resp.Body.Read(bodySnippet)
 		d.logger.Debug("[Downloader] direct URL failed",
-			"status", resp.StatusCode,
+			"status", status,
 			"url_prefix", truncateURL(d.getBaseURL(), 120),
 			"body_snippet", string(bodySnippet[:n]),
 		)
-		return fmt.Errorf("HTTP %d downloading direct URL", resp.StatusCode)
+		return status, false, fmt.Errorf("HTTP %d downloading direct URL", status)
 	}
 
 	buf := make([]byte, 64*1024) // 64KB buffer
@@ -436,7 +504,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 		// network failure the read below surfaces as such, while a cancel
 		// from above is a shutdown and must stay one.
 		if d.isCancelled() || parent.Err() != nil {
-			return d.cancelErr(parent)
+			return status, false, d.cancelErr(parent)
 		}
 
 		n, readErr := resp.Body.Read(buf)
@@ -444,7 +512,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			d.noteFetch(n)
 			written, writeErr := d.outputFile.Write(buf[:n])
 			if writeErr != nil {
-				return fmt.Errorf("%w: write: %w", ErrLocalWrite, writeErr)
+				return status, false, fmt.Errorf("%w: write: %w", ErrLocalWrite, writeErr)
 			}
 			stagedBytes := d.bytesWritten.Add(int64(written))
 
@@ -465,7 +533,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			break
 		}
 		if readErr != nil {
-			return idleFetchError(ctx, idle, fmt.Errorf("read: %w", readErr))
+			return status, true, idleFetchError(ctx, idle, fmt.Errorf("read: %w", readErr))
 		}
 	}
 
@@ -476,7 +544,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 	// "mux" would leave a stale sidecar that truncates the COMPLETE file back
 	// to its offset on the next run (sweep-2 B-M1).
 	d.ClearResume()
-	return nil
+	return status, false, nil
 }
 
 // restartDirectFallback answers a resume Range whose answer names a different
@@ -485,10 +553,10 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 // discards the partial and streams the file again. The discard zeroes the
 // byte counter, so the second request sends no Range and nothing that leads
 // here can fire on it — one level deep at most.
-func (d *SegmentDownloader) restartDirectFallback(parent context.Context, resp *http.Response, reason string) error {
+func (d *SegmentDownloader) restartDirectFallback(parent context.Context, resp *http.Response, reason string) (int, bool, error) {
 	resp.Body.Close()
 	if err := d.discardStagedMedia(reason); err != nil {
-		return err
+		return resp.StatusCode, false, err
 	}
-	return d.runDirectDownloadFallback(parent)
+	return d.streamDirectOnce(parent)
 }
