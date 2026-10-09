@@ -444,10 +444,11 @@ func TestSecondTargetKeepsHistoryAfterFirstTargetsRelease(t *testing.T) {
 // the OTHER target's terminal release takes the whole job entry — and with it
 // this target's History.
 //
-// MUTANT: remove `delete(j.closed, key)` from `remember`. Target B's
-// `finished` drops the entry although A had reopened, so A's terminal PATCH
-// renders a one-line History ("Finished") instead of the three states it saw.
-// Every other test in the suite stays green.
+// MUTANT: remove `delete(j.closed, key)` from `messageID` — the lookup every
+// create follows, so the clear `remember` used to make is made there. Target
+// B's `finished` drops the entry although A had reopened, so A's terminal
+// PATCH renders a one-line History ("Finished") instead of the three states it
+// saw.
 func TestClosedFlagClearsWhenATargetOpensANewMessage(t *testing.T) {
 	fa := newFakeDiscord(t, okCreated("MA"))
 	fb := newFakeDiscord(t, okCreated("MB"))

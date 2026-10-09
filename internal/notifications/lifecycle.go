@@ -146,8 +146,8 @@ func normalizeTargetMode(mode string) string {
 // and a write per event, which the cadence ruling does not allow.
 // The map is bounded: entries are released when a job's story ends (see
 // release) and, for jobs that never reach a terminal event, evicted
-// least-recently-touched first past maxTrackedJobs — never while a send the
-// entry is read for is still queued (hold).
+// least-recently-touched first past maxTrackedJobs — either way, never while
+// a send the entry is read for is still queued (hold).
 type lifecycleTracker struct {
 	// writeMu serialises the whole read-modify-write of a job's stored map
 	// against the store. UpdateNotificationMsgs replaces the WHOLE map, so
@@ -174,12 +174,13 @@ type lifecycleTracker struct {
 	dropping map[string]map[string]int
 	// held counts, per job, the managed sends queued for it on an edit-mode
 	// target and not yet gone from their queue (hold). evictLocked passes a
-	// held job over: its row can be deleted before the send is dispatched —
+	// held job over, and release keeps a held job's entry until the last pin
+	// lets go: its row can be deleted before the send is dispatched —
 	// deleting an active job queues its cancel first — and an entry evicted
-	// meanwhile had nothing left to be rebuilt from.
+	// or released meanwhile had nothing left to be rebuilt from.
 	//
-	// Beside jobs, like dropping: release and the drops delete entries a
-	// queued send still holds, and the count must outlive them.
+	// Beside jobs, like dropping: the drops still delete an entry a queued
+	// send holds once nothing is left in it, and the count must outlive it.
 	held map[string]int
 	log  interface {
 		Debug(msg string, args ...any)
@@ -272,6 +273,16 @@ type extraMsg struct {
 // job. Dropping it orphaned it, reading "Downloading" for good. It stays under
 // its old key and is returned in extra: every edit rewrites it too, and the
 // terminal edit closes it (release) like the job's own message.
+//
+// The lookup is a managed send's, about to write these messages, so it opens
+// their story again: a release recorded for them — a terminal event before a
+// Retry, or a message-less one before the target's first message — no longer
+// counts, and only this send's own delivered terminal edit closes them once
+// more. release reads closed against the ids in msgs, so a stale mark made a
+// target mid-story look closed: another target's release took the entry, and
+// this target's History with it, and an entry a release kept for a queued
+// send (held) went when that send's pin let go, so a Retry's next event began
+// its History again. Kept or rebuilt from the row, the entry now reads alike.
 func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (id string, extra []extraMsg) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -288,8 +299,10 @@ func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (id st
 			delete(j.msgs, lk)
 		default:
 			extra = append(extra, extraMsg{key: lk, id: old})
+			delete(j.closed, lk)
 		}
 	}
+	delete(j.closed, key)
 	return j.msgs[key], extra
 }
 
@@ -319,10 +332,8 @@ func (l *lifecycleTracker) remember(jobID, key, messageID string) {
 		return
 	}
 	j.msgs[key] = messageID
-	// A new message reopens this target's story, so a release recorded for an
-	// earlier one (a terminal event before a Retry) must not count this id as
-	// already closed — release reads closed against the ids in msgs.
-	delete(j.closed, key)
+	// No closed mark to clear: the send that created this message looked it
+	// up first (messageID), and the lookup opened the target's story again.
 	snapshot := make(map[string]string, len(j.msgs))
 	for k, v := range j.msgs {
 		// A deleted job's id waiting on its target's drop stays out of the
@@ -382,6 +393,16 @@ func (l *lifecycleTracker) forget(jobID, key string) {
 // `finished` out keeps the entry alive until evictLocked, which is the same
 // bound a job that never reaches a terminal event already has.
 //
+// A held job's entry stays until the last pin lets go (hold), closed: a
+// queued send still reads it, and the row it would be rebuilt from can be
+// gone by then. The terminal edit releasing it is no exception, and neither
+// is the send's own pin, which lets go only once the dispatch that called
+// this returns. Released and dropped at once, an "error" delivered while the
+// job's later sends were queued behind it — a Retry's "downloading", the
+// delete's "cancelled" — left them the row alone, and the delete had taken
+// that: the cancel posted plain, or the "downloading" opened a second message,
+// and the job's message read "Failed" for good.
+//
 // keys are the target's key and the old-spelling keys of the second messages
 // its terminal edit closed (extraMsg).
 func (l *lifecycleTracker) release(jobID string, keys ...string) {
@@ -397,6 +418,17 @@ func (l *lifecycleTracker) release(jobID string, keys ...string) {
 	for _, key := range keys {
 		delete(j.history, key)
 		j.closed[key] = true
+	}
+	l.dropIfClosedLocked(jobID, j)
+}
+
+// dropIfClosedLocked deletes a job's entry once its story is over — some
+// target's release closed it and no target that holds a message is still open
+// — and no queued send holds it. release asks first, and the last pin to let
+// go asks again (hold). Caller holds l.mu.
+func (l *lifecycleTracker) dropIfClosedLocked(jobID string, j *lifecycleJob) {
+	if len(j.closed) == 0 || l.held[jobID] > 0 {
+		return
 	}
 	for k := range j.msgs {
 		if !j.closed[k] {
@@ -555,6 +587,10 @@ func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone fu
 // The load is a store read on the Send caller's goroutine — a worker, a
 // monitor, an HTTP handler — and never a wait on Discord. The send's own
 // dispatch would have read the row anyway; this reads it first.
+//
+// The last pin to let go finishes what a release deferred for it: an entry
+// whose story is still closed goes then (dropIfClosedLocked). A job whose
+// sends were all delivered leaves no entry behind, as before the pin.
 func (l *lifecycleTracker) hold(jobID string) (letGo func()) {
 	l.mu.Lock()
 	l.held[jobID]++
@@ -567,6 +603,9 @@ func (l *lifecycleTracker) hold(jobID string) (letGo func()) {
 			defer l.mu.Unlock()
 			if l.held[jobID]--; l.held[jobID] <= 0 {
 				delete(l.held, jobID)
+				if j := l.jobs[jobID]; j != nil {
+					l.dropIfClosedLocked(jobID, j)
+				}
 			}
 		})
 	}
@@ -716,7 +755,8 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 		// The lookup just created the entry, and this event is the end of the
 		// story: release it again rather than leave a slot (and the store read
 		// behind it) held for a message that was never opened. On a target
-		// filtered to ["error","finished"] that is every failing job.
+		// filtered to ["error","finished"] that is every failing job. Queued,
+		// the send holds the entry, so it goes when the pin lets go (hold).
 		m.tracker().release(opts.JobID, t.msgKey)
 		return lifecyclePlan{}
 	}
@@ -793,8 +833,8 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	}
 	// A delivered terminal edit ends this job's story for THIS target: drop its
 	// history (and the job's entry once every target holding a message is
-	// closed). The PERSISTED id stays, so a Retry reloads it once and keeps
-	// editing the same message.
+	// closed and no queued send holds it). The PERSISTED id stays, so a Retry
+	// reloads it once and keeps editing the same message.
 	if lifecycleErr == nil && (plan.AlsoSeparate || opts.Event == "finished") {
 		tr.release(opts.JobID, append([]string{t.msgKey}, closedExtra...)...)
 	}

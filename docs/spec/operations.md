@@ -719,6 +719,15 @@ as the queues hold sends for. Without the pin an entry evicted — by a
 backfill's `found`s on any edit-mode target — before the cancel was queued, or
 while it waited behind a busy target, left the cancel with neither the id nor
 the row, and it posted plain beside a message that read "Downloading" for good.
+A release waits for the pin too: a terminal edit delivered while later sends
+of the job are queued behind it closes its target's story but keeps the entry,
+and the last pin to let go drops it if the story is still closed
+(`dropIfClosedLocked`). Released at once, an `error` delivered ahead of a
+Retry's `downloading` and the delete's `cancelled` left them the row alone,
+which the delete had taken: the `downloading` opened a second message, or the
+cancel posted plain, and the job's message read "Failed" for good. A managed
+send's lookup opens the story it writes again (`messageID`), so a Retry that
+edits the closed message is mid-story to every later release, not closed.
 
 **During shutdown** every request on this path is single-attempt, like every
 other send: the owner's ruling caps a graceful shutdown at 15 s, and one
