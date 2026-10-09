@@ -48,6 +48,10 @@ func (c Call) Field(name string) (string, bool) {
 type Recorder struct {
 	mu    sync.Mutex
 	calls []Call
+	// forgotten and retained record the deleted-job hooks, in call order, so
+	// a test can see that a delete reached the notifier at all.
+	forgotten []string
+	retained  []map[string]struct{}
 }
 
 // New returns an empty Recorder.
@@ -117,6 +121,7 @@ func (r *Recorder) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = nil
+	r.forgotten, r.retained = nil, nil
 }
 
 // HasTargets reports true so a producer's `if notifier.HasTargets()` cost gate
@@ -134,9 +139,37 @@ func (r *Recorder) BeginShutdown() {}
 // Wait is a no-op: a Recorder has no queue to drain.
 func (r *Recorder) Wait() {}
 
-// ForgetJob and RetainJobs are no-ops: a Recorder keeps no per-job message
-// state.
-func (r *Recorder) ForgetJob(string) {}
+// ForgetJob records the deleted job's id. A Recorder keeps no per-job message
+// state to drop; what a test needs is that the delete reached the notifier.
+func (r *Recorder) ForgetJob(jobID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.forgotten = append(r.forgotten, jobID)
+}
 
-// RetainJobs is a no-op; see ForgetJob.
-func (r *Recorder) RetainJobs(map[string]struct{}) {}
+// RetainJobs records a copy of the live set it was handed; see ForgetJob.
+// Copied because the caller owns the map.
+func (r *Recorder) RetainJobs(live map[string]struct{}) {
+	cp := make(map[string]struct{}, len(live))
+	for id := range live {
+		cp[id] = struct{}{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retained = append(r.retained, cp)
+}
+
+// Forgotten returns the ids ForgetJob was called with, in call order.
+func (r *Recorder) Forgotten() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.forgotten...)
+}
+
+// Retained returns the live sets RetainJobs was called with, in call order.
+// Each is the recorder's own copy; a test must not edit it.
+func (r *Recorder) Retained() []map[string]struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]map[string]struct{}(nil), r.retained...)
+}

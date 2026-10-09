@@ -1931,23 +1931,9 @@ func (s *runState) wireMonitorCallbacks() {
 		s.onJobDeleted(ev.JobID)
 	})
 
-	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
-		// Keep per-job log tracking in sync (matches TS knownJobIds update):
-		// live jobs routed, terminal ones dropped from the scan (CORE-12).
-		activeIDs := make(map[string]struct{}, len(jobs))
-		for _, j := range jobs {
-			activeIDs[j.ID] = struct{}{}
-		}
-		s.db.SyncJobLogTracking(jobs)
-		s.db.PruneJobLogs(activeIDs)
-		// The bulk deletes (a departed channel's prune) fire only this event,
-		// so the notifier's edit-mode state for their jobs goes here, as
-		// onJobDeleted drops a single job's.
-		if s.notifyMgr != nil {
-			s.notifyMgr.RetainJobs(activeIDs)
-		}
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
-	})
+	// OnJobsChange subscriber: the bulk writers' full-list refresh (see
+	// onJobsChange).
+	s.unsubWSJobsChange = s.db.OnJobsChange(s.onJobsChange)
 
 	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
 	s.logSub = s.log.Subscribe()
@@ -2078,6 +2064,26 @@ func (s *runState) onJobDeleted(jobID string) {
 	if s.notifyMgr != nil {
 		s.notifyMgr.ForgetJob(jobID)
 	}
+}
+
+// onJobsChange is the OnJobsChange subscriber's body — onJobDeleted's twin for
+// the bulk writers, a method for the same reason: a test can drive it.
+func (s *runState) onJobsChange(jobs []*database.Job) {
+	// Keep per-job log tracking in sync (matches TS knownJobIds update):
+	// live jobs routed, terminal ones dropped from the scan (CORE-12).
+	activeIDs := make(map[string]struct{}, len(jobs))
+	for _, j := range jobs {
+		activeIDs[j.ID] = struct{}{}
+	}
+	s.db.SyncJobLogTracking(jobs)
+	s.db.PruneJobLogs(activeIDs)
+	// The bulk deletes (a departed channel's prune) fire only this event, so
+	// the notifier's edit-mode state for their jobs goes here, as onJobDeleted
+	// drops a single job's.
+	if s.notifyMgr != nil {
+		s.notifyMgr.RetainJobs(activeIDs)
+	}
+	s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 }
 
 // outageAlert builds the Outage Alert notification for a connectivity
