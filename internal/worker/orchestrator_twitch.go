@@ -661,14 +661,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// ends, the broadcast changes, or a terminal interrupt arrives.
 sessionLoop:
 	for {
-		// Each session decides its own verdict. A latch taken in a session
-		// that then RESUMED after a connectivity outage is stale: the check
-		// that failed did so because the monitor cancelled the session from
-		// inside the re-verify's own 5-35 s window, and the resumed session
-		// may run to a clean, confirmed end. Carrying it forward marked a
-		// completed capture Error and skipped its final mux (fix round 1).
-		unconfirmedEndErr = nil
-
 		// Quality- and gap-aware download loop
 		for ctx.Err() == nil {
 
@@ -953,6 +945,20 @@ sessionLoop:
 		// recovery sets it again, and the checks below route back to the
 		// wait instead of finalizing mid-broadcast.
 		offlineCancelled.Store(false)
+		// Each session decides its own verdict, and the outage ends this
+		// one's. A latch it took is stale: the check that failed did so
+		// because the monitor cancelled the session from inside the
+		// re-verify's own 5-35 s window. Discarded HERE, on entry, rather
+		// than when the next session starts, because the recovery below has
+		// two ways out that never start one — the broadcast ended during the
+		// outage, or a failed refresh whose re-verify confirms it over — and
+		// both finalize. A latch carried into the resumed session marked a
+		// capture it completed cleanly Error and skipped its final mux (fix
+		// round 1); carried into those finalize exits, it turned a
+		// broadcast the recovery confirmed over into a marked Error exit
+		// that never muxed its last part. Only a latch the recovery itself
+		// takes, or the resumed session's own, reaches the exit below.
+		unconfirmedEndErr = nil
 		// The pause instant, stamped where the flag is consumed. NOT sent:
 		// a "download paused, connectivity lost" embed has no connectivity to
 		// travel over, so its three attempts and ~7 s of backoff delivered it

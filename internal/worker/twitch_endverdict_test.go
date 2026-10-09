@@ -286,9 +286,9 @@ func TestUnconfirmedEndExitReturnsBeforeTheMuxingStatus(t *testing.T) {
 // end. The latch belonged to the session that took it — carrying it across
 // the resume marks a completed capture as Error and skips its final mux.
 //
-// Mutant: dropping the `unconfirmedEndErr = nil` reset at the top of the
-// session loop — ExecuteTwitch then returns the stale ErrQualityLost from
-// session 1 even though session 2 finished cleanly.
+// Mutant: dropping the `unconfirmedEndErr = nil` reset where the outage
+// branch consumes offlineCancelled — ExecuteTwitch then returns the stale
+// ErrQualityLost from session 1 even though session 2 finished cleanly.
 func TestUnconfirmedEndLatchDoesNotOutliveItsSession(t *testing.T) {
 	var session2Hits atomic.Int32
 	ended := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +337,99 @@ func TestUnconfirmedEndLatchDoesNotOutliveItsSession(t *testing.T) {
 	if errors.Is(err, engine.ErrQualityLost) {
 		t.Errorf("ExecuteTwitch = %v — session 1's unconfirmed-end latch outlived its session and "+
 			"errored a capture that session 2 completed cleanly", err)
+	}
+}
+
+// TestStaleLatchDoesNotOverrideAnOutageFinalize is the same stale latch on the
+// recovery's other way out: connectivity dies inside session 1's re-verify, so
+// that session latches, and the recovery then confirms the broadcast OVER
+// instead of resuming it — so no second session starts. The exit's gate keys
+// on the job's context and the operator's cancel (the post-outage latches
+// need it to), which the outage leaves alone, so a latch carried this far
+// returned session 1's error: the row landed in Error, marked for the
+// automatic mux, its last part never muxed and the "Finalizing — Connectivity
+// Lost" embed never sent. The capture must finalize instead.
+//
+// Both finalize exits of the recovery are driven: the recheck finds the
+// broadcast ended, and a refresh that keeps failing on a broadcast the recheck
+// still read live is then re-verified over.
+//
+// Mutants: the reset moved back to the top of the session loop (both cases
+// return ErrQualityLost, marked, and never reach Muxing); the reset dropped
+// altogether (likewise, and TestUnconfirmedEndLatchDoesNotOutliveItsSession
+// fails too).
+func TestStaleLatchDoesNotOverrideAnOutageFinalize(t *testing.T) {
+	cases := []struct {
+		name string
+		// arm installs the recovery's view of the broadcast, given the
+		// harness whose session 1 has just latched.
+		arm        func(h *endVerdictHarness)
+		wantChecks int32
+	}{
+		{
+			name: "recheck finds the broadcast ended",
+			arm: func(h *endVerdictHarness) {
+				h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
+					return &twitch.TwitchStreamInfo{IsLive: false}, nil
+				}
+			},
+			wantChecks: 2,
+		},
+		{
+			name: "failed refresh re-verified over",
+			arm: func(h *endVerdictHarness) {
+				// The recheck keeps the harness's "still live", so the
+				// recovery refreshes; every attempt fails, and the
+				// re-verify (the third consult below) says it is over.
+				h.variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
+					return nil, errUsher
+				}
+			},
+			wantChecks: 3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			old := postOutageRetryDelay
+			postOutageRetryDelay = time.Millisecond
+			t.Cleanup(func() { postOutageRetryDelay = old })
+
+			h := newEndVerdictHarness(t, "tw_stale_finalize")
+			h.variant.CheckStreamFn = func(ctx context.Context) (bool, error) {
+				switch h.checks.Add(1) {
+				case 1:
+					return true, nil // the engine's 404 consult: live ⇒ ErrQualityLost
+				case 2:
+					// The re-verify: the outage cancels the session inside
+					// its window, so the latch is taken. Arming the recovery
+					// here is safe for the reason the test above gives.
+					tc.arm(h)
+					h.conn.set(false)
+					h.conn.set(true)
+					return false, ctx.Err()
+				default:
+					return false, nil // confirmed over
+				}
+			}
+
+			statuses := h.watchStatuses()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			err := h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil)
+			seq := statuses()
+
+			if got := h.checks.Load(); got != tc.wantChecks {
+				t.Fatalf("CheckStreamFn calls = %d, want %d — the run did not take the recovery exit this case is about",
+					got, tc.wantChecks)
+			}
+			if errors.Is(err, engine.ErrQualityLost) || errors.Is(err, ErrTwitchEndUnconfirmed) {
+				t.Errorf("ExecuteTwitch = %v — the latch of the session the outage cancelled outlived it and "+
+					"turned a broadcast the recovery confirmed over into a marked Error exit", err)
+			}
+			if !sawMuxing(seq) {
+				t.Errorf("status sequence = %v — the outage finalize never ran", seq)
+			}
+		})
 	}
 }
 
