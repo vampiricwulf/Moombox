@@ -1143,7 +1143,9 @@ func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
 // 204 → 403; drop the trusted_proxies test from browserSchemeUnknown — the
 // unlisted-peer request goes 403 → 204; drop its r.TLS test — the
 // TLS-to-Moombox request goes 403 → 204; drop its trust_forwarded_proto
-// test — the request with no X-Forwarded-Proto goes 403 → 204.
+// test — the request with no X-Forwarded-Proto goes 403 → 204; let the
+// unknown scheme admit any port (`if schemeUnknown { return true }`) — the
+// portless X-Forwarded-Host subtest goes 403 → 204.
 func TestCSRFHoldsALocalOriginToTheServedPort(t *testing.T) {
 	newStore := func(publicURL string, proxies ...string) *config.Store {
 		return config.NewStore(&config.MoomboxConfig{
@@ -1214,6 +1216,24 @@ func TestCSRFHoldsALocalOriginToTheServedPort(t *testing.T) {
 			map[string]string{"X-Forwarded-Host": "192.168.1.5:8443"})
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204 — the proxy says the browser addressed :8443: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("a listed proxy's portless X-Forwarded-Host does not carry another port", func(t *testing.T) {
+		// nginx on :8443 with `proxy_set_header X-Forwarded-Host $host;`:
+		// $host drops the port, so the authority compared is the portless
+		// 192.168.1.5 and the browser's :8443 is not it. README and
+		// security.md tell the operator to forward $http_host instead.
+		proxied := newStore("", "10.4.0.9")
+		rr, _ := post(proxied, "10.4.0.9:5555", "10.4.0.9:774", "https://192.168.1.5:8443",
+			map[string]string{"X-Forwarded-Host": "192.168.1.5"})
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 — a portless forwarded host names a default port, not :8443", rr.Code)
+		}
+		rr, _ = post(proxied, "10.4.0.9:5555", "10.4.0.9:774", "https://192.168.1.5:8443",
+			map[string]string{"X-Forwarded-Host": "192.168.1.5:8443"})
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — $http_host carries the browser's port: %s", rr.Code, rr.Body.String())
 		}
 	})
 

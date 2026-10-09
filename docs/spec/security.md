@@ -153,9 +153,17 @@ else. Only the port is
 added: the origin's host is still judged by IP class, so `http://localhost:774` and
 `http://127.0.0.1:774` are interchangeable against a dashboard on `:774`. The certificate-SAN
 widening is held to the same port. The dashboard's own fetches and socket, the TUI (internal token,
-no Origin), the yt-dlp plugin (no Origin) and a trusted reverse proxy that sets `X-Forwarded-Host`
-are unaffected; a proxy on another port that sets no `X-Forwarded-Host` needs `network.public_url`
-to name the address the browser types. `HostGateMiddleware` compares the `Host` with itself, so the
+no Origin), the yt-dlp plugin (no Origin) and a reverse proxy that passes on the port the browser used
+— in the `Host` it forwards, or in `X-Forwarded-Host` when it is listed in `network.trusted_proxies`
+— are unaffected. Caddy and Traefik forward the browser's own `Host` by default. Refused since this
+rule, each until `network.public_url` names the address the browser types or the proxy is fixed: a
+proxy on a non-default port whose forwarded host carries no port — one that rewrites `Host` to the
+upstream's and sets no `X-Forwarded-Host` or is not listed, and a listed one whose `X-Forwarded-Host`
+is portless, which is nginx's `$host` (`$http_host` or `$host:$server_port` carries the port) — and
+an unlisted TLS-terminating proxy on 443 forwarding a portless `Host` with `trust_forwarded_proto`
+off (above). A listed proxy's forwarded host is the authority the browser addressed; Moombox cannot
+recover a port the proxy dropped, and accepting any port there would reopen the rule for every other
+service on a trusted address. `HostGateMiddleware` compares the `Host` with itself, so the
 rule is a no-op there. Pinned by the D-S7 rows of `TestIsAllowedOrigin`,
 `TestCSRFHoldsALocalOriginToTheServedPort` (`internal/web/middleware_test.go`) and
 `TestWebSocketUpgradeHoldsALoopbackOriginToItsPort` (`internal/web/websocket_origin_test.go`).

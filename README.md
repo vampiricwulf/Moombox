@@ -210,10 +210,17 @@ the password — with the host of `network.public_url` admitted as well.
 On `localhost` and `lan` the dashboard also trusts only pages served on
 **its own port**: a page another program serves from the same address
 on a different port (a dev server on `127.0.0.1:3000`, a router's admin
-page) cannot drive it. A reverse proxy listening on another port keeps
-working when it is listed in `trusted_proxies` and sets
-`X-Forwarded-Host`; otherwise set `network.public_url` to the address
-you type into the browser, whose port is admitted as well.
+page) cannot drive it. An address with no port means its scheme's
+default, so `http://` is port 80 and `https://` is 443. A reverse proxy
+keeps working when the port the browser used reaches Moombox — in the
+`Host` it forwards, or in `X-Forwarded-Host` when the proxy is listed
+in `trusted_proxies`. nginx's `$host` drops the port: forward
+`$http_host` (or `$host:$server_port`) instead. Caddy and Traefik
+forward the browser's own `Host` by default. A proxy terminating TLS on
+443 forwards no port at all, so Moombox must also learn that the browser
+used HTTPS: list the proxy in `trusted_proxies` or turn on
+`trust_forwarded_proto`. Otherwise set `network.public_url` to the
+address you type into the browser, whose port is admitted as well.
 
 To reach the dashboard from outside that boundary, pick one of these —
 strongest first.
