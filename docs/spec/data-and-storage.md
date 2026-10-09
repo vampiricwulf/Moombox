@@ -406,7 +406,7 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 **Normal flow:** `Upcoming` -> `Live` -> `Downloading` -> `Muxing` -> `Finished`
 
-A VOD skips `Live`, and stays at the status it came in with (`Upcoming` for a fresh one) while it queues for a download slot — its progress line says so — until `ExecuteWithChat` writes `Downloading` with the slot held.
+A VOD skips `Live`, and stays at the status it came in with (`Upcoming` for a fresh one) while it queues for a download slot — its progress line says so — until `ExecuteWithChat` (`ExecuteTwitch` for a Twitch VOD) writes `Downloading` with the slot held.
 
 **Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`. A backlog VOD returns to `Queued` from a cookie repair (when its feed row still exists) and from a transient pre-download fetch failure or a download that ran out of disk, held from re-admission for a backoff and only up to three runs in a row before it ends in `Error` (`requeueBacklogAfterTransientFailure` and `requeueBacklogAfterDiskFull`, `internal/worker/backlog_retry.go`). The scheduler admits nothing while the connectivity monitor reports offline, nor while the output volume is at or past `disk_critical_percent` (`Scheduler.diskGateClosed`, `internal/worker/scheduler.go`).
 

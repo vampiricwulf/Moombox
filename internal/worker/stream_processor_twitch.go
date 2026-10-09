@@ -420,8 +420,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		}, nil
 	}
 
+	// No status, as for a YouTube VOD (vodStatusUpdates): the download-slot
+	// wait is still ahead, and a Twitch VOD queueing behind a busy pool read
+	// Downloading through all of it. ExecuteTwitch writes Downloading once
+	// the slot is held; until then the row keeps the status it came in with
+	// and processJob's progress line says what it is waiting for.
 	vodUpdates := map[string]any{
-		"status":         database.StatusDownloading,
 		"is_vod":         true,
 		"title":          vodInfo.ChannelDisplayName + " — " + vodInfo.Title,
 		"channel_name":   vodInfo.ChannelDisplayName,
