@@ -1124,7 +1124,7 @@ Every major feature exists in both UIs:
 
 The middleware is applied in this exact order (`NewServer` in `server.go`). Order matters — each middleware wraps the next, so the first listed is the outermost. Two housekeeping layers come first: chi's **RequestID** (so recovery and log lines can be correlated to a request) and **DrainMiddleware** (answers 503 once `StartDrain` is called, placed ahead of recovery so a panic in a later middleware cannot disturb the shutdown path). Then:
 
-1. **RecoveryMiddleware** — Catches panics in any handler. Logs the stack trace. Returns 500 to the client. Prevents a single request from crashing the server.
+1. **RecoveryMiddleware** — Catches panics in any handler. Logs the stack that panicked (one line, innermost 32 frames, no argument values). Returns 500 to the client. Prevents a single request from crashing the server.
 2. **CORSMiddleware** — Handles Cross-Origin Resource Sharing headers based on configuration.
 3. **SecurityHeaders** — Sets CSP, X-Content-Type-Options, X-Frame-Options, and other security headers on every response.
 4. **CSRFMiddleware** — Validates Origin/Referer headers on state-changing requests (POST, PUT, DELETE). Requests with a valid `X-Internal-Token` header bypass this check (TUI path).

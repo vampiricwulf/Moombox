@@ -916,7 +916,65 @@ func (rw *recoveryWriter) Unwrap() http.ResponseWriter {
 	return rw.ResponseWriter
 }
 
-// RecoveryMiddleware catches panics and returns 500.
+// panicStackFrames bounds the stack RecoveryMiddleware logs with a handler
+// panic. The frames an operator needs — the function that panicked and the
+// handler that called it — are the innermost ones; the outermost are the
+// middleware chain and net/http's connection loop, the same for every request.
+const panicStackFrames = 32
+
+// panicStack renders the stack of the goroutine that is recovering a panic as
+// ONE line, innermost frame first — "function (file:line)" per frame, joined
+// by " < ", starting below the runtime's own panic machinery — and at most
+// panicStackFrames frames of it. Call it from the deferred function that
+// recovered: that is where the panicking frames are still on the stack.
+//
+// Built from program counters rather than debug.Stack. One line, because the
+// same line reaches the ring buffer, every dashboard and the TUI log panel,
+// none of which escape a newline the way the file handler does. And no
+// argument values: debug.Stack prints each frame's raw argument words, the
+// one part of a trace that comes from the request rather than from the code.
+func panicStack() string {
+	pcs := make([]uintptr, 128)
+	n := runtime.Callers(2, pcs) // from the deferred function down
+	frames := runtime.CallersFrames(pcs[:n])
+	var all []runtime.Frame
+	start := 0
+	for {
+		f, more := frames.Next()
+		all = append(all, f)
+		if f.Function == "runtime.gopanic" {
+			start = len(all) // what panicked is below gopanic, not above it
+		}
+		if !more {
+			break
+		}
+	}
+	all = all[start:]
+
+	var sb strings.Builder
+	for i, f := range all {
+		if i == panicStackFrames {
+			atLeast := ""
+			if n == len(pcs) {
+				atLeast = "at least " // the capture itself was cut short
+			}
+			fmt.Fprintf(&sb, " < … %s%d more", atLeast, len(all)-i)
+			break
+		}
+		if i > 0 {
+			sb.WriteString(" < ")
+		}
+		file := f.File
+		if slash := strings.LastIndexByte(file, '/'); slash >= 0 {
+			file = file[slash+1:]
+		}
+		fmt.Fprintf(&sb, "%s (%s:%d)", f.Function, file, f.Line)
+	}
+	return sb.String()
+}
+
+// RecoveryMiddleware catches panics, logs them with the stack that raised
+// them, and returns 500.
 func RecoveryMiddleware(logger interface {
 	Error(msg string, args ...any)
 }) func(http.Handler) http.Handler {
@@ -929,13 +987,17 @@ func RecoveryMiddleware(logger interface {
 					// any other log lines emitted during this request handling
 					// (audit reports/web.md S-22). method+remoteAddr added per
 					// audit Q-25 to make panic reports actionable without
-					// needing the user to reproduce.
+					// needing the user to reproduce. The stack is what locates
+					// the bug: without it a panic reported from the field said
+					// what went wrong and never where (W24-15). Path, not URL —
+					// the query string can carry a token.
 					logger.Error("panic recovered in HTTP handler",
 						"panic", rvr,
 						"method", r.Method,
 						"path", r.URL.Path,
 						"remoteAddr", r.RemoteAddr,
 						"reqID", chimiddleware.GetReqID(r.Context()),
+						"stack", panicStack(),
 					)
 					if !rw.headersSent {
 						w.Header().Set("Content-Type", "application/json")

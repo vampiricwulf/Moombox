@@ -34,7 +34,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - Wraps the `http.ResponseWriter` in a `recoveryWriter` that tracks whether headers have already been sent to the client.
 - If a panic occurs and headers have not been sent, it writes a `500 Internal Server Error` JSON response: `{"error":"Internal server error"}`.
 - If headers have already been sent (partial response written), it cannot write a new status code — the connection is effectively broken, but the server survives.
-- Logs the panic value and the request path at Error level.
+- Logs the panic value, the method, the request path (never the query string), the peer, the request ID and the stack that panicked at Error level. The stack is one line of `function (file:line)` frames, innermost first and at most 32 of them, built from program counters rather than `debug.Stack`, which prints each frame's raw argument words — the one part of a trace that comes from the request rather than the code.
 
 **Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler. Placed later, a panic in a middleware it had skipped past would escape it: `net/http` recovers such a panic per-connection, so the process survives either way, but the client sees an aborted connection instead of the 500 JSON response and the stack is logged by the standard library rather than by Moombox. `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above).
 

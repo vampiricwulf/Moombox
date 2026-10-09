@@ -670,7 +670,7 @@ go func() {
 **HTTP middleware (`RecoveryMiddleware`):**
 - Catches panics in HTTP handlers
 - Returns HTTP 500 with a JSON error body
-- Logs the panic with stack trace
+- Logs the panic with the stack that raised it (`panicStack` in `internal/web/server.go`): one `stack` field on the same line, innermost frame first from the frame that panicked, `function (file:line)` per frame, at most 32 frames and a count of the rest — no argument values, so nothing from the request beyond the method, path, peer and request ID the line already carries
 
 **Database subscriber callbacks:**
 - `safeCallJobUpdate(fn, job)` wraps each `OnJobUpdate` subscriber call
