@@ -329,14 +329,26 @@ func TestRingDelta(t *testing.T) {
 
 // TestJobLogKeysAreTheLogPanels: scrolling, paging, / search with n/N, End
 // and Esc work in the overlay as on the log panel, through App.Update — and
-// no key falls through to the chord system or the panels underneath.
+// no key falls through to the chord system or the panels underneath. The
+// header says so whatever the job is called: a stream title as long as the
+// terminal is wide still leaves room for [PAUSED] and the search's count.
 //
 // Mutants: drop the overlay arm in routeComponentMsg — PgUp no longer
 // scrolls; drop the overlay intercept in handleKey — "a" arms the Action
 // prefix and "/" opens the log panel's search instead; drop the End case —
-// End leaves the overlay paused.
+// End leaves the overlay paused; cut the title to the count alone again
+// (drop `- reserve` in LogViewerModel.View) — the long title fills the
+// header, and neither [PAUSED] nor "(2 matches)" is shown.
 func TestJobLogKeysAreTheLogPanels(t *testing.T) {
+	t.Run("short title", func(t *testing.T) { testJobLogKeys(t, "First stream") })
+	t.Run("long title", func(t *testing.T) {
+		testJobLogKeys(t, "【歌枠】Late night karaoke with chat requests — 3 hours of songs!! #VTuber #karaoke")
+	})
+}
+
+func testJobLogKeys(t *testing.T, title string) {
 	a, logs := jobLogApp(t)
+	a.taskList.GetJobByID("job1").Title = title
 	for i := range 120 {
 		line := jobLine("job1", i)
 		if i == 30 || i == 90 {
@@ -458,6 +470,77 @@ func TestJobLogClosesWhenItsJobIsDeleted(t *testing.T) {
 	}})
 	if a.jobLog.IsVisible() {
 		t.Fatal("a snapshot without the overlay's job (a bulk delete) must close it")
+	}
+}
+
+// TestJobLogHeaderLeavesRoomForItsSuffixes: the overlay's header names the
+// job, and an ordinary stream title is longer than the room a terminal of
+// 60 to 120 columns leaves it. It used to be cut to the header's width less
+// the count, which left nothing for the suffixes after it, so each one was
+// dropped for not fitting: a search that found nothing said nothing, and a
+// reader who had scrolled up saw no [PAUSED]. The title now gives way to
+// them, down to "Job Log — " and the first few cells of the job's name, and
+// keeps one width while the reader scrolls.
+//
+// Mutants: drop `- reserve` in LogViewerModel.View — no "(0 matches)" and no
+// [PAUSED] at any size; drop the minHeaderTitleWidth floor — at 60 columns
+// the name is cut to "Min…"; reserve the scroll percentage's own width
+// instead of the widest — the title grows a cell between the first PgUp's
+// percentage and [0%].
+func TestJobLogHeaderLeavesRoomForItsSuffixes(t *testing.T) {
+	titles := []struct{ name, title string }{
+		{"latin", "Minecraft hardcore day 12 — building the castle"},
+		{"cjk", "【歌枠】久しぶりのアコースティック歌枠！リクエストも受け付けます ♪ #新衣装 #karaoke"},
+	}
+	for _, size := range [][2]int{{minTermWidth, minTermHeight}, {80, 24}, {120, 40}} {
+		for _, tt := range titles {
+			title := tt.title
+			t.Run(fmt.Sprintf("%dx%d %s", size[0], size[1], tt.name), func(t *testing.T) {
+				a, logs := jobLogApp(t)
+				a.width, a.height = size[0], size[1]
+				a.recalcLayout()
+				a.taskList.GetJobByID("job1").Title = title
+				for i := range 120 {
+					logs.append("job1", jobLine("job1", i))
+				}
+				openJobLog(t, a, "job1")
+				header := func() string {
+					return strings.Split(stripANSI(a.View().Content), "\n")[1]
+				}
+				for _, r := range "/absent" {
+					a.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+				}
+				a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+				if h := header(); !strings.Contains(h, "[/absent] (0 matches)") {
+					t.Errorf("a search with no hit must say so: %q", h)
+				}
+				a.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+				paused := header()
+				if !strings.Contains(paused, "[PAUSED]") || !strings.Contains(paused, "(0 matches)") {
+					t.Errorf("a paused, searched view must show both: %q", paused)
+				}
+				// The title keeps "Job Log — " and the first five cells
+				// of the name at the narrowest terminal.
+				if prefix := jobLogTitlePrefix + truncateWidth(title, 5, ""); !strings.Contains(paused, prefix) {
+					t.Errorf("the title must keep %q: %q", prefix, paused)
+				}
+				for range 20 {
+					a.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+				}
+				top := header()
+				if !strings.Contains(top, "[0%]") && size[0] > minTermWidth {
+					t.Fatalf("setup: twenty PgUp presses must reach the top: %q", top)
+				}
+				before, _, _ := strings.Cut(paused, " (120)")
+				after, _, _ := strings.Cut(top, " (120)")
+				if before != after {
+					t.Errorf("the title moved as the reader scrolled: %q, then %q", before, after)
+				}
+				if w := lipgloss.Width(top); w != size[0] {
+					t.Errorf("the header row is %d columns wide, want %d: %q", w, size[0], top)
+				}
+			})
+		}
 	}
 }
 

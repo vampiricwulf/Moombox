@@ -16,6 +16,12 @@ import (
 
 const maxLogLines = 1000
 
+// minHeaderTitleWidth is as narrow as a viewer's own title (the O L
+// overlay's "Job Log — <job title>") is cut to make room for the header's
+// suffixes: "Job Log — " and the first few cells of the job's name. Past
+// that the suffixes give way instead, from the last.
+const minHeaderTitleWidth = 16
+
 // LogLevel represents a log filter level.
 type LogLevel int
 
@@ -876,46 +882,54 @@ func (m *LogViewerModel) View() string {
 	// header wrapping (which adds an extra line and causes vertical shifting).
 	// rawCount, not len(m.filtered): filtered holds wrapped DISPLAY lines, so
 	// one long line would otherwise be counted as several.
-	//
-	// The title is cut, never the count, when the two do not fit: the O L
-	// overlay's names a job, and a long one would wrap the header.
-	title := "Logs"
 	count := fmt.Sprintf(" (%d)", m.rawCount)
-	if m.title != "" {
-		title = truncateString(m.title, max(contentW-lipgloss.Width(count), 1))
-	}
-	header := titleStyle.Render(title + count)
+	// suffixes, in the order they are dropped from the end when they do not
+	// all fit; reserve is the width the title leaves them.
+	var suffixes []string
+	reserve := 0
 	// Search query indicator (when search is active but not typing).
 	// truncateString is rune/width-aware — byte-slicing would split
 	// multi-byte runes in the user's query.
 	if !m.searching && m.searchQuery != "" {
 		queryDisplay := truncateString(m.searchQuery, 20)
 		matchSuffix := fmt.Sprintf(" [/%s] (%d matches)", queryDisplay, m.matchCount)
-		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render(matchSuffix)
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
-		}
+		suffixes = append(suffixes, " "+lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render(matchSuffix))
 	}
 	// Level filter suffix (L3)
 	if m.level != LogLevelAll {
-		suffix := " " + YellowStyle.Render("["+m.level.String()+"+]")
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
-		}
+		suffixes = append(suffixes, " "+YellowStyle.Render("["+m.level.String()+"+]"))
 	}
 	// PAUSED indicator when not auto-scrolling and focused (L4)
 	if !m.autoScroll && m.focused {
-		suffix := " " + YellowStyle.Render("[PAUSED]")
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
-		}
+		suffixes = append(suffixes, " "+YellowStyle.Render("[PAUSED]"))
 	}
-	// Scroll percentage with brackets (L1 - match TS format [XX%])
+	for _, sfx := range suffixes {
+		reserve += lipgloss.Width(sfx)
+	}
+	// Scroll percentage with brackets (L1 - match TS format [XX%]). Its
+	// reserve is the widest it gets, so the title does not shift a cell as
+	// the reader scrolls past 10% and 100%.
 	if len(m.filtered) > m.viewport.Height() {
 		pct := int(m.viewport.ScrollPercent() * 100)
-		suffix := " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
+		suffixes = append(suffixes, " "+DimStyle.Render(fmt.Sprintf("[%d%%]", pct)))
+		reserve += lipgloss.Width(" [100%]")
+	}
+
+	// The title is cut, never the count, when the two do not fit: the O L
+	// overlay's names a job, and a long one would wrap the header. It is cut
+	// to leave the suffixes their room too, down to minHeaderTitleWidth — cut
+	// to the count alone, an ordinary stream title filled the row, and every
+	// suffix was dropped for want of room: a search there said nothing, not
+	// even "(0 matches)", and a reader who had scrolled up saw no [PAUSED].
+	title := "Logs"
+	if m.title != "" {
+		room := contentW - lipgloss.Width(count) - reserve
+		title = truncateString(m.title, max(room, min(minHeaderTitleWidth, contentW-lipgloss.Width(count)), 1))
+	}
+	header := titleStyle.Render(title + count)
+	for _, sfx := range suffixes {
+		if lipgloss.Width(header)+lipgloss.Width(sfx) <= contentW {
+			header += sfx
 		}
 	}
 
