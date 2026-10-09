@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
@@ -83,7 +85,7 @@ func outageThenRecover(t *testing.T, h *endVerdictHarness, srv *httptest.Server,
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, nil) }()
+	go func() { done <- h.o.ExecuteTwitch(ctx, h.jobCtx, h.variant, false, h.chat) }()
 	select {
 	case <-first:
 	case <-time.After(20 * time.Second):
@@ -143,5 +145,81 @@ func TestPostOutageRecheckFailureDoesNotFinishTheJob(t *testing.T) {
 	fresh, err := outageThenRecover(t, h, srv, first)
 	if err == nil || fresh.Status == database.StatusFinished {
 		t.Errorf("an unanswered recheck ended as err=%v status=%s, want an error and no Finished", err, fresh.Status)
+	}
+}
+
+// TestOutageFinalizeKeepsABoundarySpill: a part roll that could not write its
+// boundary batch spilled it beside the part it closed and counted it in the
+// downloader's rollUnwritten, which the current part's resume sidecar carries
+// across a restart. When the broadcast then ends while connectivity is down,
+// the outage finalize ends chat with Stop(), never MarkStreamEnded, and
+// Start's interrupted exit returned nil before it read that count: the row
+// read chat "finished" over a capture short by the spilled messages, and the
+// staging cleanup deleted the spill with everything else. The verdict now
+// says incomplete, and the cleanup keeps the chat capture, spill included.
+//
+// The staging tree is what a restart into the second part finds: the closed
+// part at the root with its spill beside it, and seg_1 holding the current
+// part and the sidecar with the count.
+//
+// Mutant: Start's interrupted-exit arm not returning rollUnwrittenErr — the
+// row reads "finished" and the spill is gone after the cleanup.
+func TestOutageFinalizeKeepsABoundarySpill(t *testing.T) {
+	prevIRC := constants.TwitchURLs.IRCWS
+	constants.TwitchURLs.IRCWS = "ws://127.0.0.1:1/" // refused at once: no IRC in this test
+	t.Cleanup(func() { constants.TwitchURLs.IRCWS = prevIRC })
+
+	srv, first := liveTwitchWindow(t)
+	h := newEndVerdictHarness(t, "tw_outage_spill")
+	// The recovery finds the broadcast over: the outage finalize.
+	h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
+		return &twitch.TwitchStreamInfo{IsLive: false}, nil
+	}
+
+	writeJSON := func(path string, v any) {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := func(id string, at int64) twitch.TwitchChatMessage {
+		return twitch.TwitchChatMessage{ID: id, TimestampMs: at, Message: "hi", MessageType: "chat"}
+	}
+	staging := h.jobCtx.StagingDir
+	rootChat := filepath.Join(staging, "chat.json")
+	writeJSON(rootChat, twitch.TwitchChatData{Platform: "twitch", ChannelLogin: "streamer", StreamID: "s1",
+		MessageCount: 2, EmoteOffsets: "utf16",
+		Messages: []twitch.TwitchChatMessage{msg("a", 1767225600000), msg("b", 1767225601000)}})
+	spill := rootChat + ".lostbatch.json"
+	writeJSON(spill, []twitch.TwitchChatMessage{msg("x1", 1767225602000), msg("x2", 1767225602100),
+		msg("x3", 1767225602200), msg("x4", 1767225602300), msg("x5", 1767225602400)})
+	partChat := filepath.Join(staging, "seg_1", "chat.json")
+	writeJSON(partChat, twitch.TwitchChatData{Platform: "twitch", ChannelLogin: "streamer", StreamID: "s1",
+		MessageCount: 1, EmoteOffsets: "utf16", Messages: []twitch.TwitchChatMessage{msg("c", 1767225603000)}})
+	writeJSON(partChat+".resume.json", twitch.ChatResumeState{MessageCount: 1, TotalCount: 3, RollUnwritten: 5,
+		StreamID: "s1", RecentIDs: []string{"a", "b", "c"}})
+
+	h.chat = twitch.NewChatDownloader(twitch.ChatDownloaderOptions{ChannelLogin: "streamer", StreamID: "s1",
+		OutputPath: rootChat}, &discardLogger{})
+	fresh, err := outageThenRecover(t, h, srv, first)
+	if err != nil || fresh.Status != database.StatusFinished {
+		t.Fatalf("the outage finalize ended as err=%v status=%s, want it Finished — this test is about its chat verdict",
+			err, fresh.Status)
+	}
+	if fresh.ChatStatus != chatStatusIncomplete {
+		t.Errorf("chat_status = %q after an outage finalize over a capture with 5 boundary messages spilled, want %q",
+			fresh.ChatStatus, chatStatusIncomplete)
+	}
+
+	h.w.cleanupStagingAfterMux(h.job.ID, staging)
+	if _, err := os.Stat(spill); err != nil {
+		t.Errorf("the staging cleanup deleted the boundary spill: %v", err)
 	}
 }

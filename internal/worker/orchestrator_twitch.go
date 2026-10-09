@@ -1195,7 +1195,10 @@ sessionLoop:
 			desc, notifications.TypeDownload, "connectivity_split", currentQuality, segmentIndex+1)
 
 		// Stop chat (resume state is preserved by the interrupted-exit path;
-		// the file on disk is complete through the last flush).
+		// the file on disk is complete through the last flush). That exit's
+		// verdict is what resolveChatOutcome records below, so it carries a
+		// batch a part roll spilled (rollUnwritten) exactly as the stream-end
+		// drain's does: incomplete, and the cleanup keeps the spill.
 		if twitchChatDl != nil {
 			twitchChatDl.Stop()
 		}

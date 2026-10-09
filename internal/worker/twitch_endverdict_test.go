@@ -185,6 +185,7 @@ func (c *scriptedConn) set(online bool) {
 // about. The outage test installs it mid-run, at the one point where nothing
 // else reads it, so the recovery path can refresh its variant.
 type endVerdictHarness struct {
+	w       *DownloadWorker
 	o       *DownloadOrchestrator
 	db      *database.Database
 	conn    *scriptedConn
@@ -192,6 +193,9 @@ type endVerdictHarness struct {
 	jobCtx  *JobContext
 	variant *TwitchVariantInfo
 	checks  atomic.Int32
+	// chat is the chat source outageThenRecover hands ExecuteTwitch; nil
+	// (no chat) unless a test sets one.
+	chat ChatSource
 }
 
 func newEndVerdictHarness(t *testing.T, jobID string) *endVerdictHarness {
@@ -202,7 +206,7 @@ func newEndVerdictHarness(t *testing.T, jobID string) *endVerdictHarness {
 	t.Cleanup(dead.Close)
 
 	w, db := testWorkerSetup(t)
-	h := &endVerdictHarness{o: w.orchestrator, db: db, conn: newScriptedConn()}
+	h := &endVerdictHarness{w: w, o: w.orchestrator, db: db, conn: newScriptedConn()}
 	h.o.conn = h.conn
 
 	h.job = &database.Job{

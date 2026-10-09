@@ -582,10 +582,12 @@ func TestARollWithNothingPendingSalvagesATornClosedPart(t *testing.T) {
 // the stream ended "finished" and the staging cleanup deleted the spill with
 // the part's dir. The spilled messages now leave the job total (it follows
 // what the part files hold) and Start reports the capture incomplete at the
-// stream's end — also after a restart, through the sidecar.
+// stream's end — also after a restart, through the sidecar — and on an
+// interrupted exit, which is how ExecuteTwitch's outage finalize ends chat.
 //
 // Mutants: drop either noteRollUnwritten call in RollFile; drop the
-// rollUnwritten check in Start's stream-end path; drop RollUnwritten from
+// rollUnwritten check in Start's stream-end path, or in its interrupted-exit
+// arm; return it from that arm whatever the count; drop RollUnwritten from
 // saveResumeState or restoreResumeState; drop the totalCount subtraction.
 func TestABoundarySpillMakesTheCaptureIncomplete(t *testing.T) {
 	endStream := func(t *testing.T, cd *ChatDownloader) error {
@@ -598,7 +600,7 @@ func TestABoundarySpillMakesTheCaptureIncomplete(t *testing.T) {
 	wantIncomplete := func(t *testing.T, err error) {
 		t.Helper()
 		if err == nil || !strings.Contains(err.Error(), "part boundary") {
-			t.Errorf("Start at the stream's end = %v, want the boundary spill reported", err)
+			t.Errorf("Start = %v, want the boundary spill reported", err)
 		}
 	}
 
@@ -663,12 +665,36 @@ func TestABoundarySpillMakesTheCaptureIncomplete(t *testing.T) {
 		wantIncomplete(t, endStream(t, resumed))
 	})
 
+	// ExecuteTwitch's outage finalize — the broadcast ended while
+	// connectivity was down — ends chat with Stop(), never MarkStreamEnded,
+	// and records the verdict of that interrupted exit. It used to return nil
+	// before the count was read, so the job read "finished" and the cleanup
+	// deleted the spill. The exit keeps the sidecar carrying the count, for
+	// the resumed run a shutdown hands it to.
+	t.Run("interrupted exit", func(t *testing.T) {
+		cd, path, _ := startOnUnreadPart(t)
+		for i := range 5 {
+			cd.addMessage(damageTestMessage("new", i))
+		}
+		_ = cd.flush()
+		next := rollTestNextPart(t, path)
+		cd.RollFile(next, "2026-06-11T11:00:00Z")
+		cd.Stop()
+		wantIncomplete(t, cd.Start(cancelledContext(t)))
+		if _, err := os.Stat(chatResumePath(next)); err != nil {
+			t.Errorf("the interrupted exit did not keep the sidecar carrying the count: %v", err)
+		}
+	})
+
 	t.Run("no spill", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "chat.json")
 		cd := newTestChatDownloader(t, path)
 		_ = cd.Start(cancelledContext(t))
 		cd.addMessage(damageTestMessage("m", 0))
 		cd.RollFile(rollTestNextPart(t, path), "2026-06-11T11:00:00Z")
+		if err := cd.Start(cancelledContext(t)); err != nil {
+			t.Errorf("a clean roll's interrupted exit = %v, want nil", err)
+		}
 		if err := endStream(t, cd); err != nil {
 			t.Errorf("a clean roll's stream end = %v, want nil", err)
 		}

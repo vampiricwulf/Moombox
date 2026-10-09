@@ -623,12 +623,27 @@ func (cd *ChatDownloader) SettlePartBase(path string, programDateTime time.Time)
 // noteRollUnwritten records n boundary-batch messages RollFile could not write
 // to the part it closed. They are in no part file, so they leave the job total
 // — which follows what the files hold, as flushLocked's salvage arm does — and
-// they make the capture incomplete at the stream's end (Start).
+// they make the capture incomplete on Start's way out (rollUnwrittenErr).
 func (cd *ChatDownloader) noteRollUnwritten(n int) {
 	cd.mu.Lock()
 	cd.rollUnwritten += n
 	cd.totalCount = max(cd.totalCount-n, 0)
 	cd.mu.Unlock()
+}
+
+// rollUnwrittenErr is the verdict noteRollUnwritten's count puts on Start's
+// exit: nil while every roll wrote its boundary batch, otherwise the error
+// naming how many messages are in no part file. Start returns it from the
+// stream-end drain and from an interrupted exit alike, because both can be
+// the exit a job finalizes on.
+func (cd *ChatDownloader) rollUnwrittenErr() error {
+	cd.mu.Lock()
+	unwritten := cd.rollUnwritten
+	cd.mu.Unlock()
+	if unwritten <= 0 {
+		return nil
+	}
+	return fmt.Errorf("twitch chat: %d messages could not be written to their part at a part boundary; see the part's chat.json.lostbatch.json", unwritten)
 }
 
 // resolveEmotesCached resolves third-party emotes (7TV/BTTV/FFZ) once per

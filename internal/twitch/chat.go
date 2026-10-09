@@ -1531,6 +1531,16 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			// here used to destroy all previously archived chat), and skip
 			// emote enrichment: enriched files must not receive appends.
 			cd.saveResumeState()
+			// A boundary spill is reported here too, not only at the
+			// stream's end. ExecuteTwitch's outage finalize — the broadcast
+			// ended while connectivity was down — ends chat with Stop() and
+			// records THIS verdict, so a nil here read "finished" and the
+			// staging cleanup deleted the spill with the part's dir. A
+			// shutdown discards the verdict, and the sidecar just saved
+			// carries the count to the resumed run's end.
+			if err := cd.rollUnwrittenErr(); err != nil && retErr == nil {
+				retErr = err
+			}
 			return
 		}
 
@@ -1564,11 +1574,8 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		// it must not read "finished": that verdict let the staging cleanup
 		// delete the spill with the part's dir. Incomplete keeps it
 		// (keepOnlyChatCapture keeps every chat.json.* file at any depth).
-		cd.mu.Lock()
-		unwritten := cd.rollUnwritten
-		cd.mu.Unlock()
-		if unwritten > 0 && retErr == nil {
-			retErr = fmt.Errorf("twitch chat: %d messages could not be written to their part at a part boundary; see the part's chat.json.lostbatch.json", unwritten)
+		if err := cd.rollUnwrittenErr(); err != nil && retErr == nil {
+			retErr = err
 		}
 
 		// Stream-over drain: clear resume state
