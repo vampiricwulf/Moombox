@@ -21,6 +21,17 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// The O L overlay scrolls under the wheel as the log panel does, three
+	// rows a notch; a click does nothing there.
+	if a.jobLog.IsVisible() {
+		if isScrollUp(msg) {
+			a.jobLog.Scroll(-3)
+		} else if isScrollDown(msg) {
+			a.jobLog.Scroll(3)
+		}
+		return a, nil
+	}
+
 	if a.hasActiveOverlay() {
 		return a, nil
 	}

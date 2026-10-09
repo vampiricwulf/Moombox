@@ -15,7 +15,7 @@ import (
 // ctrlCMsg is the message bubbletea v2 actually delivers for Ctrl+C: an
 // ORDINARY key press carrying the ctrl modifier. tea.InterruptMsg arrives
 // only from a real SIGINT, so the app's own handler is the only thing
-// standing between Ctrl+C and the fourteen overlays that intercept every key
+// standing between Ctrl+C and the fifteen overlays that intercept every key
 // before it (CORE-5, O-M).
 func ctrlCMsg() tea.KeyPressMsg { return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl} }
 
@@ -85,10 +85,13 @@ func TestCtrlCQuitsThroughEveryOverlay(t *testing.T) {
 		{"client tokens", func(a *App) { a.clientTokensDlg.Open() }, func(a *App) bool { return a.clientTokensDlg.IsVisible() }},
 		{"ytdlp plugin", func(a *App) { a.ytdlpDlg.Open() }, func(a *App) bool { return a.ytdlpDlg.IsVisible() }},
 		{"stats", func(a *App) { a.statsDlg.Open() }, func(a *App) bool { return a.statsDlg.IsVisible() }},
+		{"job log", func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) }, func(a *App) bool { return a.jobLog.IsVisible() }},
+		{"job log search box", func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")); a.jobLog.log.StartSearch() },
+			func(a *App) bool { return a.jobLog.IsVisible() && a.jobLog.log.IsSearching() }},
 	}
 
-	if len(rows) != 14 {
-		t.Fatalf("the census covers %d overlays, but handleKey intercepts 14", len(rows))
+	if len(rows) != 16 {
+		t.Fatalf("the census covers %d rows, but handleKey intercepts 15 overlays (and the job log's search box)", len(rows))
 	}
 
 	for _, row := range rows {

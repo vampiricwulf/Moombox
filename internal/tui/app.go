@@ -341,6 +341,19 @@ type (
 	// open (see App.statsEpoch).
 	statsRefreshTickMsg struct{ Epoch int }
 
+	// jobLogLinesMsg is the async result of OnGetJobLogs — the O L overlay's
+	// open and every refresh tick go through it. Epoch is the App.jobLogEpoch
+	// the read started under, so a read that outlives its open is dropped
+	// rather than painted into another job's overlay.
+	jobLogLinesMsg struct {
+		Epoch int
+		Lines []string
+	}
+	// jobLogRefreshTickMsg fires every jobLogRefreshInterval while the O L
+	// overlay is open; ignored once the overlay is closed, OnGetJobLogs is
+	// nil, or Epoch names an earlier open (see App.jobLogEpoch).
+	jobLogRefreshTickMsg struct{ Epoch int }
+
 	// Async results for setup wizard cookie extraction.
 	//
 	// Carries the whole SetupResult rather than the bool pair it used to. Two
@@ -422,6 +435,7 @@ type App struct {
 	clientTokensDlg *ClientTokensDialogModel
 	ytdlpDlg        *YtdlpDialogModel
 	statsDlg        *StatsDialogModel
+	jobLog          *JobLogModel
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
 
@@ -431,6 +445,10 @@ type App struct {
 	// ticks and fetch results from an earlier open are dropped instead of
 	// re-arming a second chain (the Web's single setInterval).
 	statsEpoch int
+	// jobLogEpoch is statsEpoch's twin for the O L overlay: bumped on every
+	// open and close, so exactly one refresh chain follows exactly one job,
+	// and a read from an earlier open never lands in a later one.
+	jobLogEpoch int
 
 	// Trim progress (async encoding)
 	trimInProgress  bool
@@ -726,6 +744,11 @@ type App struct {
 	// chord); nil deletes the chord.
 	OnGetStats func() (stats.Snapshot, error)
 
+	// OnGetJobLogs returns a copy of one job's own log buffer — db.GetJobLogs,
+	// the buffer the dashboard's job dialog reads through GET
+	// /api/jobs/{id}/logs — for the O L overlay; nil deletes the chord.
+	OnGetJobLogs func(jobID string) []string
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
@@ -783,6 +806,7 @@ func NewApp() *App {
 		clientTokensDlg:   NewClientTokensDialogModel(),
 		ytdlpDlg:          NewYtdlpDialogModel(),
 		statsDlg:          NewStatsDialogModel(),
+		jobLog:            NewJobLogModel(),
 		setupWiz:          NewSetupWizardModel(),
 		settings:          NewSettingsModel(),
 		ffmpegCheck:       NewFFmpegCheckModel(),
@@ -1180,6 +1204,7 @@ func (a *App) hasActiveOverlay() bool {
 		a.clientTokensDlg.IsVisible() ||
 		a.ytdlpDlg.IsVisible() ||
 		a.statsDlg.IsVisible() ||
+		a.jobLog.IsVisible() ||
 		a.setupWiz.IsVisible() ||
 		a.ffmpegCheck.IsVisible() ||
 		a.actionMenu.IsVisible()

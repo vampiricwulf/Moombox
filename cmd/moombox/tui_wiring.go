@@ -389,6 +389,9 @@ func (s *runState) runTUI() {
 		snap.Uptime = time.Since(s.startTime)
 		return snap, nil
 	}
+	// O L: the per-job log buffer the dashboard's job dialog reads through
+	// GET /api/jobs/{id}/logs — the database's, never a second copy.
+	app.OnGetJobLogs = s.db.GetJobLogs
 	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) error {
 		// Serialize on the store lock like every other saver (web routes,
 		// Store.Update-driven background saves, and the setup-wizard callback

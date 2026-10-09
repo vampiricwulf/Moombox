@@ -53,12 +53,12 @@ type LogViewerModel struct {
 	// exactly once — when the line arrives — instead of once per visible line
 	// per frame in styleLogLine (the viewport's StyleLineFunc, which runs for
 	// every visible row on every render) and once per line per rebuild in the
-	// level filter. appendLine/capLines are the only writers of lines+levels,
-	// so the two cannot fall out of step.
+	// level filter. appendLine/dropOldest are the only writers of
+	// lines+levels, so the two cannot fall out of step.
 	levels         []string
 	filteredLevels []string
 	// wrapped[i] is lines[i] cut to wrapWidth, nil until it is first needed.
-	// Parallel to lines and levels (appendLine, capLines and Clear are its
+	// Parallel to lines and levels (appendLine, dropOldest and Clear are its
 	// only writers), so a source line is cut EXACTLY ONCE in its life instead
 	// of once per rebuild. At the 1,000-line cap capLines trims on every
 	// insertion, so a 24/7 process re-cut every wrapping line ~10 times a
@@ -81,6 +81,12 @@ type LogViewerModel struct {
 	height     int
 	focused    bool
 	level      LogLevel
+
+	// title heads the panel ("Logs" when empty) and emptyText is what an
+	// empty buffer says ("No logs yet." when empty). The O L overlay is the
+	// one viewer that sets them: it shows ONE job's log, and says so.
+	title     string
+	emptyText string
 
 	// renderCache / cacheKey memoise View(). bubbletea calls View() after
 	// EVERY message (~180/s with one active download at the defaults: 60
@@ -218,6 +224,45 @@ func (m *LogViewerModel) AddLines(batch []string) {
 		m.appendLine(line)
 	}
 	m.redisplay(m.capLines())
+}
+
+// SyncLines brings the buffer in line with snapshot, a fresh read of a ring
+// this viewer mirrors rather than owns — the O L overlay's per-job log
+// (db.GetJobLogs). It applies only the difference, as the ring itself moved:
+// the lines evicted from the front go through dropOldest and the new ones are
+// appended, so a paused view stays on its lines across a read exactly as the
+// log panel's does across an insertion (W24-12). Reports whether anything
+// changed; an identical read leaves the display, and its render cache, alone.
+func (m *LogViewerModel) SyncLines(snapshot []string) bool {
+	drop, tail := ringDelta(m.lines, snapshot)
+	if drop == 0 && len(tail) == 0 {
+		return false
+	}
+	trimmed := m.dropOldest(drop)
+	for _, line := range tail {
+		m.appendLine(line)
+	}
+	m.redisplay(trimmed + m.capLines())
+	return true
+}
+
+// ringDelta works out how a ring buffer moved between two reads of it: drop
+// lines left the front of prev, and tail was appended after what survived.
+// The per-job log buffer only ever appends and trims its front (capLogLines,
+// internal/database), so cur is prev[drop:] followed by tail for the smallest
+// drop that lines up. Taking the SMALLEST is what keeps a run of identical
+// lines (one message repeated within the same second) from reading as an
+// eviction. A cur that matches no suffix of prev — the buffer was cleared,
+// or replaced outright — comes back as every line of prev dropped and every
+// line of cur new, which is a full replace.
+func ringDelta(prev, cur []string) (drop int, tail []string) {
+	for drop = 0; drop < len(prev); drop++ {
+		kept := prev[drop:]
+		if len(kept) <= len(cur) && slices.Equal(kept, cur[:len(kept)]) {
+			return drop, cur[len(kept):]
+		}
+	}
+	return len(prev), cur
 }
 
 // redisplay rebuilds the display after lines were added and trimmedRows
@@ -435,7 +480,11 @@ func (m *LogViewerModel) updateViewportContent() {
 			m.viewport.SetContent("No " + m.level.String() + "+ lines. F cycles the level.")
 			return
 		}
-		m.viewport.SetContent("No logs yet.")
+		empty := m.emptyText
+		if empty == "" {
+			empty = "No logs yet."
+		}
+		m.viewport.SetContent(empty)
 		return
 	}
 
@@ -742,7 +791,15 @@ func (m *LogViewerModel) View() string {
 	// header wrapping (which adds an extra line and causes vertical shifting).
 	// rawCount, not len(m.filtered): filtered holds wrapped DISPLAY lines, so
 	// one long line would otherwise be counted as several.
-	header := titleStyle.Render(fmt.Sprintf("Logs (%d)", m.rawCount))
+	//
+	// The title is cut, never the count, when the two do not fit: the O L
+	// overlay's names a job, and a long one would wrap the header.
+	title := "Logs"
+	count := fmt.Sprintf(" (%d)", m.rawCount)
+	if m.title != "" {
+		title = truncateString(m.title, max(contentW-lipgloss.Width(count), 1))
+	}
+	header := titleStyle.Render(title + count)
 	// Search query indicator (when search is active but not typing).
 	// truncateString is rune/width-aware — byte-slicing would split
 	// multi-byte runes in the user's query.

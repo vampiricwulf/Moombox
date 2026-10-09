@@ -268,6 +268,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// A bulk delete (a departed channel's prune) arrives only as this
+		// snapshot, never as a JobDeletedMsg.
+		if a.jobLog.IsVisible() && !slices.ContainsFunc(msg.Jobs, func(j *database.Job) bool { return j.ID == a.jobLog.JobID() }) {
+			a.closeJobLogOfDeletedJob(a.jobLog.JobID())
+		}
 		a.updateTerminalTitle()
 		// Initial snapshot / full refresh — start the progress loop if any
 		// job is live (this is the primary startup path; Init no longer
@@ -786,6 +791,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		return a, tea.Batch(a.fetchStatsCmd(msg.Epoch), statsRefreshTick(msg.Epoch))
+
+	case jobLogLinesMsg:
+		if !a.jobLog.IsVisible() || msg.Epoch != a.jobLogEpoch {
+			return a, nil // closed or re-opened on another job since this read started
+		}
+		a.jobLog.SetLines(msg.Lines)
+		return a, nil
+	case jobLogRefreshTickMsg:
+		// The statsRefreshTickMsg discipline: one chain per open, re-armed
+		// here only, dropped once its open is over. It keeps reading after
+		// the job turns terminal — an A S recovery runs on a job that is not
+		// active and reports through this very log.
+		if !a.jobLog.IsVisible() || msg.Epoch != a.jobLogEpoch || a.OnGetJobLogs == nil {
+			return a, nil
+		}
+		return a, tea.Batch(a.fetchJobLogCmd(msg.Epoch, a.jobLog.JobID()), jobLogRefreshTick(msg.Epoch))
 
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {
@@ -1530,6 +1551,22 @@ func (a *App) handleJobDeleted(ev *database.JobDeleted) {
 	// both cases.
 	a.updateSelectedJob()
 	a.updateTerminalTitle()
+	a.closeJobLogOfDeletedJob(ev.JobID)
+}
+
+// closeJobLogOfDeletedJob closes the O L overlay when the job it shows is
+// gone, as the dashboard closes its job dialog on job_deleted. The job's log
+// buffer goes with its row (ClearJobLogs, or PruneJobLogs for the bulk
+// deletes), so the next read would blank the page the operator was reading
+// with nothing on screen to say why. Retiring the epoch drops the session's
+// refresh chain and any read still in flight.
+func (a *App) closeJobLogOfDeletedJob(jobID string) {
+	if !a.jobLog.IsVisible() || a.jobLog.JobID() != jobID {
+		return
+	}
+	a.jobLog.Close()
+	a.jobLogEpoch++
+	a.setFeedbackWithSeverity("Job log closed: the job was deleted", severityWarning)
 }
 
 // handleTrimsChanged applies a TrimsChanged lifecycle event from the
@@ -1622,6 +1659,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.statsDlg.IsVisible() {
 		return a.statsDlg.UpdateComponents(msg)
+	}
+	if a.jobLog.IsVisible() {
+		return a.jobLog.UpdateComponents(msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {

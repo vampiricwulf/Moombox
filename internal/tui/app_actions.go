@@ -552,6 +552,21 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))
 		openBrowser(url)
+	case "O L":
+		if job == nil {
+			return a, nil
+		}
+		if a.OnGetJobLogs == nil {
+			a.setFeedbackWithSeverity("Job logs are unavailable", severityWarning)
+			return a, nil
+		}
+		a.clearFeedback()
+		a.jobLog.SetSize(a.width, a.height)
+		a.jobLog.Open(job)
+		// The only place a refresh chain starts, and — as for E T — the tick
+		// goes last in the batch.
+		a.jobLogEpoch++
+		return a, tea.Batch(a.fetchJobLogCmd(a.jobLogEpoch, job.ID), jobLogRefreshTick(a.jobLogEpoch))
 	case "O G":
 		a.setFeedback("Opening: " + constants.ProjectRepoURL)
 		openBrowser(constants.ProjectRepoURL)
@@ -966,6 +981,17 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL (best effort)", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
+	)
+	// O L: the job's own log — the dashboard job dialog's "Job Logs"
+	// section. Every job has a buffer to read, empty or not (the dashboard
+	// shows the section for every job too), so there is no filter; gated on
+	// the callback like the E chords, since without it there is nothing to
+	// read.
+	if a.OnGetJobLogs != nil {
+		items = append(items, ActionMenuItem{Chord: "O L", Label: "Open Job Log", HintLabel: "Log", Category: "Open", NeedsJob: true,
+			DisabledReason: "no jobs"})
+	}
+	items = append(items,
 		ActionMenuItem{Chord: "O G", Label: "Open GitHub Page", HintLabel: "GitHub", Category: "Open"},
 	)
 

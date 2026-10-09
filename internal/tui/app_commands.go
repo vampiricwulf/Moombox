@@ -463,6 +463,24 @@ func statsRefreshTick(epoch int) tea.Cmd {
 	return tea.Tick(statsRefreshInterval, func(time.Time) tea.Msg { return statsRefreshTickMsg{Epoch: epoch} })
 }
 
+// fetchJobLogCmd reads one job's log buffer through OnGetJobLogs off the UI
+// goroutine, tagging the lines with the O L session (App.jobLogEpoch) that
+// asked for them. The ID and the callback are captured here, on the update
+// goroutine; the closure touches no App field.
+func (a *App) fetchJobLogCmd(epoch int, jobID string) tea.Cmd {
+	fn := a.OnGetJobLogs
+	return safeCmd(func() tea.Msg {
+		return jobLogLinesMsg{Epoch: epoch, Lines: fn(jobID)}
+	})
+}
+
+// jobLogRefreshTick schedules the O L overlay's next read for one session.
+// As with statsRefreshTick only the open and the tick arm call it, so a
+// session has one chain however many reads land.
+func jobLogRefreshTick(epoch int) tea.Cmd {
+	return tea.Tick(jobLogRefreshInterval, func(time.Time) tea.Msg { return jobLogRefreshTickMsg{Epoch: epoch} })
+}
+
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	deleteFn := a.OnDeleteOrphan
 	return safeCmd(func() tea.Msg {

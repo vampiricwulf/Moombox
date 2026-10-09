@@ -400,6 +400,19 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// The O L overlay owns every key while open: its search box, n/N, End
+	// and the close keys here, the scroll keys already fed to its viewport
+	// by routeComponentMsg. Nothing reaches the chord system underneath.
+	if a.jobLog.IsVisible() {
+		cmd, action := a.jobLog.HandleKey(msg)
+		if action == "close" {
+			// HandleKey already hid the overlay. Retiring the epoch orphans
+			// the session's pending tick and any read in flight.
+			a.jobLogEpoch++
+		}
+		return a, cmd
+	}
+
 	// Log search intercept — must be before key normalization to preserve
 	// case for N (shift+n) and before chord system to capture / and n/N.
 	if a.focusedPanel == PanelLogs {
