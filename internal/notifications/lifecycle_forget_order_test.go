@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -377,4 +378,76 @@ func TestAQueueStepIsNeverShedOrDiscarded(t *testing.T) {
 	if q.enqueueControl(func() {}) {
 		t.Error("a step was accepted by a queue whose goroutine has returned")
 	}
+}
+
+// A delete queues one step per job on every edit-mode target, and the cap
+// counted them as messages: a batch delete of a few hundred jobs while a
+// delivery was held (a rate-limit wait, a slow Discord) made the queue "full",
+// and the next alert was shed in their place. The cap counts messages only.
+//
+// Mutant: enqueue comparing len(q.items) against the cap — the alert after the
+// deletes is shed.
+func TestDeleteStepsDoNotShedAnAlert(t *testing.T) {
+	f, release := gated(t, 0)
+	m := editManager(t, f, newMemStore(), nil)
+
+	m.Send("Download Failed", "x", TypeError, nil, SendOptions{Event: "error", JobID: "jobBefore"})
+	if !waitCalls(t, f, 1, 3*time.Second) {
+		t.Fatal("the first alert never reached the server")
+	}
+	for i := range notificationQueueCap { // the Web UI's batch Delete
+		m.ForgetJob(fmt.Sprintf("finishedJob%03d", i))
+	}
+	m.Send("Download Failed", "x", TypeError, nil, SendOptions{Event: "error", JobID: "jobAfter"})
+	release()
+
+	if !waitCalls(t, f, 2, 3*time.Second) {
+		t.Errorf("the alert sent after the batch delete was never delivered: %v", requestLines(f.calls()))
+	}
+}
+
+// A separate-mode target never reads or records a message id, so a delete
+// queues it no step. A target flipped out of edit mode keeps getting them
+// until a delivery starts under the new mode: the one in flight at the flip
+// is still on the edit path, and its POST can still record an id.
+//
+// Mutants: editKeys ignoring editing — the separate-mode target gets a step;
+// setDispatch clearing editing on a separate-mode bind — the flipped target's
+// in-flight edit gets none; dispatchFor not clearing it — the flipped target
+// gets steps for good.
+func TestOnlyATargetThatCanHoldEditStateGetsADeleteStep(t *testing.T) {
+	t.Run("separate mode", func(t *testing.T) {
+		f, release := gated(t, 0)
+		m := &Manager{logger: testLogger{}}
+		installTargets(t, m, editTarget(f, nil, ModeSeparate))
+		m.Send("Download Failed", "x", TypeError, nil, SendOptions{Event: "error", JobID: "otherJob123"})
+		if !waitCalls(t, f, 1, 3*time.Second) {
+			t.Fatal("the alert never reached the server")
+		}
+		m.ForgetJob("dQw4w9WgXcQ")
+		m.RetainJobs(map[string]struct{}{})
+		if n := m.targets[0].pending(); n != 0 {
+			t.Errorf("a separate-mode target holds %d queued steps after a delete, want 0", n)
+		}
+		release()
+	})
+
+	t.Run("flipped out of edit mode", func(t *testing.T) {
+		f, release := gated(t, 0)
+		m := editManager(t, f, newMemStore(), nil)
+		q := m.targets[0]
+		m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "dQw4w9WgXcQ"})
+		if !waitCalls(t, f, 1, 3*time.Second) {
+			t.Fatal("the found POST never reached the server")
+		}
+		installTargets(t, m, editTarget(f, nil, ModeSeparate)) // flipped mid-POST
+		if len(q.editKeys()) == 0 {
+			t.Error("a target flipped to separate mode while an edit was in flight gets no delete step")
+		}
+		release()
+		run(t, m, "otherJob123", "error") // the first delivery under the new mode
+		if keys := q.editKeys(); len(keys) != 0 {
+			t.Errorf("a target delivering in separate mode still gets delete steps for %v", keys)
+		}
+	})
 }

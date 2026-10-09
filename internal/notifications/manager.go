@@ -738,7 +738,7 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			// save, silently resetting its bucket state.
 			bound := tgt
 			bound.sender = q.sender
-			q.setDispatch(func(msg Message, once bool) error {
+			q.setDispatch(bound, func(msg Message, once bool) error {
 				return m.dispatchOne(bound, msg, once)
 			})
 			modes = append(modes, struct {

@@ -30,7 +30,7 @@ func TestAModeFlipCannotRewindAJobToFound(t *testing.T) {
 	// The gap: dispatch rebound to the edit-mode decision, batcher not yet moved.
 	bound := editTarget(f, nil, ModeEdit)
 	bound.sender = q.sender
-	q.setDispatch(func(msg Message, once bool) error { return m.dispatchOne(bound, msg, once) })
+	q.setDispatch(bound, func(msg Message, once bool) error { return m.dispatchOne(bound, msg, once) })
 	m.Send("Download Starting", "d", TypeDownload, nil, SendOptions{Event: "downloading", JobID: job})
 	q.batch.setMode(ModeEdit)
 

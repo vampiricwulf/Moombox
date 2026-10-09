@@ -783,9 +783,10 @@ func (m *Manager) RetainJobs(live map[string]struct{}) {
 	tr.retain(kept, queued)
 }
 
-// forgetInOrder queues fn(key) on every target's FIFO — the live ones and any
-// retired one still finishing its delivery in flight — and returns the keys
-// it was queued for. The caller drops every other key at once.
+// forgetInOrder queues fn(key) on the FIFO of every target that can hold
+// edit-mode state (editKeys) — the live ones and any retired one still
+// finishing its delivery in flight — and returns the keys it was queued for.
+// The caller drops every other key at once.
 //
 // In order, not at once, because a deleted job can still have deliveries on
 // its way. Deleting an active job cancels it first, so its "cancelled" is
@@ -808,11 +809,10 @@ func (m *Manager) forgetInOrder(fn func(key string)) map[string]bool {
 
 	queued := make(map[string]bool, len(queues))
 	for _, q := range queues {
-		if q.msgKey == "" {
-			continue
-		}
-		if q.enqueueControl(func() { fn(q.msgKey) }) {
-			queued[q.msgKey] = true
+		for _, key := range q.editKeys() {
+			if q.enqueueControl(func() { fn(key) }) {
+				queued[key] = true
+			}
 		}
 	}
 	return queued

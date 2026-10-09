@@ -45,7 +45,8 @@ type queued struct {
 	// ctl, when set, makes this item a step for the sender to run rather than
 	// a message to deliver: enqueueControl's way of doing something to this
 	// target's edit-mode state AFTER every item queued before it. Never
-	// delivered, never shed (its tier is not TierLow), never discarded.
+	// delivered, never shed (its tier is not TierLow), never discarded, and
+	// never counted toward notificationQueueCap (targetQueue.steps).
 	ctl func()
 }
 
@@ -80,9 +81,14 @@ type targetQueue struct {
 	// mu guards everything below. A plain mutex over a slice rather than a
 	// buffered channel: a channel cannot drop its OLDEST element, which is
 	// exactly what the overflow policy has to do.
-	mu      sync.Mutex
-	events  map[string]bool // nil means all events
-	items   []queued
+	mu     sync.Mutex
+	events map[string]bool // nil means all events
+	items  []queued
+	// steps is how many of items are enqueueControl steps. The cap counts
+	// messages only: a batch delete queues one step per job on every
+	// edit-mode target, and counted, a few hundred of them behind a slow
+	// delivery made the queue "full" and shed the next alert.
+	steps   int
 	closing bool // drain what is queued, then exit (Wait)
 	discard bool // drop what is queued, then exit (a removed target)
 	// exited is set by the pop that tells the goroutine to return: nothing
@@ -103,6 +109,15 @@ type targetQueue struct {
 	// it did before edit mode existed. Guarded by mu like mention/events,
 	// because applyTargets rebinds it on a surviving queue.
 	dispatch func(msg Message, once bool) error
+	// mode is the delivery mode dispatch was bound in, and editing whether
+	// this queue may still create or edit a lifecycle message: set by a bind
+	// in edit mode, and cleared only when a delivery starts under a
+	// separate-mode bind — a flip away from edit mode leaves the delivery in
+	// flight on the edit path, and its POST can still record an id. Read by
+	// editKeys: a queue that cannot hold a job's edit-mode state gets no
+	// ForgetJob step. Both guarded by mu.
+	mode    string
+	editing bool
 
 	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
 	// of shed are counted separately because they mean different things: the
@@ -140,6 +155,8 @@ func newTargetQueue(t notificationTarget, logger interface {
 		mention:        t.mention,
 		mentionAllowed: t.mentionAllowed,
 		mentionEvents:  t.mentionEvents,
+		mode:           normalizeTargetMode(t.mode),
+		editing:        normalizeTargetMode(t.mode) == ModeEdit,
 		shuttingDown:   shuttingDown,
 		logger:         logger,
 		wake:           make(chan struct{}, 1),
@@ -256,11 +273,29 @@ func (q *targetQueue) setMention(t notificationTarget) {
 // Reload — the twin of setEvents and setMention, and required for the same
 // reason: applyTargets keeps a survivor's queue and discards the freshly
 // built notificationTarget, so a `mode` change would otherwise be accepted
-// by both UIs, written to the file, and ignored until restart.
-func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error) {
+// by both UIs, written to the file, and ignored until restart. t is the
+// target fn was bound for; its mode moves with fn, under the same hold.
+func (q *targetQueue) setDispatch(t notificationTarget, fn func(msg Message, once bool) error) {
 	q.mu.Lock()
 	q.dispatch = fn
+	q.mode = normalizeTargetMode(t.mode)
+	if q.mode == ModeEdit {
+		q.editing = true
+	}
 	q.mu.Unlock()
+}
+
+// editKeys returns the keys a ForgetJob or RetainJobs step on this queue
+// drops, or nil when the queue cannot hold edit-mode state (see editing) —
+// a separate-mode target never reads or records a message id, and a step
+// there was only a queue slot spent on nothing.
+func (q *targetQueue) editKeys() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.msgKey == "" || !q.editing {
+		return nil
+	}
+	return []string{q.msgKey}
 }
 
 // dispatchFor runs the bound decision function under mu (a Reload rebinds it
@@ -269,6 +304,9 @@ func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error) {
 func (q *targetQueue) dispatchFor(msg Message) error {
 	q.mu.Lock()
 	d := q.dispatch
+	// The delivery about to start runs under this bind, so a queue flipped
+	// to separate mode can hold no new edit-mode state from here on.
+	q.editing = q.mode == ModeEdit
 	q.mu.Unlock()
 	once := q.shuttingDown != nil && q.shuttingDown.Load()
 	if d == nil {
@@ -277,7 +315,8 @@ func (q *targetQueue) dispatchFor(msg Message) error {
 	return d(msg, once)
 }
 
-// pending is the queue depth. Test-facing: pop reads len(q.items) itself.
+// pending is the queue depth, steps included. Test-facing: pop reads
+// len(q.items) itself.
 func (q *targetQueue) pending() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -299,7 +338,7 @@ func (q *targetQueue) enqueue(it queued) {
 			"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
 	}
-	if len(q.items) < notificationQueueCap {
+	if len(q.items)-q.steps < notificationQueueCap {
 		q.items = append(q.items, it)
 		q.mu.Unlock()
 		q.signal()
@@ -341,10 +380,12 @@ func (q *targetQueue) enqueue(it queued) {
 // everything already queued — and after the delivery in flight — and reports
 // whether it will run. It refuses only once the goroutine has returned.
 //
-// Outside the policies that govern a message: past the cap (a step is not a
-// delivery, and shedding one would leave the state it exists to clear), onto a
-// queue draining for shutdown (the drain runs it), and onto a retired one
-// (pop's discard runs the steps it holds before the goroutine returns).
+// Outside the policies that govern a message: past the cap, and never counted
+// toward it either (a step is not a delivery: shedding one would leave the
+// state it exists to clear, and counting one would shed a message in its
+// place), onto a queue draining for shutdown (the drain runs it), and onto a
+// retired one (pop's discard runs the steps it holds before the goroutine
+// returns).
 func (q *targetQueue) enqueueControl(fn func()) bool {
 	q.mu.Lock()
 	if q.exited {
@@ -352,6 +393,7 @@ func (q *targetQueue) enqueueControl(fn func()) bool {
 		return false
 	}
 	q.items = append(q.items, queued{ctl: fn})
+	q.steps++
 	q.mu.Unlock()
 	q.signal()
 	return true
@@ -429,6 +471,7 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 			n++
 		}
 		q.items = nil
+		q.steps = 0
 		q.exited = true
 		q.mu.Unlock()
 		for _, fn := range steps {
@@ -459,6 +502,9 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 	}
 	it = q.items[0]
 	q.items = q.items[1:]
+	if it.ctl != nil {
+		q.steps--
+	}
 	q.mu.Unlock()
 	return it, true, false
 }
