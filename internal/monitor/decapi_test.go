@@ -823,23 +823,31 @@ func TestDecapi_ARepeatedAnswerLogsAtDebug(t *testing.T) {
 // date fetch keeps failing (a dateless verdict is not memoized) — so they
 // reach it on every 15 s cycle. It ignored the repeat and logged at Info each
 // time, after the match and classification lines had been demoted. The first
-// sighting still logs it at Info; repeats at Debug.
+// sighting still logs it at Info; repeats at Debug. The failing date fetch's
+// own line, just before the skip, did the same at Warn: it now warns on the
+// first sighting and logs repeats at Debug, so no line of a repeat rises
+// above Debug.
 //
-// Mutant: the window skip logging at Info whatever repeat says — 4 Info lines
-// over the 4 repeats in both cases.
+// Mutants: the window skip logging at Info whatever repeat says — 4 Info
+// lines over the 4 repeats in both cases; the date-fetch failure logging at
+// Warn whatever repeat says — 4 Warn lines over the dateless case's repeats.
 func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
-	const skipMsg = "decapi: newest video is outside the archive window; skipping"
+	const (
+		skipMsg  = "decapi: newest video is outside the archive window; skipping"
+		fetchMsg = "decapi: date fetch failed; window unverifiable this sighting"
+	)
 	cases := []struct {
-		name      string
-		status    string
-		probeDate func(context.Context, string) (string, string, error)
+		name       string
+		status     string
+		probeDate  func(context.Context, string) (string, string, error)
+		fetchFails bool
 	}{
 		{"post_live dated outside the window", "post_live", func(context.Context, string) (string, string, error) {
 			return time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339), "exact", nil
-		}},
+		}, false},
 		{"vod whose date fetch keeps failing", "vod", func(context.Context, string) (string, string, error) {
 			return "", "", errors.New("date fetch: transport error")
-		}},
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -858,18 +866,25 @@ func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
 			ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
 			body := decapiBody("vidOutside1", "ended stream")
 
-			skips := func(level slog.Level) int {
+			count := func(msg string, level slog.Level) int {
 				n := 0
 				for _, r := range records {
-					if r.Level == level && r.Message == skipMsg {
+					if r.Level == level && r.Message == msg {
 						n++
 					}
 				}
 				return n
 			}
+			wantFetchLines := 0
+			if tc.fetchFails {
+				wantFetchLines = 1
+			}
 			_ = dm.processResponse(context.Background(), body, ch)
-			if n := skips(slog.LevelInfo); n != 1 {
+			if n := count(skipMsg, slog.LevelInfo); n != 1 {
 				t.Fatalf("the first sighting logged the window skip %d times at Info, want once", n)
+			}
+			if n := count(fetchMsg, slog.LevelWarn); n != wantFetchLines {
+				t.Errorf("the first sighting logged the date-fetch failure %d times at Warn, want %d", n, wantFetchLines)
 			}
 			records = records[:0]
 			for range 4 {
@@ -879,17 +894,20 @@ func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
 				t.Fatalf("%d probes over 5 sightings, want 5 — a memoized answer never reaches the skip, so this "+
 					"test would say nothing about its level", probes)
 			}
-			var infos []string
+			var loud []string
 			for _, r := range records {
-				if r.Level == slog.LevelInfo {
-					infos = append(infos, r.Message)
+				if r.Level > slog.LevelDebug {
+					loud = append(loud, r.Level.String()+" "+r.Message)
 				}
 			}
-			if len(infos) != 0 {
-				t.Errorf("%d Info lines over 4 repeats of the same answer, want 0: %q", len(infos), infos)
+			if len(loud) != 0 {
+				t.Errorf("%d lines above Debug over 4 repeats of the same answer, want 0: %q", len(loud), loud)
 			}
-			if n := skips(slog.LevelDebug); n != 4 {
+			if n := count(skipMsg, slog.LevelDebug); n != 4 {
 				t.Errorf("the window skip logged %d times at Debug over 4 repeats, want 4", n)
+			}
+			if n := count(fetchMsg, slog.LevelDebug); n != 4*wantFetchLines {
+				t.Errorf("the date-fetch failure logged %d times at Debug over 4 repeats, want %d", n, 4*wantFetchLines)
 			}
 			if len(*found) != 0 {
 				t.Errorf("found = %v, want nothing jobbed outside the window", *found)

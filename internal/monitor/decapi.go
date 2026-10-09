@@ -857,7 +857,8 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// fetch below; if the date remains unknowable it cannot verify the
 	// window ⇒ treated as outside — unlike the feed path there is no
 	// self-healing 'unknown' store row (DECAPI writes none, §13), so the
-	// first sighting's skip logs at Info to keep it visible.
+	// first sighting's skip logs at Info, and its failed date fetch at Warn,
+	// to keep them visible.
 	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
 		if result.PublishedAt == "" && dm.ProbeDate != nil {
 			// Two-phase probe (§9): the status probe carries no microformat,
@@ -870,7 +871,15 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 			if pub, _, err := dm.ProbeDate(ctx, videoID); err == nil {
 				result.PublishedAt = pub
 			} else {
-				dm.logger.Warn("decapi: date fetch failed; window unverifiable this sighting",
+				// A dateless verdict is not memoized (below), so a fetch
+				// that keeps failing reaches this line on every 15 s cycle
+				// for the same answer: a repeat logs at Debug, as the skip
+				// it leads to does. The first sighting keeps the Warn.
+				fetchLog := dm.logger.Warn
+				if reprobe || repeat {
+					fetchLog = dm.logger.Debug
+				}
+				fetchLog("decapi: date fetch failed; window unverifiable this sighting",
 					"videoID", videoID, "err", err)
 			}
 		}
