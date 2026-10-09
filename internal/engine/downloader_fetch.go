@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -85,6 +84,10 @@ const (
 // already has a query string) to a segment URL. Returns the URL unchanged
 // if the token is empty. Centralized here so segment, head-probe, and
 // chunk fetch all inject the token identically.
+//
+// Every error a request built from the result can return goes through
+// redact.PoToken: a *url.Error — a transport failure, or a URL net/url
+// refused to parse — quotes the whole URL, token and all.
 func applyPoTokenQuery(rawURL, token string) string {
 	if token == "" {
 		return rawURL
@@ -95,86 +98,6 @@ func applyPoTokenQuery(rawURL, token string) string {
 	}
 	return rawURL + sep + "pot=" + token
 }
-
-// potValueRe matches a pot query value in a URL or an error string. It is the
-// fallback for a URL net/url cannot parse, and the scrub for a wrapper's
-// precomputed message.
-var potValueRe = regexp.MustCompile(`pot=[^&"\s]+`)
-
-// redactedPotValue replaces the PO token wherever an error would print it.
-const redactedPotValue = "pot=<redacted>"
-
-// redactPoToken keeps the GVS PO token out of an error's text. A transport
-// failure from http.Client.Do is a *url.Error whose Error() embeds the full
-// request URL, and applyPoTokenQuery put the token in that URL — so the
-// string would reach `job error` and the job's stored error.
-//
-// Contract: when a *url.Error anywhere in err's chain carries a pot value,
-// its URL field is rewritten IN PLACE to pot=<redacted> (Op and Err are
-// untouched, so errors.Is / errors.As on the cause still hold). When err is
-// that *url.Error itself it is returned as is; when it sits under a wrapper
-// whose message was precomputed (fmt.Errorf), the result is a thin wrapper
-// with the scrubbed message whose Unwrap is err. Every other error — nil,
-// no *url.Error, no pot value — is returned unchanged, and a second call is
-// a no-op.
-func redactPoToken(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	redacted := redactPotInURL(ue.URL)
-	if redacted == ue.URL {
-		return err
-	}
-	msg := err.Error()
-	ue.URL = redacted
-	if err == error(ue) {
-		return err
-	}
-	return &potRedactedError{msg: potValueRe.ReplaceAllString(msg, redactedPotValue), err: err}
-}
-
-// redactPotInURL rewrites every pot query value in rawURL to <redacted>,
-// leaving every other parameter and their order byte-identical. A URL
-// net/url cannot parse falls back to the regexp.
-func redactPotInURL(rawURL string) string {
-	if _, err := url.Parse(rawURL); err != nil {
-		return potValueRe.ReplaceAllString(rawURL, redactedPotValue)
-	}
-	// Splice the raw string rather than re-serialise through url.URL, so
-	// nothing but the pot value can change.
-	head, rest, hasQuery := strings.Cut(rawURL, "?")
-	if !hasQuery {
-		return rawURL
-	}
-	query, frag, hasFrag := strings.Cut(rest, "#")
-	parts := strings.Split(query, "&")
-	changed := false
-	for i, p := range parts {
-		if key, _, _ := strings.Cut(p, "="); key == "pot" && p != redactedPotValue {
-			parts[i] = redactedPotValue
-			changed = true
-		}
-	}
-	if !changed {
-		return rawURL
-	}
-	out := head + "?" + strings.Join(parts, "&")
-	if hasFrag {
-		out += "#" + frag
-	}
-	return out
-}
-
-// potRedactedError carries a wrapper's message with the PO token scrubbed;
-// Unwrap keeps the original chain for errors.Is / errors.As.
-type potRedactedError struct {
-	msg string
-	err error
-}
-
-func (e *potRedactedError) Error() string { return e.msg }
-func (e *potRedactedError) Unwrap() error { return e.err }
 
 // ConnectivityReporter is the interface the engine uses to notify the
 // connectivity monitor about HTTP successes and failures. It's stored in an
@@ -395,7 +318,7 @@ func withFetchDeadlines(parent context.Context, idle, ceiling time.Duration) (co
 // idleFetchError re-labels a context error that the read-progress deadline
 // caused, so callers and logs see a stall rather than a bare cancellation.
 // Any other error passes through with only its PO token redacted
-// (redactPoToken), so no caller can carry the token into a job error.
+// (redact.PoToken), so no caller can carry the token into a job error.
 // Shared with runDirectDownloadFallback, which has no ceiling.
 func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if err == nil {
@@ -404,7 +327,7 @@ func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if errors.Is(context.Cause(ctx), errFetchIdle) {
 		return fmt.Errorf("stalled: %w for %s", errFetchIdle, idle)
 	}
-	return redactPoToken(err)
+	return redact.PoToken(err)
 }
 
 // fetchDeadlineError re-labels a context error that EITHER per-fetch deadline
@@ -434,7 +357,9 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
-		return nil, 0, err
+		// url.Parse's refusal quotes the whole URL, the token with it — and
+		// an HLS playlist URL carries one in its path as well as the query.
+		return nil, 0, redact.PoToken(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
@@ -757,14 +682,14 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
-		return -1, err
+		return -1, redact.PoToken(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return -1, err
+		return -1, redact.PoToken(err)
 	}
 	reportSuccess("engine/fetch")
 	// Bounded drain to allow keep-alive reuse. The expected response to this
@@ -1118,7 +1043,7 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, redact.PoToken(err)
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))

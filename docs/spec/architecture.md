@@ -209,12 +209,13 @@ internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEnc
 internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
 internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
 internal/sqliteuri  (1 file,  ~30)     -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
+internal/redact     (1 file,  ~180)    -- one redaction rule per kind of secret, for error text, log lines and notifications (the GVS PO token)
 internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing
 ```
 
-Total: approximately 124,200 lines of Go across 322 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
+Total: approximately 124,400 lines of Go across 323 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
 
 ### Dependency Direction
 
@@ -223,7 +224,7 @@ Dependencies flow strictly downward. Lower-level packages never import higher-le
 The lists below are the `internal/` imports of each package as `go list -f '{{join .Imports " "}}' ./internal/<pkg>` prints them (regenerate the same way):
 
 - `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
-- `internal/worker` imports: `bgutils`, `chat`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `twitch`, `utils`, `youtube`
+- `internal/worker` imports: `bgutils`, `chat`, `cipher`, `config`, `constants`, `database`, `engine`, `httpx`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
 - `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `config`, `cookies`, `database`, `disk`, `jobfilter`, `notifications`, `stats`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
 - `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `internal/web/routes`
 - `internal/tui` imports: `config`, `constants`, `cookies`, `database`, `httpx`, `jobfilter`, `notifications`, `stats`, `utils`, `ytdlpplugin` — NOT `web`: the TUI's HTTP calls use a plain `net/http` client carrying the internal token, and its live updates come straight from the database subscriptions
@@ -233,11 +234,11 @@ The lists below are the `internal/` imports of each package as `go list -f '{{jo
 - `internal/cipher` imports: `bgutils/sidecar`, `goja`, `httpx`, `utils`
 - `internal/bgutils` imports: `bgutils/sidecar`, `constants`, `goja`, `httpx`
 - `internal/cookies` imports: `constants`, `cookies/dpapi`, `httpx`, `sqliteuri`, `utils` (`cookies/dpapi` imports only `sqliteuri`)
-- `internal/engine` imports: `constants`, `httpx`, `utils` (e.g. `DownloadChunkSize` is `constants.DownloadChunkSize`)
+- `internal/engine` imports: `constants`, `httpx`, `redact`, `utils` (e.g. `DownloadChunkSize` is `constants.DownloadChunkSize`)
 - `internal/chat` / `internal/notifications` import: `constants`/`config`, `httpx`, `utils`
 - `internal/utils` imports: `connectivity`, `constants`, `httpx`
 - `internal/database` imports: `sqliteuri`
-- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri` import nothing from internal
+- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri`, `internal/redact` import nothing from internal
 
 Cross-cutting concerns (logging, notifications, events) flow through callback closures wired in `cmd/moombox` (`services.go`, `monitor_callbacks.go`, `tui_wiring.go`), not through package imports.
 
