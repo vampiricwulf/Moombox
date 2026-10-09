@@ -56,11 +56,10 @@ func connIsOnline(c Connectivity) func() bool {
 
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
-	// muxer and ffmpegPath are both guarded by muxerMu: paths.ffmpeg_path is
-	// hot-reloadable, and SetFfmpegPath swaps the pair while downloads run.
-	// Read them through mux() / ffmpegPathValue(), never directly.
+	// muxer is guarded by muxerMu: paths.ffmpeg_path is hot-reloadable, and
+	// SetFfmpegPath swaps it while downloads run. Read it through mux(),
+	// never directly.
 	muxer        *engine.Muxer
-	ffmpegPath   string
 	muxerMu      sync.RWMutex
 	db           *database.Database
 	queue        *JobQueue
@@ -74,7 +73,14 @@ type DownloadOrchestrator struct {
 	// ONE registry to both). ExecuteTwitch registers into it; cmd/moombox
 	// broadcasts through the worker's accessor. nil is inert.
 	twitchChats *twitchChatRegistry
-	logger      logger
+	// trims is the trim service both UIs use (DownloadWorkerDeps.TrimService),
+	// which the post-download trim runs through. It built a TrimService of its
+	// own, whose one-trim-per-job slot the shared one could not see: a
+	// dashboard trim of the range the post-download trim was encoding started
+	// beside it, both FFmpegs wrote the same .partial.mp4, and the clip stored
+	// was unplayable. Nor did the dashboard see that trim running.
+	trims  *TrimService
+	logger logger
 	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
 	// the background part muxes, the connectivity-outage finalize and the
 	// off-queue restart mux, all of which used context.Background() and were
@@ -97,7 +103,6 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 	muxRootCtx, muxRootCancel := context.WithCancel(context.Background())
 	return &DownloadOrchestrator{
 		muxer:         engine.NewMuxer(ffmpegPath, logger),
-		ffmpegPath:    ffmpegPath,
 		db:            db,
 		queue:         queue,
 		cipherSolver:  cs,
@@ -113,13 +118,13 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 
 // SetFfmpegPath rebuilds the muxer for a new ffmpeg path (config hot-reload),
 // mirroring TrimService.SetFfmpegPath. Downloads already in flight keep the
-// muxer they captured; new muxes, probes, part merges and post-download trims
-// see the new binary.
+// muxer they captured; new muxes, probes and part merges see the new binary.
+// A post-download trim runs through the shared trim service, which the same
+// reload re-points on its own (cmd/moombox applyFfmpegPath).
 func (o *DownloadOrchestrator) SetFfmpegPath(path string) {
 	m := engine.NewMuxer(path, o.logger)
 	o.muxerMu.Lock()
 	o.muxer = m
-	o.ffmpegPath = path
 	o.muxerMu.Unlock()
 }
 
@@ -128,13 +133,6 @@ func (o *DownloadOrchestrator) mux() *engine.Muxer {
 	o.muxerMu.RLock()
 	defer o.muxerMu.RUnlock()
 	return o.muxer
-}
-
-// ffmpegPathValue returns the current ffmpeg path under the read lock.
-func (o *DownloadOrchestrator) ffmpegPathValue() string {
-	o.muxerMu.RLock()
-	defer o.muxerMu.RUnlock()
-	return o.ffmpegPath
 }
 
 // ExecuteWithChat runs the full download pipeline for a YouTube job,
@@ -670,15 +668,24 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 // postDownloadTrim creates the trim a job asked for when it was added
 // (StartTime/EndTime), once its recording is finalized. A method of its own
 // so its failure sends can be asserted without running a download.
+//
+// It runs through o.trims, the service both UIs use, so it holds the job's
+// trim slot like any other trim (a dashboard or TUI trim of the job is
+// refused while it encodes), shows in RunningTrims and trim_status, and
+// TrimService.Stop reaches it.
 func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *database.Job) {
 	o.logger.Info("creating post-download trim",
 		"jobID", job.ID,
 		"startTime", job.StartTime,
 		"endTime", job.EndTime)
 
-	trimService := NewTrimService(o.db, o.ffmpegPathValue(), o.logger)
-	if o.notifier != nil {
-		trimService.SetNotifier(o.notifier)
+	if o.trims == nil {
+		// Unreachable from cmd/moombox, which always hands the worker its
+		// trim service; a worker built without one says so, not nothing.
+		err := errors.New("no trim service to run the trim")
+		o.logger.Error("post-download trim failed", "err", err, "jobID", job.ID)
+		o.sendTrimFailed(job, err)
+		return
 	}
 	startSec := 0.0
 	if job.StartTime != nil {
@@ -701,17 +708,20 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 	if endSec <= startSec {
 		return
 	}
-	_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
+	_, trimErr := o.trims.CreateTrim(ctx, freshJob, startSec, endSec, nil)
 	if trimErr == nil {
 		return
 	}
 	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
 	// The service sends Trim Failed itself for a trim that broke. A refusal
-	// (the range the job asked for) it leaves to its caller to answer, and a
-	// run cut short by this context it does not count as a failure — but
-	// nobody asked for this trim from a dialog, so both are told here: one
-	// Trim Failed per failed post-download trim, as before.
-	if _, refused := errors.AsType[*TrimRefusedError](trimErr); refused || ctx.Err() != nil {
+	// (the range the job asked for, or a trim of the job already running) it
+	// leaves to its caller to answer, and a run cut short — by this context,
+	// or by the service's Stop at shutdown, which leaves this context live —
+	// it does not count as a failure. But nobody asked for this trim from a
+	// dialog, so both are told here: one Trim Failed per failed post-download
+	// trim, as before.
+	_, refused := errors.AsType[*TrimRefusedError](trimErr)
+	if refused || errors.Is(trimErr, errTrimInterrupted) {
 		o.sendTrimFailed(job, trimErr)
 	}
 }

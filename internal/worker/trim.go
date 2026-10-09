@@ -88,6 +88,14 @@ const trimFailedReason = "Could not create the trim; the log has the reason"
 // operator stopped Moombox, nothing failed, so no trim_error is sent.
 const trimInterruptedReason = "Moombox stopped before the trim finished"
 
+// errTrimInterrupted wraps the error of a trim cut short — by its caller's
+// context or by Stop — so a caller can tell it from one that broke. The
+// service sends no trim_error for it; the post-download trim, which nobody
+// asked for from a dialog, tells the user itself. Its own job context is
+// still live when Stop cuts it short at shutdown, so that context alone
+// cannot say so.
+var errTrimInterrupted = errors.New("the trim was stopped before it finished")
+
 // trimProgressInterval is the least time between two "running" events of
 // one trim. FFmpeg reports progress about twice a second and the dashboard's
 // bar needs no more; RunningTrims always has the latest figure.
@@ -476,6 +484,7 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 			ev.State, ev.Trim = TrimStateFinished, rec
 		case ctx.Err() != nil:
 			ev.State, ev.Error = TrimStateFailed, trimInterruptedReason
+			err = fmt.Errorf("%w: %w", errTrimInterrupted, err)
 		default:
 			ev.State, ev.Error = TrimStateFailed, trimFailedReason
 			ts.sendTrimFailed(job, err)

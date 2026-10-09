@@ -517,7 +517,7 @@ Warn per key, and the next save leaves them out of the file.
 
 `database_path` also places `open-alerts.json`, the notifications sent and not yet closed and the backlog disk gate's hold, in the same directory (`openAlertsPath`, `cmd/moombox/open_alerts.go`; see operations.md, Event Types), so a volume or a moved install carries both.
 
-`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims, muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
+`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims (a finished job's post-download one included — it runs through the trim service), muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
 
 `staging_directory` is not restart-required, but it is read per job: `buildJobContext` snapshots it when a job
 starts, and the Mux and Resume lookups, `A R` / `A S` and the orphan scan all read the CURRENT value. A change

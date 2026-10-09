@@ -429,7 +429,7 @@ Shutdown is triggered by context cancellation (from signal handler, restart trig
 ### Order
 
 1. **Stop monitors** — TwitchMonitor, DecapiMonitor, FeedMonitor (prevents new job creation)
-2. **Stop the trim service** — `TrimService.Stop` cancels every trim it runs (a dashboard's detached one, a TUI's in-process one), waits up to 2 seconds for each to remove its `.partial.mp4`, and refuses any trim asked for after it. A stopped trim sends no `trim_error`: nothing failed
+2. **Stop the trim service** — `TrimService.Stop` cancels every trim it runs (a dashboard's detached one, a TUI's in-process one, a finished job's post-download one), waits up to 2 seconds for each to remove its `.partial.mp4`, and refuses any trim asked for after it. A stopped trim sends no `trim_error`: nothing failed
 3. **Stop download worker** — Waits for active downloads to save state (resume files)
 4. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 15-second force-exit, not `Wait`'s 30-second timeout: step 3 can legitimately spend 12 of those seconds (`worker.StopBudget`) waiting out in-flight jobs and their muxes, so the drain gets whatever is left — as little as 3 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
 5. **Stop cookie services** — CookieRefresh, AutoCookies

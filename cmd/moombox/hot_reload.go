@@ -45,8 +45,9 @@ func (s *runState) applyTrustForwardedProto(trust bool) {
 }
 
 // applyFfmpegPath re-applies paths.ffmpeg_path to both consumers that captured
-// it when their muxers were built: the trim service, and the download worker's
-// orchestrator (mux, probe and part merge for every download). Each is reached
+// it when their muxers were built: the trim service (every trim, a finished
+// job's post-download one included), and the download worker's orchestrator
+// (mux, probe and part merge for every download). Each is reached
 // independently — a nil one must not skip the other.
 // Three callers: the config PUT's diff, the TUI save, and POST
 // /api/ffmpeg/check (WEB-2).

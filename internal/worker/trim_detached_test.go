@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
@@ -363,7 +364,7 @@ func TestPostDownloadTrimSendsOneTrimFailed(t *testing.T) {
 	touch(t, gate, "gate")
 	touch(t, gate, "fail")
 	r := newTrimRig(t, ffmpeg)
-	o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, ffmpegPath: ffmpeg}
+	o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, trims: r.ts}
 
 	start := 60.0
 	job := *r.job
@@ -472,4 +473,149 @@ func TestRunningTrimsReportProgress(t *testing.T) {
 	}
 	touch(t, gate2, "gate")
 	r2.events.wait(t, TrimStateFinished)
+}
+
+// TestPostDownloadTrimHoldsTheJobsTrimSlot: the post-download trim built a
+// TrimService of its own, whose one-trim-per-job slot the shared service —
+// the dashboard's and the TUI's — could not see. While it encoded,
+// RunningTrims (initial_state) listed nothing, and a dashboard trim of the
+// very range it was encoding was accepted: both FFmpegs wrote the one
+// .partial.mp4, the first to finish renamed it into place while the other
+// still wrote it, and the clip stored and announced was unplayable. It now
+// runs through the shared service, so it holds the job's slot — a second
+// trim of the job, the same range or another, is refused (409) while it
+// runs — and it is listed and reported like any other trim.
+//
+// Mutants: build a private NewTrimService in postDownloadTrim again — nothing
+// is listed, the dashboard trim starts beside it, and FFmpeg runs twice for
+// two rows; drop prepare's `ts.activeOps[job.ID] != nil` refusal — the
+// dashboard trim starts.
+func TestPostDownloadTrimHoldsTheJobsTrimSlot(t *testing.T) {
+	ffmpeg, gate := gatedFFmpeg(t)
+	r := newTrimRig(t, ffmpeg)
+	o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, trims: r.ts}
+
+	start, end := 60.0, 300.0
+	job := *r.job
+	job.StartTime, job.EndTime = &start, &end
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.postDownloadTrim(t.Context(), &job)
+	}()
+	// Whatever fails below, the gated encodes end before the test does.
+	t.Cleanup(func() {
+		_ = os.WriteFile(filepath.Join(gate, "gate"), nil, 0o644)
+		<-done
+	})
+	waitFor(t, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+
+	if rs := r.ts.RunningTrims(); len(rs) != 1 || rs[0].JobID != r.job.ID || rs[0].StartTime != start || rs[0].EndTime != end {
+		t.Errorf("RunningTrims = %+v while the post-download trim encodes, want it listed", rs)
+	}
+	for _, rng := range [][2]float64{{start, end}, {10, 20}} {
+		_, err := r.ts.StartTrim(r.job, rng[0], rng[1])
+		var refused *TrimRefusedError
+		if !errors.As(err, &refused) || !refused.Conflict {
+			t.Errorf("a dashboard trim [%v, %v] while the post-download trim runs: err = %v, want a conflict", rng[0], rng[1], err)
+		}
+	}
+
+	touch(t, gate, "gate")
+	<-done
+	waitFor(t, "every trim to end", func() bool { return len(r.ts.RunningTrims()) == 0 })
+	if n := r.events.count(TrimStateRunning); n == 0 {
+		t.Error("no running event for the post-download trim: the dashboard never sees it")
+	}
+	if ev := r.events.wait(t, TrimStateFinished); ev.JobID != r.job.ID || ev.Trim == nil {
+		t.Errorf("finished event %+v, want the post-download trim's record", ev)
+	}
+	if b, _ := os.ReadFile(filepath.Join(gate, "outputs")); strings.Count(string(b), "\n") != 1 {
+		t.Errorf("FFmpeg ran for:\n%s\nwant the one post-download encode", b)
+	}
+	if rows, _ := r.db.GetTrimsForJob(r.job.ID); len(rows) != 1 {
+		t.Errorf("%d trim rows, want the post-download trim's one: %+v", len(rows), rows)
+	}
+	if n := len(r.rec.ByEvent("trim_created")); n != 1 {
+		t.Errorf("trim_created sent %d times, want 1", n)
+	}
+	if n := len(r.rec.ByEvent("trim_error")); n != 0 {
+		t.Errorf("trim_error sent %d times", n)
+	}
+}
+
+// TestStoppedPostDownloadTrimSendsTrimFailed: at shutdown TrimService.Stop
+// runs ahead of the worker, so it cuts a post-download trim short while the
+// job's own context is still live. The service sends nothing for a stopped
+// trim — nothing failed, and a UI that asked has its answer — but nobody
+// asked for this one from a dialog, so the post-download trim tells the user
+// itself. Its context cannot say the trim was stopped; the error does.
+//
+// Mutants: test the job context again (`ctx.Err() != nil`) in place of
+// errTrimInterrupted — nothing is sent; drop run's errTrimInterrupted wrap —
+// likewise.
+func TestStoppedPostDownloadTrimSendsTrimFailed(t *testing.T) {
+	ffmpeg, _ := gatedFFmpeg(t) // the gate never opens
+	r := newTrimRig(t, ffmpeg)
+	o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, trims: r.ts}
+
+	start := 60.0
+	job := *r.job
+	job.StartTime = &start
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.postDownloadTrim(t.Context(), &job)
+	}()
+	waitFor(t, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+
+	r.ts.Stop()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the post-download trim outlived the trim service's Stop")
+	}
+	if n := len(r.rec.ByEvent("trim_error")); n != 1 {
+		t.Errorf("a post-download trim the stop cut short: trim_error sent %d times, want 1", n)
+	}
+	if got := r.files(t); len(got) != 0 {
+		t.Errorf("the stopped post-download trim left %v in trim/", got)
+	}
+	if rows, _ := r.db.GetTrimsForJob(r.job.ID); len(rows) != 0 {
+		t.Errorf("the stopped post-download trim stored %d rows", len(rows))
+	}
+}
+
+// TestPostDownloadTrimWithoutServiceSaysSo: a worker built without a trim
+// service (DownloadWorkerDeps.TrimService unset) cannot run the trim the job
+// asked for; it says so rather than skipping it in silence.
+//
+// Mutant: return without the send.
+func TestPostDownloadTrimWithoutServiceSaysSo(t *testing.T) {
+	r := newTrimRig(t, "ffmpeg-unused")
+	o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec}
+
+	start := 60.0
+	job := *r.job
+	job.StartTime = &start
+	o.postDownloadTrim(t.Context(), &job)
+	if n := len(r.rec.ByEvent("trim_error")); n != 1 {
+		t.Errorf("trim_error sent %d times, want 1", n)
+	}
+}
+
+// TestNewDownloadWorkerSharesTheTrimService: the trim service handed in
+// DownloadWorkerDeps is the one the orchestrator's post-download trim runs
+// through — not a service of the worker's own, whose slot the dashboard's
+// cannot see (TestPostDownloadTrimHoldsTheJobsTrimSlot).
+//
+// Mutant: drop NewDownloadWorker's `orchestrator.trims = trims`.
+func TestNewDownloadWorkerSharesTheTrimService(t *testing.T) {
+	r := newTrimRig(t, "ffmpeg-unused")
+	cfg := &config.MoomboxConfig{}
+	cfg.Paths.StagingDirectory = filepath.Join(t.TempDir(), "staging")
+	w := NewDownloadWorker(r.db, nil, cfg, &discardLogger{}, &DownloadWorkerDeps{TrimService: r.ts})
+	if w.orchestrator.trims != r.ts {
+		t.Errorf("the orchestrator's trim service is %p, want the one handed in (%p)", w.orchestrator.trims, r.ts)
+	}
 }

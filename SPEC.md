@@ -115,8 +115,8 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only fallback when sidecar disabled or unhealthy. Triple in-process cache (session, minter, inflight).
 9. **CipherSolver** — YouTube signature/n-parameter decryption, 10-VM LRU, disk cache
 10. **NotificationManager** — Discord webhook dispatch
-11. **DownloadWorker** — Job queue (100 lifecycle + N VOD download slots), backlog scheduler, stream processor, orchestrator
-12. **TrimService** — FFmpeg-based clip extraction from finished recordings
+11. **TrimService** — FFmpeg-based clip extraction from finished recordings; ahead of the worker, which runs every job's post-download trim through it
+12. **DownloadWorker** — Job queue (100 lifecycle + N VOD download slots), backlog scheduler, stream processor, orchestrator
 13. **FeedMonitor + BackfillWorker** — YouTube RSS/membership discovery into the persistent feed-history store; serial full-catalog backfill scans
 14. **DECAPIMonitor** — DECAPI live-check polling for YouTube
 15. **TwitchMonitor** — Twitch GQL stream polling
@@ -517,7 +517,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `connectivity` — Network reachability changed (payload: `{online}`)
 - `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
-- `trim_status` — A trim the trim service runs, from either UI (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running — as it starts, then with FFmpeg's percentage at most every 250 ms — then finished with the stored `trim` record or failed with an `error` written for the user). Running trims are also seeded via `initial_state`, so a reload mid-trim still shows its progress bar
+- `trim_status` — A trim the trim service runs, from either UI or a finished job's post-download trim (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running — as it starts, then with FFmpeg's percentage at most every 250 ms — then finished with the stored `trim` record or failed with an `error` written for the user). Running trims are also seeded via `initial_state`, so a reload mid-trim still shows its progress bar
 - `pong` — Reply to the client's `ping` (payload: none)
 
 That list is the whole wire protocol: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the four `cmd/moombox` callers (`update_available`, `disk_status`, `backfill_status`, `config_update`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.
@@ -778,7 +778,7 @@ When the main context is cancelled (Ctrl+C, SIGTERM, or restart trigger):
 
 1. 15-second force-exit timer starts (it must outlast the worker's 12-second stop budget — see `forceExitAfter` in `cmd/moombox/shutdown.go`)
 2. Notifications switch to single-attempt delivery
-3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor, then the TrimService (cancels the trims it runs and waits up to 2 s for each to remove its partial file)
+3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor, then the TrimService (cancels the trims it runs — a finished job's post-download trim among them — and waits up to 2 s for each to remove its partial file)
 4. Stop DownloadWorker (waits up to 10 s for active downloads to save resume state, then cancels in-flight muxes)
 5. Flush pending notifications
 6. Stop CookieRefresh and AutoCookieService

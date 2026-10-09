@@ -331,6 +331,12 @@ type DownloadWorkerDeps struct {
 	TwitchService *twitch.Service
 	Notifier      notifications.Sender
 	Conn          Connectivity
+
+	// TrimService is the trim service both UIs use; the post-download trim
+	// runs through it, so its one-trim-per-job slot, RunningTrims and Stop
+	// cover that trim too. Without one, a post-download trim sends Trim
+	// Failed instead of running.
+	TrimService *TrimService
 }
 
 // NewDownloadWorker creates a new download worker.
@@ -350,6 +356,7 @@ func NewDownloadWorker(
 	var tw *twitch.Service
 	var nm notifications.Sender
 	var conn Connectivity
+	var trims *TrimService
 	if deps != nil {
 		cs = deps.CipherSolver
 		routedCs = deps.RoutedCipherSolver
@@ -357,6 +364,7 @@ func NewDownloadWorker(
 		tw = deps.TwitchService
 		nm = deps.Notifier
 		conn = deps.Conn
+		trims = deps.TrimService
 	}
 
 	sp := NewStreamProcessor(yt, tw, cfg, db, logger)
@@ -382,6 +390,7 @@ func NewDownloadWorker(
 	twitchChats := newTwitchChatRegistry()
 	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
 	orchestrator.twitchChats = twitchChats
+	orchestrator.trims = trims
 
 	w := &DownloadWorker{
 		db:           db,

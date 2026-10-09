@@ -893,29 +893,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.notifyMgr = notifyMgr
 
 	// =========================================================================
-	// 10. Download worker
-	// =========================================================================
-	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:       gojaSolver,
-		RoutedCipherSolver: cipherSolver,
-		PotProvider:        potProvider,
-		TwitchService:      twService,
-		Notifier:           notifyMgr,
-		Conn:               s.connMon,
-	})
-	s.dlWorker = dlWorker
-
-	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
-
-	// The engine's process-wide reorder ceilings (downloader.reorder_buffer_mb
-	// / reorder_budget_mb). Read ONCE here and re-applied from the same
-	// applier on every config save from either UI (hot_reload.go), which is
-	// why nothing downstream — not DownloaderOptions, not the strategies —
-	// carries the value. Warns here if the saved pair is incoherent.
-	s.applyReorderBudget(cfg.Downloader)
-
-	// =========================================================================
-	// 11. Trim service
+	// 10. Trim service — ahead of the worker, which runs every job's
+	// post-download trim through it: one service, so one trim slot per job
+	// whichever of the dashboard, the TUI or the finished download asks.
 	// =========================================================================
 	trimSvc := worker.NewTrimService(db, cfg.Paths.FfmpegPath, log)
 	trimSvc.SetNotifier(notifyMgr)
@@ -943,6 +923,29 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Info("import-temp cleanup", slog.Int("removed", removed))
 		}
 	}()
+
+	// =========================================================================
+	// 11. Download worker
+	// =========================================================================
+	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
+		CipherSolver:       gojaSolver,
+		RoutedCipherSolver: cipherSolver,
+		PotProvider:        potProvider,
+		TwitchService:      twService,
+		Notifier:           notifyMgr,
+		Conn:               s.connMon,
+		TrimService:        trimSvc,
+	})
+	s.dlWorker = dlWorker
+
+	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
+
+	// The engine's process-wide reorder ceilings (downloader.reorder_buffer_mb
+	// / reorder_budget_mb). Read ONCE here and re-applied from the same
+	// applier on every config save from either UI (hot_reload.go), which is
+	// why nothing downstream — not DownloaderOptions, not the strategies —
+	// carries the value. Warns here if the saved pair is incoherent.
+	s.applyReorderBudget(cfg.Downloader)
 
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
