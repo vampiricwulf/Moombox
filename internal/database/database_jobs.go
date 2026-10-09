@@ -340,6 +340,38 @@ func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
 	return out, rows.Err()
 }
 
+// TwitchEndUnconfirmedJobs returns the Twitch jobs sitting in Error with
+// ParkReasonTwitchEndUnconfirmed — a live capture that failed while its
+// broadcast's end was unconfirmed, staging kept — with the fields the Twitch
+// monitor needs to tell whether that broadcast is over: ID, VideoID, URL,
+// ChannelName, StreamStartTime and ManuallyAdded.
+func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, video_id, url, channel_name, stream_start_time, manually_added FROM jobs
+		 WHERE platform = 'twitch' AND status = ? AND park_reason = ?`,
+		StatusError, ParkReasonTwitchEndUnconfirmed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		var id string
+		var videoID, url, channelName, start sql.NullString
+		var manual sql.NullInt64
+		if err := rows.Scan(&id, &videoID, &url, &channelName, &start, &manual); err != nil {
+			return nil, err
+		}
+		out = append(out, &Job{ID: id, VideoID: videoID.String, URL: url.String, ChannelName: channelName.String,
+			StreamStartTime: start.String, ManuallyAdded: manual.Int64 != 0, Platform: "twitch",
+			Status: StatusError, ParkReason: ParkReasonTwitchEndUnconfirmed})
+	}
+	return out, rows.Err()
+}
+
 // BackfillTwitchQualityPreference records a twitch_quality_preference on every
 // Twitch row that has none — the rows that predate schema v21 — and reports
 // how many it wrote. prefFor decides each row's value from ID, VideoID, URL,

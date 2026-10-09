@@ -19,7 +19,9 @@ const (
 	StatusCookies     JobStatus = "COOKIES?"
 )
 
-// ParkReason records WHY a job was parked at StatusCookies. The status alone
+// ParkReason records WHY a job was parked at StatusCookies — and, for one
+// Twitch case, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed,
+// the only value an Error row carries). The status alone
 // says "credentials are the fix", which is true for every value here — but it
 // does not say WHICH credentials, and the automatic recovery sweeps need that
 // distinction to avoid retrying a job that cannot possibly succeed against the
@@ -52,6 +54,19 @@ const (
 	// session cannot help, so the auth-recovered sweep skips these; only a
 	// genuine change of account identity resumes them.
 	ParkReasonMembership ParkReason = "membership"
+
+	// ParkReasonTwitchEndUnconfirmed is the one reason an ERROR row carries
+	// (owner decision D-T4): a live Twitch download failed while nothing said
+	// its broadcast was over, so the job stopped in Error with its staging and
+	// resume sidecar kept (ExecuteTwitch's unconfirmed-end latch). It is what
+	// lets the Twitch monitor mux that staging automatically once it confirms
+	// the broadcast is over — offline, or live as a different broadcast —
+	// exactly as the Mux action would, and only for these rows: the marker is
+	// written by the latch, never inferred from the error text, and the
+	// automatic mux clears it before it starts, so it runs once per failure.
+	// No COOKIES? sweep reads an Error row, so the credential sweeps never see
+	// it.
+	ParkReasonTwitchEndUnconfirmed ParkReason = "twitch_end_unconfirmed"
 )
 
 // Job is the primary data model for a download job.

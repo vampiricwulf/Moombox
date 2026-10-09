@@ -243,6 +243,16 @@ type DownloadWorker struct {
 	// their previous run, so a second click does not queue a second reset.
 	afterExitPending sync.Map
 
+	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
+	// monitor poll that lands while one is in flight does not start another;
+	// autoMuxMu makes autoMuxNow's re-check and claim one step. See
+	// twitch_end_unconfirmed.go.
+	autoMuxPending sync.Map
+	autoMuxMu      sync.Mutex
+	// twitchLiveness overrides confirmTwitchStreamInfo for
+	// AutoMuxEndedBroadcast's confirmation. nil in production; tests set it.
+	twitchLiveness func(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error)
+
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
 	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
 	//
@@ -1407,9 +1417,16 @@ func cookieRefreshWorthAttempting(err error) bool {
 //
 // Returns ParkReasonNone for anything that does not park at StatusCookies, so
 // callers can write the field unconditionally and never leave a stale
-// classification behind on a job that failed for an unrelated reason.
+// classification behind on a job that failed for an unrelated reason — with
+// one Error-row exception: a live Twitch capture that stopped on its
+// unconfirmed-end latch (ErrTwitchEndUnconfirmed) is recorded as
+// ParkReasonTwitchEndUnconfirmed, the marker the automatic mux keys on
+// (AutoMuxEndedBroadcast, D-T4).
 func parkReasonForError(err error) database.ParkReason {
 	if !cookiesStatusError(err) {
+		if errors.Is(err, ErrTwitchEndUnconfirmed) {
+			return database.ParkReasonTwitchEndUnconfirmed
+		}
 		return database.ParkReasonNone
 	}
 	if errors.Is(err, ErrNotAMember) {
@@ -2193,6 +2210,13 @@ func (w *DownloadWorker) Asides(jobID string) (AsideReport, error) {
 // MuxJob force-muxes a cancelled/errored job's staging files.
 // Bypasses the download queue — runs directly in a wg-tracked goroutine.
 func (w *DownloadWorker) MuxJob(jobID string) error {
+	return w.muxJob(jobID, func(err error) string { return err.Error() })
+}
+
+// muxJob is MuxJob with the error a failed mux leaves on the row chosen by
+// the caller: the Mux action's is the mux error itself, the automatic mux of
+// an ended Twitch broadcast says it was automatic (autoMuxFailure).
+func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error {
 	// Read config for staging check
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -2220,8 +2244,13 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 	if prior, _ := w.db.GetJob(jobID); prior != nil && prior.Status == database.StatusMuxing {
 		capturedMux = false
 	}
+	// A mux of the staging ends what an unconfirmed-end marker was waiting
+	// for, whoever started it: cleared here, an operator's Mux that fails
+	// is not followed by an automatic one when the channel next reads
+	// offline (D-T4). On every other row the value is already empty.
 	w.db.UpdateJobFields(jobID, map[string]any{
-		"status": database.StatusMuxing,
+		"status":      database.StatusMuxing,
+		"park_reason": database.ParkReasonNone,
 	})
 
 	w.wg.Go(func() {
@@ -2324,7 +2353,7 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
 			w.db.UpdateJobFields(jobID, map[string]any{
 				"status": database.StatusError,
-				"error":  err.Error(),
+				"error":  failure(err),
 			})
 			return
 		}

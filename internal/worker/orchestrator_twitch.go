@@ -596,7 +596,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// still archive what was captured. Nothing continues the capture from
 	// there — /resume refuses every non-YouTube job, Retry starts over with
 	// fresh staging and the monitor recovers offline flaps only — which is
-	// why the in-loop variant refresh retries before taking this exit.
+	// why the in-loop variant refresh retries before taking this exit. What
+	// the monitor does do, for a LIVE capture's latch (markEndUnconfirmed), is
+	// mux that staging itself once it confirms the broadcast over (D-T4,
+	// AutoMuxEndedBroadcast), so the archive no longer waits on the operator.
 	var unconfirmedEndErr error
 
 	// latchIfUnconfirmed takes that latch unless the broadcast is CONFIRMED
@@ -632,7 +635,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 		o.logger.Warn("Twitch download ended without a confirmed stream end — keeping staging for recovery",
 			"jobID", jobCtx.Job.ID, "stillLive", stillLive, "checkErr", checkErr)
-		unconfirmedEndErr = cause
+		// Marked (D-T4): the row this leaves in Error is the one the Twitch
+		// monitor muxes automatically once it confirms the broadcast over.
+		unconfirmedEndErr = markEndUnconfirmed(cause)
 		return true
 	}
 
@@ -1006,7 +1011,7 @@ sessionLoop:
 				// half of a broadcast still running.
 				o.logger.Warn("Twitch broadcast could not be rechecked after the outage — keeping staging for recovery",
 					"err", recheckErr, "jobID", jobCtx.Job.ID)
-				unconfirmedEndErr = fmt.Errorf("recheck Twitch broadcast after outage: %w", recheckErr)
+				unconfirmedEndErr = markEndUnconfirmed(fmt.Errorf("recheck Twitch broadcast after outage: %w", recheckErr))
 				break sessionLoop
 			}
 			if !stillLive || !o.sameTwitchBroadcast(jobCtx.Job.ID, info) {

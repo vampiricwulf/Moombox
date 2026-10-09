@@ -1655,6 +1655,20 @@ func (s *runState) wireMonitorCallbacks() {
 			slog.String("streamID", info.StreamID))
 	}
 
+	// A live Twitch capture that failed with its broadcast's end unconfirmed
+	// kept its staging in Error; once the monitor sees that broadcast over,
+	// the worker confirms it and muxes the staging as the Mux action would,
+	// once (D-T4). Disjoint from OnStreamRecover by construction: that one
+	// fires for the SAME broadcast still live and a different error.
+	s.twitchMon.OnBroadcastOver = func(jobID string) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("Panic in OnBroadcastOver (twitch)", slog.Any("panic", r))
+			}
+		}()
+		s.dlWorker.AutoMuxEndedBroadcast(jobID)
+	}
+
 	// Backfill worker -> UIs: progress surfacing (spec §11), modeled on the
 	// disk_status pipeline in main.go — generic hub.Broadcast for web
 	// clients, non-blocking channel push for the TUI — plus the snapshot

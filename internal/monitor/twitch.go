@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +63,14 @@ type TwitchMonitor struct {
 	OnSchedule      func(nextCheckAt int64)
 	OnStreamFound   func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig)
 	OnStreamRecover func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig, jobID string)
+	// OnBroadcastOver is called for each Twitch job that stopped in Error on
+	// the unconfirmed-end latch (database.ParkReasonTwitchEndUnconfirmed) once
+	// a poll shows its broadcast over — the channel offline, or live with a
+	// different broadcast (worker.TwitchBroadcastOver). One poll is one
+	// sample; the receiver confirms before it acts (D-T4,
+	// worker.DownloadWorker.AutoMuxEndedBroadcast). Called on the monitor's
+	// goroutine, so it must not block.
+	OnBroadcastOver func(jobID string)
 	IsOnline        func() bool // nil = always online
 
 	// FetchBatch overrides the GQL batch call (tm.tw.GetStreamInfoBatch) for
@@ -431,6 +440,41 @@ func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelC
 		}
 		if err := tm.processStreamInfo(ctx, ch, infos[i]); err != nil {
 			tm.logger.Debug("twitch process failed", "channel", ch.Name, "err", err)
+		}
+	}
+	tm.dispatchEndedBroadcasts(chunk, infos, errs)
+}
+
+// dispatchEndedBroadcasts hands OnBroadcastOver every job the unconfirmed-end
+// latch left in Error whose channel this chunk just answered for with its
+// broadcast over (D-T4): offline, or live with another broadcast. A channel
+// whose check failed answered nothing and is skipped; so is a job whose
+// channel the config no longer holds, which only the Mux action can archive.
+// The rows are read once per chunk — a handful at most, and usually none.
+func (tm *TwitchMonitor) dispatchEndedBroadcasts(chunk []config.ChannelConfig, infos []*twitch.TwitchStreamInfo, errs []error) {
+	if tm.OnBroadcastOver == nil {
+		return
+	}
+	jobs, err := tm.db.TwitchEndUnconfirmedJobs()
+	if err != nil {
+		tm.logger.Debug("TwitchEndUnconfirmedJobs query failed", "err", err)
+		return
+	}
+	for _, job := range jobs {
+		login := worker.TwitchJobLogin(job)
+		if login == "" {
+			continue
+		}
+		for i := range chunk {
+			if errs[i] != nil || !strings.EqualFold(chunk[i].ID, login) {
+				continue
+			}
+			if worker.TwitchBroadcastOver(job, infos[i]) {
+				tm.logger.Info("twitch broadcast of an errored capture is over — handing its staging to the automatic mux",
+					"jobID", job.ID, "channel", login)
+				tm.OnBroadcastOver(job.ID)
+			}
+			break
 		}
 	}
 }

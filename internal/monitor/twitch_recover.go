@@ -29,6 +29,14 @@ func isRecoverableTwitchError(job *database.Job, maxRetries int) bool {
 	if job.Error != worker.TwitchOfflineErrMsg {
 		return false
 	}
+	// A row the unconfirmed-end latch marked is the automatic mux's
+	// (dispatchEndedBroadcasts, D-T4), never a re-initialisation's: that
+	// would delete the staging the mux exists to archive. The error check
+	// above already keeps the two apart — the latch's error is a download
+	// failure — and this states it where it cannot drift with the prose.
+	if job.ParkReason == database.ParkReasonTwitchEndUnconfirmed {
+		return false
+	}
 	if job.LastVideoSeq != nil {
 		return false
 	}
