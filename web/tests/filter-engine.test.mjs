@@ -76,6 +76,25 @@ test("status: finished is Finished only — Cancelled moved to issues", () => {
   assert.deepEqual(bucketWith("status:finished"), ["f"]);
 });
 
+// One job per status, so each bucket's membership is pinned status by status.
+// The shared `jobs` hold no Downloading or Queued row, so either could leave
+// the active bucket with every suite green — and backlog VODs wait in Queued,
+// which status:active (the Active chip here, F → Active in the TUI) must show.
+// internal/jobfilter's TestStatusBucketsHoldExactlyTheirStatuses is the Go
+// twin, and its TestStatusBucketsMatchTheDashboard runs this module against
+// Go's Match, so the twins cannot drift apart either.
+//
+// Mutants: "Queued" or "Downloading" dropped from STATUS_FILTER_MAP.active, or
+// any status moved between buckets.
+const STATUSES = ["Queued", "Upcoming", "Live", "Downloading", "Muxing", "Finished", "Error", "Cancelled", "COOKIES?"];
+const statusJobs = STATUSES.map(status => ({ id: status, title: "", channelName: "", status, platform: "youtube" }));
+test("each status bucket holds exactly its statuses, Queued in active", () => {
+  const ids = (query) => applyFilterTokens(statusJobs, parseFilterQuery(query)).map(j => j.id).sort();
+  assert.deepEqual(ids("status:active"), ["Downloading", "Live", "Muxing", "Queued", "Upcoming"]);
+  assert.deepEqual(ids("status:issues"), ["COOKIES?", "Cancelled", "Error"]);
+  assert.deepEqual(ids("status:finished"), ["Finished"]);
+});
+
 test("status: errors stays an alias of issues for hand-typed queries", () => {
   assert.deepEqual(bucketWith("status:errors"), bucketWith("status:issues"));
 });

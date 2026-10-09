@@ -3,10 +3,15 @@ package jobfilter
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/dop251/goja"
+
 	"github.com/vampiricwulf/Moombox/internal/database"
+	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
 // equalToken compares two tokens ignoring the unexported lower field, which
@@ -310,6 +315,85 @@ func TestStatusIssuesGroupsErrorCancelledCookies(t *testing.T) {
 func TestStatusFinishedIsFinishedOnly(t *testing.T) {
 	// node test: "status: finished is Finished only — Cancelled moved to issues"
 	assertIDs(t, bucketWith("status:finished"), "f")
+}
+
+// allStatuses is one of each database.JobStatus.
+var allStatuses = []database.JobStatus{
+	database.StatusQueued, database.StatusUpcoming, database.StatusLive, database.StatusDownloading,
+	database.StatusMuxing, database.StatusFinished, database.StatusError, database.StatusCancelled,
+	database.StatusCookies,
+}
+
+// One job per status, so each bucket's membership is pinned status by status.
+// The shared fixture holds no Downloading or Queued row, so either could leave
+// the active bucket with every suite green — and backlog VODs wait in Queued,
+// which status:active (the TUI's F → Active, the dashboard's Active chip) must
+// show. The node twin is "each status bucket holds exactly its statuses,
+// Queued in active" in web/tests/filter-engine.test.mjs.
+//
+// Mutants: StatusQueued or StatusDownloading dropped from
+// BucketStatuses["active"], or any status moved between buckets.
+func TestStatusBucketsHoldExactlyTheirStatuses(t *testing.T) {
+	ids := func(query string) []string {
+		var out []string
+		for _, s := range allStatuses {
+			if Match(Parse(query), &database.Job{ID: string(s), Status: s, Platform: "youtube"}) {
+				out = append(out, string(s))
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	assertIDs(t, ids("status:active"), "Downloading", "Live", "Muxing", "Queued", "Upcoming")
+	assertIDs(t, ids("status:issues"), "COOKIES?", "Cancelled", "Error")
+	assertIDs(t, ids("status:finished"), "Finished")
+}
+
+// The buckets are a twin constant — BucketStatuses here, STATUS_FILTER_MAP in
+// web/public/modules/filter-engine.js — and each side's own tests only pin
+// their own copy. This runs the SHIPPED parser and engine in goja and asks
+// both twins the same question for every status: a status dropped from one
+// twin's bucket leaves the TUI and the dashboard disagreeing about what
+// Active (or Issues, or Finished) shows.
+//
+// Mutants: a status dropped from, or added to, a bucket on one side only.
+func TestStatusBucketsMatchTheDashboard(t *testing.T) {
+	var src strings.Builder
+	for _, name := range []string{"public/modules/filter-parser.js", "public/modules/filter-engine.js"} {
+		raw, err := webassets.PublicFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read the embedded %s: %v", name, err)
+		}
+		s := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		s = regexp.MustCompile(`(?m)^import .*$`).ReplaceAllString(s, "")
+		src.WriteString(regexp.MustCompile(`(?m)^export `).ReplaceAllString(s, ""))
+		src.WriteString("\n")
+	}
+	src.WriteString(`function webMatches(query, status) {
+		const job = { title: "", channelName: "", videoId: "", status, platform: "youtube" };
+		return applyFilterTokens([job], parseFilterQuery(query)).length === 1;
+	}`)
+	vm := goja.New()
+	if _, err := vm.RunString(src.String()); err != nil {
+		t.Fatalf("the dashboard's filter modules do not evaluate: %v", err)
+	}
+	webMatch, ok := goja.AssertFunction(vm.Get("webMatches"))
+	if !ok {
+		t.Fatal("webMatches is not a function")
+	}
+	for _, query := range []string{"status:active", "status:issues", "status:errors", "status:finished", "-status:active"} {
+		for _, s := range allStatuses {
+			v, err := webMatch(goja.Undefined(), vm.ToValue(query), vm.ToValue(string(s)))
+			if err != nil {
+				t.Fatalf("%s on %s: %v", query, s, err)
+			}
+			web := v.ToBoolean()
+			tui := Match(Parse(query), &database.Job{Status: s, Platform: "youtube"})
+			if web != tui {
+				t.Errorf("%s on a %s job: dashboard %v, TUI %v", query, s, web, tui)
+			}
+		}
+	}
 }
 
 func TestStatusErrorsAliasOfIssues(t *testing.T) {
