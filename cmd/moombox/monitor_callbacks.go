@@ -111,12 +111,20 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 			log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
 				"job", job.ID, "platform", platform, "err", err)
 		}
-		db.UpdateJobFields(job.ID, map[string]any{
+		// Only while the row is still parked: GetAllJobs read it COOKIES?,
+		// and an operator's Cancel can land before this write — which,
+		// written unconditionally, turned the Cancelled row back into a
+		// download.
+		if !db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
 			"status":        status,
 			"error":         "",
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
-		})
+		}) {
+			log.Debug("cookie-parked sweep: the job left COOKIES? before its resume; leaving it",
+				"job", job.ID, "platform", platform)
+			continue
+		}
 		resumed++
 	}
 	// Outside the loop and outside any lock the caller holds: one signal is

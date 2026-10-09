@@ -1730,12 +1730,37 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 			w.logger.Debug("could not read the feed_items partner; resuming to Upcoming",
 				"jobID", job.ID, "err", err)
 		}
-		w.db.UpdateJobFields(job.ID, map[string]any{
+		// Only while the row is still parked. The refresh can take two
+		// minutes, and both UIs offer Cancel on a COOKIES? row: written
+		// unconditionally, this turned the operator's Cancelled back into
+		// Upcoming (Queued for a backlog VOD) and the hand-off below
+		// enqueued it — the cancelled job downloaded after all. setJobError
+		// settled this run, so that Cancel was its caller's to report and
+		// nothing more is owed here.
+		if !w.db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
 			"status":        status,
 			"error":         "",
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
-		})
+		}) {
+			// The credential sweep the refresh's own re-check sets off
+			// (cmd/moombox resumeCookieParkedJobs) resumes every parked row
+			// of the platform, usually this one among them, before the
+			// refresh returns. That resume is the one this would have made,
+			// and still wants the hand-off: the sweep wakes the scheduler
+			// but leaves an Upcoming row to the heartbeat. Anything else —
+			// Cancelled, retried, deleted — is not this run's to resume.
+			var now database.JobStatus // "" when the row is gone
+			if cur, gerr := w.db.GetJob(job.ID); gerr == nil && cur != nil {
+				now = cur.Status
+			}
+			if now != database.StatusUpcoming && now != database.StatusQueued {
+				w.logger.Info("the job left COOKIES? while the cookie refresh ran; not resuming it",
+					"jobID", job.ID, "status", now)
+				return
+			}
+			status = now
+		}
 		// This runs inside the parked run's own tail, which is still
 		// registered: an Enqueue now would be dropped as a duplicate (and the
 		// job left for the heartbeat), so the hand-off waits for the run to

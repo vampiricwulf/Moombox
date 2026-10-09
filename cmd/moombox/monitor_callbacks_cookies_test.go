@@ -498,3 +498,45 @@ func TestResumeCookieParkedJobs_APartnerlessBacklogRowGoesToUpcoming(t *testing.
 			"never admit has no exit at all", admit)
 	}
 }
+
+// TestResumeCookieParkedJobs_LeavesACancelStanding: the sweep reads every job
+// first and writes each resume after, and an operator's Cancel of a parked
+// row can land in between — both UIs offer Cancel on a COOKIES? row. The
+// resume, written unconditionally, turned the Cancelled row back into a
+// download. Here each resume cancels the other parked row, so whichever the
+// loop reaches second has been cancelled since GetAllJobs read it.
+//
+// Mutant: write the resume with UpdateJobFields — both rows are resumed.
+func TestResumeCookieParkedJobs_LeavesACancelStanding(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "cancel.db"))
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ids := []string{"parked_a", "parked_b"}
+	for _, id := range ids {
+		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube",
+			Status: database.StatusCookies}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := map[string]string{ids[0]: ids[1], ids[1]: ids[0]}
+	unsub := db.OnJobUpdate(func(j *database.Job) {
+		if o, ok := other[j.ID]; ok && j.Status == database.StatusUpcoming {
+			db.UpdateJobFieldsIf(o, database.StatusCookies, map[string]any{"status": database.StatusCancelled})
+		}
+	})
+	defer unsub()
+
+	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", ""); n != 1 {
+		t.Errorf("resumed %d jobs, want 1 (the other was cancelled before its resume)", n)
+	}
+	got := map[database.JobStatus]int{}
+	for _, id := range ids {
+		j, _ := db.GetJob(id)
+		got[j.Status]++
+	}
+	if got[database.StatusUpcoming] != 1 || got[database.StatusCancelled] != 1 {
+		t.Errorf("statuses = %v, want one Upcoming and the cancelled one left Cancelled", got)
+	}
+}

@@ -317,3 +317,97 @@ func TestBacklogRequeueBetweenCancelsTwoHalvesEndsTheRunCancelled(t *testing.T) 
 		t.Error("CancelJob flagged a requeued run: its caller leaves Job Cancelled to a run that will not send it")
 	}
 }
+
+// parkedRun adds a job (a backlog VOD with its feed_items partner when
+// backlog) and dequeues it, so setJobError can park it as a run would.
+func parkedRun(t *testing.T, w *DownloadWorker, db *database.Database, id string, backlog bool) *database.Job {
+	t.Helper()
+	ch := "UC_park"
+	job := &database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube", Title: "T",
+		ChannelName: "Chan", Status: database.StatusDownloading, ChannelID: &ch}
+	if backlog {
+		job.QueuePriority = 1
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	if backlog {
+		addFeedItemRow(t, db, ch, id, "2026-07-10T00:00:00Z")
+	}
+	w.queue.Enqueue(id, database.StatusDownloading)
+	if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
+		t.Fatal("Dequeue returned no job")
+	}
+	return job
+}
+
+// TestCookieRefreshResumeLeavesACancelStanding: setJobError parks the job in
+// COOKIES? and then waits on the automatic cookie refresh, up to two minutes,
+// while both UIs offer Cancel on the parked row. The operator cancels; the
+// refresh succeeds; and the resume, written unconditionally, turned the
+// Cancelled row back into Upcoming (Queued for a backlog VOD) and handed it on
+// once the run exited — the job the operator had cancelled downloaded after
+// all. The resume is a compare-and-set on COOKIES?, and nothing is handed on.
+//
+// Mutants: write the resume with UpdateJobFields — the row is resumed and
+// enqueued; hand off whatever the row now reads — the Cancelled job is
+// enqueued.
+func TestCookieRefreshResumeLeavesACancelStanding(t *testing.T) {
+	for _, backlog := range []bool{false, true} {
+		t.Run(fmt.Sprintf("backlog=%v", backlog), func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			id := fmt.Sprintf("refresh_cancel_%v", backlog)
+			job := parkedRun(t, w, db, id, backlog)
+			w.OnCookieRefreshNeeded = func(string) bool {
+				if row, _ := db.GetJob(id); row.Status != database.StatusCookies {
+					t.Errorf("status during the refresh = %s, want COOKIES?", row.Status)
+				}
+				w.CancelJob(id) // the operator cancels the parked row
+				return true
+			}
+			w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
+			w.queue.Complete(id) // the run exits
+			w.wg.Wait()          // and any hand-off it left runs
+
+			if row, _ := db.GetJob(id); row.Status != database.StatusCancelled {
+				t.Errorf("status = %s after the operator cancelled the parked job, want Cancelled", row.Status)
+			}
+			if backlog {
+				w.scheduler.resolveSlots = func(string) int { return 1 }
+				w.scheduler.sweep()
+			}
+			if w.queue.isPending(id) {
+				t.Error("the cancelled job was enqueued for download")
+			}
+		})
+	}
+}
+
+// TestCookieRefreshResumeHandsOnARowTheSweepResumed: the refresh's own
+// re-check sets off the credential sweep, which resumes every parked row of
+// the platform — this one among them — before the refresh returns, so the
+// resume's compare-and-set on COOKIES? finds it Upcoming. That is the resume
+// this run would have made, and it is still handed on when the run exits
+// rather than left to the heartbeat.
+//
+// Mutant: return whenever the resume does not apply — the job waits for the
+// heartbeat.
+func TestCookieRefreshResumeHandsOnARowTheSweepResumed(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	job := parkedRun(t, w, db, "refresh_swept", false)
+	w.OnCookieRefreshNeeded = func(string) bool {
+		db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
+			"status": database.StatusUpcoming, "error": "", "park_reason": database.ParkReasonNone,
+		}) // the sweep's resume
+		return true
+	}
+	w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
+	w.queue.Complete(job.ID)
+	w.wg.Wait()
+
+	if !w.queue.isPending(job.ID) {
+		t.Error("the resumed job was not handed on when its parked run exited")
+	}
+}
