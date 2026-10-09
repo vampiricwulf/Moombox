@@ -34,7 +34,7 @@ func TestEveryJobChangeIsBroadcast(t *testing.T) {
 	}
 	text := string(src)
 	start := strings.Index(text, "s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {")
-	dispatch := strings.Index(text, "\t\tif isProgressOnlyChange(ev.Changes) {")
+	dispatch := strings.Index(text, "\t\tif database.IsProgressOnlyChange(ev.Changes) {")
 	if start < 0 || dispatch < start {
 		t.Fatal("cannot find the job_update subscriber and its dispatch")
 	}

@@ -378,7 +378,9 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
 // This is useful when only a few fields need to change without loading the full job.
-// Returns the updated job after notifying subscribers, or nil on error.
+// Returns the updated job after notifying subscribers, or nil on error. The
+// job is the row GetJob would return, child rows included, unless the write
+// was a progress tick (IsProgressOnlyChange; see JobChange).
 //
 // Note: updated_at is bumped and OnJobUpdate fires on every call, even when the
 // supplied values match what's already on disk (no dirty check). Callers that
@@ -509,9 +511,14 @@ func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond 
 
 	// Read back the full job under the same critical section so subscribers
 	// see consistent state. TUI + WebSocket need all fields; UpdateJobFields
-	// only wrote a subset, so a SELECT is required.
+	// only wrote a subset, so a SELECT is required. The whole row, child
+	// rows included, as GetJob reads it — except for a progress tick, which
+	// moves none of them and no subscriber replaces a row with (JobChange).
 	job, scanErr := scanJob(db.stmtGetJob.QueryRowContext(db.getCtx(), id))
 	if scanErr == nil {
+		if !IsProgressOnlyChange(changes) {
+			db.loadChildRows(job)
+		}
 		db.jobWriteVersion++
 		job.Version = db.jobWriteVersion
 	}

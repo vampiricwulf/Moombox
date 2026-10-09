@@ -143,7 +143,8 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 
 	// Transient view state (progress overlay, scroll position, marquee
 	// phase) resets only on a genuine job switch. SetJob is also called as
-	// a same-job re-sync whenever ANY job's display column changes — with
+	// a same-job re-sync whenever ANY job changes other than by a progress
+	// tick (hasDisplayChange) — with
 	// several active downloads, unconditional resets would blank the
 	// overlay and snap the scrolling title back to position 0 constantly.
 	if prevID != newID {

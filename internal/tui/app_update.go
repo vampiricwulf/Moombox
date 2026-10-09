@@ -1250,46 +1250,34 @@ func (a *App) clearFeedback() {
 	a.feedback = appFeedback{}
 }
 
-// displayColumns is the set of database column names whose changes require
-// rebuilding the task-list row and (if selected) the detail panel.
-// Mirrors the previous 12-field compare in handleJobUpdate but driven by
-// JobChange.Changes from UpdateJobFields — the database tells us exactly
-// which columns were written, so we no longer need to fetch the previous
-// snapshot and compare field-by-field. Audit reports/tui.md F20.
-var displayColumns = map[string]struct{}{
-	"status":            {},
-	"title":             {},
-	"channel_name":      {},
-	"thumbnail_url":     {},
-	"description":       {},
-	"stream_start_time": {},
-	"stream_end_time":   {},
-	"error":             {},
-	"output_file":       {},
-	"filename":          {},
-	"is_vod":            {},
-	"chat_status":       {},
-}
-
-// hasDisplayChange reports whether any column in changes warrants a
-// task-list / detail-panel rebuild.
+// hasDisplayChange reports whether a change may move anything the task-list
+// row or the detail panel shows, so that the held row is replaced and both
+// are rebuilt: every change but a progress tick (database.IsProgressOnlyChange,
+// the predicate the dashboard's job_update / job_progress split reads).
+//
+// It was an allow-list of twelve columns, the field-by-field compare that
+// JobChange.Changes replaced (audit reports/tui.md F20), and a column the TUI
+// shows that the list left out kept the held row stale until the next full
+// snapshot. A single-job A W writes watched and resume_position: the row
+// kept Watched=false, so the dim dot never appeared, and the next A W
+// computed !job.Watched from it and marked the job watched again — one job
+// could never be unmarked. A quality split's twitch_quality and a VOD's
+// resolution, each written alone, went stale the same way.
+//
+// The tick is the one change kept off this path: it lands ~60 times a second
+// per download and flows through progressStore, and its Job is the slim row
+// the database reads back without gaps, trims and parts (database.JobChange)
+// — the held row, replaced with it, would lose them.
 func hasDisplayChange(changes []string) bool {
-	for _, col := range changes {
-		if _, ok := displayColumns[col]; ok {
-			return true
-		}
-	}
-	return false
+	return !database.IsProgressOnlyChange(changes)
 }
 
 // tallyColumns is the set of database column names the STATUS BAR's stored
 // tally derives from: tallyJobs reads Job.Status for the active counter, and
 // parkedCookieJobs reads Job.Status and Job.Platform for the B1 parked badge.
 //
-// NOT a subset of displayColumns, and not meant to be — platform is not a
-// display column. The gate below stays nested inside the hasDisplayChange
-// branch, which is what makes that safe: UpdateJobFields never writes platform
-// today, and if it ever did it would arrive alongside a display column.
+// The gate below stays nested inside the hasDisplayChange branch, which every
+// change but a progress tick reaches, and neither column is a progress one.
 //
 // Why a named set rather than the two keys spelled out at the call site, which
 // is what this replaces: the gate is coupled to what tallyJobs and
@@ -1374,9 +1362,10 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 		})
 	}
 
-	// Rebuild task-list row + detail panel only when a display-relevant
-	// column was actually written. Progress-only updates (~10/sec during
-	// downloads) flow through progressStore and don't need list rebuilds.
+	// Replace the held row and rebuild the task-list row + detail panel for
+	// every change but a progress tick. Ticks (~60/sec per download) flow
+	// through progressStore, need no list rebuild, and carry a row without
+	// its child rows (hasDisplayChange).
 	if hasDisplayChange(ev.Changes) {
 		a.taskList.UpdateJob(job)
 		// Re-tally the status bar. UpdateJob replaces the element in the
@@ -1389,9 +1378,9 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 		//
 		// Gated on tallyColumns — exactly the columns tallyJobs and
 		// parkedCookieJobs derive from — so a real transition costs one walk
-		// and a progress tick costs none: progress is not a display column,
-		// so it never reaches this branch at all, and the gate keeps the
-		// other eleven that do (title, filename, …) off the tally too. The
+		// and a progress tick costs none: it never reaches this branch at
+		// all, and the gate keeps every other column that does (title,
+		// filename, watched, …) off the tally too. The
 		// set is a named home rather than two keys typed out here so the
 		// coupling to the derivation is checkable; status is the key that
 		// fires in practice.

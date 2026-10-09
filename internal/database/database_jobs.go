@@ -108,8 +108,17 @@ func (db *Database) GetJob(id string) (*Job, error) {
 		}
 		return nil, err
 	}
+	db.loadChildRows(job)
+	return job, nil
+}
 
-	// Load gaps (non-fatal — gaps may simply not exist)
+// loadChildRows fills job's gaps, trims and segments from their tables: the
+// whole row GetJob returns, which UpdateJobFields' read-back hands its
+// subscribers too. Each load is non-fatal — a job may simply have none — and
+// a failed one is logged and leaves that field empty. The caller must hold
+// db.mu (read or write).
+func (db *Database) loadChildRows(job *Job) {
+	id := job.ID
 	if gaps, err := db.getGaps(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load gaps for job", "jobID", id, "err", err)
@@ -117,7 +126,6 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Gaps = gaps
 	}
-	// Load trims (non-fatal — trims may simply not exist)
 	if trims, err := db.getTrimsUnlocked(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load trims for job", "jobID", id, "err", err)
@@ -125,7 +133,6 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Trims = trims
 	}
-	// Load segments (non-fatal — segments may simply not exist)
 	if segments, err := db.getSegments(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load segments for job", "jobID", id, "err", err)
@@ -133,8 +140,6 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Segments = segments
 	}
-
-	return job, nil
 }
 
 // GetAllJobs returns all jobs from the database. Age-based filtering of

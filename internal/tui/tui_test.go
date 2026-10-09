@@ -245,16 +245,27 @@ func TestIsCompletedStatus(t *testing.T) {
 
 // --- hasDisplayChange (DECISIONS #21 / audit tui.md F20) ---
 
+// Every change but a progress tick replaces the held row: the columns the
+// allow-list this replaced never named (watched, twitch_quality, the VOD's
+// resolution, incomplete_tail) are the rows that went stale.
+//
+// Mutants: an allow-list again (the watched / twitch_quality / video_width /
+// incomplete_tail rows fail); a progress tick let through (the tick rows
+// fail).
 func TestHasDisplayChange(t *testing.T) {
 	tests := []struct {
 		name    string
 		changes []string
 		want    bool
 	}{
-		{"empty changes", nil, false},
-		{"empty slice", []string{}, false},
-		{"progress-only update (10/sec path)", []string{"progress", "percent", "speed", "eta", "last_video_seq", "last_audio_seq"}, false},
-		{"silent column slipped through (shouldn't reach here, defensive)", []string{"resume_position", "chat_offset"}, false},
+		{"empty changes: unclassifiable, so the full path", nil, true},
+		{"empty slice", []string{}, true},
+		{"progress-only update (the ~60 Hz path)", []string{"progress", "percent", "speed", "eta", "last_video_seq", "last_audio_seq"}, false},
+		{"a chat-count-only tick", []string{"total_chat_messages"}, false},
+		{"single-job A W", []string{"watched", "resume_position"}, true},
+		{"a quality split's variant", []string{"twitch_quality"}, true},
+		{"a VOD's resolution", []string{"video_width", "video_height", "video_fps"}, true},
+		{"an unfetched tail", []string{"incomplete_tail"}, true},
 		{"status transition", []string{"status"}, true},
 		{"title rename", []string{"title"}, true},
 		{"channel name rename", []string{"channel_name"}, true},
@@ -267,7 +278,6 @@ func TestHasDisplayChange(t *testing.T) {
 		{"chat status changed", []string{"chat_status"}, true},
 		{"mixed: progress + status (status wins)", []string{"progress", "status", "eta"}, true},
 		{"mixed: progress + error (error wins)", []string{"percent", "error"}, true},
-		{"unknown column ignored", []string{"some_unknown_column"}, false},
 	}
 
 	for _, tc := range tests {
@@ -277,26 +287,6 @@ func TestHasDisplayChange(t *testing.T) {
 				t.Errorf("hasDisplayChange(%v) = %v, want %v", tc.changes, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestDisplayColumnsCoverage guards against drift between handleJobUpdate's
-// pre-migration 12-field compare and the column-set check that replaced it.
-// If a future audit recommends skipping a column (or adding one), update
-// both this test and the displayColumns map together.
-func TestDisplayColumnsCoverage(t *testing.T) {
-	want := []string{
-		"status", "title", "channel_name", "thumbnail_url", "description",
-		"stream_start_time", "stream_end_time", "error",
-		"output_file", "filename", "is_vod", "chat_status",
-	}
-	if len(displayColumns) != len(want) {
-		t.Fatalf("displayColumns size = %d, want %d (drift from handleJobUpdate's pre-migration field set)", len(displayColumns), len(want))
-	}
-	for _, col := range want {
-		if _, ok := displayColumns[col]; !ok {
-			t.Errorf("displayColumns missing %q", col)
-		}
 	}
 }
 

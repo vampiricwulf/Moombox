@@ -15,9 +15,66 @@ package database
 // of re-fetching the full list. Only the two bulk writers,
 // BatchSetWatched and DeleteJobsAndHistoryForChannel, still dispatch a
 // full-list OnJobsChange.
+//
+// Job is the row GetJob returns — gaps, trims and segments included — for
+// every change but a progress tick (IsProgressOnlyChange), whose Job carries
+// the jobs row alone. Both UIs replace the row they hold with Job, and the
+// read-back once skipped the child rows for every write: a status
+// transition, a rename or a Mark Watched replaced a row that had them with
+// one that did not (the fields are omitempty, so the JSON lost the keys),
+// and the details lost their Parts, Trims and Gaps, the trimmer its parts,
+// until a reload. A tick moves no child row, and it is the ~60 Hz path, so
+// it does not pay three more queries under the write lock; nothing replaces
+// a row with a tick's Job — the dashboard merges the slim job_progress frame
+// built from it, and the TUI reads it into its progress store.
 type JobChange struct {
 	Job     *Job
 	Changes []string // schema column names from fieldToColumn that were written
+}
+
+// progressColumns are the schema columns a download's ~60 Hz progress tick
+// writes (internal/worker/progress.go ProgressTracker.maybeUpdate and the two
+// activity writers) and that nothing else writes alone. A JobChange whose
+// every column is in this set carries no state transition, so the dashboard
+// is sent the slim job_progress frame instead of the whole row
+// (cmd/moombox/job_progress.go), and the read-back leaves the child rows out.
+//
+// total_video_seq / total_audio_seq are here although O-O's field list does not
+// name them: maybeUpdate writes them on every tick that the stream has
+// reported, so omitting them would classify every real tick as a transition and
+// leave the whole change inert.
+//
+// "status" is deliberately ABSENT: a status change re-sorts the list and can
+// cross the archive boundary, which is what job_update is for.
+var progressColumns = map[string]bool{
+	"progress":            true,
+	"percent":             true,
+	"eta":                 true,
+	"speed":               true,
+	"last_video_seq":      true,
+	"total_video_seq":     true,
+	"last_audio_seq":      true,
+	"total_audio_seq":     true,
+	"total_chat_messages": true,
+}
+
+// IsProgressOnlyChange reports whether every column in changes is a progress
+// column — whether a JobChange is a progress tick.
+//
+// An empty (or nil) set is NOT progress-only. UpdateJobFields never produces
+// one for a real write — it refuses a call with no known field and strips only
+// updated_at from the list — so an empty set means "a change we cannot
+// classify", and the safe answer for that is the full row.
+func IsProgressOnlyChange(changes []string) bool {
+	if len(changes) == 0 {
+		return false
+	}
+	for _, col := range changes {
+		if !progressColumns[col] {
+			return false
+		}
+	}
+	return true
 }
 
 // JobAdded is the event payload delivered to OnJobAdded subscribers when

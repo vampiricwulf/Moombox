@@ -128,7 +128,7 @@ func TestProgressFrameCarriesEveryFieldTheCardAndDialogRead(t *testing.T) {
 // TestOnlyProgressColumnsTakeTheSlimFrame is the classifier.
 //
 // THE MUTANTS:
-//   - add "status" to progressOnlyColumns: a Finished transition arrives as a
+//   - add "status" to database.progressColumns: a Finished transition arrives as a
 //     progress frame, the client never re-sorts or re-evaluates the archive
 //     boundary, and the row keeps its old badge.
 //   - return true for an empty change set: a change we cannot classify is sent
@@ -157,8 +157,8 @@ func TestOnlyProgressColumnsTakeTheSlimFrame(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isProgressOnlyChange(tc.changes); got != tc.want {
-				t.Errorf("isProgressOnlyChange(%v) = %v, want %v", tc.changes, got, tc.want)
+			if got := database.IsProgressOnlyChange(tc.changes); got != tc.want {
+				t.Errorf("IsProgressOnlyChange(%v) = %v, want %v", tc.changes, got, tc.want)
 			}
 		})
 	}
@@ -177,7 +177,7 @@ func TestJobChangeSubscriberRoutesProgressTicksToTheSlimFrame(t *testing.T) {
 	}
 	text := string(src)
 	for _, want := range []string{
-		"if isProgressOnlyChange(ev.Changes) {",
+		"if database.IsProgressOnlyChange(ev.Changes) {",
 		"s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))",
 		"s.wsHub.BroadcastJobUpdate(job)",
 	} {
@@ -226,7 +226,7 @@ func downloadTickChangeSets(ticks int) [][]string {
 //
 // THE MUTANTS:
 //   - drop total_video_seq (or any other tick column) from
-//     progressOnlyColumns: those ticks fall through to job_update and the
+//     database.progressColumns: those ticks fall through to job_update and the
 //     whole change is inert — the first half fails, naming the tick shape.
 //   - insert a throttle or a coalescer into the dispatch block (a time.Since
 //     gate, a bare `return` on an unchanged percent): a tick that used to emit
@@ -235,7 +235,7 @@ func TestEveryProgressTickStillProducesExactlyOneFrame(t *testing.T) {
 	ticks := downloadTickChangeSets(60)
 	slim := 0
 	for i, changes := range ticks {
-		if !isProgressOnlyChange(changes) {
+		if !database.IsProgressOnlyChange(changes) {
 			t.Errorf("tick %d (%v) is classified as a transition — it would still send the whole row, "+
 				"and the change is inert for that tick shape", i, changes)
 			continue
@@ -251,7 +251,7 @@ func TestEveryProgressTickStillProducesExactlyOneFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read monitor_callbacks.go: %v", err)
 	}
-	dispatch := "\t\tif isProgressOnlyChange(ev.Changes) {\n" +
+	dispatch := "\t\tif database.IsProgressOnlyChange(ev.Changes) {\n" +
 		"\t\t\ts.wsHub.BroadcastJobProgress(newJobProgressFrame(job))\n" +
 		"\t\t\treturn\n" +
 		"\t\t}\n" +

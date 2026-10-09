@@ -1925,7 +1925,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// status included — stays on job_update, which the client handles
 		// exactly as before. The cadence is untouched: this makes each update
 		// cheaper, never rarer (WEB-5 / O-O).
-		if isProgressOnlyChange(ev.Changes) {
+		if database.IsProgressOnlyChange(ev.Changes) {
 			s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))
 			return
 		}
