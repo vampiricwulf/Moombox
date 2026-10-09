@@ -163,11 +163,31 @@ func incompleteStagingExpired(cfg *config.MoomboxConfig, job *database.Job) bool
 	return time.Since(updated) >= time.Duration(days*24)*time.Hour
 }
 
-// DeleteOrphanedFile safely deletes a file or directory if it's under the configured directories.
-// Re-queries the database immediately before deletion and refuses if any currently-active job owns
-// the path, or any trim row names it — closes the race window between ScanOrphanedFiles and the
-// user's delete click during which a user might restart a job and make its staging/output path
-// live again, or re-create a trim over the file the listing offered.
+// NotOrphanError is DeleteOrphanedFile's refusal of a path that is no longer
+// an orphan: a job or trim row names it (or, for a directory, a file inside
+// it), a running finalize is writing it, or it is the staging an active job
+// uses or a finished one keeps. The sweep never lists such a path, so the
+// list the delete came from was read before that owner appeared, and the
+// answer is to refresh it — which is what the message says. The REST layer
+// answers it 409; the terminal shows the message as it stands.
+type NotOrphanError struct {
+	Owner string // who owns the path now: "job <id>", "a trim of job <id>"
+	How   string // how it owns it: "names it", "is writing it", "needs it", ...
+}
+
+// Error is the whole message, written for the operator: the dashboard toasts
+// it and the terminal's Files dialog shows it as it stands.
+func (e *NotOrphanError) Error() string {
+	return "No longer an orphan: " + e.Owner + " " + e.How + " now. Refresh the list."
+}
+
+// DeleteOrphanedFile safely deletes a file or directory if it's under the
+// configured directories. Immediately before deleting it re-reads the
+// database and refuses, with a *NotOrphanError, a path that is no longer an
+// orphan (orphanOwner) — the window between ScanOrphanedFiles and the
+// operator's click, in which a job can restart and make its staging live
+// again, a finalize can finish and name its archive, or a trim can be
+// re-created over the file the listing offered.
 func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxConfig) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -193,18 +213,13 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 		return fmt.Errorf("path is not under staging or output directory")
 	}
 
-	// Recheck: refuse if the path is now owned by an active job. Scan filtered these out, but a job
-	// could have been restarted between scan and delete. DB lookup is authoritative.
+	// Recheck: the sweep filtered owned paths out, but its list is a
+	// snapshot. The DB, read now, is authoritative.
 	if db != nil {
-		if jobID, err := findActiveJobForPath(absPath, db, cfg); err != nil {
-			return fmt.Errorf("check for active job: %w", err)
-		} else if jobID != "" {
-			return fmt.Errorf("refusing to delete: path is now owned by active job %s", jobID)
-		}
-		if trimID, err := findTrimForPath(absPath, db, cfg); err != nil {
-			return fmt.Errorf("check for trim: %w", err)
-		} else if trimID != "" {
-			return fmt.Errorf("refusing to delete: path is trim %s", trimID)
+		if notOrphan, err := orphanOwner(absPath, db, cfg); err != nil {
+			return fmt.Errorf("check for an owner: %w", err)
+		} else if notOrphan != nil {
+			return notOrphan
 		}
 	}
 
@@ -228,92 +243,84 @@ func canonicalDir(dir string) string {
 	return dir
 }
 
-// findActiveJobForPath returns the ID of a currently-active job that owns the given path,
-// or "" if the path is not associated with any active job.
+// orphanOwner returns why absPath is not an orphan now, or nil when it still
+// is one. Three owners, each read at the moment of the delete:
 //
-// A path a running finalize is still writing (outputClaims) is owned by that
-// job before any column names it. Otherwise, for staging paths, the jobID is
-// the first path component under the staging directory (staging/<jobID>/...);
-// for output paths, we scan all jobs and check their output/chat/
-// thumbnail/description/segment file paths for a normalized match.
+//   - a running finalize, part mux, trim encode or aside recovery that is
+//     writing it, or (for a directory) writing inside it — outputClaims, which
+//     own a file before any column names it;
+//   - the job whose staging it is, while that job is active or keeps its
+//     staging (findActiveJobForPath);
+//   - any job or trim row that names it, whatever the job's status
+//     (outputOwners, the rule the sweep lists by).
 //
-// The lookup runs on the path as given against the configured directories,
-// then again on its canonical spelling against the canonical directories —
+// The last was once a recheck of ACTIVE jobs' columns and of trim rows alone,
+// so a Finished job's archive that appeared after the listing — a mux that
+// finished between the sweep and the click, a re-download onto a listed
+// leftover's name — was deleted by a Delete click on the stale list. A
+// genuine orphan is never named by a row, so refusing every row's file costs
+// nothing deletable. The rows are read in one pass: every job with its parts
+// (one GetAllJobs) and every trim (one GetAllTrims), no per-row query.
+func orphanOwner(absPath string, db *database.Database, cfg *config.MoomboxConfig) (*NotOrphanError, error) {
+	// One check covers both spellings: claimOutputStem records the stem in
+	// its configured spelling and its canonical one.
+	if id := outputClaimOwner(absPath); id != "" {
+		return &NotOrphanError{Owner: "job " + id, How: "is writing it"}, nil
+	}
+	if id := outputClaimOwnerUnder(absPath); id != "" {
+		return &NotOrphanError{Owner: "job " + id, How: "is writing a file in it"}, nil
+	}
+	if id, err := findActiveJobForPath(absPath, db, cfg); err != nil {
+		return nil, err
+	} else if id != "" {
+		return &NotOrphanError{Owner: "job " + id, How: "needs it"}, nil
+	}
+	jobs, err := db.GetAllJobs()
+	if err != nil {
+		return nil, err
+	}
+	trims, err := db.GetAllTrims()
+	if err != nil {
+		return nil, err
+	}
+	if owner, how := newOutputOwners(jobs, trims, resolveOutputDir(cfg)).ownerOf(absPath); owner != "" {
+		return &NotOrphanError{Owner: owner, How: how}, nil
+	}
+	return nil, nil
+}
+
+// findActiveJobForPath returns the ID of the job whose staging the given path
+// is, while that job is active or keeps its staging (jobNeedsStaging), or ""
+// otherwise. The job is the first path component under the staging directory
+// (staging/<jobID>/...). An output path is never a staging path: the rows
+// that name output files are orphanOwner's outputOwners.
+//
+// The lookup runs on the path as given against the configured directory,
+// then again on its canonical spelling against the canonical directory —
 // the both-sides rule DeleteOrphanedFile's containment check already uses.
 // The first pass alone let a request spell an active job's staging through
 // the real directory behind a symlinked or junctioned staging_directory: it
 // passed containment (canonical on both sides), then filepath.Rel against the
 // configured spelling found no job, and the job's staging was RemoveAll'd.
 func findActiveJobForPath(absPath string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
-	// One check covers both spellings: claimOutputStem records the stem in
-	// its configured spelling and its canonical one.
-	if id := outputClaimOwner(absPath); id != "" {
-		return id, nil
-	}
-	stagingDir, outputDir := resolveStagingDir(cfg), resolveOutputDir(cfg)
-	if id, err := findActiveJobUnder(absPath, stagingDir, outputDir, db, cfg); err != nil || id != "" {
+	stagingDir := resolveStagingDir(cfg)
+	if id, err := findActiveJobUnder(absPath, stagingDir, db, cfg); err != nil || id != "" {
 		return id, err
 	}
 	realPath, err := utils.CanonicalPath(absPath)
 	if err != nil {
 		return "", nil
 	}
-	realStaging, realOutput := canonicalDir(stagingDir), canonicalDir(outputDir)
-	if realPath == absPath && realStaging == stagingDir && realOutput == outputDir {
+	realStaging := canonicalDir(stagingDir)
+	if realPath == absPath && realStaging == stagingDir {
 		return "", nil // nothing spells differently; the first pass was the whole answer
 	}
-	return findActiveJobUnder(realPath, realStaging, realOutput, db, cfg)
-}
-
-// findTrimForPath returns the ID of a trim whose row names the path, or "" if
-// none does. A trim has no active state: its row existing is what makes the
-// file live, so the recheck refuses it whatever its job's status — a list
-// read before the row was written goes stale the moment it is. The trim
-// service names a file deterministically ("<id> [Ns-Ms].mp4") and the
-// disambiguation sees only rows, so a range re-created after DeleteTrim
-// overwrites the very file the sweep had just offered as an orphan; the
-// operator's click on that listing then deleted the new trim.
-//
-// Rows resolve as the sweep resolves them (trimFileLocations), and are matched
-// in the path's spelling and its canonical one, as findActiveJobForPath
-// matches job columns. Every location a row resolves to ends in the row's
-// base name, so only the rows carrying the path's name need their job read.
-func findTrimForPath(absPath string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
-	trims, err := db.GetAllTrims()
-	if err != nil {
-		return "", err
-	}
-	targets := map[string]bool{normalizePath(absPath): true}
-	if real, err := utils.CanonicalPath(absPath); err == nil {
-		targets[normalizePath(real)] = true
-	}
-	names := make(map[string]bool, len(targets))
-	for t := range targets {
-		names[filepath.Base(t)] = true
-	}
-	absOut := resolveOutputDir(cfg)
-	for _, tr := range trims {
-		if !names[filepath.Base(normalizePath(tr.Filename))] {
-			continue
-		}
-		job, err := db.GetJob(tr.JobID)
-		if err != nil {
-			return "", err
-		}
-		for _, p := range trimFileLocations(tr, job, absOut) {
-			if targets[normalizePath(p)] || targets[normalizePath(canonicalDir(p))] {
-				return tr.ID, nil
-			}
-		}
-	}
-	return "", nil
+	return findActiveJobUnder(realPath, realStaging, db, cfg)
 }
 
 // findActiveJobUnder is findActiveJobForPath's lookup for one spelling of the
-// path and the two directories. A job column is matched in its stored
-// spelling and in its canonical one, so the canonical pass recognises a file
-// the row names through the configured (linked) directory.
-func findActiveJobUnder(absPath, stagingDir, outputDir string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
+// path and the staging directory.
+func findActiveJobUnder(absPath, stagingDir string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
 	if rel, err := filepath.Rel(stagingDir, absPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
 		// Path under staging/ — the first component is the jobID
 		parts := strings.SplitN(rel, string(filepath.Separator), 2)
@@ -332,51 +339,6 @@ func findActiveJobUnder(absPath, stagingDir, outputDir string, db *database.Data
 		}
 		return "", nil
 	}
-
-	if rel, err := filepath.Rel(outputDir, absPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
-		// Path under output/ — scan active jobs for a matching file reference
-		jobs, err := db.GetAllJobs()
-		if err != nil {
-			return "", err
-		}
-		target := normalizePath(absPath)
-		names := func(candidate string) bool {
-			return normalizePath(candidate) == target || normalizePath(canonicalDir(candidate)) == target
-		}
-		absOut, absErr := filepath.Abs(outputDir)
-		for _, job := range jobs {
-			if !activeJobStatuses[job.Status] {
-				continue
-			}
-			for _, candidate := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
-				if candidate != "" && names(candidate) {
-					return job.ID, nil
-				}
-			}
-			// Relative-path columns too (imports set ONLY these). The
-			// delete-time recheck deliberately considers these for ACTIVE jobs
-			// only (the status filter above), mirroring how scanOutputOrphans
-			// treats them for ALL jobs when building the orphan list — the
-			// recheck just has to refuse deleting a file an active job still
-			// owns, not reproduce the full scan set.
-			if absErr == nil {
-				for _, rel := range []string{job.Filename, job.ChatFilename} {
-					if rel != "" && names(filepath.Join(absOut, rel)) {
-						return job.ID, nil
-					}
-				}
-			}
-			for _, seg := range job.Segments {
-				if seg.FilePath != "" && names(seg.FilePath) {
-					return job.ID, nil
-				}
-				if seg.ChatFile != "" && names(seg.ChatFile) {
-					return job.ID, nil
-				}
-			}
-		}
-	}
-
 	return "", nil
 }
 
@@ -538,90 +500,18 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		return nil, nil
 	}
 
-	// Collect all known output and chat file paths from DB.
-	// Uses normalizePath for case-insensitive comparison on Windows.
+	// What the rows own (outputOwners): every job with its parts, and every
+	// trim in one query, not one per job (sweep-2 ENGINE-17). A failed read
+	// fails the scan: without the trim rows every live trim reads as unowned.
 	jobs, err := db.GetAllJobs()
 	if err != nil {
 		return nil, err
 	}
-
-	knownFiles := make(map[string]bool)
-	// knownStems is knownFiles with the container extension off, so a
-	// recovered set-aside recording can be recognised as belonging to the
-	// archive whose name it carries (see the sibling branch in the walk).
-	knownStems := make(map[string]bool)
-	known := func(p string) {
-		n := normalizePath(p)
-		knownFiles[n] = true
-		knownStems[strings.TrimSuffix(n, filepath.Ext(n))] = true
-	}
-	for _, job := range jobs {
-		if job.OutputFile != "" {
-			known(job.OutputFile)
-		}
-		if job.ChatFile != "" {
-			known(job.ChatFile)
-		}
-		if job.ThumbnailFile != "" {
-			known(job.ThumbnailFile)
-		}
-		if job.DescriptionFile != "" {
-			known(job.DescriptionFile)
-		}
-		// The RELATIVE-path columns must count too: imported jobs set ONLY
-		// Filename/ChatFilename (no absolute OutputFile/ChatFile), so
-		// without these their perfectly valid files would be offered as
-		// orphans — and deleting them leaves a broken Finished job. They
-		// are relative to the JOB's output directory, not the global one
-		// (rowRelativeLocations).
-		for _, rel := range []string{job.Filename, job.ChatFilename} {
-			for _, p := range rowRelativeLocations(job, rel, absOutputDir) {
-				known(p)
-			}
-		}
-		// Include part (quality/gap split) files so they aren't flagged as
-		// orphans — both the videos and their per-part chat files.
-		for _, seg := range job.Segments {
-			if seg.FilePath != "" {
-				known(seg.FilePath)
-				// And the base the parts share ("X" for "X - part2.mp4"):
-				// the job's recovered set-aside siblings are named after it
-				// (pinnedPartLocation), and with no thumbnail or description
-				// to carry that stem they were offered as strays.
-				if dir, base, ok := recordedArchiveLocation(seg.FilePath); ok {
-					knownStems[normalizePath(filepath.Join(dir, base))] = true
-				}
-			}
-			if seg.ChatFile != "" {
-				known(seg.ChatFile)
-			}
-		}
-	}
-
-	// Trims: every file a trim row names is owned, resolved the way the trim
-	// service wrote it, and the directories the service writes into are where
-	// an unowned file is a trim — a clip whose row DeleteTrim removed (it
-	// leaves the file for this sweep), or an encode that died. One query, not
-	// one per job (sweep-2 ENGINE-17). A failed read fails the scan: without
-	// the trim rows every live trim reads as unowned.
 	trims, err := db.GetAllTrims()
 	if err != nil {
 		return nil, err
 	}
-	jobsByID := make(map[string]*database.Job, len(jobs))
-	trimDirs := make(map[string]bool)
-	for _, job := range jobs {
-		jobsByID[job.ID] = job
-		for _, dir := range trimDirsOf(job) {
-			trimDirs[normalizePath(dir)] = true
-		}
-	}
-	for _, tr := range trims {
-		for _, p := range trimFileLocations(tr, jobsByID[tr.JobID], absOutputDir) {
-			known(p)
-			trimDirs[normalizePath(filepath.Dir(p))] = true
-		}
-	}
+	owners := newOutputOwners(jobs, trims, absOutputDir)
 
 	var entries, trimEntries []OrphanedEntry
 	// Recovered set-aside recordings found in the walk, grouped by the stem
@@ -644,7 +534,7 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// before the two walks became one). A job's files there are still
 		// owned: the known check below runs for every directory.
 		absPath, _ := filepath.Abs(path)
-		inTrimDir := trimDirs[normalizePath(filepath.Dir(absPath))]
+		inTrimDir := owners.trimDirs[normalizePath(filepath.Dir(absPath))]
 		ext := strings.ToLower(filepath.Ext(path))
 		isMedia := ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".ts"
 		isThumbnail := ext == ".jpg" || ext == ".webp" || ext == ".png"
@@ -654,7 +544,7 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 			return nil
 		}
 
-		if knownFiles[normalizePath(absPath)] {
+		if _, owned := owners.files[normalizePath(absPath)]; owned {
 			return nil // Referenced by a job or a trim
 		}
 		if outputClaimOwner(absPath) != "" {
@@ -669,20 +559,8 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// archive whose stem it carries: owned while that archive is known,
 		// and otherwise folded into the archive's own entry rather than
 		// offered as a row of its own.
-		//
-		// A recovered recording's chat archive is <stem>.restart-<ts>.chat.json.
-		// RestartSiblingStem strips ONE extension, which leaves ".chat" glued to
-		// the timestamp and makes the name fail its digits rule — so without
-		// folding the compound extension first, the chat file recoverAsides
-		// writes beside a sibling is offered as a deletable orphan the moment it
-		// lands, while the sibling itself is correctly owned.
-		sibBase := filepath.Base(absPath)
-		if isChat {
-			sibBase = strings.TrimSuffix(sibBase, ".json")
-		}
-		if stem, ok := engine.RestartSiblingStem(sibBase); ok {
-			stemPath := normalizePath(filepath.Join(filepath.Dir(absPath), stem))
-			if knownStems[stemPath] {
+		if stemPath, ok := asideSiblingStem(absPath); ok {
+			if _, owned := owners.stems[stemPath]; owned {
 				return nil // its job still has the archive this belongs to
 			}
 			group := siblingsByStem[stemPath]
@@ -803,6 +681,171 @@ func rowRelativeLocations(job *database.Job, rel, absOutputDir string) []string 
 		}
 	}
 	return append(paths, filepath.Join(absOutputDir, rel))
+}
+
+// jobFileLocations returns the absolute paths a job row names: its absolute
+// columns as stored — the output, the chat, the thumbnail and the
+// description, and each part's video and chat (a quality or gap split) — and
+// its relative ones (filename, chat_filename) as rowRelativeLocations
+// resolves them. The relative ones must count too: imported jobs once set
+// ONLY those, and without them their perfectly valid files were offered as
+// orphans — deleting them left a broken Finished job.
+func jobFileLocations(job *database.Job, absOutputDir string) []string {
+	var paths []string
+	for _, p := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	for _, rel := range []string{job.Filename, job.ChatFilename} {
+		paths = append(paths, rowRelativeLocations(job, rel, absOutputDir)...)
+	}
+	for _, seg := range job.Segments {
+		for _, p := range []string{seg.FilePath, seg.ChatFile} {
+			if p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
+}
+
+// outputOwners is what the job and trim rows own in the output tree — the one
+// rule the sweep lists by (scanOutputOrphans) and the delete re-checks by
+// (orphanOwner), so a path the sweep would not list now is a path the delete
+// refuses now. Keys are normalizePath spellings; a value names the row as
+// NotOrphanError.Owner spells it.
+type outputOwners struct {
+	// files is every file a row names: a job's columns and parts
+	// (jobFileLocations), and every place a trim row can resolve to
+	// (trimFileLocations).
+	files map[string]string
+	// stems is files with the container extension off, plus the base a
+	// job's parts share ("X" for "X - part2.mp4"): a recovered set-aside
+	// recording is named after one (asideSiblingStem), and with no thumbnail
+	// or description to carry a split job's stem its siblings were offered as
+	// strays (pinnedPartLocation names them after the parts' base).
+	stems map[string]string
+	// trimDirs is every directory the trim service writes into: "trim"
+	// beside a job's output and each of its parts (trimDirsOf), and the
+	// directory each trim row resolves to. An unowned file there is a trim —
+	// a clip whose row DeleteTrim removed (it leaves the file for the sweep),
+	// or an encode that died.
+	trimDirs map[string]bool
+}
+
+// newOutputOwners builds outputOwners from rows already read: every job with
+// its parts, and every trim. A path two rows name keeps the first, a job's
+// ahead of a trim's.
+func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutputDir string) *outputOwners {
+	o := &outputOwners{files: map[string]string{}, stems: map[string]string{}, trimDirs: map[string]bool{}}
+	first := func(m map[string]string, k, owner string) {
+		if _, ok := m[k]; !ok {
+			m[k] = owner
+		}
+	}
+	own := func(p, owner string) {
+		n := normalizePath(p)
+		first(o.files, n, owner)
+		first(o.stems, strings.TrimSuffix(n, filepath.Ext(n)), owner)
+	}
+	jobsByID := make(map[string]*database.Job, len(jobs))
+	for _, job := range jobs {
+		jobsByID[job.ID] = job
+		owner := "job " + job.ID
+		for _, p := range jobFileLocations(job, absOutputDir) {
+			own(p, owner)
+		}
+		for _, seg := range job.Segments {
+			if dir, base, ok := recordedArchiveLocation(seg.FilePath); ok {
+				first(o.stems, normalizePath(filepath.Join(dir, base)), owner)
+			}
+		}
+		for _, dir := range trimDirsOf(job) {
+			o.trimDirs[normalizePath(dir)] = true
+		}
+	}
+	for _, tr := range trims {
+		owner := "a trim of job " + tr.JobID
+		for _, p := range trimFileLocations(tr, jobsByID[tr.JobID], absOutputDir) {
+			own(p, owner)
+			o.trimDirs[normalizePath(filepath.Dir(p))] = true
+		}
+	}
+	return o
+}
+
+// ownerOf returns the row that owns absPath and how it owns it, or "" when no
+// row does. The path is matched in its own spelling and its canonical one, as
+// DeleteOrphanedFile's containment check compares them:
+//
+//   - a row names the file — in its stored spelling, or through a linked
+//     directory whose canonical spelling is the path's (only the rows carrying
+//     the path's name are resolved, since every spelling ends in it);
+//   - it is a recovered set-aside recording named after a file a row names;
+//   - it is a directory holding a file a row names, which deleting it would
+//     take along. The sweep never lists a directory under the output tree, so
+//     only a request built by hand can name one.
+func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
+	spellings := []string{absPath}
+	if real, err := utils.CanonicalPath(absPath); err == nil && normalizePath(real) != normalizePath(absPath) {
+		spellings = append(spellings, real)
+	}
+	targets := make(map[string]bool, len(spellings))
+	names := make(map[string]bool, len(spellings))
+	for _, s := range spellings {
+		n := normalizePath(s)
+		targets[n] = true
+		names[filepath.Base(n)] = true
+	}
+
+	for _, s := range spellings {
+		if row, ok := o.files[normalizePath(s)]; ok {
+			return row, "names it"
+		}
+	}
+	for f, row := range o.files {
+		if names[filepath.Base(f)] && targets[normalizePath(canonicalDir(f))] {
+			return row, "names it"
+		}
+	}
+	for _, s := range spellings {
+		if stem, ok := asideSiblingStem(s); ok {
+			if row, ok := o.stems[stem]; ok {
+				return row, "names its archive"
+			}
+		}
+	}
+	for f, row := range o.files {
+		for t := range targets {
+			if strings.HasPrefix(f, t+string(filepath.Separator)) {
+				return row, "names a file in it"
+			}
+		}
+	}
+	return "", ""
+}
+
+// asideSiblingStem returns the normalised stem a recovered set-aside
+// recording (<stem>.restart-<ts>[-N].<ext>) is named after, and whether the
+// path is one.
+//
+// A recovered recording's chat archive is <stem>.restart-<ts>.chat.json.
+// RestartSiblingStem strips ONE extension, which leaves ".chat" glued to the
+// timestamp and makes the name fail its digits rule — so without folding the
+// compound extension first, the chat file recoverAsides writes beside a
+// sibling was offered as a deletable orphan the moment it landed, while the
+// sibling itself was correctly owned.
+func asideSiblingStem(absPath string) (string, bool) {
+	base := filepath.Base(absPath)
+	if strings.HasSuffix(strings.ToLower(base), ".chat.json") {
+		base = base[:len(base)-len(".json")]
+	}
+	stem, ok := engine.RestartSiblingStem(base)
+	if !ok {
+		return "", false
+	}
+	return normalizePath(filepath.Join(filepath.Dir(absPath), stem)), true
 }
 
 // appendOrphanedSiblings attaches each recovered set-aside recording to the

@@ -135,9 +135,14 @@ export class FilesController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths: [path] }),
       });
-      if (!resp.ok) throw new Error("Failed to delete");
+      // 409: the file is no longer an orphan — a job or trim names it now,
+      // so the list this click came from is stale. The server's message says
+      // so and to refresh the list; it is the toast, not "Failed to delete".
+      if (!resp.ok && resp.status !== 409) throw new Error("Failed to delete");
       const result = await resp.json();
-      if (result.deleted && result.deleted.length > 0) {
+      if (resp.status === 409) {
+        this.app.showToast(result.error || "No longer an orphan. Refresh the list.", "warning");
+      } else if (result.deleted && result.deleted.length > 0) {
         this.app.showToast("File deleted", "success");
       } else if (result.errors && result.errors.length > 0) {
         this.app.showToast(`Failed: ${result.errors[0].error}`, "danger");
@@ -167,11 +172,15 @@ export class FilesController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths }),
       });
-      if (!resp.ok) throw new Error("Failed to delete");
+      // 409 as in deleteOrphanedFile: some of the list went stale. The rest
+      // were still decided one by one, so the count of what went comes first.
+      if (!resp.ok && resp.status !== 409) throw new Error("Failed to delete");
       const result = await resp.json();
       const count = result.deleted ? result.deleted.length : 0;
       const errCount = result.errors ? result.errors.length : 0;
-      if (errCount > 0) {
+      if (resp.status === 409) {
+        this.app.showToast(`Deleted ${count}. ${result.error || "Some are no longer orphans. Refresh the list."}`, "warning");
+      } else if (errCount > 0) {
         this.app.showToast(`Deleted ${count}, ${errCount} errors`, "warning");
       } else {
         this.app.showToast(`Deleted ${count} file${count === 1 ? "" : "s"}`, "success");

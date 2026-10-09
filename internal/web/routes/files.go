@@ -2,6 +2,8 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -45,6 +47,15 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 	})
 
 	// DELETE /api/files/orphaned — delete specific orphaned paths
+	//
+	// Each path is decided on its own, as the terminal's Delete All decides
+	// them: what can go goes, and each refusal is named in errors. A path the
+	// delete refuses because it is no longer an orphan — a row names it now,
+	// a finalize is writing it, its job needs its staging — means the list the
+	// request came from is stale, which is a conflict with the server's state
+	// rather than a failure: the answer is 409, the same {deleted, errors}
+	// body plus an error telling the operator to refresh the list. Any other
+	// refusal keeps the 200 and its fixed "failed to delete file".
 	r.Delete("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Paths []string `json:"paths"`
@@ -58,33 +69,49 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 			return
 		}
 
-		var deleted []string
-		var errors []map[string]string
+		deleted := []string{}
+		failures := []map[string]string{}
+		var stale []string // the NotOrphanError messages, in request order
 
 		cfg := deps.Store.Snapshot()
 		for _, path := range body.Paths {
-			if err := worker.DeleteOrphanedFile(path, deps.DB, cfg); err != nil {
-				errors = append(errors, map[string]string{
+			err := worker.DeleteOrphanedFile(path, deps.DB, cfg)
+			var notOrphan *worker.NotOrphanError
+			switch {
+			case err == nil:
+				deleted = append(deleted, path)
+				deps.Logger.Info("deleted orphaned file", "path", path)
+			case errors.As(err, &notOrphan):
+				failures = append(failures, map[string]string{"path": path, "error": notOrphan.Error()})
+				stale = append(stale, notOrphan.Error())
+				deps.Logger.Info("refused to delete a file that is no longer an orphan",
+					"path", path, "owner", notOrphan.Owner)
+			default:
+				failures = append(failures, map[string]string{
 					"path":  path,
 					"error": "failed to delete file",
 				})
 				deps.Logger.Warn("failed to delete orphaned file", "path", path, "err", err)
-			} else {
-				deleted = append(deleted, path)
-				deps.Logger.Info("deleted orphaned file", "path", path)
 			}
 		}
 
-		if deleted == nil {
-			deleted = []string{}
-		}
-		if errors == nil {
-			errors = []map[string]string{}
-		}
-
-		jsonResponse(rw, map[string]any{
+		result := map[string]any{
 			"deleted": deleted,
-			"errors":  errors,
-		})
+			"errors":  failures,
+		}
+		if len(stale) > 0 {
+			msg := stale[0]
+			if len(stale) > 1 {
+				msg = fmt.Sprintf("%d of these are no longer orphans. Refresh the list.", len(stale))
+			}
+			result["error"] = msg
+			// Content-Type before the explicit WriteHeader — headers set after
+			// it are dropped.
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(rw).Encode(result)
+			return
+		}
+		jsonResponse(rw, result)
 	})
 }

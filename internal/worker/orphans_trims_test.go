@@ -61,10 +61,10 @@ func orphanTypeOf(t *testing.T, db *database.Database, cfg *config.MoomboxConfig
 //     the override cases fail once Reinitialize clears output_file.
 //   - trimFileLocations without the beside-the-output candidates: the
 //     "global directory moved" case fails at once.
-//   - DeleteOrphanedFile without the findTrimForPath recheck: the delete of a
-//     live trim succeeds.
-//   - findTrimForPath's name filter keyed on the row's whole filename rather
-//     than its base name: no row ever matches, the same.
+//   - orphanOwner without the rows recheck (outputOwners.ownerOf): the delete
+//     of a live trim succeeds.
+//   - newOutputOwners without the trim rows: the live trim is offered, and
+//     its delete succeeds.
 //   - scanOutputOrphans not registering trimDirsOf(job) as trims directories:
 //     the leftover is offered as "output", not "trim".
 func TestOrphanSweepResolvesTrimsWhereTheTrimServiceWroteThem(t *testing.T) {

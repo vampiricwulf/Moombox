@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TestFilesBoxDims pins the box-sizing formula extracted from the three call
@@ -369,5 +371,42 @@ func TestFilesDialogBulkDeleteThroughTheApp(t *testing.T) {
 	runCmd(t, cmd)
 	if listCalls != before+1 {
 		t.Errorf("OnListOrphans called %d times, want %d — the sweep must re-fetch", listCalls, before+1)
+	}
+}
+
+// A D on a stale row is refused by the worker as no longer an orphan — a job
+// or trim names the file now — and the dialog shows the worker's message as
+// it stands, the same message the dashboard toasts, "Refresh the list."
+// included: it is what tells the operator that R, not another D, is the way
+// on. The single delete's error row is shown whole (the bulk sweep's is cut to
+// the box), so the longest such message wraps inside the box at the smallest
+// terminal rather than pushing it off the screen.
+//
+// Mutant: SetActionError cutting the message to the box's content width — the
+// instruction is lost.
+func TestFilesDialogShowsTheNotOrphanRefusalWhole(t *testing.T) {
+	refusal := &worker.NotOrphanError{Owner: "a trim of job tw_315689876412", How: "names it"}
+	app := NewApp()
+	app.OnDeleteOrphan = func(string) error { return refusal }
+	app.filesDlg.SetSize(60, 20)
+	app.filesDlg.Open()
+	app.filesDlg.SetFiles([]OrphanedFileEntry{{Path: "/a/clip.mp4", RelPath: "clip.mp4", Type: "trim"}})
+	app.filesDlg.SetHistory(nil)
+
+	if _, cmd := app.handleKey(keyMsg("D")); cmd != nil {
+		t.Fatal("the first D must only arm the confirm")
+	}
+	_, cmd := app.handleKey(keyMsg("D"))
+	if cmd == nil {
+		t.Fatal("the second D produced no delete command")
+	}
+	app.Update(runCmd(t, cmd))
+
+	v := stripANSI(app.filesDlg.View())
+	if !strings.Contains(v, "No longer an orphan: a trim of job tw_315689876412") || !strings.Contains(v, "names it now. Refresh the list.") {
+		t.Errorf("the dialog does not show the refusal whole (%q):\n%s", refusal.Error(), v)
+	}
+	if got := strings.Count(v, "\n") + 1; got > 20 {
+		t.Errorf("View() is %d lines on a 20-line terminal:\n%s", got, v)
 	}
 }

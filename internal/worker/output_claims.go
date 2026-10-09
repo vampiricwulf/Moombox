@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -102,6 +103,28 @@ func outputClaimOwner(path string) string {
 	for stem, c := range outputClaims.stems {
 		if strings.HasPrefix(n, stem) {
 			return c.jobID
+		}
+	}
+	return ""
+}
+
+// outputClaimOwnerUnder returns the job whose in-flight finalize claims a
+// path inside dir, or "" when none does. outputClaimOwner answers for a path
+// a claim covers; this answers for a directory holding one, which a delete
+// would take along with the file being written. dir is matched in its own
+// spelling and its canonical one.
+func outputClaimOwnerUnder(dir string) string {
+	prefixes := []string{normalizePath(dir) + string(filepath.Separator)}
+	if c := normalizePath(canonicalDir(dir)) + string(filepath.Separator); c != prefixes[0] {
+		prefixes = append(prefixes, c)
+	}
+	outputClaims.mu.Lock()
+	defer outputClaims.mu.Unlock()
+	for stem, c := range outputClaims.stems {
+		for _, p := range prefixes {
+			if strings.HasPrefix(stem, p) {
+				return c.jobID
+			}
 		}
 	}
 	return ""

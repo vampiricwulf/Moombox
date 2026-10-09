@@ -52,3 +52,47 @@ test("the delete confirms say when set-aside recordings go with the files", { sk
   await h.app.files.deleteAllOrphanedFiles();
   assert.match(asked.at(-1), /^Delete all 2 orphaned files\?\n\n1 of them holds set-aside recordings/);
 });
+
+// A Delete from a stale list — a job or trim came to name the file after the
+// list was read — answers 409 with a message telling the operator to refresh
+// the list (DELETE /api/files/orphaned). Both deletes threw on any non-2xx,
+// so the operator read "Failed to delete file", which says nothing about why
+// or what to do. The message is the toast now, and the list is re-fetched as
+// after every other answer; Delete All says first how many did go, since the
+// rest of its list was still decided one by one.
+//
+// Mutant: restore `if (!resp.ok) throw` in either delete — the toast is the
+// fixed failure again.
+test("a delete refused as no longer an orphan toasts the server's message", { skip }, async () => {
+  const stale = "No longer an orphan: job abc123 names it now. Refresh the list.";
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/files/orphaned": () => [file("abc123"), file("def456")],
+      "DELETE /api/files/orphaned": ({ body }) => harness.response({
+        status: 409,
+        body: {
+          error: stale,
+          deleted: body.paths.filter((p) => !p.endsWith("abc123")),
+          errors: [{ path: "/data/staging/abc123", error: stale }],
+        },
+      }),
+    },
+  });
+  h.app.showConfirm = async () => true;
+  h.app.files._orphanedFiles = [file("abc123"), file("def456")];
+  const said = () => h.toasts().map((t) => t.textContent);
+  const lists = () => h.http.matching("/api/files/orphaned", "GET").length;
+
+  const before = lists();
+  await h.app.files.deleteOrphanedFile("/data/staging/abc123");
+  await h.flush();
+  assert.equal(said().at(-1), stale);
+  assert.equal(h.toasts().at(-1).variant, "warning");
+  assert.equal(lists(), before + 1, "the list is re-fetched after the answer");
+
+  h.app.files._orphanedFiles = [file("abc123"), file("def456")];
+  await h.app.files.deleteAllOrphanedFiles();
+  await h.flush();
+  assert.equal(said().at(-1), `Deleted 1. ${stale}`);
+  assert.equal(h.toasts().at(-1).variant, "warning");
+});
