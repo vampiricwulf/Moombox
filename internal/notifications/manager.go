@@ -392,7 +392,10 @@ func parseTarget(url string) (sender, error) {
 		if !discordWebhookRe.MatchString(resolved) {
 			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN with a numeric ID")
 		}
-		return &DiscordWebhook{URL: resolved}, nil
+		// Through the same canonical form as the https spelling: the TOKEN
+		// segment carries whatever query followed it, and a bare "?" there
+		// is no query either.
+		return &DiscordWebhook{URL: canonicalDiscordURL(resolved)}, nil
 
 	case discordWebhookRe.MatchString(url):
 		return &DiscordWebhook{URL: canonicalDiscordURL(url)}, nil
@@ -408,18 +411,22 @@ func parseTarget(url string) (sender, error) {
 // canonicalDiscordURL is the one spelling of an https webhook URL that
 // discordWebhookRe has accepted: host discord.com, whatever subdomain or
 // legacy discordapp.com it was given as, and no trailing slash on the path,
-// with the query kept. Load-bearing twice over. buildTargets dedupes on the
-// RESOLVED URL and targetMsgKey hashes it, so "…/TOKEN", "…/TOKEN/" and
-// "ptb.discord.com/…/TOKEN" built three targets that posted every embed three
-// times — and a slash added in edit mode opened new messages for every job in
-// progress. And Go's http.Client turns a 301/302 on a POST into a GET, so
-// following discordapp.com's redirect would drop the body.
+// with the query kept — unless it is a bare "?", which carries no parameter
+// and is dropped. Load-bearing twice over. buildTargets dedupes on the
+// RESOLVED URL and targetMsgKey hashes it, so "…/TOKEN", "…/TOKEN/",
+// "…/TOKEN?" and "ptb.discord.com/…/TOKEN" built four targets that posted
+// every embed four times — and a slash added in edit mode opened new messages
+// for every job in progress. And Go's http.Client turns a 301/302 on a POST
+// into a GET, so following discordapp.com's redirect would drop the body.
 func canonicalDiscordURL(raw string) string {
 	rest := strings.TrimPrefix(raw, "https://")
 	path := rest[strings.Index(rest, "/"):] // the pattern guarantees a path
 	query := ""
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path, query = path[:i], path[i:]
+	}
+	if query == "?" {
+		query = ""
 	}
 	return "https://discord.com" + strings.TrimSuffix(path, "/") + query
 }

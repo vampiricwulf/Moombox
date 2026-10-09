@@ -185,6 +185,13 @@ func TestParseTargetAcceptsTheLegacyDiscordappHost(t *testing.T) {
 		{"https://canary.discord.com/api/webhooks/" + id + "/" + tok, "https://discord.com/api/webhooks/" + id + "/" + tok},
 		{"https://discord.com/api/webhooks/" + id + "/" + tok + "/", "https://discord.com/api/webhooks/" + id + "/" + tok},
 		{"https://discord.com/api/webhooks/" + id + "/" + tok + "/?thread_id=9", "https://discord.com/api/webhooks/" + id + "/" + tok + "?thread_id=9"},
+		// A bare "?" is no query: it built a target of its own beside the plain
+		// spelling, in both forms. Mutants: canonicalDiscordURL keeping the
+		// "?", or the discord:// branch skipping canonicalDiscordURL.
+		{"https://discord.com/api/webhooks/" + id + "/" + tok + "?", "https://discord.com/api/webhooks/" + id + "/" + tok},
+		{"https://discord.com/api/webhooks/" + id + "/" + tok + "/?", "https://discord.com/api/webhooks/" + id + "/" + tok},
+		{"discord://" + id + "/" + tok + "?", "https://discord.com/api/webhooks/" + id + "/" + tok},
+		{"discord://" + id + "/" + tok + "?thread_id=9", "https://discord.com/api/webhooks/" + id + "/" + tok + "?thread_id=9"},
 		{"https://discord.com/api/webhooks/" + id + "/" + tok, "https://discord.com/api/webhooks/" + id + "/" + tok},
 	} {
 		s, err := parseTarget(tc.in)

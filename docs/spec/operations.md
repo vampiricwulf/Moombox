@@ -624,7 +624,8 @@ History begins again at the first state after the restart.
 
 Ids are keyed on the resolved URL, so every spelling of one webhook shares one
 message — `discord://ID/TOKEN`, the legacy `discordapp.com`, a `ptb.`/`canary.`
-host and a trailing slash all resolve to the one `https://discord.com/…` form
+host, a trailing slash and an empty query (a bare `?`) all resolve to the one
+`https://discord.com/…` form
 (`canonicalDiscordURL`), which is also what target dedupe keys on (a slash or a
 `ptb.` host used to build a second target that posted every embed again, and in
 edit mode opened new messages for every job in progress); a target the operator removed leaves an orphaned entry that nothing

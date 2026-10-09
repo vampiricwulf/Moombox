@@ -561,6 +561,14 @@ func TestBuildTargetsDedupesByResolvedURL(t *testing.T) {
 			1, map[string]bool{"found": true},
 		},
 		{
+			// Mutant: canonicalDiscordURL keeping a bare "?" — 2.
+			"an empty query is no query",
+			[]config.NotificationConfig{
+				{URL: full}, {URL: full + "?"}, {URL: full + "/?"}, {URL: short + "?"},
+			},
+			1, map[string]bool{"found": true},
+		},
+		{
 			"a nil filter wins over a narrow one, in either order",
 			[]config.NotificationConfig{
 				{URL: full, Events: []string{"found"}},
