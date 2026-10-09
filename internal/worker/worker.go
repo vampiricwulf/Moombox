@@ -414,8 +414,14 @@ func NewDownloadWorker(
 	// video id, so a backlog rescan can create the row again, and it would
 	// have inherited the old count and hold. For the worker's lifetime,
 	// which is the process's.
+	//
+	// Two subscriptions, because there are two ways a row goes: DeleteJob
+	// fires OnJobDeleted, while the departed-channel prune
+	// (DeleteJobsAndHistoryForChannel) deletes in bulk and fires only one
+	// OnJobsChange, with the list it left behind (endStreaksGoneFrom).
 	if db != nil {
 		db.OnJobDeleted(func(ev *database.JobDeleted) { w.endBacklogStreak(ev.JobID) })
+		db.OnJobsChange(w.endStreaksGoneFrom)
 	}
 	return w
 }

@@ -128,3 +128,55 @@ func TestDeletedBacklogRowLeavesNoStreak(t *testing.T) {
 		t.Errorf("the re-created row: count %d held %v, want no streak", n, held)
 	}
 }
+
+// TestPrunedBacklogRowLeavesNoStreak is the same through the other way a row
+// goes: the departed-channel prune (backfill.go's CancelAndPrune ->
+// DeleteJobsAndHistoryForChannel) deletes the channel's Queued rows in bulk
+// and fires no OnJobDeleted, only one OnJobsChange. A row pruned mid-backoff
+// left its count and hold behind, and the re-added channel's rescan created
+// the same id again, held, with the old count. A held row of a channel the
+// prune does not touch keeps its streak.
+//
+// Mutants: drop NewDownloadWorker's OnJobsChange subscription (the pruned
+// streak never ends: the wait times out); end every streak in
+// endStreaksGoneFrom whether or not its row is listed (the other channel's
+// row loses its count and hold); end only the counts, or only the holds
+// (the wait times out on the half left behind).
+func TestPrunedBacklogRowLeavesNoStreak(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	requeue := func(id string) *database.Job {
+		t.Helper()
+		job, _ := db.GetJob(id)
+		if ok, err := w.requeueBacklogAfterDiskFull(job, errOutOfDisk); !ok {
+			t.Fatalf("requeue of %s did not happen: %v", id, err)
+		}
+		return job
+	}
+	backlogRetryJob(t, db, "streak_pruned", 1, true) // channel UC_retry
+	pruned := requeue("streak_pruned")
+	other := "UC_other"
+	addSchedJob(t, db, &other, "streak_kept", database.StatusUpcoming, 1)
+	addFeedItemRow(t, db, other, "streak_kept", "2026-07-10T00:00:00Z")
+	kept := requeue("streak_kept")
+
+	n, err := db.DeleteJobsAndHistoryForChannel("UC_retry",
+		[]database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies})
+	if err != nil || n != 1 {
+		t.Fatalf("prune: deleted %d, err %v; want the one Queued row", n, err)
+	}
+	// OnJobsChange is delivered off the writer's goroutine.
+	waitForCond(t, 5*time.Second, "the pruned row's count and hold to end", func() bool {
+		n, held := backlogStreak(w, pruned.ID)
+		return n == 0 && !held
+	})
+	if n, held := backlogStreak(w, kept.ID); n != 1 || !held {
+		t.Errorf("the other channel's row: count %d held %v, want its streak kept (1, held)", n, held)
+	}
+
+	ch := "UC_retry"
+	addSchedJob(t, db, &ch, pruned.ID, database.StatusQueued, 1) // the re-added channel's rescan
+	if n, held := backlogStreak(w, pruned.ID); n != 0 || held {
+		t.Errorf("the re-created row after a channel prune: count %d held %v, want no streak", n, held)
+	}
+}

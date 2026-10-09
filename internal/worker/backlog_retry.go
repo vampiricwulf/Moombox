@@ -158,3 +158,38 @@ func (w *DownloadWorker) endBacklogStreak(jobID string) {
 		w.scheduler.unhold(jobID)
 	}
 }
+
+// endStreaksGoneFrom ends the streak of every job counted here whose row is
+// not in jobs — an OnJobsChange full list, the rows that exist. The channel
+// prune deletes a departed channel's Queued rows in bulk and fires no
+// OnJobDeleted for them, so a row pruned mid-backoff left its count and hold
+// behind: when the channel was added back, the rescan's new row for the same
+// video waited out a backoff it never earned and counted its first requeue on
+// top of the old streak, and the hold widened every sweep's NextQueuedJobs
+// until a restart.
+//
+// The counts are the whole set to look through: requeueBacklog notes the
+// retry before it places the hold, and every hold is dropped with its count
+// or gone before the count is (sweep admits a job only once its hold has run
+// out, and held forgets it then), so a held job is always a counted one.
+//
+// The list is the bulk write's own snapshot, delivered after it returns. A
+// row created after the snapshot was read is not on it, but it has had no run
+// yet to earn a streak of its own, so whatever this ends for it is stale.
+func (w *DownloadWorker) endStreaksGoneFrom(jobs []*database.Job) {
+	exists := make(map[string]bool, len(jobs))
+	for _, j := range jobs {
+		exists[j.ID] = true
+	}
+	var gone []string
+	w.backlogRetryMu.Lock()
+	for id := range w.backlogRetries {
+		if !exists[id] {
+			gone = append(gone, id)
+		}
+	}
+	w.backlogRetryMu.Unlock()
+	for _, id := range gone {
+		w.endBacklogStreak(id)
+	}
+}
