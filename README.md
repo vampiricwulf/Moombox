@@ -739,7 +739,10 @@ which events carry it; leave it unset for the default six (`error`, `auth`,
 to `[]` for a mention that never fires. Set `network.public_url` to your
 dashboard's externally reachable address and a job embed's title links
 straight to that job (`{public_url}/#job=<id>`) instead of the platform page,
-which moves to the channel/author line. See
+which moves to the channel/author line. The dashboard also trusts that
+address as its own (see [Remote Access](#remote-access)): on `localhost`
+and `lan` a page on its port may drive the dashboard, so name the port
+you actually use. See
 [docs/spec/operations.md](docs/spec/operations.md#target-options) for the
 full rules.
 

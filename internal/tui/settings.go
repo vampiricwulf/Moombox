@@ -125,7 +125,7 @@ var sections = []settingsSection{
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
-			{"public_url", "Public dashboard URL", fieldText, nil, "external address of this dashboard, used only in webhook embeds (e.g. https://moombox.example.com); blank = link to YouTube/Twitch", nil},
+			{"public_url", "Public dashboard URL", fieldText, nil, "address you type to reach this dashboard (e.g. https://moombox.example.com); webhook embeds link here, blank = YouTube/Twitch. Also trusted as the dashboard's own address: on localhost/lan a page on its port, from any local or private address, may drive the dashboard; on external, local browsers may open it by this host", nil},
 			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = keep the current targets (requires restart)", nil},
 		},
 	},

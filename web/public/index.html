@@ -635,7 +635,7 @@
                                 id="cfg-public-url"
                                 label="Public Dashboard URL"
                                 placeholder="https://moombox.example.com"
-                                help-text="The address you reach this dashboard on from outside. Used only in webhook notifications: a job embed's title links here and opens that job. Leave empty to keep linking to YouTube/Twitch. Applies immediately."
+                                help-text="The address you type into the browser to reach this dashboard. Webhook notifications link a job embed's title here, opening that job; leave empty to keep linking to YouTube/Twitch. The dashboard also trusts it as its own address: on Localhost Only and LAN, a page on its port may drive the dashboard from any local or private address (set it for a reverse proxy or port forward on another port); on External, browsers on this machine or the LAN may open the dashboard by its host name. Applies immediately."
                             ></sl-input>
 
                             <sl-divider></sl-divider>

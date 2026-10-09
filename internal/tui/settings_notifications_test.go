@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
 // sectionIndexByName resolves a settings section to its index. internal/tui
@@ -367,6 +369,49 @@ func TestPublicURLFieldRoundTrips(t *testing.T) {
 	m.loadValues(cfg)
 	if m.values["public_url"] != "https://x.example" {
 		t.Errorf("loadValues did not populate public_url (%q)", m.values["public_url"])
+	}
+}
+
+// TestPublicURLHelpNamesTheOriginTrust pins both UIs' help for public_url to
+// what the setting does. It used to say "used only in webhook embeds" (TUI)
+// and "Used only in webhook notifications" (Web) after D-S7 made it an
+// origin-trust setting too: on localhost/lan its port is admitted as the
+// dashboard's own for CSRF, CORS and the WebSocket, from any loopback or
+// private address, and on external its host is a name local browsers may
+// use. An operator setting it for clickable embeds alone was told it had no
+// other effect.
+//
+// THE MUTANTS: restore either old string — its half fails on "only" and on
+// the missing port.
+func TestPublicURLHelpNamesTheOriginTrust(t *testing.T) {
+	var tuiHelp string
+	for _, s := range sections {
+		for _, f := range s.fields {
+			if f.key == "public_url" {
+				tuiHelp = f.help
+			}
+		}
+	}
+
+	raw, err := webassets.PublicFS.ReadFile("public/index.html")
+	if err != nil {
+		t.Fatalf("read the embedded index.html: %v", err)
+	}
+	m := regexp.MustCompile(`id="cfg-public-url"[^>]*?help-text="([^"]*)"`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("index.html has no cfg-public-url input with a help-text")
+	}
+
+	for ui, help := range map[string]string{"TUI": tuiHelp, "Web": string(m[1])} {
+		lower := strings.ToLower(help)
+		if strings.Contains(lower, "only in webhook") {
+			t.Errorf("%s help still says public_url is used only in webhooks: %q", ui, help)
+		}
+		for _, want := range []string{"webhook", "port", "external"} {
+			if !strings.Contains(lower, want) {
+				t.Errorf("%s help %q does not mention %q", ui, help, want)
+			}
+		}
 	}
 }
 
