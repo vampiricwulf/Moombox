@@ -55,7 +55,7 @@ func validateDownloadedMP4(path string) error {
 //
 // BOTH whole-file paths save on it — the chunked loop and the streaming
 // fallback — deliberately through the one constant rather than a second
-// cadence of the fallback's own.
+// cadence of the fallback's own, and from the one mark (checkpointDirect).
 const directResumeInterval = 10 * DownloadChunkSize
 
 // directResumeIntervalBytes is directResumeInterval, or the test override when
@@ -67,10 +67,30 @@ func (d *SegmentDownloader) directResumeIntervalBytes() int64 {
 	return directResumeInterval
 }
 
+// checkpointDirect saves a resume checkpoint once the staged file has grown
+// directResumeInterval past the last one (directCheckpoint); both whole-file
+// paths call it after each write. The streaming fallback counted from the
+// start of each request it made, and it asks again after a break, an outage,
+// a refresh or a short 206: a transfer whose requests each moved less than an
+// interval wrote no sidecar however much it staged, and when it ended in an
+// error or a restart the next run found none and fetched the file from byte
+// 0. The mark also carries a mid-download 200's hand-off from the chunked
+// loop into the fallback, which started its count afresh there.
+func (d *SegmentDownloader) checkpointDirect(staged int64) {
+	if staged-d.directCheckpoint >= d.directResumeIntervalBytes() {
+		d.saveResume()
+		d.directCheckpoint = staged
+	}
+}
+
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
 // Uses 5MB chunked Range requests with per-chunk retry and percentage progress.
 // Falls back to streaming download if the server doesn't support Range requests.
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
+	// The checkpoint cadence counts from where this run starts: the offset
+	// Start restored from the sidecar, or 0.
+	d.directCheckpoint = d.bytesWritten.Load()
+
 	// Probe total file size via Range: bytes=0-0, retried so one transient
 	// failure cannot route a resumable download into the streaming fallback.
 	totalSize, err := d.probeFileSizeWithRetry(ctx)
@@ -107,8 +127,6 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// the file's tail fails Start's size check and restarts fresh, so this
 	// can never splice a torn tail. Fresh runs start at 0 (bytesWritten==0).
 	offset := d.bytesWritten.Load()
-	lastSavedOffset := offset
-	resumeInterval := d.directResumeIntervalBytes()
 	lastProgressTime := time.Time{}
 
 	for offset < totalSize {
@@ -169,10 +187,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		d.bytesWritten.Store(offset)
 
 		// Persist resume progress periodically (see directResumeInterval).
-		if offset-lastSavedOffset >= resumeInterval {
-			d.saveResume()
-			lastSavedOffset = offset
-		}
+		d.checkpointDirect(offset)
 
 		// Throttled progress emission
 		now := time.Now()
@@ -293,7 +308,10 @@ func (d *SegmentDownloader) differentFileReason(staged, total int64, source stri
 // It forgets the recorded total too: that was the length of the file just
 // discarded, and a checkpoint of whatever is fetched next must not hold it to
 // the old one's. The chunked loop records its probe's total straight after;
-// the streaming fallback, whose 200 may state none, records nothing.
+// the streaming fallback, whose 200 may state none, records nothing. And it
+// starts the checkpoint cadence over (directCheckpoint), whose mark described
+// the discarded bytes: held, it put the new file's first checkpoint that far
+// further on.
 //
 // reason is logged: every discard must be attributable, because the guard in
 // Start (ErrStagedMediaPresent) exists precisely so that nothing else can do
@@ -312,6 +330,7 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 	d.outputFile = f
 	d.bytesWritten.Store(0)
 	d.directTotalSize = 0
+	d.directCheckpoint = 0
 	d.ClearResume()
 	return nil
 }
@@ -547,13 +566,6 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 
 	buf := make([]byte, 64*1024) // 64KB buffer
 	var lastProgressTime time.Time
-	// Read AFTER the switch above: a discard there reset the counter to zero,
-	// and the checkpoint cadence measures from wherever this transfer starts.
-	// Without these saves the fallback streamed gigabytes with nothing on disk
-	// describing them, so an interruption cost the whole partial — the chunked
-	// loop's 50 MB cadence, applied to the path that has no chunks.
-	lastSavedOffset := d.bytesWritten.Load()
-	resumeInterval := d.directResumeIntervalBytes()
 	for {
 		// The CALLER's context, not the derived one: an idle stall is a
 		// network failure the read below surfaces as such, while a cancel
@@ -571,11 +583,11 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 			}
 			stagedBytes := d.bytesWritten.Add(int64(written))
 
-			// Same cadence as the chunked loop (directResumeInterval).
-			if stagedBytes-lastSavedOffset >= resumeInterval {
-				d.saveResume()
-				lastSavedOffset = stagedBytes
-			}
+			// The chunked loop's cadence, from the same mark
+			// (checkpointDirect). Without these saves the fallback streamed
+			// gigabytes with nothing on disk describing them, so an
+			// interruption cost the whole partial.
+			d.checkpointDirect(stagedBytes)
 
 			if d.OnProgress != nil && time.Since(lastProgressTime) >= ProgressThrottle {
 				lastProgressTime = time.Now()

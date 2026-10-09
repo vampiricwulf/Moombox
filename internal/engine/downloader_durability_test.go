@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -354,6 +355,154 @@ func TestDirectFallbackCheckpointsMidStream(t *testing.T) {
 	if info.Size() < state.BytesWritten {
 		t.Fatalf("staged file is %d bytes, behind the persisted position %d", info.Size(), state.BytesWritten)
 	}
+}
+
+// TestDirectCheckpointSpansTheFallbacksRequests pins that the checkpoint
+// cadence counts from the last checkpoint, not from the start of each
+// request. The streaming fallback asks again after a break, an outage, a
+// refresh or a short 206, and each request restarted the count from its own
+// offset: a transfer whose requests each moved less than an interval wrote
+// no sidecar however much it staged, and when it ended in an error the next
+// run fetched the file from byte 0. Each row's transfer breaks off part-way
+// through every request and then meets a 404; whatever it staged, the
+// sidecar must lag it by less than one interval.
+//
+//   - re-asks after breaks: three requests of 64 KB each against a 96 KB
+//     interval;
+//   - a hand-off from the chunked loop: one 5 MB chunk, a mid-download 200,
+//     and a fallback request that breaks after 3 MB, against a 7.5 MB
+//     interval — the fallback started its count afresh at the hand-off;
+//   - a discard starts the count over: a resume whose Range is answered with
+//     another file's total discards a 300 KB partial and streams the new file
+//     from byte 0, breaking after 128 KB, against a 96 KB interval — a mark
+//     left at the discarded partial's length holds the first checkpoint back.
+//
+// Mutant: restarting the mark at each request (`d.directCheckpoint =
+// d.bytesWritten.Load()` after streamDirectOnce's status switch) — the first
+// two rows write no sidecar. Mutant: restarting it as the fallback starts —
+// the hand-off row does not. Mutant: dropping `d.directCheckpoint = 0` from
+// discardStagedMedia — the discard row does not.
+func TestDirectCheckpointSpansTheFallbacksRequests(t *testing.T) {
+	const kb = 1 << 10
+	for _, tc := range []struct {
+		name     string
+		body     []byte
+		interval int64
+		seed     int // bytes of another file to stage first (0: none)
+		probeOK  bool
+		// serve answers data request n (1-based), or reports false to let
+		// the origin serve the file by Range.
+		serve func(n int, body []byte, w http.ResponseWriter, r *http.Request) bool
+	}{
+		{
+			"re-asks after breaks", headedBody(1024*kb, 'V'), 96 * kb, 0, false,
+			func(n int, body []byte, w http.ResponseWriter, r *http.Request) bool {
+				if n > 3 {
+					w.WriteHeader(http.StatusNotFound)
+					return true
+				}
+				breakAfter(w, r, body, 64*kb)
+				return true
+			},
+		},
+		{
+			"a hand-off from the chunked loop", headedBody(2*DownloadChunkSize+100, 'V'), DownloadChunkSize + DownloadChunkSize/2, 0, true,
+			func(n int, body []byte, w http.ResponseWriter, r *http.Request) bool {
+				switch {
+				case n == 1:
+					return false // the first chunk
+				case n == 2:
+					w.Header().Set("Content-Length", "1") // the Range ignored
+					w.WriteHeader(http.StatusOK)
+					w.Write(body[:1])
+				case n == 3:
+					breakAfter(w, r, body, 3<<20)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+				return true
+			},
+		},
+		{
+			"a discard starts the count over", headedBody(2048*kb, 'V'), 96 * kb, 300 * kb, false,
+			func(n int, body []byte, w http.ResponseWriter, r *http.Request) bool {
+				switch n {
+				case 1:
+					return false // the resume Range, answered with this file's total
+				case 2:
+					breakAfter(w, r, body, 128*kb) // the restart from byte 0
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+				return true
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			full := serveRangeFile(tc.body)
+			var mu sync.Mutex
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Range") == "bytes=0-0" {
+					if tc.probeOK {
+						full(w, r)
+					} else {
+						w.WriteHeader(http.StatusInternalServerError)
+					}
+					return
+				}
+				mu.Lock()
+				requests++
+				n := requests
+				mu.Unlock()
+				if !tc.serve(n, tc.body, w, r) {
+					full(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			out := filepath.Join(t.TempDir(), "video.mp4")
+			if tc.seed > 0 {
+				seedWholeFileResume(t, out, headedBody(tc.seed, 'A'), int64(len(tc.body))*2)
+			}
+			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
+			d.delays = fastDelays()
+			d.directResumeIntervalOverride = tc.interval
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			if err := d.Start(ctx); err == nil || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Start = %v, want the 404 that ends the run", err)
+			}
+			info, err := os.Stat(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(out + resumeFileSuffix); err != nil {
+				t.Fatalf("%d bytes staged at a %d-byte interval, and no sidecar describes them (%v)", info.Size(), tc.interval, err)
+			}
+			saved := readResumeSidecar(t, out+resumeFileSuffix).BytesWritten
+			if saved <= 0 || saved > info.Size() || info.Size()-saved >= tc.interval {
+				t.Errorf("the sidecar records %d of %d staged bytes, want it within one %d-byte interval of them", saved, info.Size(), tc.interval)
+			}
+		})
+	}
+}
+
+// breakAfter answers a request's Range — a 206 for the rest of the file, or
+// a 200 for all of it without one — with a body that breaks off after cut
+// bytes.
+func breakAfter(w http.ResponseWriter, r *http.Request, body []byte, cut int) {
+	var start int
+	if rng := r.Header.Get("Range"); rng != "" {
+		fmt.Sscanf(rng, "bytes=%d-", &start)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(body)-1, len(body)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)-start))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+	}
+	w.Write(body[start : start+cut])
 }
 
 // readResumeSidecar reads a sidecar the production code wrote. Deliberately a

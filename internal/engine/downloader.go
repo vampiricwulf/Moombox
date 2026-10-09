@@ -486,6 +486,15 @@ type SegmentDownloader struct {
 	// the fields above.
 	directTotalSize int64
 
+	// directCheckpoint is the staged length the whole-file download's last
+	// resume checkpoint describes — before one, the offset the download
+	// started from — so the directResumeInterval cadence (checkpointDirect)
+	// counts from it across every request the two whole-file paths make,
+	// not from wherever each request began. Set by runDirectDownload and
+	// zeroed by discardStagedMedia with the bytes it describes.
+	// Download-loop goroutine only, like the fields above.
+	directCheckpoint int64
+
 	// reportFirstSegment arms the one OnFirstSegment call: set by Start when
 	// it opens the output file fresh (not resuming), cleared by the first
 	// media write. Download-loop goroutine only, like the fields above.
@@ -586,8 +595,8 @@ type SegmentDownloader struct {
 	hlsVodBufferBytesOverride int
 
 	// directResumeIntervalOverride is the same seam again for the whole-file
-	// download's sidecar cadence (directResumeInterval, 50 MB — see both call
-	// sites in downloader_direct.go). Zero (the default) means "use
+	// download's sidecar cadence (directResumeInterval, 50 MB — see
+	// checkpointDirect in downloader_direct.go). Zero (the default) means "use
 	// directResumeInterval"; production code never sets this. A test that had
 	// to move 100 MB through an httptest server to observe two checkpoints
 	// would cost seconds and hundreds of megabytes of RAM to pin a rule that
