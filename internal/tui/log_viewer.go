@@ -158,32 +158,57 @@ func (m *LogViewerModel) appendLine(line string) {
 	m.wrapped = append(m.wrapped, nil)
 }
 
-// capLines trims all three slices to maxLogLines, identically.
-func (m *LogViewerModel) capLines() {
-	if len(m.lines) <= maxLogLines {
-		return
+// capLines trims all three slices to maxLogLines, identically, and returns
+// how many display rows left the top of the view with them (see dropOldest).
+func (m *LogViewerModel) capLines() int {
+	return m.dropOldest(len(m.lines) - maxLogLines)
+}
+
+// dropOldest removes the n oldest lines from all three slices, identically,
+// and returns how many DISPLAY rows they took with them — the rows the
+// viewport was showing above everything that survives. redisplay needs that
+// count to keep a paused view where it is.
+//
+// A dropped line counts only if it is on screen: it passes the level filter
+// (a hidden line keeps the rows it was cut into before F hid it), and it has
+// been cut — wrapped[i] is still nil for a line that arrived in the same
+// batch and never reached the display, and contributes nothing. Its rows are
+// counted the way the viewport counts them: SetContentLines splits a row at
+// an embedded "\n", and wrapLogLine passes a line that already fits through
+// uncut, so a multi-line entry (an ffmpeg stderr tail) moves the offset by
+// every row it occupied, not by one.
+func (m *LogViewerModel) dropOldest(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	n = min(n, len(m.lines))
+	rows := 0
+	for i := range min(n, len(m.wrapped)) {
+		if m.level != LogLevelAll && !m.matchLevel(m.levels[i]) {
+			continue
+		}
+		for _, r := range m.wrapped[i] {
+			rows += 1 + strings.Count(r, "\n")
+		}
 	}
 	// slices.Clone prevents the re-slice from aliasing the old backing
 	// array, which would otherwise retain MBs of string headers over the
 	// 24/7 runtime target.
-	m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
-	m.levels = slices.Clone(m.levels[len(m.levels)-maxLogLines:])
+	m.lines = slices.Clone(m.lines[n:])
+	m.levels = slices.Clone(m.levels[n:])
 	// The surviving lines keep the rows they were already cut into — that
 	// is the whole point of the cache, since this runs on every insertion
 	// once the buffer is full.
-	if len(m.wrapped) > maxLogLines {
-		m.wrapped = slices.Clone(m.wrapped[len(m.wrapped)-maxLogLines:])
+	if len(m.wrapped) >= n {
+		m.wrapped = slices.Clone(m.wrapped[n:])
 	}
+	return rows
 }
 
 // AddLine appends a single log line.
 func (m *LogViewerModel) AddLine(line string) {
 	m.appendLine(line)
-	m.capLines()
-	m.rebuildFiltered()
-	if m.autoScroll {
-		m.viewport.GotoBottom()
-	}
+	m.redisplay(m.capLines())
 }
 
 // AddLines appends a batch of log lines efficiently (single rebuildFiltered call).
@@ -192,7 +217,28 @@ func (m *LogViewerModel) AddLines(batch []string) {
 	for _, line := range batch {
 		m.appendLine(line)
 	}
-	m.capLines()
+	m.redisplay(m.capLines())
+}
+
+// redisplay rebuilds the display after lines were added and trimmedRows
+// display rows were dropped off the front of the buffer. Following, the view
+// sticks to the bottom. Paused, it stays on the lines it is showing: the
+// viewport keeps its YOffset across SetContentLines (it only clamps), so
+// once the buffer is full and every insertion trims the oldest line, the same
+// offset over the shortened buffer pointed at later lines — the "Auto-scroll
+// paused" view crept up a row per new line (more for wrapped ones), and at
+// DEBUG or with several jobs running it could not be read (W24-12). The
+// offset moves up by exactly the rows that left above it, clamped at the top
+// once the lines on screen are themselves the ones evicted.
+//
+// Moved BEFORE the rebuild, on the old content: the rebuild re-applies an
+// active search's highlights, and SetHighlights picks the selected match from
+// the offset it finds. The new offset is never past the new bottom — the
+// buffer lost trimmedRows rows and gained at least none.
+func (m *LogViewerModel) redisplay(trimmedRows int) {
+	if !m.autoScroll && trimmedRows > 0 {
+		m.viewport.SetYOffset(m.viewport.YOffset() - trimmedRows)
+	}
 	m.rebuildFiltered()
 	if m.autoScroll {
 		m.viewport.GotoBottom()
@@ -401,8 +447,16 @@ func (m *LogViewerModel) updateViewportContent() {
 	m.viewport.SetContentLines(slices.Clone(m.filtered))
 
 	// Re-apply search highlights if a query is active (SetContent clears them).
+	// SetHighlights also SCROLLS: it selects the first match at or below the
+	// top row and, when that match is off screen, moves the view to it. That
+	// is the jump Enter wants (it calls applySearchHighlights directly), but
+	// here the content merely changed, and a reader paused above the latest
+	// lines was carried down to the next match on every new line. The offset
+	// is the reader's, so it is put back.
 	if m.searchQuery != "" {
+		top := m.viewport.YOffset()
 		m.applySearchHighlights()
+		m.viewport.SetYOffset(top)
 	}
 }
 
