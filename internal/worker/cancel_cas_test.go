@@ -251,9 +251,9 @@ func TestCancelInAFailuresTailIsTheCallersToReport(t *testing.T) {
 	job := runningJob(t, w, db, "tail_cancel")
 
 	cancelled, flagged := false, true
-	w.OnCookieRefreshNeeded = func(string) bool {
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome {
 		cancelled, flagged = w.CancelJob(job.ID) // the operator cancels the COOKIES? row
-		return false
+		return CookieRefreshNotRestored
 	}
 	w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
 
@@ -362,12 +362,12 @@ func TestCookieRefreshResumeLeavesACancelStanding(t *testing.T) {
 			t.Cleanup(w.Stop)
 			id := fmt.Sprintf("refresh_cancel_%v", backlog)
 			job := parkedRun(t, w, db, id, backlog)
-			w.OnCookieRefreshNeeded = func(string) bool {
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome {
 				if row, _ := db.GetJob(id); row.Status != database.StatusCookies {
 					t.Errorf("status during the refresh = %s, want COOKIES?", row.Status)
 				}
 				w.CancelJob(id) // the operator cancels the parked row
-				return true
+				return CookieRefreshRestored
 			}
 			w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
 			w.queue.Complete(id) // the run exits
@@ -400,11 +400,11 @@ func TestCookieRefreshResumeHandsOnARowTheSweepResumed(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
 	job := parkedRun(t, w, db, "refresh_swept", false)
-	w.OnCookieRefreshNeeded = func(string) bool {
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome {
 		db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
 			"status": database.StatusUpcoming, "error": "", "park_reason": database.ParkReasonNone,
 		}) // the sweep's resume
-		return true
+		return CookieRefreshRestored
 	}
 	w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
 	w.queue.Complete(job.ID)

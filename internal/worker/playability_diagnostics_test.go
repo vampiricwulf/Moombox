@@ -219,10 +219,10 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 
 			called := false
 			gotPlatform := ""
-			w.OnCookieRefreshNeeded = func(platform string) bool {
+			w.OnCookieRefreshNeeded = func(platform string) CookieRefreshOutcome {
 				called = true
 				gotPlatform = platform
-				return false
+				return CookieRefreshNotRestored
 			}
 
 			w.setJobError(job, tc.err)
@@ -354,7 +354,7 @@ func TestSetJobErrorPersistsParkReason(t *testing.T) {
 			if _, err := db.AddJob(job); err != nil {
 				t.Fatal(err)
 			}
-			w.OnCookieRefreshNeeded = func(string) bool { return false }
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 
 			w.setJobError(job, tc.err)
 
@@ -385,7 +385,7 @@ func TestSetJobErrorOverwritesStaleParkReason(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	w.OnCookieRefreshNeeded = func(string) bool { return false }
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 
 	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
 		(&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError())
@@ -461,7 +461,7 @@ func TestSetJobErrorRecordsParkIdentity(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			w.OnCookieRefreshNeeded = func(string) bool { return false }
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 
 			called := false
 			w.CurrentCredentialIdentity = func(platform string) string {
@@ -501,7 +501,7 @@ func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	w.OnCookieRefreshNeeded = func(string) bool { return false }
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 	w.CurrentCredentialIdentity = nil
 
 	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
@@ -554,7 +554,7 @@ func TestCookieRefreshResumesBacklogThroughTheScheduler(t *testing.T) {
 				addFeedItemRow(t, db, chID, videoID, "2026-07-01T00:00:00Z")
 			}
 			job, _ := db.GetJob(videoID)
-			w.OnCookieRefreshNeeded = func(string) bool { return true }
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshRestored }
 
 			w.setJobError(job, (&StreamProcessResult{Error: "cookies", ErrSentinel: ErrCookiesRequired}).AsError())
 

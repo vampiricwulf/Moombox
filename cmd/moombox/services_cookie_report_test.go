@@ -3,10 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TestCookieRefreshReportFor pins the worker-facing wording for every verdict,
@@ -143,23 +145,100 @@ func TestCookieRefreshReportFor(t *testing.T) {
 // another browser holds (cookies.ErrProfileInUse) was logged as "auto cookie
 // refresh error". The pass declined and launched nothing, and its sentence
 // names the host and the lock to delete, so the line says "skipped" and carries
-// the sentence as the reason. Any other error keeps its line.
+// the sentence as the reason, and the worker is told it was skipped. Any other
+// error keeps its line and is not a restore.
 //
-// Mutant (checked): the ErrProfileInUse arm removed — the held profile's line
-// is the error one again.
+// Mutants (checked): the ErrProfileInUse arm removed — the held profile's line
+// is the error one again; that arm answering CookieRefreshNotRestored — the
+// worker follows the skip with its failed-refresh advice.
 func TestCookieRefreshErrorLine(t *testing.T) {
 	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
-	msg, attr := cookieRefreshErrorLine(held)
+	msg, attr, outcome := cookieRefreshErrorLine(held)
 	if msg != "automatic cookie refresh skipped — a browser holds the profile" {
 		t.Errorf("held profile: message %q, want the skip line", msg)
 	}
 	if attr.Key != "reason" || attr.Value.String() != held.Error() {
 		t.Errorf("held profile: attribute %s=%q, want reason=<the sentence>", attr.Key, attr.Value.String())
 	}
+	if outcome != worker.CookieRefreshSkipped {
+		t.Errorf("held profile: outcome %v, want CookieRefreshSkipped", outcome)
+	}
 
 	other := errors.New("start headless browser: exec: no such file")
-	msg, attr = cookieRefreshErrorLine(other)
+	msg, attr, outcome = cookieRefreshErrorLine(other)
 	if msg != "auto cookie refresh error" || attr.Key != "error" || attr.Value.String() != other.Error() {
 		t.Errorf("other error: %q %s=%q, want the error line unchanged", msg, attr.Key, attr.Value.String())
+	}
+	if outcome != worker.CookieRefreshNotRestored {
+		t.Errorf("other error: outcome %v, want CookieRefreshNotRestored", outcome)
+	}
+}
+
+// jobRefreshLogger records Warn lines with their attributes rendered, so a
+// test can assert on what the job-triggered refresh logged. The other three
+// levels are discarded.
+type jobRefreshLogger struct {
+	warns []string
+}
+
+func (l *jobRefreshLogger) Debug(string, ...any) {}
+func (l *jobRefreshLogger) Info(string, ...any)  {}
+func (l *jobRefreshLogger) Error(string, ...any) {}
+func (l *jobRefreshLogger) Warn(msg string, args ...any) {
+	var b strings.Builder
+	b.WriteString(msg)
+	for _, a := range args {
+		if attr, ok := a.(slog.Attr); ok {
+			b.WriteString(" " + attr.Key + "=" + attr.Value.String())
+		}
+	}
+	l.warns = append(l.warns, b.String())
+}
+
+// TestJobCookieRefreshOutcome pins the closure-to-worker contract of the
+// job-triggered refresh: what OnCookieRefreshNeeded logs and what it tells
+// the worker. The held profile is the row this exists for. The closure logged
+// its skip line and answered false, and the worker, which could not tell that
+// false from a failure, followed the skip with "auto cookie refresh failed —
+// the cookie file has to be replaced by hand". It answers
+// worker.CookieRefreshSkipped now, which the worker leaves parked without the
+// advice (TestHeldProfileSkipIsNotCalledAFailedRefresh in internal/worker).
+//
+// Mutants (checked): the error arm answering CookieRefreshNotRestored instead
+// of cookieRefreshErrorLine's outcome — the held row fails; the report's ok
+// not mapped to CookieRefreshRestored — the verified row fails.
+func TestJobCookieRefreshOutcome(t *testing.T) {
+	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
+	verified := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshOK, YouTubeStored: true}
+	rejected := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed, YouTubeStored: true}
+
+	cases := []struct {
+		name     string
+		result   cookies.RefreshResult
+		err      error
+		want     worker.CookieRefreshOutcome
+		wantWarn string // "" for no line
+	}{
+		{"held profile is a skip", cookies.RefreshResult{Mechanism: cookies.RefreshMechanismBrowser}, held,
+			worker.CookieRefreshSkipped, "automatic cookie refresh skipped — a browser holds the profile platform=youtube reason=" + held.Error()},
+		{"another error is not a restore", cookies.RefreshResult{}, errors.New("start headless browser: exec: no such file"),
+			worker.CookieRefreshNotRestored, "auto cookie refresh error platform=youtube error=start headless browser: exec: no such file"},
+		{"a verified platform is restored", verified, nil, worker.CookieRefreshRestored, ""},
+		{"rejected credentials are not a restore", rejected, nil,
+			worker.CookieRefreshNotRestored, "automatic cookie refresh ran and the credentials are still rejected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &jobRefreshLogger{}
+			if got := jobCookieRefreshOutcome(log, "youtube", tc.result, tc.err); got != tc.want {
+				t.Errorf("outcome %v, want %v", got, tc.want)
+			}
+			switch {
+			case tc.wantWarn == "" && len(log.warns) != 0:
+				t.Errorf("logged %q, want nothing", log.warns)
+			case tc.wantWarn != "" && (len(log.warns) != 1 || !strings.HasPrefix(log.warns[0], tc.wantWarn)):
+				t.Errorf("logged %q, want one line starting %q", log.warns, tc.wantWarn)
+			}
+		})
 	}
 }

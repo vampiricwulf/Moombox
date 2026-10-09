@@ -78,7 +78,7 @@ func TestParkedRunsCookieResumeWaitsForItsExit(t *testing.T) {
 	if !w.queue.AcquireLifecycleSlot(context.Background(), id) {
 		t.Fatal("lifecycle slot")
 	}
-	w.OnCookieRefreshNeeded = func(string) bool { return true }
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshRestored }
 
 	w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
 

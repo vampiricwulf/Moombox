@@ -116,8 +116,8 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 		// rather than left behind: "it stopped before verifying" cannot happen
 		// on either path, because every refreshAborted() carries a non-nil
 		// error and BOTH callers return before this line on one
-		// (services.go's OnCookieRefreshNeeded above, runCookieRecovery's
-		// err != nil branch).
+		// (jobCookieRefreshOutcome below, runCookieRecovery's err != nil
+		// branch).
 		return cookieRefreshReport{
 			ok:  false,
 			msg: "automatic cookie refresh ran but could not establish whether these cookies work",
@@ -137,12 +137,43 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 // error: the pass declined and launched nothing, and its sentence names the
 // host to close the browser on and the lock to delete. It was logged as "auto
 // cookie refresh error"; it says "skipped" now, with the sentence as the
-// reason. Every other error keeps its line.
-func cookieRefreshErrorLine(err error) (string, slog.Attr) {
+// reason, and the worker is told it was skipped
+// (worker.CookieRefreshSkipped), so it does not follow the skip with its
+// failed-refresh advice to replace the cookie file. Every other error keeps
+// its line and is not a restore.
+func cookieRefreshErrorLine(err error) (string, slog.Attr, worker.CookieRefreshOutcome) {
 	if errors.Is(err, cookies.ErrProfileInUse) {
-		return "automatic cookie refresh skipped — a browser holds the profile", slog.String("reason", err.Error())
+		return "automatic cookie refresh skipped — a browser holds the profile", slog.String("reason", err.Error()), worker.CookieRefreshSkipped
 	}
-	return "auto cookie refresh error", slog.String("error", err.Error())
+	return "auto cookie refresh error", slog.String("error", err.Error()), worker.CookieRefreshNotRestored
+}
+
+// jobCookieRefreshOutcome is the tail of the OnCookieRefreshNeeded closure:
+// it logs what a job-triggered refresh concluded about platform and returns
+// the worker's answer. Extracted so the closure-to-worker contract can be
+// tested — the closure itself needs the whole construction graph, and the
+// outcome it returns decides what the worker logs next.
+func jobCookieRefreshOutcome(log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, platform string, result cookies.RefreshResult, err error) worker.CookieRefreshOutcome {
+	if err != nil {
+		msg, cause, outcome := cookieRefreshErrorLine(err)
+		log.Warn(msg, slog.String("platform", platform), cause)
+		return outcome
+	}
+	report := cookieRefreshReportFor(platform, result)
+	if report.msg != "" {
+		log.Warn(report.msg,
+			slog.String("platform", platform),
+			slog.String("note", report.note))
+	}
+	if report.ok {
+		return worker.CookieRefreshRestored
+	}
+	return worker.CookieRefreshNotRestored
 }
 
 // twitchAuthLossHook wraps the platform-mark call in the goroutine its caller
@@ -1342,7 +1373,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}, log))
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
-	dlWorker.OnCookieRefreshNeeded = func(platform string) bool {
+	dlWorker.OnCookieRefreshNeeded = func(platform string) worker.CookieRefreshOutcome {
 		var autoEnabled bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			autoEnabled = c.Cookies.AutoEnabled
@@ -1356,7 +1387,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Warn("automatic cookie refresh is disabled — nothing was attempted",
 				slog.String("setting", "cookies.auto_enabled = false"),
 				slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
-			return false
+			return worker.CookieRefreshNotRestored
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -1396,18 +1427,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			}
 		}()
 
-		if err != nil {
-			msg, cause := cookieRefreshErrorLine(err)
-			log.Warn(msg, slog.String("platform", platform), cause)
-			return false
-		}
-		report := cookieRefreshReportFor(platform, result)
-		if report.msg != "" {
-			log.Warn(report.msg,
-				slog.String("platform", platform),
-				slog.String("note", report.note))
-		}
-		return report.ok
+		return jobCookieRefreshOutcome(log, platform, result, err)
 	}
 
 	// =========================================================================

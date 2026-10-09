@@ -254,13 +254,15 @@ type DownloadWorker struct {
 	twitchLiveness func(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error)
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
-	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
+	// be attempted. Returns CookieRefreshRestored if THE NAMED PLATFORM ended
+	// up authenticated, CookieRefreshSkipped if the refresh was skipped for a
+	// reason the callback has logged, and CookieRefreshNotRestored otherwise.
 	//
 	// The platform argument is not decoration. Without it the callback could
 	// only answer "did any platform end up authenticated", so a healthy Twitch
 	// told a YouTube job to retry — spending a probe attempt and a slot on a
 	// request that had just conclusively failed, on every cycle.
-	OnCookieRefreshNeeded func(platform string) bool
+	OnCookieRefreshNeeded func(platform string) CookieRefreshOutcome
 
 	// CurrentCredentialIdentity returns an opaque fingerprint of the account
 	// the platform's cookies currently belong to (cookies.CookieJar's
@@ -1828,6 +1830,24 @@ func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, editOnl
 	)
 }
 
+// CookieRefreshOutcome is OnCookieRefreshNeeded's answer for one platform.
+type CookieRefreshOutcome int
+
+const (
+	// CookieRefreshNotRestored: the platform did not end up authenticated —
+	// the refresh is off, declined, failed, or could not tell. The zero value,
+	// so an answer nobody chose leaves the job parked with the advice.
+	CookieRefreshNotRestored CookieRefreshOutcome = iota
+	// CookieRefreshRestored: the named platform ended up authenticated, so
+	// the job is retried.
+	CookieRefreshRestored
+	// CookieRefreshSkipped: the refresh did not run, for a reason the callback
+	// has already logged and a person can clear — a browser holds the profile
+	// (cookies.ErrProfileInUse). Nothing judged the cookies, so the job stays
+	// parked without the advice to replace them.
+	CookieRefreshSkipped
+)
+
 // attemptCookieRefresh runs (or deliberately declines to run) the automatic
 // cookie refresh for a job that just parked at StatusCookies, and — when it
 // cannot fix things — says what WILL, in terms the operator can act on.
@@ -1888,7 +1908,22 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 	// for a human. Guessing "youtube" here would trade that safe outcome for
 	// a second defaulting rule to keep in sync with the creators.
 	w.logger.Info("attempting automatic cookie refresh...", "platform", job.Platform)
-	if w.OnCookieRefreshNeeded(job.Platform) {
+	outcome := w.OnCookieRefreshNeeded(job.Platform)
+	if outcome == CookieRefreshSkipped {
+		// A browser holds the profile, and the callback's skip line says
+		// which host and which lock. This used to fall to the advice below:
+		// the skip, then "auto cookie refresh failed — the cookie file has
+		// to be replaced by hand" one line later, replacement named as the
+		// only remedy for cookies nothing had rejected. Freeing the profile
+		// is the remedy; replacing the file still works, so it is named
+		// second.
+		w.logger.Info("the job stays parked — the automatic cookie refresh was skipped, not failed",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"next", "it waits for a refresh that can run (the skip line above names what holds the profile) or a replaced cookie file, and resumes once the cookies work")
+		return
+	}
+	if outcome == CookieRefreshRestored {
 		w.logger.Info("cookie refresh succeeded, retrying job", "platform", job.Platform)
 		// Upcoming, not Live, so StreamProcessor.Process re-probes and
 		// classifies the stream afresh (per audit reports/worker.md

@@ -124,7 +124,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 
 Dependencies injected via `DownloadWorkerDeps` struct: cipher solver, PO token provider, Twitch service, notification manager.
 
-The `OnCookieRefreshNeeded(platform string) bool` callback is wired to `autoCookieSvc.RefreshCookiesDetailed()` for automatic cookie recovery on auth failures. It answers per platform (`RefreshResult.Verdict`), not per service: a healthy Twitch must not tell a YouTube job to retry into the same failure.
+The `OnCookieRefreshNeeded(platform string) worker.CookieRefreshOutcome` callback is wired to `autoCookieSvc.RefreshCookiesDetailed()` for automatic cookie recovery on auth failures. It answers per platform (`RefreshResult.Verdict`), not per service: a healthy Twitch must not tell a YouTube job to retry into the same failure. It answers in three ways, not two: `CookieRefreshRestored` retries the job, `CookieRefreshNotRestored` leaves it parked with the advice to replace the cookie file, and `CookieRefreshSkipped` — a browser holds the profile (`cookies.ErrProfileInUse`), which the callback has already logged as a skip — leaves it parked without that advice, since nothing judged the cookies. The closure's tail, which logs the outcome and picks the answer, is `jobCookieRefreshOutcome` (`cmd/moombox/services.go`).
 
 ### 12. Trim Service
 `worker.NewTrimService()` creates the FFmpeg-based clip creation service. Prevents concurrent trim operations on the same job via `activeOps` mutex map.
