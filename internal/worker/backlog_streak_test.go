@@ -108,8 +108,9 @@ func TestRetryAndResumeGrantAFreshBacklogBudget(t *testing.T) {
 // row's count and hold, waiting out a backoff it never earned. A deleted
 // row's streak goes with it.
 //
-// Mutant: drop NewDownloadWorker's OnJobDeleted subscription — the new row
-// is held, with the old count.
+// Mutant: drop NewDownloadWorker's OnJobDeleted subscription — the deleted
+// row's count and hold outlive it (the re-created row is cleared by the
+// insert, TestInsertedRowStartsWithoutAStreak).
 func TestDeletedBacklogRowLeavesNoStreak(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
@@ -120,6 +121,11 @@ func TestDeletedBacklogRowLeavesNoStreak(t *testing.T) {
 	}
 	if err := db.DeleteJob(job.ID); err != nil {
 		t.Fatal(err)
+	}
+	// Gone with the row, not only once the id is inserted again: a hold left
+	// behind would widen every sweep's NextQueuedJobs until then.
+	if n, held := backlogStreak(w, job.ID); n != 0 || held {
+		t.Errorf("the deleted row: count %d held %v, want no streak", n, held)
 	}
 	ch := "UC_retry"
 	addSchedJob(t, db, &ch, job.ID, database.StatusQueued, 1) // created again
@@ -178,5 +184,27 @@ func TestPrunedBacklogRowLeavesNoStreak(t *testing.T) {
 	addSchedJob(t, db, &ch, pruned.ID, database.StatusQueued, 1) // the re-added channel's rescan
 	if n, held := backlogStreak(w, pruned.ID); n != 0 || held {
 		t.Errorf("the re-created row after a channel prune: count %d held %v, want no streak", n, held)
+	}
+}
+
+// TestInsertedRowStartsWithoutAStreak: the prune's list reaches the worker off
+// the writer's goroutine, so the rescan's AddJob can come first. A row AddJob
+// inserts has had no run to earn a streak, so one its id still holds is
+// stale and goes at the insert, synchronously. Seeded here as a streak whose
+// row went without any event, so nothing but the insert can end it.
+//
+// Mutant: drop NewDownloadWorker's OnJobAdded subscription — the new row is
+// held, with the old count.
+func TestInsertedRowStartsWithoutAStreak(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	const id = "streak_stale"
+	w.noteBacklogRetry(id)
+	w.scheduler.holdUntil(id, time.Now().Add(time.Hour))
+
+	ch := "UC_retry"
+	addSchedJob(t, db, &ch, id, database.StatusQueued, 1)
+	if n, held := backlogStreak(w, id); n != 0 || held {
+		t.Errorf("the inserted row: count %d held %v, want no streak", n, held)
 	}
 }

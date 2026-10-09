@@ -417,13 +417,17 @@ func NewDownloadWorker(
 	// have inherited the old count and hold. For the worker's lifetime,
 	// which is the process's.
 	//
-	// Two subscriptions, because there are two ways a row goes: DeleteJob
-	// fires OnJobDeleted, while the departed-channel prune
+	// Two subscriptions for the two ways a row goes: DeleteJob fires
+	// OnJobDeleted, while the departed-channel prune
 	// (DeleteJobsAndHistoryForChannel) deletes in bulk and fires only one
-	// OnJobsChange, with the list it left behind (endStreaksGoneFrom).
+	// OnJobsChange, with the list it left behind (endStreaksGoneFrom). That
+	// list is delivered off the writer's goroutine, so a third makes the
+	// rule exact however the timing falls: a row AddJob inserts has had no
+	// run to earn a streak, so whatever one its id still has is stale.
 	if db != nil {
 		db.OnJobDeleted(func(ev *database.JobDeleted) { w.endBacklogStreak(ev.JobID) })
 		db.OnJobsChange(w.endStreaksGoneFrom)
+		db.OnJobAdded(func(ev *database.JobAdded) { w.endBacklogStreak(ev.Job.ID) })
 	}
 	return w
 }
