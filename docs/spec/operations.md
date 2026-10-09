@@ -654,7 +654,14 @@ History. Deleting an active job cancels it first, so its `cancelled` is already
 queued; dropped at once, a busy target dispatched that cancel with no id left
 and posted it plain, and the message read "Downloading" for good — and a POST
 in flight when the delete landed came back and remembered its id afresh, so a
-re-add PATCHed the deleted job's message after all. A removed target's queue
+re-add PATCHed the deleted job's message after all. Until a target's step runs,
+the deleted job's id it still holds is kept out of every row write
+(`markDropping`): a quicker target may already have posted for a job re-added
+under the same id, and that POST writes the new row — with the slow target's
+old id in it, a restart would edit the deleted job's message on that target.
+`RetainJobs` marks nothing, because its list is a snapshot taken at the bulk
+write and a job added since is missing from it without being deleted. A
+removed target's queue
 still runs its steps after its in-flight delivery (the rest of its queue is
 discarded); a target whose queue has already exited — after shutdown — drops
 at once.

@@ -23,13 +23,16 @@ func gated(t *testing.T, n int) (f *fakeDiscord, release func()) {
 	gate := make(chan struct{})
 	var once sync.Once
 	release = func() { once.Do(func() { close(gate) }) }
-	t.Cleanup(release)
 	f = newFakeDiscord(t, func(i int, r recordedReq, rw http.ResponseWriter) {
 		if i == n {
 			<-gate
 		}
 		createdInOrder(i, r, rw)
 	})
+	// Registered AFTER the fake, so it runs BEFORE the server's Close: Close
+	// waits for the request held at the gate, and a test that fails before
+	// releasing it would otherwise hang until the binary's timeout.
+	t.Cleanup(release)
 	return f, release
 }
 
@@ -184,6 +187,80 @@ func TestOneTargetsDropLeavesAnotherTargetsMessage(t *testing.T) {
 	if c := fA.calls()[2]; c.Method != http.MethodPatch || c.Path != "/messages/M0" {
 		t.Errorf("A's queued cancel was %s %s once B had dropped the job, want a PATCH of A's message M0", c.Method, c.Path)
 	}
+}
+
+// While a slow target still holds a deleted job's id, the same video id can be
+// re-added and the quick target post the new job's first message — whose row
+// write carries the job's whole map. The slow target's id must stay out of
+// it: its drop clears only memory, so after a restart the re-added job would
+// edit the deleted job's message on that target.
+//
+// Mutants: remember's snapshot keeping a dropping key, or ForgetJob not
+// marking the deleted job's keys — the new row holds B's old M0; the drop
+// not clearing its key's mark — the re-added job's own ids never reach its
+// row.
+func TestARowWrittenBeforeASlowTargetsDropCarriesNoDeletedID(t *testing.T) {
+	fA := newFakeDiscord(t, createdInOrder)
+	fB, release := gated(t, 1) // B is busy with another job's request
+	st := newMemStore()
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	installTargets(t, m, editTarget(fA, nil, ModeEdit), editTarget(fB, nil, ModeEdit))
+	const job = "dQw4w9WgXcQ"
+	keyA, keyB := targetMsgKey(fA.URL()), targetMsgKey(fB.URL())
+
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})
+	waitFor(t, "both ids persisted", func() bool { return len(st.NotificationMsgs(job)) == 2 })
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+	if !waitCalls(t, fB, 2, 3*time.Second) {
+		t.Fatal("the other job's POST never reached B")
+	}
+	deleteRow(st, job)
+	m.ForgetJob(job)
+
+	// Re-added: A posts its first message for the new job and writes the row.
+	m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job})
+	waitFor(t, "A's new id on the new row", func() bool { return st.NotificationMsgs(job)[keyA] != "" })
+	if row := st.NotificationMsgs(job); row[keyB] != "" {
+		t.Errorf("the re-added job's row = %v, want no id for B — %s is the deleted job's message", row, row[keyB])
+	}
+
+	// Once B reaches its drop, its own first message for the new job is
+	// stored like any other.
+	release()
+	waitFor(t, "B's new id on the new row", func() bool { return st.NotificationMsgs(job)[keyB] == "M2" })
+}
+
+// RetainJobs' steps read the list later, on each target's goroutine, so the
+// list is the one the caller handed over, not whatever its map holds by then.
+//
+// Mutant: RetainJobs handing the steps the caller's map — the job added to it
+// after the call survives the drop.
+func TestRetainJobsReadsTheListItWasGiven(t *testing.T) {
+	f, release := gated(t, 1) // another job's request holds the FIFO
+	m := editManager(t, f, newMemStore(), nil)
+	const job = "dQw4w9WgXcQ"
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})
+	if !waitCalls(t, f, 1, 3*time.Second) {
+		t.Fatal("the found POST never reached the server")
+	}
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+	if !waitCalls(t, f, 2, 3*time.Second) {
+		t.Fatal("the other job's POST never reached the server")
+	}
+	live := map[string]struct{}{"otherJob123": {}}
+	m.RetainJobs(live)
+	live[job] = struct{}{} // the caller's map, edited after the call
+	release()
+	drain(t, m)
+
+	tr := m.tracker()
+	waitFor(t, "the step", func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		_, held := tr.jobs[job]
+		return !held
+	})
 }
 
 // A webhook removed from the config while the job's POST is in flight leaves

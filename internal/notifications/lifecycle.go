@@ -175,6 +175,10 @@ type lifecycleJob struct {
 	msgs    map[string]string   // target key -> message id
 	history map[string][]string // target key -> rendered history lines
 	closed  map[string]bool     // target keys whose story this process has finished telling
+	// dropping marks the keys whose state belongs to a deleted job until
+	// that target's queue reaches its drop (ForgetJob). Their ids still
+	// serve the deleted job's queued sends, and are never written to a row.
+	dropping map[string]bool
 }
 
 // maxTrackedJobs is the backstop for a job that never reaches a terminal
@@ -285,7 +289,12 @@ func (l *lifecycleTracker) remember(jobID, key, messageID string) {
 	delete(j.closed, key)
 	snapshot := make(map[string]string, len(j.msgs))
 	for k, v := range j.msgs {
-		snapshot[k] = v
+		// A deleted job's id waiting on its target's drop stays out of the
+		// row: the row now is the re-added job's, and the id would outlive
+		// the drop there — a restart would edit the deleted job's message.
+		if !j.dropping[k] {
+			snapshot[k] = v
+		}
 	}
 	store := l.store
 	log := l.log
@@ -390,6 +399,34 @@ func (l *lifecycleTracker) retainTarget(live map[string]struct{}, key string) {
 	}
 }
 
+// markDropping marks every key a deleted job holds state under (see
+// lifecycleJob.dropping), BEFORE ForgetJob queues the drops that clear the
+// marks — a step that ran first would leave a mark nothing clears.
+//
+// Two edit-mode targets drain at their own pace, so the same video id can be
+// re-added, and the quick target post the new job's first message, while the
+// slow one still holds the deleted job's id. That POST writes the job's whole
+// map to the NEW row, and without the mark the deleted job's id went with it:
+// the slow target's drop clears only memory, so after a restart the re-added
+// job edited the deleted job's message on that target.
+func (l *lifecycleTracker) markDropping(jobID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	j := l.jobs[jobID]
+	if j == nil {
+		return
+	}
+	if j.dropping == nil {
+		j.dropping = map[string]bool{}
+	}
+	for k := range j.msgs {
+		j.dropping[k] = true
+	}
+	for k := range j.history {
+		j.dropping[k] = true
+	}
+}
+
 // drop is dropTarget, at once, for every key of a deleted job that no queue
 // will drop in order — the keys not in queued: a target no longer configured,
 // whose queue has gone, or none that ever held a message.
@@ -429,6 +466,11 @@ func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone fu
 	for k := range j.closed {
 		if gone(k) {
 			delete(j.closed, k)
+		}
+	}
+	for k := range j.dropping {
+		if gone(k) {
+			delete(j.dropping, k)
 		}
 	}
 	if len(j.msgs) == 0 && len(j.history) == 0 {
@@ -714,6 +756,7 @@ func (m *Manager) ForgetJob(jobID string) {
 		return
 	}
 	tr := m.tracker()
+	tr.markDropping(jobID)
 	queued := m.forgetInOrder(func(key string) { tr.dropTarget(jobID, key) })
 	tr.drop(jobID, queued)
 }
@@ -721,13 +764,23 @@ func (m *Manager) ForgetJob(jobID string) {
 // RetainJobs drops the edit-mode state of every job not in live (see
 // retainTarget). cmd/moombox calls it from its OnJobsChange subscriber, which
 // is the only event a bulk delete fires.
+//
+// No markDropping here. live is a list taken at the bulk write, so a job added
+// since is missing from it without being deleted, and marking it would keep
+// its first message id out of its own row — its next event after the drop
+// would open a second message.
 func (m *Manager) RetainJobs(live map[string]struct{}) {
 	if m == nil {
 		return
 	}
+	// Copied: the steps read it later, on every target's sender goroutine.
+	kept := make(map[string]struct{}, len(live))
+	for id := range live {
+		kept[id] = struct{}{}
+	}
 	tr := m.tracker()
-	queued := m.forgetInOrder(func(key string) { tr.retainTarget(live, key) })
-	tr.retain(live, queued)
+	queued := m.forgetInOrder(func(key string) { tr.retainTarget(kept, key) })
+	tr.retain(kept, queued)
 }
 
 // forgetInOrder queues fn(key) on every target's FIFO — the live ones and any
