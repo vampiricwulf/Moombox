@@ -271,10 +271,13 @@ func TestVodInfoStale(t *testing.T) {
 
 // TestVodSlotWaitSaysSoAndClearsAfter pins the row a queueing VOD shows: the
 // slot-wait progress line while it waits — never Downloading — and nothing
-// once the wait is over. A VOD that finds a slot free writes no line.
+// once the wait is over. A VOD that finds a slot free writes no line at all —
+// watched as it is written, since the deferred clear would empty the row
+// again before a read after the call could see it.
 //
 // Mutants: drop the progress write — the waiting row says nothing; drop the
-// deferred clear — the line outlives the wait.
+// deferred clear — the line outlives the wait; drop the TryAcquireDownloadSlot
+// fast path — the VOD that found the slot free writes the line and clears it.
 func TestVodSlotWaitSaysSoAndClearsAfter(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	w.queue = NewJobQueue(1)
@@ -283,11 +286,18 @@ func TestVodSlotWaitSaysSoAndClearsAfter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var freeWrites atomic.Int32
+	unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+		if j.ID == "j-busy" {
+			freeWrites.Add(1)
+		}
+	})
 	if !w.acquireDownloadSlot(context.Background(), "j-busy", true) {
 		t.Fatal("the free slot was not taken")
 	}
-	if row, _ := db.GetJob("j-busy"); row.Progress != "" {
-		t.Errorf("a VOD that found a slot free wrote %q", row.Progress)
+	unsubscribe()
+	if n := freeWrites.Load(); n != 0 {
+		t.Errorf("a VOD that found a slot free wrote its row %d times, want none", n)
 	}
 
 	got := make(chan bool, 1)
