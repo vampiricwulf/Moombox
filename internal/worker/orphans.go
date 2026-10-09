@@ -602,15 +602,16 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 // trimDirsOf returns the directories the trim service writes a job's trims
 // into: "trim" beside the job's output file (CreateTrim), and beside each part
 // for a job that finalized as parts (createMultiSegmentTrimInternal writes
-// beside the first part the range touches).
-func trimDirsOf(job *database.Job) []string {
+// beside the first part the range touches) — each where its column names it
+// and where the moved archive tree puts it (rowAbsoluteLocations).
+func trimDirsOf(job *database.Job, absOutputDir string) []string {
 	var dirs []string
-	if job.OutputFile != "" {
-		dirs = append(dirs, filepath.Join(filepath.Dir(job.OutputFile), "trim"))
+	for _, p := range rowAbsoluteLocations(job, job.OutputFile, absOutputDir) {
+		dirs = append(dirs, filepath.Join(filepath.Dir(p), "trim"))
 	}
 	for _, seg := range job.Segments {
-		if seg.FilePath != "" {
-			dirs = append(dirs, filepath.Join(filepath.Dir(seg.FilePath), "trim"))
+		for _, p := range rowAbsoluteLocations(job, seg.FilePath, absOutputDir) {
+			dirs = append(dirs, filepath.Join(filepath.Dir(p), "trim"))
 		}
 	}
 	return dirs
@@ -649,7 +650,7 @@ func trimFileLocations(tr database.TrimRecord, job *database.Job, absOutputDir s
 		return paths
 	}
 	name := filepath.Base(tr.Filename)
-	for _, dir := range trimDirsOf(job) {
+	for _, dir := range trimDirsOf(job, absOutputDir) {
 		paths = append(paths, filepath.Join(dir, name))
 	}
 	return paths
@@ -683,28 +684,53 @@ func rowRelativeLocations(job *database.Job, rel, absOutputDir string) []string 
 	return append(paths, filepath.Join(absOutputDir, rel))
 }
 
+// rowAbsoluteLocations returns the paths an absolute column of a job's row can
+// name: the column as stored, and — when it lies under the job's
+// output_directory and that is not the current global directory — the same
+// path under the global one: rowRelativeLocations' "global as well" rule, for
+// the columns that store the job's directory in their spelling. After the
+// archive tree is moved and paths.output_directory repointed at it, these
+// columns still name the old tree, and nothing else names a split job's parts
+// (its filename is the base they share, which names no file) or any job's
+// thumbnail and description; without the re-rooted spelling the sweep listed
+// them and Delete removed the recordings. An empty column names nothing.
+func rowAbsoluteLocations(job *database.Job, p, absOutputDir string) []string {
+	if p == "" {
+		return nil
+	}
+	paths := []string{p}
+	if job == nil || job.OutputDirectory == "" {
+		return paths
+	}
+	jobDir, err := filepath.Abs(job.OutputDirectory)
+	if err != nil || jobDir == absOutputDir {
+		return paths
+	}
+	rel, err := filepath.Rel(jobDir, p)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return paths // not under the job's directory: the column's own spelling is all it has
+	}
+	return append(paths, filepath.Join(absOutputDir, rel))
+}
+
 // jobFileLocations returns the absolute paths a job row names: its absolute
-// columns as stored — the output, the chat, the thumbnail and the
-// description, and each part's video and chat (a quality or gap split) — and
-// its relative ones (filename, chat_filename) as rowRelativeLocations
-// resolves them. The relative ones must count too: imported jobs once set
-// ONLY those, and without them their perfectly valid files were offered as
-// orphans — deleting them left a broken Finished job.
+// columns — the output, the chat, the thumbnail and the description, and each
+// part's video and chat (a quality or gap split) — as rowAbsoluteLocations
+// resolves them, and its relative ones (filename, chat_filename) as
+// rowRelativeLocations resolves them. The relative ones must count too:
+// imported jobs once set ONLY those, and without them their perfectly valid
+// files were offered as orphans — deleting them left a broken Finished job.
 func jobFileLocations(job *database.Job, absOutputDir string) []string {
 	var paths []string
 	for _, p := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
-		if p != "" {
-			paths = append(paths, p)
-		}
+		paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
 	}
 	for _, rel := range []string{job.Filename, job.ChatFilename} {
 		paths = append(paths, rowRelativeLocations(job, rel, absOutputDir)...)
 	}
 	for _, seg := range job.Segments {
 		for _, p := range []string{seg.FilePath, seg.ChatFile} {
-			if p != "" {
-				paths = append(paths, p)
-			}
+			paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
 		}
 	}
 	return paths
@@ -757,11 +783,13 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 			own(p, owner)
 		}
 		for _, seg := range job.Segments {
-			if dir, base, ok := recordedArchiveLocation(seg.FilePath); ok {
-				first(o.stems, normalizePath(filepath.Join(dir, base)), owner)
+			for _, p := range rowAbsoluteLocations(job, seg.FilePath, absOutputDir) {
+				if dir, base, ok := recordedArchiveLocation(p); ok {
+					first(o.stems, normalizePath(filepath.Join(dir, base)), owner)
+				}
 			}
 		}
-		for _, dir := range trimDirsOf(job) {
+		for _, dir := range trimDirsOf(job, absOutputDir) {
 			o.trimDirs[normalizePath(dir)] = true
 		}
 	}

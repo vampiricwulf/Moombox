@@ -701,3 +701,101 @@ func TestOutputSweepResolvesRelativeColumnsAgainstTheJobsDirectory(t *testing.T)
 		t.Errorf("a stray MP4 beside the archive is offered as %q, want \"output\"", typ)
 	}
 }
+
+// After the archive tree is moved and paths.output_directory repointed at it,
+// a job's absolute columns still name the old tree. The relative filename
+// kept a single-file archive owned, but nothing else named a split job's parts
+// — its filename is the base the parts share, which names no file — nor any
+// job's thumbnail, description or absolute chat. The sweep listed them as
+// "output" orphans and Delete removed the recordings. An absolute column under
+// the job's output_directory now counts under the current global directory as
+// well (rowAbsoluteLocations), the rule rowRelativeLocations applies to the
+// relative columns; one outside it keeps its own spelling alone.
+//
+// Mutants:
+//   - jobFileLocations taking the job's absolute columns as stored (the old
+//     rule): the thumbnail, description and chat are listed, and the delete
+//     removes the thumbnail.
+//   - jobFileLocations taking the parts' columns as stored: the second part
+//     and its chat are listed (the first is the job's output_file).
+//   - rowAbsoluteLocations re-rooting a column that is not under the job's
+//     directory (the ".." guard off): the stray a "../" column lands on
+//     through the global directory is owned, not listed.
+//   - newOutputOwners taking the parts' stem as stored: the set-aside
+//     recording named after the parts' base is listed.
+//   - trimDirsOf taking the output column as stored: the leftover in the
+//     moved trims directory is typed "output", not "trim".
+//
+// Equivalent mutants: dropping rowAbsoluteLocations' early return for a job
+// whose directory is the global one, which re-roots each column onto itself;
+// and trimDirsOf taking the parts' columns as stored, since a split job's
+// output_file is its first part, in the directory the parts share.
+func TestOutputSweepFindsAMovedTreesAbsoluteColumns(t *testing.T) {
+	f := newOrphanFixture(t)
+	root := filepath.Dir(f.outputDir)
+	oldOut := filepath.Join(root, "old-output")
+	old := func(rel string) string { return filepath.Join(oldOut, rel) }
+
+	// A job that finalized as parts: filename is the parts' base. The dot in
+	// the title keeps that base from carrying the set-aside recording's stem
+	// (it reads ".5 [mvdprt00001]" as an extension), so only the parts do.
+	partsBase := filepath.Join("Chan", "Stream v1.5 [mvdprt00001]")
+	part1 := f.write(t, partsBase+" - part1.mp4")
+	part2 := f.write(t, partsBase+" - part2.mp4")
+	partChat := f.write(t, partsBase+" - part2.chat.json")
+	partsAside := f.write(t, partsBase+".restart-1700000000.mp4")
+	addJob(t, f, "mvdprt00001", database.StatusFinished, func(j *database.Job) {
+		j.OutputDirectory = oldOut
+		j.Filename = partsBase
+		j.OutputFile = old(partsBase + " - part1.mp4")
+	})
+	for i, p := range []string{part1, part2} {
+		seg := &database.Segment{JobID: "mvdprt00001", SegmentIndex: i, Quality: "1080p",
+			Filename: filepath.Base(p), FilePath: old(filepath.Join("Chan", filepath.Base(p)))}
+		if i == 1 {
+			seg.ChatFile = old(filepath.Join("Chan", filepath.Base(partChat)))
+		}
+		if err := f.db.AddSegment(seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A single-file job in another channel: its thumbnail, description and
+	// chat are named only by absolute columns.
+	single := filepath.Join("Other", "Stream [mvdvid00001]")
+	f.write(t, single+".mp4")
+	thumb := f.write(t, single+".jpg")
+	desc := f.write(t, single+".description")
+	chat := f.write(t, single+".chat.json")
+	trimLeftover := f.write(t, filepath.Join("Other", "trim", "mvdvid00001 [1s-3s].mp4"))
+	addJob(t, f, "mvdvid00001", database.StatusFinished, func(j *database.Job) {
+		j.OutputDirectory = oldOut
+		j.Filename = single + ".mp4"
+		j.OutputFile = old(single + ".mp4")
+		j.ThumbnailFile = old(single + ".jpg")
+		j.DescriptionFile = old(single + ".description")
+		j.ChatFile = old(single + ".chat.json")
+	})
+
+	// A column outside the job's directory names only itself: re-rooting its
+	// "../output/Chan/..." would land on a stray in the current tree.
+	stray := f.write(t, filepath.Join("Chan", "stray.jpg"))
+	addJob(t, f, "mvdout00001", database.StatusFinished, func(j *database.Job) {
+		j.OutputDirectory = filepath.Join(root, "a", "b")
+		j.ThumbnailFile = filepath.Join(root, "a", "output", "Chan", "stray.jpg")
+	})
+
+	for _, p := range []string{part1, part2, partChat, partsAside, thumb, desc, chat} {
+		if typ := orphanTypeOf(t, f.db, f.cfg, p); typ != "" {
+			t.Errorf("%s is listed as a %q orphan after the tree move", filepath.Base(p), typ)
+		}
+	}
+	if typ := orphanTypeOf(t, f.db, f.cfg, stray); typ != "output" {
+		t.Errorf("the stray a column outside its job's directory resolves to through the global one is listed as %q, want \"output\"", typ)
+	}
+	if typ := orphanTypeOf(t, f.db, f.cfg, trimLeftover); typ != "trim" {
+		t.Errorf("a leftover in the moved trims directory is listed as %q, want \"trim\"", typ)
+	}
+	refusedAsStale(t, f, part1, "job mvdprt00001")
+	refusedAsStale(t, f, thumb, "job mvdvid00001")
+}
