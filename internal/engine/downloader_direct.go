@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // validateDownloadedMP4 guards the whole-file VOD direct-download path against
@@ -335,38 +337,52 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 // the resume Range above makes that free:
 //
 //   - a 403 or 410 asks OnCredentialRefresh for a fresh URL
-//     (refreshDirectURL), at most directRefreshAttempts times without a byte
-//     written between them. A probe that failed sends a download here, and a
-//     mid-download 200 hands one here; a URL that expired on the way ended
-//     the job on its 403;
-//   - a request that got no complete answer — none at all, or a body that
-//     broke off — while IsOnline reports the device offline, or once the
-//     monitor, given the time it needs (awaitOutageVerdict), calls an
-//     outage, waits it out. One dropped connection ended the job, however
-//     much of the file had streamed.
+//     (refreshDirectURL), at most directRefreshAttempts times without the
+//     file getting further between them. A probe that failed sends a
+//     download here, and a mid-download 200 hands one here; a URL that
+//     expired on the way ended the job on its 403;
+//   - a 5xx, or a request that got no complete answer — none at all, or a
+//     body that broke off — is asked again, at most MaxChunkRetries times
+//     without the file getting further between them, 1 s and then 2 s apart
+//     (atEdgeBackoffUnit), as the chunked loop asks for a chunk again. While
+//     IsOnline reports the device offline the failure is waited out instead
+//     and not counted, and before a failure with no complete answer is
+//     counted as the last, the monitor is given the time it needs to call an
+//     outage (awaitOutageVerdict). One dropped connection used to end the
+//     job however much of the file had streamed, unless the monitor called
+//     an outage, and a 5xx — a gateway answering for an origin it could not
+//     reach — ended it at once.
+//
+// Both counts start over whenever a request takes the file further than it
+// has ever stood — a rest-to-come round (below) included — as the chunked
+// loop's counts do with each chunk: a stream long enough to outlive two
+// URLs, or to break more than twice, is not cut off for it. The furthest
+// point, not the last one: a 200 that restarts the file from byte 0
+// (streamDirectOnce) moves the byte counter without getting the download
+// anywhere, and an origin that does that and breaks off every time must
+// still run out of attempts. The refresh count's reset used to sit below a
+// round's `continue`, where a round never reached it, so a URL that expired
+// three times, with bytes streamed between each, ended the job on its third
+// 403.
 //
 // A 206 that ends cleanly short of the file's total, having taken it past
 // the byte it was asked from, is asked for the rest from the new offset
 // (errDirectRestToCome), as the chunked loop asks for its next chunk after a
-// short one. Anything else returns as it did, a failure the monitor does not
-// call an outage among them.
-//
-// The refresh count starts over after any request that moved the file — a
-// rest-to-come round included. The reset sat below that round's `continue`,
-// so a round never reached it, and the next refusal was measured from the
-// round's end: a URL that expired three times, with bytes streamed between
-// each, ended the job on its third 403, and a refusal after a round got one
-// refresh, not directRefreshAttempts.
+// short one. Anything else returns as it did.
 func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
-	refreshes := 0
+	var refreshes, failures int
+	furthest := d.bytesWritten.Load()
 	for {
-		before := d.bytesWritten.Load()
+		if d.isCancelled() || parent.Err() != nil {
+			return d.cancelErr(parent)
+		}
 		status, linkFailed, err := d.streamDirectOnce(parent)
 		if err == nil {
 			return nil
 		}
-		if d.bytesWritten.Load() != before {
-			refreshes = 0 // a refusal after progress is a new expiry
+		if staged := d.bytesWritten.Load(); staged > furthest {
+			furthest = staged
+			refreshes, failures = 0, 0 // a failure after progress is a new one
 		}
 		if errors.Is(err, errDirectRestToCome) {
 			continue
@@ -380,18 +396,29 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 			if rerr := d.refreshDirectURL(status); rerr != nil {
 				return fmt.Errorf("%w; %w", err, rerr)
 			}
-		case linkFailed && d.opts.IsOnline != nil:
-			if d.opts.IsOnline() && !d.awaitOutageVerdict(parent) {
-				// A cancel that ended the verdict wait is still a cancel.
-				if cerr := d.cancelErr(parent); cerr != nil {
-					return cerr
+		case linkFailed || status >= 500:
+			if d.opts.IsOnline != nil {
+				offline := !d.opts.IsOnline()
+				if !offline && linkFailed && failures == MaxChunkRetries-1 {
+					offline = d.awaitOutageVerdict(parent)
 				}
+				if offline {
+					d.emitActivity(ActivityReconnecting)
+					if werr := waitForConnectivity(parent, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+						return d.cancelErr(parent)
+					}
+					continue // not counted: the failure says nothing about the file
+				}
+			}
+			// A cancel — one that ended the verdict wait among them — is
+			// still a cancel, not a request that failed.
+			if cerr := d.cancelErr(parent); cerr != nil {
+				return cerr
+			}
+			if failures++; failures >= MaxChunkRetries {
 				return err
 			}
-			d.emitActivity(ActivityReconnecting)
-			if werr := waitForConnectivity(parent, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
-				return d.cancelErr(parent)
-			}
+			utils.Sleep(parent, time.Duration(1<<uint(failures-1))*d.delays.atEdgeBackoffUnit)
 		default:
 			return err
 		}

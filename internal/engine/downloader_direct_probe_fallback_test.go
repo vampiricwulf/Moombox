@@ -147,25 +147,30 @@ func TestDirectSizeProbeRefreshIsBounded(t *testing.T) {
 // TestDirectSizeProbeWaitsOutAnOutage pins the probe's connectivity wait. An
 // outage as the download starts failed the three probes inside the outage
 // and sent the download to the streaming fallback. A probe that gets no
-// answer while IsOnline says offline — or on its last attempt, once the
-// monitor has been given the time to say so — now waits the outage out and
-// probes again, so the download runs chunked.
+// answer, or a 5xx, while IsOnline says offline — or one with no answer on
+// its last attempt, once the monitor has been given the time to say so — now
+// waits the outage out and probes again, so the download runs chunked. The
+// 5xx is a gateway answering for an origin it cannot reach.
 //
 // Mutant: dropping `offline = d.awaitOutageVerdict(ctx)` from
 // probeFileSizeWithRetry — the late-monitor row goes to the fallback.
 // Mutant: dropping `d.emitActivity(ActivityReconnecting)` — no Reconnecting
-// activity. (`offline := !d.opts.IsOnline()` → `false` is caught here only by
-// the verdict wait taking over on the last attempt;
+// activity. Mutant: `status == 0 || status >= 500` → `status == 0` — the
+// gateway row spends its three probes on the 503s and goes to the fallback.
+// (`offline := !d.opts.IsOnline()` → `false` is caught here only by the
+// verdict wait taking over on the last attempt;
 // TestDirectSizeProbeChargesNeitherARefreshNorAnOutage pins it.)
 func TestDirectSizeProbeWaitsOutAnOutage(t *testing.T) {
 	body := headedBody(2*DownloadChunkSize+100, 'V')
 	for _, tc := range []struct {
 		name                      string
+		gateway                   bool // the outage answers 503, not nothing
 		down                      time.Duration
 		offlineFrom, offlineUntil time.Duration
 	}{
-		{"the monitor already calls it offline", time.Second, 0, time.Second},
-		{"the monitor notices on the last attempt", 1200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond},
+		{"the monitor already calls it offline", false, time.Second, 0, time.Second},
+		{"the monitor notices on the last attempt", false, 1200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond},
+		{"a gateway's 503s while the monitor calls it offline", true, time.Second, 0, time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			full := serveRangeFile(body)
@@ -184,7 +189,11 @@ func TestDirectSizeProbeWaitsOutAnOutage(t *testing.T) {
 			)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if elapsedAt() < tc.down {
-					dropConnection(t, w)
+					if tc.gateway {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					} else {
+						dropConnection(t, w)
+					}
 					return
 				}
 				if r.Header.Get("Range") == "" {
@@ -542,51 +551,69 @@ func TestDirectFallbackShortHeadFromByteZeroEnds(t *testing.T) {
 	}
 }
 
+// brokenRest answers a request's Range with a 206 for the rest of the file
+// whose body breaks off before its first byte: a request that gets no
+// complete answer and moves nothing.
+func brokenRest(w http.ResponseWriter, r *http.Request, body []byte) {
+	var start int
+	fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(body)-1, len(body)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)-start))
+	w.WriteHeader(http.StatusPartialContent)
+}
+
 // TestDirectFallbackWaitsOutAnOutage pins the streaming fallback's
 // connectivity wait. Its one request ended the job on any failure, so a
 // connection that dropped partway through a stream — or an outage as it
 // started — lost the job however much had streamed. A request that gets no
 // complete answer while IsOnline says offline, or once the monitor has been
 // given the time to say so, now waits the outage out and asks again from
-// where the file stands; one the monitor keeps calling up still fails.
+// where the file stands. The first request breaks off after 1000 bytes (or,
+// in the no-answer row, gets none); every request after it fails with
+// nothing for as long as each row's link is down.
 //
-// Mutant: dropping the fallback's linkFailed case — every waited row fails.
-// Mutant: returning false for linkFailed from streamDirectOnce's broken read
-// — the broken-body rows fail. Mutant: returning false for it from the
-// failed request — the no-answer row fails. Mutant: dropping the
-// awaitOutageVerdict — the late-monitor row fails. Mutant: dropping the
-// emitActivity(ActivityReconnecting) — no Reconnecting activity.
+// Mutant: dropping the fallback's offline wait — the rows the monitor calls
+// offline spend their attempts inside the outage and fail. Mutant: returning
+// false for linkFailed from streamDirectOnce's broken read — the broken-body
+// rows fail on their first break. Mutant: returning false for it from the
+// failed request — the no-answer row fails at once. Mutant: dropping the
+// awaitOutageVerdict — the late-monitor row's third failure, inside the
+// outage, ends it. Mutant: dropping the emitActivity(ActivityReconnecting) —
+// no Reconnecting activity.
 func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 	for _, tc := range []struct {
 		name        string
 		noAnswer    bool
-		from, until time.Duration
-		wantErr     bool
+		down        time.Duration // how long every request fails, from the first
+		from, until time.Duration // when the monitor calls it offline
 	}{
-		{"no answer, the monitor already calls it offline", true, 0, 300 * time.Millisecond, false},
-		{"a body that breaks off, the monitor already calls it offline", false, 0, 300 * time.Millisecond, false},
-		{"a body that breaks off, the monitor notices late", false, 200 * time.Millisecond, 500 * time.Millisecond, false},
-		{"a body that breaks off, the monitor calls it up", false, time.Hour, time.Hour, true},
+		{"no answer, the monitor already calls it offline", true, 300 * time.Millisecond, 0, 300 * time.Millisecond},
+		{"a body that breaks off, the monitor already calls it offline", false, 300 * time.Millisecond, 0, 300 * time.Millisecond},
+		// Three failures by ~150 ms; the verdict window after the third
+		// covers the monitor's call at 400 ms.
+		{"a body that breaks off, the monitor notices late", false, 700 * time.Millisecond, 400 * time.Millisecond, 700 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var o *fallbackOrigin
 			var resumedAt atomic.Value
 			o = newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, r *http.Request) bool {
 				switch {
-				case n == 1 && !tc.noAnswer:
-					o.markBroken()
-					brokenBody(w, body, 1000)
-					return true
-				case tc.noAnswer && (n == 1 || !o.online(0, tc.until)()):
+				case n > 1 && o.online(0, tc.down)():
+					resumedAt.Store(r.Header.Get("Range"))
+					return false
+				case tc.noAnswer:
 					// Every request for the length of the outage: the
 					// transport retries one dropped on a reused connection.
 					o.markBroken()
 					dropConnection(t, w)
-					return true
+				case n == 1:
+					o.markBroken()
+					brokenBody(w, body, 1000)
+				default:
+					brokenRest(w, r, body)
 				}
-				resumedAt.Store(r.Header.Get("Range"))
-				return false
+				return true
 			})
 			out := filepath.Join(t.TempDir(), "video.mp4")
 			d := NewSegmentDownloader(DownloaderOptions{
@@ -602,14 +629,7 @@ func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			err := d.Start(ctx)
-			if tc.wantErr {
-				if err == nil || errors.Is(err, context.DeadlineExceeded) {
-					t.Errorf("Start = %v, want the broken stream's own error", err)
-				}
-				return
-			}
-			if err != nil {
+			if err := d.Start(ctx); err != nil {
 				t.Fatalf("Start = %v, want the outage waited out", err)
 			}
 			if got, _ := os.ReadFile(out); !bytes.Equal(got, body) {
@@ -627,23 +647,195 @@ func TestDirectFallbackWaitsOutAnOutage(t *testing.T) {
 	}
 }
 
+// TestDirectFallbackRetriesWhatTheMonitorDoesNotCall pins the fallback's own
+// attempts, the chunked loop's MaxChunkRetries ladder: a 5xx, or a request
+// with no complete answer that the monitor does not call an outage, is asked
+// again, and only MaxChunkRetries of them without the file getting further
+// between them end the download. One connection reset ended a multi-GB
+// stream on the spot while the monitor called the link up, the resume Range
+// that makes a retry free notwithstanding; a 5xx ended it at once, and so
+// did a 5xx a gateway answered for an unreachable origin while the device
+// was offline, which is now waited out instead.
+//
+// Mutant: `linkFailed || status >= 500` → `linkFailed` — the 503 rows fail
+// at once. Mutant: `failures >= MaxChunkRetries` → `failures >= 1`, the
+// answer at once it used to give — every retried row fails. Mutant: `failures >= MaxChunkRetries` → `false`
+// — the rows that must end ask until the test's deadline. Mutant: dropping
+// `failures = 0` — the row that moves on each break stops at its third.
+// Mutant: `staged > furthest` measured from the request's own start (a
+// `furthest = d.bytesWritten.Load()` before it) — the restarting origin's
+// row, whose 200s rewrite the file from byte 0 to alternating lengths, asks
+// until the deadline. Mutant: guarding the retry on IsOnline != nil — the
+// no-monitor row fails on its break.
+func TestDirectFallbackRetriesWhatTheMonitorDoesNotCall(t *testing.T) {
+	body := headedBody(DownloadChunkSize+100, 'V')
+	up := func() bool { return true }
+	for _, tc := range []struct {
+		name     string
+		isOnline func(o *fallbackOrigin) func() bool
+		// fail answers request n (1-based) in its place, or reports false to
+		// let the origin serve it.
+		fail      func(o *fallbackOrigin, n int, w http.ResponseWriter, r *http.Request) bool
+		wantErr   string // "" — the download finishes
+		wantAsked int    // requests made, 0 — not checked
+	}{
+		{
+			"one reset, the monitor calls the link up",
+			func(*fallbackOrigin) func() bool { return up },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
+				if n == 1 {
+					brokenBody(w, body, 1000)
+				}
+				return n == 1
+			},
+			"", 2,
+		},
+		{
+			"one reset, no monitor",
+			func(*fallbackOrigin) func() bool { return nil },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
+				if n == 1 {
+					brokenBody(w, body, 1000)
+				}
+				return n == 1
+			},
+			"", 2,
+		},
+		{
+			"two 503s, the monitor calls the link up",
+			func(*fallbackOrigin) func() bool { return up },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
+				if n <= 2 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}
+				return n <= 2
+			},
+			"", 3,
+		},
+		{
+			"503s while the monitor calls it offline",
+			func(o *fallbackOrigin) func() bool { return o.online(0, 300*time.Millisecond) },
+			func(o *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
+				if n == 1 {
+					o.markBroken()
+				}
+				if o.online(0, 300*time.Millisecond)() {
+					return false
+				}
+				w.WriteHeader(http.StatusServiceUnavailable) // the gateway, its upstream unreachable
+				return true
+			},
+			"", 0,
+		},
+		{
+			"a break after each 1000 bytes, five times",
+			func(*fallbackOrigin) func() bool { return up },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, r *http.Request) bool {
+				if n > 5 {
+					return false
+				}
+				var start int
+				fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(body)-1, len(body)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)-start))
+				w.WriteHeader(http.StatusPartialContent)
+				w.Write(body[start : start+1000])
+				return true
+			},
+			"", 6,
+		},
+		{
+			"503 throughout",
+			func(*fallbackOrigin) func() bool { return up },
+			func(_ *fallbackOrigin, _ int, w http.ResponseWriter, _ *http.Request) bool {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return true
+			},
+			"HTTP 503", MaxChunkRetries,
+		},
+		{
+			"a body that breaks off with nothing, the monitor calls the link up",
+			func(*fallbackOrigin) func() bool { return up },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, r *http.Request) bool {
+				if n == 1 {
+					brokenBody(w, body, 1000)
+				} else {
+					brokenRest(w, r, body)
+				}
+				return true
+			},
+			"unexpected EOF", MaxChunkRetries,
+		},
+		{
+			// A 200 to every Range: each answer discards the partial and
+			// breaks off again, at 3000 bytes and 2000 by turns — never
+			// further than the file has stood.
+			"an origin that restarts from byte 0 and breaks off",
+			func(*fallbackOrigin) func() bool { return up },
+			func(_ *fallbackOrigin, n int, w http.ResponseWriter, _ *http.Request) bool {
+				brokenBody(w, body, 2000+1000*(n%2))
+				return true
+			},
+			"unexpected EOF", MaxChunkRetries,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var o *fallbackOrigin
+			o = newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, r *http.Request) bool {
+				return tc.fail(o, n, w, r)
+			})
+			out := filepath.Join(t.TempDir(), "video.mp4")
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL: o.URL + "/video.mp4", OutputFile: out, IsDirectURL: true,
+				IsOnline: tc.isOnline(o),
+			})
+			d.delays = fastDelays()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			err := d.Start(ctx)
+			o.mu.Lock()
+			asked := o.requests
+			o.mu.Unlock()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("Start = %v, want an error naming %q", err, tc.wantErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Start = %v, want the failure asked past", err)
+				}
+				if got, _ := os.ReadFile(out); !bytes.Equal(got, body) {
+					t.Errorf("output is %d bytes, want the whole %d-byte file", len(got), len(body))
+				}
+			}
+			if tc.wantAsked != 0 && asked != tc.wantAsked {
+				t.Errorf("the fallback made %d requests, want %d", asked, tc.wantAsked)
+			}
+		})
+	}
+}
+
 // TestDirectFallbackOutageVerdictHonoursCancel pins that a cancel landing
 // while the fallback waits for the monitor's verdict is reported as the
 // cancel it is, not as the broken stream's error — an Error row for a job
-// the operator stopped.
+// the operator stopped. Every request breaks off with nothing after the
+// first, so the third is the last attempt and asks for the verdict.
 //
-// Mutant: dropping the cancelErr check after a failed awaitOutageVerdict —
-// Start returns the broken read's error.
+// Mutant: dropping the cancelErr check before a failure is counted — Start
+// returns the broken read's error.
 func TestDirectFallbackOutageVerdictHonoursCancel(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 	broke := make(chan struct{})
-	o := newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, _ *http.Request) bool {
+	o := newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, r *http.Request) bool {
 		if n == 1 {
 			brokenBody(w, body, 1000)
-			close(broke)
-			return true
+		} else {
+			brokenRest(w, r, body)
 		}
-		return false
+		if n == MaxChunkRetries {
+			close(broke)
+		}
+		return true
 	})
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL: o.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,

@@ -926,10 +926,12 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) (int64, int) {
 //     request — a VOD whose extraction outlived its URLs on the way here —
 //     spent the three attempts on its 403 and fell through to the streaming
 //     fallback, which had no refresh of its own then;
-//   - no answer at all while IsOnline reports the device offline waits the
-//     outage out, and the last attempt first gives the monitor the time it
-//     needs to call one (awaitOutageVerdict). An outage as the download
-//     started sent it to the fallback, whose one request then failed the job.
+//   - no answer at all, or a 5xx, while IsOnline reports the device offline
+//     waits the outage out, and the last attempt of one with no answer first
+//     gives the monitor the time it needs to call one (awaitOutageVerdict).
+//     An outage as the download started sent it to the fallback, whose one
+//     request then failed the job — a gateway answering 5xx for an origin it
+//     could not reach as much as a dead link.
 //
 // The error ends the download as the chunked loop's would, sidecar kept: a
 // refresh the probe could not use (another stream, or nothing returned), a
@@ -957,9 +959,9 @@ func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) (int64, 
 			i-- // not charged: the next probe is on the fresh URL
 			continue
 		}
-		if status == 0 && d.opts.IsOnline != nil {
+		if (status == 0 || status >= 500) && d.opts.IsOnline != nil {
 			offline := !d.opts.IsOnline()
-			if !offline && i == attempts-1 {
+			if !offline && status == 0 && i == attempts-1 {
 				offline = d.awaitOutageVerdict(ctx)
 			}
 			if offline {

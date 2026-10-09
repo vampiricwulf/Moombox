@@ -147,7 +147,8 @@ func TestStreamingFallbackDiscardsWhenRangeIgnored(t *testing.T) {
 // runs under. ENGINE-4 took the client-level five-minute Timeout away, and
 // that Timeout was the ONLY bound this GET ever had — a CDN that answers with
 // headers and then goes silent would otherwise hold a VOD download open
-// forever.
+// forever. A stall is a request with no complete answer, so the fallback asks
+// again, MaxChunkRetries times in all, before the stall's error stands.
 //
 // Mutant: dropping the withReadProgressDeadline/idleBody pair from
 // runDirectDownloadFallback — the call never returns and this test fails on
@@ -176,6 +177,7 @@ func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
 	d.outputFile = f
+	d.delays = fastDelays()
 
 	done := make(chan error, 1)
 	go func() { done <- d.runDirectDownloadFallback(context.Background()) }()

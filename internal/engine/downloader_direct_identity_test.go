@@ -205,8 +205,10 @@ func seedWholeFileResume(t *testing.T, out string, staged []byte, total int64) {
 // partial is discarded and B streamed from byte 0, where the fallback used to
 // append B's tail to A's checkpoint and return nil over the splice.
 //
-// The restart breaks off part-way, and the checkpoint it leaves must not
-// carry A's total — it describes B's bytes now. A third run resumes B from it.
+// The restart breaks off part-way, and the origin refuses the rest with a 503
+// for the remainder of the run, so the run ends once the fallback's attempts
+// are spent. The checkpoint it leaves must not carry A's total — it describes
+// B's bytes now. A third run resumes B from it.
 //
 // Mutant: dropping the differentFileReason call from the fallback's 206 arm —
 // run 2 returns nil over A's checkpoint with B's tail appended. Mutant:
@@ -230,6 +232,8 @@ func TestDirectFallbackResumeRefusesADifferentTotal(t *testing.T) {
 			w.Header().Set("Content-Length", strconv.Itoa(len(bodyB)))
 			w.WriteHeader(http.StatusOK)
 			w.Write(bodyB[:200_000])
+		case rng == "bytes=200000-" && cut.Load():
+			w.WriteHeader(http.StatusServiceUnavailable) // and the rest is refused
 		default:
 			serveB(w, r)
 		}
