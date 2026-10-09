@@ -3,6 +3,7 @@ package tui
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
@@ -60,7 +61,7 @@ func NewImportDialogModel() *ImportDialogModel {
 // panicked, and runTUI turns a TUI panic into a shutdown of the whole process.
 func newImportPicker() filepicker.Model {
 	fp := filepicker.New()
-	fp.AllowedTypes = []string{".zip"}
+	fp.AllowedTypes = zipExtVariants
 	fp.ShowSize = true
 	fp.ShowPermissions = false
 	fp.AutoHeight = false
@@ -68,6 +69,30 @@ func newImportPicker() filepicker.Model {
 	// also reads as a failure when the folder simply holds no .zip.
 	fp.Styles.EmptyDirectory = fp.Styles.EmptyDirectory.SetString("No .zip archives here (← goes up a folder)")
 	return fp
+}
+
+// zipExtVariants is ".zip" in every letter case. bubbles' filepicker tests
+// AllowedTypes with a case-sensitive suffix match, both where it dims a file
+// that cannot be picked and where Enter selects one — so ".zip" alone drew
+// "STREAM.ZIP" (what older Windows zippers write) dimmed and Enter on it did
+// nothing, while the dashboard and the server both take it.
+var zipExtVariants = caseVariants(".zip")
+
+// caseVariants returns s in every combination of upper and lower case.
+func caseVariants(s string) []string {
+	out := []string{""}
+	for _, r := range s {
+		lower, upper := string(unicode.ToLower(r)), string(unicode.ToUpper(r))
+		next := make([]string, 0, 2*len(out))
+		for _, prefix := range out {
+			next = append(next, prefix+lower)
+			if upper != lower {
+				next = append(next, prefix+upper)
+			}
+		}
+		out = next
+	}
+	return out
 }
 
 // Open opens the dialog at the given starting directory.

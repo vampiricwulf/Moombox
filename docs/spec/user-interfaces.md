@@ -209,7 +209,7 @@ All 44 non-test files of `internal/tui/`, grouped by role. Four of them form two
 | `action_menu.go` | Command palette overlay (`M`). A categorised list of every available action; selecting an entry executes it. |
 | `help.go` | Help overlay (`?`). Displays all chords grouped by category. |
 | `add_video.go` | Add Video overlay (`A A`). Multi-step flow: URL input, format selection, timestamp configuration, confirmation. |
-| `import_dialog.go` | Import overlay (`A Z`). Zip file upload with title/channel override fields. |
+| `import_dialog.go` | Import overlay (`A Z`). Zip file upload with title/channel override fields. The picker takes the extension in any letter case (`zipExtVariants` — bubbles matches `AllowedTypes` case-sensitively), as the dashboard and the server do, so `STREAM.ZIP` is not drawn dimmed and unpickable. |
 | `cookie_import_dialog.go` | Cookie file import overlay (`E I`). Path prompt with `~` expansion and an existence check, then the per-platform import outcome. Only the path is ever displayed. |
 | `trim_dialog.go` | Trim overlay (`A T`). Start/end time input, async encoding with progress display. |
 | `files_dialog.go` | Orphaned files and history overlay (`A O`). Browse and delete files and history rows that have no corresponding job. |
