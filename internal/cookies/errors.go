@@ -106,8 +106,9 @@ var (
 	// and nothing is launched, because a second browser on a live profile is
 	// the corruption the lock exists to prevent. Producers wrap it as "<this>
 	// by <host>", so the sentence both UIs render as the last cookie error
-	// names the machine to go and close the browser on. HTTP consumers map to
-	// 409: a state to change, like ErrCookieDBLocked.
+	// names the machine to go and close the browser on — and the lock's full
+	// path, to delete if no browser there is using the profile. HTTP
+	// consumers map to 409: a state to change, like ErrCookieDBLocked.
 	ErrProfileInUse = errors.New("browser profile in use")
 
 	// --- browser-free profile import (Docker / headless hosts) ---

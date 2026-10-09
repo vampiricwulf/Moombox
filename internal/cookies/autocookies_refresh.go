@@ -290,7 +290,8 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// owed for a file nobody wrote — but the reason is RECORDED, because a skip
 	// that recurs every 30 minutes behind a blank status line is the silent
 	// failure lastError exists to name; both UIs render this sentence, and it
-	// names the host to go and close the browser on.
+	// names the host to go and close the browser on, and the lock to delete if
+	// no browser there is using the profile.
 	//
 	// Ahead of the DPAPI fallback, which answers a launch that FAILED; this one
 	// was never attempted. Windows never produces it — its Chromium lock is a

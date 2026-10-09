@@ -62,7 +62,8 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 
 	// Nothing is launched on a profile another browser holds: the sign-in
 	// window would be a second browser on a live profile, and the refusal's
-	// sentence names the machine to go and close it on.
+	// sentence names the machine to go and close it on, and the lock to
+	// delete if no browser there is using the profile.
 	//
 	// RECORDED as well as returned, the way the refresh's ErrProfileInUse arm
 	// records it. StartSetup cleared lastError at its slot claim, before this
@@ -1095,7 +1096,7 @@ var (
 //     chromiumLockFiles).
 func removeStaleLock(path string) error {
 	if host, pid, ok := readSingletonLock(path); ok {
-		if err := singletonLockHolder(host, pid); err != nil {
+		if err := singletonLockHolder(path, host, pid); err != nil {
 			return err
 		}
 		os.Remove(path)
@@ -1144,9 +1145,9 @@ func parseSingletonLockTarget(target string) (host string, pid int, ok bool) {
 	return target[:i], int(n), true
 }
 
-// singletonLockHolder answers whether the browser a SingletonLock names may
-// still hold the profile: ErrProfileInUse when it may, nil when the lock is
-// provably orphaned.
+// singletonLockHolder answers whether the browser the SingletonLock at path
+// names may still hold the profile: ErrProfileInUse when it may, nil when the
+// lock is provably orphaned.
 //
 // Exactly one answer deletes — this machine's hostname AND a pid that no
 // longer answers. Everything else keeps the lock and skips the launch:
@@ -1161,18 +1162,27 @@ func parseSingletonLockTarget(target string) (host string, pid int, ok bool) {
 //     the kernel has since handed its pid. A reused pid costs a skipped pass,
 //     whose sentence names the pid, and never a lock broken under a live
 //     browser.
-func singletonLockHolder(host string, pid int) error {
+//
+// Every refusal names the lock by its full path and says when deleting it is
+// safe: whether that browser is really gone is the one thing the operator can
+// find out and nothing here can. Another machine's lock outlives a browser
+// that crashed there, or a profile that machine stopped using, and no pass
+// will ever clear it — so "close it there" alone left the profile skipped for
+// good with nothing on screen to say which file was in the way. The path is
+// the one Moombox sees (inside a container, the mounted profile's). Moombox
+// still never deletes it on these answers: the operator does, having checked.
+func singletonLockHolder(path, host string, pid int) error {
 	local, err := lockHostname()
 	switch {
 	case err != nil:
-		return fmt.Errorf("%w by %s (pid %d) — this machine's hostname could not be read to tell whether that is this machine (%v), so the lock is left alone",
-			ErrProfileInUse, host, pid, err)
+		return fmt.Errorf("%w by %s (pid %d) — this machine's hostname could not be read to tell whether that is this machine (%v), so the lock is left alone; delete %q if no browser on %s is using that profile",
+			ErrProfileInUse, host, pid, err, path, host)
 	case host != local:
-		return fmt.Errorf("%w by %s — a browser on that machine (pid %d there) holds its lock; close it there and the next pass will run",
-			ErrProfileInUse, host, pid)
+		return fmt.Errorf("%w by %s — a browser on that machine (pid %d there) holds its lock; close it there, or delete %q if no browser on %s is using that profile, and the next pass will run",
+			ErrProfileInUse, host, pid, path, host)
 	case lockPIDRunning(pid):
-		return fmt.Errorf("%w by %s (pid %d is still running) — close that browser, or remove the profile's SingletonLock if that pid is no longer one",
-			ErrProfileInUse, host, pid)
+		return fmt.Errorf("%w by %s (pid %d is still running) — close that browser, or delete %q if that pid is no longer one",
+			ErrProfileInUse, host, pid, path)
 	}
 	return nil
 }

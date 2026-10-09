@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,11 +23,14 @@ const inUseLockHost = "moombox-other-host.invalid"
 // carries a SingletonLock naming another machine's browser, with a YouTube
 // sign-in in the jar (so a refresh takes the browser branch) and a
 // "browser" at a path that does not exist (so nothing can launch if the lock
-// rule regresses — the pass fails at exec instead of opening a window).
-func heldProfileService(t *testing.T) *cookies.AutoCookieService {
+// rule regresses — the pass fails at exec instead of opening a window). It
+// also returns the lock's full path, which the sentence names as the file to
+// delete.
+func heldProfileService(t *testing.T) (*cookies.AutoCookieService, string) {
 	t.Helper()
 	profileDir := t.TempDir()
-	if err := os.Symlink(inUseLockHost+"-4242", filepath.Join(profileDir, "SingletonLock")); err != nil {
+	lock := filepath.Join(profileDir, "SingletonLock")
+	if err := os.Symlink(inUseLockHost+"-4242", lock); err != nil {
 		t.Skipf("cannot create a symlink here (%v) — Chromium's SingletonLock is one", err)
 	}
 	cookiePath := filepath.Join(t.TempDir(), "cookies.txt")
@@ -44,20 +48,53 @@ func heldProfileService(t *testing.T) *cookies.AutoCookieService {
 	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser")
 	svc.ConfiguredBrowserOverride = func() (string, string) { return unlaunchable, "chrome" }
 	t.Cleanup(svc.Stop)
-	return svc
+	return svc, lock
+}
+
+// inUseWords are what the sentence must say wherever it reaches the operator:
+// the machine holding the profile, and the lock to delete — by its full path —
+// if no browser there is using it.
+func inUseWords(lock string) []string {
+	return []string{
+		"in use by " + inUseLockHost,
+		"delete " + strconv.Quote(lock) + " if no browser on " + inUseLockHost + " is using that profile",
+	}
+}
+
+// checkInUseStatus reads auto-status as the dashboard does and asserts that its
+// lastError carries the held profile's sentence.
+func checkInUseStatus(t *testing.T, r http.Handler, lock string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodGet, "/api/cookies/auto-status", nil)))
+	var status cookies.AutoCookieStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode auto-status: %v (body %q)", err, rec.Body.String())
+	}
+	if status.LastError == nil {
+		t.Fatal("auto-status lastError is null — the held profile left no line for either UI to show")
+	}
+	for _, want := range inUseWords(lock) {
+		if !strings.Contains(*status.LastError, want) {
+			t.Errorf("auto-status lastError %q does not say %q", *status.LastError, want)
+		}
+	}
 }
 
 // TestProfileInUseReachesBothCookieRoutesVerbatim: a profile another
 // machine's browser holds answers 409 with the service's own sentence — which
-// names that machine — on the dashboard's refresh button and on the setup
-// start, and the refresh's sentence is what auto-status then publishes as
-// lastError, the field both UIs render.
+// names that machine, and the lock to delete if no browser there is using the
+// profile — on the dashboard's refresh button and on the setup start, and each
+// route's sentence is what auto-status then publishes as lastError, the field
+// both UIs render.
 //
 // Mutants: delete either ErrProfileInUse arm in cookies.go — that route falls
-// to its default 500 and a generic sentence that names no host.
+// to its default 500 and a generic sentence that names no host; hand
+// singletonLockHolder anything but the lock's own path in removeStaleLock —
+// no body or lastError carries it.
 func TestProfileInUseReachesBothCookieRoutesVerbatim(t *testing.T) {
 	t.Run("auto-refresh", func(t *testing.T) {
-		svc := heldProfileService(t)
+		svc, lock := heldProfileService(t)
 		r := chi.NewRouter()
 		CookieRoutes(r, nil, svc, nil, nil)
 
@@ -66,23 +103,17 @@ func TestProfileInUseReachesBothCookieRoutesVerbatim(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status %d, want 409 (body %q)", rec.Code, rec.Body.String())
 		}
-		if got := decodeErrorBody(t, rec)["error"]; !strings.Contains(got, "in use by "+inUseLockHost) {
-			t.Errorf("409 body %q does not name %q — the operator has nothing to go and close", got, inUseLockHost)
+		got := decodeErrorBody(t, rec)["error"]
+		for _, want := range inUseWords(lock) {
+			if !strings.Contains(got, want) {
+				t.Errorf("409 body %q does not say %q — the operator has nothing to go and close, or to delete", got, want)
+			}
 		}
-
-		rec = httptest.NewRecorder()
-		r.ServeHTTP(rec, fromTheHost(httptest.NewRequest(http.MethodGet, "/api/cookies/auto-status", nil)))
-		var status cookies.AutoCookieStatus
-		if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
-			t.Fatalf("decode auto-status: %v (body %q)", err, rec.Body.String())
-		}
-		if status.LastError == nil || !strings.Contains(*status.LastError, "in use by "+inUseLockHost) {
-			t.Errorf("auto-status lastError = %v, want it to name %q", status.LastError, inUseLockHost)
-		}
+		checkInUseStatus(t, r, lock)
 	})
 
 	t.Run("auto-setup/start", func(t *testing.T) {
-		svc := heldProfileService(t)
+		svc, lock := heldProfileService(t)
 		r := chi.NewRouter()
 		CookieRoutes(r, nil, svc, nil, nil)
 
@@ -91,8 +122,12 @@ func TestProfileInUseReachesBothCookieRoutesVerbatim(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status %d, want 409 (body %q)", rec.Code, rec.Body.String())
 		}
-		if got := decodeErrorBody(t, rec)["error"]; !strings.Contains(got, "in use by "+inUseLockHost) {
-			t.Errorf("409 body %q does not name %q", got, inUseLockHost)
+		got := decodeErrorBody(t, rec)["error"]
+		for _, want := range inUseWords(lock) {
+			if !strings.Contains(got, want) {
+				t.Errorf("409 body %q does not say %q", got, want)
+			}
 		}
+		checkInUseStatus(t, r, lock)
 	})
 }

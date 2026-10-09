@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,13 +103,19 @@ func TestParseSingletonLockTarget(t *testing.T) {
 // "dead" stub must still refuse — and a pid that answers is never deleted
 // even when it may have been reused.
 //
+// Every refusal names the lock's full path and says when deleting it is safe:
+// the operator is the only one who can find out that the browser is gone.
+//
 // Mutants: `host != local` → `host == local` (the foreign rows answer nil
 // and the dead-local row refuses); delete the foreign case (the foreign/dead
 // row deletes); delete the lockPIDRunning case (the live-local row deletes);
 // delete the hostname-error case (that row falls into the foreign one and
-// fails on the sentence, which must say why it could not tell).
+// fails on the sentence, which must say why it could not tell); drop the
+// delete clause from any one refusal (that row's path words fail).
 func TestSingletonLockHolderDeletesOnlyAnOrphanOnThisMachine(t *testing.T) {
 	const local = "desktop"
+	const lockPath = "/srv/moombox/browser-profile/SingletonLock"
+	deleteIt := "delete " + strconv.Quote(lockPath) + " if "
 	for _, tc := range []struct {
 		name      string
 		lockHost  string
@@ -118,18 +125,22 @@ func TestSingletonLockHolderDeletesOnlyAnOrphanOnThisMachine(t *testing.T) {
 		wantWords []string
 	}{
 		{"this machine, dead pid", local, nil, false, false, nil},
-		{"this machine, live pid", local, nil, true, true, []string{"in use by desktop", "pid 4242 is still running"}},
-		{"another machine, pid dead HERE", foreignLockHost, nil, false, true, []string{"in use by " + foreignLockHost, "pid 4242 there"}},
-		{"another machine, pid live HERE", foreignLockHost, nil, true, true, []string{"in use by " + foreignLockHost}},
-		{"hostname unreadable", local, errors.New("uname failed"), false, true, []string{"in use by desktop", "hostname could not be read"}},
+		{"this machine, live pid", local, nil, true, true, []string{"in use by desktop", "pid 4242 is still running",
+			deleteIt + "that pid is no longer one"}},
+		{"another machine, pid dead HERE", foreignLockHost, nil, false, true, []string{"in use by " + foreignLockHost, "pid 4242 there",
+			deleteIt + "no browser on " + foreignLockHost + " is using that profile"}},
+		{"another machine, pid live HERE", foreignLockHost, nil, true, true, []string{"in use by " + foreignLockHost,
+			deleteIt + "no browser on " + foreignLockHost + " is using that profile"}},
+		{"hostname unreadable", local, errors.New("uname failed"), false, true, []string{"in use by desktop", "hostname could not be read",
+			deleteIt + "no browser on desktop is using that profile"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubLockHost(t, local, tc.hostErr)
 			stubPIDRunning(t, tc.running)
 
-			err := singletonLockHolder(tc.lockHost, 4242)
+			err := singletonLockHolder(lockPath, tc.lockHost, 4242)
 			if gotInUse := errors.Is(err, ErrProfileInUse); gotInUse != tc.wantInUse || (err != nil) != tc.wantInUse {
-				t.Fatalf("singletonLockHolder(%q, 4242) = %v, want in-use %v", tc.lockHost, err, tc.wantInUse)
+				t.Fatalf("singletonLockHolder(%q, %q, 4242) = %v, want in-use %v", lockPath, tc.lockHost, err, tc.wantInUse)
 			}
 			for _, w := range tc.wantWords {
 				if !strings.Contains(err.Error(), w) {
@@ -266,6 +277,9 @@ func TestCleanChromiumLockFilesStopsAtAHeldLock(t *testing.T) {
 // TestCleanChromiumLockFilesStopsAtAHeldGlobMatch: the glob loop answers the
 // same way the canonical loop does, for a holder-naming link only it reaches.
 //
+// Its sentence names the variant — the file actually in the way — not the
+// canonical SingletonLock the operator would otherwise go looking for.
+//
 // Mutant: discard removeStaleLock's error in the glob loop — nil comes back
 // and the launch site would start a browser on a held profile.
 func TestCleanChromiumLockFilesStopsAtAHeldGlobMatch(t *testing.T) {
@@ -273,8 +287,12 @@ func TestCleanChromiumLockFilesStopsAtAHeldGlobMatch(t *testing.T) {
 	variant := filepath.Join(dir, "SingletonLock.lock")
 	symlinkLock(t, foreignLockHost+"-4242", variant)
 
-	if err := cleanChromiumLockFiles(dir); !errors.Is(err, ErrProfileInUse) {
-		t.Errorf("cleanChromiumLockFiles = %v, want ErrProfileInUse from the glob-matched lock", err)
+	err := cleanChromiumLockFiles(dir)
+	if !errors.Is(err, ErrProfileInUse) {
+		t.Fatalf("cleanChromiumLockFiles = %v, want ErrProfileInUse from the glob-matched lock", err)
+	}
+	if !strings.Contains(err.Error(), "delete "+strconv.Quote(variant)+" if ") {
+		t.Errorf("the refusal %q does not name the glob-matched lock it stopped at", err)
 	}
 	if !lockSurvives(variant) {
 		t.Error("the glob-matched lock was unlinked")
@@ -444,4 +462,75 @@ func TestARefusedSetupKeepsTheProfileInUseLine(t *testing.T) {
 	if got := lastErrorSnapshot(s); !strings.Contains(got, "in use by "+nextHost) {
 		t.Errorf("lastError after the refused setup = %q, want it to name %q — the profile is still held, and the status both UIs read must still say by whom", got, nextHost)
 	}
+}
+
+// TestAProfileInUseLineNamesTheLockToDelete: the line both UIs show for a
+// profile another machine's browser holds — AutoCookieStatus.LastError, read
+// through GetStatus as the dashboard and the TUI read it — names the lock by
+// its full path and says to delete it if no browser on that machine is using
+// the profile, on the refresh's skip and on the setup's refusal alike. A lock
+// whose browser crashed on that machine is never cleared by any pass, and
+// "close it there" alone gave the operator no file to remove. The lock itself
+// is still left where it is.
+//
+// Mutants: hand singletonLockHolder filepath.Base(path) in removeStaleLock —
+// neither line carries the full path; drop the delete clause from the
+// foreign-host refusal — both lines fail; drop the setError in
+// startChromiumSetup's refusal — the setup leg's status has no line at all.
+func TestAProfileInUseLineNamesTheLockToDelete(t *testing.T) {
+	heldProfile := func(t *testing.T) (*AutoCookieService, string) {
+		t.Helper()
+		captureKills(t)
+		profileDir := t.TempDir()
+		lock := filepath.Join(profileDir, "SingletonLock")
+		symlinkLock(t, foreignLockHost+"-4242", lock)
+		cookiePath := ytAuthCookieFile(t)
+		jar := NewCookieJar()
+		if err := jar.Load(cookiePath); err != nil {
+			t.Fatalf("load the fixture cookie file: %v", err)
+		}
+		s := NewAutoCookieService(profileDir, cookiePath, jar, nopAutoCookieLogger{})
+		unlaunchable := filepath.Join(t.TempDir(), "not-a-browser")
+		s.detectBrowser = func() *DetectedBrowser {
+			return &DetectedBrowser{Type: "chrome", Path: unlaunchable, Name: "unlaunchable test browser"}
+		}
+		return s, lock
+	}
+	checkLine := func(t *testing.T, s *AutoCookieService, lock string) {
+		t.Helper()
+		if !filepath.IsAbs(lock) {
+			t.Fatalf("fixture lock path %q is not absolute — the line must carry the full path", lock)
+		}
+		line := s.GetStatus().LastError
+		if line == nil {
+			t.Fatal("GetStatus().LastError is nil — the held profile left no line for either UI to show")
+		}
+		for _, want := range []string{
+			"in use by " + foreignLockHost,
+			"delete " + strconv.Quote(lock) + " if no browser on " + foreignLockHost + " is using that profile",
+		} {
+			if !strings.Contains(*line, want) {
+				t.Errorf("the status line %q does not say %q", *line, want)
+			}
+		}
+		if !lockSurvives(lock) {
+			t.Error("the lock was unlinked — the sentence tells the operator to delete it; Moombox must not")
+		}
+	}
+
+	t.Run("refresh", func(t *testing.T) {
+		s, lock := heldProfile(t)
+		if _, err := s.RefreshCookiesDetailed(context.Background()); !errors.Is(err, ErrProfileInUse) {
+			t.Fatalf("RefreshCookiesDetailed = %v, want ErrProfileInUse", err)
+		}
+		checkLine(t, s, lock)
+	})
+
+	t.Run("setup", func(t *testing.T) {
+		s, lock := heldProfile(t)
+		if err := s.StartSetup("youtube"); !errors.Is(err, ErrProfileInUse) {
+			t.Fatalf("StartSetup = %v, want ErrProfileInUse", err)
+		}
+		checkLine(t, s, lock)
+	})
 }
