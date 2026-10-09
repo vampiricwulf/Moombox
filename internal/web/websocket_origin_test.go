@@ -110,8 +110,11 @@ func TestWebSocketUpgradeSharesTheOriginDecision(t *testing.T) {
 // upgrade was addressed to, so a page another local service serves cannot
 // open the live stream.
 //
-// THE MUTANT: drop `&& originPortServed(...)` from isAllowedOrigin's lan arm —
-// the first row answers 101.
+// THE MUTANTS: drop `&& originPortServed(...)` from isAllowedOrigin's lan arm —
+// the first row answers 101; apply samePort's two-portless leniency whatever
+// browserSchemeUnknown says — the portless row answers 101 (a page another
+// local service serves on https:443 opening the socket of a dashboard
+// addressed on plain 80; loopback is exempt from mixed-content blocking).
 func TestWebSocketUpgradeHoldsALoopbackOriginToItsPort(t *testing.T) {
 	srv := wsOriginFixture(t, "lan", nil)
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -126,6 +129,12 @@ func TestWebSocketUpgradeHoldsALoopbackOriginToItsPort(t *testing.T) {
 	}
 	if got := upgradeStatus(t, srv, "", "http://localhost:"+port, nil); got != http.StatusSwitchingProtocols {
 		t.Fatalf("status %d, want 101 — the dashboard's own port, by either loopback spelling", got)
+	}
+	if got := upgradeStatus(t, srv, "127.0.0.1", "https://127.0.0.1", nil); got != http.StatusForbidden {
+		t.Fatalf("status %d, want 403 — a portless Host over plain HTTP is port 80, and an https page is 443", got)
+	}
+	if got := upgradeStatus(t, srv, "127.0.0.1", "http://localhost", nil); got != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101 — a portless Host over plain HTTP is port 80, as is an http page", got)
 	}
 }
 
@@ -228,10 +237,11 @@ func TestWebSocketUpgradeRefusalLogsTheEffectiveHost(t *testing.T) {
 // originAllowed — and this row starts refusing the literal certificate name.
 func TestWebSocketUpgradeReachesTheCertificateSANWidening(t *testing.T) {
 	useIdentityCert(t, certWatcherFor(t, "dash.lan", []string{"dash.lan"}, nil))
-	srv := wsOriginFixture(t, "lan", nil)
-	// Addressed by the name, portless, the way a browser on :443 in front of
-	// a TLS-terminating proxy sends it — the port rule holds, so the name
-	// alone decides.
+	// The test client is the listed proxy: a TLS-terminating one on :443
+	// forwards the name portless while the hop to Moombox is plain HTTP
+	// (browserSchemeUnknown), so the port rule holds and the name alone
+	// decides.
+	srv := wsOriginFixture(t, "lan", []string{"127.0.0.1"})
 	if got := upgradeStatus(t, srv, "dash.lan", "https://dash.lan", nil); got != http.StatusSwitchingProtocols {
 		t.Fatalf("status %d, want 101 — a literal certificate-attested SAN must widen the lan upgrade too", got)
 	}

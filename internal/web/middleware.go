@@ -271,7 +271,7 @@ func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 				// The Host is compared with itself here, so the port rule in
 				// isAllowedOrigin always holds and public_url cannot matter.
 				scheme := effectiveRequestScheme(r)
-				if !isAllowedOrigin(scheme+"://"+host, networkAccess, host, scheme, "", identityHosts()) {
+				if !isAllowedOrigin(scheme+"://"+host, networkAccess, host, scheme, "", false, identityHosts()) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusForbidden)
 					w.Write([]byte(`{"error":"Forbidden: unrecognized host — open the dashboard by IP address or localhost"}`))
@@ -395,7 +395,20 @@ func originAllowed(store *config.Store, r *http.Request, origin string) (bool, s
 		publicURL = c.Network.PublicURL
 	})
 	host := effectiveRequestHost(store, r)
-	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), publicURL, identityHosts()), host
+	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), publicURL,
+		browserSchemeUnknown(store, r), identityHosts()), host
+}
+
+// browserSchemeUnknown reports whether Moombox cannot know which scheme the
+// browser used: the direct peer is listed in network.trusted_proxies, the hop
+// to Moombox is plain HTTP, and trust_forwarded_proto is off. A listed proxy
+// terminating TLS on 443 and forwarding the browser's portless Host then
+// looks exactly like a plain one on 80, so originPortServed lets two portless
+// authorities match. Everywhere else the scheme is known — r.TLS, the
+// proxy's X-Forwarded-Proto, or a direct peer that connected over plain HTTP
+// — and a portless authority means that scheme's default port and no other.
+func browserSchemeUnknown(store *config.Store, r *http.Request) bool {
+	return r.TLS == nil && !trustForwardedProto.Load() && loadTrustedProxies(store).contains(ExtractIP(r))
 }
 
 // clipForLog bounds a header value the CLIENT chose before it reaches the log
@@ -485,7 +498,9 @@ func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 // passed CSRF, was echoed by CORS with credentials, and opened the socket. The
 // origin's port must now be the one this request was addressed to, or the
 // port of network.public_url (publicURL), which is what a LAN client of a
-// proxied or port-forwarded install types.
+// proxied or port-forwarded install types. schemeUnknown
+// (browserSchemeUnknown) is the one case where a portless request authority
+// does not name its own scheme's default port.
 //
 // identity is the certificate-attested host list (identityHosts). On
 // external/public it is an ADDITIONAL requirement, never a substitute:
@@ -503,7 +518,7 @@ func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 // routes through this function, so without it an install holding a real
 // certificate for "dash.lan" would lose the socket it has today. The port rule
 // holds for that widening too.
-func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publicURL string, identity []string) bool {
+func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publicURL string, schemeUnknown bool, identity []string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -517,11 +532,11 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publ
 	switch networkAccess {
 	case "localhost":
 		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
-			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
 	case "lan":
 		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIPFor(hostname, networkAccess) ||
 			hostInSANs(hostname, identity, false)) &&
-			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
 	case "external", "public":
 		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
 			return false
@@ -532,7 +547,7 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publ
 		return hostInSANs(hostname, identity, true)
 	default:
 		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
-			originPortServed(u, effectiveHost, effectiveScheme, publicURL)
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
 	}
 }
 
@@ -541,17 +556,26 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publ
 // trusted proxy's X-Forwarded-Host counts here exactly as it does on
 // external/public), or the port of network.public_url.
 //
-// The first comparison is sameSiteOrigin's port rule (samePort): exact once
-// either side writes a port, each defaulted from its own scheme, and two
-// portless authorities equal — a TLS-terminating proxy on 443 that forwards
-// the browser's portless Host while Moombox itself sees plain HTTP is the case
-// that leniency exists for. public_url is the operator's own statement of
-// scheme and port, so it is defaulted and compared with no leniency:
+// Both sides are defaulted from their own scheme and compared exactly, so a
+// portless authority means 80 or 443 and never both: a router or NAS admin
+// page at http://192.168.1.1 is not the dashboard served on 443 at
+// https://192.168.1.5, nor is https://127.0.0.1 the one served on 80. Only
+// when schemeUnknown (browserSchemeUnknown) do two portless authorities match
+// by that alone — samePort's leniency, which sameSiteOrigin applies on every
+// request: a listed proxy terminating TLS on 443 forwards the browser's
+// portless Host while Moombox sees plain HTTP, and nothing on the request
+// says which default it meant. A proxy that is not listed, or a direct peer,
+// gets no such benefit of the doubt; trust_forwarded_proto or public_url
+// names the port for it. public_url is the operator's own statement of
+// scheme and port, so it is defaulted and compared with no leniency either:
 // "https://10.0.0.5" admits 443 and nothing else.
-func originPortServed(u *url.URL, effectiveHost, effectiveScheme, publicURL string) bool {
+func originPortServed(u *url.URL, effectiveHost, effectiveScheme, publicURL string, schemeUnknown bool) bool {
 	_, oPort := splitAuthority(u.Host)
 	_, rPort := splitAuthority(effectiveHost)
-	if samePort(oPort, u.Scheme, rPort, effectiveScheme) {
+	if schemeUnknown && samePort(oPort, u.Scheme, rPort, effectiveScheme) {
+		return true
+	}
+	if defaultedPort(oPort, u.Scheme) == defaultedPort(rPort, effectiveScheme) {
 		return true
 	}
 	if publicURL == "" {
@@ -666,9 +690,10 @@ func sameSiteOrigin(origin, effectiveHost, effectiveScheme string) bool {
 	return samePort(oPort, u.Scheme, rPort, effectiveScheme)
 }
 
-// samePort is sameSiteOrigin's port rule, shared with originPortServed: two
-// portless authorities match, and once either side writes a port both are
-// defaulted from their OWN scheme and compared exactly.
+// samePort is sameSiteOrigin's port rule, which originPortServed applies only
+// when the browser's scheme is unknown: two portless authorities match, and
+// once either side writes a port both are defaulted from their OWN scheme and
+// compared exactly.
 func samePort(oPort, oScheme, rPort, rScheme string) bool {
 	if oPort == "" && rPort == "" {
 		return true

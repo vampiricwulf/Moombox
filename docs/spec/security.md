@@ -136,11 +136,20 @@ on the LAN — passed CSRF, was echoed by CORS with credentials, and opened the 
 (or Referer) must now ALSO name a port this deployment answers on (`originPortServed`): the port the
 request was addressed to — the effective host's, so `X-Forwarded-Host` from a proxy listed in
 `network.trusted_proxies` still decides, exactly as on `external`/`public` — or the port of
-`network.public_url`. The request-port comparison is `sameSiteOrigin`'s own (`samePort`): exact once
-either side writes a port, each defaulted from its own scheme, and two portless authorities equal, so
-a TLS-terminating proxy on 443 that forwards the browser's portless `Host` while Moombox sees plain
-HTTP keeps working. `public_url` is the operator's statement of scheme and port and is compared
-defaulted, with no such leniency — `https://192.168.1.5` admits 443 and nothing else. Only the port is
+`network.public_url`. Both sides of the request-port comparison are defaulted from their own scheme
+and compared exactly, so a portless authority names its scheme's default port and no other: a router
+admin page at `http://192.168.1.1` (80) is not a dashboard Moombox serves over TLS on 443, and a page at
+`https://127.0.0.1` (443) is not one addressed on plain 80. `sameSiteOrigin`'s two-portless leniency
+(`samePort`) applies only when Moombox cannot know the browser's scheme (`browserSchemeUnknown`): the
+direct peer is listed in `network.trusted_proxies`, the hop to Moombox is plain HTTP, and
+`trust_forwarded_proto` is off. That is a listed TLS-terminating proxy on 443 forwarding the browser's
+portless `Host`, which keeps working. An unlisted proxy doing the same looks exactly like a browser
+that connected on plain 80 and is refused: list it, turn `trust_forwarded_proto` on (its
+`X-Forwarded-Proto: https` then names 443), or set `network.public_url`. Until the 2026-10 review the
+leniency applied to every request, so with the dashboard on 443 a page at `http://192.168.1.1` passed
+— the other-service case this rule exists to close. `public_url` is the operator's statement of scheme
+and port and is compared defaulted, with no leniency — `https://192.168.1.5` admits 443 and nothing
+else. Only the port is
 added: the origin's host is still judged by IP class, so `http://localhost:774` and
 `http://127.0.0.1:774` are interchangeable against a dashboard on `:774`. The certificate-SAN
 widening is held to the same port. The dashboard's own fetches and socket, the TUI (internal token,
@@ -151,7 +160,7 @@ rule is a no-op there. Pinned by the D-S7 rows of `TestIsAllowedOrigin`,
 `TestCSRFHoldsALocalOriginToTheServedPort` (`internal/web/middleware_test.go`) and
 `TestWebSocketUpgradeHoldsALoopbackOriginToItsPort` (`internal/web/websocket_origin_test.go`).
 
-**Source:** `CORSMiddleware`, `isAllowedOrigin` and `originPortServed` in `internal/web/middleware.go`.
+**Source:** `CORSMiddleware`, `isAllowedOrigin`, `originPortServed` and `browserSchemeUnknown` in `internal/web/middleware.go`.
 
 ### 5. SecurityHeaders
 
@@ -446,7 +455,7 @@ One string breaks that guarantee on its own: `isLoopback` deliberately resolves 
 
 ### Where it is used
 
-Every trust decision that is a function of the CLIENT IP routes through `EffectiveClientIP`. One decision is not: the same-host Origin comparison needs the DIRECT peer, not the resolved client, so `effectiveRequestHost` applies the `trusted_proxies` test itself and reads `X-Forwarded-Host` rather than going through `EffectiveClientIP`. It is the setting's second consumer.
+Every trust decision that is a function of the CLIENT IP routes through `EffectiveClientIP`. One decision is not: the Origin comparison needs the DIRECT peer, not the resolved client, so `effectiveRequestHost` applies the `trusted_proxies` test itself and reads `X-Forwarded-Host` rather than going through `EffectiveClientIP`, and `browserSchemeUnknown` applies the same direct-peer test to decide whether a portless `Host` may stand for either default port (the port rule, § 4. CORSMiddleware). They are the setting's second consumer.
 
 | Decision point | Source |
 |----------------|--------|
@@ -458,7 +467,8 @@ Every trust decision that is a function of the CLIENT IP routes through `Effecti
 | Rate limiters — API, POT, login, password | `RateLimiter.ClientIP` wired in `initServices`, `cmd/moombox/services.go` |
 | Rate limiter — import | `ImportRoutes`, `internal/web/routes/import_routes.go` |
 | Login/password audit log lines, client-token labels and `LastIP` | `internal/web/routes/auth.go`, `cmd/moombox/ws_wiring.go` |
-| Same-host Origin comparison on `external` / `public` — reads `X-Forwarded-Host`, deliberately NOT via `EffectiveClientIP` | `effectiveRequestHost`, `internal/web/middleware.go` |
+| Origin comparison — the host on `external` / `public`, the port on `localhost` / `lan` — reads `X-Forwarded-Host`, deliberately NOT via `EffectiveClientIP` | `effectiveRequestHost`, `internal/web/middleware.go` |
+| Port rule's two-portless leniency on `localhost` / `lan` — direct peer only | `browserSchemeUnknown`, `internal/web/middleware.go` |
 
 Keying rate limiters by the effective IP matters as much as the gate: without it, a reverse proxy collapses every remote client into one bucket, and a single attacker could exhaust the 5/min login budget for everyone behind the proxy.
 
