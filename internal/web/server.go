@@ -428,6 +428,35 @@ func (s *Server) assetETag(fsys fs.FS, name string) string {
 	return tag
 }
 
+// interceptUpgrades wraps router so a WebSocket upgrade on any path goes to
+// wsHandler (matches TS noServer mode) and every other request to router.
+// Split out of Start so the gates it re-applies are under test.
+func interceptUpgrades(store *config.Store, router http.Handler, wsHandler http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			// The upgrade path bypasses the router's middleware chain —
+			// re-apply the IP gate here, or a non-private client against
+			// a "lan"-mode deployment would get the live broadcast
+			// stream (job titles, logs, state) that every HTTP route
+			// 403s, with only the forgeable Origin check in its way.
+			if !ipAllowedByNetworkAccess(store, r) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			// And the external/public host rule HostGateMiddleware
+			// applies: the rebinding page's socket would otherwise carry
+			// the live stream its GETs are refused (externalHostRefused).
+			if externalHostRefused(store, r) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			wsHandler(w, r)
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+}
+
 // Start begins listening for HTTP connections.
 func (s *Server) Start(ctx context.Context) error {
 	port := s.cfg.Network.Port
@@ -444,35 +473,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	// Wrap router to intercept WebSocket upgrades on any path (matches TS noServer mode)
 	var handler http.Handler = s.router
 	if s.wsHandler != nil {
-		wsHandler := s.wsHandler
-		router := s.router
-		store := s.configStore
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-				// The upgrade path bypasses the router's middleware chain —
-				// re-apply the IP gate here, or a non-private client against
-				// a "lan"-mode deployment would get the live broadcast
-				// stream (job titles, logs, state) that every HTTP route
-				// 403s, with only the forgeable Origin check in its way.
-				if !ipAllowedByNetworkAccess(store, r) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
-				}
-				// And the external/public host rule HostGateMiddleware
-				// applies: the rebinding page's socket would otherwise carry
-				// the live stream its GETs are refused (externalHostRefused).
-				if externalHostRefused(store, r) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
-				}
-				wsHandler(w, r)
-				return
-			}
-			router.ServeHTTP(w, r)
-		})
+		handler = interceptUpgrades(s.configStore, s.router, s.wsHandler)
 	}
 
 	s.server = &http.Server{

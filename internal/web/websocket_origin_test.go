@@ -246,3 +246,54 @@ func TestWebSocketUpgradeReachesTheCertificateSANWidening(t *testing.T) {
 		t.Fatalf("status %d, want 101 — a literal certificate-attested SAN must widen the lan upgrade too", got)
 	}
 }
+
+// The upgrade bypasses the router's middleware chain, so interceptUpgrades
+// re-applies the two gates that chain would: the IP gate, and on
+// external/public the host rule that keeps a rebinding page from getting,
+// through the socket, the live stream its GETs are refused. Nothing ran that
+// code under test while it sat inline in Server.Start: deleting either check
+// survived the package's whole suite.
+//
+// Mutants: delete the externalHostRefused check — the rebinding row reaches
+// the socket; delete the ipAllowedByNetworkAccess check — the public peer on
+// lan does; compare the Upgrade header case-sensitively — the "WebSocket" row
+// goes to the router.
+func TestUpgradeInterceptionReappliesTheChainGates(t *testing.T) {
+	for _, tc := range []struct {
+		name, access, peer, host, upgrade string
+		want                              string // "socket", "router" or "403"
+	}{
+		{"a rebinding page's socket on external", "external", "192.168.1.20:50000", "attacker.example:774", "websocket", "403"},
+		{"a rebinding page's socket on public", "public", "127.0.0.1:50000", "attacker.example", "websocket", "403"},
+		{"a LAN socket by IP on external", "external", "192.168.1.20:50000", "192.168.1.10:774", "websocket", "socket"},
+		{"a public peer's socket by name on external", "external", "203.0.113.5:50000", "moombox.example.com", "websocket", "socket"},
+		{"a public peer's socket on lan", "lan", "203.0.113.5:50000", "192.168.1.10:774", "websocket", "403"},
+		{"a LAN socket on lan", "lan", "192.168.1.20:50000", "192.168.1.10:774", "WebSocket", "socket"},
+		{"a plain request is the chain's to judge", "external", "192.168.1.20:50000", "attacker.example:774", "", "router"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Network.NetworkAccess = tc.access
+			var reached string
+			h := interceptUpgrades(config.NewStore(cfg, ""),
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = "router" }),
+				func(w http.ResponseWriter, r *http.Request) { reached = "socket" })
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.peer
+			req.Host = tc.host
+			if tc.upgrade != "" {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", tc.upgrade)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			got := reached
+			if got == "" && rec.Code == http.StatusForbidden {
+				got = "403"
+			}
+			if got != tc.want {
+				t.Errorf("reached %q (status %d), want %q", got, rec.Code, tc.want)
+			}
+		})
+	}
+}
