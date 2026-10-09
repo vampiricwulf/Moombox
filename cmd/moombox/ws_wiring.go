@@ -8,6 +8,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/web"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 	webpublic "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -112,6 +113,14 @@ func (s *runState) wireWebSocket() {
 			})
 		}
 		s.backfillMu.Unlock()
+		// Trims the trim service is running, with their latest progress: a
+		// dashboard trim runs detached from the page that started it, so a
+		// page reloaded mid-trim learns of it here and draws its bar from the
+		// next trim_status frame on.
+		runningTrims := []worker.TrimTask{}
+		if s.trimSvc != nil {
+			runningTrims = s.trimSvc.RunningTrims()
+		}
 		return map[string]any{
 			"jobs":                jobs,
 			"logs":                s.log.GetRecentLines(),
@@ -121,6 +130,7 @@ func (s *runState) wireWebSocket() {
 			"connectivity":        s.connMon.IsOnline(),
 			"hideFinishedAgeDays": hideAge,
 			"backfill":            backfill,
+			"runningTrims":        runningTrims,
 		}
 	}
 

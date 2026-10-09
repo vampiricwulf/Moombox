@@ -17,8 +17,8 @@ import (
 
 // gatedFFmpeg is a stand-in FFmpeg for the trim service: it records the
 // output it was given (its last argument) in dir/outputs, writes a few bytes
-// there the way a real encode opens its output at once, and then waits for
-// dir/gate. With dir/fail present it then fails as FFmpeg does; otherwise it
+// there the way a real encode opens its output at once, reports 24 s encoded
+// on stderr the way FFmpeg's stats line does, and then waits for dir/gate. With dir/fail present it then fails as FFmpeg does; otherwise it
 // finishes the file. It gives up after 30 s, so a run nothing stops (a broken
 // Stop) cannot outlive the test binary. Its sibling ffprobe does not exist,
 // so the audio-bitrate probe falls back to its default without running
@@ -34,6 +34,7 @@ func gatedFFmpeg(t *testing.T) (ffmpeg, dir string) {
 		"for a; do out=\"$a\"; done\n" +
 		"printf '%s\\n' \"$out\" >> '" + dir + "/outputs'\n" +
 		"printf partial > \"$out\"\n" +
+		"printf 'frame=120 fps=60 q=28.0 size=256kB time=00:00:24.00 bitrate=87.4kbits/s speed=12x\\r' >&2\n" +
 		"i=0; while [ ! -e '" + dir + "/gate' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n" +
 		"if [ -e '" + dir + "/fail' ]; then echo 'Error writing trailer: No space left on device' >&2; echo 'Conversion failed!' >&2; exit 1; fi\n" +
 		"printf whole > \"$out\"\n"
@@ -413,4 +414,62 @@ func TestTrimEventWireShape(t *testing.T) {
 	if _, ok := got["error"]; ok {
 		t.Errorf("a finished trim's frame carries an error: %s", b)
 	}
+}
+
+// TestRunningTrimsReportProgress: the dashboard had no trim progress at all —
+// only a spinning Create button — while the TUI showed a percentage. The
+// service now keeps each running trim's FFmpeg percentage, the figure the
+// TUI's dialog reads, in RunningTrims (what initial_state seeds a page with,
+// so a reload mid-trim still shows it) and hands it on as "running" events,
+// at most one per progressInterval; a finished trim leaves the list.
+//
+// Mutants: drop noteProgress's `plan.task.Progress = pct` — RunningTrims
+// says 0; drop its emit — no event carries the figure; drop its interval
+// check — a closed interval still sends every report; drop release's delete
+// — the finished trim is still listed.
+func TestRunningTrimsReportProgress(t *testing.T) {
+	ffmpeg, gate := gatedFFmpeg(t)
+	r := newTrimRig(t, ffmpeg)
+	r.ts.progressInterval = 0 // every report
+
+	task, err := r.ts.StartTrim(r.job, 60, 300) // 24 s of 240 s: 10%
+	if err != nil {
+		t.Fatalf("StartTrim: %v", err)
+	}
+	waitFor(t, "the running trim's progress", func() bool {
+		rs := r.ts.RunningTrims()
+		return len(rs) == 1 && rs[0].ID == task.ID && rs[0].Progress == 10
+	})
+	waitFor(t, "a running event carrying the progress", func() bool {
+		r.events.mu.Lock()
+		defer r.events.mu.Unlock()
+		for _, ev := range r.events.evs {
+			if ev.State == TrimStateRunning && ev.ID == task.ID && ev.Progress == 10 {
+				return true
+			}
+		}
+		return false
+	})
+	touch(t, gate, "gate")
+	r.events.wait(t, TrimStateFinished)
+	if rs := r.ts.RunningTrims(); len(rs) != 0 {
+		t.Errorf("RunningTrims lists %+v after the trim finished", rs)
+	}
+
+	// The interval: with none elapsed, the start's event is the only one.
+	ffmpeg2, gate2 := gatedFFmpeg(t)
+	r2 := newTrimRig(t, ffmpeg2)
+	r2.ts.progressInterval = time.Hour
+	if _, err := r2.ts.StartTrim(r2.job, 60, 300); err != nil {
+		t.Fatalf("StartTrim: %v", err)
+	}
+	waitFor(t, "the second trim's progress", func() bool {
+		rs := r2.ts.RunningTrims()
+		return len(rs) == 1 && rs[0].Progress == 10
+	})
+	if n := r2.events.count(TrimStateRunning); n != 1 {
+		t.Errorf("%d running events inside one progress interval, want only the start's", n)
+	}
+	touch(t, gate2, "gate")
+	r2.events.wait(t, TrimStateFinished)
 }

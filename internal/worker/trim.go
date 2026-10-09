@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,11 @@ const trimFailedReason = "Could not create the trim; the log has the reason"
 // operator stopped Moombox, nothing failed, so no trim_error is sent.
 const trimInterruptedReason = "Moombox stopped before the trim finished"
 
+// trimProgressInterval is the least time between two "running" events of
+// one trim. FFmpeg reports progress about twice a second and the dashboard's
+// bar needs no more; RunningTrims always has the latest figure.
+const trimProgressInterval = 250 * time.Millisecond
+
 // trimStopWait bounds how long Stop waits for the trims it cancelled to
 // remove their partial files. A cancelled FFmpeg is killed, so the wait is
 // normally milliseconds; the bound only keeps a wedged one from holding the
@@ -112,12 +118,16 @@ type TrimService struct {
 	activeMu sync.Mutex
 	// activeOps holds the trim in flight per job — one at a time, so a
 	// second request for a job (the same range or another) is refused while
-	// the first encodes. A reservation whose request is still being checked
-	// has no ID yet and is not reported by RunningTrims.
+	// the first encodes — with the progress RunningTrims reports. A
+	// reservation whose request is still being checked has no ID yet.
 	activeOps map[string]*TrimTask
 	stopped   bool // set by Stop, under activeMu: no trim starts after it
 	onEvent   func(TrimEvent)
-	logger    interface {
+	// progressInterval is trimProgressInterval; a field so a test can take
+	// every report, or none.
+	progressInterval time.Duration
+
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -140,6 +150,8 @@ func NewTrimService(db *database.Database, ffmpegPath string, logger interface {
 		cancel:    cancel,
 		activeOps: make(map[string]*TrimTask),
 		logger:    logger,
+
+		progressInterval: trimProgressInterval,
 	}
 }
 
@@ -237,6 +249,11 @@ func (ts *TrimService) StartTrim(job *database.Job, startTime, endTime float64) 
 			}
 		}()
 		if _, err := ts.run(ts.ctx, plan, nil); err != nil {
+			if ts.ctx.Err() != nil {
+				// Stop cut it short: Moombox is stopping, nothing failed.
+				ts.logger.Info("trim interrupted by shutdown", "jobID", job.ID, "trimID", task.ID)
+				return
+			}
 			ts.logger.Error("Failed to create trim", "jobID", job.ID, "trimID", task.ID, "error", err.Error())
 		}
 	}()
@@ -264,6 +281,10 @@ type trimPlan struct {
 	// involved is set for a quality-split job: the segments the range
 	// covers, in order.
 	involved []segTrimInfo
+	// lastEmit is when run last sent this trim's "running" event. Only the
+	// trim's own goroutine touches it: FFmpeg's progress is reported from
+	// the stderr loop run's encode runs in.
+	lastEmit time.Time
 }
 
 // prepare holds the job's trim slot and checks the request, returning the
@@ -463,11 +484,13 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 		ts.emit(ev)
 	}()
 
+	plan.lastEmit = time.Now()
 	ts.emit(TrimEvent{TrimTask: ts.snapshot(plan), State: TrimStateRunning})
 	progress := func(pct float64) {
 		if progressFn != nil {
 			progressFn(pct)
 		}
+		ts.noteProgress(plan, pct)
 	}
 
 	if plan.involved == nil {
@@ -529,6 +552,41 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 
 	ts.logger.Info("trim created", "trimID", record.ID, "path", plan.trimPath)
 	return record, nil
+}
+
+// noteProgress records a trim's FFmpeg percentage — what RunningTrims gives a
+// page that connects mid-trim — and hands it on as a "running" event, at most
+// one per progressInterval: the same figure the TUI's dialog reads off its
+// own callback, for the dashboard's bar.
+func (ts *TrimService) noteProgress(plan *trimPlan, pct float64) {
+	ts.activeMu.Lock()
+	plan.task.Progress = pct
+	snap := *plan.task
+	interval := ts.progressInterval
+	ts.activeMu.Unlock()
+	now := time.Now()
+	if now.Sub(plan.lastEmit) < interval {
+		return
+	}
+	plan.lastEmit = now
+	ts.emit(TrimEvent{TrimTask: snap, State: TrimStateRunning})
+}
+
+// RunningTrims returns the trims the service is encoding, with their latest
+// progress: what a dashboard is seeded with when it connects (initial_state),
+// so a page reloaded mid-trim still shows the trim running. A reservation
+// whose request is still being checked has no id yet and is not listed.
+func (ts *TrimService) RunningTrims() []TrimTask {
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	out := make([]TrimTask, 0, len(ts.activeOps))
+	for _, t := range ts.activeOps {
+		if t.ID != "" {
+			out = append(out, *t)
+		}
+	}
+	slices.SortFunc(out, func(a, b TrimTask) int { return strings.Compare(a.ID, b.ID) })
+	return out
 }
 
 // encodeSingle encodes a single-file recording's trim into out.

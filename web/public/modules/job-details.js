@@ -4,6 +4,12 @@
  */
 import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
 
+/** A running trim's progress as the whole percentage its bar shows. */
+function trimPercent(progress) {
+  const n = Number(progress);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.floor(n))) : 0;
+}
+
 export class JobDetailsController {
   constructor(app) {
     this.app = app;
@@ -384,7 +390,8 @@ export class JobDetailsController {
    */
   _trimsSectionHtml(job) {
     const trims = Array.isArray(job.trims) ? job.trims : [];
-    if (trims.length === 0) return "";
+    const running = this._runningTrimsFor(job.id);
+    if (trims.length === 0 && running.length === 0) return "";
     const esc = (v) => this.app.escapeHtml(v);
     const rows = trims.map((trim) => {
       const range = `${esc(this.app.formatTimestamp(trim.startTime))} - ${esc(this.app.formatTimestamp(trim.endTime))}`;
@@ -401,18 +408,70 @@ export class JobDetailsController {
               </div>
             `;
     }).join('');
+    // A trim the server is encoding: its range, a bar, and the percentage
+    // (updateRunningTrim moves the last two in place). Last, as the newest.
+    const runningRows = running.map((t) => {
+      const range = `${esc(this.app.formatTimestamp(t.startTime))} - ${esc(this.app.formatTimestamp(t.endTime))}`;
+      const pct = trimPercent(t.progress);
+      return `
+              <div class="trim-item trim-item-running" data-running-trim="${esc(t.id)}">
+                <span class="trim-running-range"><strong>${range}</strong> (trimming)</span>
+                <sl-progress-bar class="trim-progress" value="${pct}" label="Trimming ${range}"></sl-progress-bar>
+                <span class="trim-progress-text">${pct}%</span>
+              </div>
+            `;
+    }).join('');
+    const summary = running.length > 0
+      ? `Trims (${trims.length}, ${running.length} running)`
+      : `Trims (${trims.length})`;
     return `
-      <sl-details summary="Trims (${esc(trims.length)})" open class="details-section">
+      <sl-details summary="${esc(summary)}" open class="details-section">
         <div class="trim-list">
-          ${rows}
+          ${rows}${runningRows}
         </div>
       </sl-details>
       `;
   }
 
-  /** What the Trims section shows, as one comparable string. */
+  /** The trims the server is running for jobId, oldest first. */
+  _runningTrimsFor(jobId) {
+    return Object.values(this.app.runningTrims || {})
+      .filter((t) => t.jobId === jobId)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  /**
+   * A running trim's frame. With its job's details open, the bar and the
+   * percentage move in place — a progress tick must not rebuild the list
+   * under the operator's pointer — and a trim with no row yet (its first
+   * frame) redraws the section. Another job's open details are left alone.
+   */
+  updateRunningTrim(task) {
+    if (this.app.selectedJobId !== task.jobId) return;
+    const row = [...document.querySelectorAll("#details-trims [data-running-trim]")]
+      .find((r) => r.dataset.runningTrim === task.id);
+    if (!row) {
+      const job = this.app.jobs.find((j) => j.id === task.jobId)
+        || this.app.archivedJobs.find((j) => j.id === task.jobId);
+      this._syncTrims(job);
+      return;
+    }
+    const pct = trimPercent(task.progress);
+    const bar = row.querySelector("sl-progress-bar");
+    if (bar && bar.value !== pct) bar.value = pct;
+    const text = row.querySelector(".trim-progress-text");
+    if (text && text.textContent !== `${pct}%`) text.textContent = `${pct}%`;
+  }
+
+  /**
+   * Which rows the Trims section shows, as one comparable string: the
+   * stored trims and the running ones. Progress is not in it — a tick moves
+   * a bar (updateRunningTrim), it does not redraw the list.
+   */
   _trimsKey(job) {
-    return (Array.isArray(job.trims) ? job.trims : []).map((t) => t.id).join("|");
+    const stored = (Array.isArray(job.trims) ? job.trims : []).map((t) => t.id).join("|");
+    const running = this._runningTrimsFor(job.id).map((t) => t.id).join("|");
+    return `${stored}#${running}`;
   }
 
   /**

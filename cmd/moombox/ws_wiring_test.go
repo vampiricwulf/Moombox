@@ -41,3 +41,27 @@ func TestInitialStateStillSuppliesTheLogs(t *testing.T) {
 			"is what replaced the hub's copy")
 	}
 }
+
+// TestInitialStateCarriesTheRunningTrims: a dashboard trim runs detached from
+// the page that started it, so a page reloaded mid-trim learns that it is
+// still running — and draws its progress bar — only from initial_state's
+// runningTrims, seeded from the trim service. Structural, for the reason
+// TestInitialStateStillSuppliesTheLogs gives.
+//
+// THE MUTANTS: put the list under another key (`"trims":`), or leave it
+// empty instead of reading s.trimSvc.RunningTrims() — a reload mid-trim shows
+// no trim running until its outcome arrives.
+func TestInitialStateCarriesTheRunningTrims(t *testing.T) {
+	src, err := os.ReadFile("ws_wiring.go")
+	if err != nil {
+		t.Fatalf("read ws_wiring.go: %v", err)
+	}
+	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	if !strings.Contains(text, `"runningTrims":`) {
+		t.Error(`the InitialState provider no longer puts a "runningTrims" key in the payload — a ` +
+			"dashboard reloaded mid-trim no longer shows the trim it started running")
+	}
+	if !strings.Contains(text, "s.trimSvc.RunningTrims()") {
+		t.Error("the InitialState payload does not read the trim service's RunningTrims")
+	}
+}

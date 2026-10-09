@@ -561,7 +561,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
 | POST | `/api/jobs/{id}/retry` | Retry failed job |
 | DELETE | `/api/jobs/{id}` | Delete job |
-| POST | `/api/jobs/{id}/trims` | Create trimmed clip |
+| POST | `/api/jobs/{id}/trims` | Start a trimmed clip — answers 202 at once; the encode runs on the server, and its progress and result arrive as `trim_status` WebSocket messages |
 | POST | `/api/import` | Import zip archive |
 | GET | `/api/config` | Get configuration |
 | PUT | `/api/config` | Update configuration |
@@ -577,7 +577,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/stats` | Get download statistics |
 | GET | `/api/logs` | Get recent log lines (from the in-memory ring buffer) |
 
-WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `pong`
+WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `trim_status`, `pong`
 
 ## yt-dlp Integration
 

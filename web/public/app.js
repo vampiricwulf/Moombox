@@ -33,6 +33,12 @@ export class MoomboxApp {
     // "error") — "done"/"idle" delete the entry. Rendered as a badge on the
     // Settings channel cards.
     this.backfillStatus = {};
+    // Trims the server is running, keyed by trim id (worker.TrimTask:
+    // id, jobId, startTime, endTime, progress). Seeded from `initial_state`
+    // (payload.runningTrims) and kept by `trim_status` frames; a trim leaves
+    // it when its outcome arrives. Drawn as a progress bar in its job's Trims
+    // section.
+    this.runningTrims = {};
     this.selectedJobId = null;
     this._selectedTaskJobs = new Set();
     this._selectedArchivedJobs = new Set();
@@ -1144,6 +1150,20 @@ export class MoomboxApp {
           }
         }
         this.settings.refreshBackfillBadges();
+        // Running trims: a trim outlives the page that started it, so a
+        // reload mid-trim learns of it here. Rebuilt, not merged — one that
+        // ended while the socket was down is dropped — and before the open
+        // details are refreshed below, which redraws their Trims section.
+        this.runningTrims = {};
+        for (const t of p.runningTrims || []) {
+          if (t?.id && t.jobId) this.runningTrims[t.id] = t;
+        }
+        if (this.selectedJobId) {
+          // An archived row's open details are not refreshed below.
+          const shown = this.jobs.find((j) => j.id === this.selectedJobId)
+            || this.archivedJobs.find((j) => j.id === this.selectedJobId);
+          if (shown) this.details._syncTrims(shown);
+        }
         // On a reconnect the archived list may carry rows the fresh active
         // list now owns again — prune them so neither panel double-counts.
         const archivedPruned = this._pruneArchivedAgainstActive();
@@ -1501,6 +1521,8 @@ export class MoomboxApp {
   /**
    * A trim_status frame: a trim the server runs (worker.TrimEvent). It is
    * keyed to the job and trim it names, never to whatever dialog is open —
+   * a "running" frame moves that trim's bar in its job's Trims section; an
+   * outcome takes the trim out of runningTrims and —
    * the dialog that asked may be long gone, or the trim may have been asked
    * for by the other UI. "finished" carries the stored record: it is merged
    * into the job this page holds (the OnTrimsChanged job_update normally
@@ -1510,7 +1532,14 @@ export class MoomboxApp {
    */
   handleTrimStatus(p) {
     if (!p?.id || !p.jobId) return;
+    if (p.state === "running") {
+      // A trim starting, then its progress (at most four frames a second).
+      this.runningTrims[p.id] = p;
+      this.details.updateRunningTrim(p);
+      return;
+    }
     if (p.state !== "finished" && p.state !== "failed") return;
+    delete this.runningTrims[p.id];
     const job = this.jobs.find((j) => j.id === p.jobId) || this.archivedJobs.find((j) => j.id === p.jobId);
     const range = `${formatTimestamp(p.startTime)} – ${formatTimestamp(p.endTime)}`;
     const of = job?.title ? ` of "${job.title}"` : "";

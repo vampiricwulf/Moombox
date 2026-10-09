@@ -512,12 +512,12 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
 - `log` — Log line (payload: string)
 - `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
-- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill}`)
+- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims}`)
 - `update_available` — New version found (payload: release info)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `connectivity` — Network reachability changed (payload: `{online}`)
 - `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
-- `trim_status` — A trim the trim service runs, from either UI (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running, then finished with the stored `trim` record or failed with an `error` written for the user)
+- `trim_status` — A trim the trim service runs, from either UI (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running — as it starts, then with FFmpeg's percentage at most every 250 ms — then finished with the stored `trim` record or failed with an `error` written for the user). Running trims are also seeded via `initial_state`, so a reload mid-trim still shows its progress bar
 - `pong` — Reply to the client's `ping` (payload: none)
 
 That list is the whole wire protocol: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the four `cmd/moombox` callers (`update_available`, `disk_status`, `backfill_status`, `config_update`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.

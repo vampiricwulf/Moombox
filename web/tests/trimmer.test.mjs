@@ -281,3 +281,62 @@ test("a job_update whose trims moved redraws the open Trims section", { skip }, 
   r.h.app.handleMessage({ type: "job_update", payload: { ...finishedJob("A"), trims: [] } });
   assert.deepEqual(trimsShown(r.h), []);
 });
+
+// ── A running trim's progress ─────────────────────────────────────────────
+//
+// The trim runs on the server; its "running" trim_status frames carry the
+// percentage the TUI reads off FFmpeg, and the job's Trims section draws it.
+
+const runningFrame = (id, jobId, progress) => ({ id, jobId, startTime: 60, endTime: 300, progress, state: "running" });
+const runningRow = (h, id) => [...h.el("details-trims").querySelectorAll("[data-running-trim]")]
+  .find((row) => row.dataset.runningTrim === id);
+const barValue = (row) => {
+  const bar = row.querySelector("sl-progress-bar");
+  return Number(bar.value ?? bar.getAttribute("value"));
+};
+
+// Mutants: drop the running rows from _trimsSectionHtml (no bar); redraw the
+// section on every tick (updateRunningTrim always takes the _syncTrims arm,
+// forced) — the row is rebuilt under the pointer; keep the trim in
+// runningTrims after its outcome (drop handleTrimStatus's delete) — the bar
+// outlives the trim.
+test("a running trim's bar moves in place and gives way to the trim", { skip }, async () => {
+  const r = await trimRace();
+  await r.openDetails("A");
+  trimStatus(r.h, runningFrame("tA", "A", 0));
+  const row = runningRow(r.h, "tA");
+  assert.ok(row, "the running trim has no bar in its job's Trims section");
+  assert.equal(barValue(row), 0);
+  assert.match(r.h.el("details-trims").querySelector("sl-details").getAttribute("summary"), /Trims \(0, 1 running\)/);
+
+  trimStatus(r.h, runningFrame("tA", "A", 42.7));
+  assert.equal(runningRow(r.h, "tA"), row, "a progress tick rebuilt the list");
+  assert.equal(barValue(row), 42);
+  assert.equal(row.querySelector(".trim-progress-text").textContent, "42%");
+
+  // Another job's frame leaves this job's section as it is.
+  trimStatus(r.h, runningFrame("tB", "B", 5));
+  assert.equal(runningRow(r.h, "tB"), undefined);
+
+  trimStatus(r.h, { ...runningFrame("tA", "A", 100), state: "finished", trim: trimRecord("tA", "A", 60, 300) });
+  assert.equal(runningRow(r.h, "tA"), undefined, "the finished trim kept its bar");
+  assert.deepEqual(trimsShown(r.h), ["tA"]);
+});
+
+// Mutants: initial_state does not seed runningTrims — the reloaded page
+// shows no bar; merge it instead of rebuilding (drop `this.runningTrims =
+// {}` there) — a trim that ended while the socket was down keeps its bar.
+test("a page reloaded mid-trim shows the trim still running", { skip }, async () => {
+  const r = await trimRace();
+  const snapshot = (jobs, runningTrims) => r.h.app.handleMessage({ type: "initial_state", payload: { jobs, runningTrims } });
+  snapshot([finishedJob("A"), finishedJob("B")], [{ id: "tA", jobId: "A", startTime: 60, endTime: 300, progress: 30 }]);
+  await r.openDetails("A");
+  const row = runningRow(r.h, "tA");
+  assert.ok(row, "the reloaded page does not show the running trim");
+  assert.equal(barValue(row), 30);
+
+  // A reconnect whose snapshot no longer lists it: it ended meanwhile.
+  snapshot([{ ...finishedJob("A"), trims: [trimRecord("tA", "A", 60, 300)] }, finishedJob("B")], []);
+  assert.equal(runningRow(r.h, "tA"), undefined, "a trim that ended while the socket was down kept its bar");
+  assert.deepEqual(trimsShown(r.h), ["tA"]);
+});
