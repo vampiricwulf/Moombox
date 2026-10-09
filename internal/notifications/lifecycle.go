@@ -224,10 +224,32 @@ func (l *lifecycleTracker) jobLocked(jobID string) *lifecycleJob {
 }
 
 // messageID returns the message this target edits for this job.
-func (l *lifecycleTracker) messageID(jobID, key string) (string, bool) {
+//
+// legacy are the keys an older release stored this target's ids under
+// (legacyResolvedURL, manager.go). A job whose row still holds one was opened
+// before its webhook's spelling was canonicalised, and its next event must
+// edit that message, not open a second one beside it. The id is ADOPTED: it
+// moves to key in memory, and every legacy key leaves the map, so the job's
+// next row write (remember) stores it under the current key and drops the
+// old one — no write of its own, so the one-write-per-(job, target) budget
+// stands. Until then a restart reads the old key again and adopts it again.
+// Dropping the legacy keys even when key already holds an id matters too:
+// release closes the entry only once every key in the map is closed, and no
+// target will ever close a key nobody sends under any more.
+func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	id := l.jobLocked(jobID).msgs[key]
+	j := l.jobLocked(jobID)
+	for _, lk := range legacy {
+		if lk == "" || lk == key {
+			continue
+		}
+		if old := j.msgs[lk]; old != "" && j.msgs[key] == "" {
+			j.msgs[key] = old
+		}
+		delete(j.msgs, lk)
+	}
+	id := j.msgs[key]
 	return id, id != ""
 }
 
@@ -458,7 +480,7 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 	if terminalLifecycleEvents[opts.Event] {
 		// Close an OPEN message; never open one. A job whose first word to
 		// this target is "failed" has no story to rewrite.
-		if id, ok := m.tracker().messageID(opts.JobID, t.msgKey); ok {
+		if id, ok := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...); ok {
 			return lifecyclePlan{Manage: true, MessageID: id, AlsoSeparate: true}
 		}
 		// The lookup just created the entry, and this event is the end of the
@@ -468,7 +490,7 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 		m.tracker().release(opts.JobID, t.msgKey)
 		return lifecyclePlan{}
 	}
-	id, _ := m.tracker().messageID(opts.JobID, t.msgKey)
+	id, _ := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...)
 	return lifecyclePlan{Manage: true, MessageID: id}
 }
 

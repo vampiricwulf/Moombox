@@ -628,7 +628,16 @@ host, a trailing slash and an empty query (a bare `?`) all resolve to the one
 `https://discord.com/…` form
 (`canonicalDiscordURL`), which is also what target dedupe keys on (a slash or a
 `ptb.` host used to build a second target that posted every embed again, and in
-edit mode opened new messages for every job in progress); a target the operator removed leaves an orphaned entry that nothing
+edit mode opened new messages for every job in progress). The releases that
+shipped edit mode, 2.8.9 and 2.8.10, rewrote only `discordapp.com` and kept the
+rest as typed, so a row they wrote under one of the other spellings holds the
+id under that spelling's own key. A target remembers the old key of every
+spelling folded into it (`legacyResolvedURL`, `internal/notifications/manager.go`)
+and reads it when the current key misses: the id is adopted under the current
+key in memory and the old key leaves the map (`messageID`,
+`internal/notifications/lifecycle.go`), so a job open across the upgrade keeps
+editing its message — and its error or cancel still closes it — and the old key
+leaves the row at the job's next write, with no write of its own. A target the operator removed leaves an orphaned entry that nothing
 reads; a target the operator adds starts a new message at its next allowed
 event; and deleting the job drops the row and the ids with it (no DELETE is ever
 sent to Discord) — and the running process's copy too: `onJobDeleted` calls

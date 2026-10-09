@@ -4,6 +4,7 @@ package notifications
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -348,6 +349,11 @@ type notificationTarget struct {
 	// handing the raw webhook URL — the credential — to the hot path the
 	// hashing exists to keep it out of.
 	msgKey string
+	// legacyMsgKeys are the keys 2.8.9 and 2.8.10 stored this target's
+	// message ids under, for every configured spelling of it whose old
+	// resolution differs from today's (legacyResolvedURL). Read only on a
+	// miss, so a job opened before the upgrade keeps editing its message.
+	legacyMsgKeys []string
 }
 
 // sender is one delivery destination.
@@ -429,6 +435,30 @@ func canonicalDiscordURL(raw string) string {
 		query = ""
 	}
 	return "https://discord.com" + strings.TrimSuffix(path, "/") + query
+}
+
+// legacyResolvedURL is the URL 2.8.9 and 2.8.10 — the releases that shipped
+// edit mode — resolved a configured webhook to, and therefore the string
+// whose targetMsgKey their rows store message ids under. Those releases only
+// rewrote the legacy discordapp.com host and kept everything else as typed,
+// so a ptb./canary. host, a trailing slash or a bare "?" each gave the
+// webhook a key of its own; canonicalDiscordURL now folds them all into one.
+// Without the old key a job open across the upgrade lost its message: its
+// next event opened a second one, and its error or cancel — which never
+// opens one — left the first reading "Downloading" for good.
+//
+// Kept for as long as a row can hold such a key: a finished job's row
+// outlives any number of upgrades, and a Retry of it edits its message.
+// Only ever called on a URL parseTarget accepted.
+func legacyResolvedURL(url string) string {
+	if raw, ok := strings.CutPrefix(url, "discord://"); ok {
+		segments := strings.SplitN(raw, "/", 3)
+		if len(segments) < 2 {
+			return ""
+		}
+		return "https://discord.com/api/webhooks/" + strings.Join(segments[:2], "/")
+	}
+	return strings.Replace(url, "discordapp.com", "discord.com", 1)
 }
 
 // ValidateURL reports whether a notification URL would be accepted by the
@@ -586,9 +616,23 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		if d, ok := s.(*DiscordWebhook); ok {
 			key = d.URL
 		}
+		msgKey := targetMsgKey(key)
+		// The key this spelling's ids were stored under before the upgrade,
+		// when it differs from the one they are stored under now.
+		legacyKey := ""
+		if key != "" {
+			if lk := targetMsgKey(legacyResolvedURL(url)); lk != msgKey {
+				legacyKey = lk
+			}
+		}
 		if key != "" {
 			if idx, dup := seen[key]; dup {
 				collapsed++
+				// Every spelling that collapsed here had a key of its own
+				// before the upgrade, so each one's stored ids stay readable.
+				if legacyKey != "" && !slices.Contains(targets[idx].legacyMsgKeys, legacyKey) {
+					targets[idx].legacyMsgKeys = append(targets[idx].legacyMsgKeys, legacyKey)
+				}
 				// UNION the one per-target option, with a nil filter winning
 				// outright. nil means "every event", so a webhook listed once
 				// unfiltered and once filtered keeps the wider subscription the
@@ -616,6 +660,10 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			seen[key] = len(targets)
 		}
 
+		var legacyMsgKeys []string
+		if legacyKey != "" {
+			legacyMsgKeys = []string{legacyKey}
+		}
 		targets = append(targets, notificationTarget{
 			sender:         s,
 			events:         events,
@@ -624,7 +672,8 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			mentionAllowed: mentionAllowed,
 			mentionEvents:  mentionEvents,
 			mode:           normalizeTargetMode(nc.Mode),
-			msgKey:         targetMsgKey(key),
+			msgKey:         msgKey,
+			legacyMsgKeys:  legacyMsgKeys,
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
