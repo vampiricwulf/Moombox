@@ -179,26 +179,35 @@ func (m *StatsDialogModel) View() string {
 
 // writeStorage is the Web Stats tab's Storage card, flattened to rows: the
 // disk bar, the Web's two labels under it (used of total, free and the
-// percentage) folded onto one line, then the six size figures.
+// percentage) folded onto one line — or, with no disk reading, the Web's
+// one-line notice in their place — then the six size figures.
 func (m *StatsDialogModel) writeStorage(b *strings.Builder, tight bool) {
 	d := m.snap.Disk
 	fmt.Fprintf(b, "%s\n", HeaderStyle.Render("Storage"))
 
-	used := int64(d.Total) - int64(d.Free)
-	used = max(used, 0)
-	bar := m.bar
-	switch d.WarnLevel {
-	case "critical":
-		bar.FullColor = ColorError
-	case "warn":
-		bar.FullColor = ColorWarning
-	default:
-		bar.FullColor = ColorFinished
+	// No reading — stats.Build's zero Disk, before the first successful disk
+	// check and for as long as the output directory's disk cannot be read:
+	// say so in the Web's words, not with an empty bar over "0B used of 0B
+	// 0B free (0.0% used)", which reads as a real disk with nothing on it.
+	if d.Total == 0 {
+		fmt.Fprintf(b, "  %s\n", DimStyle.Render("No disk reading available"))
+	} else {
+		used := int64(d.Total) - int64(d.Free)
+		used = max(used, 0)
+		bar := m.bar
+		switch d.WarnLevel {
+		case "critical":
+			bar.FullColor = ColorError
+		case "warn":
+			bar.FullColor = ColorWarning
+		default:
+			bar.FullColor = ColorFinished
+		}
+		fmt.Fprintf(b, "  %s\n", bar.ViewAs(d.UsedPct/100))
+		fmt.Fprintf(b, "  %s used of %s   %s free (%.1f%% used)\n",
+			utils.FormatFileSize(used), utils.FormatFileSize(int64(d.Total)),
+			utils.FormatFileSize(int64(d.Free)), d.UsedPct)
 	}
-	fmt.Fprintf(b, "  %s\n", bar.ViewAs(d.UsedPct/100))
-	fmt.Fprintf(b, "  %s used of %s   %s free (%.1f%% used)\n",
-		utils.FormatFileSize(used), utils.FormatFileSize(int64(d.Total)),
-		utils.FormatFileSize(int64(d.Free)), d.UsedPct)
 
 	writeStatRows(b, [][2]string{
 		{"Total Recorded", utils.FormatFileSize(m.snap.TotalSize)},

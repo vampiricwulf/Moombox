@@ -7,6 +7,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -64,6 +65,44 @@ func TestStatsDialogRendersEveryWebCard(t *testing.T) {
 		if w := runewidth.StringWidth(line); w > 100 {
 			t.Errorf("line wider than the dialog (%d): %q", w, line)
 		}
+	}
+}
+
+// With no disk reading — stats.Build's zero Disk, before the first successful
+// disk check or while the output directory's disk cannot be read — the
+// overlay drew an empty bar over "0B used of 0B   0B free (0.0% used)", a
+// real-looking 0-byte disk, where the Web Stats tab says "No disk reading
+// available" (web/tests/dashboard-text.test.mjs pins the Web side). The
+// storage figures under it still show, as the Web's Storage cards do.
+//
+// Mutant: writeStorage without its d.Total == 0 arm — the fabricated disk
+// line is back and the notice is missing.
+func TestStatsDialogSaysWhenThereIsNoDiskReading(t *testing.T) {
+	for _, size := range [][2]int{{60, 20}, {80, 24}, {100, 40}} {
+		m := NewStatsDialogModel()
+		m.SetSize(size[0], size[1])
+		m.Open()
+		snap := stats.Build(&database.JobStats{FinishedSize: 512 << 30}, nil)
+		m.SetSnapshot(snap)
+		v := stripANSI(m.View())
+		if !strings.Contains(v, "No disk reading available") {
+			t.Errorf("%dx%d: the Web's no-reading notice is missing:\n%s", size[0], size[1], v)
+		}
+		if strings.Contains(v, "used of") || strings.Contains(v, "░") {
+			t.Errorf("%dx%d: a disk bar and labels were drawn with no reading:\n%s", size[0], size[1], v)
+		}
+		if !strings.Contains(v, "512.0GB") {
+			t.Errorf("%dx%d: the storage figures must still show:\n%s", size[0], size[1], v)
+		}
+	}
+
+	// A reading brings the bar and its labels back.
+	m := NewStatsDialogModel()
+	m.SetSize(100, 40)
+	m.Open()
+	m.SetSnapshot(sampleSnapshot())
+	if v := stripANSI(m.View()); strings.Contains(v, "No disk reading") || !strings.Contains(v, "used of") {
+		t.Errorf("with a reading the bar and its labels show, not the notice:\n%s", v)
 	}
 }
 

@@ -31,6 +31,33 @@ func TestFormatFileSize(t *testing.T) {
 	}
 }
 
+// TestFormatFileSizeRoundsTiesLikeTheWeb: a size of exactly N.25 of a unit is
+// a tie at one decimal, and the Web's formatBytes (toFixed(1)) rounds it up
+// where %.1f rounded it to even — the TUI read "1.2GB" beside the dashboard's
+// "1.3GB". The wants are what formatBytes in web/public/modules/utils.js
+// prints for the same inputs; N.75 ties and non-ties already agreed.
+//
+// Mutant: toFixed1 formatting v with %.1f (round half to even) — every .25
+// tie reads one tenth low.
+func TestFormatFileSizeRoundsTiesLikeTheWeb(t *testing.T) {
+	for in, want := range map[int64]string{
+		1280:                "1.3KB", // 1.25 KiB
+		5*1024 + 256:        "5.3KB",
+		2*1024*1024 + 1<<18: "2.3MB",
+		1342177280:          "1.3GB", // 1.25 GiB
+		5 << 40 / 4:         "1.3TB",
+		1792:                "1.8KB", // 1.75: both rules round up
+		1288:                "1.3KB", // 1.2578…, not a tie
+		1331:                "1.3KB", // 1.2998…
+		1023 * 1024:         "1023.0KB",
+		1024*1024 - 1:       "1024.0KB", // rounds up within its tier, as the Web does
+	} {
+		if got := FormatFileSize(in); got != want {
+			t.Errorf("FormatFileSize(%d) = %q, the Web's formatBytes prints %q", in, got, want)
+		}
+	}
+}
+
 func TestFormatDurationHuman(t *testing.T) {
 	tests := []struct {
 		d        time.Duration
