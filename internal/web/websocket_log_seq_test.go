@@ -31,8 +31,10 @@ import (
 // Mutants this kills:
 //   - BroadcastLog leaving Seq off the frame: no frame can be told apart.
 //   - a frame numbered with anything but the ring's number (the forwarder
-//     sending 0, or the logger's broadcast handing out another count): the
-//     replayed line no longer sits at or below logSeq, or the new one above.
+//     sending 0, or the logger's broadcast feeding 0): the replayed line no
+//     longer sits at or below logSeq, or the new one above. A line fed under
+//     another line's number needs two goroutines logging at once; the
+//     logger's TestAFedLineKeepsTheNumberTheRingGaveIt interleaves them.
 func TestAConnectShowsEachLogLineOnce(t *testing.T) {
 	log, err := logger.New("", "DEBUG", 1<<20, 1)
 	if err != nil {

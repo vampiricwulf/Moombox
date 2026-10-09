@@ -1112,8 +1112,10 @@ func TestLineRouterRunsInsideTheLogCall(t *testing.T) {
 // Mutants this kills:
 //   - addToRingBuffer not advancing ringSeq: the snapshot says 0 and every
 //     line is numbered 0, so nothing tells the replayed line from a new one.
-//   - broadcast handing SubscribeLines a number other than the ring's (0, or
-//     one read again after the fact): the fed numbers stop matching.
+//   - broadcast handing SubscribeLines 0 instead of the ring's number: the fed
+//     numbers stop matching. (A number read again after the fact matches it
+//     whenever one goroutine logs; TestAFedLineKeepsTheNumberTheRingGaveIt
+//     interleaves two.)
 //   - RecentLines returning the line count instead of the newest number once
 //     the ring wraps: the snapshot claims fewer lines than it has seen.
 //   - Close leaving SubscribeLines channels open: the range below never ends.
@@ -1162,5 +1164,68 @@ func TestRingSequenceNumbersPairASnapshotWithItsFeed(t *testing.T) {
 	}
 	if after := fed[1]; !strings.HasSuffix(after.Text, "after the snapshot") || after.Seq != snapSeq+1 {
 		t.Errorf("the line logged after the snapshot was fed as %q #%d, want #%d — above the snapshot's", after.Text, after.Seq, snapSeq+1)
+	}
+}
+
+// TestAFedLineKeepsTheNumberTheRingGaveIt: SubscribeLines feeds each line
+// with the number addToRingBuffer handed back for THAT line, even when another
+// goroutine's line takes the next number before the first is fed. A reader
+// skips what its snapshot already holds by that number (W24-14), so a line
+// fed under a later line's number sits above the snapshot's newest and shows
+// twice, while the later line's own number no longer says where it is.
+//
+// Deterministic, not a race to win: log() hands the line to the router
+// between the ring append and the feed, holding no lock, so the router parks
+// the first goroutine there while this one logs a second line end to end.
+//
+// Mutant: broadcast ignoring its seq and reading l.ringSeq again under ringMu
+// — the parked line is fed under the second line's number.
+func TestAFedLineKeepsTheNumberTheRingGaveIt(t *testing.T) {
+	l, err := New("", "INFO", 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SuppressStdout()
+	sub := l.SubscribeLines()
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	l.SetLineRouter(func(line string) {
+		if strings.HasSuffix(line, "parked between the ring and the feed") {
+			close(parked)
+			<-release
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("panic logging the parked line: %v", r)
+			}
+		}()
+		l.Info("parked between the ring and the feed")
+	}()
+	<-parked
+	l.Info("logged while the first waits")
+	close(release)
+	<-done
+
+	lines, newest := l.RecentLines()
+	l.Close()
+	ringNumber := map[string]uint64{}
+	for i, text := range lines {
+		ringNumber[text] = newest - uint64(len(lines)-1-i)
+	}
+	var fed []Line
+	for line := range sub {
+		fed = append(fed, line)
+	}
+	if len(fed) != 2 {
+		t.Fatalf("SubscribeLines delivered %d lines, want 2: %v", len(fed), fed)
+	}
+	for _, line := range fed {
+		if want, ok := ringNumber[line.Text]; !ok || line.Seq != want {
+			t.Errorf("%q was fed as #%d; the ring numbered it #%d", line.Text, line.Seq, want)
+		}
 	}
 }
