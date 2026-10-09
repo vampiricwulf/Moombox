@@ -2,16 +2,19 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -37,6 +40,13 @@ func stubRefreshVideoInfo(t *testing.T, fresh func() *youtube.VideoInfo) *atomic
 // rendition being appended mid-file. The token half follows the SERVED
 // stream's client: a stream riding a missing_pot shadow stays bare.
 //
+// A token-free stream the fresh pool does not serve is asked of the
+// cookieless chain again, as DownloadVod's missing_pot re-extract asked it:
+// that stream came from there when the extraction's web_creator pool was
+// adequate and carried no shadow, and a fresh extraction carries none either
+// (the 2026-09-29 incident's shape). A stream that needs a token is never in
+// that chain and does not ask it.
+//
 // Mutant: dropping `c.ContentLength == served.ContentLength` from
 // sameVodFile — the re-encode row installs a URL for another file. Mutant:
 // dropping `formats[i].TokenFreeAlternate` from its candidates — the shadow
@@ -44,32 +54,49 @@ func stubRefreshVideoInfo(t *testing.T, fresh func() *youtube.VideoInfo) *atomic
 // row takes the web_creator winner's URL. Mutant: dropping
 // `youtube.GvsTokenRequired(served.Source) &&` from refreshVodURL — the
 // shadow row mints a token for a bare URL. Mutant: bypassCache true → false
-// — the tokenised row's mint reads the cache.
+// — the tokenised row's mint reads the cache. Mutant: dropping the cookieless
+// re-extract from refreshVodURL — the incident row keeps the expired URL.
+// Mutant: dropping its `!youtube.GvsTokenRequired(served.Source)` gate — the
+// tokenised re-encode row asks the cookieless chain. Mutant: handing the
+// re-extract ctx instead of refreshCtx — the incident row's fetch carries no
+// deadline.
 func TestRefreshVodURLServesTheSameFile(t *testing.T) {
-	const old, freshURL, shadowURL = "http://cdn.invalid/videoplayback?expire=1&id=o-A&itag=137&clen=1000",
+	const old, freshURL, shadowURL, cookielessURL = "http://cdn.invalid/videoplayback?expire=1&id=o-A&itag=137&clen=1000",
 		"http://cdn.invalid/videoplayback?expire=2&id=o-B&itag=137&clen=1000",
-		"http://cdn.invalid/videoplayback?expire=2&id=o-C&itag=137&clen=1000&c=ANDROID_VR"
+		"http://cdn.invalid/videoplayback?expire=2&id=o-C&itag=137&clen=1000&c=ANDROID_VR",
+		"http://cdn.invalid/visionos/videoplayback?expire=2&id=o-D&itag=137&clen=1000"
+	// What the cookieless chain serves of itag 137: the served file, and a
+	// re-encode of it.
+	cookielessFile := []youtube.Format{{Itag: 137, URL: cookielessURL, ContentLength: "1000", Source: "visionos"}}
+	cookielessReencode := []youtube.Format{{Itag: 137, URL: cookielessURL, ContentLength: "2000", Source: "visionos"}}
 	for _, tc := range []struct {
-		name      string
-		served    string // the served stream's client
-		fresh     []youtube.Format
-		wantURL   string
-		wantToken string
+		name           string
+		served         string // the served stream's client
+		fresh          []youtube.Format
+		cookieless     []youtube.Format // what the cookieless chain answers
+		wantURL        string
+		wantToken      string
+		wantCookieless int32 // cookieless re-extracts
 	}{
 		{"the same file re-resolves", "android_vr",
-			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "android_vr"}}, freshURL, ""},
+			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "android_vr"}}, cookielessFile, freshURL, "", 0},
 		{"a re-encode under the same itag keeps the current URL", "android_vr",
-			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "2000", Source: "android_vr"}}, "", ""},
+			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "2000", Source: "android_vr"}}, cookielessReencode, "", "", 1},
 		{"a missing_pot stream rides the fresh shadow, bare", "android_vr",
 			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "web_creator",
-				TokenFreeAlternate: &youtube.Format{Itag: 137, URL: shadowURL, ContentLength: "1000", Source: "android_vr"}}}, shadowURL, ""},
+				TokenFreeAlternate: &youtube.Format{Itag: 137, URL: shadowURL, ContentLength: "1000", Source: "android_vr"}}}, cookielessFile, shadowURL, "", 0},
+		{"a missing_pot stream the cookieless chain served is asked of it again, bare", "visionos",
+			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "web_creator"}}, cookielessFile, cookielessURL, "", 1},
 		{"a tokenised stream is re-minted past the cache", "web_creator",
-			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "web_creator"}}, freshURL, "fresh-token"},
+			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "1000", Source: "web_creator"}}, cookielessFile, freshURL, "fresh-token", 0},
+		{"a tokenised re-encode asks no cookieless client", "web_creator",
+			[]youtube.Format{{Itag: 137, URL: freshURL, ContentLength: "2000", Source: "web_creator"}}, cookielessFile, "", "fresh-token", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubRefreshVideoInfo(t, func() *youtube.VideoInfo {
 				return &youtube.VideoInfo{PlayerURL: "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js", Formats: tc.fresh}
 			})
+			rx, sawDeadline := fakeCookielessCtx(t, tc.cookieless, nil)
 			var mints int
 			minter := &fakePotProvider{generate: func(ctx context.Context, binding string, bypassCache bool) (string, error) {
 				mints++
@@ -89,6 +116,11 @@ func TestRefreshVodURLServesTheSameFile(t *testing.T) {
 			}
 			if tc.wantToken == "" && mints != 0 {
 				t.Errorf("minted %d tokens for a stream whose client needs none", mints)
+			}
+			if n := rx.Load(); n != tc.wantCookieless {
+				t.Errorf("cookieless re-extracts = %d, want %d", n, tc.wantCookieless)
+			} else if n > 0 && !sawDeadline.Load() {
+				t.Errorf("the cookieless re-extract's ctx carries no deadline — it must run under the refresh's bound")
 			}
 		})
 	}
@@ -228,5 +260,68 @@ func TestVodDownloadersWireRefreshAndConnectivity(t *testing.T) {
 				t.Errorf("player-response re-fetches = %d, want one per stream", refreshes.Load())
 			}
 		})
+	}
+}
+
+// TestVodMissingPotStreamRefreshesItsURL pins the refresh end to end for the
+// 2026-09-29 incident's shape: a cookied extraction whose web_creator pool is
+// adequate carries no token-free shadow, the GVS mint fails, and DownloadVod
+// serves the cookieless chain's visionos copies. Their URLs expire
+// mid-transfer. The player-response re-fetch hands back the same web_creator
+// pool, with nothing of the served token class in it, so the refresh asks the
+// cookieless chain again for the same file — where it used to return nothing,
+// and the job ended on the 403 the refresh exists to answer.
+//
+// Mutant: dropping the cookieless re-extract from refreshVodURL — the
+// download fails on "HTTP 403; the URL refresh returned nothing".
+func TestVodMissingPotStreamRefreshesItsURL(t *testing.T) {
+	srv := newVodExpiryServer(t)
+	relabel := func(formats []youtube.Format, source string, level int) []youtube.Format {
+		for i := range formats {
+			formats[i].Source = source
+			if source == "visionos" {
+				formats[i].URL = strings.Replace(formats[i].URL, "videoplayback", "visionos/videoplayback", 1)
+			}
+			formats[i] = withLevel(formats[i], level)
+		}
+		return formats
+	}
+	fakeVodMint(t, "", errors.New("sidecar down"))
+	var rx atomic.Int32
+	orig := fetchCookielessFormats
+	fetchCookielessFormats = func(*youtube.Service, context.Context, string) ([]youtube.Format, error) {
+		// Each call hands out the next URL generation; the setup's, expire=1,
+		// expires past the first chunk.
+		return relabel(srv.formats(int(rx.Add(1))), "visionos", youtube.AuthLevelVisionOS), nil
+	}
+	t.Cleanup(func() { fetchCookielessFormats = orig })
+	refreshes := stubRefreshVideoInfo(t, func() *youtube.VideoInfo {
+		return &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, Formats: relabel(srv.formats(2), "web_creator", youtube.AuthLevelWebCreator)}
+	})
+
+	job, _ := reextractJob(t)
+	job.Logger = discardLogger{} // two downloaders log at once
+	info := &youtube.VideoInfo{PlayerURL: "https://www.youtube.com/s/player/abcd1234/player_ias.vflset/en_US/base.js", StreamStatus: youtube.StreamVOD,
+		Formats: relabel(srv.formats(1), "web_creator", youtube.AuthLevelWebCreator)}
+	res, err := DownloadVod(context.Background(), job, info, stubCipherSolver{}, nil, &bgutils.PotProvider{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.VideoFormat.Source != "visionos" || res.AudioFormat.Source != "visionos" {
+		t.Fatalf("setup served %s / %s, want the cookieless visionos copies", res.VideoFormat.Source, res.AudioFormat.Source)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	o := &DownloadOrchestrator{logger: discardLogger{}}
+	if err := o.runDownloaders(ctx, res); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	for _, p := range []string{res.VideoPath, res.AudioPath} {
+		if fi, err := os.Stat(p); err != nil || fi.Size() != srv.size {
+			t.Errorf("%s = %v (err %v), want the whole %d-byte file", p, fi, err, srv.size)
+		}
+	}
+	if r, n := refreshes.Load(), rx.Load(); r != 2 || n != 3 {
+		t.Errorf("player-response re-fetches = %d, cookieless re-extracts = %d — want one of each per stream, plus the setup's re-extract", r, n)
 	}
 }

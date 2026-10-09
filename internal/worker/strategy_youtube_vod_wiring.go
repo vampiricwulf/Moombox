@@ -39,7 +39,9 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 // seam) and resolves the format serving the SAME file (sameVodFile): a URL
 // for any other would append a different rendition mid-file, so none is
 // returned and the engine's refusal stands. The engine checks the URL's
-// fingerprint again before installing it (refreshDirectURL).
+// fingerprint again before installing it (refreshDirectURL). A token-free
+// stream the fresh pool does not serve is looked for in the cookieless chain
+// too, where DownloadVod's missing_pot re-extract found it.
 //
 // The token half runs first, as in refreshGvsCredentials, and is gated by the
 // SERVED stream's own client: a stream riding a missing_pot shadow was left
@@ -76,6 +78,24 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, serve
 		return "", poToken
 	}
 	f := sameVodFile(fresh.Formats, &served)
+	if f == nil && !youtube.GvsTokenRequired(served.Source) {
+		// A token-free stream DownloadVod's missing_pot re-extract served is
+		// missing from the fresh pool for the reason it was missing from the
+		// first: the cascade runs the cookieless chain only when web_creator
+		// is inadequate, so an adequate pool carries no shadow to find. Ask
+		// that chain again, as DownloadVod did, under the same bound.
+		// sameVodFile reads every format and shadow it is handed, so the
+		// fetch needs no merge into the pool to be searched. A stream that
+		// needs a token cannot come from that chain, so its refresh does not
+		// ask it.
+		extra, rxErr := fetchCookielessFormats(job.YT, refreshCtx, job.Job.VideoID)
+		if rxErr != nil {
+			job.Logger.Warn("[POT] VOD URL refresh: cookieless re-extract failed",
+				"jobID", job.Job.ID, "tag", tag, "err", rxErr)
+		} else {
+			f = sameVodFile(extra, &served)
+		}
+	}
 	if f == nil {
 		job.Logger.Warn("[POT] VOD URL refresh: the re-extraction serves no format for the same file — keeping the current URL",
 			"jobID", job.Job.ID, "tag", tag, "itag", served.Itag, "clen", served.ContentLength, "source", served.Source)
