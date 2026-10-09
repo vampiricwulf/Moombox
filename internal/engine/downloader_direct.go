@@ -465,7 +465,7 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	offset := d.bytesWritten.Load()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return 0, false, fmt.Errorf("create request: %w", redact.PoToken(err))
+		return 0, false, fmt.Errorf("create request: %w", redact.MediaError(err))
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	if offset > 0 {
@@ -475,7 +475,7 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return 0, true, idleFetchError(ctx, idle, fmt.Errorf("download: %w", redact.PoToken(err)))
+		return 0, true, idleFetchError(ctx, idle, fmt.Errorf("download: %w", redact.MediaError(err)))
 	}
 	reportSuccess("engine/fetch")
 	resp.Body = &idleBody{rc: resp.Body, timer: idleTimer, idle: idle}

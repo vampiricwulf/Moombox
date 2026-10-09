@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -1488,8 +1489,12 @@ func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	return nil
 }
 
-// truncateURL returns the first maxLen characters of a URL for logging.
+// truncateURL returns a URL for a log line: its media credentials cut
+// (redact.MediaURL), then its first maxLen characters. Truncating alone hid
+// nothing that mattered: a googlevideo URL carries the client's public IP
+// (ip=) within its first 120 characters.
 func truncateURL(u string, maxLen int) string {
+	u = redact.MediaURL(u)
 	if len(u) <= maxLen {
 		return u
 	}

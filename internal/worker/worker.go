@@ -1662,11 +1662,12 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 
 	// The one text every sink below shares — the "job error" line, the
 	// stored error the dashboard and the TUI show, and the Job Failed embed —
-	// so a GVS PO token that reached this error by any route is cut out once,
-	// here. The producers redact at the source too (redact.PoToken on the
-	// fetch errors that quote a tokenised URL); this is the last stop before
-	// the text is kept and posted.
-	errMsg := redact.PoTokenText(err.Error())
+	// so a googlevideo URL's credentials (the GVS PO token, the client's
+	// public IP, the signatures) that reached this error by any route are cut
+	// out once, here. The producers redact at the source too
+	// (redact.MediaError on the fetch errors that quote a media URL); this is
+	// the last stop before the text is kept and posted.
+	errMsg := redact.MediaText(err.Error())
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
 
 	status := database.StatusError
@@ -2064,21 +2065,23 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 
 // fetchURL is a helper to download a URL's body.
 //
-// Its errors go through redact.PoToken. The live DASH and HLS strategies
-// fetch their manifest here with the GVS PO token appended as a /pot/<token>
-// path segment, and a transport failure — or a URL net/url refuses — is a
-// *url.Error quoting the whole URL: returned as it was, the token reached the
-// "job error" log line, the job's stored error and the Job Failed embed.
+// Its errors go through redact.MediaError. The live DASH and HLS strategies
+// fetch their manifest here — a signed googlevideo URL carrying the client's
+// public IP and the URL's signature, with the GVS PO token appended as a
+// /pot/<token> path segment — and a transport failure, or a URL net/url
+// refuses, is a *url.Error quoting the whole URL: returned as it was, all of
+// it reached the "job error" log line, the job's stored error and the Job
+// Failed embed.
 func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, 0, redact.PoToken(err)
+		return nil, 0, redact.MediaError(err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	resp, err := workerHTTPClient.Do(req)
 	if err != nil {
-		return nil, 0, redact.PoToken(err)
+		return nil, 0, redact.MediaError(err)
 	}
 	defer resp.Body.Close()
 

@@ -246,7 +246,7 @@ func refusedURL(t *testing.T) string {
 // error` and the job's stored error. The token is redacted in place while the
 // error chain stays intact for errors.Is / errors.As.
 //
-// Mutant (run): returning err unchanged from redact.PoToken fails every
+// Mutant (run): returning err unchanged from redact.MediaError fails every
 // "contains SECRETTOKEN" row below.
 func TestFallbackTransportErrorRedactsPoToken(t *testing.T) {
 	t.Run("dial refused", func(t *testing.T) {

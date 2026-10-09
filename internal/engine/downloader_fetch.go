@@ -86,8 +86,9 @@ const (
 // chunk fetch all inject the token identically.
 //
 // Every error a request built from the result can return goes through
-// redact.PoToken: a *url.Error — a transport failure, or a URL net/url
-// refused to parse — quotes the whole URL, token and all.
+// redact.MediaError: a *url.Error — a transport failure, or a URL net/url
+// refused to parse — quotes the whole URL, token and all, and a googlevideo
+// URL carries the client's public IP and the URL's signature besides.
 func applyPoTokenQuery(rawURL, token string) string {
 	if token == "" {
 		return rawURL
@@ -317,8 +318,9 @@ func withFetchDeadlines(parent context.Context, idle, ceiling time.Duration) (co
 
 // idleFetchError re-labels a context error that the read-progress deadline
 // caused, so callers and logs see a stall rather than a bare cancellation.
-// Any other error passes through with only its PO token redacted
-// (redact.PoToken), so no caller can carry the token into a job error.
+// Any other error passes through with only its media URL's credentials — the
+// PO token, the client's IP, the signatures — redacted (redact.MediaError), so
+// no caller can carry them into a job error.
 // Shared with runDirectDownloadFallback, which has no ceiling.
 func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if err == nil {
@@ -327,13 +329,13 @@ func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if errors.Is(context.Cause(ctx), errFetchIdle) {
 		return fmt.Errorf("stalled: %w for %s", errFetchIdle, idle)
 	}
-	return redact.PoToken(err)
+	return redact.MediaError(err)
 }
 
 // fetchDeadlineError re-labels a context error that EITHER per-fetch deadline
 // caused. The ceiling branch names the bound and how far the transfer got;
 // everything else — an idle stall, a caller cancel, a transport failure —
-// falls through to idleFetchError, which redacts any PO token in a transport
+// falls through to idleFetchError, which redacts the credentials in a transport
 // error's URL and otherwise passes it through. body is nil when the fetch died
 // before there was one, which is why received() tolerates a nil receiver.
 func fetchDeadlineError(ctx context.Context, idle, ceiling time.Duration, body *idleBody, err error) error {
@@ -359,7 +361,7 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 	if err != nil {
 		// url.Parse's refusal quotes the whole URL, the token with it — and
 		// an HLS playlist URL carries one in its path as well as the query.
-		return nil, 0, redact.PoToken(err)
+		return nil, 0, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
@@ -682,14 +684,14 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
-		return -1, redact.PoToken(err)
+		return -1, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return -1, redact.PoToken(err)
+		return -1, redact.MediaError(err)
 	}
 	reportSuccess("engine/fetch")
 	// Bounded drain to allow keep-alive reuse. The expected response to this
@@ -1043,7 +1045,7 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return nil, 0, redact.PoToken(err)
+		return nil, 0, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))

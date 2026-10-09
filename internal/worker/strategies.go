@@ -11,6 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -211,7 +212,9 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 	// YouTube's URL signature verification and causes HTTP 403.
 	parsed, err := url.Parse(result)
 	if err != nil {
-		return result, err
+		// url.Parse's refusal quotes the URL — a signed segment URL, the
+		// client's IP and the signature in it — and the caller logs it.
+		return result, redact.MediaError(err)
 	}
 	// Extract raw (percent-encoded) n-param for accurate string matching.
 	rawN, nParam := cipher.RawQueryParam(parsed.RawQuery, "n")

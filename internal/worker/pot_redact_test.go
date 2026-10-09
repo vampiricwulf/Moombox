@@ -106,10 +106,10 @@ func TestLiveManifestFetchErrorRedactsPoToken(t *testing.T) {
 // message feeds the "job error" log line, the stored error the dashboard and
 // the TUI show, and the Job Failed embed. A token that reached it by a route
 // no producer redacted — here a *url.Error flattened with %v, which leaves no
-// *url.Error in the chain for redact.PoToken to find — is cut out there, in
+// *url.Error in the chain for redact.MediaError to find — is cut out there, in
 // both forms, before any of the three sees it.
 //
-// Mutant (run): errMsg := err.Error() without redact.PoTokenText — the stored
+// Mutant (run): errMsg := err.Error() without redact.MediaText — the stored
 // error, the log line and the embed's Error field all carry both tokens.
 func TestJobErrorRedactsPoToken(t *testing.T) {
 	const pathToken, queryToken = "SECRETPATHTOKEN", "SECRETQUERYTOKEN"

@@ -47,8 +47,10 @@ func (l *secretLogger) containing(secret string) []string {
 // fetch failed after N consecutive errors: %w" — carried the path copy into
 // the job's error: the redactor knew only the query form.
 //
-// Mutant (run): redact.PoTokenURL without its redactPotPath call — Start's
-// error keeps SECRETPATHTOKEN.
+// Mutant (run): redact.MediaError returning err unchanged — Start's error
+// keeps both tokens. (redact.PoTokenURL without its redactPotPath call no
+// longer fails this row: the variant URL is a media URL, whose path pairs
+// redact.MediaURL cuts as well; TestPoTokenURL pins that call.)
 func TestHlsPlaylistPollErrorRedactsPathToken(t *testing.T) {
 	const pathToken, queryToken = "SECRETPATHTOKEN", "SECRETQUERYTOKEN"
 	lg := &secretLogger{}
@@ -91,7 +93,7 @@ func TestHlsPlaylistPollErrorRedactsPathToken(t *testing.T) {
 // net/url cannot parse with a *url.Error that quotes it whole, and those sites
 // returned that error bare — only the transport failure was redacted.
 //
-// Mutants (run): each row's site returning err instead of redact.PoToken(err)
+// Mutants (run): each row's site returning err instead of redact.MediaError(err)
 // — fetchSegment, fetchChunk, probeHeadAt, ProbeSegmentAvailable and
 // streamDirectOnce — fails that row alone.
 func TestFetchRequestBuildErrorsRedactPoToken(t *testing.T) {

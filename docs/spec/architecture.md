@@ -209,7 +209,7 @@ internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEnc
 internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
 internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
 internal/sqliteuri  (1 file,  ~30)     -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
-internal/redact     (3 files, ~280)    -- one redaction rule per kind of secret, for error text, log lines and notifications (the GVS PO token, a credential inside a URL)
+internal/redact     (4 files, ~430)    -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo media URL's credentials, the GVS PO token, a credential inside a URL)
 internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing

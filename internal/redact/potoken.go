@@ -28,10 +28,11 @@ var (
 	potPathRe  = regexp.MustCompile(`/pot/[^/?#&"\s]+`)
 )
 
-// PoTokenText cuts every GVS PO token out of s, in both forms. It is the rule
-// for text that has already been flattened — an error's message, a job's
-// error column — where nothing says which part of it is a URL. A string with
-// no token is returned as is.
+// PoTokenText cuts every GVS PO token out of s, in both forms. It is the
+// token's rule for text that has already been flattened, where nothing says
+// which part of it is a URL; MediaText applies it, after MediaURL, to an
+// error's message and a job's error column. A string with no token is
+// returned as is.
 func PoTokenText(s string) string {
 	if !strings.Contains(s, "pot") {
 		return s
@@ -95,71 +96,3 @@ func redactPotPath(head string) string {
 	}
 	return prefix + strings.Join(segs, "/")
 }
-
-// PoToken keeps the GVS PO token out of an error's text. A transport failure
-// from http.Client.Do — and a request net/url refused to build — is a
-// *url.Error whose Error() quotes the whole request URL, token and all, and
-// that string reaches the "job error" log line, the job's stored error and
-// the Job Failed embed.
-//
-// Contract: every *url.Error in err's tree whose URL carries a token has its
-// URL rewritten IN PLACE by PoTokenURL (Op and Err are untouched, so
-// errors.Is / errors.As on the cause still hold). When err is such a
-// *url.Error itself it is returned as is; when the token sits under a wrapper
-// whose message was precomputed (fmt.Errorf), the result is a thin wrapper
-// carrying that message through PoTokenText, whose Unwrap is err. Every other
-// error — nil, no *url.Error, no token — is returned unchanged, and a second
-// call is a no-op.
-func PoToken(err error) error {
-	if err == nil {
-		return nil
-	}
-	msg := err.Error()
-	if !rewritePotURLs(err) {
-		return err
-	}
-	if _, ok := err.(*url.Error); ok {
-		return err
-	}
-	return &potRedactedError{msg: PoTokenText(msg), err: err}
-}
-
-// rewritePotURLs applies PoTokenURL to every *url.Error in err's tree and
-// reports whether any of them changed.
-func rewritePotURLs(err error) bool {
-	changed := false
-	var walk func(error)
-	walk = func(e error) {
-		for e != nil {
-			if ue, ok := e.(*url.Error); ok {
-				if r := PoTokenURL(ue.URL); r != ue.URL {
-					ue.URL = r
-					changed = true
-				}
-			}
-			switch u := e.(type) {
-			case interface{ Unwrap() []error }:
-				for _, inner := range u.Unwrap() {
-					walk(inner)
-				}
-				return
-			case interface{ Unwrap() error }:
-				e = u.Unwrap()
-			default:
-				return
-			}
-		}
-	}
-	walk(err)
-	return changed
-}
-
-// potRedactedError carries a wrapper's message with the PO token cut out;
-// Unwrap keeps the original chain for errors.Is / errors.As.
-type potRedactedError struct {
-	msg string
-	err error
-}
-
-func (e *potRedactedError) Error() string { return e.msg }
-func (e *potRedactedError) Unwrap() error { return e.err }

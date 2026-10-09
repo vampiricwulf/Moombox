@@ -7,8 +7,12 @@
 // is hiding and the rule for finding that secret lives in one place rather
 // than in a string edit at every site that meets it:
 //
-//   - the GVS PO token (potoken.go): PoToken for an error, PoTokenURL for a
-//     URL, PoTokenText for text already flattened;
+//   - a googlevideo media URL's credentials — the client's public IP, the
+//     signatures, the GVS PO token and the rest of what the server signed
+//     the URL for (media.go): MediaError for an error, MediaURL for a URL,
+//     MediaText for text already flattened;
+//   - the GVS PO token alone, in any URL (potoken.go): PoTokenURL for a URL,
+//     PoTokenText for text; the media rules apply both;
 //   - a credential inside a URL (url.go): URLOrigin for a URL whose secret can
 //     sit anywhere in it, such as a webhook URL; URLUserinfo for one whose
 //     only place for a secret is its user:password@, such as
