@@ -11,6 +11,14 @@ export class ImportController {
     this.importInitialized = false;
     this._activeXhr = null;
     this._clearTimeout = null;
+    this._bodySent = false;
+  }
+
+  // The whole archive has gone out and the server is extracting it: the
+  // stretch between xhr.upload's "load" and the response. Nothing can be
+  // cancelled any more — see uploadImport.
+  _importing() {
+    return this._activeXhr !== null && this._bodySent;
   }
 
   initImports() {
@@ -72,7 +80,7 @@ export class ImportController {
   }
 
   cancelUpload() {
-    if (this._activeXhr) {
+    if (this._activeXhr && !this._importing()) {
       this._activeXhr.abort();
       this._activeXhr = null;
       this.importUploading = false;
@@ -110,7 +118,9 @@ export class ImportController {
     // Swapping the file mid-upload hid the progress bar and its Cancel button
     // while the old file kept uploading.
     if (this.importUploading) {
-      this.app.showToast("An import is uploading — cancel it before choosing another file", "warning");
+      this.app.showToast(this._importing()
+        ? "The archive is being imported — wait for it to finish before choosing another file"
+        : "An import is uploading — cancel it before choosing another file", "warning");
       const fileInput = document.getElementById("import-file-input");
       if (fileInput) fileInput.value = "";
       return;
@@ -141,6 +151,12 @@ export class ImportController {
   }
 
   clearImportFile() {
+    // Once the body is all sent there is no giving up on it from here — the
+    // server is importing it — so Clear, like the hidden Cancel, waits.
+    if (this._importing()) {
+      this.app.showToast("The archive is being imported — wait for it to finish", "warning");
+      return;
+    }
     // Clearing the file is giving up on it: an upload still running would
     // otherwise go on with its progress and Cancel button hidden, then toast
     // a result out of nowhere.
@@ -175,6 +191,7 @@ export class ImportController {
     if (!this.importFile || this.importUploading) return;
 
     this.importUploading = true;
+    this._bodySent = false;
 
     const submitBtn = document.getElementById("import-submit-btn");
     const progress = document.getElementById("import-progress");
@@ -219,6 +236,19 @@ export class ImportController {
         progressBar.value = pct;
         statusText.textContent = `Uploading... ${pct}% (${formatBytes(e.loaded)} / ${formatBytes(e.total)})`;
       }
+    });
+
+    // The body is all sent and the server is extracting the archive, which
+    // for a large one takes a while. Cancel stayed offered here and toasted
+    // "Upload cancelled" while the server went on to create the job, so a
+    // retry then met "job already exists". Hide it and say what is happening
+    // until the response arrives. (A client that goes anyway — a closed tab —
+    // is caught by the server, which then removes what it extracted.)
+    xhr.upload.addEventListener("load", () => {
+      if (this._activeXhr !== xhr) return;
+      this._bodySent = true;
+      this._hideCancelButton();
+      statusText.textContent = "Importing…";
     });
 
     this._activeXhr = xhr;
