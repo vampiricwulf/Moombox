@@ -240,10 +240,11 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	if qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			if v := selectHlsByHeight(capped, targetHeight, fpsPreference(targetFPS, prefer60fps)); v != nil {
+			prefer := fpsPreference(targetFPS, prefer60fps)
+			if v := selectHlsByHeight(capped, targetHeight, prefer); v != nil {
 				return v
 			}
-			if v := selectNextLowerHls(capped, targetHeight); v != nil {
+			if v := selectNextLowerHls(capped, targetHeight, prefer); v != nil {
 				return v
 			}
 			// No lower heights — fall through to source/best
@@ -292,13 +293,12 @@ func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight int, prefer f
 	return variants[idx]
 }
 
-// selectNextLowerHls finds the best HLS variant below the target height,
-// descending through available heights. Thin wrapper around selectNextLowerIdx
-// (audit reports/worker.md F36).
-func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int) *engine.HlsVariant {
-	idx := selectNextLowerIdx(variants, func(v *engine.HlsVariant) (int, int) {
-		return utils.CapDimension(v.Width, v.Height), v.Bandwidth
-	}, targetHeight)
+// selectNextLowerHls finds the HLS variant a preference picks at the next
+// lower size below the target height, ranked by frame rate (prefer) and then
+// bandwidth. Thin wrapper around selectNextLowerIdx (audit reports/worker.md
+// F36).
+func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int, prefer func(int) bool) *engine.HlsVariant {
+	idx := selectNextLowerIdx(variants, hlsFieldAccessor, targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}

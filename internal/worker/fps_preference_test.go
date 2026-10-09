@@ -75,8 +75,8 @@ func TestLiveSelectorsHonourPrefer60fps(t *testing.T) {
 // and descended to the next lower HEIGHT it did find — the 480x854
 // rendition. Both selectors measure the short edge now.
 //
-// Mutant: dashFieldAccessor / hlsFieldAccessor (or the next-lower accessors)
-// returning Height again.
+// Mutant: dashFieldAccessor / hlsFieldAccessor (which the next-lower descent
+// shares) returning Height again.
 func TestPortraitPreferenceMatchesTheShortEdge(t *testing.T) {
 	dash := []DashStreamInfo{
 		{Itag: 1, MimeType: "video/mp4", Width: 1080, Height: 1920, FPS: 30, Bandwidth: 5},
@@ -99,6 +99,49 @@ func TestPortraitPreferenceMatchesTheShortEdge(t *testing.T) {
 	}
 	if h := selectHlsVariant(hls, "900p", 2160, true); h == nil || h.URL != "720" {
 		t.Errorf("HLS portrait 900p: got %+v, want the next lower short edge, 720x1280", h)
+	}
+}
+
+// A preference whose size the stream does not offer descends to the next lower
+// size, and that size used to be ranked by bandwidth alone: "1440p" on a
+// stream topping out at 1080 recorded 1080p60 with prefer_60fps off, though
+// "1080p" itself took 1080p30, and a "1440p60" took whichever 1080 rendition
+// carried more bits. The descent now ranks the lower size exactly as the
+// named size would have been — the fps suffix, else prefer_60fps, then
+// bandwidth — the rule Twitch's selectNextLowerVariant applies.
+//
+// Mutants: selectNextLowerIdx taking the highest bandwidth at the lower size
+// again; either descent call ranking with fpsPreference(0, prefer60fps) (the
+// suffix dropped), or with a literal true or false for prefer60fps.
+func TestQualityDescentRanksTheLowerSizeByFrameRate(t *testing.T) {
+	ladder := func(bw60, bw30 int) []DashStreamInfo {
+		return []DashStreamInfo{
+			{Itag: 299, MimeType: "video/mp4", Width: 1920, Height: 1080, FPS: 60, Bandwidth: bw60},
+			{Itag: 137, MimeType: "video/mp4", Width: 1920, Height: 1080, FPS: 30, Bandwidth: bw30},
+			{Itag: 136, MimeType: "video/mp4", Width: 1280, Height: 720, FPS: 30, Bandwidth: 2_000_000},
+		}
+	}
+	for _, tc := range []struct {
+		pref       string
+		prefer60   bool
+		bw60, bw30 int
+		wantFPS    int
+	}{
+		{"1440p", false, 6_000_000, 4_000_000, 30},   // the 60 out-bits the 30 the setting asks for
+		{"1440p", true, 4_000_000, 6_000_000, 60},    // the 30 out-bits the 60 the setting asks for
+		{"1440p60", false, 4_000_000, 6_000_000, 60}, // the suffix asks for 60 at the lower size too
+	} {
+		dash := ladder(tc.bw60, tc.bw30)
+		hls := make([]engine.HlsVariant, len(dash))
+		for i, s := range dash {
+			hls[i] = engine.HlsVariant{Width: s.Width, Height: s.Height, FPS: s.FPS, Bandwidth: s.Bandwidth}
+		}
+		if d := SelectBestDashStream(dash, 0, 2160, true, tc.pref, tc.prefer60); d == nil || d.Height != 1080 || d.FPS != tc.wantFPS {
+			t.Errorf("DASH pref=%q prefer60=%v: got %+v, want 1080p%d", tc.pref, tc.prefer60, d, tc.wantFPS)
+		}
+		if h := selectHlsVariant(hls, tc.pref, 2160, tc.prefer60); h == nil || h.Height != 1080 || h.FPS != tc.wantFPS {
+			t.Errorf("HLS pref=%q prefer60=%v: got %+v, want 1080p%d", tc.pref, tc.prefer60, h, tc.wantFPS)
+		}
 	}
 }
 

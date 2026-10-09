@@ -90,11 +90,13 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	if isVideo && qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			if match := selectByHeightPref(streams, candidates, targetHeight, fpsPreference(targetFPS, prefer60fps)); match != nil {
+			prefer := fpsPreference(targetFPS, prefer60fps)
+			if match := selectByHeightPref(streams, candidates, targetHeight, prefer); match != nil {
 				return match
 			}
-			// Target height not found — descend through lower heights
-			if match := selectNextLowerHeight(streams, candidates, targetHeight); match != nil {
+			// Target height not found — descend to the next lower size,
+			// ranked there by the same frame-rate rule
+			if match := selectNextLowerHeight(streams, candidates, targetHeight, prefer); match != nil {
 				return match
 			}
 			// No lower heights either — fall through to source/best
@@ -194,44 +196,37 @@ func selectAtHeightIdx[T any](items []T, accessor func(T) (size, fps, bandwidth 
 	return at[rankByFPSThenBandwidth(sub, accessor, prefer)]
 }
 
-// selectNextLowerIdx returns the index into items of the best-bandwidth entry
-// whose height is strictly below targetHeight, or -1 if nothing is below.
-// Shared with HLS (audit reports/worker.md F36).
-func selectNextLowerIdx[T any](items []T, accessor func(T) (height, bandwidth int), targetHeight int) int {
-	bestHeight := 0
+// selectNextLowerIdx returns the index into items of the entry a preference
+// picks at the largest size strictly below targetHeight — ranked there by
+// selectAtHeightIdx under prefer, exactly as the size the preference named
+// would have been — or -1 if nothing is below. Shared with HLS (audit
+// reports/worker.md F36).
+//
+// It ranked the lower size by bandwidth alone, so a "1440p" on a stream
+// whose top size was 1080 recorded the 1080p60 rendition with prefer_60fps
+// off — the 1080p30 one that "1080p" itself took — and a "1440p60" could
+// land on a 30 fps rendition that out-bit the 60 beside it. Twitch's descent
+// (selectNextLowerVariant) has applied its size's ranking, fps suffix
+// included, since D-Y2.
+func selectNextLowerIdx[T any](items []T, accessor func(T) (size, fps, bandwidth int), targetHeight int, prefer func(int) bool) int {
+	lower := 0
 	for _, item := range items {
-		h, _ := accessor(item)
-		if h < targetHeight && h > bestHeight {
-			bestHeight = h
+		if h, _, _ := accessor(item); h < targetHeight && h > lower {
+			lower = h
 		}
 	}
-	if bestHeight == 0 {
+	if lower == 0 {
 		return -1
 	}
-	best := -1
-	var bestBw int
-	for i, item := range items {
-		h, bw := accessor(item)
-		if h == bestHeight {
-			if best < 0 || bw > bestBw {
-				best = i
-				bestBw = bw
-			}
-		}
-	}
-	return best
+	return selectAtHeightIdx(items, accessor, lower, prefer)
 }
 
-// dashFieldAccessor and dashHeightBandwidth measure a stream by its frame's
-// SHORTER edge, the cap's own measure (ruling R1): a preference compared
-// against the raw Height sent a portrait stream's "1080p" (1080x1920) down
-// the next-lower-height descent to its 480x854 rendition.
+// dashFieldAccessor measures a stream by its frame's SHORTER edge, the cap's
+// own measure (ruling R1): a preference compared against the raw Height sent a
+// portrait stream's "1080p" (1080x1920) down the next-lower-height descent to
+// its 480x854 rendition.
 func dashFieldAccessor(s DashStreamInfo) (int, int, int) {
 	return utils.CapDimension(s.Width, s.Height), s.FPS, s.Bandwidth
-}
-
-func dashHeightBandwidth(s DashStreamInfo) (int, int) {
-	return utils.CapDimension(s.Width, s.Height), s.Bandwidth
 }
 
 // selectByHeightPref finds a DASH stream matching the target height, ranked by
@@ -250,14 +245,15 @@ func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight
 	return &streams[candidates[idx]]
 }
 
-// selectNextLowerHeight finds the best DASH stream below the target height,
-// descending through available heights. Returns nil if no lower heights exist.
-func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHeight int) *DashStreamInfo {
+// selectNextLowerHeight finds the DASH stream a preference picks at the next
+// lower size below the target height, ranked by frame rate (prefer) and then
+// bandwidth. Returns nil if no lower size exists.
+func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHeight int, prefer func(int) bool) *DashStreamInfo {
 	filtered := make([]DashStreamInfo, len(candidates))
 	for i, idx := range candidates {
 		filtered[i] = streams[idx]
 	}
-	idx := selectNextLowerIdx(filtered, dashHeightBandwidth, targetHeight)
+	idx := selectNextLowerIdx(filtered, dashFieldAccessor, targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}
