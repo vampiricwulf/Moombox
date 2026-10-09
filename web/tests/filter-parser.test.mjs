@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseFilterQuery, serializeToken } from "../public/modules/filter-parser.js";
+import { openToken, parseFilterQuery, serializeToken } from "../public/modules/filter-parser.js";
 
 test("parseFilterQuery: empty string returns []", () => {
   assert.deepEqual(parseFilterQuery(""), []);
@@ -149,5 +149,34 @@ test("serializeToken round-trips values the old quoting broke", () => {
           `${type} ${JSON.stringify(value)} (negate ${negate}) serialized to ${q}`);
       }
     }
+  }
+});
+
+// The filter bar's debounce chips only closed tokens; openToken names the one
+// still being typed, exactly as typed. A token is open until an unquoted space
+// follows it — an open quote keeps it open past spaces, and a closed quote
+// does not close it (one more character would still join it).
+//
+// Mutants: openToken returning the last token whatever follows it — the
+// trailing-space cases fail; returning "" always — every open case fails.
+test("openToken: the token still being typed, as typed", () => {
+  const cases = [
+    ["", ""],
+    ["   ", ""],
+    ["status:", "status:"],
+    ["status:li", "status:li"],
+    ["status:live ", ""],
+    ["night status:live", "status:live"],
+    ["night status:live  ", ""],
+    ['channel:"Shachi', 'channel:"Shachi'],
+    ['channel:"Shachi ', 'channel:"Shachi '],
+    ['channel:"Shachi Too"', 'channel:"Shachi Too"'],
+    ['channel:"Shachi Too" ', ""],
+    ["-", "-"],
+    ["a|b", "a|b"],
+    ["mori's", "mori's"],
+  ];
+  for (const [query, want] of cases) {
+    assert.equal(openToken(query), want, `openToken(${JSON.stringify(query)})`);
   }
 });

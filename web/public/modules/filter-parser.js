@@ -105,6 +105,24 @@ export function parseFilterQuery(query) {
 }
 
 /**
+ * The token the operator is still typing: the query's last raw token while
+ * nothing has closed it — no unquoted space follows it yet, or a quote it
+ * opened is still open — exactly as typed; "" once it is closed. A token is
+ * open when one more character typed would join it, and that is the test:
+ * appending one leaves the token count unchanged. The filter bar's debounce
+ * chips only closed tokens, so a pause after `status:` does not commit an
+ * empty chip and leave the `live` typed next as a text term.
+ * @param {string} query - the input's text, untrimmed (a trailing space closes)
+ * @returns {string}
+ */
+export function openToken(query) {
+  if (!query) return "";
+  const tokens = tokenize(query);
+  if (tokens.length === 0) return "";
+  return tokenize(query + "x").length === tokens.length ? tokens[tokens.length - 1] : "";
+}
+
+/**
  * Serialize a token back to query string form.
  * @param {{ type: string, value: string, negate: boolean } | { type: "or", terms: Array }} token
  * @returns {string}
