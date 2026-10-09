@@ -2,9 +2,11 @@ package worker
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
 // TestJobPanicLeavesAnOutcomeStanding: Start's recover records a panicking
@@ -56,6 +58,69 @@ func TestJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 			row, _ := db.GetJob("panics")
 			if row.Status != tc.want {
 				t.Errorf("status = %s (%q) after the run panicked, want %s", row.Status, row.Error, tc.want)
+			}
+		})
+	}
+}
+
+// panicOnEvent panics on the send of one notification event, after running
+// before: a stand-in for any panic at that point of the mux.
+type panicOnEvent struct {
+	event  string
+	before func()
+}
+
+func (p panicOnEvent) Send(_, _ string, _ notifications.NotificationType, _ []notifications.Field, opts notifications.SendOptions) {
+	if opts.Event != p.event {
+		return
+	}
+	if p.before != nil {
+		p.before()
+	}
+	panic("boom on " + p.event)
+}
+
+// TestMuxJobPanicLeavesAnOutcomeStanding is Start's guard for the off-queue
+// mux — the Mux action, the boot re-mux and the automatic mux of an ended
+// Twitch broadcast. Its recover wrote Error over whatever the row held: a
+// mux that wrote Finished and then panicked in its tail turned the archive
+// into an Error, and so did an operator's Cancel that landed on the Muxing
+// row. A panic still records Error on a mux with no outcome yet.
+//
+// Mutants: write the panic's Error with UpdateJobFields — the Finished and
+// Cancelled rows turn Error; drop the write — the row with no outcome is left
+// Muxing with nothing running it.
+func TestMuxJobPanicLeavesAnOutcomeStanding(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	for _, tc := range []struct {
+		name   string
+		event  string // the send the mux panics on
+		cancel bool   // the operator's Cancel lands just before the panic
+		want   database.JobStatus
+	}{
+		{"finished", "finished", false, database.StatusFinished},
+		{"operator's Cancel", "muxing", true, database.StatusCancelled},
+		{"no outcome", "muxing", false, database.StatusError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			const id = "mux-panics"
+			p := panicOnEvent{event: tc.event}
+			if tc.cancel {
+				p.before = func() { db.UpdateJobFields(id, map[string]any{"status": database.StatusCancelled}) }
+			}
+			w.orchestrator.notifier = p
+			staging, _ := muxFixtureJob(t, w, db, id)
+			writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 2)
+
+			if err := w.MuxJob(id); err != nil {
+				t.Fatalf("MuxJob: %v", err)
+			}
+			w.wg.Wait() // the mux's goroutine, recover included, has returned
+
+			row, _ := db.GetJob(id)
+			if statusOf(row) != tc.want {
+				t.Errorf("status = %s (%q) after the mux panicked on %q, want %s", statusOf(row), errorOf(row), tc.event, tc.want)
 			}
 		})
 	}

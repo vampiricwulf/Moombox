@@ -686,6 +686,7 @@ go func() {
 **Download worker:**
 - Each `processJob` goroutine has panic recovery
 - On panic: sets job status to `Error` with message `"internal panic: <details>"` — unless the job already reached an outcome during the run (`UpdateJobFieldsUnlessTerminal`): an operator's Cancel that landed while it ran, or a finish or failure before the panic, stands
+- The off-queue mux (`MuxJob`, `internal/worker/worker.go`: the Mux action, the boot re-mux of an interrupted `Muxing` row, and the automatic mux of an ended Twitch broadcast) recovers the same way: its `Muxing` write comes before its goroutine, so a `Finished` written before a panic in the mux's tail (the notification, the staging cleanup), or an operator's Cancel that landed on the `Muxing` row, stands rather than turning into `Error`
 
 ## Job Status Lifecycle
 

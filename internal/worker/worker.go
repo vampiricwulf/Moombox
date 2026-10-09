@@ -2345,7 +2345,14 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 		defer func() {
 			if r := recover(); r != nil {
 				w.logger.Error("panic in MuxJob", "jobID", jobID, "panic", fmt.Sprint(r))
-				w.db.UpdateJobFields(jobID, map[string]any{
+				// Not over an outcome, as in Start's recover: a mux that
+				// wrote Finished and panicked in its tail (the notification,
+				// the staging cleanup) turned the archive into an Error, and
+				// so did an operator's Cancel that landed on the Muxing row.
+				// The Muxing write above came before this goroutine, so
+				// whichever terminal status the row holds landed during this
+				// mux and stands.
+				w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 					"status": database.StatusError,
 					"error":  fmt.Sprintf("internal panic: %v", r),
 				})
