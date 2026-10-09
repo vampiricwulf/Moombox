@@ -178,9 +178,19 @@ func preferredFrameRate(fps float64, prefer60fps bool) bool {
 // YouTube selector and by none of these. It sits BELOW the codec: an AV1
 // 30 fps rendition is still the better archive than an H.264 60 fps one.
 func rankAtChosenSize(variants []TwitchHLSVariant, size int, prefer60fps bool) *TwitchHLSVariant {
+	return rankWhere(variants, prefer60fps, func(v *TwitchHLSVariant) bool {
+		return utils.CapDimension(v.Width, v.Height) == size
+	})
+}
+
+// rankWhere is rankAtChosenSize's ranking over the variants keep accepts —
+// codec, the frame rate prefer60fps asks for, the source flag, bandwidth, the
+// earlier variant on a tie — or nil when keep accepts none. The pointer is
+// into variants.
+func rankWhere(variants []TwitchHLSVariant, prefer60fps bool, keep func(*TwitchHLSVariant) bool) *TwitchHLSVariant {
 	best := -1
 	for i := range variants {
-		if utils.CapDimension(variants[i].Width, variants[i].Height) != size {
+		if !keep(&variants[i]) {
 			continue
 		}
 		if best < 0 {
@@ -222,8 +232,9 @@ func rankAtChosenSize(variants []TwitchHLSVariant, size int, prefer60fps bool) *
 //
 // maxResolution and prefer60fps are the downloader settings
 // max_video_resolution and prefer_60fps. prefer60fps decides only among the
-// renditions of the chosen size (rankAtChosenSize): a height named in
-// qualityPref is matched first, as before.
+// renditions of one size, by rankAtChosenSize's ranking: the size a height in
+// qualityPref names (an fps suffix there wins over it), or failing that the
+// next lower size, or failing both the size the cap chose.
 //
 // The returned pointer may point into either the caller-owned `variants`
 // slice OR an internal filtered slice (audio_only-stripped, then optionally
@@ -298,15 +309,15 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 	if qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := parseQualityPref(qualityPref)
 		if targetHeight > 0 {
-			// Try exact height match
-			if match := selectVariantByHeight(filtered, targetHeight, targetFPS); match != nil {
+			// The size the preference names, by the short edge
+			if match := selectVariantByHeight(filtered, targetHeight, targetFPS, prefer60fps); match != nil {
 				return match
 			}
-			// Descend through lower heights
-			if match := selectNextLowerVariant(filtered, targetHeight); match != nil {
+			// Descend to the next lower size
+			if match := selectNextLowerVariant(filtered, targetHeight, targetFPS, prefer60fps); match != nil {
 				return match
 			}
-			// No lower heights — fall through to source/best
+			// No lower size — fall through to source/best
 		} else {
 			// Non-height pref (e.g. named quality) — substring match on name
 			for i := range filtered {
@@ -339,63 +350,47 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 	return best
 }
 
-// selectVariantByHeight finds a variant matching the target height, optionally with FPS.
-func selectVariantByHeight(variants []TwitchHLSVariant, targetHeight, targetFPS int) *TwitchHLSVariant {
-	var heightMatches []int
-	for i := range variants {
-		if variants[i].Height == targetHeight {
-			heightMatches = append(heightMatches, i)
-		}
-	}
-	if len(heightMatches) == 0 {
-		return nil
-	}
-	// If FPS-specific, prefer highest bandwidth among FPS matches
+// selectVariantByHeight returns the variant a height preference picks at
+// size targetHeight, or nil when no variant has that size. A variant's size is
+// its SHORT edge (utils.CapDimension), the measure the cap and
+// rankAtChosenSize use, so a portrait stream's 720p is its 720x1280
+// rendition. An fps suffix ("720p60", targetFPS > 0) keeps the renditions of
+// that size at targetFPS-1 and up when there are any; the rest is
+// rankAtChosenSize's ranking, prefer60fps included — codec, frame rate,
+// source, bandwidth.
+//
+// It used to match the raw height and take the highest bandwidth, so a
+// portrait stream's 720p matched nothing (its 720x1280 transcode is 1280
+// high) and the preference fell to whatever lay below it, and a suffix-less
+// "720p" ignored prefer_60fps and the codec, which the size the cap chooses
+// has been ranked by since D-Y2.
+func selectVariantByHeight(variants []TwitchHLSVariant, targetHeight, targetFPS int, prefer60fps bool) *TwitchHLSVariant {
 	if targetFPS > 0 {
-		bestFPS := -1
-		for _, idx := range heightMatches {
-			if variants[idx].FPS >= float64(targetFPS)-1 {
-				if bestFPS == -1 || variants[idx].Bandwidth > variants[bestFPS].Bandwidth {
-					bestFPS = idx
-				}
-			}
-		}
-		if bestFPS >= 0 {
-			return &variants[bestFPS]
+		if match := rankWhere(variants, prefer60fps, func(v *TwitchHLSVariant) bool {
+			return utils.CapDimension(v.Width, v.Height) == targetHeight && v.FPS >= float64(targetFPS)-1
+		}); match != nil {
+			return match
 		}
 	}
-	// Return highest bandwidth at target height
-	best := heightMatches[0]
-	for _, idx := range heightMatches[1:] {
-		if variants[idx].Bandwidth > variants[best].Bandwidth {
-			best = idx
-		}
-	}
-	return &variants[best]
+	return rankAtChosenSize(variants, targetHeight, prefer60fps)
 }
 
-// selectNextLowerVariant finds the best variant below the target height,
-// descending through available heights. Returns nil if no lower heights exist.
-func selectNextLowerVariant(variants []TwitchHLSVariant, targetHeight int) *TwitchHLSVariant {
-	bestHeight := 0
+// selectNextLowerVariant picks at the largest size below targetHeight, by the
+// short edge and by selectVariantByHeight's rule (so an fps suffix still
+// counts there). Returns nil if no smaller size exists. It descended by the
+// raw height, which took a portrait stream's 480x854 rendition below a 900p
+// preference while its 720x1280 one was there, and ranked by bandwidth alone.
+func selectNextLowerVariant(variants []TwitchHLSVariant, targetHeight, targetFPS int, prefer60fps bool) *TwitchHLSVariant {
+	lower := 0
 	for i := range variants {
-		h := variants[i].Height
-		if h < targetHeight && h > bestHeight {
-			bestHeight = h
+		if size := utils.CapDimension(variants[i].Width, variants[i].Height); size < targetHeight && size > lower {
+			lower = size
 		}
 	}
-	if bestHeight == 0 {
+	if lower == 0 {
 		return nil
 	}
-	var best *TwitchHLSVariant
-	for i := range variants {
-		if variants[i].Height == bestHeight {
-			if best == nil || variants[i].Bandwidth > best.Bandwidth {
-				best = &variants[i]
-			}
-		}
-	}
-	return best
+	return selectVariantByHeight(variants, lower, targetFPS, prefer60fps)
 }
 
 // parseQualityPref parses a quality preference string like "1080p60" into height and fps.

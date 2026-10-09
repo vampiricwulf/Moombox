@@ -623,11 +623,12 @@ func TestSelectBestVariantCodecRankAtTheChosenSize(t *testing.T) {
 
 // TestSelectBestVariantHonoursAnExplicitHeightOverTheEnhancedSource: an
 // operator who asked for 1080p60 gets 1080p60, enhanced source or not. The
-// codec rung ranks only the chosen size (R2 put it ahead of the source flag)
-// and never overrides the quality preference.
+// codec rung ranks the renditions of one size — the size the preference
+// names, as the size the cap chose (R2 put it ahead of the source flag) — and
+// never overrides the size the preference names.
 //
-// Mutant: applying the codec rank inside selectVariantByHeight — the 1440p
-// HEVC source is returned for a 1080p60 request.
+// Mutant: the size test dropped from selectVariantByHeight's fps filter — the
+// 1440p HEVC source, 60 fps too, wins on its codec.
 func TestSelectBestVariantHonoursAnExplicitHeightOverTheEnhancedSource(t *testing.T) {
 	got := SelectBestVariant(ParseHLSMasterPlaylist(enhancedMasterPlaylist), "1080p60", 0, true)
 	if got == nil {
