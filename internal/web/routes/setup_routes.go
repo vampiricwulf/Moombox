@@ -26,7 +26,10 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 	mu := store.RWMutex()
 	cfg := store.Config()
 
-	r.Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
+	// Refused cross-site like GET /api/ffmpeg/check: it runs the same
+	// CheckFFmpegCached on the configured path, which spawns that binary
+	// whenever the cache is cold. The wizard and app.js fetch it same-origin.
+	r.With(web.RefuseCrossSite).Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
 		// isFirstRun matches TypeScript: !configManager.hasConfig()
 		var configLoaded bool
 		var ffmpegPath string
