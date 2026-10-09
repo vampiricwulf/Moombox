@@ -61,7 +61,14 @@ func decodeImportHeader(v string) string {
 // limiter passed via routes_wiring is intentionally NOT applied here
 // (audit Q-21/U-2); imports are rare, large, and need a tighter cap.
 // Returns a cleanup function that stops the rate limiter's background goroutine.
-func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func() {
+// logger names what an import could not write: the client gets the step that
+// failed, the log gets the error.
+func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) func() {
 	importRL := web.NewRateLimiter(5, time.Minute)
 	// Key the buckets by the effective client IP so a trusted reverse proxy
 	// doesn't collapse every remote client into a single 5/min bucket.
@@ -310,7 +317,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 		importsDir := filepath.Join(outputDir, "imports")
 		os.MkdirAll(importsDir, 0o755)
 
-		baseFilename := fmt.Sprintf("%s [%s]", utils.SanitizeForFilename(title), videoID)
+		baseFilename := importStem(title, videoID)
 		videoOutName := filepath.Join("imports", baseFilename+videoExt)
 		videoOutPath := filepath.Join(outputDir, videoOutName)
 
@@ -326,20 +333,29 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 
 		// Extract video file
 		if err := extractZipEntry(videoFile, videoOutPath); err != nil {
+			logger.Error("import: could not extract the video", "entry", zipEntryName(videoFile), "err", err)
 			jsonError(rw, "failed to extract video", http.StatusInternalServerError)
 			return
 		}
 
-		// Extract chat file if present
+		// Extract chat file if present. A chat that cannot be written fails
+		// the import: the zip carried it, and a 201 without it said the
+		// archive was imported when its chat was gone — the import used to
+		// skip it without a word (W25-02).
 		chatOutName, chatOutPath := "", ""
 		if chatFile != nil {
 			chatOutName = filepath.Join("imports", baseFilename+".chat.json")
 			chatOutPath = filepath.Join(outputDir, chatOutName)
 			if _, ok := validatePathTraversal(chatOutPath, outputDir); !ok {
-				chatOutName, chatOutPath = "", ""
-			} else if err := extractZipEntry(chatFile, chatOutPath); err != nil {
-				// Non-fatal, just skip chat
-				chatOutName, chatOutPath = "", ""
+				os.Remove(videoOutPath)
+				jsonError(rw, "invalid output path", http.StatusBadRequest)
+				return
+			}
+			if err := extractZipEntry(chatFile, chatOutPath); err != nil {
+				logger.Error("import: could not extract the chat", "entry", zipEntryName(chatFile), "err", err)
+				os.Remove(videoOutPath)
+				jsonError(rw, "failed to extract chat", http.StatusInternalServerError)
+				return
 			}
 		}
 
@@ -484,6 +500,33 @@ func zipEntryName(f *zip.File) string {
 	}
 	return strings.ToValidUTF8(f.Name, "\uFFFD")
 }
+
+// importNameReserve is what an import's file name can carry past its
+// "<title> [<id>]" stem: a " (999)" disambiguation, a " - part999" part
+// suffix and the longest sibling suffix, ".chat.json".
+const importNameReserve = len(" (999)") + len(" - part999") + len(".chat.json")
+
+// importStem is the file stem an import writes: the sanitized title and
+// " [<id>]". The title is cut by BYTES on a rune boundary, to the budget a
+// recording's template gives it (config.TemplateTitleMaxBytes) and to what a
+// 255-byte file name leaves once the id and importNameReserve are in. The
+// sanitizer's cap counts runes, and a CJK title is three bytes a rune: a
+// 90-character Japanese title made "<title> [<id>].mp4" too long to create,
+// and at 78 characters the video fitted while its ".chat.json" did not.
+func importStem(title, id string) string {
+	budget := min(config.TemplateTitleMaxBytes, importNameMaxBytes-len(" ["+id+"]")-importNameReserve)
+	safe := utils.SanitizeForFilename(title)
+	if len(safe) > budget {
+		// Sanitized again once cut, for what the cut can expose: trailing
+		// dots or spaces, or a bare Windows device name. Its "_" guard is a
+		// byte, which the -1 leaves room for.
+		safe = utils.SanitizeForFilename(truncateUTF8(safe, budget-1))
+	}
+	return fmt.Sprintf("%s [%s]", safe, id)
+}
+
+// importNameMaxBytes is a file name's limit on Linux filesystems (NAME_MAX).
+const importNameMaxBytes = 255
 
 // importNameIDRe is a bracketed id in an archive's file name: a YouTube video
 // id, or the "imp_" placeholder an earlier import minted (randomHex(4), the

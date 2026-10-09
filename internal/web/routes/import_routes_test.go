@@ -23,6 +23,7 @@ type importFixture struct {
 	db        *database.Database
 	outputDir string
 	cleanup   func() // returned by ImportRoutes; stops the per-route rate limiter
+	log       *recordingLogger
 }
 
 func newImportFixture(t *testing.T) *importFixture {
@@ -41,10 +42,11 @@ func newImportFixture(t *testing.T) *importFixture {
 	store := config.NewStore(cfg, filepath.Join(dir, "config.toml"))
 
 	r := chi.NewRouter()
-	cleanup := ImportRoutes(r, db, store)
+	log := &recordingLogger{}
+	cleanup := ImportRoutes(r, db, store, log)
 	t.Cleanup(cleanup)
 
-	return &importFixture{router: r, store: store, db: db, outputDir: outputDir, cleanup: cleanup}
+	return &importFixture{router: r, store: store, db: db, outputDir: outputDir, cleanup: cleanup, log: log}
 }
 
 // makeImportZip builds an in-memory zip with the given file name → contents

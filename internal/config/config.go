@@ -1353,6 +1353,11 @@ const (
 	templateFreeTextFloorBytes = 30
 )
 
+// TemplateTitleMaxBytes is templateTitleMaxBytes for a name built without a
+// template: the archive import cuts the title in its file names to the same
+// budget (importStem, internal/web/routes/import_routes.go).
+const TemplateTitleMaxBytes = templateTitleMaxBytes
+
 // truncateUTF8 cuts s to at most max bytes on a rune boundary.
 func truncateUTF8(s string, max int) string {
 	if len(s) <= max {
