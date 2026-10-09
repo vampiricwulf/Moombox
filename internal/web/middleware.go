@@ -292,7 +292,8 @@ func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 // externalHostRefused reports whether a request on an external/public install
 // is the DNS-rebinding read: a loopback or private peer — the peers
 // AuthMiddleware and the WebSocket waive auth for — that addressed the server
-// by a DNS name no certificate SAN, `localhost` or network.public_url names.
+// by a DNS name no certificate SAN (a wildcard one included), `localhost` or
+// network.public_url names.
 //
 // A page on attacker.example rebound to the server's LAN address fetched
 // /api/config, /api/jobs and /api/logs same-origin from the browser it runs
@@ -328,10 +329,12 @@ func externalHostRefused(store *config.Store, r *http.Request) bool {
 	if strings.EqualFold(name, "localhost") || net.ParseIP(name) != nil {
 		return false
 	}
-	for _, san := range identityHosts() {
-		if strings.EqualFold(san, name) {
-			return false
-		}
+	// A wildcard SAN counts, as it does for this mode's Origin check
+	// (isAllowedOrigin's external arm): a page the browser loaded by a name
+	// the certificate covers passes CSRF and opens the socket there, so
+	// refusing its GETs locked a LAN client out of a dashboard it may drive.
+	if hostInSANs(name, identityHosts(), true) {
+		return false
 	}
 	if u, err := url.Parse(publicURL); publicURL != "" && err == nil && strings.EqualFold(u.Hostname(), name) {
 		return false
@@ -441,10 +444,14 @@ func identityHosts() []string {
 // ("::1" == "0:0:0:0:0:0:0:1") and DNS SANs compare case-insensitively.
 //
 // allowWildcard gates the "*." expansion below (RFC 6125: exactly one
-// leftmost, non-empty, dot-free label). Only the external/public arm of
-// isAllowedOrigin passes true: there, sameSiteOrigin already pins hostname to
+// leftmost, non-empty, dot-free label). Only external/public pass true. The
+// isAllowedOrigin arm does: there, sameSiteOrigin already pins hostname to
 // the browser's address bar first, so the wildcard can only ever NARROW which
-// same-host requests still pass. The localhost/lan/default arms have no such
+// same-host requests still pass. So does externalHostRefused, those modes'
+// Host rule, so that the Host a page was loaded by and the Origin it then
+// sends are judged alike — a name the wildcard covers is one in the
+// operator's own zone, which that Origin arm already trusts. The
+// localhost/lan/default arms have no such
 // conjunction — hostInSANs alone decides — so a wildcard there would let ANY
 // sibling of an operator's wildcard certificate (e.g. a stale or
 // attacker-registered subdomain under *.example.com) become an allowed

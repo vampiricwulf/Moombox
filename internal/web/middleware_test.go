@@ -1700,6 +1700,45 @@ func TestHostGateRefusesARebindingHost(t *testing.T) {
 			t.Errorf("access=%q Host=%q: status %d, want %d", tc.access, tc.host, rr.Code, tc.want)
 		}
 	}
+
+	// With an operator certificate, the names it attests. On external/public
+	// a wildcard SAN covers one label, as it does for the same modes' Origin
+	// check: a LAN browser that loaded the dashboard by such a name (split
+	// DNS) passes CSRF there, and its GETs — the dashboard shell first — were
+	// refused as an unrecognized host. lan stays held to a literal SAN.
+	//
+	// Mutants: delete the SAN admission from externalHostRefused — the literal
+	// rows are 403; compare SANs literally (the strings.EqualFold loop it
+	// replaced) — the wildcard rows are 403; hostInSANs with wildcards off
+	// there — the same; HostGateMiddleware's lan arm allowing wildcards — the
+	// lan wildcard row passes.
+	useIdentityCert(t, certWatcherFor(t, "dash.example.net", []string{"dash.example.net", "*.example.org"}, nil))
+	for _, tc := range []struct {
+		access, host string
+		want         int
+	}{
+		{"external", "dash.example.net:774", http.StatusOK},
+		{"public", "DASH.example.net", http.StatusOK},
+		{"external", "box.example.org:774", http.StatusOK},
+		{"public", "box.example.org", http.StatusOK},
+		{"external", "a.box.example.org:774", http.StatusForbidden},
+		{"external", "example.org:774", http.StatusForbidden},
+		{"external", "attacker.example:774", http.StatusForbidden},
+		{"lan", "dash.example.net:774", http.StatusOK},
+		{"lan", "box.example.org:774", http.StatusForbidden},
+	} {
+		cfg := config.Defaults()
+		cfg.Network.NetworkAccess = tc.access
+		h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "192.168.1.20:50000"
+		req.Host = tc.host
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != tc.want {
+			t.Errorf("with a certificate, access=%q Host=%q: status %d, want %d", tc.access, tc.host, rr.Code, tc.want)
+		}
+	}
 }
 
 // The external/public host rule is for the peers that skip auth: a rebinding
