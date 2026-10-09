@@ -913,6 +913,15 @@ func (m *TaskListModel) rebuildVirtualList() {
 		if isJobArchived(j, cutoff) {
 			m.archivedSet[j.ID] = true
 			archived = append(archived, j)
+			// A collapsed archive hides its rows as surely as the filter
+			// does, so they leave the selection too. Kept, a row ticked while
+			// the archive was open — or one that aged into it while ticked —
+			// was counted in the next batch's confirm and deleted by it with
+			// no ✓ on screen. The Web keeps one selection per tab, so a
+			// Tasks batch never reaches an Archived row either.
+			if !m.archiveExpanded {
+				delete(m.selected, j.ID)
+			}
 			continue
 		}
 		m.archivedSet[j.ID] = false
