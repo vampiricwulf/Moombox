@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -525,6 +526,71 @@ func TestOffQueueMuxHonoursTheOperatorsCancel(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(staging, "video.mp4")); err != nil {
 		t.Errorf("staging media was removed by a cancelled mux: %v", err)
+	}
+}
+
+// TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing: an operator's Cancel
+// stops the off-queue mux's FFmpeg, and the mux then wrote Cancelled over
+// whatever the row held by the time it looked — read, then written
+// unconditionally — so the write meant for a row the mux's own Muxing write
+// had stranded also turned a Finished archive a racing mux wrote back into
+// Cancelled, and an operator's Resume of the cancelled row into a second
+// Cancel. The write now applies only to the row it exists for: one still
+// Muxing. The stand-in FFmpeg holds the mux open, and the row moves on ahead
+// of the mux's own listener, so the mux reads it after the move.
+//
+// Mutants: write the Cancelled with UpdateJobFields — the Finished archive
+// and the resumed row turn Cancelled; with UpdateJobFieldsUnlessTerminal —
+// the resumed row does; drop the write — the stranded row is left Muxing
+// with nothing running it.
+func TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in FFmpeg is a shell script")
+	}
+	for _, tc := range []struct {
+		name   string
+		landed database.JobStatus // what reaches the row after the route's Cancelled
+		want   database.JobStatus
+	}{
+		{"the mux's own Muxing write", database.StatusMuxing, database.StatusCancelled},
+		{"a racing mux's Finished", database.StatusFinished, database.StatusFinished},
+		{"the operator's Resume", database.StatusUpcoming, database.StatusUpcoming},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			const id = "j-cancel-landed"
+			staging, _ := muxFixtureJob(t, w, db, id)
+			if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("staged"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gates := t.TempDir()
+			started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
+			w.orchestrator.SetFfmpegPath(writeBlockingFFmpeg(t, started, release))
+			defer os.WriteFile(release, nil, 0o644) // a mux the cancel missed ends anyway
+
+			// Registered ahead of the mux's own listener, so it runs first:
+			// the mux hears the Cancelled with the row already moved on. Once
+			// only — the mux's own Cancelled must not set it off again.
+			var once sync.Once
+			unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+				if j.ID == id && j.Status == database.StatusCancelled {
+					once.Do(func() { db.UpdateJobFields(id, map[string]any{"status": tc.landed}) })
+				}
+			})
+			defer unsubscribe()
+
+			if err := w.MuxJob(id); err != nil {
+				t.Fatalf("MuxJob: %v", err)
+			}
+			waitForFile(t, started)
+			db.UpdateJobFields(id, map[string]any{"status": database.StatusCancelled}) // the cancel route's write
+			w.wg.Wait()                                                                // the mux has returned
+
+			if row, _ := db.GetJob(id); statusOf(row) != tc.want {
+				t.Errorf("status = %s after a cancelled mux found the row %s, want %s", statusOf(row), tc.landed, tc.want)
+			}
+		})
 	}
 }
 

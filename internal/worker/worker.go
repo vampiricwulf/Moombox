@@ -2430,10 +2430,12 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error 
 				// later Mux or Resume. The row says Cancelled unless the mux's
 				// own Muxing write landed just after the route's — re-assert
 				// it so the row cannot be left Muxing with nothing running.
+				// On a row still Muxing only: read and then written
+				// unconditionally, the Cancelled also landed on whatever came
+				// after the route's — a Finished archive a racing mux wrote,
+				// the operator's Resume of the cancelled row.
 				w.logger.Info("MuxJob: cancelled; staging is kept", "jobID", jobID)
-				if fresh, _ := w.db.GetJob(jobID); fresh != nil && fresh.Status != database.StatusCancelled {
-					w.db.UpdateJobFields(jobID, map[string]any{"status": database.StatusCancelled})
-				}
+				w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, map[string]any{"status": database.StatusCancelled})
 				return
 			}
 			if ctx.Err() != nil {
