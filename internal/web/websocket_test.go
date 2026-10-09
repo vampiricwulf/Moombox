@@ -146,7 +146,7 @@ func TestBroadcastLogClipsAnOverlongLine(t *testing.T) {
 func TestInitialStateCarriesOnlyTheProviderLogs(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
 	hub.InitialState = func() map[string]any { return map[string]any{"jobs": []any{}} }
-	hub.BroadcastLog("a line the hub must not be storing")
+	hub.BroadcastLog("a line the hub must not be storing", 1)
 
 	var payload struct {
 		Payload map[string]any `json:"payload"`

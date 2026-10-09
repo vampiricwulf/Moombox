@@ -1132,7 +1132,7 @@ export class MoomboxApp {
         // deep-linked dialog may hold the enriched copy there.
         this.details._preserveStagingFields([...this.jobs, ...this.archivedJobs], p.jobs || []);
         this.jobs = p.jobs || [];
-        this.logPanel.logs = p.logs || [];
+        this.logPanel.setSnapshot(p.logs || [], p.logSeq);
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1413,7 +1413,7 @@ export class MoomboxApp {
       }
 
       case "log":
-        if (p) this.logPanel.addLog(p);
+        if (p) this.logPanel.addLog(p, message.seq);
         break;
 
       case "check_timers":

@@ -199,7 +199,7 @@ func TestTheLineBeforeATerminalWriteReachesTheJobsOwnLog(t *testing.T) {
 
 	s.wireLogForwarding()
 	stopForwarder := sync.OnceFunc(func() {
-		log.Unsubscribe(s.logSub)
+		log.UnsubscribeLines(s.logSub)
 		close(s.logSubDone)
 	})
 	// What shutdown does with them.

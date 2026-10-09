@@ -51,6 +51,13 @@ const (
 type WSMessage struct {
 	Type    string `json:"type"`
 	Payload any    `json:"payload"`
+	// Seq is set on "log" frames only: the line's number in the logger's
+	// ring (logger.Line.Seq). initial_state carries the number of its newest
+	// line as payload.logSeq, and the dashboard skips a log frame at or below
+	// it — see BroadcastLog. Beside the payload rather than inside it, so a
+	// tab still running the previous app.js after an update keeps reading a
+	// plain string payload.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // InitialStateProvider supplies data for the initial state message.
@@ -283,9 +290,12 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// job_deleted committed after the snapshot's GetAllJobs went out first (a
 	// no-op on an empty client), and the snapshot then restored the deleted
 	// row. Replaying them after it is correct — they are idempotent upserts
-	// and deletes. A tab that falls behind in its first second gets its next
-	// full snapshot one wsResyncMinInterval from the seed above, not stacked
-	// straight on top of this one.
+	// and deletes. Log frames are appends, not upserts: a line logged since
+	// registration (this Debug line, at DEBUG) is in the snapshot too, and
+	// the client skips its frame by number (BroadcastLog, logSeq). A tab
+	// that falls behind in its first second gets its next full snapshot one
+	// wsResyncMinInterval from the seed above, not stacked straight on top of
+	// this one.
 	hub.sendInitialState(client)
 	if client.ctx.Err() != nil {
 		return // the snapshot write failed and the client is already gone
@@ -731,6 +741,12 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 
 // Broadcast sends a message to all connected clients.
 func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
+	hub.broadcastMessage(WSMessage{Type: msgType, Payload: payload})
+}
+
+// broadcastMessage is Broadcast for a message already built — the one way a
+// frame carrying more than a type and a payload (a log line's Seq) goes out.
+func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
 	hub.mu.RLock()
 	n := len(hub.clients)
 	hub.mu.RUnlock()
@@ -738,7 +754,6 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 		return
 	}
 
-	msg := WSMessage{Type: msgType, Payload: payload}
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		return
@@ -897,14 +912,23 @@ func clipLogLine(line string) string {
 	return line[:n] + "... (truncated)"
 }
 
-// BroadcastLog sends a log line to all clients.
+// BroadcastLog sends a log line to all clients, with the sequence number the
+// logger's ring gave it.
 //
 // The hub keeps NO buffer of its own: the logger owns the only ring
-// (logger.GetRecentLines), ws_wiring.go always puts it in the initial-state
+// (logger.RecentLines), ws_wiring.go always puts it in the initial-state
 // payload, and the hub's copy was appended on every line and never read
 // (WEB-14).
-func (hub *WebSocketHub) BroadcastLog(line string) {
-	hub.Broadcast("log", clipLogLine(line))
+//
+// The number is what keeps a line from showing twice. A client joins the hub
+// BEFORE its snapshot reads the ring — the order that leaves no gap — so a
+// line logged in between is in the snapshot AND reaches the client as a
+// frame. Every frame here goes out after the snapshot is written (see
+// HandleUpgrade), so the dashboard drops the ones at or below the snapshot's
+// payload.logSeq: the hub's own "websocket connected" line, at DEBUG, was
+// such a line on every connect (W24-14).
+func (hub *WebSocketHub) BroadcastLog(line string, seq uint64) {
+	hub.broadcastMessage(WSMessage{Type: "log", Payload: clipLogLine(line), Seq: seq})
 }
 
 // ClientCount returns the number of connected clients.

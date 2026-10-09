@@ -145,7 +145,7 @@ func (s *runState) shutdown() bool {
 		// (wireLogForwarding): lines logged after this reach the file, the
 		// ring and the TUI, not a database that is about to close.
 		s.log.SetLineRouter(nil)
-		s.log.Unsubscribe(s.logSub)
+		s.log.UnsubscribeLines(s.logSub)
 		if s.logSubDone != nil {
 			close(s.logSubDone)
 		}

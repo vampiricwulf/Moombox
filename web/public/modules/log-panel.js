@@ -13,6 +13,26 @@ export class LogPanelController {
     // flush them. See _flushPendingLines.
     this._pendingLines = [];
     this._pendingFrame = null;
+
+    // The server's number for the newest line of the last initial_state
+    // snapshot (payload.logSeq). See setSnapshot.
+    this._snapshotSeq = 0;
+  }
+
+  /**
+   * Replace the buffer with an initial_state snapshot.
+   *
+   * The server registers a tab before it reads the log ring for the snapshot,
+   * so a line logged in between is in the snapshot AND arrives after it as a
+   * `log` frame. Each frame carries the line's number (`seq`); addLog skips a
+   * frame at or below the snapshot's newest, which it already holds. Without
+   * that, the hub's own "websocket connected" line showed twice on every
+   * connect at DEBUG. A server too old to send numbers sends neither, and
+   * nothing is skipped.
+   */
+  setSnapshot(lines, seq) {
+    this.logs = lines;
+    this._snapshotSeq = typeof seq === "number" ? seq : 0;
   }
 
   /** Wire up the log filter buttons, search input, scroll tracking, and clear button. */
@@ -80,7 +100,12 @@ export class LogPanelController {
     }
   }
 
-  addLog(log) {
+  /**
+   * Append one line. `seq` is the `log` frame's number, when it has one: a
+   * line the last snapshot already holds is skipped (see setSnapshot).
+   */
+  addLog(log, seq) {
+    if (typeof seq === "number" && seq <= this._snapshotSeq) return;
     this.logs.push(log);
     if (this.logs.length > 500) {
       this.logs = this.logs.slice(-500);

@@ -121,9 +121,15 @@ func (s *runState) wireWebSocket() {
 		if s.trimSvc != nil {
 			runningTrims = s.trimSvc.RunningTrims()
 		}
+		// logSeq numbers the snapshot's newest line. This client joined the
+		// hub before this read, so a line logged since is here AND on its
+		// way as a log frame; the dashboard skips frames at or below logSeq
+		// (W24-14).
+		logs, logSeq := s.log.RecentLines()
 		return map[string]any{
 			"jobs":                jobs,
-			"logs":                s.log.GetRecentLines(),
+			"logs":                logs,
+			"logSeq":              logSeq,
 			"nextFeedCheck":       s.feedMon.GetNextCheckAt(),
 			"nextDecapiCheck":     s.decapiMon.GetNextCheckAt(),
 			"nextTwitchCheck":     s.twitchMon.GetNextCheckAt(),

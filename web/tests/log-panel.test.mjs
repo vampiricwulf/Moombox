@@ -109,3 +109,73 @@ test("a full render supersedes a queued batch", { skip }, async () => {
     "a queued batch must be dropped by a full rebuild — flushing it afterwards (the mutant) " +
     "re-appends a line the rebuild already decided against");
 });
+
+// The server registers a tab before it reads the log ring for initial_state,
+// so a line logged in between — at DEBUG the hub's own "websocket connected",
+// on every connect — is in the snapshot AND arrives after it as a `log` frame
+// (W24-14). Each frame carries the line's number in the ring (`seq`), the
+// snapshot the number of its newest line (`logSeq`); a frame at or below it is
+// a line the panel already holds. internal/web's TestAConnectShowsEachLogLineOnce
+// pins the server's half.
+//
+// Mutants: setSnapshot ignoring logSeq, addLog comparing with `<` instead of
+// `<=`, or app.js's `log` case not passing message.seq — the connect line is
+// shown twice.
+const countIn = (viewer, text) =>
+  [...viewer.children].filter((el) => el.textContent.includes(text)).length;
+
+test("a log frame for a line the snapshot holds is shown once", { skip }, async () => {
+  const h = await harness.makeApp();
+  const viewer = h.el("logs-viewer");
+
+  h.app.handleMessage({
+    type: "initial_state",
+    payload: { jobs: [], logs: ["INFO before the connect", "DEBUG websocket connected clients=1"], logSeq: 7 },
+  });
+  h.flushRaf();
+  await h.flush();
+
+  h.app.handleMessage({ type: "log", payload: "DEBUG websocket connected clients=1", seq: 7 });
+  h.app.handleMessage({ type: "log", payload: "INFO after the connect", seq: 8 });
+  h.flushRaf();
+
+  assert.deepEqual(h.app.logPanel.logs,
+    ["INFO before the connect", "DEBUG websocket connected clients=1", "INFO after the connect"],
+    "the replayed frame must be skipped and the new one kept");
+  assert.equal(countIn(viewer, "websocket connected"), 1, "the connect line is drawn twice");
+  assert.equal(countIn(viewer, "after the connect"), 1, "a line newer than the snapshot must be drawn");
+});
+
+// A resync snapshot (the hub sends one in place of a frame a lagging tab
+// dropped) moves the mark, and so does a reconnect to a restarted server,
+// whose numbering starts again from 1 — the mark is the last snapshot's, not
+// the highest ever seen.
+//
+// Mutant: setSnapshot keeping the larger of the old and new marks — after the
+// restart every line is skipped until the new numbers pass the old ones.
+test("each snapshot sets the mark, even a lower one after a restart", { skip }, async () => {
+  const h = await harness.makeApp();
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO a"], logSeq: 500 } });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO b", "INFO c"], logSeq: 2 } });
+  h.app.handleMessage({ type: "log", payload: "INFO c", seq: 2 });
+  h.app.handleMessage({ type: "log", payload: "INFO d", seq: 3 });
+  h.flushRaf();
+
+  assert.deepEqual(h.app.logPanel.logs, ["INFO b", "INFO c", "INFO d"],
+    "after a restart's snapshot, its own numbering decides what is new");
+});
+
+// A server that predates the numbers sends neither logSeq nor seq; a line the
+// page logs for itself (app.addLog) has no number either. None of them may be
+// skipped.
+test("lines without a number are always shown", { skip }, async () => {
+  const h = await harness.makeApp();
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [], logs: ["INFO old server"] } });
+  h.app.handleMessage({ type: "log", payload: "INFO unnumbered frame" });
+  h.app.addLog("INFO from the page itself");
+  h.flushRaf();
+
+  assert.deepEqual(h.app.logPanel.logs, ["INFO old server", "INFO unnumbered frame", "INFO from the page itself"]);
+});

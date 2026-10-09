@@ -173,7 +173,7 @@ After all services are created, `main.go` wires the event callbacks:
 - `db.OnJobChange` -> `wsHub.BroadcastJobProgress()` for a progress-only write, otherwise `wsHub.BroadcastJobUpdate()` (per-job WebSocket messages); re-syncs per-job log routing on a status write
 - `db.OnJobAdded` / `db.OnTrimsChanged` -> `wsHub.BroadcastJobUpdate()` for the one job; `db.OnJobDeleted` -> `onJobDeleted` (clear the job's log buffer + `BroadcastJobDeleted`)
 - `db.OnJobsChange` (the two bulk writers only) -> `wsHub.BroadcastJobsUpdate()` (full job list), re-sync and prune job logs
-- `log.SetLineRouter(db.RouteLogToJobs)` (per-job log buffers) — synchronous, inside every log call, so a line logged before a status write is routed before the write can untrack its job — and `log.Subscribe()` -> `wsHub.BroadcastLog()` (`wireLogForwarding`)
+- `log.SetLineRouter(db.RouteLogToJobs)` (per-job log buffers) — synchronous, inside every log call, so a line logged before a status write is routed before the write can untrack its job — and `log.SubscribeLines()` -> `wsHub.BroadcastLog(text, seq)` (`wireLogForwarding`), each frame numbered as the logger's ring numbered the line
 - `cookieRefresh.OnRecoveryNeeded` -> `runCookieRecovery()` in a background goroutine: `autoCookieSvc.RefreshCookiesDetailed()`, then notifies on the triggering platform's own verdict (OK / Failed / Unknown)
 
 All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer func() { if r := recover() }()` for panic isolation.

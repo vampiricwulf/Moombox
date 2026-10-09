@@ -42,8 +42,8 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 // Lock hierarchy (acquire in this order to avoid deadlock; never invert):
 //
 //  1. fileMu     — protects file rotation (rotate() and Write of formatted line)
-//  2. subMu      — protects the subscribers slice
-//  3. ringMu     — protects the ringBuffer slice + ringIndex/ringCount.
+//  2. subMu      — protects the subscribers and lineSubs slices
+//  3. ringMu     — protects the ringBuffer slice + ringIndex/ringCount/ringSeq.
 //     Leaf lock: rotate→diagf ring-appends while holding fileMu, so
 //     nothing may acquire another logger lock under ringMu. (broadcast's
 //     slow-subscriber warning is appended only after it releases
@@ -116,10 +116,18 @@ type Logger struct {
 	ringSize   int
 	ringIndex  int
 	ringCount  int
+	// ringSeq numbers the lines the ring has taken, 1 for the first: the
+	// newest entry is ringSeq, the one before it ringSeq-1, and so on. It is
+	// how a reader holding a snapshot tells a line it already has from one it
+	// does not (RecentLines, SubscribeLines). Guarded by ringMu.
+	ringSeq uint64
 
 	// Pub/sub for log lines
 	subscribers []chan string
-	subMu       sync.RWMutex
+	// lineSubs are the SubscribeLines subscribers: the same lines, each with
+	// its ring sequence number. Guarded by subMu.
+	lineSubs []chan Line
+	subMu    sync.RWMutex
 
 	// router receives every line log() emits, SYNCHRONOUSLY, on the goroutine
 	// that logged it — see SetLineRouter. An atomic pointer rather than a
@@ -499,9 +507,20 @@ func (l *Logger) log(level slog.Level, msg string, args ...any) {
 	// The ring-buffer / subscriber line — the TUI log panel's and the
 	// dashboard's shape, which is deliberately not the file's.
 	line := formatLogLine(now, level, msg, args...)
-	l.addToRingBuffer(line)
+	seq := l.addToRingBuffer(line)
 	l.route(line)
-	l.broadcast(line)
+	l.broadcast(line, seq)
+}
+
+// Line is one log line as SubscribeLines delivers it: the ring-buffer /
+// subscriber text and the sequence number the ring gave it.
+type Line struct {
+	// Seq is the line's position in the ring's numbering, 1 for the first
+	// line the logger ever emitted. Every line RecentLines returns with a
+	// newest-seq of N has a Seq of at most N; every line emitted after that
+	// snapshot has a greater one.
+	Seq  uint64
+	Text string
 }
 
 // SetLineRouter installs fn to receive every line the logger emits, in the
@@ -604,7 +623,8 @@ func formatLogLine(now time.Time, level slog.Level, msg string, args ...any) str
 	return strings.Clone(sb.String())
 }
 
-func (l *Logger) addToRingBuffer(line string) {
+// addToRingBuffer appends one line and returns the sequence number it took.
+func (l *Logger) addToRingBuffer(line string) uint64 {
 	l.ringMu.Lock()
 	defer l.ringMu.Unlock()
 
@@ -613,9 +633,12 @@ func (l *Logger) addToRingBuffer(line string) {
 	if l.ringCount < l.ringSize {
 		l.ringCount++
 	}
+	l.ringSeq++
+	return l.ringSeq
 }
 
-func (l *Logger) broadcast(line string) {
+// broadcast sends one line, which the ring numbered seq, to every subscriber.
+func (l *Logger) broadcast(line string, seq uint64) {
 	if l.closed.Load() {
 		return
 	}
@@ -626,27 +649,37 @@ func (l *Logger) broadcast(line string) {
 	// still defer it past RUnlock so subMu and ringMu are never held at once and
 	// the hot fan-out loop stays free of a ringMu acquisition.
 	var ringWarn string
+	dropped := func() {
+		// Drop if subscriber is slow — rate-limit the warning to at most
+		// once per second to avoid flooding stderr under sustained load
+		now := time.Now().UnixNano()
+		last := l.dropWarnLast.Load()
+		if now-last >= int64(time.Second) {
+			if l.dropWarnLast.CompareAndSwap(last, now) {
+				if l.stderrGate == nil || l.stderrGate.enabled.Load() {
+					fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
+				} else {
+					// Defer the ring-append (see ringWarn above); the CAS
+					// rate-limit guarantees this is set at most once here.
+					ringWarn = time.Now().Format("2006-01-02 15:04:05") +
+						" WARN logger: dropped log line for slow subscriber"
+				}
+			}
+		}
+	}
 	l.subMu.RLock()
 	for _, ch := range l.subscribers {
 		select {
 		case ch <- line:
 		default:
-			// Drop if subscriber is slow — rate-limit the warning to at most
-			// once per second to avoid flooding stderr under sustained load
-			now := time.Now().UnixNano()
-			last := l.dropWarnLast.Load()
-			if now-last >= int64(time.Second) {
-				if l.dropWarnLast.CompareAndSwap(last, now) {
-					if l.stderrGate == nil || l.stderrGate.enabled.Load() {
-						fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
-					} else {
-						// Defer the ring-append (see ringWarn above); the CAS
-						// rate-limit guarantees this is set at most once here.
-						ringWarn = time.Now().Format("2006-01-02 15:04:05") +
-							" WARN logger: dropped log line for slow subscriber"
-					}
-				}
-			}
+			dropped()
+		}
+	}
+	for _, ch := range l.lineSubs {
+		select {
+		case ch <- Line{Seq: seq, Text: line}:
+		default:
+			dropped()
 		}
 	}
 	l.subMu.RUnlock()
@@ -678,6 +711,20 @@ func (l *Logger) Error(msg string, args ...any) {
 
 // GetRecentLines returns the most recent log lines from the ring buffer.
 func (l *Logger) GetRecentLines() []string {
+	lines, _ := l.RecentLines()
+	return lines
+}
+
+// RecentLines returns the ring buffer, oldest line first, and the sequence
+// number of its newest line (0 while it is empty), read together under one
+// lock.
+//
+// A reader that pairs this snapshot with a live feed takes the feed FIRST
+// (SubscribeLines) and the snapshot second, so nothing falls between them —
+// and then skips every fed line whose Seq is at most the snapshot's: a line
+// logged in between is in both. That replay is what put the dashboard's
+// "websocket connected" line on screen twice on every connect (W24-14).
+func (l *Logger) RecentLines() ([]string, uint64) {
 	l.ringMu.RLock()
 	defer l.ringMu.RUnlock()
 
@@ -694,7 +741,7 @@ func (l *Logger) GetRecentLines() []string {
 			result = append(result, l.ringBuffer[idx])
 		}
 	}
-	return result
+	return result, l.ringSeq
 }
 
 // Subscribe creates a new subscription channel for log lines.
@@ -736,6 +783,32 @@ func (l *Logger) Unsubscribe(ch chan string) {
 	for i, sub := range l.subscribers {
 		if sub == ch {
 			l.subscribers = append(l.subscribers[:i], l.subscribers[i+1:]...)
+			return
+		}
+	}
+}
+
+// SubscribeLines is Subscribe with each line's ring sequence number, for a
+// reader that also takes a RecentLines snapshot and must not show a line
+// twice. Same buffering, drop policy and lifecycle as Subscribe; release it
+// with UnsubscribeLines.
+func (l *Logger) SubscribeLines() chan Line {
+	ch := make(chan Line, 100)
+	l.subMu.Lock()
+	l.lineSubs = append(l.lineSubs, ch)
+	l.subMu.Unlock()
+	return ch
+}
+
+// UnsubscribeLines is Unsubscribe for a SubscribeLines channel, and likewise
+// leaves it open.
+func (l *Logger) UnsubscribeLines(ch chan Line) {
+	l.subMu.Lock()
+	defer l.subMu.Unlock()
+
+	for i, sub := range l.lineSubs {
+		if sub == ch {
+			l.lineSubs = append(l.lineSubs[:i], l.lineSubs[i+1:]...)
 			return
 		}
 	}
@@ -795,8 +868,7 @@ func (l *Logger) diagf(format string, args ...any) {
 		return
 	}
 	line := time.Now().Format("2006-01-02 15:04:05") + " WARN " + msg
-	l.addToRingBuffer(line)
-	l.broadcast(line)
+	l.broadcast(line, l.addToRingBuffer(line))
 }
 
 // Close flushes and closes the logger.
@@ -817,9 +889,14 @@ func (l *Logger) Close() {
 	l.subMu.Lock()
 	subs := l.subscribers
 	l.subscribers = nil
+	lineSubs := l.lineSubs
+	l.lineSubs = nil
 	l.subMu.Unlock()
 
 	for _, ch := range subs {
+		close(ch)
+	}
+	for _, ch := range lineSubs {
 		close(ch)
 	}
 }

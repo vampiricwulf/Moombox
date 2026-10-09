@@ -1031,3 +1031,67 @@ func TestLineRouterRunsInsideTheLogCall(t *testing.T) {
 		t.Errorf("a panicking router left no diagnostic:\n%s", ring)
 	}
 }
+
+// TestRingSequenceNumbersPairASnapshotWithItsFeed pins what lets a reader
+// that seeds from RecentLines and then follows SubscribeLines show each line
+// once (W24-14): the snapshot names the number of its newest line, every line
+// fed is numbered the way the ring numbered it, and a line emitted after the
+// snapshot always numbers above it. A reader subscribes FIRST, so a line
+// logged between the two reads is in both — and is the one the number lets
+// it skip.
+//
+// Mutants this kills:
+//   - addToRingBuffer not advancing ringSeq: the snapshot says 0 and every
+//     line is numbered 0, so nothing tells the replayed line from a new one.
+//   - broadcast handing SubscribeLines a number other than the ring's (0, or
+//     one read again after the fact): the fed numbers stop matching.
+//   - RecentLines returning the line count instead of the newest number once
+//     the ring wraps: the snapshot claims fewer lines than it has seen.
+//   - Close leaving SubscribeLines channels open: the range below never ends.
+func TestRingSequenceNumbersPairASnapshotWithItsFeed(t *testing.T) {
+	l, err := New("", "INFO", 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SuppressStdout()
+
+	if lines, seq := l.RecentLines(); len(lines) != 0 || seq != 0 {
+		t.Fatalf("an empty ring reported %d lines up to %d, want none up to 0", len(lines), seq)
+	}
+
+	// Past the ring's size, so the numbers have to keep counting after the
+	// ring starts overwriting.
+	const before = defaultRingSize + 50
+	for i := range before {
+		l.Info("before the reader", "i", i)
+	}
+
+	// The reader's order: the feed first, then the snapshot.
+	sub := l.SubscribeLines()
+	l.Info("between the subscription and the snapshot")
+	lines, snapSeq := l.RecentLines()
+	l.Info("after the snapshot")
+	l.Close()
+
+	if snapSeq != before+1 {
+		t.Errorf("the snapshot's newest line is numbered %d, want %d — one per line the ring took", snapSeq, before+1)
+	}
+	if len(lines) != defaultRingSize || !strings.HasSuffix(lines[len(lines)-1], "between the subscription and the snapshot") {
+		t.Fatalf("the snapshot holds %d lines ending %q", len(lines), lines[len(lines)-1])
+	}
+
+	var fed []Line
+	for line := range sub {
+		fed = append(fed, line)
+	}
+	if len(fed) != 2 {
+		t.Fatalf("SubscribeLines delivered %d lines, want the 2 logged after it: %v", len(fed), fed)
+	}
+	if between := fed[0]; !strings.HasSuffix(between.Text, "between the subscription and the snapshot") || between.Seq != snapSeq {
+		t.Errorf("the line both reads carry was fed as %q #%d; it is the snapshot's newest, #%d, and a reader must be able to tell",
+			between.Text, between.Seq, snapSeq)
+	}
+	if after := fed[1]; !strings.HasSuffix(after.Text, "after the snapshot") || after.Seq != snapSeq+1 {
+		t.Errorf("the line logged after the snapshot was fed as %q #%d, want #%d — above the snapshot's", after.Text, after.Seq, snapSeq+1)
+	}
+}

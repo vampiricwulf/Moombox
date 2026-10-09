@@ -510,9 +510,9 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `jobs_update` — Full job list refresh (payload: array of all visible jobs)
 - `job_deleted` — A job row was removed (payload: `{id}`)
 - `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
-- `log` — Log line (payload: string)
+- `log` — Log line (payload: string; beside it, `seq` — the line's number in the logger's ring, which the dashboard compares with `initial_state`'s `logSeq` to skip a line the snapshot already holds)
 - `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
-- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims}`)
+- `initial_state` — Sent on connect (payload: `{jobs, logs, logSeq, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, connectivity, hideFinishedAgeDays, backfill, runningTrims}`; `logSeq` numbers the newest line of `logs`)
 - `update_available` — New version found (payload: release info)
 - `update_cleared` — The pending release was withdrawn: skipped, or a check found nothing newer, so it was pulled (payload: `{tagName}`; a dashboard drops its badge only when the tag names the release it shows)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
@@ -547,7 +547,7 @@ Database.OnJobAdded()      -> jobAddedCh (cap 100)       -> tea.Cmd -> TUI model
 Database.OnJobDeleted()    -> jobDeletedCh (cap 100)     -> tea.Cmd -> TUI model
 Database.OnTrimsChanged()  -> jobTrimsChangedCh (cap 50) -> tea.Cmd -> TUI model
 Database.OnJobsChange()    -> jobsUpdateCh (cap 10)      -> tea.Cmd -> TUI model (bulk writes only)
-Logger.Subscribe()         -> logCh (cap 200)            -> tea.Cmd -> TUI model (250ms batch)
+Logger.SubscribeLines()    -> logCh (cap 200)            -> tea.Cmd -> TUI model (250ms batch; lines the backfill holds skipped)
 CookieRefresh.OnAuthChange -> cookieStatusCh (cap 5)     -> tea.Cmd -> TUI model
 Monitor.OnSchedule         -> checkTimersCh (cap 10)     -> tea.Cmd -> TUI model
 ```

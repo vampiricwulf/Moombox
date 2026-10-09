@@ -2047,8 +2047,10 @@ func (s *runState) wireMonitorCallbacks() {
 func (s *runState) wireLogForwarding() {
 	s.log.SetLineRouter(s.db.RouteLogToJobs)
 
-	// Logger -> WebSocket: broadcast log lines.
-	s.logSub = s.log.Subscribe()
+	// Logger -> WebSocket: broadcast log lines, each with its ring sequence
+	// number, which a dashboard compares with its snapshot's logSeq so a line
+	// both carry is shown once (BroadcastLog).
+	s.logSub = s.log.SubscribeLines()
 	s.logSubDone = make(chan struct{})
 	logSub, logSubDone := s.logSub, s.logSubDone
 	go func() {
@@ -2057,7 +2059,7 @@ func (s *runState) wireLogForwarding() {
 				s.log.Error("log forwarder panic", "panic", r)
 			}
 		}()
-		// Not `range logSub`: Unsubscribe never closes the channel (see
+		// Not `range logSub`: UnsubscribeLines never closes the channel (see
 		// Logger.Subscribe), so shutdown closes logSubDone after it.
 		for {
 			select {
@@ -2067,7 +2069,7 @@ func (s *runState) wireLogForwarding() {
 				if !ok {
 					return
 				}
-				s.wsHub.BroadcastLog(line)
+				s.wsHub.BroadcastLog(line.Text, line.Seq)
 			}
 		}
 	}()

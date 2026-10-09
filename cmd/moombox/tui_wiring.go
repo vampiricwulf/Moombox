@@ -17,6 +17,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/web"
@@ -971,36 +972,22 @@ func (s *runState) runTUI() {
 		}
 	}()
 
-	// Forward log lines to TUI
-	tuiLogSub := s.log.Subscribe()
+	// Forward log lines to TUI. Subscribed BEFORE the backfill is read, so no
+	// line falls between the two — and a line logged in between is in both,
+	// which forwardTUILogs skips by its number.
+	tuiLogSub := s.log.SubscribeLines()
+	backfill, backfillSeq := s.log.RecentLines()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("[Main] Panic in TUI log forwarder", "panic", fmt.Sprint(r))
 			}
 		}()
-		// Not `range tuiLogSub`: Unsubscribe never closes the channel (see
-		// Logger.Subscribe), and the TUI's exit cancels s.ctx before it
-		// unsubscribes.
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case line, ok := <-tuiLogSub:
-				if !ok {
-					return
-				}
-				select {
-				case logCh <- line:
-				default:
-					tuiDroppedLogs.Add(1)
-				}
-			}
-		}
+		forwardTUILogs(s.ctx, tuiLogSub, backfillSeq, logCh, &tuiDroppedLogs)
 	}()
 
 	// Backfill TUI with logs emitted before subscription
-	app.BackfillLogs(s.log.GetRecentLines())
+	app.BackfillLogs(backfill)
 
 	// Forward monitor schedule events to TUI via the atomic pointers installed
 	// by monitor_callbacks.wireMonitorCallbacks. Store() is race-free against
@@ -1150,7 +1137,7 @@ func (s *runState) runTUI() {
 	// unsubscribe. Don't close channels: non-blocking sends mean no
 	// goroutine will block, and GC handles cleanup.
 	s.cancel() // TUI quit triggers shutdown
-	s.log.Unsubscribe(tuiLogSub)
+	s.log.UnsubscribeLines(tuiLogSub)
 	unsubTUIJobUpdate()
 	unsubTUIJobAdded()
 	unsubTUIJobDeleted()
@@ -1303,4 +1290,35 @@ func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
 		TagName:      release.TagName,
 		ReleaseNotes: release.ReleaseNotes,
 	}, nil
+}
+
+// forwardTUILogs copies the logger's lines into the TUI's log channel until
+// ctx ends, skipping every line numbered at or below backfillSeq: the backfill
+// the log panel was seeded with already holds those. The subscription is
+// taken before the backfill is read so that no line falls between the two,
+// which means a line logged in between is in both — and the panel showed it
+// twice (the dashboard's W24-14, at the TUI's start). A full channel drops the
+// line and counts it.
+//
+// Not a `range` over sub: UnsubscribeLines never closes the channel (see
+// Logger.Subscribe), and the TUI's exit cancels ctx before it unsubscribes.
+func forwardTUILogs(ctx context.Context, sub <-chan logger.Line, backfillSeq uint64, logCh chan<- string, dropped *atomic.Int64) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case line, ok := <-sub:
+			if !ok {
+				return
+			}
+			if line.Seq <= backfillSeq {
+				continue
+			}
+			select {
+			case logCh <- line.Text:
+			default:
+				dropped.Add(1)
+			}
+		}
+	}
 }

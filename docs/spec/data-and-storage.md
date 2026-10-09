@@ -1299,6 +1299,8 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 
 `GetRecentLines()` returns lines in chronological order regardless of current buffer position.
 
+**Every line the ring takes is numbered** (`ringSeq`, 1 for the first line of the process), and `RecentLines()` returns the lines together with the number of the newest, in one read. A reader that pairs a snapshot with a live feed subscribes FIRST (`SubscribeLines`, whose lines carry their number) and reads the snapshot second, so no line falls between the two; a line logged in between is then in both, and the reader skips every fed line numbered at or below the snapshot's. Both such readers do: the dashboard, through `initial_state`'s `logSeq` and each `log` frame's `seq`, and the TUI's log forwarder (`forwardTUILogs`, `cmd/moombox/tui_wiring.go`) against its backfill. Without the number the line showed twice — at DEBUG the hub's own "websocket connected" line, on every dashboard connect.
+
 ### Per-Job Log Buffers
 
 The LIVE per-job log pipeline is the database's: the logger's line router (`SetLineRouter`, called inside every log call, before `Debug`/`Info`/`Warn`/`Error` return) feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs). Only NON-TERMINAL jobs are scanned for — see § Per-Job Log Buffers above for the routed set.
@@ -1311,7 +1313,9 @@ The Logger type once carried a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` 
 
 `Unsubscribe(ch)` removes the channel from the subscriber list. The channel is not closed (to avoid a race with concurrent `broadcast()` calls); it is left for GC.
 
-`broadcast(line)` sends to all subscribers. If a subscriber's channel is full, the line is dropped (non-blocking send).
+`SubscribeLines()` / `UnsubscribeLines(ch)` are the same with each line delivered as a `Line{Seq, Text}` — its number in the ring beside the text (see § Ring Buffer).
+
+`broadcast(line, seq)` sends to all subscribers of both kinds. If a subscriber's channel is full, the line is dropped (non-blocking send).
 
 ### Log Levels
 
