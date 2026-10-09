@@ -1415,12 +1415,6 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// loadJob fetches the job a handler acts on, and answers the request itself
-// when it cannot: 404 when no such job exists, 500 when the lookup failed.
-// GetJob returns (nil, nil) for a missing row and (nil, err) for a failed
-// read; folding both into 404 told the dashboard — whose 404 branch means
-// "the job is gone" — that every job had vanished whenever the database was
-// locked or failing.
 // cancelJob is the cancel route's write: the worker's CancelJob, which also
 // stops a run in flight, or with no worker the same conditional write alone.
 // Neither writes over a terminal status, and cancelled says whether the job
@@ -1434,6 +1428,12 @@ var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID stri
 	return db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{"status": database.StatusCancelled}), false
 }
 
+// loadJob fetches the job a handler acts on, and answers the request itself
+// when it cannot: 404 when no such job exists, 500 when the lookup failed.
+// GetJob returns (nil, nil) for a missing row and (nil, err) for a failed
+// read; folding both into 404 told the dashboard — whose 404 branch means
+// "the job is gone" — that every job had vanished whenever the database was
+// locked or failing.
 func loadJob(rw http.ResponseWriter, db *database.Database, jobID string) (*database.Job, bool) {
 	job, err := db.GetJob(jobID)
 	if err != nil {
