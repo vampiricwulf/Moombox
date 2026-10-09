@@ -38,9 +38,14 @@ const (
 //
 // Transient is classifyProbeErr's verdict — network, timeout, 429/5xx and
 // everything it cannot place; a definitive refusal (a 404, a playability
-// verdict) is not retried. Which jobs qualify is requeueBacklog's rule.
+// verdict) is not retried. A stale VOD's re-extraction returns its verdict
+// on the video as an error, whose text classifyProbeErr cannot place, so
+// that answer is recognised first (vodRefreshVerdict): a backlog VOD that
+// went private or members-only while it queued ends where the verdict sends
+// it, as one refused up front does. Which jobs qualify is requeueBacklog's
+// rule.
 func (w *DownloadWorker) requeueBacklogAfterTransientFailure(job *database.Job, err error) (bool, error) {
-	if classifyProbeErr(err) != classNetwork {
+	if isVodRefreshVerdict(err) || classifyProbeErr(err) != classNetwork {
 		return false, err
 	}
 	return w.requeueBacklog(job, err, "backlog VOD's pre-download fetch failed; back to Queued for a retry")

@@ -372,15 +372,25 @@ func (sp *StreamProcessor) RefreshVodInfo(ctx context.Context, job *database.Job
 	if err != nil {
 		return nil, fmt.Errorf("full fetch failed: %w", err)
 	}
-	if errMsg, sentinel := sp.checkPlayability(info); errMsg != "" {
+	return judgeRefreshedVodInfo(info)
+}
+
+// judgeRefreshedVodInfo is RefreshVodInfo's reading of the player response it
+// fetched. A refusal is returned as an error, where Process returns one as a
+// result, so it is marked as the answer it is (vodRefreshVerdict): unmarked,
+// processJob's retry rule could not tell it from a fetch that failed, and a
+// backlog VOD that went private or members-only while it queued was sent back
+// to Queued for a retry instead of to the Error or COOKIES? its verdict names.
+func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) {
+	if errMsg, sentinel := playabilityVerdict(info); errMsg != "" {
 		res := &StreamProcessResult{Error: errMsg, ErrSentinel: sentinel}
-		return nil, res.AsError()
+		return nil, &vodRefreshVerdict{err: res.AsError()}
 	}
 	switch info.StreamStatus {
 	case youtube.StreamVOD, youtube.StreamPostLive, youtube.StreamNotAStream:
 		return info, nil
 	}
-	return nil, fmt.Errorf("stream status changed to %s while the download waited for a slot", info.StreamStatus)
+	return nil, &vodRefreshVerdict{err: fmt.Errorf("stream status changed to %s while the download waited for a slot", info.StreamStatus)}
 }
 
 // checkPlayability returns an error string and an optional sentinel for

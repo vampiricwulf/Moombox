@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -82,6 +83,26 @@ func (w *DownloadWorker) processStream(ctx context.Context, job *database.Job) (
 		return w.processStreamFn(ctx, job)
 	}
 	return w.streamProc.Process(ctx, job)
+}
+
+// vodRefreshVerdict is the answer a stale VOD's re-extraction got about the
+// video itself — a playability refusal, or a status that is no longer a
+// finished stream's (judgeRefreshedVodInfo) — as opposed to a fetch that
+// failed. It reads as the error it wraps, sentinels included, so setJobError
+// routes it exactly as it routes the same verdict from Process. What it adds
+// is that it can be told apart: classifyProbeErr cannot place a verdict's
+// text and calls it transient, and a backlog VOD was sent back to Queued on
+// it (requeueBacklogAfterTransientFailure).
+type vodRefreshVerdict struct{ err error }
+
+func (v *vodRefreshVerdict) Error() string { return v.err.Error() }
+func (v *vodRefreshVerdict) Unwrap() error { return v.err }
+
+// isVodRefreshVerdict reports whether err is, or wraps, a re-extraction's
+// verdict on the video.
+func isVodRefreshVerdict(err error) bool {
+	_, ok := errors.AsType[*vodRefreshVerdict](err)
+	return ok
 }
 
 // refreshVodInfo is streamProc.RefreshVodInfo, unless a test replaced it.

@@ -78,6 +78,47 @@ func TestStaleVodExtractionIsRefreshedAfterSlotWait(t *testing.T) {
 	}
 }
 
+// TestStaleVodRefreshVerdictIsNotRetried: a backlog VOD whose stale
+// re-extraction hears that the video went members-only or private while it
+// queued — or is no longer a finished stream — ends where that answer sends
+// it, as one refused up front does: COOKIES? or Error, not back in Queued
+// for a retry. The verdict reaches processJob as an error whose text
+// classifyProbeErr cannot place, and so used to read as transient.
+//
+// Mutants: drop `isVodRefreshVerdict(err) ||` from
+// requeueBacklogAfterTransientFailure — every row goes back to Queued, held;
+// return the playability verdict unwrapped from judgeRefreshedVodInfo — the
+// members-only and private rows do; return the status change unwrapped —
+// the live row does.
+func TestStaleVodRefreshVerdictIsNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info *youtube.VideoInfo
+		want database.JobStatus
+	}{
+		{"members-only, signed out", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, PlayabilityReason: "Join this channel to get access to members-only content", SessionAuth: youtube.SessionAuthLoggedOut}, database.StatusCookies},
+		{"private", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate, PlayabilityReason: "Private video"}, database.StatusError},
+		{"live again", &youtube.VideoInfo{StreamStatus: youtube.StreamLive}, database.StatusError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			backlogRetryJob(t, db, "verdict_vod", 1, true)
+			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				// expire=1: stale once the slots are held
+				return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt("http://127.0.0.1:1", 1, 1)}, nil
+			}
+			w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+				return judgeRefreshedVodInfo(tc.info)
+			}
+			w.processJob(context.Background(), "verdict_vod")
+			row, _ := db.GetJob("verdict_vod")
+			if row.Status != tc.want {
+				t.Errorf("status = %s (%q, held %v), want %s", row.Status, row.Error, w.scheduler.held("verdict_vod", time.Now()), tc.want)
+			}
+		})
+	}
+}
+
 // TestFreshVodExtractionIsNotRefreshed: a download that starts on a fresh
 // extraction spends no request on a second one.
 //
