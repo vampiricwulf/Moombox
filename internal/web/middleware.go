@@ -120,9 +120,11 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // of browser context.
 //
 // Legitimate browser fetches always set Origin on cross-origin OR
-// same-origin mutating requests (Fetch spec). Non-browser local CLIs
-// (e.g. `moombox add`) should set Origin to the server's base URL or use
-// the InternalToken.
+// same-origin mutating requests (Fetch spec). A non-browser client that
+// mutates must set Origin to the server's base URL or use the
+// InternalToken. `moombox add` is not one: it writes the database directly
+// and makes no HTTP request. The yt-dlp plugin's loopback POT routes are
+// exempted below.
 func CSRFMiddleware(store *config.Store, internalToken string, logger interface {
 	Warn(msg string, args ...any)
 }) func(http.Handler) http.Handler {
