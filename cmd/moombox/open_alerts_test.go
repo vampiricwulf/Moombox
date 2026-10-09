@@ -283,3 +283,29 @@ func TestAuthFailureOpenAcrossARestartGetsItsClose(t *testing.T) {
 		t.Errorf("after the close the next start reads %v open", got)
 	}
 }
+
+// TestAStillDeadPlatformIsAnnouncedAgainAfterTheCooldown pins the boundary
+// operations.md states for auth: the cookie refresh fires its recovery on the
+// first conclusive check of every start, so a platform still dead after a
+// restart reaches the cooldown again. The restored stamp holds that back only
+// while it is inside its 30 minutes; past them the failure is announced again,
+// as every start announced it before the stamp was persisted. It is still open
+// either way, so its close still comes.
+//
+// Mutant: hold every restored stamp back until its close (the test reads no
+// second announcement).
+func TestAStillDeadPlatformIsAnnouncedAgainAfterTheCooldown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), openAlertsFileName)
+	restart(t, path).update(func(d *openAlertsDoc) { d.setAuth("youtube", time.Now().Add(-31*time.Minute)) })
+
+	sent := 0
+	notify, wasNotified := withPersistedAuthFailureCooldown(func(string, string, string, notifications.NotificationType) { sent++ },
+		restart(t, path))
+	notify("youtube", "Cookie Re-Authentication Required", "still dead", notifications.TypeError)
+	if sent != 1 {
+		t.Errorf("a platform still dead 31 minutes after its announcement sent %d alerts after the restart, want 1", sent)
+	}
+	if !wasNotified("youtube") {
+		t.Error("the platform is no longer seen as announced — its close never fires")
+	}
+}
