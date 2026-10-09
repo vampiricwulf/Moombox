@@ -479,15 +479,27 @@ func (q *JobQueue) WasCancelled(jobID string) bool {
 // tail, which an automatic cookie refresh can hold for minutes, or a
 // requeue — was reported by nobody, since its caller had left it to the run.
 func (q *JobQueue) settle(jobID string) bool {
+	flagged, _ := q.settleRun(jobID)
+	return flagged
+}
+
+// settleRun is settle, also reporting whether the run had settled before this
+// call (already): it recorded its outcome — a failure, a requeue, the end of
+// a cancelled or interrupted run — and is in what is left of it. A run that
+// panics asks (recordRunPanic), since the outcome it recorded before the
+// panic stands. The two never both hold: Cancel does not flag a settled run,
+// and a flagged run settles only as its flag is consumed (WasCancelled).
+func (q *JobQueue) settleRun(jobID string) (flagged, already bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.cancelled[jobID] {
-		return true
+		return true, false
 	}
 	if _, ok := q.processing[jobID]; ok {
+		already = q.settled[jobID]
 		q.settled[jobID] = true
 	}
-	return false
+	return false, already
 }
 
 // SetMaxDownloads updates the max parallel downloads.

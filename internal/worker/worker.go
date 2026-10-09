@@ -447,7 +447,9 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 			defer func() {
 				// processJob records its own panic (recordRunPanic), ahead
 				// of the Complete that ends the run; this one is what
-				// recording it panics into, and records it the same way.
+				// recording it panics into, and writes the guarded Error
+				// alone — the run's flag and settled mark went with that
+				// Complete.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
 					w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
@@ -1346,10 +1348,22 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 // or failed before it panicked, or the operator cancelled it while it ran —
 // written unconditionally, that Cancelled came back as "internal panic".
 // processJob runs no row that is already terminal, so whichever one it holds
-// landed during this run and stands.
+// landed during this run and stands. Nor over an outcome the run recorded and
+// settled before it panicked, terminal or not (JobQueue.settleRun): a COOKIES?
+// park, which a credential repair resumes; a backlog VOD requeued to Queued;
+// the Upcoming a successful automatic cookie refresh resumed it to; the row a
+// shutdown leaves to resume on restart. Guarded by the terminal statuses
+// alone, a panic in what was left of the run — setJobError's notification,
+// the cookie refresh that can hold it for minutes — turned each of them into
+// "internal panic", which only a manual Retry undid.
 func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) {
 	w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-	if w.queue.settle(jobID) {
+	flagged, already := w.queue.settleRun(jobID)
+	if already {
+		w.logger.Info("panic after the run recorded its outcome; leaving it as is", "jobID", jobID)
+		return
+	}
+	if flagged {
 		row, err := w.db.GetJob(jobID)
 		if err == nil && (row == nil || row.Status == database.StatusCancelled || !row.IsTerminal()) {
 			if job == nil {

@@ -14,34 +14,49 @@ import (
 // (recordRunPanic; Start's recover, until the record moved ahead of
 // processJob's Complete), and the record wrote it over whatever the row held
 // — an operator's Cancel that landed while the run was in flight came back as
-// "internal panic", and so did a job that had already finished. The panic
-// still records Error on a job with no outcome yet, and leaves one alone.
+// "internal panic", and so did a job that had already finished. Guarded by
+// the terminal statuses alone, it still wrote over a failure the run had
+// recorded as a COOKIES? park and then panicked in its tail (the auth
+// notification here; the automatic cookie refresh can hold it for minutes):
+// the park a credential repair would have resumed became an Error only a
+// manual Retry undid. The panic still records Error on a job with no outcome
+// yet, and leaves one alone.
 //
 // Mutants: write recordRunPanic's Error with UpdateJobFields — the Cancelled
 // and Finished rows turn Error; drop the write — the job with no outcome is
-// left Upcoming with nothing running it.
+// left Upcoming with nothing running it; drop recordRunPanic's return for a
+// run already settled — the COOKIES? park turns Error; have settleRun read
+// already after it marks the run settled — the job with no outcome is left
+// Upcoming.
 func TestJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		landed database.JobStatus // what the row reaches before the panic; "" for nothing
+		fails  error              // the run fails with this instead, and panics in the failure's notification
 		want   database.JobStatus
 	}{
-		{"operator's Cancel", database.StatusCancelled, database.StatusCancelled},
-		{"finished", database.StatusFinished, database.StatusFinished},
-		{"no outcome", "", database.StatusError},
+		{"operator's Cancel", database.StatusCancelled, nil, database.StatusCancelled},
+		{"finished", database.StatusFinished, nil, database.StatusFinished},
+		{"parked in COOKIES?", "", ErrCookiesRequired, database.StatusCookies},
+		{"no outcome", "", nil, database.StatusError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)
+			w.notifier = panicOnEvent{event: "auth"}
 			if _, err := db.AddJob(&database.Job{ID: "panics", VideoID: "panics", URL: "u", Platform: "youtube",
 				Status: database.StatusUpcoming}); err != nil {
 				t.Fatal(err)
 			}
-			reached := make(chan struct{})
+			reached, proceed := make(chan struct{}), make(chan struct{})
 			w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+				close(reached)
+				<-proceed
+				if tc.fails != nil {
+					return nil, tc.fails
+				}
 				if tc.landed != "" {
 					db.UpdateJobFields("panics", map[string]any{"status": tc.landed})
 				}
-				close(reached)
 				panic("boom")
 			}
 
@@ -53,6 +68,9 @@ func TestJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 				w.Start(ctx) // enqueues the Upcoming row and runs it
 			}()
 			<-reached
+			done := w.queue.Done("panics")
+			close(proceed)
+			<-done // the run ends on its own, before a shutdown could interrupt it
 			cancel()
 			<-started
 			w.wg.Wait() // the run's goroutine, recover included, has returned
@@ -60,6 +78,45 @@ func TestJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 			row, _ := db.GetJob("panics")
 			if row.Status != tc.want {
 				t.Errorf("status = %s (%q) after the run panicked, want %s", row.Status, row.Error, tc.want)
+			}
+		})
+	}
+}
+
+// TestAPanicAfterASettledOutcomeLeavesItStanding: the run's other outcomes
+// that are not terminal, each recorded and settled before a panic in what
+// was left of the run — a backlog requeue to Queued, the Upcoming a
+// successful automatic cookie refresh resumed the park to, and a shutdown
+// that leaves the row to resume on restart. A panic there wrote Error over
+// each: the requeued VOD and the resumed job were never run again, and the
+// interrupted one no longer resumed.
+//
+// Mutant: drop recordRunPanic's return for a run already settled — each row
+// turns Error.
+func TestAPanicAfterASettledOutcomeLeavesItStanding(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		settle  func(w *DownloadWorker, id string) // the run records its outcome as it does
+		landed  database.JobStatus                 // and what it writes; "" for nothing
+		wantRow database.JobStatus
+	}{
+		{"requeued", func(w *DownloadWorker, id string) { w.queue.settle(id) }, database.StatusQueued, database.StatusQueued},
+		{"resumed by the cookie refresh", func(w *DownloadWorker, id string) { w.queue.settle(id) }, database.StatusUpcoming, database.StatusUpcoming},
+		{"interrupted by a shutdown", func(w *DownloadWorker, id string) { w.queue.WasCancelled(id) }, "", database.StatusDownloading},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			job := runningJob(t, w, db, "panic_settled")
+
+			tc.settle(w, job.ID)
+			if tc.landed != "" {
+				db.UpdateJobFields(job.ID, map[string]any{"status": tc.landed})
+			}
+			w.recordRunPanic(job.ID, job, "boom")
+
+			if row, _ := db.GetJob(job.ID); statusOf(row) != tc.wantRow || errorOf(row) != "" {
+				t.Errorf("row = %s %q after a panic past the run's outcome, want %s standing", statusOf(row), errorOf(row), tc.wantRow)
 			}
 		})
 	}
