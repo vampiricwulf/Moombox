@@ -1334,6 +1334,14 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 // panicked stands, as below. Otherwise the run is settled now, and a Cancel
 // from here on is its caller's to report.
 //
+// A flagged run whose row is gone ends cancelled too, as setJobError ends it:
+// a Cancelled row is deleted at once (the delete route waits on no run for
+// one), and a run unwinding from that Cancel that then panicked sent nothing
+// — its Job Cancelled was still the run's to send, and an edit-mode message
+// stayed at its last state. Only a run that panicked before it read its row,
+// which is gone, has nothing to send it for, as processJob ends a row that
+// vanished before its run.
+//
 // The panic's Error is not written over an outcome: the run may have finished
 // or failed before it panicked, or the operator cancelled it while it ran —
 // written unconditionally, that Cancelled came back as "internal panic".
@@ -1342,12 +1350,15 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) {
 	w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
 	if w.queue.settle(jobID) {
-		if row, _ := w.db.GetJob(jobID); row != nil && (row.Status == database.StatusCancelled || !row.IsTerminal()) {
+		row, err := w.db.GetJob(jobID)
+		if err == nil && (row == nil || row.Status == database.StatusCancelled || !row.IsTerminal()) {
 			if job == nil {
 				job = row
 			}
-			w.handleCancellation(job)
-			return
+			if job != nil {
+				w.handleCancellation(job)
+				return
+			}
 		}
 	}
 	w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{

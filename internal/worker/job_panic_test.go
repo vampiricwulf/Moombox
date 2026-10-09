@@ -73,22 +73,29 @@ func TestJobPanicLeavesAnOutcomeStanding(t *testing.T) {
 // The panic now settles the run the way setJobError settles a failure
 // (JobQueue.settle) ahead of Complete: flagged first, it ends as a cancelled
 // run and sends the one Job Cancelled — unless the run's own Finished landed
-// over the Cancel, which stands as Start's recover lets it stand.
+// over the Cancel, which stands as Start's recover lets it stand. A row the
+// operator deleted after the Cancel is no exception: the delete route removes
+// a Cancelled row at once, without waiting on its run, and the run unwinding
+// from the Cancel still sends the Job Cancelled left to it, as setJobError
+// sends it.
 //
 // Mutants: drop the settle from the panic's record — no Job Cancelled;
 // register the recover ahead of processJob's Complete defer, so it runs after
 // it — the flag is gone and no Job Cancelled; end a flagged run cancelled
 // whatever its row holds — the Finished archive turns Cancelled and Job
-// Cancelled is sent for it.
+// Cancelled is sent for it; end it cancelled only on a row still present —
+// no Job Cancelled for the deleted one.
 func TestAPanicAfterAFlaggedCancelEndsTheRunCancelled(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		landed        database.JobStatus // what the run writes after the Cancel, before it panics
+		deleted       bool               // the operator deletes the row after the Cancel, before the panic
 		want          database.JobStatus
 		wantCancelled int
 	}{
-		{"cancelled, then panics", "", database.StatusCancelled, 1},
-		{"finishes over the cancel, then panics", database.StatusFinished, database.StatusFinished, 0},
+		{"cancelled, then panics", "", false, database.StatusCancelled, 1},
+		{"finishes over the cancel, then panics", database.StatusFinished, false, database.StatusFinished, 0},
+		{"cancelled and deleted, then panics", "", true, "<missing>", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)
@@ -120,6 +127,11 @@ func TestAPanicAfterAFlaggedCancelEndsTheRunCancelled(t *testing.T) {
 			done := w.queue.Done(id)
 			if cancelled, flagged := w.CancelJob(id); !cancelled || !flagged {
 				t.Fatalf("CancelJob = (%v, %v), want the running job cancelled and its run flagged", cancelled, flagged)
+			}
+			if tc.deleted {
+				if err := db.DeleteJob(id); err != nil {
+					t.Fatal(err)
+				}
 			}
 			close(proceed)
 			<-done
