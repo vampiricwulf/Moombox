@@ -170,6 +170,64 @@ func TestRestartMuxAfterWholeFileVodArchivesTheVod(t *testing.T) {
 	}
 }
 
+// TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture is W20-18 end to
+// end: the staging root holds TWO earlier captures of different shapes — a
+// 2 s DASH video_stream and a 4 s HLS video.ts from an interlude in another
+// session — when the job comes back as a whole-file VOD. Both are set aside
+// under one stamp; each must come out as its own sibling beside the complete
+// download, and neither may be deleted unmuxed.
+//
+// Mutant: drop asideRecordingOf from groupStagedAsides' key — the two asides
+// are one group, only the video_stream is muxed, and the video.ts is removed
+// with the group.
+func TestRestartMuxAfterWholeFileVodKeepsEveryEarlierCapture(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	staging, outputDir := muxFixtureJob(t, w, db, "j-twoshapes")
+
+	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video_stream"), 2)
+	writeAsideFixture(t, ffmpegPath, filepath.Join(staging, "video.ts"), 4)
+	full := filepath.Join(t.TempDir(), "full.mp4")
+	writeMuxFixture(t, ffmpegPath, full, 10)
+	body, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := serveWholeFile(t, body)
+
+	job, _ := db.GetJob("j-twoshapes")
+	jobCtx := w.buildJobContext(job)
+	res, err := DownloadVod(context.Background(), jobCtx, wholeFileVodInfo(srv, len(body)), stubCipherSolver{}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("DownloadVod: %v", err)
+	}
+	if err := w.orchestrator.runDownloaders(context.Background(), res); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	stamps := map[int64]bool{}
+	for _, a := range stagedRestartAsides(staging) {
+		stamps[stagedRestartStamp(a)] = true
+	}
+	if len(stamps) != 1 {
+		t.Fatalf("precondition: the two captures were set aside under %d stamps, want one", len(stamps))
+	}
+
+	w.enqueueExistingJobs() // the restart: a Muxing row re-muxes from staging
+	w.Stop()
+
+	fresh, _ := db.GetJob("j-twoshapes")
+	if fresh.Status != database.StatusFinished {
+		t.Fatalf("status = %s (%q), want Finished", fresh.Status, fresh.Error)
+	}
+	if p := w.orchestrator.runFFprobe(context.Background(), fresh.OutputFile); p == nil || p.DurationSec < 9 {
+		t.Fatalf("archive %s probes %+v, want the complete 10 s download", fresh.OutputFile, p)
+	}
+	if got := restartSiblingDurations(t, w.orchestrator, outputDir); len(got) != 2 || got[0] != 2 || got[1] != 4 {
+		t.Errorf("siblings beside the archive probe %v s, want [2 4] — each earlier capture on its own; staging asides left: %v",
+			got, stagedRestartAsides(staging))
+	}
+}
+
 // TestSetAsideStagedMediaNeverRenamesOntoAnAside pins the stamp search: a
 // second set-aside inside the same second must not rename onto the first,
 // which on POSIX silently replaces it.

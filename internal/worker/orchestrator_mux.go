@@ -268,9 +268,18 @@ type asideGroup struct {
 }
 
 // groupStagedAsides folds a flat list of asides into one group per (staging
-// dir, timestamp), classifying each file by the stem the engine stamped —
-// the same names discoverStagingMedia recognises. Input order is preserved,
-// so groups come back oldest recording first.
+// dir, timestamp, recording), classifying each file by the stem the engine
+// stamped — the same names discoverStagingMedia recognises. Input order is
+// preserved, so groups come back oldest recording first.
+//
+// A shared stamp does not make one recording. setAsideStagedMedia sets every
+// live-shape capture in a dir aside under ONE stamp, so an HLS video.ts an
+// earlier session left beside a DASH capture shares the DASH pair's stamp.
+// Grouped by the stamp alone it joined the pair's group with no slot of its
+// own: muxStagedAsides muxed the pair, verified the copy against the pair,
+// and then removed every file in the group — the video.ts unmuxed. The
+// recording a stem belongs to (asideRecordingOf) is part of the key, so the
+// video.ts is a group, and a sibling, of its own.
 //
 // The two halves of one DASH restart are stamped by two SegmentDownloaders,
 // each reading the clock itself, so a restart that straddles a second
@@ -280,7 +289,7 @@ type asideGroup struct {
 func groupStagedAsides(asides []string) []asideGroup {
 	var order []string
 	byKey := map[string]*asideGroup{}
-	dirOf := map[string]string{}
+	bucketOf := map[string]string{}
 	for _, p := range asides {
 		base := filepath.Base(p)
 		i := strings.LastIndex(base, engine.StagedRestartSuffix)
@@ -288,12 +297,13 @@ func groupStagedAsides(asides []string) []asideGroup {
 			continue // engine.IsStagedRestartPath already vouched for the name
 		}
 		stem, stamp := base[:i], base[i+len(engine.StagedRestartSuffix):]
-		key := filepath.Dir(p) + "\x00" + stamp
+		bucket := filepath.Dir(p) + "\x00" + asideRecordingOf(stem)
+		key := bucket + "\x00" + stamp
 		g := byKey[key]
 		if g == nil {
 			g = &asideGroup{stamp: stamp}
 			byKey[key] = g
-			dirOf[key] = filepath.Dir(p)
+			bucketOf[key] = bucket
 			order = append(order, key)
 		}
 		g.files = append(g.files, p)
@@ -304,21 +314,38 @@ func groupStagedAsides(asides []string) []asideGroup {
 		}
 	}
 	out := make([]asideGroup, 0, len(order))
-	dirs := make([]string, 0, len(order))
+	buckets := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, *byKey[k])
-		dirs = append(dirs, dirOf[k])
+		buckets = append(buckets, bucketOf[k])
 	}
-	return pairStraddledHalves(out, dirs)
+	return pairStraddledHalves(out, buckets)
+}
+
+// asideRecordingOf names the recording an aside's stem belongs to: the two
+// halves of one DASH capture (video_stream, audio_stream) are one recording,
+// and so are the two halves of one whole-file download (video.mp4,
+// audio.m4a). Every other stem — video.ts, the HLS strategy's single muxed
+// stream — is a recording of its own, which no audio half ever joins.
+func asideRecordingOf(stem string) string {
+	switch stem {
+	case "audio_stream":
+		return "video_stream"
+	case "audio.m4a":
+		return "video.mp4"
+	}
+	return stem
 }
 
 // pairStraddledHalves merges a video-only group into the audio-only group of
-// the same staging dir stamped one second either side of it — one DASH
-// restart whose two downloaders read the clock on either side of a second
-// boundary. Two separate restarts are never a second apart (each is a full
-// downloader restart), so the pairing cannot join two recordings. The merged
-// group keeps the video half's stamp and position. dirs[i] is groups[i]'s dir.
-func pairStraddledHalves(groups []asideGroup, dirs []string) []asideGroup {
+// the same staging dir and recording stamped one second either side of it —
+// one DASH restart whose two downloaders read the clock on either side of a
+// second boundary. Two separate restarts are never a second apart (each is a
+// full downloader restart), so the pairing cannot join two recordings; nor
+// can it join a video.ts to an audio_stream, which are never one recording
+// however close their stamps. The merged group keeps the video half's stamp
+// and position. buckets[i] is groups[i]'s (dir, recording).
+func pairStraddledHalves(groups []asideGroup, buckets []string) []asideGroup {
 	used := make([]bool, len(groups))
 	for i := range groups {
 		if used[i] || groups[i].video == "" || groups[i].audio != "" {
@@ -329,7 +356,7 @@ func pairStraddledHalves(groups []asideGroup, dirs []string) []asideGroup {
 			continue
 		}
 		for j := range groups {
-			if j == i || used[j] || dirs[j] != dirs[i] || groups[j].audio == "" || groups[j].video != "" {
+			if j == i || used[j] || buckets[j] != buckets[i] || groups[j].audio == "" || groups[j].video != "" {
 				continue
 			}
 			as, err := strconv.ParseInt(groups[j].stamp, 10, 64)
@@ -492,8 +519,10 @@ const asideOutputCollisionLimit = 100
 
 // asideOutputPath is where one group's recovered file lands: the archive's own
 // name with the aside's suffix on it, so the two sort together in the output
-// directory. Two groups can only collide when a root and a seg_N restart share
-// a second; the counter keeps both files rather than overwriting one. Reports
+// directory. Two groups collide when a root and a seg_N restart share a
+// second, or when two recordings in one dir were set aside under one stamp
+// (setAsideStagedMedia's video.ts beside a DASH pair); the counter keeps both
+// files rather than overwriting one. Reports
 // false when every name within the bound is taken — the caller must then leave
 // the aside in staging rather than write over somebody's archive.
 func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool) (string, bool) {

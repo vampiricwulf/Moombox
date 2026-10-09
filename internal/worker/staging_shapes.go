@@ -32,8 +32,10 @@ var liveShapeStagingNames = []string{"video_stream", "audio_stream", "video.ts"}
 // and recoverable on demand (A S, RecoverAsides).
 //
 // ONE stamp for the whole call, so a DASH capture's video and audio halves
-// group as one recording (groupStagedAsides keys on the stamp), and a stamp no
-// existing aside in dir already uses: two set-asides inside one second would
+// group as one recording (groupStagedAsides keys on the stamp — and on the
+// recording a name belongs to, so a video.ts set aside in the same call is
+// still a recording, and a sibling, of its own), and a stamp no existing
+// aside in dir already uses: two set-asides inside one second would
 // otherwise rename onto each other, which on POSIX silently replaces the
 // first.
 //
