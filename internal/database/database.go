@@ -175,7 +175,7 @@ const jobStatsCacheTTL = 5 * time.Second
 // (e.g. a newer on-disk binary during the staged-update window) would leave
 // the running daemon's old code writing against a new schema.
 func FileSchemaVersion(dbPath string) (int, error) {
-	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", dbPath))
+	sqlDB, err := sql.Open("sqlite", sqliteFileURI(dbPath)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return 0, err
 	}
@@ -187,6 +187,28 @@ func FileSchemaVersion(dbPath string) (int, error) {
 	return v, nil
 }
 
+// sqliteURIPathEscaper escapes the three characters SQLite's URI parser reads
+// in a "file:" path: '%' (a %HH escape), '?' (the query) and '#' (a fragment).
+var sqliteURIPathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
+
+// sqliteFileURI is the "file:" URI that names dbPath literally. modernc opens
+// every "file:" DSN with SQLITE_OPEN_URI, so SQLite parses the path as a URI:
+// pasted in raw, a database_path of "/srv/Moombox #2/moombox.db" opened
+// whatever came before the '#' as the database, one with a '?' was cut there
+// and lost the busy_timeout pragma into the query, and "%41" was decoded to
+// "A". Only those three characters are escaped, so a path without them —
+// relative, with spaces, or a Windows one with a drive letter and backslashes
+// — reads exactly as before. A path that starts with "//" is given an empty
+// authority in front of it, or SQLite would read its first segment as a host
+// name and refuse it.
+func sqliteFileURI(dbPath string) string {
+	p := sqliteURIPathEscaper.Replace(dbPath)
+	if strings.HasPrefix(p, "//") {
+		p = "//" + p
+	}
+	return "file:" + p
+}
+
 // openDSN builds the SQLite connection string. Production keeps SQLite's
 // default synchronous level (FULL in WAL mode: an fsync per commit; the
 // durability ruling of 2026-07-03 stands). Under `go test` — and only there,
@@ -196,7 +218,7 @@ func FileSchemaVersion(dbPath string) (int, error) {
 // (5.6 s on Linux, where fsync is cheap). Nothing else about the test
 // database differs.
 func openDSN(dbPath string, underTest bool) string {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", dbPath)
+	dsn := sqliteFileURI(dbPath) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	if underTest {
 		dsn += "&_pragma=synchronous(OFF)"
 	}
