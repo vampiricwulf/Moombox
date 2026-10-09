@@ -407,7 +407,7 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 A VOD skips `Live`, and stays at the status it came in with (`Upcoming` for a fresh one) while it queues for a download slot — its progress line says so — until `ExecuteWithChat` (`ExecuteTwitch` for a Twitch VOD) writes `Downloading` with the slot held.
 
-**Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`. A backlog VOD returns to `Queued` from a cookie repair (when its feed row still exists) and from a transient pre-download fetch failure or a download that ran out of disk, held from re-admission for a backoff and only up to three runs in a row before it ends in `Error` (`requeueBacklogAfterTransientFailure` and `requeueBacklogAfterDiskFull`, `internal/worker/backlog_retry.go`). The scheduler admits nothing while the connectivity monitor reports offline, nor while the output volume is at or past `disk_critical_percent` (`Scheduler.diskGateClosed`, `internal/worker/scheduler.go`).
+**Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`. A backlog VOD returns to `Queued` from a cookie repair (when its feed row still exists) and from a transient pre-download fetch failure or a download that ran out of disk, held from re-admission for a backoff and only up to three runs in a row before it ends in `Error` (`requeueBacklogAfterTransientFailure` and `requeueBacklogAfterDiskFull`, `internal/worker/backlog_retry.go`). The scheduler admits nothing while the connectivity monitor reports offline, nor from the moment the output volume reaches `disk_critical_percent` until usage is 2 points below it (`Scheduler.diskGateClosed`, `internal/worker/scheduler.go`).
 
 **Error paths:** Any status -> `Error`, `Cancelled`, or `COOKIES?`
 
@@ -585,7 +585,7 @@ longer found by any of them until its folder is moved across; both help texts sa
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
 | WarnPercent | int | 90 | `disk_warn_percent` | Valid: 1-99 |
-| CriticalPercent | int | 95 | `disk_critical_percent` | Must be > WarnPercent. Also the backlog scheduler's admission gate: no backlog VOD is admitted while the output volume is at or past it |
+| CriticalPercent | int | 95 | `disk_critical_percent` | Must be > WarnPercent. Also the backlog scheduler's admission gate: no backlog VOD is admitted from the reading at or past it until usage is 2 points below it |
 
 #### [updates]
 

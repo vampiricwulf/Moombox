@@ -1200,7 +1200,7 @@
                                 max="99"
                                 label="Critical Threshold"
                                 placeholder="95"
-                                help-text="Raise a critical alert when disk usage reaches this percentage (default: 95%, must be higher than warning). At or above it, backlog VODs wait in Queued until space is freed; live and running downloads are not paused — free space before the disk fills."
+                                help-text="Raise a critical alert when disk usage reaches this percentage (default: 95%, must be higher than warning). From the moment usage reaches it, backlog VODs wait in Queued until usage is 2 points below it; live and running downloads are not paused — free space before the disk fills."
                             ></sl-input>
                         </div>
 

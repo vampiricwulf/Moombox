@@ -46,13 +46,14 @@ type Scheduler struct {
 	// readDisk reads the volume the jobs write to against the disk_critical
 	// threshold (DownloadWorker.readOutputDisk; nil: never full). An
 	// admission while it reads critical is a backlog VOD sent to download
-	// onto a disk that is filling, so sweep admits nothing then, and reads
-	// again on every sweep after — the heartbeat's included, which is what
-	// notices the space coming back.
+	// onto a disk that is filling, so sweep admits nothing from then until it
+	// reads clear of the threshold, and reads again on every sweep after —
+	// the heartbeat's included, which is what notices the space coming back.
 	readDisk func() (diskReading, error)
-	// diskHeld is the gate's state as the last reading left it, so the
-	// close and the reopen are each logged once. Touched only by sweep,
-	// which only Run's goroutine calls.
+	// diskHeld is the gate's state as the last reading left it: what a
+	// reading inside the recovery margin keeps, and what logs the close and
+	// the reopen once each. Touched only by sweep, which only Run's goroutine
+	// calls.
 	diskHeld bool
 
 	// holds are the backlog jobs a transient pre-download failure returned
@@ -121,9 +122,15 @@ func (s *Scheduler) heldCount() int {
 	return len(s.holds)
 }
 
-// diskGateClosed reports whether backlog admission must wait for disk space:
-// the volume the jobs write to is at or past the disk_critical threshold. The
-// gate's close and its reopen are each logged once, not once per sweep.
+// diskGateClosed reports whether backlog admission must wait for disk space.
+// The gate closes when the volume the jobs write to reaches the disk_critical
+// threshold and reopens only once usage is config.DiskRecoveryMargin points
+// below it — the reading an open disk_critical alert steps down on. A reading
+// in between leaves the gate as it was: reopened on the first reading under
+// the threshold, a volume sitting on the line admitted a backlog VOD every
+// time it dipped under it, each one more download onto the disk the gate had
+// just closed for. The close and the reopen are each logged once, not once
+// per sweep.
 //
 // A reading that fails leaves the gate as the last good one left it — the
 // disk alerts freeze on their last good reading the same way, and say so
@@ -139,19 +146,27 @@ func (s *Scheduler) diskGateClosed() bool {
 			"dir", r.dir, "held", s.diskHeld, "err", err)
 		return s.diskHeld
 	}
-	if r.critical != s.diskHeld {
-		s.diskHeld = r.critical
+	closed := s.diskHeld
+	switch {
+	case r.critical:
+		closed = true
+	case r.clear:
+		closed = false
+	}
+	if closed != s.diskHeld {
+		s.diskHeld = closed
 		freeGB := fmt.Sprintf("%.1f", float64(r.free)/(1<<30))
 		usedPct := fmt.Sprintf("%.1f", r.usedPct)
-		if r.critical {
-			s.log.Warn("scheduler: disk at the critical threshold; backlog VODs wait in Queued until space is freed (live and manually added jobs are not held)",
-				"dir", r.dir, "usedPct", usedPct, "freeGB", freeGB)
+		if closed {
+			s.log.Warn("scheduler: disk at the critical threshold; backlog VODs wait in Queued until usage falls to resumeAtPct (live and manually added jobs are not held)",
+				"dir", r.dir, "usedPct", usedPct, "freeGB", freeGB,
+				"resumeAtPct", fmt.Sprintf("%.1f", r.resumeAtPct))
 		} else {
-			s.log.Info("scheduler: disk below the critical threshold again; backlog admission resumes",
+			s.log.Info("scheduler: disk clear of the critical threshold again; backlog admission resumes",
 				"dir", r.dir, "usedPct", usedPct, "freeGB", freeGB)
 		}
 	}
-	return r.critical
+	return closed
 }
 
 // Wake signals the scheduler that backlog state changed (a Queued job was

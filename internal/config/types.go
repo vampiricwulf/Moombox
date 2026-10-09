@@ -371,6 +371,16 @@ type DiskConfig struct {
 	CriticalPercent int `toml:"disk_critical_percent" json:"disk_critical_percent"`
 }
 
+// DiskRecoveryMargin is how far, in percentage points, usage must fall below a
+// disk threshold before what reaching it set off ends: an open disk alert
+// closes or steps down (cmd/moombox's diskAlerts), and the backlog scheduler's
+// admission gate reopens (internal/worker). Without it a volume sitting on the
+// line — 90.0% one reading, 89.9% the next — sent a Warning and a Recovered on
+// every six-minute check, and the gate, which reads on every sweep, would
+// admit a backlog VOD each time the volume dipped under the line, onto the
+// disk it had just stopped admitting to.
+const DiskRecoveryMargin = 2.0
+
 // AtCritical reports whether usedPct has reached the critical threshold: AT
 // OR ABOVE it, and never while the threshold is 0. One rule for its two
 // readers — the disk alerts' level (routes.ComputeWarnLevel) and the backlog
@@ -378,6 +388,27 @@ type DiskConfig struct {
 // the reading that sends disk_critical.
 func (d DiskConfig) AtCritical(usedPct float64) bool {
 	return d.CriticalPercent > 0 && usedPct >= float64(d.CriticalPercent)
+}
+
+// ClearOfCritical reports whether usedPct is DiskRecoveryMargin points or more
+// below the critical threshold — the reading that ends what AtCritical set
+// off: an open disk_critical alert steps down, and the backlog admission gate
+// reopens. Between the two a volume is neither: whatever the threshold set
+// off stays as it is. Always true while the threshold is 0.
+func (d DiskConfig) ClearOfCritical(usedPct float64) bool {
+	return clearOf(d.CriticalPercent, usedPct)
+}
+
+// ClearOfWarn is ClearOfCritical for the warning threshold: the reading that
+// closes an open disk_warning alert with disk_ok.
+func (d DiskConfig) ClearOfWarn(usedPct float64) bool {
+	return clearOf(d.WarnPercent, usedPct)
+}
+
+// clearOf is the recovery rule both thresholds share: usage at least
+// DiskRecoveryMargin below threshold, or the threshold disabled.
+func clearOf(threshold int, usedPct float64) bool {
+	return threshold <= 0 || usedPct <= float64(threshold)-DiskRecoveryMargin
 }
 
 // UpdatesConfig holds auto-update settings.

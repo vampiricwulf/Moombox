@@ -172,7 +172,7 @@ func TestDiskAlertsNameTheAbsoluteOutputDirectory(t *testing.T) {
 // repeats of the SAME level, and an ok reading reset it, so a volume sitting
 // on the warn line (90.0% then 89.9%) sent a Warning and a Recovered on every
 // six-minute check, and one on the critical line alternated Critical and
-// Warning. An open alert now holds until usage falls diskRecoveryMargin below
+// Warning. An open alert now holds until usage falls config.DiskRecoveryMargin below
 // its threshold.
 //
 // Mutants: dropping the heldOpen check — the flaps alert every reading;

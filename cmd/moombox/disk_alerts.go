@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
@@ -12,13 +13,6 @@ import (
 // diskNotifyCooldown is how long the same warning LEVEL waits before repeating.
 // A level change (warn -> critical) never waits it out.
 const diskNotifyCooldown = 30 * time.Minute
-
-// diskRecoveryMargin is how far, in percentage points, usage must fall below
-// a threshold before an open alert at that level closes or steps down. Without
-// it a volume sitting on the line — 90.0% one reading, 89.9% the next — sent a
-// Warning and a Recovered on every six-minute check, ten an hour, because the
-// cooldown only spaces repeats of the SAME level and an ok reading reset it.
-const diskRecoveryMargin = 2.0
 
 // diskReadFailuresBeforeAlert is how many consecutive failed readings the
 // low-disk safety net must miss before the operator hears about it. The second
@@ -51,10 +45,11 @@ type diskAlerts struct {
 	lastNotify time.Time
 	lastLevel  string
 
-	// warnPct and critPct are the configured thresholds, refreshed before
-	// every reading (setThresholds), that diskRecoveryMargin is measured
-	// from. Zero disables the hold for that level.
-	warnPct, critPct float64
+	// thresholds are the configured warn/critical percentages, refreshed
+	// before every reading (setThresholds), that an open alert's recovery
+	// margin (config.DiskRecoveryMargin) is measured from. Zero disables the
+	// hold for that level.
+	thresholds config.DiskConfig
 
 	// readFailing/readFailCount track the monitoring-failure streak, and
 	// readFailNotified says whether that streak was reported — the first
@@ -127,18 +122,20 @@ func absOutputDir(outputDir string) string {
 // reading's recovery margin is measured from. Called before every onReading,
 // so a threshold edited in Settings applies from the next check.
 func (d *diskAlerts) setThresholds(warnPct, critPct int) {
-	d.warnPct, d.critPct = float64(warnPct), float64(critPct)
+	d.thresholds = config.DiskConfig{WarnPercent: warnPct, CriticalPercent: critPct}
 }
 
 // heldOpen reports whether a reading whose level is below the open alert's
 // should still count as inside that incident: usage has not yet fallen
-// diskRecoveryMargin below the open level's threshold.
+// config.DiskRecoveryMargin below the open level's threshold. The critical
+// half is the rule the backlog admission gate reopens on (ClearOfCritical),
+// so the alert steps down on the reading that resumes the backlog.
 func (d *diskAlerts) heldOpen(ds *routes.DiskStatus) bool {
 	switch {
 	case d.lastLevel == "critical" && ds.WarnLevel != "critical":
-		return d.critPct > 0 && ds.UsedPct > d.critPct-diskRecoveryMargin
+		return !d.thresholds.ClearOfCritical(ds.UsedPct)
 	case d.lastLevel == "warn" && ds.WarnLevel == "ok":
-		return d.warnPct > 0 && ds.UsedPct > d.warnPct-diskRecoveryMargin
+		return !d.thresholds.ClearOfWarn(ds.UsedPct)
 	}
 	return false
 }
