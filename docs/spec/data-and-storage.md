@@ -175,7 +175,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 
 ### Schema
 
-**Current version: 20** (`schemaVersion`, `internal/database/migrations.go`)
+**Current version: 21** (`schemaVersion`, `internal/database/migrations.go`)
 
 #### Tables
 
