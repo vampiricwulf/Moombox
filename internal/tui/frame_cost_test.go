@@ -231,6 +231,9 @@ func steadyStateAllocs(t *testing.T, body func()) (allocs, bytes uint64) {
 // Mutant: deleting the cache lookup in LogViewerModel.View() specifically —
 // the log-panel budget fails as well, naming the panel (5,892).
 func TestFrameCostAtLogCap(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the one-second probe window does not fit beside a whole-module -race run — see race_test.go")
+	}
 	a := frameBenchApp(t)
 	frameAllocs, frameBytes := steadyStateAllocs(t, func() { a.View() })
 	t.Logf("cached frame: %d allocs/op, %d B/op", frameAllocs, frameBytes)
