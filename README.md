@@ -253,6 +253,7 @@ Terminate TLS at nginx/Caddy/Traefik and forward to Moombox. In
 network_access = "external"
 trusted_proxies = ["172.18.0.2"]  # the proxy's address — as narrow as possible
 trust_forwarded_proto = true      # proxy terminates TLS; Moombox sees plain HTTP
+public_url = "https://moombox.example.com"  # the address browsers type
 ```
 
 `trusted_proxies` is what makes this safe. Without it every forwarded
@@ -299,6 +300,17 @@ Note that `network_access` must be `external`/`public` here, not `lan`.
 Once `trusted_proxies` resolves the real client, that client is an
 internet address — the `lan` filter would 403 it, which is the whole
 point of resolving it.
+
+`public_url` is for the clients on your own network. A browser on this
+machine or the LAN that reaches the proxy by its public name (split DNS,
+or hairpin NAT) still arrives with a private address, so it skips the
+password — and is therefore held to the host rule in
+[Remote Access](#remote-access): the name it used must be the host of
+`network.public_url`, or a name on a certificate Moombox itself serves,
+which a TLS-terminating proxy leaves it without. Leave `public_url` unset
+and those browsers get `403 unrecognized host` while internet clients
+get in. It also makes notification embeds link to the dashboard (see
+[Mentions and dashboard links](#mentions-and-dashboard-links)).
 
 Then choose where authentication happens:
 
