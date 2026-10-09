@@ -337,6 +337,69 @@ func TestOrphanSweepShieldsAnAsideOnlyStagingDir(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepShieldsAnUnusedRootRecording: a Finished job whose staging
+// root holds a recording its finalize did not use — the whole-file download
+// beside a job that finalized as parts — keeps that staging through
+// cleanupStagingAfterMux (unusedRootRecording), and the sweep must not then
+// offer it as an orphan, at any age. The control is the same job whose root
+// holds only part 0's own capture, which is an ordinary orphan.
+//
+// Mutants: drop the unusedRootRecording term from jobNeedsStaging — the dir
+// is offered for deletion; put the term under the age rule — the month-old
+// dir is offered on the stock seven-day expiry.
+func TestOrphanSweepShieldsAnUnusedRootRecording(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		root       string
+		wantShield bool
+	}{
+		{"whole-file download beside the parts", "video.mp4", true},
+		{"part 0's own capture", "video_stream", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, db := testWorkerSetup(t)
+			stagingRoot := filepath.Join(t.TempDir(), "staging")
+			cfg := &config.MoomboxConfig{Downloader: config.DownloaderConfig{
+				IncompleteStagingExpiryDays: config.FlexDuration{Value: 7},
+			}}
+			cfg.Paths.StagingDirectory = stagingRoot
+			jobDir := filepath.Join(stagingRoot, "j-root")
+			if err := os.MkdirAll(jobDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(jobDir, tc.root), []byte("\x00\x00\x00\x18ftypdash"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.AddJob(&database.Job{ID: "j-root", VideoID: "j-root", Status: database.StatusFinished}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AddSegment(&database.Segment{JobID: "j-root", SegmentIndex: 0, Filename: "x - part1.mp4"}); err != nil {
+				t.Fatal(err)
+			}
+
+			entries, err := scanStagingOrphans(db, cfg)
+			if err != nil {
+				t.Fatalf("scanStagingOrphans: %v", err)
+			}
+			offered := false
+			for _, e := range entries {
+				if normalizePath(e.Path) == normalizePath(jobDir) {
+					offered = true
+				}
+			}
+			if offered == tc.wantShield {
+				t.Errorf("sweep offered the staging dir = %v, want %v", offered, !tc.wantShield)
+			}
+
+			aged := &database.Job{ID: "j-root", Status: database.StatusFinished,
+				UpdatedAt: time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)}
+			if got := jobNeedsStaging(db, cfg, aged, jobDir); got != tc.wantShield {
+				t.Errorf("jobNeedsStaging for a month-old row = %v, want %v — the unused-root shield has no age rule", got, tc.wantShield)
+			}
+		})
+	}
+}
+
 // TestOutputSweepOwnsARecoveredAsideSibling pins fix round 1's Important 1: a
 // recovered set-aside recording is written into the OUTPUT directory as
 // <stem>.restart-<ts>.mp4, and nothing references it (it is deliberately not a

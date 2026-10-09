@@ -90,20 +90,23 @@ func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] 
 // deliberately preserved rather than cleaned up, and so must NOT be offered
 // (or allowed) as a deletable orphan. Mirrors the exact carve-out applied at
 // job-finish time (see (*DownloadWorker).cleanupStagingAfterMux in
-// worker.go): a Finished job's staging only survives cleanup for four
+// worker.go): a Finished job's staging only survives cleanup for five
 // reasons — it's flagged IncompleteTail (tail is Resume-able), its chat
 // capture ended incomplete (no verb re-pages from the capture kept in
 // staging — Retry refuses a Finished job and Reinitialize starts over — but
 // it can be the only copy of those comments when the archive's chat copy
 // failed, an aside recovery carries it beside the recovered recording, and
 // the operator can take it by hand), it still holds a recording the engine set
-// aside rather than truncated (engine.StagedRestartSuffix), or it still has
-// an unmuxed captured part (recoverable via the Mux action). The tail and
+// aside rather than truncated (engine.StagedRestartSuffix), it still has
+// an unmuxed captured part (recoverable via the Mux action), or its root
+// holds a recording the finalize did not use (unusedRootRecording — the
+// from-the-start download beside a job that finalized as parts, or a second
+// recording beside the one a single-file finalize muxed). The tail and
 // chat shields expire on one age rule — which is ON by default: the option
 // behind it, downloader.incomplete_staging_expiry_days, ships at 7 days ("0 =
-// preserve forever" describes the VALUE 0, not the default). The set-aside
-// and unmuxed-part shields have no age rule at all: both hold captured media
-// that exists nowhere else.
+// preserve forever" describes the VALUE 0, not the default). The set-aside,
+// unmuxed-part and unused-root shields have no age rule at all: each holds
+// captured media that can exist nowhere else.
 //
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
@@ -125,10 +128,17 @@ func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *data
 	// until it is muxed or the job is deleted. The unmuxed-PART shield below
 	// is unconditional for the same reason.
 	asideShield := len(stagedAsideRecordings(jobStagingDir)) > 0
+	// The unused-root shield is cleanupStagingAfterMux's, read by the same
+	// function, and off the age rule for the aside shield's reason: the
+	// recording it keeps can be the longer copy (a complete VOD download the
+	// parts did not take), and the cleanup kept the dir precisely so it would
+	// not be lost. Without it the sweep offered that dir as an ordinary
+	// orphan — one click from deleting what the cleanup had preserved.
 	return (job.IncompleteTail && notExpired) ||
 		(job.ChatStatus == chatStatusIncomplete && notExpired) ||
 		asideShield ||
-		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir)
+		hasUnmuxedSegmentParts(db, job.ID, jobStagingDir) ||
+		unusedRootRecording(db, job.ID, jobStagingDir) != ""
 }
 
 // incompleteStagingExpired reports whether an incomplete_tail job's staging
@@ -408,8 +418,9 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 			}
 			if jobNeedsStaging(db, cfg, job, absPath) {
 				// Finished but deliberately preserved (IncompleteTail, an
-				// incomplete chat capture, a set-aside recording, or an
-				// unmuxed part) — not a genuine orphan, skip.
+				// incomplete chat capture, a set-aside recording, an unmuxed
+				// part, or a root recording the finalize did not use) — not
+				// a genuine orphan, skip.
 				continue
 			}
 		}
