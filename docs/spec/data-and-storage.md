@@ -1269,6 +1269,8 @@ Log output is sent to both:
 1. **Stdout** via a `switchableWriter` that can be toggled off when the TUI is running (BubbleTea owns the alternate screen; raw writes would corrupt the display). `SuppressStdout()` / `RestoreStdout()` control this.
 2. **Log file** via the Logger itself (which implements `io.Writer` with rotation).
 
+**Stdout is best effort and can never cost the file a line.** `io.MultiWriter` stops at the first writer that returns an error, and stdout is the first, so the `switchableWriter` swallows every error of the stdout write and reports the full length written. Otherwise a stdout that fails every write for the rest of the run — the hung-up tty of an SSH session that started `moombox --headless` and logged out (EIO), a process started with fd 1 closed (EBADF), a console-less Windows child's invalid handle — kept every line out of `moombox.log`, the only persistent log, while the ring buffer and the dashboard looked normal.
+
 ### File Rotation
 
 | Setting | Default | Config Key |

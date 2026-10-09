@@ -887,3 +887,91 @@ func TestRotationFailureRemindsHourly(t *testing.T) {
 		t.Errorf("%d reminders after the rotation started succeeding, want the same %d", after, reminders)
 	}
 }
+
+// TestFailingStdoutNeverCostsTheFileALine is W24-10: once stdout stops taking
+// writes — a hung-up SSH tty after `moombox --headless & disown` (EIO), a
+// process started with fd 1 closed (EBADF), a console-less Windows child —
+// moombox.log must keep receiving every line. The stdout sink sat FIRST in an
+// io.MultiWriter, which returns at the first writer's error, and the
+// switchable writer passed os.Stdout's error on unchanged: the file stopped
+// getting lines for the rest of the run while the ring buffer looked normal.
+//
+// New captures os.Stdout at construction, as production does, so the test
+// swaps it first. A closed *os.File fails every write with os.ErrClosed on
+// every platform. The first phase is the mid-run shape (stdout works, then
+// dies); the second a stdout that was dead from the start.
+//
+// Mutant: switchableWriter.Write returning the inner writer's error again —
+// both phases lose their lines from the file.
+func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
+	swapStdout := func(f *os.File) {
+		t.Helper()
+		orig := os.Stdout
+		os.Stdout = f
+		t.Cleanup(func() { os.Stdout = orig })
+	}
+	dir := t.TempDir()
+
+	t.Run("stdout dies mid-run", func(t *testing.T) {
+		stdout, err := os.Create(filepath.Join(dir, "stdout-mid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		swapStdout(stdout)
+		logPath := filepath.Join(dir, "mid.log")
+		l, err := New(logPath, "INFO", 1<<20, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Info("while stdout works")
+		stdout.Close() // the hang-up
+		l.Info("after stdout died", "n", 1)
+		l.Warn("after stdout died", "n", 2)
+		l.Close()
+
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"while stdout works", "n=1", "n=2"} {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("moombox.log is missing %q after stdout failed:\n%s", want, data)
+			}
+		}
+		// Control: stdout itself did take the line written while it worked.
+		echoed, err := os.ReadFile(stdout.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(echoed), "while stdout works") {
+			t.Errorf("stdout never took the line written while it worked: %q", echoed)
+		}
+	})
+
+	t.Run("stdout dead from the start", func(t *testing.T) {
+		stdout, err := os.Create(filepath.Join(dir, "stdout-dead"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout.Close()
+		swapStdout(stdout)
+		logPath := filepath.Join(dir, "dead.log")
+		l, err := New(logPath, "INFO", 1<<20, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Info("first line")
+		l.Error("last line")
+		l.Close()
+
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"first line", "last line"} {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("moombox.log is missing %q with stdout closed:\n%s", want, data)
+			}
+		}
+	})
+}

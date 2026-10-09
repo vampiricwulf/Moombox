@@ -22,11 +22,19 @@ type switchableWriter struct {
 	enabled atomic.Bool
 }
 
+// Write never reports a failure of the inner writer. Stdout is the
+// best-effort sink: a hung-up SSH tty (EIO), a closed fd 1 (EBADF) or a
+// console-less Windows child's invalid handle fails EVERY write for the rest
+// of the run, and io.MultiWriter stops at the first writer's error — so
+// passing it on kept every line out of moombox.log, the only persistent log,
+// while the ring buffer looked normal (W24-10). Logger.Write swallows a
+// failed reopen for the same reason.
 func (sw *switchableWriter) Write(p []byte) (int, error) {
 	if !sw.enabled.Load() {
 		return len(p), nil
 	}
-	return sw.w.Write(p)
+	_, _ = sw.w.Write(p)
+	return len(p), nil
 }
 
 // Logger wraps slog with file rotation, pub/sub, and ring buffer support.
@@ -220,6 +228,9 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 	// Create multi-writer (stdout + file)
 	// Stdout goes through a switchable writer so it can be suppressed
 	// when the TUI is running (the TUI log panel uses Subscribe() instead).
+	// io.MultiWriter stops at the first writer that errors, so the stdout
+	// sink must never return one: the switchable writer swallows stdout's
+	// failures — a dead stdout must never cost the file a line.
 	l.stdout = &switchableWriter{w: os.Stdout}
 	l.stdout.enabled.Store(true)
 	l.stderrGate = &switchableWriter{w: os.Stderr}
