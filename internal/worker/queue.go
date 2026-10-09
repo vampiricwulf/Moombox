@@ -445,7 +445,7 @@ func (q *JobQueue) Cancel(jobID string) bool {
 // WasCancelled returns true if the job was explicitly cancelled by the user
 // (as opposed to being stopped by shutdown). Clears the flag after reading,
 // and settles the run (settle): it is ending either way, so a Cancel that
-// arrives after this is its caller's to report — the cancel route writes
+// arrives after this is its caller's to report — CancelJob writes
 // Cancelled before it flags, and that write alone can end a run here.
 func (q *JobQueue) WasCancelled(jobID string) bool {
 	q.mu.Lock()

@@ -606,7 +606,7 @@ There is one job writer and it is synchronous. `UpdateJobFields()` (`internal/da
 3. Releases `db.mu` BEFORE notifying, so a subscriber may call back into the database without deadlocking
 4. Notifies `OnJobUpdate` and `OnJobChange` subscribers synchronously on the caller's goroutine; if the row vanished between the write and the read-back, fires `OnJobDeleted` instead
 
-Its two conditional forms, `UpdateJobFieldsIf` and `UpdateJobFieldsUnless` (`internal/database/database.go`), are the same writer with a status condition ANDed into the `UPDATE`: a write the condition refuses stops after step 1 and reports false (see [data-and-storage.md](data-and-storage.md), Conditional writes).
+Its conditional forms, `UpdateJobFieldsIf`, `UpdateJobFieldsUnless` and `UpdateJobFieldsUnlessTerminal` (`internal/database/database.go`), are the same writer with a status condition ANDed into the `UPDATE`: a write the condition refuses stops after step 1 and reports false (see [data-and-storage.md](data-and-storage.md), Conditional writes).
 
 The only goroutine the package ever starts is the `OnJobsChange` fan-out (`dispatchJobsChange`), used by the two bulk writers. Write amplification during a download is bounded upstream, not here: `ProgressTracker` (`internal/worker/progress.go`) reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms default) and flushes gap rows at most once a second, and every other `UpdateJobFields` caller is event-driven. When nothing is being written, nothing runs.
 
@@ -741,7 +741,8 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 
 - **User cancellation:** `WasCancelled(jobID)` returns true. Status set to `Cancelled`. Notification sent.
 - **Shutdown cancellation:** `WasCancelled(jobID)` returns false. Status is preserved (not changed). Job will resume on next startup.
-- **Cancel of a settled run:** a run that has recorded its outcome — `setJobError`'s failure, a backlog requeue, or the end of a cancelled or interrupted run — is settled (`JobQueue.settle`), and a Cancel that reaches it in what is left of the run is not flagged: `CancelJob` answers false and its caller (the cancel route, the TUI) sends the notification. That covers a Cancel of a `COOKIES?` row whose run is still in its automatic cookie refresh, of a row just requeued to `Queued`, and the cancel route's own order — it writes `Cancelled` before it calls `CancelJob`, and that write alone can end the run first.
+- **Cancel of a settled run:** a run that has recorded its outcome — `setJobError`'s failure, a backlog requeue, or the end of a cancelled or interrupted run — is settled (`JobQueue.settle`), and a Cancel that reaches it in what is left of the run is not flagged: `CancelJob` answers false and its caller (the cancel route, the TUI) sends the notification. That covers a Cancel of a `COOKIES?` row whose run is still in its automatic cookie refresh, of a row just requeued to `Queued`, and `CancelJob`'s own order — it writes `Cancelled` before it flags the run, and that write alone can end the run first.
+- **Cancel of an ended job:** a Cancel is decided on a status read earlier — the row a UI showed, the cancel route's own read — and `CancelJob` writes `Cancelled` with `UpdateJobFieldsUnlessTerminal` (`internal/database/database.go`), never over `Finished`, `Error` or `Cancelled`. Written unconditionally, it turned a job that finished or failed in between into a Cancelled one. A Cancel that finds the job ended does nothing else either — no flag, no stopped run — and answers that nothing was cancelled, which both entry points report: the cancel route with a 409 naming the status the job reached (`cancelJob`, `internal/web/routes/jobs.go`), the TUI's `A C` with a warning that the job had already ended (`cancelJobFromTUI`, `cmd/moombox/job_notifications.go`); neither sends Job Cancelled for it.
 
 This distinction is critical: on shutdown, jobs in `Downloading` status keep that status so they are re-enqueued on restart. User cancellations are permanent.
 
@@ -842,7 +843,7 @@ Key methods:
 - `GetJob(id) -> (*Job, error)`: Single job with gaps, trims, segments loaded.
 - `GetAllJobs() -> ([]*Job, error)`: All jobs ordered by `updated_at DESC`.
 - `UpdateJobFields(jobID, map[string]any)`: Dynamic partial update with auto `updated_at`. Triggers subscribers.
-- `UpdateJobFieldsIf(jobID, expected, map[string]any) -> bool` / `UpdateJobFieldsUnless(jobID, unwanted, map[string]any) -> bool`: The same write, applied only while the row's status is `expected` (a compare-and-set) or is not `unwanted`; reports whether it applied, and triggers subscribers only when it did.
+- `UpdateJobFieldsIf(jobID, expected, map[string]any) -> bool` / `UpdateJobFieldsUnless(jobID, unwanted, map[string]any) -> bool` / `UpdateJobFieldsUnlessTerminal(jobID, map[string]any) -> bool`: The same write, applied only while the row's status is `expected` (a compare-and-set), is not `unwanted`, or is not terminal (`Finished`, `Error`, `Cancelled` — `Job.IsTerminal`'s set); reports whether it applied, and triggers subscribers only when it did.
 - `DeleteJob(id) -> error`: Hard delete with cascading gap/trim/segment cleanup.
 - `OnJobUpdate(fn) -> unsubscribe` / `OnJobChange(fn) -> unsubscribe`: Subscribe to per-job update events; the latter also receives the list of columns written.
 - `OnJobAdded(fn)` / `OnJobDeleted(fn)` / `OnTrimsChanged(fn) -> unsubscribe`: Lifecycle events of `AddJob`, `DeleteJob` and `AddTrim`/`DeleteTrim`.
@@ -858,7 +859,7 @@ Key methods:
 - `Start(ctx)`: Main loop. Blocks (run in goroutine). Enqueues existing pending jobs, then dequeues and processes.
 - `Stop()`: Signals stop, waits up to 10 seconds for in-flight jobs.
 - `EnqueueJob(jobID)`: Adds a job to the queue with priority from its current status.
-- `CancelJob(jobID) -> bool`: User-initiated cancellation. True when it flagged a run that will send the Job Cancelled notification; false — no run, or one that has settled its outcome — leaves it to the caller.
+- `CancelJob(jobID) -> (cancelled, flagged bool)`: User-initiated cancellation. `cancelled` is false when the job had already ended (`Finished`, `Error`, `Cancelled`), which it leaves as it is and touches nothing else for; `flagged` is true when it flagged a run that will send the Job Cancelled notification, and false — no run, or one that has settled its outcome — leaves that to the caller.
 - `SetParallelDownloads(n)`: Runtime update of max concurrent downloads.
 
 ### worker.StreamProcessor

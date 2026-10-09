@@ -1,6 +1,8 @@
 // Package database provides SQLite-based persistence for Moombox.
 package database
 
+import "slices"
+
 // JobStatus represents the status of a download job.
 type JobStatus string
 
@@ -219,9 +221,14 @@ type Job struct {
 // that keeps a copy needs to drop a stale delivery (see Version).
 func (j *Job) JobVersion() (string, uint64) { return j.ID, j.Version }
 
+// terminalStatuses are the statuses a job's run ends in — its outcome.
+// IsTerminal reads them, and UpdateJobFieldsUnlessTerminal will not write
+// over them.
+var terminalStatuses = []JobStatus{StatusFinished, StatusError, StatusCancelled}
+
 // IsTerminal returns true if the job status is a terminal state.
 func (j *Job) IsTerminal() bool {
-	return j.Status == StatusFinished || j.Status == StatusError || j.Status == StatusCancelled
+	return slices.Contains(terminalStatuses, j.Status)
 }
 
 // Gap represents a missing segment range in a download.

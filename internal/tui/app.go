@@ -597,8 +597,10 @@ type App struct {
 	asidesCache     AsideSummary
 
 	// Callbacks for actions
-	OnAddVideo  func(url string)
-	OnCancelJob func(jobID string)
+	OnAddVideo func(url string)
+	// OnCancelJob cancels a job and reports whether it did: a job that
+	// ended since the list last showed it is left as it ended.
+	OnCancelJob func(jobID string) bool
 	OnDeleteJob func(jobID string)
 	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
 	// /watched routes are the twin.

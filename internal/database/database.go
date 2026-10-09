@@ -394,6 +394,22 @@ func (db *Database) UpdateJobFieldsUnless(id string, unwanted JobStatus, fields 
 	return applied
 }
 
+// UpdateJobFieldsUnlessTerminal is UpdateJobFieldsUnless over every terminal
+// status at once (Job.IsTerminal: Finished, Error, Cancelled): the write
+// applies only while the row has not reached an outcome. For a write that
+// must not undo whichever outcome landed since its caller read the row — the
+// operator's Cancel, decided on the status a UI showed, turned a job that had
+// finished or failed meanwhile into a Cancelled one.
+func (db *Database) UpdateJobFieldsUnlessTerminal(id string, fields map[string]any) bool {
+	args := make([]any, len(terminalStatuses))
+	for i, st := range terminalStatuses {
+		args[i] = st
+	}
+	cond := "status NOT IN (?" + strings.Repeat(", ?", len(args)-1) + ")"
+	_, applied := db.updateJobFieldsWhere(id, fields, cond, args)
+	return applied
+}
+
 // updateJobFieldsWhere is the dynamic SET machinery behind UpdateJobFields
 // and its two conditional forms. cond, when not empty, is ANDed to the
 // statement's WHERE id=? with condArgs as its arguments, and a statement it

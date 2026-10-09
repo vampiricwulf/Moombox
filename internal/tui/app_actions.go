@@ -229,7 +229,10 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A C":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
-			count := 0
+			// ended counts the jobs the list showed cancellable that had
+			// finished, failed or been cancelled by the time the cancel
+			// reached them: OnCancelJob leaves those as they ended.
+			count, ended := 0, 0
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -242,18 +245,29 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				default:
 					continue
 				}
-				a.OnCancelJob(id)
-				count++
+				if a.OnCancelJob(id) {
+					count++
+				} else {
+					ended++
+				}
 			}
 			a.taskList.ClearSelection()
-			if count > 0 {
+			switch {
+			case ended > 0 && count > 0:
+				a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
+			case ended > 0:
+				a.setFeedbackWithSeverity("Not cancelled: "+jobCount(ended)+" had already ended", severityWarning)
+			case count > 0:
 				a.setFeedback("Cancelled " + jobCount(count))
-			} else {
+			default:
 				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
 			}
 		} else if job != nil && a.OnCancelJob != nil {
-			a.OnCancelJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+			if a.OnCancelJob(job.ID) {
+				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+			} else {
+				a.setFeedbackWithSeverity(fmt.Sprintf("Not cancelled — %s had already ended", job.Title), severityWarning)
+			}
 		}
 	case "A D":
 		// OnDeleteJob blocks in WaitForJobExit (up to 5s per job) — run the

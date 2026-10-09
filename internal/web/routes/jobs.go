@@ -943,16 +943,18 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		db.UpdateJobFields(jobID, map[string]any{
-			"status": database.StatusCancelled,
-		})
-
 		// When the cancel flagged an actively-processing run, that run's
 		// handleCancellation emits the "cancelled" notification — sending
 		// here too produced two embeds per cancel of an in-flight job.
-		workerWillNotify := false
-		if w != nil {
-			workerWillNotify = w.CancelJob(jobID)
+		cancelled, workerWillNotify := cancelJob(db, w, jobID)
+		if !cancelled {
+			// The job ended — finished, failed, or was cancelled from the
+			// TUI — between the read above and the write, which does not
+			// overwrite an outcome. Nothing was cancelled, so say that.
+			if now, ok := loadJob(rw, db, jobID); ok {
+				jsonError(rw, fmt.Sprintf("Not cancelled — the job is %s now", now.Status), http.StatusConflict)
+			}
+			return
 		}
 
 		if notifier != nil && !workerWillNotify {
@@ -1419,6 +1421,19 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 // read; folding both into 404 told the dashboard — whose 404 branch means
 // "the job is gone" — that every job had vanished whenever the database was
 // locked or failing.
+// cancelJob is the cancel route's write: the worker's CancelJob, which also
+// stops a run in flight, or with no worker the same conditional write alone.
+// Neither writes over a terminal status, and cancelled says whether the job
+// was cancelled; workerWillNotify, whether a run was flagged to announce it.
+// A variable so a test can land a status change between the route's read
+// and the write.
+var cancelJob = func(db *database.Database, w *worker.DownloadWorker, jobID string) (cancelled, workerWillNotify bool) {
+	if w != nil {
+		return w.CancelJob(jobID)
+	}
+	return db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{"status": database.StatusCancelled}), false
+}
+
 func loadJob(rw http.ResponseWriter, db *database.Database, jobID string) (*database.Job, bool) {
 	job, err := db.GetJob(jobID)
 	if err != nil {

@@ -30,7 +30,7 @@ func TestAdvisoryFeedbackStatesItsSeverity(t *testing.T) {
 		want  color.Color
 	}{
 		{"A C with nothing cancellable in the selection", func(a *App) {
-			a.OnCancelJob = func(string) {}
+			a.OnCancelJob = func(string) bool { return true }
 			a.taskList.SetJobs([]*database.Job{finished()})
 			a.taskList.ToggleSelection("f")
 			a.dispatchAction("A C", nil)

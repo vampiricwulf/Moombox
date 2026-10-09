@@ -551,19 +551,37 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 	return w.streamProc.TwitchHintStats()
 }
 
-// CancelJob cancels a job and writes its status Cancelled. Returns true when an actively-processing run was
-// flagged — that run's handleCancellation emits the "cancelled"
-// notification, so callers that notify should skip their own emission. A
-// run that has already settled its outcome (a failure recorded, a backlog
-// requeue — JobQueue.settle) is not flagged and answers false: it no longer
-// reads the flag, and the caller sends the notification itself.
-func (w *DownloadWorker) CancelJob(jobID string) bool {
-	flagged := w.queue.Cancel(jobID)
-	w.db.UpdateJobFields(jobID, map[string]any{
+// CancelJob is the operator's Cancel: it writes the job's status Cancelled and
+// stops its run, if one is in flight. cancelled reports whether it did. When
+// it did, flagged reports whether an actively-processing run was flagged —
+// that run's handleCancellation emits the "cancelled" notification, so
+// callers that notify should skip their own emission. A run that has already
+// settled its outcome (a failure recorded, a backlog requeue, a run the write
+// alone ended — JobQueue.settle) is not flagged: it no longer reads the flag,
+// and the caller sends the notification itself.
+//
+// A Cancel is decided on a status read earlier — the row a UI showed, the
+// cancel route's own read — and the write is never over a terminal one
+// (UpdateJobFieldsUnlessTerminal). Written unconditionally, it turned a job
+// that finished or failed in between into a Cancelled one: a Finished
+// archive or an Error the operator had yet to read, gone. A Cancel that finds
+// the job ended does nothing at all — no flag, no stopped run, no streak
+// ended — and answers cancelled false, so its caller says so rather than
+// claiming a cancel.
+//
+// The write comes first and the flag after, so it is the write that decides.
+// The write alone ends a run (its listeners cancel the download); one that
+// gets to WasCancelled before the flag is settled by it, and is the caller's
+// to report.
+func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool) {
+	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusCancelled,
-	})
+	}) {
+		return false, false
+	}
+	flagged = w.queue.Cancel(jobID)
 	w.endBacklogStreak(jobID)
-	return flagged
+	return true, flagged
 }
 
 // WaitForJobExit blocks until the job's orchestrator goroutine has returned,
@@ -1574,7 +1592,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// operator's verdict stands, and the run ends as a cancelled one: when a
 	// Cancel flagged it before this failure settled (JobQueue.settle) —
 	// though its Cancelled write may not have landed yet — or when the row
-	// already reads Cancelled — the cancel route writes before it flags.
+	// already reads Cancelled — CancelJob writes before it flags.
 	// Settled here, a Cancel from now on is its caller's to report: this
 	// run's tail no longer reads the flag.
 	if w.queue.settle(job.ID) || !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{

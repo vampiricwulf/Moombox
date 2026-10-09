@@ -66,12 +66,19 @@ func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, ca
 // the Web's cancel route (internal/web/routes/jobs.go) sends it itself. In
 // edit mode that also left the job's message short of its terminal state, and
 // the tracker holding it.
-func (s *runState) cancelJobFromTUI(jobID string) {
+//
+// It reports whether the job was cancelled. The TUI decides on the row its
+// list last showed, and a job that finished, failed or was cancelled since is
+// not (CancelJob does not write over an outcome): the TUI says so rather than
+// "Cancelled", and nobody announces a cancel that did not happen.
+func (s *runState) cancelJobFromTUI(jobID string) bool {
 	job, _ := s.db.GetJob(jobID)
-	if s.dlWorker.CancelJob(jobID) || job == nil || job.IsTerminal() {
-		return
+	cancelled, flagged := s.dlWorker.CancelJob(jobID)
+	if !cancelled || flagged || job == nil {
+		return cancelled
 	}
 	if s.notifyMgr != nil && s.notifyMgr.HasTargets() {
 		s.notifyMgr.Send(notifications.JobCancelled(worker.NotifyFacts(job)))
 	}
+	return true
 }

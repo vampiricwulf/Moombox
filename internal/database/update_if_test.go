@@ -97,3 +97,39 @@ func TestUpdateJobFieldsUnlessSparesOneStatus(t *testing.T) {
 		t.Errorf("a write that did not apply notified %d subscribers", n)
 	}
 }
+
+// TestUpdateJobFieldsUnlessTerminalSparesEveryOutcome: the write applies over
+// every status a job is still on its way through and over none it ends in —
+// Finished, Error, Cancelled, the statuses IsTerminal reports — and one it
+// spares tells no subscriber anything.
+//
+// Mutants: drop a status from terminalStatuses — the write lands on that
+// outcome; compare with IN instead of NOT IN — it lands only on outcomes.
+func TestUpdateJobFieldsUnlessTerminalSparesEveryOutcome(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		status   JobStatus
+		terminal bool
+	}{
+		{StatusQueued, false}, {StatusUpcoming, false}, {StatusLive, false}, {StatusDownloading, false},
+		{StatusMuxing, false}, {StatusCookies, false},
+		{StatusFinished, true}, {StatusError, true}, {StatusCancelled, true},
+	} {
+		st := tc.status
+		if got := (&Job{Status: st}).IsTerminal(); got != tc.terminal {
+			t.Errorf("%s: IsTerminal = %v, want %v", st, got, tc.terminal)
+		}
+		db, notified := casFixture(t, "t", st)
+		applied := db.UpdateJobFieldsUnlessTerminal("t", map[string]any{"status": StatusCancelled, "progress": "cancelled"})
+		if applied == tc.terminal {
+			t.Errorf("%s: applied = %v, want %v", st, applied, !tc.terminal)
+		}
+		row, _ := db.GetJob("t")
+		if tc.terminal && (row.Status != st || row.Progress != "" || notified.Load() != 0) {
+			t.Errorf("%s: row = %s %q with %d notifications, want it untouched", st, row.Status, row.Progress, notified.Load())
+		}
+		if !tc.terminal && row.Status != StatusCancelled {
+			t.Errorf("%s: status = %s after an applied write, want Cancelled", st, row.Status)
+		}
+	}
+}

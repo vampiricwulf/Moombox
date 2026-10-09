@@ -668,7 +668,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `GET` | `/api/jobs/{id}/trims` | List trim clips created from this job. |
 | `GET` | `/api/jobs/{id}/logs` | Get per-job log lines (worker-level logs specific to this job). |
 | `POST` | `/api/jobs` | Create a new job. Rate limited. Body contains URL, format preferences, timestamps. |
-| `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
+| `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. 400 for a status that cannot be cancelled; 409 (`Not cancelled — the job is <status> now`) when the job ended between the route's read and its write, which leaves it as it ended. |
 | `POST` | `/api/jobs/{id}/retry` | Retry a failed/cancelled job — backward-compatible alias that delegates to `ReinitializeJob`, so it DELETES the staging directory. Allowed from Error / Cancelled / COOKIES? only; a Finished job flagged `incompleteTail` is deliberately refused here, because the redownload would destroy the preserved staging and resume sidecar that flag exists to protect. |
 | `POST` | `/api/jobs/{id}/resume` | Resume a YouTube job, PRESERVING its staging files — the counterpart to `/retry` and `/reinitialize`, which delete them. Allowed from Error / Cancelled / COOKIES?, and from Finished when `incompleteTail` is set. `400` when the job is not YouTube, and `400` "No staging files found — use Reinitialize instead" when nothing survives in staging. |
 | `POST` | `/api/jobs/{id}/reinitialize` | Reset a job to a fresh state and re-enqueue it, DELETING its staging files. Allowed from Error / Cancelled / COOKIES? only. |
