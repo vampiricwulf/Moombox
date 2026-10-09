@@ -856,8 +856,8 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// the three-status list. A dateless result first tries the §9 date
 	// fetch below; if the date remains unknowable it cannot verify the
 	// window ⇒ treated as outside — unlike the feed path there is no
-	// self-healing 'unknown' store row (DECAPI writes none, §13), so log at
-	// Info to keep the final skip visible.
+	// self-healing 'unknown' store row (DECAPI writes none, §13), so the
+	// first sighting's skip logs at Info to keep it visible.
 	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
 		if result.PublishedAt == "" && dm.ProbeDate != nil {
 			// Two-phase probe (§9): the status probe carries no microformat,
@@ -876,7 +876,16 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		}
 		cutoff := time.Now().UTC().Add(-time.Duration(windowDays) * 24 * time.Hour).Format(time.RFC3339)
 		if result.PublishedAt == "" || result.PublishedAt < cutoff {
-			dm.logger.Info("decapi: newest video is outside the archive window; skipping",
+			// A repeat logs at Debug, as the match line above does. The two
+			// verdicts the memo never carries — a post_live newest video,
+			// which is not terminal, and a dateless one, below — reach this
+			// line on every 15 s cycle, so Info here was the per-cycle spam
+			// the repeat demotion exists to end. The first sighting keeps it.
+			skipLog := dm.logger.Info
+			if reprobe || repeat {
+				skipLog = dm.logger.Debug
+			}
+			skipLog("decapi: newest video is outside the archive window; skipping",
 				"videoID", videoID, "published", result.PublishedAt)
 			if result.PublishedAt != "" {
 				// A DATED verdict is durable — the cutoff only moves forward

@@ -817,3 +817,83 @@ func TestDecapi_ARepeatedAnswerLogsAtDebug(t *testing.T) {
 		t.Errorf("%d Info lines over 4 repeats of the same answer, want 0", n)
 	}
 }
+
+// The §13 window skip is the last line of the two answers the terminal memo
+// never carries — a post_live newest video (not terminal) and a VOD whose
+// date fetch keeps failing (a dateless verdict is not memoized) — so they
+// reach it on every 15 s cycle. It ignored the repeat and logged at Info each
+// time, after the match and classification lines had been demoted. The first
+// sighting still logs it at Info; repeats at Debug.
+//
+// Mutant: the window skip logging at Info whatever repeat says — 4 Info lines
+// over the 4 repeats in both cases.
+func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
+	const skipMsg = "decapi: newest video is outside the archive window; skipping"
+	cases := []struct {
+		name      string
+		status    string
+		probeDate func(context.Context, string) (string, string, error)
+	}{
+		{"post_live dated outside the window", "post_live", func(context.Context, string) (string, string, error) {
+			return time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339), "exact", nil
+		}},
+		{"vod whose date fetch keeps failing", "vod", func(context.Context, string) (string, string, error) {
+			return "", "", errors.New("date fetch: transport error")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			probes := 0
+			dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+				probes++
+				// A production status probe carries no date (§9), so every
+				// sighting goes on to the date fetch.
+				return &VideoProbeResult{StreamStatus: tc.status, Title: "ended stream"}, nil
+			})
+			dm.ProbeDate = tc.probeDate
+			found := recordDecapiVideoFound(dm)
+			var records []slog.Record
+			dm.logger = slog.New(recordingHandler{records: &records})
+			ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
+			body := decapiBody("vidOutside1", "ended stream")
+
+			skips := func(level slog.Level) int {
+				n := 0
+				for _, r := range records {
+					if r.Level == level && r.Message == skipMsg {
+						n++
+					}
+				}
+				return n
+			}
+			_ = dm.processResponse(context.Background(), body, ch)
+			if n := skips(slog.LevelInfo); n != 1 {
+				t.Fatalf("the first sighting logged the window skip %d times at Info, want once", n)
+			}
+			records = records[:0]
+			for range 4 {
+				_ = dm.processResponse(context.Background(), body, ch)
+			}
+			if probes != 5 {
+				t.Fatalf("%d probes over 5 sightings, want 5 — a memoized answer never reaches the skip, so this "+
+					"test would say nothing about its level", probes)
+			}
+			var infos []string
+			for _, r := range records {
+				if r.Level == slog.LevelInfo {
+					infos = append(infos, r.Message)
+				}
+			}
+			if len(infos) != 0 {
+				t.Errorf("%d Info lines over 4 repeats of the same answer, want 0: %q", len(infos), infos)
+			}
+			if n := skips(slog.LevelDebug); n != 4 {
+				t.Errorf("the window skip logged %d times at Debug over 4 repeats, want 4", n)
+			}
+			if len(*found) != 0 {
+				t.Errorf("found = %v, want nothing jobbed outside the window", *found)
+			}
+		})
+	}
+}
