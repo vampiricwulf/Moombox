@@ -250,9 +250,9 @@ func directShortFileError(answer string, offset, totalSize int64) error {
 }
 
 // errDirectRestToCome is streamDirectOnce's word that its 206 ended cleanly
-// short of the file's total after moving the file on, so
-// runDirectDownloadFallback asks for the rest from the new offset. It never
-// leaves the fallback.
+// short of the file's total after taking the file past the offset it was
+// asked from, so runDirectDownloadFallback asks for the rest from the new
+// offset. It never leaves the fallback.
 var errDirectRestToCome = errors.New("the answer ended before the file did")
 
 // differentFileReason says why staged bytes cannot be a prefix of a file whose
@@ -345,11 +345,18 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 //     outage, waits it out. One dropped connection ended the job, however
 //     much of the file had streamed.
 //
-// A 206 that ends cleanly short of the file's total, having moved it on, is
-// asked for the rest from the new offset (errDirectRestToCome), as the
-// chunked loop asks for its next chunk after a short one. Anything else
-// returns as it did, a failure the monitor does not call an outage among
-// them.
+// A 206 that ends cleanly short of the file's total, having taken it past
+// the byte it was asked from, is asked for the rest from the new offset
+// (errDirectRestToCome), as the chunked loop asks for its next chunk after a
+// short one. Anything else returns as it did, a failure the monitor does not
+// call an outage among them.
+//
+// The refresh count starts over after any request that moved the file — a
+// rest-to-come round included. The reset sat below that round's `continue`,
+// so a round never reached it, and the next refusal was measured from the
+// round's end: a URL that expired three times, with bytes streamed between
+// each, ended the job on its third 403, and a refusal after a round got one
+// refresh, not directRefreshAttempts.
 func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) error {
 	refreshes := 0
 	for {
@@ -358,11 +365,11 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 		if err == nil {
 			return nil
 		}
-		if errors.Is(err, errDirectRestToCome) {
-			continue
-		}
 		if d.bytesWritten.Load() != before {
 			refreshes = 0 // a refusal after progress is a new expiry
+		}
+		if errors.Is(err, errDirectRestToCome) {
+			continue
 		}
 		switch {
 		case status == http.StatusForbidden || status == http.StatusGone:
@@ -518,8 +525,7 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	// Without these saves the fallback streamed gigabytes with nothing on disk
 	// describing them, so an interruption cost the whole partial — the chunked
 	// loop's 50 MB cadence, applied to the path that has no chunks.
-	streamedFrom := d.bytesWritten.Load()
-	lastSavedOffset := streamedFrom
+	lastSavedOffset := d.bytesWritten.Load()
 	resumeInterval := d.directResumeIntervalBytes()
 	for {
 		// The CALLER's context, not the derived one: an idle stall is a
@@ -562,13 +568,17 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 	// A 206 that ended cleanly short of the file's total was taken for the
 	// whole file: the sidecar was cleared and the truncated file finished as
 	// the archive — after a mid-download 200 handed the chunked loop's
-	// transfer here, past the probed total it knew. One that moved the file
-	// on is asked for the rest (errDirectRestToCome); one that brought
-	// nothing is the short origin the chunked loop reads an empty 206 as, an
-	// error that keeps the sidecar.
+	// transfer here, past the probed total it knew. One that took the file
+	// past the byte it was asked from is asked for the rest
+	// (errDirectRestToCome); one that did not is the short origin the chunked
+	// loop reads an empty 206 as, an error that keeps the sidecar. Past the
+	// asked offset, not merely moved: a 206 labelled from byte 0 discards the
+	// partial above and writes again from the top, and an origin answering
+	// every Range with a short head of the file from byte 0 was asked again
+	// without end.
 	if staged := d.bytesWritten.Load(); total > 0 && staged < total {
-		if staged == streamedFrom {
-			return status, false, directShortFileError("a 206 that brought nothing", staged, total)
+		if staged <= offset {
+			return status, false, directShortFileError("a 206 that brought nothing past the resume offset", staged, total)
 		}
 		return status, false, errDirectRestToCome
 	}

@@ -304,8 +304,8 @@ func TestDirectChunkedLoopShortOriginIsAnError(t *testing.T) {
 // Mutants: dropping the short-answer check after streamDirectOnce's read loop
 // — both 206 rows finish short, and the empty row too; `total =
 // d.directTotalSize` → `total = 0` there — the `*` row finishes short;
-// dropping the `staged == streamedFrom` arm — the empty row asks again until
-// the test's deadline; dropping runDirectDownloadFallback's
+// dropping the `staged <= offset` arm — the empty row asks again until the
+// test's deadline; dropping runDirectDownloadFallback's
 // errDirectRestToCome `continue` — both 206 rows end on that error; dropping
 // the 416 arm's `total = d.directTotalSize` (730c208) — the 416 row reads as
 // complete.

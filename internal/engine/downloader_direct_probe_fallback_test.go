@@ -335,14 +335,17 @@ func TestDirectFallbackRefusedRefreshesTheURL(t *testing.T) {
 
 // TestDirectFallbackRefreshIsBounded pins the fallback's refresh bound: at
 // most directRefreshAttempts refreshes without a byte written between them.
-// A fresh URL the origin still refuses ends the download after that many; a
-// refusal after the transfer moved is a new expiry and starts the count
-// again, so a stream long enough to outlive two URLs is not cut off.
+// A fresh URL the origin still refuses ends the download after
+// that many; a refusal after the transfer moved is a new expiry and starts
+// the count again, so a stream long enough to outlive two URLs is not cut
+// off — whether it moved through a body that broke off or through 206s that
+// ended short of the file and were asked for the rest (errDirectRestToCome).
 //
 // Mutant: `refreshes >= directRefreshAttempts` → `false` — the still-refused
 // row refreshes until the test's deadline. Mutant: dropping `refreshes = 0`
-// — the progress row stops on its third refusal, the one after the transfer
-// moved.
+// — the progress rows stop on the refusal after the transfer moved. Mutant:
+// moving the reset below the errDirectRestToCome `continue`, where it was —
+// both short-round rows stop on a 403 the budget should have covered.
 func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 	body := headedBody(DownloadChunkSize+100, 'V')
 
@@ -408,6 +411,135 @@ func TestDirectFallbackRefreshIsBounded(t *testing.T) {
 			t.Errorf("OnCredentialRefresh calls = %d, want 3", n)
 		}
 	})
+
+	// shortRound answers a Range with a 206 of the next 1000 bytes that
+	// states the whole file's total: a round that ends short of the file.
+	shortRound := func(w http.ResponseWriter, r *http.Request) {
+		var start int
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+999, len(body)))
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(body[start : start+1000])
+	}
+
+	for _, tc := range []struct {
+		name string
+		// serve answers a request for path; false lets the origin serve the
+		// rest of the file. hits counts the requests path has had before.
+		serve     func(path string, hits int, w http.ResponseWriter, r *http.Request) bool
+		wantCalls int32
+	}{
+		{
+			// /u0 is refused; /u1 serves one short round, then is refused;
+			// /u2 is refused; /u3 serves the rest: two refreshes after the
+			// round, as many as directRefreshAttempts allows.
+			"a refusal after a short round gets the whole budget",
+			func(path string, hits int, w http.ResponseWriter, r *http.Request) bool {
+				switch {
+				case path == "/u3":
+					return false
+				case path == "/u1" && hits == 0:
+					shortRound(w, r)
+					return true
+				}
+				w.WriteHeader(http.StatusForbidden)
+				return true
+			},
+			3,
+		},
+		{
+			// Every URL serves one short round and then expires: three
+			// expiries, each after the file moved on.
+			"three expiries with short rounds between",
+			func(path string, hits int, w http.ResponseWriter, r *http.Request) bool {
+				switch {
+				case path == "/u3":
+					return false
+				case hits == 0:
+					shortRound(w, r)
+					return true
+				}
+				w.WriteHeader(http.StatusForbidden)
+				return true
+			},
+			3,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			hits := map[string]int{}
+			o := newFallbackOrigin(t, body, func(_ int, path string, w http.ResponseWriter, r *http.Request) bool {
+				mu.Lock()
+				n := hits[path]
+				hits[path]++
+				mu.Unlock()
+				return tc.serve(path, n, w, r)
+			})
+			var calls atomic.Int32
+			out := filepath.Join(t.TempDir(), "video.mp4")
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL: o.URL + "/u0", OutputFile: out, IsDirectURL: true,
+				OnCredentialRefresh: func() (string, string) {
+					return o.URL + "/u" + strconv.Itoa(int(calls.Add(1))), ""
+				},
+			})
+			d.delays = fastDelays()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			if err := d.Start(ctx); err != nil {
+				t.Fatalf("Start = %v, want every refusal after a short round refreshed past", err)
+			}
+			if got, _ := os.ReadFile(out); !bytes.Equal(got, body) {
+				t.Errorf("output is %d bytes, want the whole %d-byte file", len(got), len(body))
+			}
+			if n := calls.Load(); n != tc.wantCalls {
+				t.Errorf("OnCredentialRefresh calls = %d, want %d", n, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestDirectFallbackShortHeadFromByteZeroEnds pins that a 206 the fallback
+// asks for the rest of must have taken the file past the byte it was asked
+// from. An origin that answers every Range with a short head of the file
+// labelled from byte 0 discards the partial (streamDirectOnce) and writes
+// the head again; that moved the byte counter, and was read as a round that
+// moved the file on, so the fallback asked again without end — thousands of
+// requests a second. It is now the short origin, an error.
+//
+// Mutant: `staged <= offset` → `staged == offset` — the heads alternate in
+// length, so no request lands exactly on its offset and the fallback asks
+// until the test's deadline. Mutant: dropping the arm — the same.
+func TestDirectFallbackShortHeadFromByteZeroEnds(t *testing.T) {
+	body := headedBody(DownloadChunkSize+100, 'V')
+	o := newFallbackOrigin(t, body, func(n int, _ string, w http.ResponseWriter, _ *http.Request) bool {
+		head := 1000 // odd requests; even ones get half as much
+		if n%2 == 0 {
+			head = 500
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", head-1, len(body)))
+		w.Header().Set("Content-Length", strconv.Itoa(head))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(body[:head])
+		return true
+	})
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL: o.URL + "/video.mp4", OutputFile: filepath.Join(t.TempDir(), "video.mp4"), IsDirectURL: true,
+	})
+	d.delays = fastDelays()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err := d.Start(ctx)
+	if err == nil || !strings.Contains(err.Error(), "ends short of its probed size") {
+		t.Errorf("Start = %v, want the short origin's error", err)
+	}
+	o.mu.Lock()
+	n := o.requests
+	o.mu.Unlock()
+	if n != 2 {
+		t.Errorf("the fallback made %d requests, want 2: the head, and the answer from byte 0 that got no further", n)
+	}
 }
 
 // TestDirectFallbackWaitsOutAnOutage pins the streaming fallback's
