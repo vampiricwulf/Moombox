@@ -162,7 +162,16 @@ type lifecycleTracker struct {
 	jobs    map[string]*lifecycleJob
 	touched map[string]uint64 // job id -> last-touch sequence, for eviction
 	seq     uint64
-	log     interface {
+	// dropping counts, per deleted job and key, the ForgetJob steps queued
+	// for that key that have not run yet (markDropping). While a key has one,
+	// whatever id it holds for the job is the deleted job's — even one its
+	// own POST records after the delete — and it is never written to a row.
+	//
+	// Beside jobs, not inside an entry: release, eviction and another
+	// target's drop delete entries, and a mark lost with one let the deleted
+	// job's id land on a re-added job's row after all.
+	dropping map[string]map[string]int
+	log      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -175,10 +184,6 @@ type lifecycleJob struct {
 	msgs    map[string]string   // target key -> message id
 	history map[string][]string // target key -> rendered history lines
 	closed  map[string]bool     // target keys whose story this process has finished telling
-	// dropping marks the keys whose state belongs to a deleted job until
-	// that target's queue reaches its drop (ForgetJob). Their ids still
-	// serve the deleted job's queued sends, and are never written to a row.
-	dropping map[string]bool
 }
 
 // maxTrackedJobs is the backstop for a job that never reaches a terminal
@@ -189,9 +194,10 @@ const maxTrackedJobs = 512
 
 func newLifecycleTracker(store MessageStore) *lifecycleTracker {
 	return &lifecycleTracker{
-		store:   store,
-		jobs:    map[string]*lifecycleJob{},
-		touched: map[string]uint64{},
+		store:    store,
+		jobs:     map[string]*lifecycleJob{},
+		touched:  map[string]uint64{},
+		dropping: map[string]map[string]int{},
 	}
 }
 
@@ -292,7 +298,7 @@ func (l *lifecycleTracker) remember(jobID, key, messageID string) {
 		// A deleted job's id waiting on its target's drop stays out of the
 		// row: the row now is the re-added job's, and the id would outlive
 		// the drop there — a restart would edit the deleted job's message.
-		if !j.dropping[k] {
+		if l.dropping[jobID][k] == 0 {
 			snapshot[k] = v
 		}
 	}
@@ -367,18 +373,27 @@ func (l *lifecycleTracker) release(jobID, key string) {
 }
 
 // dropTarget removes what ONE target holds for a job that no longer exists,
-// and the job's entry once nothing is left in it. Unlike release it leaves
-// nothing to re-read: the row and the ids it stored are gone. A YouTube job's
-// id is its video id, so the same id comes back on a re-add — or when a
-// channel removed and re-added re-detects it — and an entry kept from the
-// deleted job used to PATCH that job's old message, far up the channel where
-// an edit notifies nobody, with the old History carried over.
+// and the job's entry once nothing is left in it, and clears one of the
+// key's marks (markDropping). Unlike release it leaves nothing to re-read:
+// the row and the ids it stored are gone. A YouTube job's id is its video
+// id, so the same id comes back on a re-add — or when a channel removed and
+// re-added re-detects it — and an entry kept from the deleted job used to
+// PATCH that job's old message, far up the channel where an edit notifies
+// nobody, with the old History carried over.
 //
 // Per target, and run on that target's sender goroutine behind everything it
 // had queued (ForgetJob): see Manager.forgetInOrder for why.
 func (l *lifecycleTracker) dropTarget(jobID, key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if marks := l.dropping[jobID]; marks[key] > 0 {
+		if marks[key]--; marks[key] == 0 {
+			delete(marks, key)
+		}
+		if len(marks) == 0 {
+			delete(l.dropping, jobID)
+		}
+	}
 	if j := l.jobs[jobID]; j != nil {
 		l.dropKeysLocked(jobID, j, func(k string) bool { return k == key })
 	}
@@ -399,59 +414,56 @@ func (l *lifecycleTracker) retainTarget(live map[string]struct{}, key string) {
 	}
 }
 
-// markDropping marks every key a deleted job holds state under (see
-// lifecycleJob.dropping), BEFORE ForgetJob queues the drops that clear the
-// marks — a step that ran first would leave a mark nothing clears.
+// markDropping marks key for a deleted job (see lifecycleTracker.dropping)
+// BEFORE ForgetJob queues the drop that clears the mark — a step that ran
+// first would leave a mark nothing clears.
 //
-// Two edit-mode targets drain at their own pace, so the same video id can be
-// re-added, and the quick target post the new job's first message, while the
-// slow one still holds the deleted job's id. That POST writes the job's whole
-// map to the NEW row, and without the mark the deleted job's id went with it:
-// the slow target's drop clears only memory, so after a restart the re-added
-// job edited the deleted job's message on that target.
-func (l *lifecycleTracker) markDropping(jobID string) {
+// Every key a drop is queued for, not only the keys holding state when the
+// delete lands: a target can still have the deleted job's POST queued, or in
+// flight, with no id yet. Two edit-mode targets drain at their own pace, so
+// the same video id can be re-added, and the quick target post the new job's
+// first message, while the slow one still holds — or is yet to record — the
+// deleted job's id. That POST writes the job's whole map to the NEW row, and
+// without the mark the deleted job's id went with it: the slow target's drop
+// clears only memory, so the re-added job edited the deleted job's message
+// on that target.
+func (l *lifecycleTracker) markDropping(jobID, key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	j := l.jobs[jobID]
-	if j == nil {
-		return
+	marks := l.dropping[jobID]
+	if marks == nil {
+		marks = map[string]int{}
+		l.dropping[jobID] = marks
 	}
-	if j.dropping == nil {
-		j.dropping = map[string]bool{}
-	}
-	for k := range j.msgs {
-		j.dropping[k] = true
-	}
-	for k := range j.history {
-		j.dropping[k] = true
-	}
+	marks[key]++
 }
 
-// drop is dropTarget, at once, for every key of a deleted job that no queue
-// will drop in order — the keys not in queued: a target no longer configured,
-// whose queue has gone, or none that ever held a message.
-func (l *lifecycleTracker) drop(jobID string, queued map[string]bool) {
+// drop removes, at once, a deleted job's state under every key no queue
+// drops in order — the keys not in covered: a target no longer configured,
+// whose queue has gone, or one in separate mode.
+func (l *lifecycleTracker) drop(jobID string, covered map[string]bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if j := l.jobs[jobID]; j != nil {
-		l.dropKeysLocked(jobID, j, func(k string) bool { return !queued[k] })
+		l.dropKeysLocked(jobID, j, func(k string) bool { return !covered[k] })
 	}
 }
 
 // retain is drop for every job not in live: the at-once half of RetainJobs.
-func (l *lifecycleTracker) retain(live map[string]struct{}, queued map[string]bool) {
+func (l *lifecycleTracker) retain(live map[string]struct{}, covered map[string]bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for id, j := range l.jobs {
 		if _, ok := live[id]; !ok {
-			l.dropKeysLocked(id, j, func(k string) bool { return !queued[k] })
+			l.dropKeysLocked(id, j, func(k string) bool { return !covered[k] })
 		}
 	}
 }
 
 // dropKeysLocked removes a job's message id, History and closed mark for
 // every key gone admits, then the job's entry once it holds no id and no
-// History for anyone. Caller holds l.mu.
+// History for anyone. The ForgetJob marks are not the entry's and stay.
+// Caller holds l.mu.
 func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone func(key string) bool) {
 	for k := range j.msgs {
 		if gone(k) {
@@ -466,11 +478,6 @@ func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone fu
 	for k := range j.closed {
 		if gone(k) {
 			delete(j.closed, k)
-		}
-	}
-	for k := range j.dropping {
-		if gone(k) {
-			delete(j.dropping, k)
 		}
 	}
 	if len(j.msgs) == 0 && len(j.history) == 0 {
@@ -756,9 +763,10 @@ func (m *Manager) ForgetJob(jobID string) {
 		return
 	}
 	tr := m.tracker()
-	tr.markDropping(jobID)
-	queued := m.forgetInOrder(func(key string) { tr.dropTarget(jobID, key) })
-	tr.drop(jobID, queued)
+	covered := m.forgetInOrder(
+		func(key string) { tr.markDropping(jobID, key) },
+		func(key string) { tr.dropTarget(jobID, key) })
+	tr.drop(jobID, covered)
 }
 
 // RetainJobs drops the edit-mode state of every job not in live (see
@@ -779,14 +787,16 @@ func (m *Manager) RetainJobs(live map[string]struct{}) {
 		kept[id] = struct{}{}
 	}
 	tr := m.tracker()
-	queued := m.forgetInOrder(func(key string) { tr.retainTarget(kept, key) })
-	tr.retain(kept, queued)
+	covered := m.forgetInOrder(nil, func(key string) { tr.retainTarget(kept, key) })
+	tr.retain(kept, covered)
 }
 
-// forgetInOrder queues fn(key) on the FIFO of every target that can hold
+// forgetInOrder queues step(key) on the FIFO of every target that can hold
 // edit-mode state (editKeys) — the live ones and any retired one still
-// finishing its delivery in flight — and returns the keys it was queued for.
-// The caller drops every other key at once.
+// finishing its delivery in flight — and returns the keys it covered. mark,
+// when set, runs for each key just before its step is queued. A queue whose
+// goroutine has returned runs nothing again, so its step runs at once. The
+// caller drops every other key at once.
 //
 // In order, not at once, because a deleted job can still have deliveries on
 // its way. Deleting an active job cancels it first, so its "cancelled" is
@@ -798,7 +808,7 @@ func (m *Manager) RetainJobs(live map[string]struct{}) {
 // video id PATCHed the deleted job's message — the very thing the drop is
 // for. Behind everything queued, the drop runs after both, and before any
 // send of a job re-added under the same id.
-func (m *Manager) forgetInOrder(fn func(key string)) map[string]bool {
+func (m *Manager) forgetInOrder(mark, step func(key string)) map[string]bool {
 	m.targetsMu.RLock()
 	queues := make([]*targetQueue, 0, len(m.targets)+len(m.retiring))
 	queues = append(queues, m.targets...)
@@ -807,13 +817,17 @@ func (m *Manager) forgetInOrder(fn func(key string)) map[string]bool {
 	}
 	m.targetsMu.RUnlock()
 
-	queued := make(map[string]bool, len(queues))
+	covered := make(map[string]bool, len(queues))
 	for _, q := range queues {
 		for _, key := range q.editKeys() {
-			if q.enqueueControl(func() { fn(key) }) {
-				queued[key] = true
+			if mark != nil {
+				mark(key)
 			}
+			if !q.enqueueControl(func() { step(key) }) {
+				step(key)
+			}
+			covered[key] = true
 		}
 	}
-	return queued
+	return covered
 }

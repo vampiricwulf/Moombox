@@ -660,10 +660,17 @@ queued; dropped at once, a busy target dispatched that cancel with no id left
 and posted it plain, and the message read "Downloading" for good — and a POST
 in flight when the delete landed came back and remembered its id afresh, so a
 re-add PATCHed the deleted job's message after all. Until a target's step runs,
-the deleted job's id it still holds is kept out of every row write
-(`markDropping`): a quicker target may already have posted for a job re-added
-under the same id, and that POST writes the new row — with the slow target's
-old id in it, a restart would edit the deleted job's message on that target.
+any id it holds for the job under that key is the deleted job's, and it is kept
+out of every row write (`markDropping`): a quicker target may already have
+posted for a job re-added under the same id, and that POST writes the new row —
+with the slow target's old id in it, the re-added job would edit the deleted
+job's message on that target. The mark is set for every key a step is queued
+for, before the step, whether or not the target holds anything yet — its
+deleted-job send can still be queued or in flight, and the id that POST brings
+back is the deleted job's too — and it is counted per step, so a job deleted
+twice before a slow target drains stays marked until both drops have run. It
+lives beside the per-job entry, not in it, so a release or an eviction of the
+entry cannot take it.
 `RetainJobs` marks nothing, because its list is a snapshot taken at the bulk
 write and a job added since is missing from it without being deleted. A
 removed target's queue

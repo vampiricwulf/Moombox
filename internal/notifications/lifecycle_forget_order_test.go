@@ -451,3 +451,171 @@ func TestOnlyATargetThatCanHoldEditStateGetsADeleteStep(t *testing.T) {
 		}
 	})
 }
+
+// A deleted job's lifecycle send still QUEUED on a busy target when the
+// delete lands left nothing for the mark to find: the target held no id or
+// History for the job yet. Re-added under the same id before the target
+// reached it, the deleted job's queued send then posted its message and
+// wrote the id to the re-added job's row, and the re-added job's first event
+// PATCHed the deleted job's message. Every key a drop is queued for is
+// marked now, whatever it holds.
+//
+// Mutants: markDropping not counting the key, or remember's snapshot keeping
+// a marked key — the re-added job's row holds M1 and its first event PATCHes
+// it.
+func TestADeletedJobsQueuedPostStaysOffAReAddedRow(t *testing.T) {
+	f, release := gated(t, 0) // another job's request holds the FIFO
+	st := newMemStore()
+	m := editManager(t, f, st, nil)
+	const job = "dQw4w9WgXcQ"
+	key := targetMsgKey(f.URL())
+
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+	if !waitCalls(t, f, 1, 3*time.Second) {
+		t.Fatal("the other job's POST never reached the server")
+	}
+	m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job})
+	deleteRow(st, job)
+	m.ForgetJob(job)
+	// Re-added: the new row starts empty, and the new job's own event queues.
+	m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job})
+	release()
+
+	if !waitCalls(t, f, 3, 3*time.Second) {
+		t.Fatalf("requests %v, want 3", requestLines(f.calls()))
+	}
+	if c := f.calls()[2]; c.Method != http.MethodPost {
+		t.Errorf("the re-added job's first event was %s %s, want a POST of a new message (M1 is the deleted job's)", c.Method, c.Path)
+	}
+	waitFor(t, "the re-added job's id on its row", func() bool { return st.NotificationMsgs(job)[key] == "M2" })
+}
+
+// The mark outlives the job's tracker entry. A quicker target's delivered
+// cancel releases the entry once every id in it is closed — and the slow
+// target, its creating POST still in flight, held no id yet. The mark went
+// with the entry, so the POST came back to an unmarked entry and wrote the
+// deleted job's id to the re-added job's row: after the slow target's drop,
+// the re-added job's first event PATCHed the deleted job's message.
+//
+// Mutant: release deleting the job's marks with its entry — the re-added
+// job's row holds B's M0.
+func TestAQuickTargetsReleaseKeepsASlowTargetsMark(t *testing.T) {
+	events := []string{"found", "downloading", "muxing", "finished", "error", "cancelled"}
+	fA := newFakeDiscord(t, createdInOrder)
+	fB, releaseB := gated(t, 0) // B's creating POST for the job is held
+	st := newMemStore()
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	installTargets(t, m, editTarget(fA, events, ModeEdit), editTarget(fB, events, ModeEdit))
+	const job = "dQw4w9WgXcQ"
+	keyA, keyB := targetMsgKey(fA.URL()), targetMsgKey(fB.URL())
+
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})
+	waitFor(t, "A's id persisted", func() bool { return st.NotificationMsgs(job)[keyA] != "" })
+	if !waitCalls(t, fB, 1, 3*time.Second) {
+		t.Fatal("B's found POST never reached the server")
+	}
+	// Deleting the active job: its cancel, then the row, then ForgetJob.
+	m.Send("Cancelled", "desc", TypeCancelled, nil, SendOptions{Event: "cancelled", JobID: job})
+	st.mu.Lock()
+	delete(st.rows, job)
+	st.missing[job] = true
+	st.mu.Unlock()
+	m.ForgetJob(job)
+	if !waitCalls(t, fA, 3, 3*time.Second) { // A closes its message: PATCH + separate POST
+		t.Fatalf("A: %v", requestLines(fA.calls()))
+	}
+	// Re-added: a new row, whose "added" neither target subscribes to.
+	st.mu.Lock()
+	delete(st.missing, job)
+	st.mu.Unlock()
+	m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job})
+
+	releaseB()
+	if !waitCalls(t, fB, 3, 3*time.Second) { // B: the POST returns; the cancel's PATCH + POST
+		t.Fatalf("B: %v", requestLines(fB.calls()))
+	}
+	drain(t, m)
+	if row := st.NotificationMsgs(job); row[keyB] != "" {
+		t.Errorf("the re-added job's row = %v, want no id for B — %s is the deleted job's message", row, row[keyB])
+	}
+	nB := len(fB.calls())
+	m.Send("Downloading", "x", TypeDownload, nil, SendOptions{Event: "downloading", JobID: job})
+	if !waitCalls(t, fB, nB+1, 3*time.Second) {
+		t.Fatalf("B: %v", requestLines(fB.calls()))
+	}
+	if c := fB.calls()[nB]; c.Method != http.MethodPost {
+		t.Errorf("the re-added job's first event on B was %s %s, want a POST of a new message", c.Method, c.Path)
+	}
+}
+
+// One target, the job's creating POST in flight when it is deleted, and the
+// same video re-added — a new row — before that POST comes back. With no id
+// held yet, the mark alone keeps the deleted job's id out of the new row.
+// The older test of an in-flight POST keeps the row missing until the POST
+// has returned, so its write fails either way and cannot see this.
+//
+// Mutants: markDropping not counting the key, or remember's snapshot keeping
+// a marked key — the re-added row holds M0 and the re-added job PATCHes it.
+func TestADeletedJobsInFlightPostStaysOffARowReAddedMeanwhile(t *testing.T) {
+	events := []string{"found", "downloading", "muxing", "finished", "error", "cancelled"}
+	f, release := gated(t, 0)
+	st := newMemStore()
+	m := editManager(t, f, st, events)
+	const job = "dQw4w9WgXcQ"
+
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})
+	if !waitCalls(t, f, 1, 3*time.Second) {
+		t.Fatal("the found POST never reached the server")
+	}
+	deleteRow(st, job)
+	m.ForgetJob(job)
+	m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job}) // re-added; filtered out
+	before := st.writeCount()
+	release()
+	waitFor(t, "the in-flight POST's remember", func() bool { return st.writeCount() > before })
+	drain(t, m)
+	if row := st.NotificationMsgs(job); len(row) != 0 {
+		t.Errorf("the re-added job's row = %v, want no id of the deleted job's", row)
+	}
+	m.Send("Downloading", "x", TypeDownload, nil, SendOptions{Event: "downloading", JobID: job})
+	if !waitCalls(t, f, 2, 3*time.Second) {
+		t.Fatal("the re-added job's downloading never reached the server")
+	}
+	if c := f.calls()[1]; c.Method != http.MethodPost {
+		t.Errorf("the re-added job's first event was %s %s, want a POST of a new message", c.Method, c.Path)
+	}
+}
+
+// The marks count. A job deleted, re-added and deleted again before a slow
+// target drains has two drops queued there; the first clearing the key let
+// the second life's POST, queued between them, write its id to the third
+// life's row.
+//
+// Mutant: markDropping setting the count to one — the third life's first
+// event PATCHes the second life's M2.
+func TestEachQueuedDropKeepsItsOwnMark(t *testing.T) {
+	f, release := gated(t, 0) // another job's request holds the FIFO
+	st := newMemStore()
+	m := editManager(t, f, st, nil)
+	const job = "dQw4w9WgXcQ"
+
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+	if !waitCalls(t, f, 1, 3*time.Second) {
+		t.Fatal("the other job's POST never reached the server")
+	}
+	for range 2 { // added, then deleted: twice
+		m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job})
+		deleteRow(st, job)
+		m.ForgetJob(job)
+	}
+	m.Send("Added", "x", TypeDownload, nil, SendOptions{Event: "added", JobID: job}) // the third life
+	release()
+
+	if !waitCalls(t, f, 4, 3*time.Second) {
+		t.Fatalf("requests %v, want 4", requestLines(f.calls()))
+	}
+	if c := f.calls()[3]; c.Method != http.MethodPost {
+		t.Errorf("the third life's first event was %s %s, want a POST of a new message", c.Method, c.Path)
+	}
+}
