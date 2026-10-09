@@ -19,19 +19,26 @@ import (
 //     "https://ntfy.example.com/…<redacted>".
 //   - Any other scheme keeps the scheme alone, because its authority may be
 //     the credential: "tgram://…<redacted>". So does an http(s) URL net/url
-//     cannot parse.
+//     cannot parse, and one with an '@' past the end of net/url's
+//     authority: net/url ends the authority at the first '/', '?' or '#',
+//     so a credential holding one ("https://tk_SECRET/half@host") is read
+//     with its first half as the host, and nothing in the URL says which
+//     '@' ends the userinfo.
 //   - A string with no "://" in it, or nothing that reads as a scheme before
 //     it, keeps nothing: "…<redacted>". ("user:password@host" would parse
 //     with "user" as its scheme.)
 func URLOrigin(raw string) string {
 	const cut = "…" + Marker
 	s := strings.TrimSpace(raw)
-	scheme, _, ok := strings.Cut(s, "://")
+	scheme, rest, ok := strings.Cut(s, "://")
 	if !ok || !isScheme(scheme) {
 		return cut
 	}
 	scheme = strings.ToLower(scheme)
 	if scheme != "http" && scheme != "https" {
+		return scheme + "://" + cut
+	}
+	if end := strings.IndexAny(rest, "/?#"); end >= 0 && strings.LastIndexByte(rest, '@') > end {
 		return scheme + "://" + cut
 	}
 	u, err := url.Parse(s)
@@ -69,22 +76,20 @@ func isScheme(s string) bool {
 // network.public_url in a validation message; a URL whose credential can sit
 // anywhere — a webhook URL — takes URLOrigin instead.
 //
-// The userinfo is everything before the LAST '@' ahead of the query or the
-// fragment, after the "://" when there is one. Not the first '/': a password
-// typed with a '/' in it ends net/url's authority early, and the rest of it
-// would survive. A '@' further along the path costs only the path before it.
-// A URL with no '@' there is returned as is.
+// The userinfo is everything before the LAST '@', after the "://" when there
+// is one. Not net/url's authority, which ends at the first '/', '?' or '#':
+// a password typed with any of them in it would keep the rest of itself, or
+// all of itself, after that delimiter. A '@' in the path, the query or the
+// fragment costs what comes before it — a URL that carries no credential
+// loses some text, which is the safe way to be wrong. A URL with no '@' after
+// its "://" is returned as is.
 func URLUserinfo(raw string) string {
 	start := 0
 	if i := strings.Index(raw, "://"); i >= 0 {
 		start = i + len("://")
 	}
 	rest := raw[start:]
-	end := strings.IndexAny(rest, "?#")
-	if end < 0 {
-		end = len(rest)
-	}
-	at := strings.LastIndexByte(rest[:end], '@')
+	at := strings.LastIndexByte(rest, '@')
 	if at < 0 {
 		return raw
 	}

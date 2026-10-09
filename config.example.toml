@@ -70,7 +70,8 @@
 # this process — it's a reverse proxy, tunnel, or port forward the operator
 # has separately set up.
 # Must be an absolute http(s) URL with a host and no query, fragment, or
-# credentials. Leave unset (default) to omit the dashboard link from embeds.
+# credentials (an "@" anywhere is refused as credentials). Leave unset
+# (default) to omit the dashboard link from embeds.
 # Applies immediately — no restart needed.
 # public_url = "https://moombox.example.com"
 

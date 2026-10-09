@@ -101,18 +101,32 @@ func ParseMention(raw string) (canonical string, form MentionForm, id string, er
 // fragment, or userinfo — the notification manager appends "/#job=<id>" to
 // this value in every job embed's title link, so a trailing slash is trimmed
 // and anything that would collide with or leak through that link is
-// rejected.
+// rejected. A value with an '@' anywhere in it is refused as userinfo before
+// it is parsed, so a path that happens to hold one goes too.
 func ValidatePublicURL(raw string) (canonical string, err error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return "", nil
 	}
+	// This error is shown and logged — the boot line for a value Load
+	// replaced, the settings API's field error, the TUI form — so it must
+	// never carry a password, and url.Parse cannot be trusted with one.
+	// net/url ends the authority at the first '/', '?' or '#', so a
+	// password holding any of them ("https://u:pa/ss@host") is read as
+	// host:port and refused with `invalid port ":pa" after host`, quoting
+	// it; with '#' it can even parse ("https://u:1234#pw@host" is host u,
+	// port 1234 and a fragment). Every userinfo needs an '@', so an '@'
+	// anywhere is refused first, with a message that quotes nothing — a
+	// public_url has no use for one: not in the authority, and the query
+	// and fragment are refused below anyway.
+	if strings.Contains(s, "@") {
+		return "", fmt.Errorf("must not contain userinfo (an '@')")
+	}
 	u, err := url.Parse(s)
 	if err != nil {
-		// url.Parse's error quotes the whole value, a password in its
-		// userinfo with it, and this error is shown and logged: the boot
-		// line for a value Load replaced, the settings API's field error,
-		// the TUI form. Its cause alone says what is wrong.
+		// url.Parse's error quotes the whole value. Its cause alone says
+		// what is wrong, and with no '@' left in the value the host or
+		// port slot it may quote is no one's password.
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
 			err = uerr.Err
 		}
@@ -130,9 +144,6 @@ func ValidatePublicURL(raw string) (canonical string, err error) {
 	}
 	if u.Fragment != "" {
 		return "", fmt.Errorf("must not contain a fragment")
-	}
-	if u.User != nil {
-		return "", fmt.Errorf("must not contain userinfo")
 	}
 	u.Scheme = scheme
 	u.Path = strings.TrimSuffix(u.Path, "/")

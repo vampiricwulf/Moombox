@@ -18,6 +18,9 @@ import (
 //     "tgram, token as the host" row keeps its token.
 //   - dropping the isScheme check: "user:SECRET@host://x" keeps everything
 //     before its "://" as a "scheme".
+//   - dropping the check for an '@' past net/url's authority: every
+//     "delimiter in the userinfo" row keeps the part net/url took for the
+//     host ("https://tk_SECRET/…<redacted>").
 func TestURLOrigin(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"https://discord.com/api/webhooks/123/SECRETTOKEN", "https://discord.com/…<redacted>"},
@@ -40,6 +43,15 @@ func TestURLOrigin(t *testing.T) {
 		{"user:SECRET@host://x", "…<redacted>"},
 		{"1abc://SECRET/x", "…<redacted>"},
 		{"", "…<redacted>"},
+		// A delimiter in the userinfo: net/url ends the authority at the
+		// first '/', '?' or '#', so it reads the credential's first half as
+		// the host — or, for "u:pw@SECRET/x@host", a password's second.
+		{"https://tk_SECRET/half@ntfy.example.com/alerts", "https://…<redacted>"},
+		{"https://tk_SECRET?half@ntfy.example.com/alerts", "https://…<redacted>"},
+		{"https://tk_SECRET#half@ntfy.example.com/alerts", "https://…<redacted>"},
+		{"https://u:pw@SECRET/x@ntfy.example.com/alerts", "https://…<redacted>"},
+		// The price: an '@' that is only in a path or a query costs the host.
+		{"https://hooks.example.com/x?to=a@b", "https://…<redacted>"},
 	}
 	for _, tc := range cases {
 		got := URLOrigin(tc.in)
@@ -59,7 +71,9 @@ func TestURLOrigin(t *testing.T) {
 //   - cutting at the FIRST '@': the "two @" row keeps the half after it.
 //   - ending the authority at the first '/' (net/url's rule): the "password
 //     with a '/'" row keeps the rest of the password.
-//   - searching the query too: the "@ in the query" row loses its host.
+//   - searching only ahead of the first '?' or '#' (the rule this replaced):
+//     the "password with a '?'" and "password with a '#'" rows come back
+//     whole, password and all.
 func TestURLUserinfo(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"no userinfo", "https://dash.example.com/moombox", "https://dash.example.com/moombox"},
@@ -67,14 +81,23 @@ func TestURLUserinfo(t *testing.T) {
 		{"token as the user", "https://SECRETTOKEN@dash.example.com", "https://<redacted>@dash.example.com"},
 		{"two @", "https://SECRET@user:SECRET2@dash.example.com", "https://<redacted>@dash.example.com"},
 		{"password with a '/'", "https://u:SECRET/half@dash.example.com/x", "https://<redacted>@dash.example.com/x"},
-		{"@ in the query", "https://dash.example.com/x?to=a@b", "https://dash.example.com/x?to=a@b"},
+		{"password with a '?'", "https://u:SECRET?half@dash.example.com", "https://<redacted>@dash.example.com"},
+		{"password with a '#'", "https://u:SECRET#half@dash.example.com", "https://<redacted>@dash.example.com"},
+		{"port-like password before a '#'", "https://u:1234#SECRET@dash.example.com", "https://<redacted>@dash.example.com"},
+		// The price of reading every '@' as the end of a userinfo: one in
+		// the query costs what comes before it.
+		{"@ in the query", "https://dash.example.com/x?to=a@b", "https://<redacted>@b"},
 		{"no scheme", "u:SECRET@dash.example.com/x", "<redacted>@dash.example.com/x"},
 		{"unparseable", "https://u:SECRET@dash example.com", "https://<redacted>@dash example.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := URLUserinfo(tc.in); got != tc.want {
+			got := URLUserinfo(tc.in)
+			if got != tc.want {
 				t.Fatalf("URLUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if strings.Contains(got, "SECRET") {
+				t.Fatalf("URLUserinfo(%q) = %q keeps the secret", tc.in, got)
 			}
 		})
 	}
