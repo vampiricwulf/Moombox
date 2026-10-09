@@ -135,10 +135,14 @@ func TestTwitch_AWholeBatchFailureStreakIsWarnedOnce(t *testing.T) {
 // matched it: when the channel went live the monitor created a second job and
 // both recorded the broadcast. The monitor stands aside for a manual job that
 // is waiting, or recording this same broadcast — and only those: one parked
-// in COOKIES? or muxing an earlier broadcast blocked every later one.
+// in COOKIES? or muxing an earlier broadcast blocked every later one. Waiting
+// includes Live: processTwitchLive writes it, and the row keeps it until
+// ExecuteTwitch flips it to Downloading — a window that takes in the wait for
+// a lifecycle slot.
 //
 // Mutants: manualJobClaims claiming for every status (the parked and muxing
-// rows find nothing), and never claiming (the waiting row is duplicated).
+// rows find nothing), never claiming (the waiting row is duplicated), and
+// never claiming for Live (the row on its way to downloading is duplicated).
 func TestTwitch_AManualJobClaimsOnlyTheBroadcastItWaitsFor(t *testing.T) {
 	const started = "2026-10-05T12:00:00Z"
 	for _, tc := range []struct {
@@ -148,6 +152,7 @@ func TestTwitch_AManualJobClaimsOnlyTheBroadcastItWaitsFor(t *testing.T) {
 		wantFound bool
 	}{
 		{"waiting", database.StatusUpcoming, "", false},
+		{"live, on its way to downloading", database.StatusLive, started, false},
 		{"recording this broadcast", database.StatusDownloading, started, false},
 		{"recording an earlier broadcast", database.StatusDownloading, "2026-10-04T12:00:00Z", true},
 		{"parked", database.StatusCookies, "", true},
