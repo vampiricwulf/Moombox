@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -52,8 +53,8 @@ type Scheduler struct {
 	readDisk func() (diskReading, error)
 	// diskHeld is the gate's state as the last reading left it: what a
 	// reading inside the recovery margin keeps, and what logs the close and
-	// the reopen once each. Touched only by sweep, which only Run's goroutine
-	// calls.
+	// the reopen once each. Seeded before Start by RestoreDiskHold, and
+	// touched after that only by sweep, which only Run's goroutine calls.
 	diskHeld bool
 
 	// holds are the backlog jobs a transient pre-download failure returned
@@ -167,6 +168,22 @@ func (s *Scheduler) diskGateClosed() bool {
 		}
 	}
 	return closed
+}
+
+// RestoreDiskHold starts the backlog disk gate closed, for a host whose
+// previous process left a disk_critical alert open (cmd/moombox). The gate
+// keeps its close in memory, and a new process's gate started open: it read
+// a volume still inside the recovery margin — 94% against a threshold of 95
+// — as neither critical nor clear, kept the open state it started with, and
+// its first sweep admitted backlog onto the disk the last run had stopped
+// admitting to, while the restored alert held critical on the same reading.
+// The first reading clear of the threshold reopens it, as it reopens any
+// close. Call it before the worker starts: Run's goroutine owns the gate
+// from then on.
+func (s *Scheduler) RestoreDiskHold() {
+	s.diskHeld = true
+	s.log.Warn("scheduler: a disk_critical alert was still open when the last run stopped; backlog VODs wait in Queued until usage falls marginPoints below the critical threshold (live and manually added jobs are not held)",
+		"marginPoints", config.DiskRecoveryMargin)
 }
 
 // Wake signals the scheduler that backlog state changed (a Queued job was

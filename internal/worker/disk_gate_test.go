@@ -218,6 +218,41 @@ func TestSchedulerClosedDiskGateReadsWithoutBacklog(t *testing.T) {
 	}
 }
 
+// TestSchedulerRestoredDiskHoldKeepsTheGateClosed: a process whose previous
+// run left a disk_critical alert open starts its gate closed
+// (RestoreDiskHold), so the margin holds across a restart. The gate keeps its
+// close in memory, and a new process's gate started open: its first sweep
+// read 94% against 95 as neither critical nor clear, kept the open state, and
+// admitted backlog onto the disk the last run had stopped admitting to, while
+// the restored alert held critical on the same reading.
+//
+// Mutant: RestoreDiskHold leaves diskHeld false — 94% admits.
+func TestSchedulerRestoredDiskHoldKeepsTheGateClosed(t *testing.T) {
+	s, db, log := testSchedulerSetup(t, 2)
+	lg := &levelLogger{}
+	s.log = lg
+	d := &fakeDisk{used: 94}
+	s.readDisk = d.read
+	queueBacklog(t, db, "UC_restart", "restart_a", "restart_b")
+
+	s.RestoreDiskHold()
+	s.sweep()
+	if n := log.enqueueCount(); n != 0 {
+		t.Fatalf("admitted %d at 94%% after a restart with disk_critical open, want 0: the gate reopened inside the recovery margin", n)
+	}
+	d.used = 93
+	s.sweep()
+	if n := log.enqueueCount(); n != 2 {
+		t.Errorf("admitted %d at 93.0%%, 2 points below the threshold, want 2", n)
+	}
+	if n := lg.count("WARN", "disk_critical alert was still open"); n != 1 {
+		t.Errorf("restored-hold warnings = %d, want 1", n)
+	}
+	if n := lg.count("INFO", "backlog admission resumes"); n != 1 {
+		t.Errorf("gate-open infos = %d, want 1", n)
+	}
+}
+
 // TestSchedulerDiskGateReopensOnlyPastTheRecoveryMargin: the gate closes at
 // the critical threshold and reopens only once usage is DiskRecoveryMargin
 // points below it, the reading an open disk_critical alert steps down on.

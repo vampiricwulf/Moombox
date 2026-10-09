@@ -96,6 +96,20 @@ func (d *diskAlerts) restoreFrom(st *openAlerts) {
 	}
 }
 
+// restoreDiskGate starts the backlog admission gate closed when the previous
+// process left a disk_critical alert open. The gate closes and reopens on the
+// alert's own rules (config.DiskConfig.AtCritical, ClearOfCritical) but keeps
+// its close in memory only, so a restart — an update, a crash, Stop/Start —
+// opened it again: at 94% against 95 the new gate admitted backlog while the
+// restored alert held critical on the same reading. Seeded from the alert's
+// persisted level, the two still agree after the restart, and the first
+// reading clear of the threshold ends both. Called before the worker starts.
+func restoreDiskGate(st *openAlerts, gate interface{ RestoreDiskHold() }) {
+	if open := st.snapshot().Disk; open != nil && open.Level == "critical" {
+		gate.RestoreDiskHold()
+	}
+}
+
 // persist writes the open set to the state store. A no-op without one, and
 // a write only when it changed (openAlerts.update).
 func (d *diskAlerts) persist() {

@@ -166,6 +166,55 @@ func TestDiskAlertOpenAcrossARestartGetsItsClose(t *testing.T) {
 	}
 }
 
+// diskGateSpy counts RestoreDiskHold calls: the backlog scheduler's half of
+// restoreDiskGate.
+type diskGateSpy struct{ holds int }
+
+func (g *diskGateSpy) RestoreDiskHold() { g.holds++ }
+
+// TestDiskGateStartsClosedOnARestoredCritical: a disk_critical alert open
+// when the process stops starts the next process's backlog disk gate closed,
+// and nothing else does. The gate kept its close in memory only, so after a
+// restart it admitted backlog at 94% against 95 — inside the recovery margin
+// — while the restored alert held critical on the same reading.
+//
+// Mutants: drop the call from restoreDiskGate — the restored critical starts
+// the gate open; seed on any open disk alert (drop the Level check) — an open
+// warning, or a critical already stepped down to one, closes the gate.
+func TestDiskGateStartsClosedOnARestoredCritical(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readings []float64 // what the stopped process read, against 90/95
+		want     int
+	}{
+		{"critical open", []float64{96, 94}, 1},
+		{"critical stepped down to a warning", []float64{96, 92}, 0},
+		{"warning open", []float64{91}, 0},
+		{"nothing open", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), openAlertsFileName)
+			first := newDiskAlerts(notificationtest.New(), &nopLogger{})
+			first.restoreFrom(restart(t, path))
+			first.setThresholds(90, 95)
+			for i, used := range tc.readings {
+				ds := diskReading("warn", used)
+				if used >= 95 {
+					ds = diskReading("critical", used)
+				}
+				first.onReading(ds, "./output", time.Now().Add(time.Duration(i)*time.Minute))
+			}
+
+			gate := &diskGateSpy{}
+			restoreDiskGate(restart(t, path), gate)
+			if gate.holds != tc.want {
+				t.Errorf("RestoreDiskHold calls = %d, want %d (the stopped process left %+v open)",
+					gate.holds, tc.want, restart(t, path).snapshot().Disk)
+			}
+		})
+	}
+}
+
 // TestSidecarOutageOpenAcrossARestartGetsItsClose: "BotGuard Sidecar Down"
 // sent by one process is closed by the next process's first healthy snapshot,
 // and an unhealthy one arms no second alert.

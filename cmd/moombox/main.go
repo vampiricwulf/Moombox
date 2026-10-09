@@ -273,6 +273,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		s.openAlerts = loadOpenAlerts(openAlertsPath(c.Paths.DatabasePath), log)
 		s.openAlerts.dropUnmonitored(c)
 	})
+	// The backlog disk gate too, ahead of dlWorker.Start below: an open
+	// disk_critical starts it closed, as the alert it closes and reopens
+	// with comes back critical.
+	restoreDiskGate(s.openAlerts, dlWorker.Scheduler())
 
 	// Register all routes. See routes_wiring.go.
 	importCleanup := s.wireRoutes()
