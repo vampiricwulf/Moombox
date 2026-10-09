@@ -1123,7 +1123,15 @@ sessionLoop:
 	// chat was Stop()'d, the file on disk is complete through its last flush,
 	// and the job is going to Error with staging intact, so waiting out
 	// chatWaitTimeout buys nothing. A Retry re-runs the whole capture.
-	if unconfirmedEndErr != nil && ctx.Err() == nil {
+	//
+	// Gated on the JOB's context and the user's cancel, not on the session's:
+	// the post-outage exits (a recheck that never answers, a refresh that
+	// keeps failing on a live broadcast) latch from the recovery loop, where
+	// the session context is the one the outage cancelled. Gated on that,
+	// they fell through to the shutdown path and returned "context canceled"
+	// — the row read Error with that text, and lost the end-unconfirmed mark
+	// the automatic mux keys on (D-T4).
+	if unconfirmedEndErr != nil && parentCtx.Err() == nil && !userCancelled.Load() {
 		segmentMuxWg.Wait()
 		if twitchChatDl != nil {
 			if twitchChatDl.IsRunning() {
