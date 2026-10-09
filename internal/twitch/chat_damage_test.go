@@ -451,7 +451,7 @@ func TestAPartAdoptedAtItsFirstFlushKeepsItsClock(t *testing.T) {
 //
 // The spill is blocked (a directory in its place), so the batch is still
 // pending when the exit saves: an interrupted exit that can spill it takes it
-// out of the downloader first (spillOnInterruptedExit), and the save would
+// out of the downloader first (spillUnwrittenBatch), and the save would
 // then have nothing pending to leave out.
 //
 // Mutant: save fileCount/totalCount without subtracting the pending messages
@@ -554,7 +554,7 @@ func TestAFailedFinalFlushIsReportedNotDropped(t *testing.T) {
 // restart resumes from the sidecar — still reports it. A spill that fails
 // leaves the batch pending, and the relaunch writes it.
 //
-// Mutants: drop the spillOnInterruptedExit call in Start's interrupted arm, or
+// Mutants: drop the spillUnwrittenBatch call in Start's interrupted arm, or
 // return nil from it — Start returns nil and nothing is spilled; leave the
 // spilled batch in cd.messages — the relaunch writes it to the part too; drop
 // the rollUnwritten increment — the relaunch's end and the resumed run's end
@@ -714,6 +714,138 @@ func TestAFailedFinalFlushOnAnInterruptedExitIsSpilledAndReported(t *testing.T) 
 		if n := partHolds(t, path, "tail"); n != 3 {
 			t.Errorf("the part holds %d of the 3 pending messages after the relaunch, want 3", n)
 		}
+	})
+}
+
+// TestAFailedFinalFlushAtTheStreamsEndOrAPanicIsSpilledLikeAnInterruptedOne:
+// the stream-end drain spilled a batch its final flush could not write and
+// kept it — pending, and in the part's count and the job total — where the
+// interrupted exit's spill takes it out for the rollUnwritten count
+// (spillUnwrittenBatch). So MessageCount, which the job's chat count follows,
+// counted messages no part file holds; a relaunch in this process wrote the
+// spilled batch to the part as well; and the sidecar the drain saved carried
+// no count, so the end of a run resumed from it read clean and the staging
+// cleanup deleted the spill. A panicking Start whose final flush failed did
+// not spill at all: the batch lived in memory alone, and a restart lost it.
+// Both arms now spill the way the interrupted exit does, and both still
+// report the capture incomplete.
+//
+// Mutants: put back the stream-end arm's own dump, which keeps the batch —
+// MessageCount keeps it, the relaunch writes it to the part and its end reads
+// clean, and so does the resumed run's; save the sidecar ahead of the spill
+// in either arm — the resumed run's end reads clean; drop the panic arm's
+// spill — nothing is spilled, MessageCount keeps the batch, and the resumed
+// run's end reads clean.
+func TestAFailedFinalFlushAtTheStreamsEndOrAPanicIsSpilledLikeAnInterruptedOne(t *testing.T) {
+	endStream := func(t *testing.T, cd *ChatDownloader) error {
+		t.Helper()
+		cd.mu.Lock()
+		cd.streamEnded = true
+		cd.mu.Unlock()
+		return cd.Start(cancelledContext(t))
+	}
+	wantUnwritten := func(t *testing.T, what string, err error, n int) {
+		t.Helper()
+		if want := fmt.Sprintf("%d messages could not be written", n); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s = %v, want the %d spilled messages reported", what, err, n)
+		}
+	}
+	spilled := func(t *testing.T, path string) int {
+		t.Helper()
+		raw, err := os.ReadFile(path + ".lostbatch.json")
+		if err != nil {
+			t.Errorf("the unwritten messages were not spilled: %v", err)
+			return 0
+		}
+		var msgs []TwitchChatMessage
+		if err := json.Unmarshal(raw, &msgs); err != nil {
+			t.Fatalf("the spill does not parse: %v", err)
+		}
+		return len(msgs)
+	}
+	partHolds := func(t *testing.T, path, prefix string) int {
+		t.Helper()
+		n := 0
+		for _, m := range readDamageTestFile(t, path).Messages {
+			if strings.HasPrefix(m.ID, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	// partWithFullDisk is a part file holding 3 messages, with its sidecar,
+	// and the downloader that wrote them holding 3 more no append can write.
+	// restore gives the disk back.
+	partWithFullDisk := func(t *testing.T) (cd *ChatDownloader, path string, restore func()) {
+		t.Helper()
+		path = filepath.Join(t.TempDir(), "chat.json")
+		cd = newTestChatDownloader(t, path)
+		for i := range 3 {
+			cd.addMessage(damageTestMessage("old", i))
+		}
+		if err := cd.flush(); err != nil {
+			t.Fatal(err)
+		}
+		cd.saveResumeState()
+		real := appendChatMessages
+		t.Cleanup(func() { appendChatMessages = real })
+		appendChatMessages = func(string, []TwitchChatMessage, int, utils.ChatFileLogger) error {
+			return fmt.Errorf("%w: disk full", utils.ErrChatFilePartialWrite)
+		}
+		for i := range 3 {
+			cd.addMessage(damageTestMessage("tail", i))
+		}
+		return cd, path, func() { appendChatMessages = real }
+	}
+	// resumedEnd is the end of a run a restart resumes from the sidecar.
+	resumedEnd := func(t *testing.T, path string) error {
+		t.Helper()
+		resumed := newTestChatDownloader(t, path)
+		_ = resumed.Start(cancelledContext(t))
+		return endStream(t, resumed)
+	}
+
+	t.Run("stream end, then a relaunch", func(t *testing.T) {
+		cd, path, restore := partWithFullDisk(t)
+		err := endStream(t, cd)
+		if err == nil || !strings.Contains(err.Error(), "final flush failed") {
+			t.Errorf("the stream's end = %v, want the failed final flush reported", err)
+		}
+		if n := spilled(t, path); n != 3 {
+			t.Errorf("the spill holds %d messages, want the 3 unwritten", n)
+		}
+		if got := cd.MessageCount(); got != 3 {
+			t.Errorf("MessageCount %d after the end spilled 3, want the 3 the part holds", got)
+		}
+
+		restore()
+		wantUnwritten(t, "the relaunch's end", endStream(t, cd), 3)
+		if n := partHolds(t, path, "tail"); n != 0 {
+			t.Errorf("the part holds %d of the spilled messages as well, want 0", n)
+		}
+	})
+
+	t.Run("stream end, then a restart", func(t *testing.T) {
+		cd, path, restore := partWithFullDisk(t)
+		_ = endStream(t, cd)
+		restore()
+		wantUnwritten(t, "the resumed run's end", resumedEnd(t, path), 3)
+	})
+
+	t.Run("a panic, then a restart", func(t *testing.T) {
+		cd, path, restore := partWithFullDisk(t)
+		cd.logger = &panicOnceLogger{} // panics on runIRCSession's first line
+		if err := cd.Start(t.Context()); err == nil || !strings.Contains(err.Error(), "panic") {
+			t.Fatalf("Start = %v after a recovered panic, want the panic reported", err)
+		}
+		if n := spilled(t, path); n != 3 {
+			t.Errorf("the spill holds %d messages, want the 3 unwritten", n)
+		}
+		if got := cd.MessageCount(); got != 3 {
+			t.Errorf("MessageCount %d after the panic's exit spilled 3, want the 3 the part holds", got)
+		}
+		restore()
+		wantUnwritten(t, "the resumed run's end", resumedEnd(t, path), 3)
 	})
 }
 

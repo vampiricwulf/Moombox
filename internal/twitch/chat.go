@@ -1514,6 +1514,16 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 		flushErr := cd.flushFinal()
 
 		if panicked {
+			// A final flush that could not write the pending batch is
+			// spilled first, as on every other exit (spillUnwrittenBatch):
+			// the batch lived in memory alone, and a restart lost it. Safe
+			// here for the reason the flush above is: both take flushMu and
+			// cd.mu, and a panic that left either held has hung this exit
+			// before now. The panic is the verdict; the spill's error adds
+			// nothing to it.
+			if flushErr != nil {
+				_ = cd.spillUnwrittenBatch(flushErr)
+			}
 			// Don't clear resume state on panic — allow resume on restart.
 			// Unthrottled, exactly like the interrupted-exit save just below:
 			// the flush above went through saveResumeStateThrottled, which can
@@ -1533,9 +1543,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			//
 			// A final flush that could not write the pending batch is
 			// spilled and reported first, so the sidecar saved next carries
-			// the count and leaves the batch out (spillOnInterruptedExit).
+			// the count and leaves the batch out (spillUnwrittenBatch).
 			if flushErr != nil {
-				if err := cd.spillOnInterruptedExit(flushErr); err != nil && retErr == nil {
+				if err := cd.spillUnwrittenBatch(flushErr); err != nil && retErr == nil {
 					retErr = err
 				}
 			}
@@ -1559,21 +1569,23 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			// and nil returned, so the job read "finished" over a capture
 			// that had lost them. Spill them beside the part, keep the
 			// sidecar, and report the capture incomplete.
-			cd.mu.Lock()
-			pending := append([]TwitchChatMessage(nil), cd.messages...)
-			path := cd.outputPath
-			cd.mu.Unlock()
-			if len(pending) > 0 && path != "" {
-				if dumpErr := dumpLostChatBatch(path, pending); dumpErr != nil {
-					cd.logger.Error("twitch chat: could not spill the unwritten messages", "path", path, "err", dumpErr)
-				} else {
-					cd.logger.Error("twitch chat: final flush failed; unwritten messages spilled for recovery",
-						"path", path+".lostbatch.json", "messages", len(pending))
-				}
+			//
+			// Spilled the way the interrupted exit spills them
+			// (spillUnwrittenBatch), ahead of the save. This arm dumped the
+			// batch and kept it — pending, and in the part's count and the
+			// job total — so the job's chat count took in messages no part
+			// holds, a relaunch wrote them to the part as well as the spill,
+			// and the sidecar carried no count: a run resumed from it ended
+			// clean, and the staging cleanup deleted the spill.
+			if err := cd.spillUnwrittenBatch(flushErr); err != nil && retErr == nil {
+				retErr = err
 			}
 			cd.saveResumeState()
-			if retErr == nil {
-				retErr = fmt.Errorf("twitch chat: final flush failed, %d messages not written to %s: %w", len(pending), path, flushErr)
+			// Nothing left to spill — a roll drained the batch after the
+			// final flush let go of flushMu — leaves the verdict to the
+			// boundary count, as on the interrupted exit.
+			if err := cd.rollUnwrittenErr(); err != nil && retErr == nil {
+				retErr = err
 			}
 			return
 		}

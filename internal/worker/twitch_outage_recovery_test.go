@@ -239,7 +239,7 @@ func TestOutageFinalizeKeepsABoundarySpill(t *testing.T) {
 // mux counts the directory as no chat rather than failing a copy of it — that
 // would read "incomplete" for a reason of its own.
 //
-// Mutant: Start's interrupted-exit arm not calling spillOnInterruptedExit —
+// Mutant: Start's interrupted-exit arm not calling spillUnwrittenBatch —
 // the row reads "finished" with 2 messages and nothing is spilled.
 func TestOutageFinalizeSpillsAFailedFinalFlush(t *testing.T) {
 	at := time.Now().Add(-time.Minute)
