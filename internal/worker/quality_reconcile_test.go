@@ -12,7 +12,7 @@ import (
 )
 
 func hasLogPrefix(logs *captureLogger, prefix string) bool {
-	for _, m := range logs.msgs {
+	for _, m := range logs.lines() {
 		if msg, _ := m[0].(string); strings.HasPrefix(msg, prefix) {
 			return true
 		}

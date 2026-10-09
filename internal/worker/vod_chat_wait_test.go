@@ -231,7 +231,7 @@ func TestVodChatWaitBoundReadsTheFreshRow(t *testing.T) {
 // loggedDuration finds the duration logged under key in the first captured
 // message with the given text.
 func loggedDuration(cl *captureLogger, msg, key string) (time.Duration, bool) {
-	for _, entry := range cl.msgs {
+	for _, entry := range cl.lines() {
 		if len(entry) == 0 || entry[0] != msg {
 			continue
 		}

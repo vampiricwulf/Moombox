@@ -194,14 +194,14 @@ func TestWaitForTwitchLiveConsumesHint(t *testing.T) {
 	if got := takeLiveHint(c, logs, "chan2"); got != nil {
 		t.Error("takeLiveHint returned a non-live hint — the wait must keep polling")
 	}
-	if len(logs.msgs) != 1 {
-		t.Errorf("a non-live hint logged %d lines, want 1 — it is consumed either way, so silence loses the only record of it", len(logs.msgs))
+	if len(logs.lines()) != 1 {
+		t.Errorf("a non-live hint logged %d lines, want 1 — it is consumed either way, so silence loses the only record of it", len(logs.lines()))
 	}
 	// A plain miss stays silent: every poll cycle takes, and almost every take
 	// finds nothing.
-	logs.msgs = nil
-	if got := takeLiveHint(c, logs, "never-stashed"); got != nil || len(logs.msgs) != 0 {
-		t.Errorf("an ordinary miss returned %v and logged %d lines, want nil and 0", got, len(logs.msgs))
+	logs.reset()
+	if got := takeLiveHint(c, logs, "never-stashed"); got != nil || len(logs.lines()) != 0 {
+		t.Errorf("an ordinary miss returned %v and logged %d lines, want nil and 0", got, len(logs.lines()))
 	}
 
 	// The wait loop itself needs a live Twitch API and a 15-20 s sleep to

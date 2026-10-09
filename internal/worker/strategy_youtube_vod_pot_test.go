@@ -63,7 +63,7 @@ func vodPotInfo(videoSource, audioSource string) *youtube.VideoInfo {
 
 // potMintLine returns the args of the "[POT] GVS mint" Info line, or nil.
 func potMintLine(logs *captureLogger) map[string]any {
-	for _, m := range logs.msgs {
+	for _, m := range logs.lines() {
 		if m[0] != "[POT] GVS mint" {
 			continue
 		}
@@ -117,7 +117,7 @@ func TestDownloadVodAttachesGvsTokenToWebFamily(t *testing.T) {
 		}
 		line := potMintLine(logs)
 		if line == nil {
-			t.Fatalf("no [POT] GVS mint line logged: %v", logs.msgs)
+			t.Fatalf("no [POT] GVS mint line logged: %v", logs.lines())
 		}
 		if line["videoSource"] != "web_creator" || line["audioSource"] != "web_creator" {
 			t.Errorf("[POT] GVS mint line = %v, want videoSource=web_creator audioSource=web_creator", line)
@@ -214,7 +214,7 @@ func (failingSigSolver) Batch(_ context.Context, _ string, _, _ []string) (map[s
 // logLine returns the args of the first log line whose message starts with
 // prefix, as a key/value map (with the message under ""), or nil.
 func logLine(logs *captureLogger, prefix string) map[string]any {
-	for _, m := range logs.msgs {
+	for _, m := range logs.lines() {
 		msg, _ := m[0].(string)
 		if !strings.HasPrefix(msg, prefix) {
 			continue
@@ -285,7 +285,7 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 			}
 			line := logLine(logs, "[POT] missing_pot")
 			if line == nil {
-				t.Fatalf("no [POT] missing_pot line logged: %v", logs.msgs)
+				t.Fatalf("no [POT] missing_pot line logged: %v", logs.lines())
 			}
 			if line["dropped"] != 2 {
 				t.Errorf("[POT] missing_pot dropped = %v, want 2 (line %v)", line["dropped"], line)
@@ -347,7 +347,7 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 		}
 		line := logLine(logs, "[FormatSelector] Manual video itag 303 requires a GVS token")
 		if line == nil {
-			t.Errorf("no manual-itag GVS fallback warning: %v", logs.msgs)
+			t.Errorf("no manual-itag GVS fallback warning: %v", logs.lines())
 		}
 		if l := logLine(logs, "[FormatSelector] Manual video itag 303 not found"); l != nil {
 			t.Errorf("the generic not-found warning fired instead of (or beside) the GVS one: %v", l)
@@ -368,7 +368,7 @@ func TestDownloadVodMissingPotDegrades(t *testing.T) {
 		}
 		line := logLine(logs, "[FormatSelector] Manual audio itag 251 requires a GVS token none could be minted; falling back to auto")
 		if line == nil {
-			t.Errorf("no manual-audio-itag GVS fallback warning: %v", logs.msgs)
+			t.Errorf("no manual-audio-itag GVS fallback warning: %v", logs.lines())
 		}
 		if l := logLine(logs, "[FormatSelector] Manual audio itag 251 not found"); l != nil {
 			t.Errorf("the generic not-found warning fired instead of (or beside) the GVS one: %v", l)
@@ -446,7 +446,7 @@ func TestDownloadVodMissingPotSwapsToTheTokenFreeShadow(t *testing.T) {
 		}
 		line := logLine(logs, "[POT] missing_pot")
 		if line == nil {
-			t.Fatalf("no [POT] missing_pot line logged: %v", logs.msgs)
+			t.Fatalf("no [POT] missing_pot line logged: %v", logs.lines())
 		}
 		if line["dropped"] != 2 || line["swapped"] != 2 {
 			t.Errorf("[POT] missing_pot dropped=%v swapped=%v, want 2 and 2 (line %v)", line["dropped"], line["swapped"], line)
@@ -505,7 +505,7 @@ func TestDownloadVodMissingPotSwapsToTheTokenFreeShadow(t *testing.T) {
 			"[FormatSelector] Manual audio itag 251 served from visionos after missing_pot",
 		} {
 			if logLine(logs, want) == nil {
-				t.Errorf("no %q line: %v", want, logs.msgs)
+				t.Errorf("no %q line: %v", want, logs.lines())
 			}
 		}
 		for _, unwanted := range []string{
