@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // panicLineLogger records the one Error line RecoveryMiddleware writes, both
@@ -113,4 +115,51 @@ func TestRecoveryLogsTheStackThatPanicked(t *testing.T) {
 			t.Errorf("the cut must drop the OUTERMOST frames, not the panic site; it starts %q", frames[0])
 		}
 	})
+}
+
+// TestAPanicBehindGzipStillAnswers500 runs the real chain with the
+// Accept-Encoding every browser sends. CompressionMiddleware sits inside
+// RecoveryMiddleware, and its deferred Close committed the response on the
+// panic's way out — the 200 it defaults to, plus whatever the handler had
+// buffered — so RecoveryMiddleware found headers sent and skipped its 500:
+// a panicking API call reached the dashboard as an empty 200, and only a
+// client that did not ask for gzip ever saw the 500.
+//
+// Mutant this kills: CompressionMiddleware back to an unconditional
+// `defer gz.Close()` — the first panicking row answers an empty 200, the
+// second the 201 and the half body it had buffered.
+func TestAPanicBehindGzipStillAnswers500(t *testing.T) {
+	s := NewServer(config.NewStore(config.Defaults(), ""), testWSLogger{})
+	s.Router().Get("/api/panics", handlerThatPanics)
+	s.Router().Get("/api/panics-midway", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"half":`)) // under the gzip threshold: still buffered
+		panic("boom after a partial body")
+	})
+	s.Router().Get("/api/fine", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+
+	for _, tc := range []struct {
+		path     string
+		wantCode int
+		wantBody string
+	}{
+		{"/api/panics", http.StatusInternalServerError, `{"error":"Internal server error"}`},
+		{"/api/panics-midway", http.StatusInternalServerError, `{"error":"Internal server error"}`},
+		// Control: a response that completes is committed exactly as before.
+		{"/api/fine", http.StatusAccepted, `{"ok":true}`},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.RemoteAddr = "127.0.0.1:50000"
+		req.Host = "localhost:8080"
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		rr := httptest.NewRecorder()
+		s.Router().ServeHTTP(rr, req)
+		if rr.Code != tc.wantCode || rr.Body.String() != tc.wantBody {
+			t.Errorf("%s with gzip accepted: %d %q, want %d %q", tc.path, rr.Code, rr.Body.String(), tc.wantCode, tc.wantBody)
+		}
+	}
 }

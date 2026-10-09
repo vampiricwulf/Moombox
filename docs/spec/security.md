@@ -222,6 +222,7 @@ rule is a no-op there. Pinned by the D-S7 rows of `TestIsAllowedOrigin`,
   undecodable). Checked at the 1 KB threshold rather than up front, because a handler sets its
   `Content-Type` while it writes. See `skipCompression` in `internal/web/server.go`.
 - Reuses `*gzip.Writer` instances from a `sync.Pool` rather than allocating one per response.
+- Leaves the response uncommitted when the handler panics before anything reached the wire. Committing it on the way out — the default 200 plus whatever the handler had buffered — made RecoveryMiddleware, which sits outside it, find headers sent and skip its 500, so every browser (all of them offer gzip) got an empty or half-written success instead of the error.
 
 **Source:** `CompressionMiddleware` and `gzipResponseWriter` in `internal/web/server.go`.
 

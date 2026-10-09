@@ -674,9 +674,24 @@ func CompressionMiddleware(next http.Handler) http.Handler {
 			ResponseWriter: w,
 			minSize:        gzipMinSize,
 		}
-		defer gz.Close()
+		// A handler that panics before anything reached the wire must leave
+		// the response uncommitted. Close would commit it on the way out —
+		// the 200 flushStatus defaults to, plus whatever half-built body sat
+		// in the buffer — and RecoveryMiddleware, further out, would then
+		// find headers sent and skip its 500: every browser asks for gzip,
+		// so a panicking API call reached the dashboard as an empty 200.
+		// Nothing is pooled before the headers go out, so there is nothing
+		// to release either. Once they have, Close runs as before.
+		completed := false
+		defer func() {
+			if !completed && !gz.headerSent {
+				return
+			}
+			gz.Close()
+		}()
 
 		next.ServeHTTP(gz, r)
+		completed = true
 	})
 }
 
