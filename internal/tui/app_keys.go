@@ -39,11 +39,11 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Ctrl+C ALWAYS quits — checked before ANY overlay intercept (O-M).
 	// bubbletea v2 delivers Ctrl+C as a plain key (tea.InterruptMsg comes
-	// only from a real SIGINT), and fourteen overlays consume every key
-	// before it reaches the rest of this function, so twelve of them
-	// swallowed the "Ctrl+C  Quit immediately" help.go promises. No text
-	// input in the TUI binds Ctrl+C — both search boxes already hand it
-	// back — so hoisting it costs nothing (CORE-5).
+	// only from a real SIGINT), and fifteen overlays consume every key
+	// before it reaches the rest of this function; twelve of the fourteen
+	// there were then swallowed the "Ctrl+C  Quit immediately" help.go
+	// promises. No text input in the TUI binds Ctrl+C — both search boxes
+	// already hand it back — so hoisting it costs nothing (CORE-5).
 	//
 	// The wizard's cookie step is the one thing that needs doing on the way
 	// out: AutoCookieService holds the acquisition slot until someone

@@ -179,7 +179,7 @@ A job whose staging directory still holds recordings the engine set aside gets a
 
 ### Source Files
 
-All 43 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 41.
+All 44 non-test files of `internal/tui/`, grouped by role. Four of them form two build-tagged pairs (`openbrowser_*` and `clipboard_*`), so any single build compiles 42.
 
 **The application model** — `App` is split across seven files rather than one; `app.go` holds the struct and its wiring only.
 
@@ -1158,6 +1158,6 @@ Some routes apply additional per-route middleware:
 
 - **`internal/web/`** — HTTP server, middleware, WebSocket hub, auth service.
 - **`internal/web/routes/`** — All REST API route handlers, organized by domain (auth, jobs, cookies, update, ffmpeg, stats, files, ytdlp).
-- **`internal/tui/`** — All TUI source files (43 non-test files, ~22,700 lines; see §Source Files).
+- **`internal/tui/`** — All TUI source files (44 non-test files, ~23,240 lines; see §Source Files).
 - **`web/public/`** — All static web assets (HTML, JS, CSS).
 - **`web/embed.go`** — `go:embed` directive for static assets.

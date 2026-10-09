@@ -51,7 +51,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 | Package | Source Lines | Src Files | Test Files | Description |
 |---------|-------------|-----------|------------|-------------|
-| tui/ | ~22,710 | 43 | 77 | Largest — 2-over-1 panel layout, overlays, chord system |
+| tui/ | ~23,240 | 44 | 80 | Largest — 2-over-1 panel layout, overlays, chord system |
 | worker/ | ~18,070 | 39 | 64 | Download orchestration, strategies, queue, quality monitor |
 | cookies/ | ~15,870 | 35 | 80 | Cookie jar, refresh, auto-cookie (Firefox/Chromium), Job Object |
 | engine/ | ~8,170 | 20 | 43 | Segment downloader (DASH/HLS/VOD), manifest, resume, eviction probe, reorder budget |

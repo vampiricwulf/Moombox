@@ -41,9 +41,9 @@ func isQuit(cmd tea.Cmd) bool {
 }
 
 // help.go promises "Ctrl+C  Quit immediately", but bubbletea v2 delivers
-// Ctrl+C as a plain key and fourteen overlays intercept every key before the
-// app's handler — twelve of them swallowed it, and the two that did not
-// carried a hand-written copy of the quit apiece. The check is hoisted above
+// Ctrl+C as a plain key and fifteen overlays intercept every key before the
+// app's handler — twelve of the fourteen there were then swallowed it, and
+// the two that did not carried a hand-written copy of the quit apiece. The check is hoisted above
 // every overlay intercept (O-M) (CORE-5).
 //
 // Every overlay handleKey tests for is a row here, opened through its own

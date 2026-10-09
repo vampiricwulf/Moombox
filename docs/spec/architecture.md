@@ -204,7 +204,7 @@ internal/worker    (39 files, ~18,070) -- Worker, Orchestrator, StreamProcessor,
 internal/monitor    (9 files, ~5,090)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
 internal/notif.    (11 files, ~3,790)  -- Manager + Discord webhook, batching, edit-mode message ids
 internal/web       (34 files, ~11,750) -- chi router, WebSocket hub, auth, middleware (9 files) + routes/ (25 files)
-internal/tui       (43 files, ~22,710) -- 2-over-1 panel layout, overlays, chord system
+internal/tui       (44 files, ~23,240) -- 2-over-1 panel layout, overlays, chord system
 internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
 internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
 internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
