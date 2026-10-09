@@ -96,7 +96,7 @@ func TestNotifEditEnabledToggleRoundTrips(t *testing.T) {
 		t.Fatal("an existing target with no enabled key opened as disabled")
 	}
 	m.notifEditFocus = 1
-	m.handleNotifEditKey(" ")
+	m.handleNotifEditKey(keySpace)
 	if m.notifEditEnabled {
 		t.Fatal("Space on the Enabled row did not toggle it")
 	}

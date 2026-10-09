@@ -15,7 +15,13 @@ const (
 	keyHome     = "home"
 	keyEnd      = "end"
 	keyEnter    = "enter"
-	keyEsc      = "esc"
-	keyCtrlC    = "ctrl+c"
-	keyCtrlO    = "ctrl+o"
+	// keySpace is what a Space keypress stringifies to in bubbletea v2
+	// (KeyPressMsg{Code: KeySpace, Text: " "}.String()) — never " ". The two
+	// keys that bind Space matched " ", which no terminal sends, so ticking a
+	// task for a batch and every "Space to toggle" in the notification
+	// editor did nothing.
+	keySpace = "space"
+	keyEsc   = "esc"
+	keyCtrlC = "ctrl+c"
+	keyCtrlO = "ctrl+o"
 )

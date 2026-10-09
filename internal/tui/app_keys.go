@@ -500,7 +500,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case keyShiftTab:
 		a.cycleFocus(-1)
 		return a, nil
-	case " ":
+	case keySpace:
 		// Space: toggle batch selection on focused task (only when task panel focused)
 		if a.focusedPanel == PanelTasks {
 			if job := a.taskList.SelectedJob(); job != nil {

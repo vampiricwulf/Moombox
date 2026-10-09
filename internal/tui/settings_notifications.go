@@ -309,7 +309,7 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 			m.updateTextInputForField()
 		}
 		return ""
-	case " ":
+	case keySpace:
 		// Both arms are guarded on their own row, because the two text rows
 		// (URL and Mention) own their own spaces: UpdateComponents routes the
 		// key into the focused input, and this arm must not also act on it.
