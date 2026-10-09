@@ -675,7 +675,11 @@ twice before a slow target drains stays marked until both drops have run. It
 lives beside the per-job entry, not in it, so a release or an eviction of the
 entry cannot take it.
 `RetainJobs` marks nothing, because its list is a snapshot taken at the bulk
-write and a job added since is missing from it without being deleted. A
+write and a job added since is missing from it without being deleted. Such a
+job loses only its in-process History: a tracker entry that loses a target's
+key is re-read from the row on its next touch (`dropKeysLocked`), so the job's
+next event on that target still edits the message the row names rather than
+opening a second one. A
 removed target's queue
 still runs its steps after its in-flight delivery (the rest of its queue is
 discarded); a target whose queue has already exited — after shutdown — drops

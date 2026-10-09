@@ -399,11 +399,12 @@ func (l *lifecycleTracker) dropTarget(jobID, key string) {
 	}
 }
 
-// retainTarget is dropTarget for every job not in live: the bulk counterpart,
-// for the deletes that fire no per-job event (a departed channel's prune). A
-// job added after the list was taken can lose its entry too; that costs only
-// the in-process History, as a release does — its stored ids are re-read on
-// the next touch.
+// retainTarget drops what ONE target holds, as dropTarget does but marking
+// nothing off, for every job not in live: the bulk counterpart, for the
+// deletes that fire no per-job event (a departed channel's prune). A job
+// added after the list was taken can lose its entry, or this target's part
+// of it, too; that costs only the in-process History, as a release does —
+// its stored ids are re-read on the next touch (dropKeysLocked).
 func (l *lifecycleTracker) retainTarget(live map[string]struct{}, key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -464,15 +465,26 @@ func (l *lifecycleTracker) retain(live map[string]struct{}, covered map[string]b
 // every key gone admits, then the job's entry once it holds no id and no
 // History for anyone. The ForgetJob marks are not the entry's and stay.
 // Caller holds l.mu.
+//
+// An entry that survives with a key dropped is re-read from the row on its
+// next touch, like a new one. RetainJobs' list is a snapshot, so the job can
+// be live: one target's step dropped its id while a slower target still held
+// the entry, nothing re-read the row, and the job's next event on the first
+// target opened a second message beside the one the row still names. For a
+// deleted job the row is gone, or is a re-added job's, which holds none of
+// what the entry still keeps for the deleted one (markDropping).
 func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone func(key string) bool) {
+	dropped := false
 	for k := range j.msgs {
 		if gone(k) {
 			delete(j.msgs, k)
+			dropped = true
 		}
 	}
 	for k := range j.history {
 		if gone(k) {
 			delete(j.history, k)
+			dropped = true
 		}
 	}
 	for k := range j.closed {
@@ -483,6 +495,10 @@ func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone fu
 	if len(j.msgs) == 0 && len(j.history) == 0 {
 		delete(l.jobs, jobID)
 		delete(l.touched, jobID)
+		return
+	}
+	if dropped {
+		j.loaded = false
 	}
 }
 

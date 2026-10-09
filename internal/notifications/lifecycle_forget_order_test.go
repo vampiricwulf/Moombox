@@ -619,3 +619,48 @@ func TestEachQueuedDropKeepsItsOwnMark(t *testing.T) {
 		t.Errorf("the third life's first event was %s %s, want a POST of a new message", c.Method, c.Path)
 	}
 }
+
+// RetainJobs' list is a snapshot taken at the bulk write, so a job added just
+// after it is missing from the list without being deleted. Its stored ids are
+// re-read on the next touch — but with the drop per target, a quick target's
+// step removed only its own id from an entry a slow target still held, the
+// entry stayed loaded, and nothing re-read the row: the live job's next event
+// on the quick target opened a second message. An entry that loses a key is
+// re-read now.
+//
+// Mutant: dropKeysLocked leaving a surviving entry loaded — A's next event is
+// a POST.
+func TestAPartlyDroppedEntryReReadsItsRow(t *testing.T) {
+	fA := newFakeDiscord(t, createdInOrder)
+	fB, release := gated(t, 1) // B: the job's found, then another job's slow request
+	st := newMemStore()
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	installTargets(t, m, editTarget(fA, nil, ModeEdit), editTarget(fB, nil, ModeEdit))
+	const job = "dQw4w9WgXcQ"
+	keyA := targetMsgKey(fA.URL())
+
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: job})
+	waitFor(t, "both ids persisted", func() bool { return len(st.NotificationMsgs(job)) == 2 })
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+	if !waitCalls(t, fB, 2, 3*time.Second) {
+		t.Fatal("the other job's POST never reached B")
+	}
+	m.RetainJobs(map[string]struct{}{"otherJob123": {}}) // taken before the job was added
+	tr := m.tracker()
+	waitFor(t, "A's step", func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		j := tr.jobs[job]
+		return j != nil && j.msgs[keyA] == ""
+	})
+
+	m.Send("Downloading", "x", TypeDownload, nil, SendOptions{Event: "downloading", JobID: job})
+	if !waitCalls(t, fA, 3, 3*time.Second) {
+		t.Fatalf("A: %v", requestLines(fA.calls()))
+	}
+	if c := fA.calls()[2]; c.Method != http.MethodPatch || c.Path != "/messages/M0" {
+		t.Errorf("the live job's next event on A was %s %s, want a PATCH of its message M0 (row %v)", c.Method, c.Path, st.NotificationMsgs(job))
+	}
+	release()
+}
