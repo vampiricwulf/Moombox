@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -174,8 +177,19 @@ const jobStatsCacheTTL = 5 * time.Second
 // unconditionally, and migrating the daemon's live DB from a second process
 // (e.g. a newer on-disk binary during the staged-update window) would leave
 // the running daemon's old code writing against a new schema.
+//
+// It reads the same file Open would: the earlier release's file when
+// legacyDatabaseFile finds one, so a `moombox add` during the update window
+// reads the database the running daemon writes.
 func FileSchemaVersion(dbPath string) (int, error) {
-	sqlDB, err := sql.Open("sqlite", sqliteFileURI(dbPath)+"?mode=ro&_pragma=busy_timeout(5000)")
+	file, err := legacyDatabaseFile(dbPath)
+	if err != nil {
+		return 0, err
+	}
+	if file == "" {
+		file = dbPath
+	}
+	sqlDB, err := sql.Open("sqlite", sqliteFileURI(file)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return 0, err
 	}
@@ -209,6 +223,117 @@ func sqliteFileURI(dbPath string) string {
 	return "file:" + p
 }
 
+// legacySQLitePath is the file an earlier release opened for dbPath, which
+// pasted the path into the "file:" URI unescaped and let SQLite's URI parser
+// read it: a leading "//" began an authority, of which only an empty one and
+// "localhost" opened at all; the path ended at the first '?' or '#'; a %HH
+// escape was decoded, and %00 ended the path. It is "" when that URI named no
+// file, and dbPath itself for a path holding none of those.
+func legacySQLitePath(dbPath string) string {
+	p := dbPath
+	if strings.HasPrefix(p, "//") {
+		authority, rest, found := strings.Cut(p[2:], "/")
+		if authority != "" && authority != "localhost" {
+			return ""
+		}
+		p = ""
+		if found {
+			p = "/" + rest
+		}
+	}
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c == '?' || c == '#' {
+			break
+		}
+		if c == '%' && i+2 < len(p) && isHexDigit(p[i+1]) && isHexDigit(p[i+2]) {
+			c = hexValue(p[i+1])<<4 | hexValue(p[i+2])
+			i += 2
+			if c == 0 {
+				break
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func isHexDigit(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func hexValue(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
+}
+
+// sqliteHeader opens every SQLite database file.
+const sqliteHeader = "SQLite format 3\x00"
+
+// legacyDatabaseFile is the file an earlier release kept dbPath's database
+// in, when the upgrade would otherwise leave it behind, and "" when there is
+// none. Before sqliteFileURI, a database_path holding '#', '?' or a %HH escape
+// opened legacySQLitePath's file instead; opening the literal path after the
+// upgrade would create an empty database there, with no jobs and no history
+// (so the monitors and the backfill would queue the archived videos again),
+// and leave the install's data where nothing reads it. So while the literal
+// path does not exist and that other file is a database holding a jobs table,
+// Open and FileSchemaVersion keep using it, as every earlier release did. A
+// file there that is not an SQLite database, or holds no jobs table, was
+// never this install's database, and the literal path is created as usual. A
+// database there that cannot be read is an error naming both paths rather
+// than a guess either way.
+func legacyDatabaseFile(dbPath string) (string, error) {
+	legacy := legacySQLitePath(dbPath)
+	if legacy == "" || legacy == dbPath {
+		return "", nil
+	}
+	if _, err := os.Stat(dbPath); !errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	f, err := os.Open(legacy)
+	if err != nil {
+		return "", nil
+	}
+	header := make([]byte, len(sqliteHeader))
+	_, readErr := io.ReadFull(f, header)
+	info, statErr := f.Stat()
+	f.Close()
+	if readErr != nil || statErr != nil || !info.Mode().IsRegular() || string(header) != sqliteHeader {
+		return "", nil
+	}
+	hasJobs, err := holdsJobsTable(legacy)
+	if err != nil {
+		return "", fmt.Errorf("database_path %q does not exist, and %q, where earlier releases kept the database for that path, cannot be read: %w",
+			dbPath, legacy, err)
+	}
+	if !hasJobs {
+		return "", nil
+	}
+	return legacy, nil
+}
+
+// holdsJobsTable reports whether the database at path, opened read-only,
+// has a jobs table.
+func holdsJobsTable(path string) (bool, error) {
+	sqlDB, err := sql.Open("sqlite", sqliteFileURI(path)+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return false, err
+	}
+	defer sqlDB.Close()
+	var n int
+	if err := sqlDB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'jobs'`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // openDSN builds the SQLite connection string. Production keeps SQLite's
 // default synchronous level (FULL in WAL mode: an fsync per commit; the
 // durability ruling of 2026-07-03 stands). Under `go test` — and only there,
@@ -225,15 +350,32 @@ func openDSN(dbPath string, underTest bool) string {
 	return dsn
 }
 
-// Open creates or opens a SQLite database at the given path.
+// Open creates or opens a SQLite database at the given path, or at the file
+// an earlier release kept that path's database in (legacyDatabaseFile, with a
+// Warn naming both).
 // The logger parameter is optional; if nil, database errors will be silently dropped.
 func Open(dbPath string, logger ...dbLogger) (*Database, error) {
+	var log dbLogger
+	if len(logger) > 0 && logger[0] != nil {
+		log = logger[0]
+	}
+	file, err := legacyDatabaseFile(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if file == "" {
+		file = dbPath
+	} else if log != nil {
+		log.Warn("database_path holds '#', '?' or '%', and earlier releases kept its database in another file — opening that one, which holds the jobs and history; "+
+			"to use database_path, stop Moombox and move the file, with its -wal and -shm, there",
+			"database_path", dbPath, "opened", file)
+	}
 	// modernc.org/sqlite only honors `_pragma=...` query parameters — the
 	// mattn-style `_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`
 	// form was silently ignored, leaving foreign keys OFF (the child tables'
 	// ON DELETE CASCADE never fired), journal mode DELETE, and busy timeout
 	// 0 (the `moombox add` second process got immediate SQLITE_BUSY).
-	sqlDB, err := sql.Open("sqlite", openDSN(dbPath, testing.Testing()))
+	sqlDB, err := sql.Open("sqlite", openDSN(file, testing.Testing()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -252,9 +394,7 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 		fieldToColumn: ftc,
 		jobLogs:       make(map[string][]string),
 		logRouted:     make(map[string]struct{}),
-	}
-	if len(logger) > 0 && logger[0] != nil {
-		db.logger = logger[0]
+		logger:        log,
 	}
 
 	// Run migrations
