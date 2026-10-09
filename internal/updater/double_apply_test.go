@@ -98,3 +98,31 @@ func TestAnApplyOverABrokenSwapIsRefused(t *testing.T) {
 		t.Errorf(".old is gone: %v", err)
 	}
 }
+
+// The .update-broken marker refuses an apply on its own, with the running
+// binary back at the exe path — an operator who put it back by hand but has
+// not yet worked through the marker's instructions (security.md and
+// operations.md give the marker its own row). The test above lays out the
+// marker and the empty exe path together, so the missing-exe check alone
+// satisfied it and deleting the marker check survived the whole package.
+//
+// Mutant: drop the os.Stat(u.exePath + brokenUpdateSuffix) refusal — the
+// apply goes ahead and the exe holds the new binary.
+func TestABrokenSwapMarkerAloneRefusesAnApply(t *testing.T) {
+	srv := swapTestServer(t)
+	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
+	if err := os.WriteFile(exePath+brokenUpdateSuffix, []byte("manual recovery required"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := u.ApplyUpdate(context.Background(), swapRelease(srv))
+	if err == nil || !strings.Contains(err.Error(), brokenUpdateSuffix) {
+		t.Fatalf("ApplyUpdate = %v, want a refusal naming the marker", err)
+	}
+	if got, _ := os.ReadFile(exePath); string(got) != "current binary" {
+		t.Errorf("exe holds %q, want the running binary untouched", got)
+	}
+	if _, err := os.Stat(exePath + ".old"); !os.IsNotExist(err) {
+		t.Errorf("the refused apply still moved the running binary aside (stat .old: %v)", err)
+	}
+}
