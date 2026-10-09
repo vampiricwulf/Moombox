@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -69,6 +70,11 @@ func bootSweepWorker(t *testing.T) (*DownloadWorker, *database.Database, *locked
 	return NewDownloadWorker(db, nil, cfg, log, nil), db, log, cfg.Paths.StagingDirectory
 }
 
+// downloadStarted is the download_started_at a fixture row carries when it
+// stands for a job whose own run downloaded into its staging — what the boot
+// sweep asks of a Finished row before it applies the post-mux rule.
+const downloadStarted = "2026-01-01T00:00:00Z"
+
 func writeFixtureFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -84,13 +90,16 @@ func writeFixtureFile(t *testing.T, path, body string) {
 // disk and cleanupStagingAfterMux's own decision (decideStagingCleanup) says
 // remove. Every shield that function has keeps the dir — and keeps ALL of it:
 // a chat-incomplete dir is not even pruned, that is the orphan sweep's to
-// offer — as do a missing archive, a non-Finished row, an active row and a dir
-// with no row at all. A removal is logged with its path and a reason.
+// offer — as do a missing archive, a non-Finished row, an active row, a dir
+// with no row at all and a row that never downloaded anything (an import: its
+// archive says nothing about this dir). A removal is logged with its path and
+// a reason.
 //
 // Mutants: drop the missingArchiveFile check (the two missing-archive cases
 // are deleted); drop the Finished check (the Error row's staging is deleted);
 // act on every verdict but the chat prune (the tail, aside, unmuxed-part and
-// unused-root cases are deleted); drop decideStagingCleanup's tail, chat,
+// unused-root cases are deleted); drop the download_started_at check (the
+// row that never downloaded has its staging deleted); drop decideStagingCleanup's tail, chat,
 // unmuxed-part or unused-root arm (that case is deleted — its aside arm is
 // backed by hasUnmuxedPartsForJob's own aside term, so dropping it alone
 // changes nothing); drop the reason from the Info line (the redundant cases
@@ -105,6 +114,7 @@ func TestBootSweepRemovesOnlyStagingTheCleanupWouldHave(t *testing.T) {
 		part         string // "" none, "present" or "missing": a recorded part 0's file
 		root         []string
 		seg1         bool // an unrecorded part 1 with media
+		imported     bool // the row records no download of its own
 	}
 	for _, tc := range []struct {
 		name     string
@@ -125,6 +135,7 @@ func TestBootSweepRemovesOnlyStagingTheCleanupWouldHave(t *testing.T) {
 		{"not finished", fixture{status: database.StatusError, outputExists: true, root: []string{"video.mp4"}}, false},
 		{"active", fixture{status: database.StatusDownloading, outputExists: true, root: []string{"video.mp4"}}, false},
 		{"no row", fixture{noRow: true, root: []string{"video.mp4"}}, false},
+		{"the row never downloaded", fixture{status: database.StatusFinished, outputExists: true, imported: true, root: []string{"video.mp4"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db, log, stagingBase := bootSweepWorker(t)
@@ -141,8 +152,12 @@ func TestBootSweepRemovesOnlyStagingTheCleanupWouldHave(t *testing.T) {
 				writeFixtureFile(t, filepath.Join(staging, "seg_1", "video_stream"), "\x00\x00\x00\x18ftypdash")
 			}
 			if !tc.f.noRow {
+				started := downloadStarted
+				if tc.f.imported {
+					started = ""
+				}
 				if _, err := db.AddJob(&database.Job{ID: "j-boot", VideoID: "j-boot", Status: tc.f.status,
-					ChatStatus: tc.f.chat, OutputFile: archive}); err != nil {
+					ChatStatus: tc.f.chat, OutputFile: archive, DownloadStartedAt: started}); err != nil {
 					t.Fatal(err)
 				}
 				// incomplete_tail is not an INSERT column (AddJob's doc).
@@ -294,7 +309,8 @@ func TestBootSweepKeepsAFinishedStagingWithAnUnprovenMarkedAside(t *testing.T) {
 			if tc.sibling {
 				writeFixtureFile(t, sibling, "recovered")
 			}
-			if _, err := db.AddJob(&database.Job{ID: "j-fin", VideoID: "j-fin", Status: database.StatusFinished, OutputFile: archive}); err != nil {
+			if _, err := db.AddJob(&database.Job{ID: "j-fin", VideoID: "j-fin", Status: database.StatusFinished, OutputFile: archive,
+				DownloadStartedAt: downloadStarted}); err != nil {
 				t.Fatal(err)
 			}
 			staging := filepath.Join(stagingBase, "j-fin")
@@ -338,6 +354,43 @@ func TestBootSweepKeepsAFinishedStagingWithAnUnprovenMarkedAside(t *testing.T) {
 				t.Errorf("%s was deleted — nothing proved it redundant, and it may be the only copy", aside)
 			}
 		})
+	}
+}
+
+// TestBootSweepLeavesAnImportedRowsInheritedStagingAlone: job IDs are video
+// IDs, DELETE /api/jobs/{id} removes only the row, and POST /api/import inserts
+// a Finished row under the video ID with no download and no mux behind it. A
+// staging dir the deleted job left — an unmuxed capture kept for the Mux
+// action, offered by the orphan sweep — then sits under a Finished row whose
+// archive is on disk and whose shape the post-mux rule calls redundant. Nothing
+// in it is in that archive, so it stays for the orphan sweep.
+//
+// Mutant: drop the download_started_at check (the capture is deleted).
+func TestBootSweepLeavesAnImportedRowsInheritedStagingAlone(t *testing.T) {
+	w, db, _, stagingBase := bootSweepWorker(t)
+	staging := filepath.Join(stagingBase, "dQw4w9WgXcQ")
+	capture := []string{filepath.Join(staging, "video_stream"), filepath.Join(staging, "audio_stream")}
+	old := time.Now().Add(-72 * time.Hour)
+	for _, p := range capture {
+		writeFixtureFile(t, p, "\x00\x00\x00\x18ftypdash-unmuxed")
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	imported := filepath.Join(t.TempDir(), "imports", "x.mp4")
+	writeFixtureFile(t, imported, "an archive from elsewhere")
+	// The row import_routes.go writes.
+	if _, err := db.AddJob(&database.Job{ID: "dQw4w9WgXcQ", VideoID: "dQw4w9WgXcQ", Status: database.StatusFinished,
+		Progress: "Imported", ManuallyAdded: true, OutputFile: imported}); err != nil {
+		t.Fatal(err)
+	}
+
+	w.reclaimBootLeftovers()
+
+	for _, p := range capture {
+		if !fileExists(p) {
+			t.Errorf("%s was deleted: an unmuxed capture no archive holds, taken because an imported row shares its job ID", p)
+		}
 	}
 }
 
@@ -391,7 +444,8 @@ func TestBootSweepRereadsTheRowUnderTheClaim(t *testing.T) {
 	aside := filepath.Join(staging, "video_stream.restart-1700000000")
 	writeFixtureFile(t, aside, "set aside")
 	writeFixtureFile(t, aside+asideRecoveredMarker, sibling)
-	if _, err := db.AddJob(&database.Job{ID: "j-revived", VideoID: "j-revived", Status: database.StatusFinished, OutputFile: archive}); err != nil {
+	if _, err := db.AddJob(&database.Job{ID: "j-revived", VideoID: "j-revived", Status: database.StatusFinished, OutputFile: archive,
+		DownloadStartedAt: downloadStarted}); err != nil {
 		t.Fatal(err)
 	}
 	bootSweepClaimed = func(id string) {
@@ -426,7 +480,8 @@ func TestStartRunsTheBootSweep(t *testing.T) {
 	writeFixtureFile(t, archive, "archive")
 	staging := filepath.Join(stagingBase, "j-start")
 	writeFixtureFile(t, filepath.Join(staging, "video.mp4"), "\x00\x00\x00\x18ftypdash")
-	if _, err := db.AddJob(&database.Job{ID: "j-start", VideoID: "j-start", Status: database.StatusFinished, OutputFile: archive}); err != nil {
+	if _, err := db.AddJob(&database.Job{ID: "j-start", VideoID: "j-start", Status: database.StatusFinished, OutputFile: archive,
+		DownloadStartedAt: downloadStarted}); err != nil {
 		t.Fatal(err)
 	}
 

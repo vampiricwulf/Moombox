@@ -27,10 +27,11 @@ var bootSweepClaimed func(jobID string)
 //     written, so the aside is footage that already exists beside the archive;
 //   - the staging dir of a Finished job whose archive file(s) exist, when
 //     cleanupStagingAfterMux would have deleted it (decideStagingCleanup says
-//     removeStaging) and no aside marked recovered is left in it. Its own
-//     cleanup did not run or did not finish — the process died between the
-//     Finished write and the RemoveAll, or Windows held a handle on a file in
-//     it.
+//     removeStaging), no aside marked recovered is left in it, and the row
+//     records a download of its own (an imported row never ran one, so its
+//     archive says nothing about this dir). Its own cleanup did not run or
+//     did not finish — the process died between the Finished write and the
+//     RemoveAll, or Windows held a handle on a file in it.
 //
 // Every deletion is logged with its path and the reason. Anything that is not
 // provable — a job row that cannot be read or is gone, an archive that is not
@@ -100,6 +101,19 @@ func (w *DownloadWorker) reclaimJobLeftovers(jobID, stagingDir string) {
 	// RemoveAll below would take it with the directory.
 	if keptAside {
 		w.logger.Debug("boot cleanup: keeping a finished job's staging; a set-aside recording marked recovered is still in it",
+			"path", stagingDir, "jobID", jobID)
+		return
+	}
+	// The rule below is the post-mux cleanup's, so it holds only for staging
+	// that this row's own run left: a row that never downloaded anything
+	// (download_started_at is stamped by ExecuteWithChat and ExecuteTwitch,
+	// and cleared only by a Reinitialize that deletes staging with it) was
+	// never muxed from this dir. That is an import — POST /api/import inserts
+	// a Finished row under the video ID — sitting on the staging a deleted
+	// job of the same ID left for the orphan sweep, which can be an unmuxed
+	// capture no archive holds.
+	if job.DownloadStartedAt == "" {
+		w.logger.Debug("boot cleanup: keeping a finished job's staging; the row records no download of its own (an import), so nothing in it was muxed for this row",
 			"path", stagingDir, "jobID", jobID)
 		return
 	}
