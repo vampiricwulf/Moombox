@@ -146,11 +146,18 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	if startTime >= endTime {
 		return nil, refuseTrim("start time must be before end time")
 	}
-	// Validate end time doesn't exceed video duration
+	// Validate end time doesn't exceed video duration. length_seconds is the
+	// probed duration with its fraction dropped (muxAndFinalize stores
+	// int(ffprobe's duration)), so the file runs on for up to a second past
+	// it — and the dashboard's end marker is the player's own fractional
+	// duration: "to the end" of a 3600.48 s archive posts 3600.48 against a
+	// row reading 3600, and was refused as past the end. The end is past the
+	// file only from the next whole second on; FFmpeg stops at the file's end
+	// whatever lies between.
 	if job.LengthSeconds != nil && *job.LengthSeconds > 0 {
 		maxDuration := float64(*job.LengthSeconds)
-		if endTime > maxDuration {
-			return nil, refuseTrim("end time (%.0fs) exceeds video duration (%.0fs)", endTime, maxDuration)
+		if endTime >= maxDuration+1 {
+			return nil, refuseTrim("end time (%s) exceeds video duration (%s)", trimSeconds(endTime), trimSeconds(maxDuration))
 		}
 	}
 	duration := endTime - startTime
@@ -348,9 +355,12 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 		cumulative += seg.DurationSeconds
 	}
 
+	// The segments' durations are the probed ones, fraction and all, so the
+	// bound is exact here; only the message rounds, and it rounds the way the
+	// single-file one does.
 	totalDuration := cumulative
 	if endTime > totalDuration {
-		return nil, refuseTrim("end time (%.0fs) exceeds total duration (%.0fs)", endTime, totalDuration)
+		return nil, refuseTrim("end time (%s) exceeds total duration (%s)", trimSeconds(endTime), trimSeconds(totalDuration))
 	}
 
 	trimDuration := endTime - startTime
@@ -555,6 +565,14 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 	ts.logger.Info("multi-segment trim created", "trimID", trimID, "path", trimPath,
 		"segments", len(involved))
 	return record, nil
+}
+
+// trimSeconds spells a trim bound for a refusal: to the millisecond, without
+// trailing zeros. Rounded to whole seconds, "%.0f" told someone whose end ran
+// 0.48 s past a 3600 s row that "end time (3600s) exceeds video duration
+// (3600s)".
+func trimSeconds(v float64) string {
+	return strconv.FormatFloat(math.Round(v*1000)/1000, 'f', -1, 64) + "s"
 }
 
 // uniqueTrimBasename returns a trim filename that doesn't collide with any
