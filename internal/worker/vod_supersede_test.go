@@ -322,7 +322,9 @@ func TestSupersededRootIsNeverReadAsPartZero(t *testing.T) {
 //
 // Mutants: drop the unusedRootRecording branch from cleanupStagingAfterMux —
 // the staging (and the download in it) is deleted; drop the single-file
-// two-shapes arm — the last case's complete download is deleted.
+// two-shapes arm — the last two cases' complete downloads are deleted; look
+// only for video_stream / video.ts beside the whole file (W20-20) — the
+// audio-only job's complete audio.m4a is deleted with staging.
 func TestCleanupKeepsRootRecordingTheFinalizeDidNotUse(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -336,6 +338,7 @@ func TestCleanupKeepsRootRecordingTheFinalizeDidNotUse(t *testing.T) {
 		{"part 0's own capture", true, []string{"video_stream"}, false, false},
 		{"single file, one recording", false, []string{"video.mp4", "audio.m4a"}, false, false},
 		{"single file, a capture beside the download", false, []string{"video_stream", "video.mp4"}, false, true},
+		{"single file, an audio capture beside the audio download", false, []string{"audio_stream", "audio.m4a"}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)

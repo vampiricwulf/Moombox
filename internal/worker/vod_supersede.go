@@ -246,10 +246,12 @@ func (o *DownloadOrchestrator) supersedePartsWithVod(jobCtx *JobContext) error {
 // and the cleanup then deleted.
 //
 // A single-file finalize muxed ONE recording from the root, so a root holding
-// a live-shape capture AND the whole-file pair kept one it did not use.
+// a live-shape capture AND a whole-file download kept one it did not use.
 // setAsideLiveShapesForVod stops a run producing that layout; a staging dir
 // that already had it when that landed still holds the complete download
-// beside the capture the restart mux preferred.
+// beside the capture the restart mux preferred. Any live-shape name counts —
+// audio_stream too: an audio-only job's stale audio_stream ranks above its
+// complete audio.m4a exactly as video_stream ranks above video.mp4.
 //
 // A segment read that fails answers "unused", as hasUnmuxedSegmentParts does:
 // keeping the dir is the side that cannot lose footage.
@@ -274,8 +276,13 @@ func unusedRootRecording(db *database.Database, jobID, stagingDir string) string
 		return path
 	}
 	if len(segs) == 0 {
-		if wholeFile != "" && (fileExists(filepath.Join(stagingDir, "video_stream")) || fileExists(filepath.Join(stagingDir, "video.ts"))) {
-			return wholeFile
+		if wholeFile == "" {
+			return ""
+		}
+		for _, name := range liveShapeStagingNames {
+			if fileExists(filepath.Join(stagingDir, name)) {
+				return wholeFile
+			}
 		}
 		return ""
 	}
