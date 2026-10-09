@@ -56,16 +56,13 @@ func ScanOrphanedFiles(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		entries = append(entries, stagingEntries...)
 	}
 
-	// Scan output files
+	// Scan output files, trims included: a trim is a file under the output
+	// directory like any other, told apart by the trims table and the
+	// directories the trim service writes into (scanOutputOrphans), never by
+	// a second walk that trusted a directory's name.
 	outputEntries, err := scanOutputOrphans(db, cfg)
 	if err == nil {
 		entries = append(entries, outputEntries...)
-	}
-
-	// Scan trim files
-	trimEntries, err := scanTrimOrphans(db, cfg)
-	if err == nil {
-		entries = append(entries, trimEntries...)
 	}
 
 	return entries, nil
@@ -168,8 +165,9 @@ func incompleteStagingExpired(cfg *config.MoomboxConfig, job *database.Job) bool
 
 // DeleteOrphanedFile safely deletes a file or directory if it's under the configured directories.
 // Re-queries the database immediately before deletion and refuses if any currently-active job owns
-// the path — closes the race window between ScanOrphanedFiles and the user's delete click during
-// which a user might restart a job and make its staging/output path live again.
+// the path, or any trim row names it — closes the race window between ScanOrphanedFiles and the
+// user's delete click during which a user might restart a job and make its staging/output path
+// live again, or re-create a trim over the file the listing offered.
 func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxConfig) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -202,6 +200,11 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 			return fmt.Errorf("check for active job: %w", err)
 		} else if jobID != "" {
 			return fmt.Errorf("refusing to delete: path is now owned by active job %s", jobID)
+		}
+		if trimID, err := findTrimForPath(absPath, db, cfg); err != nil {
+			return fmt.Errorf("check for trim: %w", err)
+		} else if trimID != "" {
+			return fmt.Errorf("refusing to delete: path is trim %s", trimID)
 		}
 	}
 
@@ -260,6 +263,50 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 		return "", nil // nothing spells differently; the first pass was the whole answer
 	}
 	return findActiveJobUnder(realPath, realStaging, realOutput, db, cfg)
+}
+
+// findTrimForPath returns the ID of a trim whose row names the path, or "" if
+// none does. A trim has no active state: its row existing is what makes the
+// file live, so the recheck refuses it whatever its job's status — a list
+// read before the row was written goes stale the moment it is. The trim
+// service names a file deterministically ("<id> [Ns-Ms].mp4") and the
+// disambiguation sees only rows, so a range re-created after DeleteTrim
+// overwrites the very file the sweep had just offered as an orphan; the
+// operator's click on that listing then deleted the new trim.
+//
+// Rows resolve as the sweep resolves them (trimFileLocations), and are matched
+// in the path's spelling and its canonical one, as findActiveJobForPath
+// matches job columns. Every location a row resolves to ends in the row's
+// base name, so only the rows carrying the path's name need their job read.
+func findTrimForPath(absPath string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
+	trims, err := db.GetAllTrims()
+	if err != nil {
+		return "", err
+	}
+	targets := map[string]bool{normalizePath(absPath): true}
+	if real, err := utils.CanonicalPath(absPath); err == nil {
+		targets[normalizePath(real)] = true
+	}
+	names := make(map[string]bool, len(targets))
+	for t := range targets {
+		names[filepath.Base(t)] = true
+	}
+	absOut := resolveOutputDir(cfg)
+	for _, tr := range trims {
+		if !names[filepath.Base(normalizePath(tr.Filename))] {
+			continue
+		}
+		job, err := db.GetJob(tr.JobID)
+		if err != nil {
+			return "", err
+		}
+		for _, p := range trimFileLocations(tr, job, absOut) {
+			if targets[normalizePath(p)] || targets[normalizePath(canonicalDir(p))] {
+				return tr.ID, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // findActiveJobUnder is findActiveJobForPath's lookup for one spelling of the
@@ -462,7 +509,20 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 	return entries, nil
 }
 
-// scanOutputOrphans scans the output directory for files not referenced by any job.
+// scanOutputOrphans scans the output directory for files that no job and no
+// trim references. One walk covers archives and trims alike: a file is owned
+// when a job column names it or a trim row resolves to it (trimFileLocations),
+// whatever directory it sits in, and an unowned file is typed "trim" when its
+// directory is one the trim service writes into (trimDirsOf), else "output".
+//
+// The trim half used to be a second walk keyed on the directory's NAME: the
+// output walk skipped every directory called "trim", and the trim walk offered
+// every file in one that no TRIM row named — so a channel whose name sanitises
+// to "trim" (the default template is "${channel}/...") had its archives,
+// chat, thumbnails and descriptions offered for deletion as trims. And it
+// resolved every trim row against the GLOBAL output directory, while the trim
+// service writes beside the job's own output — under a per-channel or per-job
+// output_directory, every live trim was offered too, and Delete removed it.
 func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]OrphanedEntry, error) {
 	outputDir := cfg.Paths.OutputDirectory
 	if outputDir == "" {
@@ -537,7 +597,32 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		}
 	}
 
-	var entries []OrphanedEntry
+	// Trims: every file a trim row names is owned, resolved the way the trim
+	// service wrote it, and the directories the service writes into are where
+	// an unowned file is a trim — a clip whose row DeleteTrim removed (it
+	// leaves the file for this sweep), or an encode that died. One query, not
+	// one per job (sweep-2 ENGINE-17). A failed read fails the scan: without
+	// the trim rows every live trim reads as unowned.
+	trims, err := db.GetAllTrims()
+	if err != nil {
+		return nil, err
+	}
+	jobsByID := make(map[string]*database.Job, len(jobs))
+	trimDirs := make(map[string]bool)
+	for _, job := range jobs {
+		jobsByID[job.ID] = job
+		for _, dir := range trimDirsOf(job) {
+			trimDirs[normalizePath(dir)] = true
+		}
+	}
+	for _, tr := range trims {
+		for _, p := range trimFileLocations(tr, jobsByID[tr.JobID], absOutputDir) {
+			known(p)
+			trimDirs[normalizePath(filepath.Dir(p))] = true
+		}
+	}
+
+	var entries, trimEntries []OrphanedEntry
 	// Recovered set-aside recordings found in the walk, grouped by the stem
 	// they belong to. They are never rows of their own: either the stem is a
 	// known archive and the sibling is owned (dropped here), or the stem is
@@ -549,26 +634,27 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 			return nil // skip errors
 		}
 		if info.IsDir() {
-			// Skip trim directories — handled separately
-			if info.Name() == "trim" {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 
-		// Only check media, chat, thumbnail, and description files
+		// Only check media, chat, thumbnail, and description files — except
+		// in a trims directory, the trim service's own, where whatever an
+		// encode left is offered whatever its extension (the trim walk's rule
+		// before the two walks became one). A job's files there are still
+		// owned: the known check below runs for every directory.
+		absPath, _ := filepath.Abs(path)
+		inTrimDir := trimDirs[normalizePath(filepath.Dir(absPath))]
 		ext := strings.ToLower(filepath.Ext(path))
 		isMedia := ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".ts"
 		isThumbnail := ext == ".jpg" || ext == ".webp" || ext == ".png"
 		isChat := strings.HasSuffix(strings.ToLower(path), ".chat.json")
 		isDescription := ext == ".description"
-		if !isMedia && !isThumbnail && !isChat && !isDescription {
+		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription {
 			return nil
 		}
 
-		absPath, _ := filepath.Abs(path)
 		if knownFiles[normalizePath(absPath)] {
-			return nil // Referenced by a job
+			return nil // Referenced by a job or a trim
 		}
 		if outputClaimOwner(absPath) != "" {
 			return nil // Being written by a finalize that has not named it yet
@@ -609,13 +695,19 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 
 		relPath, _ := filepath.Rel(absOutputDir, absPath)
 
-		entries = append(entries, OrphanedEntry{
+		entry := OrphanedEntry{
 			Path:     absPath,
 			RelPath:  relPath,
 			Type:     "output",
 			Size:     info.Size(),
 			Modified: info.ModTime().UTC().Format(time.RFC3339),
-		})
+		}
+		if inTrimDir {
+			entry.Type = "trim"
+			trimEntries = append(trimEntries, entry)
+			return nil
+		}
+		entries = append(entries, entry)
 
 		return nil
 	})
@@ -623,7 +715,60 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		return entries, err
 	}
 
-	return appendOrphanedSiblings(entries, siblingsByStem, absOutputDir), nil
+	// Trims after the archives, the order the two walks used to give (the
+	// terminal's list shows the sweep in the order it comes).
+	return append(appendOrphanedSiblings(entries, siblingsByStem, absOutputDir), trimEntries...), nil
+}
+
+// trimDirsOf returns the directories the trim service writes a job's trims
+// into: "trim" beside the job's output file (CreateTrim), and beside each part
+// for a job that finalized as parts (createMultiSegmentTrimInternal writes
+// beside the first part the range touches).
+func trimDirsOf(job *database.Job) []string {
+	var dirs []string
+	if job.OutputFile != "" {
+		dirs = append(dirs, filepath.Join(filepath.Dir(job.OutputFile), "trim"))
+	}
+	for _, seg := range job.Segments {
+		if seg.FilePath != "" {
+			dirs = append(dirs, filepath.Join(filepath.Dir(seg.FilePath), "trim"))
+		}
+	}
+	return dirs
+}
+
+// trimFileLocations returns the absolute paths a trim row can name. The row
+// stores its file relative to the JOB's output directory — "trim/<name>"
+// under the directory of the job's relative filename (CreateTrim) — which is
+// the job's own output_directory when it has one (a per-channel or per-job
+// override; buildJobContext) and the global one otherwise; so that is the
+// base it resolves against, not absOutputDir alone. The file was written
+// beside the job's output, or beside the part the range began in, so those
+// spellings count too: they still find it after the global output directory
+// moves, when the relative name resolves somewhere it never was. A row whose
+// job is gone resolves against the global directory, all it has; an absolute
+// row is its own answer.
+func trimFileLocations(tr database.TrimRecord, job *database.Job, absOutputDir string) []string {
+	if tr.Filename == "" {
+		return nil
+	}
+	if filepath.IsAbs(tr.Filename) {
+		return []string{tr.Filename}
+	}
+	base := absOutputDir
+	if job != nil && job.OutputDirectory != "" {
+		if abs, err := filepath.Abs(job.OutputDirectory); err == nil {
+			base = abs
+		}
+	}
+	paths := []string{filepath.Join(base, tr.Filename)}
+	if job != nil {
+		name := filepath.Base(tr.Filename)
+		for _, dir := range trimDirsOf(job) {
+			paths = append(paths, filepath.Join(dir, name))
+		}
+	}
+	return paths
 }
 
 // appendOrphanedSiblings attaches each recovered set-aside recording to the
@@ -679,82 +824,6 @@ func appendOrphanedSiblings(entries []OrphanedEntry, siblingsByStem map[string]*
 type orphanedSiblings struct {
 	dir   string
 	names []string
-}
-
-// scanTrimOrphans scans for trim files not referenced by any DB trim record.
-func scanTrimOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]OrphanedEntry, error) {
-	outputDir := cfg.Paths.OutputDirectory
-	if outputDir == "" {
-		outputDir = "./output"
-	}
-
-	absOutputDir, err := filepath.Abs(outputDir)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := os.Stat(absOutputDir); os.IsNotExist(err) {
-		return nil, nil
-	}
-
-	// One query, not one per job (sweep-2 ENGINE-17).
-	trims, err := db.GetAllTrims()
-	if err != nil {
-		return nil, err
-	}
-
-	knownTrimFiles := make(map[string]bool, len(trims))
-	for _, tr := range trims {
-		// Resolve trim path: relative to output dir
-		trimAbs := tr.Filename
-		if !filepath.IsAbs(trimAbs) {
-			trimAbs = filepath.Join(absOutputDir, trimAbs)
-		}
-		knownTrimFiles[normalizePath(trimAbs)] = true
-	}
-
-	var entries []OrphanedEntry
-
-	// Walk looking for */trim/*.mp4 patterns
-	err = filepath.Walk(absOutputDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			return nil
-		}
-
-		// Only consider files inside "trim" directories
-		dir := filepath.Dir(path)
-		if filepath.Base(dir) != "trim" {
-			return nil
-		}
-
-		absPath, _ := filepath.Abs(path)
-		if knownTrimFiles[normalizePath(absPath)] {
-			return nil // Referenced by a trim record
-		}
-		if outputClaimOwner(absPath) != "" {
-			return nil // An encode that has not recorded its trim yet
-		}
-
-		relPath, _ := filepath.Rel(absOutputDir, absPath)
-
-		entries = append(entries, OrphanedEntry{
-			Path:     absPath,
-			RelPath:  relPath,
-			Type:     "trim",
-			Size:     info.Size(),
-			Modified: info.ModTime().UTC().Format(time.RFC3339),
-		})
-
-		return nil
-	})
-	if err != nil {
-		return entries, err
-	}
-
-	return entries, nil
 }
 
 // dirSizeAndModified computes total size and latest modification time for a directory.

@@ -485,7 +485,9 @@ func TestOutputSweepOwnsARecoveredAsideSibling(t *testing.T) {
 }
 
 // TestScanTrimOrphansIssuesOneQuery pins ENGINE-17 (report #52): the scan used
-// one GetTrimsForJob per job (N+1) on every orphan sweep.
+// one GetTrimsForJob per job (N+1) on every orphan sweep. The trim half of the
+// sweep now lives in scanOutputOrphans (one walk for archives and trims), so
+// that is the function whose shape is pinned.
 //
 // Mutant: restoring the per-job loop — queries counts once per job instead of
 // once per scan.
@@ -534,7 +536,7 @@ func TestScanTrimOrphansIssuesOneQuery(t *testing.T) {
 	// can see it — so read the shape from the syntax tree, the package's
 	// technique for exactly this (queue_lifecycle_test.go's take-site pin).
 	// The mutant the brief names (restoring the per-job loop) puts
-	// GetTrimsForJob back inside scanTrimOrphans and fires the first arm.
+	// GetTrimsForJob back inside scanOutputOrphans and fires the first arm.
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, "orphans.go", nil, parser.ParseComments)
 	if err != nil {
@@ -542,19 +544,19 @@ func TestScanTrimOrphansIssuesOneQuery(t *testing.T) {
 	}
 	var scan *ast.FuncDecl
 	for _, decl := range parsed.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "scanTrimOrphans" {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "scanOutputOrphans" {
 			scan = fn
 		}
 	}
 	if scan == nil {
-		t.Fatal("no scanTrimOrphans declaration in orphans.go")
+		t.Fatal("no scanOutputOrphans declaration in orphans.go")
 	}
 	if n := len(methodCallPositions(scan, "GetTrimsForJob")); n != 0 {
-		t.Errorf("scanTrimOrphans calls GetTrimsForJob %d time(s) — that call is per JOB, so the "+
+		t.Errorf("scanOutputOrphans calls GetTrimsForJob %d time(s) — that call is per JOB, so the "+
 			"sweep pays one query per job again (ENGINE-17)", n)
 	}
 	if n := len(methodCallPositions(scan, "GetAllTrims")); n != 1 {
-		t.Errorf("scanTrimOrphans calls GetAllTrims %d time(s), want exactly 1 — one query per sweep", n)
+		t.Errorf("scanOutputOrphans calls GetAllTrims %d time(s), want exactly 1 — one query per sweep", n)
 	}
 }
 
@@ -606,21 +608,23 @@ func TestScanTrimOrphansReportsOnlyUnreferencedClips(t *testing.T) {
 		t.Fatalf("AddTrim absolute: %v", err)
 	}
 
-	entries, err := scanTrimOrphans(db, cfg)
+	entries, err := scanOutputOrphans(db, cfg)
 	if err != nil {
-		t.Fatalf("scanTrimOrphans: %v", err)
+		t.Fatalf("scanOutputOrphans: %v", err)
 	}
-	got := map[string]bool{}
+	got := map[string]string{}
 	for _, e := range entries {
-		got[normalizePath(e.Path)] = true
+		got[normalizePath(e.Path)] = e.Type
 	}
-	if !got[normalizePath(orphan)] {
-		t.Errorf("scanTrimOrphans did not offer the unreferenced clip %s", orphan)
+	if typ, ok := got[normalizePath(orphan)]; !ok {
+		t.Errorf("the sweep did not offer the unreferenced clip %s", orphan)
+	} else if typ != "trim" {
+		t.Errorf("the unreferenced clip %s is offered as %q, want \"trim\" — its directory is one a trim row names", orphan, typ)
 	}
-	if got[normalizePath(kept)] {
-		t.Errorf("scanTrimOrphans offered %s, which a trim record references by relative path", kept)
+	if _, ok := got[normalizePath(kept)]; ok {
+		t.Errorf("the sweep offered %s, which a trim record references by relative path", kept)
 	}
-	if got[normalizePath(abs)] {
-		t.Errorf("scanTrimOrphans offered %s, which a trim record references by absolute path", abs)
+	if _, ok := got[normalizePath(abs)]; ok {
+		t.Errorf("the sweep offered %s, which a trim record references by absolute path", abs)
 	}
 }

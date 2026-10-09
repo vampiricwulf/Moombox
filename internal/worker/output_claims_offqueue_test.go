@@ -39,7 +39,7 @@ func assertSweepSpares(t *testing.T, db *database.Database, cfg *config.MoomboxC
 // and no trim row names the file until it is done — so the Files sweep listed
 // the half-written trim, and Delete All unlinked it under FFmpeg.
 //
-// Mutant: dropping CreateTrim's claimOutputStem, or scanTrimOrphans' claim
+// Mutant: dropping CreateTrim's claimOutputStem, or the output sweep's claim
 // check.
 func TestOrphanSweepLeavesAnInProgressTrimAlone(t *testing.T) {
 	if runtime.GOOS == "windows" {

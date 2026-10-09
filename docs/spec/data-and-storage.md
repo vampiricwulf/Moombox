@@ -265,7 +265,7 @@ Index: `idx_gaps_job_id(job_id)`.
 | job_id | TEXT | NOT NULL, FK -> jobs(id) ON DELETE CASCADE |
 | start_time | REAL | Seconds |
 | end_time | REAL | Seconds |
-| filename | TEXT | Output filename |
+| filename | TEXT | `trim/<video id> [<start>s-<end>s].mp4` under the directory of the job's own `filename`, so relative to the JOB's output directory — its `output_directory` (a per-channel or per-job override) when set, else the global one. The file is written beside the job's output (or beside the part the range begins in), in `trim/`. Bounds are whole seconds, so a range that rounds to a taken name gets ` (2)`, ` (3)`… (`uniqueTrimBasename`, `internal/worker/trim.go`) rather than overwriting it. The orphan sweep resolves the row the same way (`trimFileLocations`, `internal/worker/orphans.go`) |
 | created_at | TEXT | RFC3339 |
 | duration | REAL | Seconds |
 | file_size | INTEGER | Bytes, nullable |
