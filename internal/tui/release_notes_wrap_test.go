@@ -85,18 +85,23 @@ func TestReleaseNotesListItemsHangUnderTheirText(t *testing.T) {
 
 // TestReleaseNotesHangCoversEveryListShape pins the shapes RELEASE_NOTES.md
 // does not happen to contain today: a numbered item hangs past its "1. ", a
-// nested bullet past its own bullet, a task past its checkbox — and a CODE
-// line that begins "1. " gets no hang at all, because only glamour's list
-// prefixes carry the mark. The mark itself never reaches the screen.
+// nested bullet past its own bullet, a task past its checkbox, a bullet whose
+// Markdown source is hard-wrapped onto a second line hangs that line too —
+// and a CODE line that begins "1. " gets no hang at all, because only
+// glamour's list prefixes carry the mark. The mark itself never reaches the
+// screen.
 //
 // Mutants: drop the mark from Enumeration, or from Task — that row's
 // continuation lands at the margin; replace the mark-detecting branch with a
 // "• or N. " pattern over the text — the code line hangs; drop the
-// strings.ReplaceAll — U+E000 is on screen.
+// strings.ReplaceAll — U+E000 is on screen; drop wrapReleaseNotes's
+// `default:` arm (the pre-fix rule) — the hard-wrapped bullet's second source
+// line and its rows start flush with the bullet.
 func TestReleaseNotesHangCoversEveryListShape(t *testing.T) {
 	const notes = "## Shapes\n\n" +
 		"1. A numbered item that is long enough to wrap over several rows at forty columns.\n" +
 		"2. Short.\n\n" +
+		"- A bullet whose Markdown source is hard-wrapped\n  onto a second line that is long enough to wrap at forty.\n\n" +
 		"- Outer bullet\n" +
 		"  - A nested bullet that is long enough to wrap over several rows at forty columns.\n\n" +
 		"- [x] A ticked task that is long enough to wrap over several rows at forty columns.\n" +
@@ -114,8 +119,8 @@ func TestReleaseNotesHangCoversEveryListShape(t *testing.T) {
 		if code < 0 {
 			t.Fatalf("the fixture's code line was not rendered:\n%s", joined)
 		}
-		if checked := checkHangingIndent(t, rows[:code], 40); checked < 8 {
-			t.Errorf("dark=%v: only %d continuation rows checked — every long item in the fixture wraps twice", dark, checked)
+		if checked := checkHangingIndent(t, rows[:code], 40); checked < 11 {
+			t.Errorf("dark=%v: only %d continuation rows checked — every long item in the fixture wraps twice, and the hard-wrapped bullet adds three", dark, checked)
 		}
 		// One row per shape, spelled out, so a shape the generic checker
 		// misread cannot pass unseen.
@@ -123,6 +128,7 @@ func TestReleaseNotesHangCoversEveryListShape(t *testing.T) {
 			"     enough to wrap over several rows",  // "  1. " — five columns
 			"      enough to wrap over several rows", // "    • " (nested) and "  [✓] " — six
 			"      to wrap over several rows at",     // "  [ ] " — six
+			"    onto a second line that is long",    // "  • ", its second source line — four
 		} {
 			if !slices.Contains(rows, want) {
 				t.Errorf("dark=%v: no continuation row reads %q:\n%s", dark, want, joined)
@@ -132,6 +138,55 @@ func TestReleaseNotesHangCoversEveryListShape(t *testing.T) {
 		// glamour's own wrap left it — never under its "1. ".
 		if next := rows[code+1]; !strings.HasPrefix(next, "  ") || strings.HasPrefix(next, "   ") {
 			t.Errorf("dark=%v: a code line beginning \"1. \" was hung like a list item:\n%q\n%q", dark, rows[code], next)
+		}
+	}
+}
+
+// TestReleaseNotesItemSourceLinesHangUnderTheText: glamour keeps a list
+// item's source line breaks (a paragraph's it turns into spaces) and starts
+// each later line at the item's BULLET column, unmarked. Every one of those
+// lines belongs under the item's text — the item's own, a nested item's, and
+// the outer item's again once the nested list is over, which glamour gives no
+// blank line. What is not the item's text keeps the margin rule: a code line
+// inside the item continues at the document margin as glamour's wrap left
+// it, and the paragraph after the list is not part of any item at all.
+//
+// Mutants: drop the `default:` arm's re-indent (keep only the hang) — each
+// second source line's first row stays at the bullet column; drop the pop
+// loop — the outer item's paragraph after the nested list stays at the
+// bullet column; `> indent` → `>= indent` in it — every second source line
+// closes its own item; `== indent` → `<= indent` — the code line hangs under
+// the item's text; drop `open = open[:0]` — the paragraph after the list is
+// hung like the item before it.
+func TestReleaseNotesItemSourceLinesHangUnderTheText(t *testing.T) {
+	const notes = "- An outer item whose source\n  runs onto a second line, long enough to wrap.\n" +
+		"  - A nested item whose source\n    runs on as well, and long enough to wrap again.\n\n" +
+		"  The outer item's next paragraph, long enough to wrap.\n\n" +
+		"  ```\n  a code line in the item, long enough to wrap at forty\n  ```\n\n" +
+		"A paragraph after the list, long enough to wrap at forty.\n"
+	want := []string{
+		"",
+		"  ",
+		"  • An outer item whose source",
+		"    runs onto a second line, long",
+		"    enough to wrap.",
+		"    • A nested item whose source",
+		"      runs on as well, and long enough",
+		"      to wrap again.",
+		"    The outer item's next paragraph,",
+		"    long enough to wrap.",
+		"    a code line in the item, long",
+		"  enough to wrap at forty",
+		"  ",
+		"  ",
+		"  A paragraph after the list, long",
+		"  enough to wrap at forty.",
+		"",
+		"",
+	}
+	for _, dark := range []bool{true, false} {
+		if got := renderedRows(t, notes, 40, dark); !slices.Equal(got, want) {
+			t.Errorf("dark=%v:\n--- got\n%s\n--- want\n%s", dark, strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 	}
 }
@@ -184,13 +239,16 @@ func TestReleaseNotesOtherBlocksWrapAsGlamourDid(t *testing.T) {
 
 // TestReleaseNotesNarrowestBodyNeverSpills: a box narrower than a bullet's
 // hang has no room for text beside it, so the hang is dropped rather than
-// leaving a non-positive width to wrap to (which wraps nothing at all).
+// leaving a non-positive width to wrap to (which wraps nothing at all). A
+// second source line, moved under the item's text, is held to the same edge.
 //
-// Mutant: delete `if hang >= limit { hang = 0 }` — the item comes back as one
-// unwrapped row.
+// Mutants: delete `if hang >= limit { hang = 0 }` — the item comes back as one
+// unwrapped row; drop `open[n-1].text < limit` from wrapReleaseNotes's
+// re-indent — at three columns the second source line's first row is the
+// four spaces it was given and a letter.
 func TestReleaseNotesNarrowestBodyNeverSpills(t *testing.T) {
 	for width := 3; width <= 8; width++ {
-		for i, row := range renderedRows(t, "- A bullet with words in it\n", width, true) {
+		for i, row := range renderedRows(t, "- A bullet with words in it\n  and a second source line\n", width, true) {
 			if w := ansi.StringWidth(row); w > width {
 				t.Errorf("width %d, row %d is %d columns: %q", width, i, w, row)
 			}

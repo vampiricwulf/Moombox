@@ -255,12 +255,18 @@ func releaseNotesStyle(dark bool) gansi.StyleConfig {
 // limit, ANSI-aware (lipgloss.Wrap carries a style across the rows it breaks),
 // breaking at spaces and hyphens — the rule glamour applied to paragraphs and
 // headings. Unwrapped, glamour emits one line per block line, so each line is
-// one heading, one paragraph, one code line or one list item, and it decides
-// where that line's continuation rows start:
+// one heading, one paragraph, one code line, or one source line of a list
+// item, and it decides where that line's continuation rows start:
 //
 //   - a list item continues UNDER ITS TEXT, at the column the list mark
 //     sits in — past the bullet, the "1. " or the checkbox, at any nesting
 //     depth;
+//   - so does a list item's text that its SOURCE broke over several lines —
+//     a hard-wrapped Markdown bullet, or a lazy continuation line. A
+//     paragraph's soft breaks glamour turns into spaces, but an item's it
+//     keeps, and it starts each later line at the item's BULLET column with
+//     no mark; that line is moved under the item's text and hangs there too.
+//     See releaseNotesItem for how a line is told to be one;
 //   - everything else continues at the margin glamour indented the block by,
 //     the run of plain spaces ahead of the line's first escape sequence. That
 //     is where glamour's own wrap put it: a heading or paragraph continues at
@@ -269,15 +275,55 @@ func releaseNotesStyle(dark bool) gansi.StyleConfig {
 func wrapReleaseNotes(rendered string, limit int) string {
 	lines := strings.Split(rendered, "\n")
 	out := make([]string, 0, len(lines))
+	var open []releaseNotesItem // the items a line may still belong to, outermost first
 	for _, line := range lines {
 		hang := len(line) - len(strings.TrimLeft(line, " "))
-		if i := strings.Index(line, releaseNotesListMark); i >= 0 {
+		visible := ansi.Strip(line)
+		indent := len(visible) - len(strings.TrimLeft(visible, " "))
+		switch i := strings.Index(line, releaseNotesListMark); {
+		case i >= 0:
 			hang = ansi.StringWidth(line[:i])
+			open = append(open, releaseNotesItem{bullet: indent, text: hang})
 			line = strings.ReplaceAll(line, releaseNotesListMark, "")
+		case strings.TrimSpace(visible) == "":
+			// Glamour closes every list with a blank line, and every block
+			// after one opens past it.
+			open = open[:0]
+		default:
+			for len(open) > 0 && open[len(open)-1].bullet > indent {
+				open = open[:len(open)-1]
+			}
+			// Not when the text column leaves no room: hangingWrap drops
+			// such a hang, and the spaces added here would stay on the
+			// first row, past the edge. The line keeps glamour's indent, as
+			// the item's first line keeps its bullet.
+			if n := len(open); n > 0 && open[n-1].bullet == indent && open[n-1].text < limit {
+				// TruncateLeft drops glamour's indent cells, styled or not,
+				// and keeps their escape sequences.
+				hang = open[n-1].text
+				line = strings.Repeat(" ", hang) + ansi.TruncateLeft(line, indent, "")
+			}
 		}
 		out = append(out, hangingWrap(line, hang, limit)...)
 	}
 	return strings.Join(out, "\n")
+}
+
+// releaseNotesItem is a list item a later unmarked line may still belong to:
+// the visible column its bullet starts at and the column its text starts at.
+//
+// Glamour starts an item's later source lines at its BULLET column, so a line
+// that does belongs to the item: a nested item's line sits two columns deeper,
+// a code block inside the item deeper still (it keeps the margin rule, as a
+// top-level one does), and the enclosing item's shallower — which is why the
+// open items are a stack. Glamour ends a nested list with no blank line before
+// the enclosing item's next paragraph, so a shallower line closes every item
+// deeper than it and lands on the one it belongs to; a blank line closes them
+// all. Only the top is ever compared, so a sibling the newest item replaced
+// is never popped on its own: it sits under that item, as deep or deeper, and
+// leaves with it.
+type releaseNotesItem struct {
+	bullet, text int
 }
 
 // hangingWrap breaks one line into rows no wider than limit: the first keeps
