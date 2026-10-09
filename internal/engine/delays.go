@@ -9,8 +9,11 @@ import "time"
 // of intent and this struct is the only knob. Tests poke it directly after
 // NewSegmentDownloader, the way they already poke MayResume and OnActivity;
 // nothing outside the package sees it. The first-segment hunt
-// (firstSegmentHuntDelay), the direct-download backoffs (downloader_fetch.go)
-// and the eviction probe keep their own constants: no test waits on them.
+// (firstSegmentHuntDelay) and the eviction probe (evictionProbeRetryDelay)
+// keep their own constants: no test waits on them. The whole-file
+// direct-download path is not among them — its size probe backs off in
+// genericRetry, its chunk ladder and outage verdict count in
+// atEdgeBackoffUnit, and its outage waits poll on connectivityPoll.
 //
 // fetchHardCeiling is the one member that is not a sleep: it is a per-fetch
 // deadline, and it lives here for the same reason the sleeps do — a test that
@@ -25,7 +28,7 @@ type delays struct {
 	hlsPlaylistRetry       time.Duration // hlsPlaylistRetryDelay — playlist fetch or parse failed
 	hlsStuckRetry          time.Duration // hlsStuckRetryDelay — a segment or the init keeps failing
 	connectivityPoll       time.Duration // connectivityPollInterval — waitForConnectivity's ticker
-	atEdgeBackoffUnit      time.Duration // the second the 429 backoff, same-head retry and per-chunk backoff count in
+	atEdgeBackoffUnit      time.Duration // the second the 429 backoff, same-head retry, per-chunk backoff and outage verdict count in
 	hlsReloadUnit          time.Duration // the second hlsReloadDelay scales playlist durations by
 	hlsResumeSave          time.Duration // hlsResumeSaveInterval — live-loop resume sidecar floor
 	fetchHardCeiling       time.Duration // segmentHardCeiling — one segment/chunk fetch's absolute lifetime
