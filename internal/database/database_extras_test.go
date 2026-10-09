@@ -133,6 +133,76 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 	}
 }
 
+// Total Recording Time and Chat Messages — both dashboards' Activity figures
+// — sum length_seconds and total_chat_messages over Finished rows only, and a
+// row with an empty platform counts as YouTube in both the count and the
+// size. The aggregate test above seeds neither column and no empty platform,
+// so zeroing either sum, summing them over every status, or dropping the
+// empty platform from the YouTube clauses survived every suite.
+//
+// Mutants: `THEN length_seconds` or `THEN total_chat_messages` → `THEN 0`;
+// either sum widened to Error/Downloading rows; the YouTube count's or size's
+// platform clause narrowed to `platform = 'youtube'`.
+func TestGetJobStatsSumsFinishedDurationChatAndLegacyPlatform(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	type seed struct {
+		id       string
+		plat     string
+		status   JobStatus
+		size     int64
+		length   int
+		messages int
+	}
+	seeds := []seed{
+		{"f1", "youtube", StatusFinished, 100, 3600, 1200},
+		{"f2", "twitch", StatusFinished, 50, 600, 34},
+		{"legacy", "youtube", StatusFinished, 7, 60, 5}, // platform blanked below
+		// Not Finished: their length and chat must not count.
+		{"e1", "youtube", StatusError, 10, 9000, 9000},
+		{"a1", "youtube", StatusDownloading, 0, 7000, 7000},
+	}
+	for _, s := range seeds {
+		if _, err := db.AddJob(&Job{ID: s.id, VideoID: s.id, URL: "u", Platform: s.plat, Status: s.status}); err != nil {
+			t.Fatalf("AddJob %s: %v", s.id, err)
+		}
+		if got := db.UpdateJobFields(s.id, map[string]any{
+			"file_size": s.size, "length_seconds": s.length, "total_chat_messages": s.messages,
+		}); got == nil {
+			t.Fatalf("UpdateJobFields %s: nil", s.id)
+		}
+	}
+	// A row whose platform is empty — the stats query counts it as YouTube.
+	if _, err := db.db.Exec(`UPDATE jobs SET platform = '' WHERE id = 'legacy'`); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := db.GetJobStats()
+	if err != nil {
+		t.Fatalf("GetJobStats: %v", err)
+	}
+	if stats.TotalDuration != 3600+600+60 {
+		t.Errorf("TotalDuration = %d, want %d (Finished rows only)", stats.TotalDuration, 3600+600+60)
+	}
+	if stats.TotalChatMessages != 1200+34+5 {
+		t.Errorf("TotalChatMessages = %d, want %d (Finished rows only)", stats.TotalChatMessages, 1200+34+5)
+	}
+	if stats.YouTubeCount != 4 || stats.TwitchCount != 1 {
+		t.Errorf("platform counts = youtube %d, twitch %d; want 4 and 1 — the empty platform is YouTube",
+			stats.YouTubeCount, stats.TwitchCount)
+	}
+	if stats.YouTubeSize != 100+7+10 || stats.TwitchSize != 50 {
+		t.Errorf("platform sizes = youtube %d, twitch %d; want %d and 50 — the empty platform is YouTube",
+			stats.YouTubeSize, stats.TwitchSize, 100+7+10)
+	}
+}
+
 func TestJobStatsQueuedCount(t *testing.T) {
 	t.Parallel()
 	// Queued is a resting state: it surfaces in its own QueuedCount bucket
@@ -208,6 +278,43 @@ func TestGetJobStatsCachesResultsBriefly(t *testing.T) {
 	// the cached pointer is safe because callers only read the value")
 	if first != second {
 		t.Error("cached call should return same pointer as first call")
+	}
+}
+
+// The cache is never invalidated on writes, so expiry is the only way the
+// Stats tab and the E T overlay ever see a new figure. Nothing pinned it: a
+// cache that never expired showed the first snapshot for the life of the
+// process with every suite green.
+//
+// Mutants: the TTL check → `true` (never expires), or a TTL far longer than
+// jobStatsCacheTTL — the row added after the first read never shows.
+func TestGetJobStatsCacheExpires(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	first, err := db.GetJobStats()
+	if err != nil || first.FinishedCount != 0 {
+		t.Fatalf("first read on an empty DB = %+v, %v", first, err)
+	}
+	if _, err := db.AddJob(&Job{ID: "late", VideoID: "x", URL: "u", Platform: "youtube", Status: StatusFinished}); err != nil {
+		t.Fatal(err)
+	}
+	// Age the cached snapshot just past its TTL rather than sleeping 5 s.
+	db.statsMu.Lock()
+	db.statsCachedAt = time.Now().Add(-jobStatsCacheTTL - time.Second)
+	db.statsMu.Unlock()
+
+	fresh, err := db.GetJobStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == first || fresh.FinishedCount != 1 {
+		t.Errorf("a read past the TTL served the stale snapshot: FinishedCount %d, want 1", fresh.FinishedCount)
 	}
 }
 
