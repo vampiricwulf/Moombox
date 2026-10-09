@@ -413,6 +413,18 @@ func NewDownloadWorker(
 func (w *DownloadWorker) Start(ctx context.Context) {
 	w.logger.Info("download worker started")
 
+	// Staging leftovers a previous run left behind that are provably
+	// redundant (reclaimBootLeftovers). Off the queue's path: a slow delete
+	// must not hold up a live capture waiting to start.
+	w.wg.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("panic in the boot staging cleanup", "panic", fmt.Sprint(r))
+			}
+		}()
+		w.reclaimBootLeftovers()
+	})
+
 	// Enqueue existing pending jobs
 	w.enqueueExistingJobs()
 
@@ -1028,15 +1040,9 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	w.db.TrackJobForLogs(jobID)
 	defer w.restoreLogRouting(jobID)
 	fresh, _ := w.db.GetJob(jobID)
-	preserveForTail := fresh != nil && fresh.IncompleteTail
-	// A chat capture that ended without completing leaves its resume
-	// sidecar in staging; deleting the dir turns a recoverable truncation
-	// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
-	// shape as the incomplete_tail preservation above it, and the orphan
-	// scanner mirrors it in jobNeedsStaging — but only the chat files are
-	// kept, not the muxed-away media (see keepOnlyChatCapture).
-	preserveForChat := fresh != nil && fresh.ChatStatus == chatStatusIncomplete
-	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
+	v := decideStagingCleanup(w.db, fresh, jobID, stagingDir)
+	switch v.keep {
+	case keepStagingForAsides:
 		// A recording the engine could not resume was set aside rather than
 		// truncated (engine.StagedRestartSuffix), and nothing in the mux
 		// pipeline has consumed it: the fresh capture that replaced it is not
@@ -1045,11 +1051,11 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		// the strength of a shorter one finishing cleanly. Named in recording
 		// order so an operator muxing them by hand knows which came first.
 		w.logger.Warn("preserving staging dir: a set-aside recording was never merged into the archive; these are in recording order, oldest first",
-			"asides", strings.Join(asides, " | "), "path", stagingDir, "jobID", jobID)
-	} else if w.hasUnmuxedParts(jobID, stagingDir) {
+			"asides", strings.Join(v.asides, " | "), "path", stagingDir, "jobID", jobID)
+	case keepStagingForUnmuxedPart:
 		w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
 			"path", stagingDir, "jobID", jobID)
-	} else if unused := unusedRootRecording(w.db, jobID, stagingDir); unused != "" {
+	case keepStagingForUnusedRoot:
 		// The staging root holds a recording the finalize did not use: the
 		// from-the-start download beside a job that finalized as parts (one
 		// that did not complete, or one from before the root was claimed for
@@ -1057,11 +1063,11 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		// muxed. Either can be the longer copy; deleting it here is how a
 		// complete VOD download used to vanish (vod_supersede.go).
 		w.logger.Warn("preserving staging dir: the staging root holds a recording the finalize did not use",
-			"recording", unused, "path", stagingDir, "jobID", jobID)
-	} else if preserveForTail {
+			"recording", v.unusedRoot, "path", stagingDir, "jobID", jobID)
+	case keepStagingForTail:
 		w.logger.Warn("preserving staging dir: recording tail incomplete; Resume will append the missing segments from the sidecar",
 			"path", stagingDir, "jobID", jobID)
-	} else if preserveForChat {
+	case keepStagingChatOnly:
 		// Keep the chat capture, drop everything else: the media in here
 		// is already muxed into the output file, so shielding the whole
 		// dir for downloader.incomplete_staging_expiry_days (7 by
@@ -1073,11 +1079,68 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		}
 		w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar is kept for a re-run",
 			"path", stagingDir, "jobID", jobID)
-	} else if err := os.RemoveAll(stagingDir); err != nil {
-		w.logger.Warn("failed to remove staging directory", "path", stagingDir, "err", err)
-	} else {
-		w.logger.Debug("removed staging directory", "path", stagingDir)
+	default:
+		if err := os.RemoveAll(stagingDir); err != nil {
+			w.logger.Warn("failed to remove staging directory", "path", stagingDir, "err", err)
+		} else {
+			w.logger.Debug("removed staging directory", "path", stagingDir)
+		}
 	}
+}
+
+// stagingKeep is what decideStagingCleanup concluded about a finalized job's
+// staging directory: delete it (removeStaging), keep all of it for one of four
+// reasons, or prune it down to the chat capture.
+type stagingKeep int
+
+const (
+	removeStaging stagingKeep = iota
+	keepStagingForAsides
+	keepStagingForUnmuxedPart
+	keepStagingForUnusedRoot
+	keepStagingForTail
+	keepStagingChatOnly
+)
+
+// stagingVerdict is decideStagingCleanup's answer, with what the Warn that
+// keeps the directory names: the set-aside recordings, or the root recording
+// the finalize did not use.
+type stagingVerdict struct {
+	keep       stagingKeep
+	asides     []string
+	unusedRoot string
+}
+
+// decideStagingCleanup is cleanupStagingAfterMux's decision, without the
+// acting on it — split out so the boot sweep (reclaimBootLeftovers) deletes a
+// finalized job's staging on exactly the rules this function would have, and
+// never on a looser copy of them. The shields are checked in the order the
+// cleanup has always checked them, so the Warn an operator reads names the
+// first that holds. fresh may be nil (the row read failed or the row is
+// gone): the tail and chat shields then do not apply, as they never did.
+func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, stagingDir string) stagingVerdict {
+	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
+		return stagingVerdict{keep: keepStagingForAsides, asides: asides}
+	}
+	if hasUnmuxedPartsForJob(db, jobID, stagingDir) {
+		return stagingVerdict{keep: keepStagingForUnmuxedPart}
+	}
+	if unused := unusedRootRecording(db, jobID, stagingDir); unused != "" {
+		return stagingVerdict{keep: keepStagingForUnusedRoot, unusedRoot: unused}
+	}
+	if fresh != nil && fresh.IncompleteTail {
+		return stagingVerdict{keep: keepStagingForTail}
+	}
+	// A chat capture that ended without completing leaves its resume
+	// sidecar in staging; deleting the dir turns a recoverable truncation
+	// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
+	// shape as the incomplete_tail preservation above it, and the orphan
+	// scanner mirrors it in jobNeedsStaging — but only the chat files are
+	// kept, not the muxed-away media (see keepOnlyChatCapture).
+	if fresh != nil && fresh.ChatStatus == chatStatusIncomplete {
+		return stagingVerdict{keep: keepStagingChatOnly}
+	}
+	return stagingVerdict{keep: removeStaging}
 }
 
 // keepOnlyChatCapture deletes everything under a preserved staging dir except

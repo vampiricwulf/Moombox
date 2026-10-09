@@ -631,7 +631,7 @@ Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses it into TWO 
 
 ### File Output
 
-**Staging directory:** Active downloads write segments to `staging/{jobID}/`. Contains video segments, audio segments, chat JSON, and resume state files.
+**Staging directory:** Active downloads write segments to `staging/{jobID}/`. Contains video segments, audio segments, chat JSON, and resume state files. At each start the worker deletes only the leftovers that are provably redundant — a recovered set-aside recording whose sibling is on disk, and a `Finished` job's staging when its archive is on disk and the post-mux cleanup's own rules would have deleted it — logging each with its path and reason; everything else waits for the orphan sweep's confirm-before-delete (`reclaimBootLeftovers`, `internal/worker/boot_leftovers.go`).
 
 **Output template:** Default `${channel}/${start_date} ${title} [${id}]`. Variables are expanded at mux time. Creates per-channel subdirectories.
 
