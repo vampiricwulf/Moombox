@@ -29,8 +29,9 @@ func legacyKeyTarget(t *testing.T, f *fakeDiscord, urls ...string) notificationT
 }
 
 // 2.8.9 and 2.8.10 resolved a webhook by rewriting only discordapp.com, so a
-// ptb./canary. host, a trailing slash or a bare "?" each stored a job's
-// message id under a key of its own. canonicalDiscordURL folded them all into
+// ptb./canary. host, a trailing slash, a bare "?", and a query's order, stray
+// '&' or wait each stored a job's message id under a key of its own.
+// canonicalDiscordURL folded them all into
 // one https://discord.com/... form, which changed the key: after the upgrade an
 // in-progress job's next event found no id and opened a SECOND message, and its
 // error or cancel — which never opens one — left the first reading
@@ -42,7 +43,7 @@ func legacyKeyTarget(t *testing.T, f *fakeDiscord, urls ...string) notificationT
 //
 // Mutants: messageID ignoring its legacy keys, or buildTargets not deriving
 // them — every row POSTs; the duplicate branch not appending the collapsed
-// spelling's key — the last row POSTs.
+// spelling's key — both collapsed rows POST.
 func TestAnUpgradeKeepsEditingTheMessageAnOldSpellingStored(t *testing.T) {
 	const id, tok = "123456789012345678", "abcdefTOKEN"
 	plain := "https://discord.com/api/webhooks/" + id + "/" + tok
@@ -60,6 +61,11 @@ func TestAnUpgradeKeepsEditingTheMessageAnOldSpellingStored(t *testing.T) {
 		{"a bare query", []string{plain + "?"}, plain + "?"},
 		{"a bare query on the discord:// form", []string{"discord://" + id + "/" + tok + "?"}, plain + "?"},
 		{"a spelling that collapsed into an earlier one", []string{plain, ptb}, ptb},
+		{"a query carrying wait", []string{plain + "?wait=true&thread_id=9"}, plain + "?wait=true&thread_id=9"},
+		{"a query in another order with a stray '&'",
+			[]string{plain + "?with_components=true&thread_id=9&"}, plain + "?with_components=true&thread_id=9&"},
+		{"a query spelling that collapsed into an earlier one",
+			[]string{plain + "?thread_id=9", plain + "?thread_id=9&"}, plain + "?thread_id=9&"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeDiscord(t, okCreated("NEW"))
@@ -95,6 +101,7 @@ func TestACanonicalSpellingCarriesNoOldKey(t *testing.T) {
 		"https://discord.com/api/webhooks/" + id + "/" + tok,
 		"discord://" + id + "/" + tok,
 		"https://discord.com/api/webhooks/" + id + "/" + tok + "?thread_id=9",
+		"https://discord.com/api/webhooks/" + id + "/" + tok + "?thread_id=9&with_components=true",
 	} {
 		if got := legacyKeyTarget(t, f, u).legacyMsgKeys; len(got) != 0 {
 			t.Errorf("%q carries old keys %v, want none", u, got)

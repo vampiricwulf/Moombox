@@ -631,7 +631,16 @@ host, a trailing slash and an empty query (a bare `?`) all resolve to the one
 `https://discord.com/…` form
 (`canonicalDiscordURL`), which is also what target dedupe keys on (a slash or a
 `ptb.` host used to build a second target that posted every embed again, and in
-edit mode opened new messages for every job in progress). The releases that
+edit mode opened new messages for every job in progress). The query is folded
+too (`canonicalWebhookQuery`, `internal/notifications/discord_edit.go`): its
+parameters sorted by name, as the sender already encodes them on the wire,
+with every nameless pair (a stray `&`) and every `wait` dropped — the sender
+adds `wait=true` itself to the one request that reads the created message and
+strips it from the edit route, so a configured one changed only the key.
+`thread_id` and every other named parameter stay, even with an empty value,
+and a query `net/url` refuses to parse (a `;` separator, a bad escape) is kept
+as typed. `…?thread_id=9`, `…?thread_id=9&` and `…?wait=true&thread_id=9`
+are one target; `…?thread_id=9` and the bare URL are two. The releases that
 shipped edit mode, 2.8.9 and 2.8.10, rewrote only `discordapp.com` and kept the
 rest as typed, so a row they wrote under one of the other spellings holds the
 id under that spelling's own key. A target remembers the old key of every

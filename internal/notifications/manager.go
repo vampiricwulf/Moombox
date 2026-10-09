@@ -416,23 +416,23 @@ func parseTarget(url string) (sender, error) {
 
 // canonicalDiscordURL is the one spelling of an https webhook URL that
 // discordWebhookRe has accepted: host discord.com, whatever subdomain or
-// legacy discordapp.com it was given as, and no trailing slash on the path,
-// with the query kept — unless it is a bare "?", which carries no parameter
-// and is dropped. Load-bearing twice over. buildTargets dedupes on the
-// RESOLVED URL and targetMsgKey hashes it, so "…/TOKEN", "…/TOKEN/",
-// "…/TOKEN?" and "ptb.discord.com/…/TOKEN" built four targets that posted
-// every embed four times — and a slash added in edit mode opened new messages
-// for every job in progress. And Go's http.Client turns a 301/302 on a POST
-// into a GET, so following discordapp.com's redirect would drop the body.
+// legacy discordapp.com it was given as, no trailing slash on the path, and
+// the query in its own one spelling (canonicalWebhookQuery, discord_edit.go):
+// its parameters sorted, with no empty pair and no wait — and none at all,
+// "?" included, when that leaves no parameter. Load-bearing twice over.
+// buildTargets dedupes on the RESOLVED URL and targetMsgKey hashes it, so
+// "…/TOKEN", "…/TOKEN/", "…/TOKEN?" and "ptb.discord.com/…/TOKEN" built four
+// targets that posted every embed four times, and "…?thread_id=9&" or
+// "…?wait=true&thread_id=9" one more each beside "…?thread_id=9" — and a
+// slash added in edit mode opened new messages for every job in progress.
+// And Go's http.Client turns a 301/302 on a POST into a GET, so following
+// discordapp.com's redirect would drop the body.
 func canonicalDiscordURL(raw string) string {
 	rest := strings.TrimPrefix(raw, "https://")
 	path := rest[strings.Index(rest, "/"):] // the pattern guarantees a path
 	query := ""
 	if i := strings.IndexByte(path, '?'); i >= 0 {
-		path, query = path[:i], path[i:]
-	}
-	if query == "?" {
-		query = ""
+		path, query = path[:i], canonicalWebhookQuery(path[i+1:])
 	}
 	return "https://discord.com" + strings.TrimSuffix(path, "/") + query
 }
@@ -441,8 +441,9 @@ func canonicalDiscordURL(raw string) string {
 // edit mode — resolved a configured webhook to, and therefore the string
 // whose targetMsgKey their rows store message ids under. Those releases only
 // rewrote the legacy discordapp.com host and kept everything else as typed,
-// so a ptb./canary. host, a trailing slash or a bare "?" each gave the
-// webhook a key of its own; canonicalDiscordURL now folds them all into one.
+// so a ptb./canary. host, a trailing slash, a bare "?", and a query's order,
+// stray '&' or wait each gave the webhook a key of its own;
+// canonicalDiscordURL now folds them all into one.
 // Without the old key a job open across the upgrade lost its message: its
 // next event opened a second one, and its error or cancel — which never
 // opens one — left the first reading "Downloading" for good.
