@@ -109,6 +109,72 @@ func TestACanonicalSpellingCarriesNoOldKey(t *testing.T) {
 	}
 }
 
+// An old key is read only where the old resolution named the target's own
+// webhook. "discord://ID/TOKEN/?thread_id=9" resolved to the bare channel
+// webhook before its query was kept, so its old key is the channel's, and the
+// ids under it are channel messages: the thread target's edit route cannot
+// reach them, and when the channel is configured too they are the channel
+// target's own. Read as the thread's, the thread target adopted the channel
+// target's id, and the channel target's next event, finding it gone, opened a
+// second message.
+//
+// Mutant: buildTargets deriving an old key whatever its old resolution named
+// — the thread PATCHes the channel's message in both rows, and the channel
+// POSTs in the second.
+func TestAnOldKeyOfAnotherWebhookIsNotRead(t *testing.T) {
+	const id, tok = "123456789012345678", "abcdefTOKEN"
+	plain := "https://discord.com/api/webhooks/" + id + "/" + tok
+	thread := "discord://" + id + "/" + tok + "/?thread_id=9"
+	const job = "dQw4w9WgXcQ"
+	for _, tc := range []struct {
+		name string
+		urls []string
+	}{
+		{"the thread alone", []string{thread}},
+		{"beside its channel", []string{plain, thread}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.MoomboxConfig{}
+			for _, u := range tc.urls {
+				cfg.Notifications = append(cfg.Notifications, config.NotificationConfig{URL: u, Mode: ModeEdit})
+			}
+			built := buildTargets(cfg, testLogger{})
+			if len(built) != len(tc.urls) {
+				t.Fatalf("%v built %d targets, want %d", tc.urls, len(built), len(tc.urls))
+			}
+			fakes := make([]*fakeDiscord, len(built))
+			for i := range built {
+				fakes[i] = newFakeDiscord(t, okCreated("NEW"))
+				built[i].sender = &DiscordWebhook{URL: fakes[i].URL()}
+			}
+			threadTgt, threadFake := built[len(built)-1], fakes[len(fakes)-1]
+			if len(threadTgt.legacyMsgKeys) != 0 {
+				t.Errorf("the thread target reads old keys %v, want none", threadTgt.legacyMsgKeys)
+			}
+			st := newMemStore()
+			st.rows[job] = map[string]string{targetMsgKey(plain): "M_CHANNEL"}
+			m := &Manager{logger: testLogger{}}
+			m.SetMessageStore(st)
+
+			// The thread first: what it takes from the row, the channel's
+			// event then misses.
+			for i := len(built) - 1; i >= 0; i-- {
+				if err := m.dispatchOne(built[i], One("Downloading", "d", 0, nil, SendOptions{Event: "downloading", JobID: job}), false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := requestLines(threadFake.calls()); !slices.Equal(got, []string{"POST /"}) {
+				t.Errorf("the thread's first event = %v, want a POST opening its own message", got)
+			}
+			if len(built) == 2 {
+				if got := requestLines(fakes[0].calls()); !slices.Equal(got, []string{"PATCH /messages/M_CHANNEL"}) {
+					t.Errorf("the channel's next event = %v, want a PATCH of its message M_CHANNEL", got)
+				}
+			}
+		})
+	}
+}
+
 // Adopting an old key's id moves it: the old key leaves the in-memory map, so
 // the job's next row write — here another target's first POST for the job —
 // stores the id under the current key and the old key is gone; and a

@@ -383,12 +383,22 @@ func parseTarget(url string) (sender, error) {
 	case strings.HasPrefix(url, "discord://"):
 		// discord://ID/TOKEN -> https://discord.com/api/webhooks/ID/TOKEN
 		raw := strings.TrimPrefix(url, "discord://")
+		// The query is cut off before the path is split, and goes back on
+		// after. Split with it, "discord://ID/TOKEN/?thread_id=9" — the slash
+		// the https spelling accepts there too — made "?thread_id=9" a third
+		// segment, which the split drops: every post went to the channel
+		// rather than the thread, and listed beside its https spelling the
+		// webhook built two targets that posted every embed twice.
+		raw, query, hasQuery := strings.Cut(raw, "?")
 		// Only use the first two path segments (ID/TOKEN), matching TS behavior
 		segments := strings.SplitN(raw, "/", 3)
 		if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
 			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN")
 		}
 		resolved := "https://discord.com/api/webhooks/" + strings.Join(segments[:2], "/")
+		if hasQuery {
+			resolved += "?" + query
+		}
 		// The resolved URL passes the same anchored check as the https
 		// spelling. Without it this form took anything — a ")" from a
 		// Markdown link, a trailing space or newline from a paste, a
@@ -398,9 +408,8 @@ func parseTarget(url string) (sender, error) {
 		if !discordWebhookRe.MatchString(resolved) {
 			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN with a numeric ID")
 		}
-		// Through the same canonical form as the https spelling: the TOKEN
-		// segment carries whatever query followed it, and a bare "?" there
-		// is no query either.
+		// Through the same canonical form as the https spelling: a bare "?"
+		// is no query here either.
 		return &DiscordWebhook{URL: canonicalDiscordURL(resolved)}, nil
 
 	case discordWebhookRe.MatchString(url):
@@ -451,6 +460,11 @@ func canonicalDiscordURL(raw string) string {
 // Kept for as long as a row can hold such a key: a finished job's row
 // outlives any number of upgrades, and a Retry of it edits its message.
 // Only ever called on a URL parseTarget accepted.
+//
+// Their discord:// arm split the query with the path, so a slash before it
+// ("discord://ID/TOKEN/?thread_id=9") resolved to the bare channel webhook:
+// this returns that, as they did, and buildTargets reads an old key only
+// where canonicalDiscordURL of it is the target's own URL.
 func legacyResolvedURL(url string) string {
 	if raw, ok := strings.CutPrefix(url, "discord://"); ok {
 		segments := strings.SplitN(raw, "/", 3)
@@ -619,11 +633,21 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		}
 		msgKey := targetMsgKey(key)
 		// The key this spelling's ids were stored under before the upgrade,
-		// when it differs from the one they are stored under now.
+		// when it differs from the one they are stored under now — and only
+		// when the old resolution named this same webhook. One that named
+		// another stored the ids of that destination's messages:
+		// "discord://ID/TOKEN/?thread_id=9" resolved to the bare channel
+		// webhook, so its old key is the channel's. Read as this target's,
+		// the thread target took the ids of messages its edit route cannot
+		// reach, and when the channel is configured too, the channel
+		// target's own: that one's next event, finding its id adopted away,
+		// opened a second message.
 		legacyKey := ""
 		if key != "" {
-			if lk := targetMsgKey(legacyResolvedURL(url)); lk != msgKey {
-				legacyKey = lk
+			if old := legacyResolvedURL(url); canonicalDiscordURL(old) == key {
+				if lk := targetMsgKey(old); lk != msgKey {
+					legacyKey = lk
+				}
 			}
 		}
 		if key != "" {

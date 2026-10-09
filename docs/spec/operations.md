@@ -497,7 +497,7 @@ Notifications are configured in the TOML config as an array of notification targ
 | Format | Example | Behavior |
 |--------|---------|----------|
 | Full HTTPS | `https://discord.com/api/webhooks/123/abc` | Used directly |
-| Shorthand | `discord://123/abc` | Expanded to `https://discord.com/api/webhooks/123/abc` |
+| Shorthand | `discord://123/abc` | Expanded to `https://discord.com/api/webhooks/123/abc`, keeping a query (`?thread_id=…`) whether or not a slash comes before it; any path past the token is dropped |
 
 URL validation rejects non-HTTPS Discord webhook URLs and URLs with invalid ID/token structure. Unsupported URL schemes are logged as warnings and skipped.
 
@@ -640,12 +640,19 @@ strips it from the edit route, so a configured one changed only the key.
 `thread_id` and every other named parameter stay, even with an empty value,
 and a query `net/url` refuses to parse (a `;` separator, a bad escape) is kept
 as typed. `…?thread_id=9`, `…?thread_id=9&` and `…?wait=true&thread_id=9`
-are one target; `…?thread_id=9` and the bare URL are two. The releases that
+are one target; `…?thread_id=9` and the bare URL are two. The shorthand keeps
+its query too, with or without a slash before it: `discord://ID/TOKEN/?thread_id=9`
+used to lose it with the path past the token, and posted to the channel —
+beside its https spelling, as a second target. The releases that
 shipped edit mode, 2.8.9 and 2.8.10, rewrote only `discordapp.com` and kept the
 rest as typed, so a row they wrote under one of the other spellings holds the
 id under that spelling's own key. A target remembers the old key of every
 spelling folded into it (`legacyResolvedURL`, `internal/notifications/manager.go`)
-and reads it when the current key misses: the id is adopted under the current
+whose old resolution named the same webhook — not the shorthand's with a slash
+before its query, which resolved to the bare channel webhook: the ids under
+that key are channel messages, the thread's edit route cannot reach them, and
+when the channel is configured too they are the channel target's own — and
+reads it when the current key misses: the id is adopted under the current
 key in memory and the old key leaves the map (`messageID`,
 `internal/notifications/lifecycle.go`), so a job open across the upgrade keeps
 editing its message — and its error or cancel still closes it — and the old key

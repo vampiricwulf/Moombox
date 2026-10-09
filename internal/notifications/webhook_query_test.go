@@ -15,11 +15,18 @@ import (
 // nameless one and every wait dropped; thread_id and any other parameter
 // stays, and a query net/url refuses to parse is kept as given.
 //
+// The discord:// form keeps its query whole, wherever a slash falls: split
+// with the path, a slash before it ("discord://ID/TOKEN/?thread_id=9") made
+// the query a third segment, dropped with it, and the thread's posts went to
+// the channel.
+//
 // Mutants: canonicalDiscordURL keeping the query as given — every reordered,
 // '&' and wait row fails; keeping wait — the wait rows fail; keeping a
 // nameless pair — the "=x" row fails; dropping a named parameter with an
 // empty value — the "thread_id=" row fails; dropping the pairs a parse
-// refused — the ';' row fails.
+// refused — the ';' row fails; parseTarget's discord:// arm splitting the
+// query with the path — the discord:// rows with a slash in or before the
+// query fail.
 func TestAWebhooksQueryIsCanonical(t *testing.T) {
 	const id, tok = "123456789012345678", "tok-en_ABC"
 	base := "https://discord.com/api/webhooks/" + id + "/" + tok
@@ -36,6 +43,13 @@ func TestAWebhooksQueryIsCanonical(t *testing.T) {
 		{base + "?thread_id=9&wait=false", base + "?thread_id=9"},
 		{"discord://" + id + "/" + tok + "?wait=true&thread_id=9", base + "?thread_id=9"},
 		{"https://ptb.discordapp.com/api/webhooks/" + id + "/" + tok + "/?thread_id=9&", base + "?thread_id=9"},
+		{"discord://" + id + "/" + tok + "/?thread_id=9", base + "?thread_id=9"},
+		{"discord://" + id + "/" + tok + "/?wait=true&thread_id=9&", base + "?thread_id=9"},
+		{"discord://" + id + "/" + tok + "/?", base},
+		// Past ID/TOKEN the path is still dropped, as it always was; the
+		// query is not.
+		{"discord://" + id + "/" + tok + "/extra?thread_id=9", base + "?thread_id=9"},
+		{"discord://" + id + "/" + tok + "?x=a/b", base + "?x=a%2Fb"},
 		// A named parameter with no value is not nothing: folded into the
 		// bare URL, it would post to the channel what was configured for a
 		// thread.
@@ -60,8 +74,10 @@ func TestAWebhooksQueryIsCanonical(t *testing.T) {
 // Every spelling of one webhook's query is one target, and two queries that
 // mean two destinations stay two.
 //
-// Mutant: canonicalDiscordURL keeping the query as given — the first two rows
-// build more than one target.
+// Mutants: canonicalDiscordURL keeping the query as given — the first and
+// third rows build more than one target; parseTarget's discord:// arm
+// splitting the query with the path — the second row builds two targets,
+// and the last row one.
 func TestAWebhooksQuerySpellingsAreOneTarget(t *testing.T) {
 	const id, tok = "123456789012345678", "abcdefTOKEN"
 	base := "https://discord.com/api/webhooks/" + id + "/" + tok
@@ -76,9 +92,17 @@ func TestAWebhooksQuerySpellingsAreOneTarget(t *testing.T) {
 			base + "?wait=true&thread_id=9",
 			"discord://" + id + "/" + tok + "?thread_id=9&wait=true",
 		}, 1},
+		{"one thread, a slash before the query in both forms", []string{
+			base + "/?thread_id=9",
+			"discord://" + id + "/" + tok + "/?thread_id=9",
+		}, 1},
 		{"wait is no destination", []string{base, base + "?wait=true", base + "/?wait=true&"}, 1},
 		{"two threads", []string{base + "?thread_id=9", base + "?thread_id=10"}, 2},
 		{"a thread and its channel", []string{base, base + "?thread_id=9"}, 2},
+		{"a thread and its channel on the discord:// form", []string{
+			"discord://" + id + "/" + tok,
+			"discord://" + id + "/" + tok + "/?thread_id=9",
+		}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.MoomboxConfig{}

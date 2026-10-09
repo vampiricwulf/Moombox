@@ -104,6 +104,11 @@ func TestNewManagerRejectsDiscordSchemeEdgeCases(t *testing.T) {
 		{"non-numeric ID rejected", "discord://not-a-number/mytoken", false},
 		{"fragment rejected", "discord://12345/mytoken?wait=false#frag", false},
 		{"forum thread query still accepted", "discord://12345/mytoken?thread_id=9", true},
+		// A slash before the query no longer hides it from the check: split
+		// with the path, it was a third segment, dropped unread (mutant: the
+		// query split with the path — this one is accepted again).
+		{"fragment after a slash rejected", "discord://12345/mytoken/?thread_id=9#frag", false},
+		{"forum thread query after a slash accepted", "discord://12345/mytoken/?thread_id=9", true},
 	}
 
 	for _, tc := range tests {
