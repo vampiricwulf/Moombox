@@ -299,7 +299,7 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	// new-but-dead pair moves the credential fingerprint exactly as a
 	// working one does — so firing on success only would leave the
 	// Twitch auth mark keyed to a pair that is no longer on disk. A
-	// DECLINED pass (seven refreshDeclined() exits) wrote nothing, so
+	// DECLINED pass (eight refreshDeclined() exits) wrote nothing, so
 	// there is nothing to re-read.
 	if result.Ran {
 		s.notePassCompleted()

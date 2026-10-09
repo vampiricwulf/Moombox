@@ -99,11 +99,12 @@ func TestNotePassCompletedHasExactlyItsTwoWritingCallers(t *testing.T) {
 // recovery site, because deleting an `if result.Ran` leaves every behavioural
 // test green: the guarded call still happens.
 //
-// The gate is not decoration. Seven refreshDeclined() exits reach these two
+// The gate is not decoration. Eight refreshDeclined() exits reach these two
 // tails having written nothing at all — setup in progress, a refresh already in
-// flight, no browser, no profile, the service stopped — and firing the seam on
-// those spends a full in-process re-check, two validate round-trips, on a file
-// nobody touched, then logs a staleness warning that describes nothing.
+// flight, no browser, no profile, the service stopped, a profile another
+// browser holds — and firing the seam on those spends a full in-process
+// re-check, two validate round-trips, on a file nobody touched, then logs a
+// staleness warning that describes nothing.
 //
 // The mutations: `if result.Ran` → `if true` at either site; hoisting the call
 // out of the if entirely; and — the one the first version of this test let

@@ -648,6 +648,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			case errors.Is(err, cookies.ErrCookieDBLocked):
 				jsonError(rw, err.Error(), http.StatusConflict)
+			// The same shape one level up: not the cookie DB but the whole
+			// profile, held by a browser its SingletonLock names — on another
+			// machine, or under a pid that still answers. Verbatim, because the
+			// sentence names that machine, and "cookie refresh failed" would
+			// leave the operator nothing to close.
+			case errors.Is(err, cookies.ErrProfileInUse):
+				jsonError(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrCookieDBUnreadable):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			// S9's abort: Moombox could not read the existing cookies.txt and
@@ -873,6 +880,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// in-progress cases get, because this one never clears.
 			case errors.Is(err, cookies.ErrServiceStopped):
 				jsonErrorSized(rw, err.Error(), http.StatusServiceUnavailable)
+			// A browser already holds the profile the sign-in window would
+			// open, so none was launched. 409 and verbatim, as on the refresh
+			// route: a state to change, and the sentence names where.
+			case errors.Is(err, cookies.ErrProfileInUse):
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			default:
 				jsonErrorSized(rw, "failed to start setup", http.StatusInternalServerError)
 			}

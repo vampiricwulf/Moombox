@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +42,14 @@ const (
 )
 
 // Chromium lock files that prevent headless launch when a headed session was killed.
-var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
+//
+// SingletonLock FIRST, and the order is load-bearing. It is the one entry
+// whose target names its holder, so it is judged before any sibling is
+// touched: a held lock stops cleanChromiumLockFiles before SingletonSocket and
+// SingletonCookie, which on Linux are symlinks too — to the live browser's
+// socket and to a random cookie — that name no holder, so the age rule would
+// unlink them under the very browser the lock has just said is running.
+var chromiumLockFiles = []string{"SingletonLock", "lockfile", "SingletonSocket", "SingletonCookie"}
 
 func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url string) error {
 	if s.profileDirErr != nil {
@@ -52,7 +60,12 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		return fmt.Errorf("get free port: %w", err)
 	}
 
-	cleanChromiumLockFiles(s.profileDir)
+	// Nothing is launched on a profile another browser holds: the sign-in
+	// window would be a second browser on a live profile, and the refusal's
+	// sentence names the machine to go and close it on.
+	if err := cleanChromiumLockFiles(s.profileDir); err != nil {
+		return err
+	}
 
 	cmd := exec.Command(browser.Path,
 		fmt.Sprintf("--user-data-dir=%s", s.profileDir),
@@ -209,7 +222,12 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	if s.profileDirErr != nil {
 		return "", false, s.profileDirErr
 	}
-	cleanChromiumLockFiles(s.profileDir)
+	// Before the port and the launch. A profile another browser holds comes
+	// back as ErrProfileInUse with nothing started, and RefreshCookiesDetailed
+	// turns that into a declined pass that records why.
+	if err := cleanChromiumLockFiles(s.profileDir); err != nil {
+		return "", false, err
+	}
 
 	port, err := getFreePort()
 	if err != nil {
@@ -1038,23 +1056,127 @@ func getFreePort() (int, error) {
 // touched within seconds (audit reports/cookies.md #9).
 const lockFileFreshThreshold = 5 * time.Second
 
-// removeStaleLock unlinks path only if its mtime is older than
-// lockFileFreshThreshold. Errors stat'ing the file are treated as "not
-// present" — proceed with the unlink attempt, which is itself a no-op for
-// missing files.
-func removeStaleLock(path string) {
+// lockHostname and lockPIDRunning are the two facts the SingletonLock rule
+// asks of the machine. Vars so a test can stand in another host, an unreadable
+// hostname, and a live or dead pid without a second machine or a real browser;
+// pidRunning is the platform's answer (lockholder_unix.go, lockholder_windows.go).
+var (
+	lockHostname   = os.Hostname
+	lockPIDRunning = pidRunning
+)
+
+// removeStaleLock unlinks a lock the browser that wrote it has left behind,
+// and refuses — with ErrProfileInUse, unlinking nothing — when that browser
+// may still be running. Two shapes, two rules:
+//
+//   - A SYMLINK whose target reads "<hostname>-<pid>" is Chromium's POSIX
+//     SingletonLock, and it is judged by the holder it names; see
+//     singletonLockHolder. It used to go through the age rule below, which
+//     cannot read it: the target is a name, never a file, so os.Stat — which
+//     follows the link — always failed, the failure read as "not present",
+//     and the lock was deleted under a live browser every time.
+//   - Anything else keeps the age rule: a lock whose mtime is younger than
+//     lockFileFreshThreshold is left alone, and a stat error is treated as
+//     "not present" — proceed with the unlink attempt, itself a no-op for a
+//     missing file. That covers every Windows lock (`lockfile` is a plain
+//     file there; Windows has no symlink lock), Firefox's two, and the
+//     symlinks whose targets name no holder — SingletonSocket and
+//     SingletonCookie, reached only once SingletonLock has been judged (see
+//     chromiumLockFiles).
+func removeStaleLock(path string) error {
+	if host, pid, ok := readSingletonLock(path); ok {
+		if err := singletonLockHolder(host, pid); err != nil {
+			return err
+		}
+		os.Remove(path)
+		return nil
+	}
 	if info, err := os.Stat(path); err == nil {
 		if time.Since(info.ModTime()) < lockFileFreshThreshold {
-			return // recently touched — likely held by a live browser
+			return nil // recently touched — likely held by a live browser
 		}
 	}
 	os.Remove(path)
+	return nil
 }
 
-func cleanChromiumLockFiles(profileDir string) {
+// readSingletonLock reports the holder a symlink lock names. ok is false for a
+// plain file, a missing path, an unreadable link, or a target that is not
+// "<hostname>-<pid>" — all of which keep the age rule. The last case follows
+// Chromium itself, which treats a SingletonLock it cannot parse as invalid
+// and unlinks it.
+func readSingletonLock(path string) (host string, pid int, ok bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return "", 0, false
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", 0, false
+	}
+	return parseSingletonLockTarget(target)
+}
+
+// parseSingletonLockTarget splits Chromium's SingletonLock target,
+// "<hostname>-<pid>", at its LAST hyphen — hostnames carry hyphens, a pid does
+// not. The pid must be a positive decimal in pid_t's 32-bit range: anything
+// else is not a pid a process can hold, and a truncated or non-positive one
+// handed to kill(2) would ask about a process GROUP rather than the browser.
+func parseSingletonLockTarget(target string) (host string, pid int, ok bool) {
+	i := strings.LastIndexByte(target, '-')
+	if i <= 0 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(target[i+1:], 10, 32)
+	if err != nil || n <= 0 {
+		return "", 0, false
+	}
+	return target[:i], int(n), true
+}
+
+// singletonLockHolder answers whether the browser a SingletonLock names may
+// still hold the profile: ErrProfileInUse when it may, nil when the lock is
+// provably orphaned.
+//
+// Exactly one answer deletes — this machine's hostname AND a pid that no
+// longer answers. Everything else keeps the lock and skips the launch:
+//
+//   - another host. Its pid means nothing here and cannot be signalled, so a
+//     live browser and a dead one look the same, and guessing wrong puts two
+//     browsers on one profile. This is the host's browser seen from a
+//     container through a mounted profile. Chromium refuses the same case
+//     itself ("in use by another computer").
+//   - a hostname this machine cannot read: no way to say the lock is ours.
+//   - a pid that answers. Either the browser that wrote the lock, or a process
+//     the kernel has since handed its pid. A reused pid costs a skipped pass,
+//     whose sentence names the pid, and never a lock broken under a live
+//     browser.
+func singletonLockHolder(host string, pid int) error {
+	local, err := lockHostname()
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w by %s (pid %d) — this machine's hostname could not be read to tell whether that is this machine (%v), so the lock is left alone",
+			ErrProfileInUse, host, pid, err)
+	case host != local:
+		return fmt.Errorf("%w by %s — a browser on that machine (pid %d there) holds its lock; close it there and the next pass will run",
+			ErrProfileInUse, host, pid)
+	case lockPIDRunning(pid):
+		return fmt.Errorf("%w by %s (pid %d is still running) — close that browser, or remove the profile's SingletonLock if that pid is no longer one",
+			ErrProfileInUse, host, pid)
+	}
+	return nil
+}
+
+// cleanChromiumLockFiles unlinks what a dead browser left in profileDir and
+// stops at the first lock a live one may still hold, returning its
+// ErrProfileInUse. Both launch sites start nothing on that answer.
+func cleanChromiumLockFiles(profileDir string) error {
 	// Remove the canonical set first; covers every known Chromium variant.
+	// SingletonLock leads it — see chromiumLockFiles for why that matters.
 	for _, name := range chromiumLockFiles {
-		removeStaleLock(filepath.Join(profileDir, name))
+		if err := removeStaleLock(filepath.Join(profileDir, name)); err != nil {
+			return err
+		}
 	}
 	// Newer Chrome/Brave/Edge/Opera builds sometimes leave additional
 	// Singleton* variants (e.g. SingletonLock.lock); glob them too so a
@@ -1065,7 +1187,10 @@ func cleanChromiumLockFiles(profileDir string) {
 			continue
 		}
 		for _, m := range matches {
-			removeStaleLock(m)
+			if err := removeStaleLock(m); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }

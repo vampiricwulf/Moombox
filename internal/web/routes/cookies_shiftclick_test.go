@@ -310,6 +310,7 @@ func TestRungThreeAgreesAcrossBothSurfaces(t *testing.T) {
 		"ErrProfileDirNotOptedIn": cookies.ErrProfileDirNotOptedIn,
 		"ErrCookieDBNotFound":     cookies.ErrCookieDBNotFound,
 		"ErrCookieDBLocked":       cookies.ErrCookieDBLocked,
+		"ErrProfileInUse":         cookies.ErrProfileInUse,
 		"ErrCookieDBUnreadable":   cookies.ErrCookieDBUnreadable,
 		"ErrNoCookiesInProfile":   cookies.ErrNoCookiesInProfile,
 		"ErrCookieFileUnreadable": cookies.ErrCookieFileUnreadable,

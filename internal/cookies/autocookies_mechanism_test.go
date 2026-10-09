@@ -36,7 +36,7 @@ import (
 // nothing here can execute a browser however the branch goes.
 //
 // The fifth row is the abort exits, and it is the one an earlier pass at this
-// test missed entirely (arc review F-2): eight of the eighteen returns are
+// test missed entirely (arc review F-2): eight of the nineteen returns are
 // ABORTS — real work was attempted and stopped on an error — and none of the
 // four rows above drives one, so a defer that stamped only nil-error returns
 // (`if retErr == nil { out.Mechanism = mechanism }`) passed the whole package.

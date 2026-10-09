@@ -928,9 +928,10 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	// re-check cannot delay the line that tells the operator what happened.
 	//
 	// Gated on Ran, which is an OVER-approximation and deliberately so. Ran is
-	// false at all seven refreshDeclined() exits — setup in progress, a refresh
-	// already in flight, nothing configured, the service stopped — where
-	// nothing was written and there is nothing to re-read. It is true at the
+	// false at all eight refreshDeclined() exits — setup in progress, a refresh
+	// already in flight, nothing configured, the service stopped, a profile
+	// another browser holds — where nothing was written and there is nothing
+	// to re-read. It is true at the
 	// FIVE aborts that failed before the write as well as at the three that
 	// failed after it: an empty profile import, a browser refresh that errored,
 	// a failed MkdirAll, the S9 read abort, and the write itself failing. Each

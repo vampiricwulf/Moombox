@@ -801,8 +801,14 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 func cleanFirefoxLockFiles(profileDir string) {
 	// Skip recently-touched locks so we don't yank a parent.lock out from
 	// under a live Firefox instance (audit reports/cookies.md #9).
+	//
+	// removeStaleLock's ErrProfileInUse is discarded because it cannot arise
+	// here: both names are plain files, so only the age rule reaches them.
+	// Firefox's own POSIX symlink lock is `lock`, which this list does not
+	// name, and its target is "<ip>:+<pid>", not Chromium's
+	// "<hostname>-<pid>".
 	for _, name := range firefoxLockFiles {
-		removeStaleLock(filepath.Join(profileDir, name))
+		_ = removeStaleLock(filepath.Join(profileDir, name))
 	}
 }
 
