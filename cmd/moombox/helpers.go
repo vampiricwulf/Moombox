@@ -368,6 +368,47 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 		failureMarkerPresent
 }
 
+// clearSupersededFailureMarker deletes the <exe>.update-failed marker once a
+// LATER update has applied successfully, and returns the path it removed (""
+// when it removed nothing).
+//
+// "Later" and "successfully" are both read off the .update-pending breadcrumb
+// (pendingPath), which ApplyUpdate writes only after a swap that worked:
+// pendingTag naming this binary's own version means the update landed and
+// this boot of it got past the first-successful-boot milestone, and a
+// breadcrumb NEWER than the marker means that update was applied after the
+// failure the marker records. A marker written after the breadcrumb is this
+// very update's own failure — a first launch that failed with no rollback
+// possible, then a relaunch that came up — and stays for the operator.
+//
+// The marker is what keeps the Windows launcher's hands off the old launcher
+// image (`~`): cleanupOrphans and deferDeleteOldLauncher both decline while
+// it exists, because after a failed update `~` is the rollback binary its
+// instructions point at. A later successful update makes those instructions
+// stale — `~` is now simply the image this update replaced — so a marker left
+// in place kept every later update's `~` on disk, and kept arming
+// shouldSkipPendingVersion for a failure long since resolved. The
+// .update-broken marker is not touched: a swap that failed both ways refuses
+// every apply (swapLeftBroken), so no later update can supersede it.
+func clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersion string) (string, error) {
+	if pendingTag == "" || pendingTag != "v"+currentVersion {
+		return "", nil
+	}
+	marker := exePath + ".update-failed"
+	mi, err := os.Stat(marker)
+	if err != nil {
+		return "", nil
+	}
+	pi, err := os.Stat(pendingPath)
+	if err != nil || !mi.ModTime().Before(pi.ModTime()) {
+		return "", nil
+	}
+	if err := os.Remove(marker); err != nil {
+		return "", err
+	}
+	return marker, nil
+}
+
 // cookieFilePath returns the Netscape cookie file the services use — the
 // jar's, falling back to the setting — for operator-facing messages, or a
 // short prose stand-in when none is set.

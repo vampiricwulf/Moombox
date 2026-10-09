@@ -130,7 +130,10 @@ var launcherWarnf = func(format string, args ...any) {
 // EXCEPT while a failed-update marker is present: then the ~ file is the
 // deliberately-preserved rollback binary the marker's recovery
 // instructions point at — a user who simply relaunches after a failed
-// update must not have the launcher destroy their way back.
+// update must not have the launcher destroy their way back. The marker does
+// not stand forever: the boot of a LATER update that landed deletes it
+// (clearSupersededFailureMarker), after which `~` is just the image that
+// update replaced and this sweep takes it again.
 func cleanupOrphans(exePath string) {
 	for _, marker := range []string{exePath + ".update-failed", exePath + ".update-broken"} {
 		if _, err := os.Stat(marker); err == nil {

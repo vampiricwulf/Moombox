@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/updater"
 )
 
 // captureLauncherWarnings redirects the launcher's stderr warning sink into a
@@ -191,5 +194,42 @@ func TestDeferDeleteCommandDeletesOnlyTheOldLauncher(t *testing.T) {
 				t.Errorf("a file outside the install directory was deleted: %v", err)
 			}
 		})
+	}
+}
+
+// TestCleanupOrphansResumesOnceASupersededMarkerIsCleared is the point of
+// clearSupersededFailureMarker on this platform: while an earlier failure's
+// .update-failed marker stands, the launcher's startup sweep keeps every
+// later update's ~ image on disk; once a later update has landed and the boot
+// cleared the marker, the sweep removes it again.
+//
+// Mutant: clearSupersededFailureMarker removing nothing — the ~ file survives
+// the second sweep.
+func TestCleanupOrphansResumesOnceASupersededMarkerIsCleared(t *testing.T) {
+	exePath := filepath.Join(t.TempDir(), "moombox.exe")
+	writeAutoRollbackMarker(exePath, 1, true)
+	failedAt := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(exePath+".update-failed", failedAt, failedAt); err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := exePath + updater.PendingVersionSuffix
+	if err := os.WriteFile(pendingPath, []byte("v9.9.9"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exePath+"~", []byte("the launcher image a later update replaced"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupOrphans(exePath)
+	if _, err := os.Stat(exePath + "~"); err != nil {
+		t.Fatalf("the ~ file went while the marker stood (%v) — this test's premise moved", err)
+	}
+
+	if _, err := clearSupersededFailureMarker(exePath, pendingPath, "v9.9.9", "9.9.9"); err != nil {
+		t.Fatal(err)
+	}
+	cleanupOrphans(exePath)
+	if _, err := os.Stat(exePath + "~"); !os.IsNotExist(err) {
+		t.Errorf("the ~ file survived the sweep after a later update cleared the stale marker (%v)", err)
 	}
 }

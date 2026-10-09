@@ -605,6 +605,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						slog.String("version", pendingTag))
 				}
 			}
+			// Before the breadcrumb goes: its age is what proves the update
+			// that landed came AFTER an earlier failure's marker.
+			if cleared, clrErr := clearSupersededFailureMarker(exeSelf, pendingPath, pendingTag, version); clrErr != nil {
+				log.Warn("failed to remove a failed-update marker a later update superseded",
+					slog.String("marker", exeSelf+".update-failed"), slog.String("error", clrErr.Error()))
+			} else if cleared != "" {
+				log.Info("removed a failed-update marker: a later update has applied successfully, so its rollback instructions are stale",
+					slog.String("marker", cleared), slog.String("version", pendingTag))
+			}
 			if rmErr := os.Remove(pendingPath); rmErr != nil {
 				log.Warn("failed to remove pending-version breadcrumb",
 					slog.String("path", pendingPath), slog.String("error", rmErr.Error()))
