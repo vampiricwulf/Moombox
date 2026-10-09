@@ -29,11 +29,12 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 	//
 	// The failure carries the tail runFFmpeg's does, not just the last line:
 	// that line is usually FFmpeg's closing "Conversion failed!", and the one
-	// that says why comes before it — a disk that filled mid-mux says "Error
-	// writing trailer: No space left on device" there, and the worker's
-	// isDiskFull reads it from this text. With the last line alone, a trimmed
-	// backlog mux that ran out of space ended in Error instead of going back
-	// to Queued to wait for it.
+	// that says why comes before it — "Error writing trailer: No space left on
+	// device" for a disk that filled mid-trim. This runner serves Trim Video
+	// alone (Mux with a trim and a ProgressFn, TrimAndConcatWithProgress), so
+	// the tail reaches the log lines a failed trim writes, and nothing reads
+	// a full disk from it: the backlog's disk-full requeue reads the archive
+	// mux's error, and every archive mux runs through runFFmpeg.
 	tail := &cappedBuffer{maxSize: 4 * ffmpegStderrTail, keepSize: 2 * ffmpegStderrTail}
 	scanner := bufio.NewScanner(stderr)
 	scanner.Split(scanFFmpegLines)

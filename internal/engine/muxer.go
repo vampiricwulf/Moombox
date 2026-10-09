@@ -275,9 +275,9 @@ func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
 
 // ffmpegStderrTail is how much of FFmpeg's stderr a failed run's error
 // carries, in bytes: the last lines, where FFmpeg says why it failed. The
-// worker reads a full disk from this text (isDiskFull, internal/worker), so
-// it must reach back past the closing "Conversion failed!" to the line that
-// names the error.
+// worker reads a full disk from an archive mux's text (isDiskFull,
+// internal/worker), so it must reach back past the closing "Conversion
+// failed!" to the line that names the error.
 const ffmpegStderrTail = 500
 
 // stderrTail is the last ffmpegStderrTail bytes of FFmpeg's stderr.
