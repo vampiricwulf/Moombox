@@ -36,7 +36,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - If headers have already been sent (partial response written), it cannot write a new status code — the connection is effectively broken, but the server survives.
 - Logs the panic value, the method, the request path (never the query string), the peer, the request ID and the stack that panicked at Error level. The stack is one line of `function (file:line)` frames, innermost first and at most 32 of them, built from program counters rather than `debug.Stack`, which prints each frame's raw argument words — the one part of a trace that comes from the request rather than the code.
 
-**Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler. Placed later, a panic in a middleware it had skipped past would escape it: `net/http` recovers such a panic per-connection, so the process survives either way, but the client sees an aborted connection instead of the 500 JSON response and the stack is logged by the standard library rather than by Moombox. `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above).
+**Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler. Placed later, a panic in a middleware it had skipped past would escape it: `net/http` recovers such a panic per-connection, so the process survives either way, but the client sees an aborted connection instead of the 500 JSON response, and the panic is logged nowhere: `net/http` writes its report to the server's `ErrorLog`, which Moombox discards (see [HTTP Server Hardening](#http-server-hardening)). `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above), as does the WebSocket upgrade, which `interceptUpgrades` takes ahead of the router: `HandleUpgrade`'s own recover stands in there (see [Recovery Layers](#recovery-layers)).
 
 **Source:** `RecoveryMiddleware` in `internal/web/server.go`.
 
@@ -804,7 +804,7 @@ Panic recovery is a hard requirement across the entire application. A panic in o
 
 ### Recovery Layers
 
-**HTTP handlers:** `RecoveryMiddleware` (middleware layer 1) catches panics in any HTTP handler or downstream middleware. Returns 500 JSON if headers have not been sent. The WebSocket upgrade is the exception: `interceptUpgrades` (`Server.Start`'s handler) takes it ahead of the router, so `HandleUpgrade` carries its own recover, which logs the panic, removes a client it had already registered, and answers 500 when the upgrade had not yet been accepted.
+**HTTP handlers:** `RecoveryMiddleware` (middleware layer 1) catches panics in any HTTP handler or downstream middleware. Returns 500 JSON if headers have not been sent. The WebSocket upgrade is the exception: `interceptUpgrades` (`Server.Start`'s handler) takes it ahead of the router, so `HandleUpgrade` carries its own recover, which logs the panic with the stack that raised it — the same one-line `panicStack` RecoveryMiddleware logs — removes a client it had already registered, and answers 500 when the upgrade had not yet been accepted. A panic in `interceptUpgrades`' own gates, or in `RequestID` or `Drain`, escapes every recover and is logged nowhere (the server's `ErrorLog` is discarded); the process survives it.
 
 **Database subscriber callbacks:** The database package wraps all subscriber notifications in `safeCallJobUpdate` and `safeCallJobsChange`. If a subscriber callback panics, the panic is logged and the remaining subscribers still receive their notifications. The database update pipeline continues uninterrupted.
 
@@ -840,7 +840,7 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **ReadHeaderTimeout:** 30 seconds. Protects against slowloris attacks (where an attacker sends headers very slowly to tie up connections). The deadline is cleared after headers are read so that long-running requests (WebSocket, video streaming) are not affected.
 - **WriteTimeout:** 0 (disabled). Required for WebSocket connections and video streaming endpoints, which can run indefinitely.
 - **IdleTimeout:** 120 seconds. Closes idle keep-alive connections after 2 minutes.
-- **ErrorLog:** Redirected to `io.Discard`. HTTP server internal errors (broken pipe, connection reset) are suppressed from stdout/stderr. Meaningful errors are routed through the application's structured logger via middleware.
+- **ErrorLog:** Redirected to `io.Discard`. HTTP server internal errors (broken pipe, connection reset) are suppressed from stdout/stderr. Meaningful errors are routed through the application's structured logger via middleware. That includes `net/http`'s report of a panic that escaped every recover — so such a panic is not logged at all (see [RecoveryMiddleware](#1-recoverymiddleware)).
 
 **Source:** `http.Server` configuration in `Start()` in `internal/web/server.go`.
 

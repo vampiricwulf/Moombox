@@ -93,3 +93,51 @@ func TestUpgradePanicIsLoggedAndTheClientRemoved(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// upgradeLineLogger is panicLineLogger with the rest of the hub's logger.
+type upgradeLineLogger struct{ panicLineLogger }
+
+func (*upgradeLineLogger) Debug(string, ...any) {}
+func (*upgradeLineLogger) Info(string, ...any)  {}
+func (*upgradeLineLogger) Warn(string, ...any)  {}
+
+// upgradeAuthThatPanics is the bug an operator has to find from the line.
+func upgradeAuthThatPanics(*http.Request) bool { panic("auth store exploded") }
+
+// TestUpgradePanicLineSaysWhereItPanicked is W24-15 for the one request
+// RecoveryMiddleware never sees: interceptUpgrades hands the dashboard's
+// WebSocket upgrade to HandleUpgrade ahead of the router, so its own recover
+// stands in, and it logged the panic value and the peer with nothing saying
+// where — a panic in the DB-backed AuthCheck or the snapshot provider could
+// not be located from its log. It carries the same one-line, bounded,
+// argument-free stack (panicStack; TestRecoveryLogsTheStackThatPanicked pins
+// its shape).
+//
+// Mutant: the "stack" field dropped from HandleUpgrade's Error — no stack.
+func TestUpgradePanicLineSaysWhereItPanicked(t *testing.T) {
+	log := &upgradeLineLogger{}
+	hub := NewWebSocketHub(log)
+	hub.AuthCheck = upgradeAuthThatPanics
+	req := httptest.NewRequest(http.MethodGet, "/?token=QUERY-SECRET", nil)
+	req.RemoteAddr = "203.0.113.9:4000" // a public peer, so AuthCheck runs
+	req.Header.Set("Upgrade", "websocket")
+	rr := httptest.NewRecorder()
+	hub.HandleUpgrade(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rr.Code)
+	}
+	if log.fields == nil {
+		t.Fatal("the upgrade panic was not logged")
+	}
+	stack, _ := log.fields["stack"].(string)
+	if !strings.HasPrefix(stack, "github.com/vampiricwulf/Moombox/internal/web.upgradeAuthThatPanics (websocket_upgrade_test.go:") {
+		t.Errorf("the panic line does not start its stack at the function that panicked:\n%s", log.line)
+	}
+	if !strings.Contains(stack, "HandleUpgrade") {
+		t.Errorf("the stack does not name the upgrade that called it: %s", stack)
+	}
+	if strings.Contains(log.line, "QUERY-SECRET") {
+		t.Errorf("the panic line carries the request's query string: %s", log.line)
+	}
+}

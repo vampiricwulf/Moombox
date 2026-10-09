@@ -181,13 +181,14 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// The upgrade runs outside the router, so RecoveryMiddleware never sees a
 	// panic here — the DB-backed AuthCheck, or the snapshot built for the new
 	// client — and net/http's own recover writes to the discarded ErrorLog.
-	// Logged here instead, with a registered client removed rather than left
-	// in the hub with no reader or pinger.
+	// Logged here instead, with the stack that panicked as RecoveryMiddleware
+	// logs it (panicStack), and with a registered client removed rather than
+	// left in the hub with no reader or pinger.
 	var client *wsClient
 	accepted := false
 	defer func() {
 		if rvr := recover(); rvr != nil {
-			hub.logger.Error("panic in websocket upgrade", "panic", rvr, "remoteAddr", r.RemoteAddr)
+			hub.logger.Error("panic in websocket upgrade", "panic", rvr, "remoteAddr", r.RemoteAddr, "stack", panicStack())
 			if client != nil {
 				hub.removeClient(client, "upgrade panic")
 			}
