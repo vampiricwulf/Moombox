@@ -10,12 +10,15 @@ import (
 
 // forceExitAfter is the shutdown backstop. It must outlast the worker's whole
 // Stop (worker.StopBudget: the in-flight wait, then mux cancellation and its
-// grace) plus the monitor stops ahead of it. Its clock starts first, so a
-// backstop equal to the worker's own wait fired before Stop reached
-// CancelMuxes, and FFmpeg outlived the process writing into staging the
-// restarted child re-muxes with -y — the very thing owner decision O-E
+// grace) plus the stops ahead of it — the monitors, and the trim service's
+// wait for the trims it cancels (up to worker.TrimStopWait). Its clock starts
+// first, so a backstop equal to the worker's own wait fired before Stop
+// reached CancelMuxes, and FFmpeg outlived the process writing into staging
+// the restarted child re-muxes with -y — the very thing owner decision O-E
 // cancels muxes to prevent. The margin covers the steps ahead of the worker
-// and lets the ones after it start.
+// and lets the ones after it start: what the trim wait and the worker leave
+// of it is the notification drain's, as little as 1 s. It is not widened for
+// the trim wait: the owner's ruling caps a graceful shutdown at 15 s.
 const forceExitAfter = worker.StopBudget + 3*time.Second
 
 // shutdown runs the orderly stop sequence after run()'s main event loop
@@ -97,11 +100,14 @@ func (s *runState) shutdown() bool {
 	stopService("FeedMonitor", s.feedMon.Stop)
 
 	// 1b. Stop the trim service: cancels the trims it runs — a dashboard's
-	// detached one, a TUI's in-process one — and waits (briefly: a killed
-	// FFmpeg exits at once) for each to remove its partial file. Ahead of the
-	// worker, whose stop can take its whole budget, so the wait never eats
-	// into the force-exit margin. A stopped trim sends nothing; it did not
-	// fail.
+	// detached one, a TUI's in-process one, a finished job's post-download
+	// one — and waits (briefly: a killed FFmpeg exits at once) for each to
+	// remove its partial file. The wait, up to worker.TrimStopWait for an
+	// FFmpeg that will not die, starts the worker's budget that much later,
+	// so it comes out of the force-exit margin the notification flush
+	// (step 3) drains in. A stopped trim sends nothing, it did not fail;
+	// a stopped post-download trim sends Trim Failed, since nobody asked
+	// for it from a dialog.
 	if s.trimSvc != nil {
 		stopService("TrimService", s.trimSvc.Stop)
 	}

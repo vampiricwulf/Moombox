@@ -101,12 +101,14 @@ var errTrimInterrupted = errors.New("the trim was stopped before it finished")
 // bar needs no more; RunningTrims always has the latest figure.
 const trimProgressInterval = 250 * time.Millisecond
 
-// trimStopWait bounds how long Stop waits for the trims it cancelled to
+// TrimStopWait bounds how long Stop waits for the trims it cancelled to
 // remove their partial files. A cancelled FFmpeg is killed, so the wait is
 // normally milliseconds; the bound only keeps a wedged one from holding the
-// shutdown, and stays inside the force-exit margin the shutdown leaves
-// beyond the worker's own budget (cmd/moombox forceExitAfter).
-const trimStopWait = 2 * time.Second
+// shutdown. The shutdown stops the trim service ahead of the worker, so a
+// wait that runs its whole length starts the worker's StopBudget that much
+// later and comes out of the force-exit margin beyond it (cmd/moombox
+// forceExitAfter, which must outlast the two together).
+const TrimStopWait = 2 * time.Second
 
 // TrimService handles creating and deleting trim records.
 type TrimService struct {
@@ -198,7 +200,7 @@ func (ts *TrimService) mux() *engine.Muxer {
 func (ts *TrimService) FFprobePath() string { return ts.mux().FFprobePath() }
 
 // Stop cancels every trim the service is running — their FFmpeg is killed
-// and each removes its partial file — waits (up to trimStopWait) for them to
+// and each removes its partial file — waits (up to TrimStopWait) for them to
 // finish doing so, and refuses any trim asked for after it.
 func (ts *TrimService) Stop() {
 	ts.activeMu.Lock()
@@ -217,8 +219,8 @@ func (ts *TrimService) Stop() {
 	}()
 	select {
 	case <-done:
-	case <-time.After(trimStopWait):
-		ts.logger.Warn("trims still running after stop", "waited", trimStopWait)
+	case <-time.After(TrimStopWait):
+		ts.logger.Warn("trims still running after stop", "waited", TrimStopWait)
 	}
 }
 

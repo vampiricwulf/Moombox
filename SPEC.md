@@ -99,7 +99,7 @@ Moombox uses a launcher/supervisor pattern controlled by the `_MOOMBOX_CHILD` en
 
 - **With `_MOOMBOX_CHILD=1`** — The process runs the full application stack. When a restart is needed (config change, update applied, setup wizard completion, or API request — from the web or the TUI), `triggerRestart(source)` sets an atomic flag, puts the web server into drain mode (503 for new requests), and five seconds later cancels the main context and quits the TUI if it is running. The `run()` function returns `true`, and `main()` calls `os.Exit(42)`.
 
-- **Shutdown** — Context cancellation propagates to all services. A 15-second force-exit timer (`time.AfterFunc`) ensures the process terminates even if a service hangs. Shutdown order is: monitors, download worker, notifications flush, cookie services, PO token cleanup, web server, event subscribers, database close.
+- **Shutdown** — Context cancellation propagates to all services. A 15-second force-exit timer (`time.AfterFunc`) ensures the process terminates even if a service hangs. Shutdown order is: monitors, trim service, download worker, notifications flush, cookie services, PO token cleanup, web server, event subscribers, database close.
 
 ### Service Initialization Order
 
