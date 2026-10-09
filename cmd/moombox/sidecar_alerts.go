@@ -84,9 +84,11 @@ func newSidecarAlerts(notify notifications.Sender, log interface {
 // the first observation, and a healthy one sends sidecar_restored, while an
 // unhealthy one arms no second down alert — the outage was already reported.
 func (a *sidecarAlerts) restoreFrom(st *openAlerts) {
+	// Read before a.mu is taken: the store's lock always comes first.
+	down := st.snapshot().SidecarDown
 	a.mu.Lock()
 	a.state = st
-	a.downSent = st.snapshot().SidecarDown
+	a.downSent = down
 	a.mu.Unlock()
 }
 
