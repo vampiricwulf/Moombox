@@ -37,13 +37,16 @@ func captureLauncherWarnings(t *testing.T) *[]string {
 func TestHandleUpdateRestartFirstUpdateIsUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	exePath := filepath.Join(dir, "moombox.exe")
+	if handleUpdateRestart(exePath) != "" {
+		t.Fatal("a restart with no .old is a config restart — want no artifact")
+	}
 	if err := os.WriteFile(exePath+".old", []byte("previous binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	warnings := captureLauncherWarnings(t)
 
-	if !handleUpdateRestart(exePath) {
-		t.Fatal("a restart with a .old present is a binary update — want true")
+	if got, want := handleUpdateRestart(exePath), exePath+"~"; got != want {
+		t.Fatalf("a restart with a .old present is a binary update — artifact = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(exePath + ".old"); !os.IsNotExist(err) {
 		t.Errorf(".old must be renamed away on the first update, stat err: %v", err)
@@ -57,9 +60,6 @@ func TestHandleUpdateRestartFirstUpdateIsUnchanged(t *testing.T) {
 	}
 	if len(*warnings) != 0 {
 		t.Errorf("the success path must stay silent, got %v", *warnings)
-	}
-	if got, want := rollbackArtifactPath(exePath), exePath+"~"; got != want {
-		t.Errorf("rollbackArtifactPath = %q, want %q", got, want)
 	}
 }
 
@@ -98,8 +98,12 @@ func TestHandleUpdateRestartReportsARenameItCouldNotDo(t *testing.T) {
 	t.Cleanup(func() { held.Close() })
 	warnings := captureLauncherWarnings(t)
 
-	if !handleUpdateRestart(exePath) {
-		t.Fatal("a .old that could not be renamed is still a binary update — want true")
+	// The .old that stayed is one version back and therefore the artifact; ~
+	// is two.
+	//
+	// Mutant: returning exePath+"~" from the failed-rename branch fails this.
+	if got, want := handleUpdateRestart(exePath), exePath+".old"; got != want {
+		t.Fatalf("a .old that could not be renamed is still a binary update, and its artifact — got %q, want %q", got, want)
 	}
 	if len(*warnings) != 1 {
 		t.Fatalf("want exactly one warning about the failed rename, got %v", *warnings)
@@ -119,9 +123,6 @@ func TestHandleUpdateRestartReportsARenameItCouldNotDo(t *testing.T) {
 	if !strings.Contains((*warnings)[0], exePath+"~") {
 		t.Errorf("the warning must name the ~ destination the rename could not take, got %q", (*warnings)[0])
 	}
-	if got, want := rollbackArtifactPath(exePath), exePath+".old"; got != want {
-		t.Errorf("rollbackArtifactPath = %q, want %q — the surviving .old is one version back, ~ is two", got, want)
-	}
 	data, err := os.ReadFile(exePath + ".old")
 	if err != nil || string(data) != "version N+1" {
 		t.Errorf(".old must be left intact, got %q (err %v)", data, err)
@@ -133,15 +134,55 @@ func TestHandleUpdateRestartReportsARenameItCouldNotDo(t *testing.T) {
 	}
 }
 
-// TestRollbackArtifactPathWithNoArtifacts pins the message path: with neither
-// file on disk, preserveUpdateRollback's written instructions must still name
-// the ~ file, exactly as they always have.
+// TestASecondUpdatesSweptOldIsPastRollback walks the second update of one
+// launcher lifetime through the launcher's own steps. The first update's
+// rename makes ~ the launcher's image; the second cannot rename over it, so
+// its artifact is .old; that boot's milestone sweeps .old and leaves ~, two
+// versions back. Re-deriving the artifact from the names on disk at the exit
+// found ~ and rolled back to it — N+2 to N, with N+1 gone.
 //
-// Mutant: returning exePath+".old" unconditionally fails this.
-func TestRollbackArtifactPathWithNoArtifacts(t *testing.T) {
+// Mutant: handleUpdateRestart returning exePath+"~" from the failed-rename
+// branch — the judgement finds ~ on disk and routes the crash to a rollback.
+func TestASecondUpdatesSweptOldIsPastRollback(t *testing.T) {
 	exePath := filepath.Join(t.TempDir(), "moombox.exe")
-	if got, want := rollbackArtifactPath(exePath), exePath+"~"; got != want {
-		t.Errorf("rollbackArtifactPath = %q, want %q", got, want)
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	captureLauncherWarnings(t)
+
+	// Update 1 (N → N+1): ApplyUpdate left N at .old.
+	write(exePath, "N+1")
+	write(exePath+".old", "N")
+	if got, want := handleUpdateRestart(exePath), exePath+"~"; got != want {
+		t.Fatalf("first update's artifact = %q, want %q", got, want)
+	}
+	// ~ is now the launcher's mapped image; an open handle denies the same
+	// delete-sharing (see TestHandleUpdateRestartReportsARenameItCouldNotDo).
+	held, err := os.Open(exePath + "~")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { held.Close() })
+
+	// Update 2 (N+1 → N+2): ApplyUpdate left N+1 at .old.
+	write(exePath+".old", "N+1")
+	write(exePath, "N+2")
+	artifact := handleUpdateRestart(exePath)
+	if artifact != exePath+".old" {
+		t.Fatalf("second update's artifact = %q, want its .old", artifact)
+	}
+
+	// The N+2 boot reaches its milestone: CleanupOldBinary sweeps .old (no
+	// process maps N+1 any more) and cannot delete ~. Then it crashes.
+	if err := os.Remove(artifact); err != nil {
+		t.Fatal(err)
+	}
+	action, first := judgeChildExit(artifact, true, false, 1, 30*time.Second, false, 0)
+	if action != childCrash || first {
+		t.Errorf("a quick crash after the swept .old = (%v, first %v), want a supervised crash, not a rollback to ~", action, first)
 	}
 }
 

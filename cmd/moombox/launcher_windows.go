@@ -148,13 +148,29 @@ func cleanupOrphans(exePath string) {
 // rename the just-superseded .old to ~ to free the .old name for the
 // next update. The ~ file is then deferred-cleaned on launcher exit.
 //
-// Returns whether this restart followed a binary update (.old existed) —
-// config-change restarts never create .old, so this is the launcher's
-// only signal that the NEXT child is the first boot of a fresh update.
-func handleUpdateRestart(exePath string) bool {
+// Returns that update's rollback artifact — the file the binary it replaced
+// now survives as — or "" when no .old existed: config-change restarts never
+// create .old, so this is the launcher's only signal that the NEXT child is
+// the first boot of a fresh update. The artifact is
+//
+//   - `~` when the rename succeeded: every first update of a launcher lifetime,
+//     and therefore the ordinary path.
+//   - `.old` when it failed (the ~ name was still held by this launcher's
+//     mapped image, which is the second update of one launcher lifetime). It
+//     is then the version that was running a moment ago; the ~ file is the
+//     one BEFORE it, so restoring ~ would roll back two versions and the
+//     restored child's CleanupOldBinary would delete the real previous binary
+//     on its way up.
+//
+// The launcher records the answer for the boot it arms and judges that boot
+// by it, never by which names are on disk when it exits: once this update's
+// first boot reaches the milestone and its CleanupOldBinary sweeps that
+// .old, the ~ file is still there, and it stands for nothing this update can
+// roll back to.
+func handleUpdateRestart(exePath string) string {
 	oldPath := exePath + ".old"
 	if _, statErr := os.Stat(oldPath); statErr != nil {
-		return false
+		return ""
 	}
 	if err := os.Rename(oldPath, exePath+"~"); err != nil {
 		// REPORTED, not discarded. A stale ~ file on its own does NOT fail
@@ -165,36 +181,15 @@ func handleUpdateRestart(exePath string) bool {
 		// launcher lifetime that file is this launcher's own mapped image,
 		// which denies delete-sharing, and which the child's CleanupOldBinary
 		// could not delete for the same reason. The .old that then stays behind
-		// is the version that was running a moment ago, and
-		// rollbackArtifactPath prefers it for exactly that reason. This line is
-		// how the operator learns the name shuffle did not happen.
+		// is the version that was running a moment ago, and it is this
+		// update's artifact for exactly that reason. This line is how the
+		// operator learns the name shuffle did not happen.
 		launcherWarnf("warning: could not rename %s to %s (%v) — the previous binary stays at .old and remains the rollback target\n",
 			oldPath, exePath+"~", err)
-	}
-	// True either way: a .old existed, so this restart follows a BINARY update
-	// and the launcher's one-shot post-update failure window must arm
-	// (launcher.go firstAfterUpdate). A failed rename changes which file is the
-	// artifact, never whether there was an update.
-	return true
-}
-
-// rollbackArtifactPath is where the previous version's binary survives after an
-// update on this platform, in preference order:
-//
-//   - `.old`, when handleUpdateRestart could NOT rename it away (the ~ name was
-//     still held by this launcher's mapped image). It is then the version that
-//     was running a moment ago; the ~ file is the one BEFORE it, so restoring ~
-//     would roll back two versions and the restored child's CleanupOldBinary
-//     would delete the real previous binary on its way up.
-//   - `~` otherwise — the successful-rename case, i.e. every first update of a
-//     launcher lifetime and therefore the ordinary path. Also what a caller
-//     gets when neither file exists, so preserveUpdateRollback's written
-//     instructions keep naming the ~ file exactly as they always have.
-//
-// Referenced in recovery instructions when the first post-update boot fails.
-func rollbackArtifactPath(exePath string) string {
-	oldPath := exePath + ".old"
-	if _, err := os.Stat(oldPath); err == nil {
+		// Still an update: a .old existed, so the launcher's one-shot
+		// post-update failure window must arm (launcher.go firstAfterUpdate).
+		// A failed rename changes which file is the artifact, never whether
+		// there was an update.
 		return oldPath
 	}
 	return exePath + "~"

@@ -110,6 +110,12 @@ func launchAndSupervise() {
 	// on the way out, and leaves recovery instructions. One-shot: consumed
 	// by the next child exit regardless of outcome.
 	firstAfterUpdate := false
+	// updateArtifact is that update's rollback artifact, as handleUpdateRestart
+	// named it at the restart that armed firstAfterUpdate: the boot is judged
+	// and rolled back by this file, never by which names happen to be on disk
+	// when it exits. On Windows the launcher's own ~ image outlives the sweep
+	// of a second update's .old, and it is two versions back.
+	updateArtifact := ""
 	// Crash supervision state: consecutive abnormal exits (reset whenever a
 	// child survives launcherHealthyWindow) and the exit code that triggered
 	// the pending respawn (passed to the child so it can notify the operator
@@ -171,11 +177,11 @@ func launchAndSupervise() {
 				// The freshly-updated binary would not even start — restore
 				// the previous version and respawn it; fall back to keeping
 				// it on disk with manual instructions if that isn't possible.
-				if attemptAutoRollback(exePath, -1) {
+				if attemptAutoRollback(exePath, updateArtifact, -1) {
 					firstAfterUpdate = false
 					continue
 				}
-				preserveUpdateRollback(exePath, -1)
+				preserveUpdateRollback(exePath, updateArtifact, -1)
 				os.Exit(1)
 			}
 			deferDeleteOldLauncher(exePath)
@@ -205,20 +211,24 @@ func launchAndSupervise() {
 			}
 		}
 
-		action, wasFirstAfterUpdate := judgeChildExit(exePath, firstAfterUpdate, wasRespawn,
+		action, wasFirstAfterUpdate := judgeChildExit(updateArtifact, firstAfterUpdate, wasRespawn,
 			code, ranFor, terminating.Load(), consecutiveCrashes)
 		firstAfterUpdate = false
 		switch action {
 		case childRestart:
 			// Update applied: rename .old → ~ on Windows so the .old name
-			// is free for the next update (returns whether a .old existed,
-			// i.e. binary update vs config restart). Linux just reports.
-			// A config restart INSIDE a still-unproven update's window
-			// carries the one-shot forward — otherwise it would silently
-			// drop rollback preservation for a binary that never proved
-			// itself.
-			firstAfterUpdate = handleUpdateRestart(exePath) ||
-				(wasFirstAfterUpdate && ranFor < postUpdateFailureWindow)
+			// is free for the next update (returns the update's rollback
+			// artifact, "" when no .old existed, i.e. a config restart).
+			// Linux just reports .old. A config restart INSIDE a
+			// still-unproven update's window carries the one-shot forward,
+			// with the artifact it was armed with — otherwise it would
+			// silently drop rollback preservation for a binary that never
+			// proved itself.
+			if artifact := handleUpdateRestart(exePath); artifact != "" {
+				firstAfterUpdate, updateArtifact = true, artifact
+			} else {
+				firstAfterUpdate = wasFirstAfterUpdate && ranFor < postUpdateFailureWindow
+			}
 			continue
 
 		case childPostUpdateFailure:
@@ -241,12 +251,12 @@ func launchAndSupervise() {
 			// the SAME version the .update-pending breadcrumb names,
 			// shouldSkipPendingVersion is false and the release is not
 			// marked skipped.
-			if classifyPostUpdateExit(code) == postUpdateRollback && attemptAutoRollback(exePath, code) {
+			if classifyPostUpdateExit(code) == postUpdateRollback && attemptAutoRollback(exePath, updateArtifact, code) {
 				crashRespawnCode = 0
 				consecutiveCrashes = 0
 				continue
 			}
-			preserveUpdateRollback(exePath, code)
+			preserveUpdateRollback(exePath, updateArtifact, code)
 			os.Exit(code)
 
 		case childPropagate:
@@ -324,9 +334,10 @@ func forwardStop(goos string, p stoppable) {
 //
 // A first boot of a fresh update whose rollback artifact is gone has nothing
 // to roll back to (postUpdatePastRollback): its exit is an ordinary crash, and
-// a supervised one however soon it comes.
-func judgeChildExit(exePath string, firstAfterUpdate, wasRespawn bool, code int, ranFor time.Duration, terminating bool, consecutiveCrashes int) (action childExitAction, wasFirstAfterUpdate bool) {
-	pastRollback := firstAfterUpdate && postUpdatePastRollback(exePath)
+// a supervised one however soon it comes. artifact is the file
+// handleUpdateRestart named when it armed the boot.
+func judgeChildExit(artifact string, firstAfterUpdate, wasRespawn bool, code int, ranFor time.Duration, terminating bool, consecutiveCrashes int) (action childExitAction, wasFirstAfterUpdate bool) {
+	pastRollback := firstAfterUpdate && postUpdatePastRollback(artifact)
 	wasFirstAfterUpdate = firstAfterUpdate && !pastRollback
 	return classifyChildExit(code, ranFor, wasFirstAfterUpdate, terminating, wasRespawn || pastRollback, consecutiveCrashes),
 		wasFirstAfterUpdate
@@ -432,15 +443,19 @@ func crashBackoff(n int) time.Duration {
 const postUpdateFailureWindow = 2 * time.Minute
 
 // postUpdatePastRollback reports whether the first boot of a fresh update has
-// no rollback artifact left to restore (rollbackArtifactPath). On Linux that
-// is the boot that reached the first-successful-boot milestone, whose
-// CleanupOldBinary swept .old: an exit inside postUpdateFailureWindow then
+// no rollback artifact left to restore — artifact, the file
+// handleUpdateRestart named at the restart that armed the boot. A .old
+// artifact is gone once the boot reached the first-successful-boot milestone,
+// whose CleanupOldBinary swept it: an exit inside postUpdateFailureWindow then
 // used to end the launcher on preserve-with-instructions — with nothing to
 // preserve — where any other boot's crash is respawned. Windows keeps the
-// launcher's ~ image past that sweep, so a release that crashes soon after
-// starting is still rolled back there while the window lasts.
-func postUpdatePastRollback(exePath string) bool {
-	_, err := os.Stat(rollbackArtifactPath(exePath))
+// launcher's ~ image past that sweep, so where ~ is the artifact (the first
+// update of a launcher lifetime) a release that crashes soon after starting
+// is still rolled back while the window lasts. Where it is not (a later
+// update, whose rename to ~ failed), ~ is two versions back and does not
+// stand in for the swept .old.
+func postUpdatePastRollback(artifact string) bool {
+	_, err := os.Stat(artifact)
 	return err != nil
 }
 
@@ -498,12 +513,13 @@ const failedBinarySuffix = ".failed"
 // (keepAsideByLink), so the restore replaces the plain name in one rename
 // and a failed restore leaves the broken binary where it was.
 //
-// Windows note: the artifact (the ~ file) is this launcher's own mapped
-// image — renaming a mapped image is legal (it is how the update swap
+// backup is the update's rollback artifact as handleUpdateRestart named it.
+//
+// Windows note: when the artifact is the ~ file it is this launcher's own
+// mapped image — renaming a mapped image is legal (it is how the update swap
 // renamed it to ~ in the first place), and afterwards the launcher runs
 // from the file at the plain name, exactly like a fresh start.
-func attemptAutoRollback(exePath string, exitCode int) bool {
-	backup := rollbackArtifactPath(exePath)
+func attemptAutoRollback(exePath, backup string, exitCode int) bool {
 	if _, err := os.Stat(backup); err != nil {
 		return false
 	}
@@ -631,9 +647,9 @@ func sweptFailedReleaseNote(marker, failedPath string) string {
 // GitHub re-download.
 //
 // The one exception is exitCodeStartupError, which gets the honest notice and
-// NO marker — see the branch below.
-func preserveUpdateRollback(exePath string, exitCode int) {
-	backup := rollbackArtifactPath(exePath)
+// NO marker — see the branch below. backup is the update's rollback artifact
+// as handleUpdateRestart named it, which both texts point the operator at.
+func preserveUpdateRollback(exePath, backup string, exitCode int) {
 	// A deterministic startup failure is not a failed update, and the marker
 	// is what the NEXT boot announces as "Previous Update Failed" — with
 	// instructions whose first step is to replace the binary. An operator who

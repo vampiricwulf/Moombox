@@ -17,12 +17,12 @@ func TestAttemptAutoRollbackRestoresPreviousBinary(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("broken new binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	backup := rollbackArtifactPath(exePath)
+	backup := exePath + ".old"
 	if err := os.WriteFile(backup, []byte("known-good previous binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if !attemptAutoRollback(exePath, 2) {
+	if !attemptAutoRollback(exePath, backup, 2) {
 		t.Fatal("attemptAutoRollback: want true with artifact present")
 	}
 
@@ -59,7 +59,7 @@ func TestAttemptAutoRollbackNoArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if attemptAutoRollback(exePath, 2) {
+	if attemptAutoRollback(exePath, exePath+".old", 2) {
 		t.Fatal("attemptAutoRollback: want false with no artifact")
 	}
 	got, err := os.ReadFile(exePath)
@@ -71,34 +71,6 @@ func TestAttemptAutoRollbackNoArtifact(t *testing.T) {
 	}
 	if _, err := os.Stat(exePath + ".update-failed"); !os.IsNotExist(err) {
 		t.Errorf("no marker may be written on decline, stat err: %v", err)
-	}
-}
-
-// TestRollbackArtifactPathPrefersTheOldFile pins the fix for the second
-// in-place update of one launcher lifetime: when handleUpdateRestart could not
-// rename .old out of the way (the ~ name is held by the launcher's own mapped
-// image), .old is the version that was running a moment ago and ~ is the one
-// BEFORE it. Restoring ~ there rolls back two versions AND the restored child's
-// CleanupOldBinary then deletes the real previous binary.
-//
-// Cross-platform on purpose: on Linux .old is the only artifact there has ever
-// been, so "the artifact is .old when .old exists" is true on every platform
-// and this runs on both CI runners.
-//
-// Mutant: reverting rollbackArtifactPath to `return exePath + "~"` fails this
-// on Windows.
-func TestRollbackArtifactPathPrefersTheOldFile(t *testing.T) {
-	dir := t.TempDir()
-	exePath := filepath.Join(dir, "moombox.exe")
-	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(exePath+".old", []byte("previous binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if got, want := rollbackArtifactPath(exePath), exePath+".old"; got != want {
-		t.Errorf("rollbackArtifactPath = %q, want %q — a surviving .old is the freshest previous binary", got, want)
 	}
 }
 
@@ -115,11 +87,11 @@ func TestAutoRollbackKeepsTheFailedBinary(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("BROKEN"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(rollbackArtifactPath(exePath), []byte("PREVIOUS"), 0o755); err != nil {
+	if err := os.WriteFile(exePath+".old", []byte("PREVIOUS"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if !attemptAutoRollback(exePath, 1) {
+	if !attemptAutoRollback(exePath, exePath+".old", 1) {
 		t.Fatal("attemptAutoRollback must succeed when the artifact exists")
 	}
 
@@ -158,13 +130,13 @@ func TestAutoRollbackReplacesAnOlderFailedArtifact(t *testing.T) {
 	for _, f := range []struct{ path, body string }{
 		{exePath, "BROKEN-2"},
 		{exePath + failedBinarySuffix, "BROKEN-1"},
-		{rollbackArtifactPath(exePath), "PREVIOUS"},
+		{exePath + ".old", "PREVIOUS"},
 	} {
 		if err := os.WriteFile(f.path, []byte(f.body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if !attemptAutoRollback(exePath, 1) {
+	if !attemptAutoRollback(exePath, exePath+".old", 1) {
 		t.Fatal("attemptAutoRollback must succeed")
 	}
 	failed, err := os.ReadFile(exePath + failedBinarySuffix)
@@ -195,7 +167,7 @@ func TestAutoRollbackFallsBackToRemovingTheFailedBinary(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("BROKEN"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(rollbackArtifactPath(exePath), []byte("PREVIOUS"), 0o755); err != nil {
+	if err := os.WriteFile(exePath+".old", []byte("PREVIOUS"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// An undeletable destination: a directory that is not empty.
@@ -207,7 +179,7 @@ func TestAutoRollbackFallsBackToRemovingTheFailedBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !attemptAutoRollback(exePath, 1) {
+	if !attemptAutoRollback(exePath, exePath+".old", 1) {
 		t.Fatal("a destination the move aside cannot take must not block the rollback — the " +
 			"os.Remove this replaced would have restored the previous binary")
 	}
@@ -242,12 +214,12 @@ func TestStartupErrorPreservesWithoutAFailedUpdateMarker(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	backup := rollbackArtifactPath(exePath)
+	backup := exePath + ".old"
 	if err := os.WriteFile(backup, []byte("PREVIOUS"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	stderr := captureStderr(t, func() { preserveUpdateRollback(exePath, exitCodeStartupError) })
+	stderr := captureStderr(t, func() { preserveUpdateRollback(exePath, backup, exitCodeStartupError) })
 
 	if _, err := os.Stat(exePath + ".update-failed"); !os.IsNotExist(err) {
 		t.Errorf("a startup error must write no .update-failed marker (stat err: %v) — the next boot "+
@@ -267,7 +239,7 @@ func TestStartupErrorPreservesWithoutAFailedUpdateMarker(t *testing.T) {
 	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	preserveUpdateRollback(exePath, 1)
+	preserveUpdateRollback(exePath, backup, 1)
 	got, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("exit 1 must still write the marker: %v", err)

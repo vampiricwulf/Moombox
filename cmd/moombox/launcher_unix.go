@@ -15,21 +15,20 @@ func cleanupOrphans(exePath string) {}
 // handleUpdateRestart runs after the child exits with exitCodeRestart.
 // Linux needs no rename dance (the child's post-milestone
 // CleanupOldBinary removes .old directly), but the launcher still
-// reports whether this restart followed a binary update (.old exists) —
+// learns whether this restart followed a binary update (.old exists) —
 // config-change restarts never create .old, so this is the launcher's
 // only signal that the NEXT child is the first boot of a fresh update.
-func handleUpdateRestart(exePath string) bool {
-	_, statErr := os.Stat(exePath + ".old")
-	return statErr == nil
-}
-
-// rollbackArtifactPath is where the previous version's binary survives
-// after an update on this platform. On Linux the .old file keeps its
-// name; a boot-crashing update never reaches the post-milestone
-// CleanupOldBinary sweep, so it is still present exactly when the
-// recovery instructions need it.
-func rollbackArtifactPath(exePath string) string {
-	return exePath + ".old"
+//
+// It returns that update's rollback artifact, "" for a config restart. On
+// Linux the .old file keeps its name; a boot-crashing update never reaches
+// the post-milestone CleanupOldBinary sweep, so it is still present exactly
+// when the rollback and the recovery instructions need it.
+func handleUpdateRestart(exePath string) string {
+	oldPath := exePath + ".old"
+	if _, statErr := os.Stat(oldPath); statErr != nil {
+		return ""
+	}
+	return oldPath
 }
 
 // deferDeleteOldLauncher is a no-op on Linux. No deferred cleanup

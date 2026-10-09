@@ -15,7 +15,7 @@ func seedRollback(t *testing.T) string {
 	if err := os.WriteFile(exePath, []byte("BROKEN"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(rollbackArtifactPath(exePath), []byte("PREVIOUS"), 0o755); err != nil {
+	if err := os.WriteFile(exePath+".old", []byte("PREVIOUS"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return exePath
@@ -44,7 +44,7 @@ func TestAutoRollbackNeverEmptiesThePlainName(t *testing.T) {
 		return orig(from, to)
 	}
 
-	if !attemptAutoRollback(exePath, 1) {
+	if !attemptAutoRollback(exePath, exePath+".old", 1) {
 		t.Fatal("attemptAutoRollback must succeed")
 	}
 	if !bytesEqualFile(t, exePath, "PREVIOUS") {
@@ -71,13 +71,13 @@ func TestAFailedRestoreLeavesTheBrokenBinaryInPlace(t *testing.T) {
 		return orig(from, to)
 	}
 
-	if attemptAutoRollback(exePath, 1) {
+	if attemptAutoRollback(exePath, exePath+".old", 1) {
 		t.Fatal("attemptAutoRollback reported success through a failed restore")
 	}
 	if !bytesEqualFile(t, exePath, "BROKEN") {
 		t.Error("the plain name must still hold the binary it had")
 	}
-	if !bytesEqualFile(t, rollbackArtifactPath(exePath), "PREVIOUS") {
+	if !bytesEqualFile(t, exePath+".old", "PREVIOUS") {
 		t.Error("the rollback artifact must survive for the manual instructions")
 	}
 	if _, err := os.Stat(exePath + failedBinarySuffix); !errors.Is(err, os.ErrNotExist) {
