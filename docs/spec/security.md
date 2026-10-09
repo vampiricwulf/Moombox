@@ -149,15 +149,14 @@ that connected on plain 80 and is refused: list it, turn `trust_forwarded_proto`
 leniency applied to every request, so with the dashboard on 443 a page at `http://192.168.1.1` passed
 — the other-service case this rule exists to close. `public_url` is the operator's statement of scheme
 and port and is compared defaulted, with no leniency — `https://192.168.1.5` admits 443 and nothing
-else. Only the port is
-added: the origin's host is still judged by IP class, so `http://localhost:774` and
+else. Only the port is added: the origin's host is still judged by IP class, so `http://localhost:774` and
 `http://127.0.0.1:774` are interchangeable against a dashboard on `:774`. The certificate-SAN
 widening is held to the same port. The dashboard's own fetches and socket, the TUI (internal token,
 no Origin), the yt-dlp plugin (no Origin) and a reverse proxy that passes on the port the browser used
 — in the `Host` it forwards, or in `X-Forwarded-Host` when it is listed in `network.trusted_proxies`
 — are unaffected. Caddy and Traefik forward the browser's own `Host` by default. Refused since this
 rule, each until `network.public_url` names the address the browser types or the proxy is fixed: a
-proxy on a non-default port whose forwarded host carries no port — one that rewrites `Host` to the
+proxy on a non-default port that does not pass that port on — one that rewrites `Host` to the
 upstream's and sets no `X-Forwarded-Host` or is not listed, and a listed one whose `X-Forwarded-Host`
 is portless, which is nginx's `$host` (`$http_host` or `$host:$server_port` carries the port) — and
 an unlisted TLS-terminating proxy on 443 forwarding a portless `Host` with `trust_forwarded_proto`
