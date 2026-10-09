@@ -295,11 +295,12 @@ func TestRecoverAsidesMuxesEveryGroupAndCarriesTheChatSidecar(t *testing.T) {
 //
 // The commonest shape this arc exists for is a Cancelled job whose staging
 // holds BOTH the fresh recording the restart began and the aside it replaced.
-// cleanupStagingAfterMux's four shields do not cover it: the asides are gone
+// None of cleanupStagingAfterMux's shields covers it: the asides are gone
 // (the recovery just consumed them), hasUnmuxedSegmentParts is false for a
-// single-file job with no seg_N dirs, the tail is not flagged and the chat is
-// not incomplete — so an unguarded cleanup calls os.RemoveAll and destroys the
-// main recording that /mux and A M exist to rescue.
+// single-file job with no seg_N dirs, unusedRootRecording finds no second
+// recording beside the one the root holds, the tail is not flagged and the
+// chat is not incomplete — so an unguarded cleanup calls os.RemoveAll and
+// destroys the main recording that /mux and A M exist to rescue.
 //
 // Mutants this kills:
 //   - the media guard dropped (the unconditional cleanupStagingAfterMux the

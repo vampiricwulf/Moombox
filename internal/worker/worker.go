@@ -2569,14 +2569,17 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 		}
 
 		// Every aside is out of staging now — but that is NOT enough to hand
-		// the directory to cleanupStagingAfterMux. Its four shields are:
-		// asides present (just consumed), hasUnmuxedParts (FALSE for a
-		// single-file job, because hasUnmuxedSegmentParts returns false with
-		// no seg_N dirs), IncompleteTail, and chat-incomplete. A Cancelled or
-		// Error job whose staging holds both the fresh video.mp4 and an aside
-		// — the commonest shape after a mid-stream restart, and exactly what
-		// /mux and A M exist to rescue — falls through all four to
-		// os.RemoveAll. Recovering the asides would delete the main recording.
+		// the directory to cleanupStagingAfterMux. Its shields are: asides
+		// present (just consumed), hasUnmuxedParts (FALSE for a single-file
+		// job, because hasUnmuxedSegmentParts returns false with no seg_N
+		// dirs), unusedRootRecording (for a single-file job, only a
+		// whole-file download beside a live-shape capture — never the one
+		// recording a root holds), IncompleteTail, and chat-incomplete. A
+		// Cancelled or Error job whose staging holds both the fresh video.mp4
+		// and an aside — the commonest shape after a mid-stream restart, and
+		// exactly what /mux and A M exist to rescue — falls through every one
+		// of them to os.RemoveAll. Recovering the asides would delete the
+		// main recording.
 		//
 		// So: reclaim only when the directory holds no recognised media
 		// (discoverStagingMedia, the same discovery muxFromStaging uses) and
