@@ -650,7 +650,10 @@ message — far up the channel, where an edit notifies nobody — instead of ope
 a new one. Both drop in each target's delivery order, not at once
 (`forgetInOrder`, `internal/notifications/lifecycle.go`): a step goes onto the
 FIFO of every target that can hold edit-mode state, behind what it already
-holds, and drops only that target's id and History. A separate-mode target gets
+holds, and drops only that target's id and History — under its current key and
+under every old-spelling key it carries, since a job open across the upgrade can
+still hold the id under one, loaded by another target's send and not yet
+adopted, and that id is what the target's queued cancel closes. A separate-mode target gets
 none — it never records an id — unless it was flipped out of edit mode while an
 edit was still in flight, which keeps it getting steps until a delivery starts
 under the new mode (`editKeys`, `internal/notifications/queue.go`). A step is

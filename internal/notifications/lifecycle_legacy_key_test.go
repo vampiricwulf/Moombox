@@ -3,6 +3,7 @@ package notifications
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -141,5 +142,65 @@ func TestAnAdoptedOldKeyLeavesTheRowOnItsNextWrite(t *testing.T) {
 	send(tgtB, "finished")
 	if n := m.tracker().trackedJobs(); n != 0 {
 		t.Errorf("tracker holds %d jobs after every target's finished edit, want 0", n)
+	}
+}
+
+// A delete's ordered drop covers a target's old-spelling keys too. A job open
+// across the upgrade can hold the target's id under one, loaded into the
+// tracker by ANOTHER target's send and not yet adopted. That key counted as
+// one no queue would reach and was dropped at once, so the target's queued
+// cancel found no id and posted plain: its message read "Downloading" for
+// good.
+//
+// Mutants: editKeys leaving out the old-spelling keys — A's cancel is a plain
+// POST in both rows; setDispatch not moving them onto a surviving queue — in
+// the reload row.
+func TestADeleteDropsAnOldSpellingsKeyInOrder(t *testing.T) {
+	const id, tok = "123456789012345678", "abcdefTOKEN"
+	plain := "https://discord.com/api/webhooks/" + id + "/" + tok
+	ptb := "https://ptb.discord.com/api/webhooks/" + id + "/" + tok
+	for _, tc := range []struct {
+		name   string
+		reload bool
+	}{
+		{"configured at boot", false},
+		{"a spelling added by a reload", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fA, release := gated(t, 0) // A is busy with another job's request
+			fB := newFakeDiscord(t, createdInOrder)
+			tgtB := legacyKeyTarget(t, fB, "https://discord.com/api/webhooks/987654321098765432/"+tok)
+			st := newMemStore()
+			const job = "dQw4w9WgXcQ"
+			st.rows[job] = map[string]string{targetMsgKey(ptb): "M_OLD_A", tgtB.msgKey: "M_OLD_B"}
+			m := &Manager{logger: testLogger{}}
+			m.SetMessageStore(st)
+			if tc.reload {
+				installTargets(t, m, legacyKeyTarget(t, fA, plain), tgtB)
+			}
+			installTargets(t, m, legacyKeyTarget(t, fA, plain, ptb), tgtB)
+
+			m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+			if !waitCalls(t, fA, 1, 3*time.Second) {
+				t.Fatal("the other job's POST never reached A")
+			}
+			// Deleting the active job: its cancel is queued on both targets.
+			m.Send("Cancelled", "desc", TypeCancelled, nil, SendOptions{Event: "cancelled", JobID: job})
+			// B closes its own message, which loads the row — A's id still
+			// under its old key — into the tracker.
+			if !waitCalls(t, fB, 3, 3*time.Second) {
+				t.Fatalf("B: %v, want the found's POST, the cancel's PATCH and its separate POST", requestLines(fB.calls()))
+			}
+			deleteRow(st, job)
+			m.ForgetJob(job)
+			release()
+
+			if !waitCalls(t, fA, 3, 3*time.Second) {
+				t.Fatalf("A: %v, want the cancel's PATCH and its separate POST", requestLines(fA.calls()))
+			}
+			if c := fA.calls()[1]; c.Method != http.MethodPatch || c.Path != "/messages/M_OLD_A" {
+				t.Errorf("A's queued cancel was %s %s, want a PATCH closing its message M_OLD_A", c.Method, c.Path)
+			}
+		})
 	}
 }

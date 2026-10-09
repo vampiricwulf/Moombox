@@ -118,6 +118,10 @@ type targetQueue struct {
 	// ForgetJob step. Both guarded by mu.
 	mode    string
 	editing bool
+	// legacyMsgKeys are the bound target's old-spelling keys
+	// (notificationTarget.legacyMsgKeys), which a step drops with msgKey.
+	// Guarded by mu: a Reload can add or remove a spelling on a survivor.
+	legacyMsgKeys []string
 
 	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
 	// of shed are counted separately because they mean different things: the
@@ -157,6 +161,7 @@ func newTargetQueue(t notificationTarget, logger interface {
 		mentionEvents:  t.mentionEvents,
 		mode:           normalizeTargetMode(t.mode),
 		editing:        normalizeTargetMode(t.mode) == ModeEdit,
+		legacyMsgKeys:  t.legacyMsgKeys,
 		shuttingDown:   shuttingDown,
 		logger:         logger,
 		wake:           make(chan struct{}, 1),
@@ -274,11 +279,13 @@ func (q *targetQueue) setMention(t notificationTarget) {
 // reason: applyTargets keeps a survivor's queue and discards the freshly
 // built notificationTarget, so a `mode` change would otherwise be accepted
 // by both UIs, written to the file, and ignored until restart. t is the
-// target fn was bound for; its mode moves with fn, under the same hold.
+// target fn was bound for; its mode and old-spelling keys move with fn, under
+// the same hold.
 func (q *targetQueue) setDispatch(t notificationTarget, fn func(msg Message, once bool) error) {
 	q.mu.Lock()
 	q.dispatch = fn
 	q.mode = normalizeTargetMode(t.mode)
+	q.legacyMsgKeys = t.legacyMsgKeys
 	if q.mode == ModeEdit {
 		q.editing = true
 	}
@@ -289,13 +296,19 @@ func (q *targetQueue) setDispatch(t notificationTarget, fn func(msg Message, onc
 // drops, or nil when the queue cannot hold edit-mode state (see editing) —
 // a separate-mode target never reads or records a message id, and a step
 // there was only a queue slot spent on nothing.
+//
+// The old-spelling keys too. A job open across the upgrade can hold this
+// target's id under one, loaded from its row and not yet adopted (messageID
+// adopts on this target's own next send); a key no step covered was dropped
+// at once, and this target's queued cancel then found no id and posted
+// plain, leaving the message reading "Downloading" for good.
 func (q *targetQueue) editKeys() []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.msgKey == "" || !q.editing {
 		return nil
 	}
-	return []string{q.msgKey}
+	return append([]string{q.msgKey}, q.legacyMsgKeys...)
 }
 
 // dispatchFor runs the bound decision function under mu (a Reload rebinds it
