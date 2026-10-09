@@ -239,9 +239,10 @@ func launchAndSupervise() {
 			// to different circumstances). firstAfterUpdate is already false,
 			// so a quick death of the RESTORED binary hits the normal
 			// fail-fast path — no rollback ping-pong is possible. When the
-			// artifact is gone (the boot reached the milestone sweep before
-			// dying) or the restore fails, fall back to preserving what's
-			// left with manual instructions.
+			// restore fails, fall back to preserving what's left with manual
+			// instructions. A boot whose artifact is already gone (it reached
+			// the milestone sweep before dying) never gets here: judgeChildExit
+			// sends it to crash supervision.
 			//
 			// A deterministic startup error (exitCodeStartupError) skips the
 			// rollback entirely: the environment, not the binary, is what
@@ -502,10 +503,13 @@ const failedBinarySuffix = ".failed"
 // breadcrumb ApplyUpdate writes) marks the failed version skipped so
 // automatic checks stop offering a release that just proved broken.
 //
-// Returns false without touching anything when no rollback artifact
-// exists (the boot survived long enough to reach the milestone sweep
-// before dying) and on the move-aside failure path; the caller then
-// falls back to preserveUpdateRollback's manual instructions. On Windows a
+// Returns false without touching anything when the rollback artifact is not
+// on disk, and on the move-aside failure path; the caller then falls back to
+// preserveUpdateRollback's manual instructions. The artifact-gone case is not
+// the boot that reached the milestone sweep before dying — judgeChildExit
+// routes that one to crash supervision (postUpdatePastRollback), so it never
+// calls this — and the stat is a guard against the file going missing
+// between that judgement, or a failed Start, and the restore. On Windows a
 // restore failure AFTER the move aside succeeded is the one unrecoverable
 // shape (the plain name is empty) — the preserve fallback's instructions
 // still point at the intact artifact, so recovery stays one manual rename.
@@ -638,9 +642,10 @@ func sweptFailedReleaseNote(marker, failedPath string) string {
 }
 
 // preserveUpdateRollback runs when the first boot of a freshly-applied
-// update fails AND automatic rollback was not possible (artifact already
-// swept, the restore itself failed, or — exit 3 — the rollback was never
-// attempted): it deliberately SKIPS the ~-file cleanup (Windows; on Linux the
+// update fails AND automatic rollback was not possible (the restore itself
+// failed, or — exit 3 — the rollback was never attempted; a boot whose
+// artifact was already swept is a supervised crash and never gets here): it
+// deliberately SKIPS the ~-file cleanup (Windows; on Linux the
 // .old survives because the child never reached its post-milestone sweep),
 // writes a recovery-instruction marker next to the binary, and prints the
 // same instructions to stderr. Recovery is one file rename instead of a
@@ -671,8 +676,8 @@ func preserveUpdateRollback(exePath, backup string, exitCode int) {
 		"Moombox: the first launch after a self-update failed (exit code %d) at %s.\n"+
 			"The previous version's binary should still be present at:\n  %s\n"+
 			"To roll back: replace %s with that file and start Moombox again.\n"+
-			"(If the backup is missing — the boot got far enough to sweep it —\n"+
-			"re-download the previous release from GitHub instead.)\n"+
+			"(If that file is missing, re-download the previous release from GitHub\n"+
+			"instead.)\n"+
 			"Delete this marker file once resolved.\n",
 		exitCode, time.Now().Format(time.RFC3339), backup, exePath)
 	markerPath := exePath + ".update-failed"

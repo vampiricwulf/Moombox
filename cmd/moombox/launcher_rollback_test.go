@@ -49,9 +49,10 @@ func TestAttemptAutoRollbackRestoresPreviousBinary(t *testing.T) {
 }
 
 // TestAttemptAutoRollbackNoArtifact pins the fallback contract: with no
-// rollback artifact (the boot survived to the milestone sweep before dying),
-// the function must decline WITHOUT touching the binary or writing a marker —
-// the caller then runs preserveUpdateRollback's manual-instruction path.
+// rollback artifact on disk (a boot that swept it never gets here —
+// judgeChildExit supervises it — so this is the race guard), the function
+// must decline WITHOUT touching the binary or writing a marker — the caller
+// then runs preserveUpdateRollback's manual-instruction path.
 func TestAttemptAutoRollbackNoArtifact(t *testing.T) {
 	dir := t.TempDir()
 	exePath := filepath.Join(dir, "moombox.exe")
@@ -234,7 +235,7 @@ func TestStartupErrorPreservesWithoutAFailedUpdateMarker(t *testing.T) {
 		t.Error("the rollback artifact must be preserved untouched")
 	}
 
-	// Every other code keeps the marker, byte for byte as before.
+	// Every other code keeps the marker and its rollback instructions.
 	marker := exePath + ".update-failed"
 	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
@@ -244,8 +245,17 @@ func TestStartupErrorPreservesWithoutAFailedUpdateMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exit 1 must still write the marker: %v", err)
 	}
-	if !strings.Contains(string(got), "To roll back") {
+	if !strings.Contains(string(got), "To roll back") || !strings.Contains(string(got), backup) {
 		t.Errorf("the exit-1 marker lost its rollback instructions, got:\n%s", got)
+	}
+	// A boot that swept its artifact is a supervised crash (judgeChildExit)
+	// and never writes this marker, so the marker must not give that as the
+	// reason the backup could be missing.
+	//
+	// Mutant: restoring "(If the backup is missing — the boot got far enough
+	// to sweep it — …)" fails this.
+	if strings.Contains(string(got), "sweep") {
+		t.Errorf("the marker blames a sweep this path never follows, got:\n%s", got)
 	}
 }
 
