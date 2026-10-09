@@ -132,12 +132,15 @@ func TestStaleVodRefreshFailureKeepsUnexpiredURLs(t *testing.T) {
 // before — URLs already expired or with no expiry to read, a verdict on the
 // video, a definitive refusal, a cancel.
 //
-// Mutants: drop the `!ok` in vodURLsUnexpired — the no-expiry row keeps its
-// extraction; `!exp.After(now)` → `false` — the expired row does; drop
-// `!isVodRefreshVerdict(err)` — the verdict row does; drop the classNetwork
-// test — the 404 row does; drop `ctx.Err() == nil` — the cancelled row does;
-// make vodURLsUnexpired answer `true` for no URL at all — the URL-less row
-// does.
+// Mutants: drop the whole expiry test in vodURLsUnexpired — the expired and
+// no-expiry rows keep their extraction; drop `!exp.After(now)` from it
+// (`_ = exp`) — the expired row does; drop `!isVodRefreshVerdict(err)` — the
+// verdict row does; drop the classNetwork test — the 404 row does; drop
+// `ctx.Err() == nil` — the cancelled row does; make vodURLsUnexpired answer
+// `true` for no URL at all — the URL-less row does. Dropping the `!ok` alone
+// is no mutant: formatURLExpiry answers the zero time whenever ok is false,
+// which `!exp.After(now)` rejects as well, so the no-expiry row is held by
+// both terms and neither on its own.
 func TestStaleVodRefreshFailureFallsBackOnlyWhileTheURLsLive(t *testing.T) {
 	now := time.Now()
 	future := now.Add(4 * time.Hour).Unix()
