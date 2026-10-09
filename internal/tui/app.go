@@ -750,6 +750,13 @@ type appFeedback struct {
 	// scanning the text. See feedbackSeverity for why the inference is not
 	// good enough on the one line that carries a stated fact.
 	sev feedbackSeverity
+	// wrap lets the line take more than one row: View word-wraps it onto the
+	// rows above the status bar (wrapFeedback) instead of cutting it to one.
+	// Set only by setWrappedFeedback, for the lines that carry a sentence
+	// written elsewhere whose tail is the part to act on — the held profile's
+	// lock path. False, the zero value, is the one ellipsized row every other
+	// line has always had.
+	wrap bool
 	// until is when the line stops being shown. The zero value means "nothing
 	// scheduled", which is what an empty struct reads as.
 	until time.Time

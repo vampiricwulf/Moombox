@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
-
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
@@ -159,34 +157,56 @@ func TestRecheckFeedbackNamesWhyACheckCouldNotConclude(t *testing.T) {
 
 // TestRecheckFeedbackFitsThePanel is the trap this change had to clear.
 //
-// addOverlayMessage writes the feedback into a FIXED ROW of an already-composed
-// frame, as "  "+msg padded out to the width — it does not clip. A line wider
-// than the terminal therefore wraps, and the wrap pushes every row below it
-// down: the whole dashboard shifts for three seconds.
+// addOverlayMessage writes the feedback into FIXED ROWS of an already-composed
+// frame, as "  "+msg padded out to the width. A line wider than the terminal
+// used to wrap there, and the wrap pushed every row below it down: the whole
+// dashboard shifted for three seconds.
 //
 // Nothing needed this before, because everything else reaching setFeedback is
 // composed from bounded vocabulary. The reason is the first string whose length
 // is decided elsewhere — a resolver's wording, a proxy's host name — so it is
 // the first one that can do this.
+//
+// The line is no longer cut to one row: it wraps onto the rows above the
+// status bar (setWrappedFeedback), so a held profile's lock path is shown
+// whole. What has to hold is what the operator sees — the frame keeps its
+// height, no row is wider than the terminal, and a reason this long stops at
+// the block's cap with an ellipsis rather than burying the frame.
+//
+// Mutants (checked): wrapFeedback without its cap, without the capped row's
+// ellipsis, or without breaking a word wider than a row — each fails here.
 func TestRecheckFeedbackFitsThePanel(t *testing.T) {
-	huge := "resolve " + strings.Repeat("very-long-hostname-segment.", 40) + "example: no such host"
+	// Longer than the cap holds even at 120x24: twelve rows of 118 columns.
+	huge := "resolve " + strings.Repeat("very-long-hostname-segment.", 80) + "example: no such host"
 
-	for _, width := range []int{40, 80, 120} {
-		got := recheckFeedback(t, width, true, false, cookieRecheckResultMsg{
+	for _, width := range []int{60, 80, 120} {
+		const height = 24
+		// drawnFrame fails on a frame taller than the terminal or a row wider.
+		frame := drawnFrame(t, width, height, true, false, cookieRecheckResultMsg{
 			YouTube:       cookies.RefreshUnknown,
 			YouTubeReason: huge,
 		})
-		// -2 for addOverlayMessage's leading indent, which is what the line has
-		// to fit INSIDE.
-		if w := lipgloss.Width(got); w > width-2 {
-			t.Errorf("at width %d the feedback is %d columns wide: %q\n\n"+
-				"addOverlayMessage pads rather than clips, so this wraps and shifts every row "+
-				"of the frame below it", width, w, got)
+		first := -1
+		for i, row := range frame {
+			if strings.HasPrefix(row, "Cookies: YouTube") {
+				first = i
+				break
+			}
+		}
+		if first < 0 {
+			t.Fatalf("at width %d the R C line is not drawn:\n%s", width, strings.Join(frame, "\n"))
+		}
+		if rows := len(frame) - 1 - first; rows > feedbackRowCap(height) {
+			t.Errorf("at width %d the block took %d rows, past its cap of %d", width, rows, feedbackRowCap(height))
+		}
+		if last := frame[len(frame)-2]; !strings.HasSuffix(last, "…") {
+			t.Errorf("at width %d the block's last row %q does not end in an ellipsis — nothing "+
+				"says the reason goes on", width, last)
 		}
 	}
 
-	// Below the first WindowSizeMsg there is no width to clamp to, and no frame
-	// to break either. Clamping to a width nobody has reported would cut every
+	// Below the first WindowSizeMsg there is no width to wrap to, and no frame
+	// to break either. Wrapping to a width nobody has reported would cut every
 	// message to nothing.
 	got := recheckFeedback(t, 0, true, false, cookieRecheckResultMsg{
 		YouTube:       cookies.RefreshUnknown,

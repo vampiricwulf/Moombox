@@ -441,7 +441,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dashboard's refresh button is the same gesture and had drifted to a
 		// different answer entirely. This side decides only WHICH platforms
 		// were checked; the sentence is shared.
-		a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))
+		a.setWrappedFeedback(a.cookieRecheckFeedback(msg))
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
@@ -515,7 +515,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setFeedback("No browser profile found, running R C instead...")
 			return a, noProfileFallback
 		case msg.Err != nil:
-			a.setFeedback(mechanismLabel + " failed: " + msg.Err.Error())
+			// Wrapped: the error is a sentence written elsewhere, and a held
+			// profile's (ErrProfileInUse) ends in the lock to delete, which
+			// one row cut at the width never reached. Unstated, as before —
+			// the scan's "failed" sits in the lead and is never cut.
+			a.setWrappedFeedback(mechanismLabel+" failed: "+msg.Err.Error(), severityUnstated)
 		case !msg.Result.Ran:
 			// Causes from the shared constant, not restated: this line, the
 			// worker's log note and the Web toast are three renderings of one
@@ -1081,15 +1085,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // refresh is still renewing them. That combination is exactly the one an
 // operator has no other way to find out about from this key, so it is rendered
 // whenever it is set and never inferred from anything else on this message. It
-// goes LAST so the clamp below eats it before it eats the verdicts.
+// goes LAST so the row cap eats it before it eats the verdicts.
 //
-// AND THAT IS WHY THE SEVERITY IS RETURNED RATHER THAN LEFT TO THE COLORIZER.
-// The clamp runs here and feedbackColor runs on what survives it, so on a
-// narrow terminal the LastError clause — the whole reason the line is not
-// green — is truncated away before anything looks at it. Measured: at 40
-// columns the line rendered in the SUCCESS colour while announcing a recorded
-// failure. Every fact the colour depends on is in hand at this point and none
-// of it is in hand afterwards, so the answer is computed here and carried.
+// THE LINE WRAPS, it is not cut to one row. A held profile's LastError names
+// the lock to delete by its full path, and that path starts about 175 columns
+// in: cut to the width, as this line was until then (fitFeedback), it lost the
+// path at 80, 120, 160 and 200 columns alike, so the one fact the sentence was
+// written to carry never reached a TUI screen. The caller sets it with
+// setWrappedFeedback, and View lays it out with wrapFeedback — up to half the
+// terminal's rows (feedbackRowCap), the last one cut with an ellipsis.
+//
+// AND THE SEVERITY IS STILL RETURNED RATHER THAN LEFT TO THE COLORIZER. It was
+// first stated because the old clamp ran here and feedbackColor ran on what
+// survived it: at 40 columns the LastError clause — the whole reason the line
+// is not green — was truncated away and the line rendered in the SUCCESS
+// colour while announcing a recorded failure. Nothing cuts the line before the
+// colorizer now, but its scan still ranks by branch order over prose written
+// elsewhere (see feedbackSeverity), and every fact the colour depends on is in
+// hand here and nowhere after, so the answer is computed here and carried.
 func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbackSeverity) {
 	var checked []cookies.RecheckedPlatform
 	var reasons []string
@@ -1158,51 +1171,53 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 		line += " | Last cookie error: " + msg.LastError
 		// AT LEAST warning, whatever the verdicts said. A recorded failure is
 		// something to act on even beside two healthy platforms, and this is
-		// the fact the clamp destroys. Never more than warning: what was
+		// the fact the row cap cuts first. Never more than warning: what was
 		// recorded is a fact about a PREVIOUS pass, and the conclusive verdict
 		// of THIS one is the only thing that earns red.
 		stated = max(stated, severityWarning)
 	}
-	return a.fitFeedback(line), stated
-}
-
-// fitFeedback clamps a feedback line to the room the overlay actually has.
-//
-// addOverlayMessage cuts every line to the width at render time; this clamp is
-// earlier, at the composer, for the one line whose severity matters to read
-// right: the recheck reason's length is decided elsewhere (a resolver's DNS
-// wording, a proxy's host name), and the composer states the severity of the
-// line it actually shows (see feedbackSeverity). It lives here rather than
-// inside setFeedback because putting it there would silently truncate
-// messages whose exact text other tests pin.
-//
-// truncateString is the task list's own ellipsis helper, so an over-long line
-// ends the same way an over-long title does. Below the first WindowSizeMsg
-// a.width is 0 and the line is returned whole: there is no frame to break yet,
-// and clamping to a width nobody has reported would cut every message to
-// nothing.
-func (a *App) fitFeedback(line string) string {
-	const overlayIndent = 2 // addOverlayMessage's leading "  "
-	if a.width <= overlayIndent {
-		return line
-	}
-	return truncateString(line, a.width-overlayIndent)
+	return line, stated
 }
 
 func (a *App) setFeedback(msg string) {
 	a.setFeedbackWithSeverity(msg, severityUnstated)
 }
 
+// feedbackRowHold is how long one row of the feedback line stays up: the 3 s
+// every line has always had. A wrapped line gets it once per row it takes.
+const feedbackRowHold = 3 * time.Second
+
 // setFeedbackWithSeverity is setFeedback for a composer that KNOWS how alarming
 // its line is, rather than leaving feedbackColor to infer it from the finished
 // prose. See feedbackSeverity for why the inference is not good enough on the
 // one line that carries it.
+func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
+	a.feedback = appFeedback{msg: msg, sev: stated, until: time.Now().Add(feedbackRowHold)}
+}
+
+// setWrappedFeedback is setFeedbackWithSeverity for a line that must be read
+// whole: View wraps it onto as many rows as it needs (wrapFeedback) rather
+// than cutting it to one, and it stays up feedbackRowHold per row, so a block
+// naming a path to delete is up long enough to be read and copied, where the
+// 3 s a one-row line gets is not.
+//
+// For a line carrying a sentence written elsewhere whose tail is the part to
+// act on: R C's line, whose LastError names a held profile's lock, and R F's
+// error arm, which carries the same sentence. Every other line keeps the one
+// ellipsized row — their prose is bounded, and tests pin it cut.
 //
 // It takes the pair in the order cookieRecheckFeedback returns it, so the call
-// site reads `a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))` and the
+// site reads `a.setWrappedFeedback(a.cookieRecheckFeedback(msg))` and the
 // message and the fact about it cannot be assembled apart.
-func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
-	a.feedback = appFeedback{msg: msg, sev: stated, until: time.Now().Add(3 * time.Second)}
+//
+// The rows are counted at the size the terminal has now. Below the first
+// WindowSizeMsg there is no size, and the line is held as one row.
+func (a *App) setWrappedFeedback(msg string, stated feedbackSeverity) {
+	rows := len(wrapFeedback(msg, a.width, feedbackRowCap(a.height)))
+	a.feedback = appFeedback{
+		msg: msg, sev: stated, wrap: true,
+		until: time.Now().Add(time.Duration(rows) * feedbackRowHold),
+	}
 }
 
 func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {

@@ -184,16 +184,16 @@ func renderedRank(t *testing.T, c color.Color) int {
 	}
 }
 
-// recheckColor renders one R C result AS THE OPERATOR SEES IT: composed,
-// clamped to the terminal width, and then coloured by exactly the expression
-// View uses.
+// recheckColor renders one R C result AS THE OPERATOR SEES IT: composed at the
+// terminal's width and then coloured by exactly the expression View uses.
 //
-// The clamp is the whole point. The previous version of this test fed
-// feedbackColor unclamped strings, which is the one domain where the property
-// held — fitFeedback runs inside cookieRecheckFeedback and feedbackColor runs
-// on what survives it, so a 40-column terminal truncated the marker away and
-// the line rendered green while announcing a recorded failure. Going through
-// the real Update path is what makes the assertion about what is displayed.
+// The width was the whole point. The previous version of this test fed
+// feedbackColor unclamped strings, which was the one domain where the property
+// held — fitFeedback ran inside cookieRecheckFeedback and feedbackColor ran on
+// what survived it, so a 40-column terminal truncated the marker away and the
+// line rendered green while announcing a recorded failure. The line wraps now
+// rather than being cut, but going through the real Update path is still what
+// makes the assertion about what is displayed.
 func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, color.Color) {
 	t.Helper()
 	app := NewApp()
@@ -210,13 +210,15 @@ func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, 
 // TWO DEFECTS, one root: severity was being re-derived from prose by a reader
 // standing downstream of the clamp and of the branch order.
 //
-//   - THE CLAMP. cookieRecheckFeedback appends the clause and then truncates
-//     the line to the terminal width; feedbackColor then reads the truncated
-//     line. At 40 columns "…| Last cookie error: the browser…" arrives as
-//     "…| Last cookie err…", the marker is gone, and the line falls through to
-//     the SUCCESS colour. An operator in a split pane presses R C, is told
-//     their cookies are fine, and the browser refresh has been failing for
-//     days.
+//   - THE CLAMP. cookieRecheckFeedback appended the clause and then truncated
+//     the line to the terminal width; feedbackColor then read the truncated
+//     line. At 40 columns "…| Last cookie error: the browser…" arrived as
+//     "…| Last cookie err…", the marker was gone, and the line fell through to
+//     the SUCCESS colour. An operator in a split pane pressed R C, was told
+//     their cookies were fine, and the browser refresh had been failing for
+//     days. The line wraps now (setWrappedFeedback) and is no longer cut
+//     before the colour is chosen; the widths stay, as the guard against a
+//     clamp coming back.
 //   - THE BRANCH ORDER. The gray "deleted:" branch sits above the warning
 //     branch, so a recorded error whose words contained it would render
 //     NEUTRAL. No setError composes that word today — this is the row that
@@ -225,8 +227,8 @@ func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, 
 //
 // Both close the same way: cookieRecheckFeedback states the severity from the
 // facts it holds, and feedbackColor obeys a stated severity over its own scan.
-// The widths below straddle the truncation point (~42 columns) on purpose; 0 is
-// the unclamped case, which is the domain the old test lived in.
+// The widths below straddle the old truncation point (~42 columns) on purpose;
+// 0 is the unclamped case, which is the domain the old test lived in.
 func TestLastCookieErrorNeverLowersSeverity(t *testing.T) {
 	verdicts := []struct {
 		name    string
@@ -289,10 +291,10 @@ func mustColor(t *testing.T, width int, verdict cookies.RefreshVerdict, lastErro
 // also satisfied by a colour that ignores the line entirely.
 //
 // The same result must render the same colour whatever the terminal is doing.
-// The message is allowed to shrink — that is what the clamp is for — but what
-// it MEANS does not change with the width of the pane it is displayed in, and
-// any colour that varies with the width is deriving severity from the wrong
-// thing.
+// The message may be laid out differently — wrapped, cut at the row cap — but
+// what it MEANS does not change with the width of the pane it is displayed in,
+// and any colour that varies with the width is deriving severity from the
+// wrong thing.
 func TestRecheckColourSurvivesTheClampUnchanged(t *testing.T) {
 	for _, tc := range []struct {
 		name string

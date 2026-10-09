@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
-
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
@@ -67,12 +65,12 @@ func TestRecheckLineCarriesTheRecordedCookieError(t *testing.T) {
 			t.Errorf("R C feedback = %q, want %q", got, want)
 		}
 		// The ordering claim, stated independently of the exact string: the
-		// clamp eats the tail first, so the least important fact has to BE the
-		// tail. Reverse the two and a narrow terminal loses the verdict's reason
-		// to keep a message about a different service.
+		// row cap eats the tail first, so the least important fact has to BE
+		// the tail. Reverse the two and a long recorded error costs the
+		// verdict's reason to keep a message about a different service.
 		if strings.Index(got, "Last cookie error") < strings.Index(got, reason) {
-			t.Errorf("the recorded error precedes the check's own reason: %q. On a narrow terminal "+
-				"the clamp would drop the reason and keep this", got)
+			t.Errorf("the recorded error precedes the check's own reason: %q. Past the row cap "+
+				"the block would drop the reason and keep this", got)
 		}
 	})
 
@@ -94,18 +92,28 @@ func TestRecheckLineCarriesTheRecordedCookieError(t *testing.T) {
 	})
 
 	t.Run("still fits the panel", func(t *testing.T) {
-		// Same trap the reason strings brought: addOverlayMessage pads rather
-		// than clips, so an over-long line wraps and shifts every row of the
-		// frame below it for three seconds. LastError's length is decided by
-		// whichever cookie pass wrote it, which is exactly as unbounded.
+		// Same trap the reason strings brought: a line wider than the terminal
+		// shifted every row of the frame below it for three seconds.
+		// LastError's length is decided by whichever cookie pass wrote it,
+		// which is exactly as unbounded. The line wraps now (it has to: a held
+		// profile's names its lock last), so what must hold is the drawn frame
+		// — its height, every row inside the width, and a block no taller than
+		// its cap even for a path with no space to break at.
 		huge := "restore failed: " + strings.Repeat("C:/very/long/path/segment/", 40) + "cookies.txt"
-		for _, width := range []int{40, 80, 120} {
-			got := recheckFeedback(t, width, true, false, cookieRecheckResultMsg{
+		for _, width := range []int{60, 80, 120} {
+			const height = 24
+			frame := drawnFrame(t, width, height, true, false, cookieRecheckResultMsg{
 				YouTube:   cookies.RefreshOK,
 				LastError: huge,
 			})
-			if w := lipgloss.Width(got); w > width-2 {
-				t.Errorf("at width %d the feedback is %d columns wide: %q", width, w, got)
+			for i, row := range frame {
+				if strings.HasPrefix(row, "Cookies: YouTube OK") {
+					if rows := len(frame) - 1 - i; rows > feedbackRowCap(height) {
+						t.Errorf("at width %d the block took %d rows, past its cap of %d",
+							width, rows, feedbackRowCap(height))
+					}
+					break
+				}
 			}
 		}
 	})
