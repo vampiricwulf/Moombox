@@ -637,7 +637,14 @@ and reads it when the current key misses: the id is adopted under the current
 key in memory and the old key leaves the map (`messageID`,
 `internal/notifications/lifecycle.go`), so a job open across the upgrade keeps
 editing its message — and its error or cancel still closes it — and the old key
-leaves the row at the job's next write, with no write of its own. A target the operator removed leaves an orphaned entry that nothing
+leaves the row at the job's next write, with no write of its own. Those releases
+built one target per spelling, so a webhook configured in two spellings (say
+with and without the trailing slash) posted a message per spelling for every
+job, and a job open across the upgrade holds a different id under each key.
+The second is not dropped: it stays under its old key and every edit rewrites
+it with the same body, the terminal edit included, which closes it beside the
+first (`extraMsg`, `patchExtra`, `internal/notifications/lifecycle.go`); one
+Discord no longer has is forgotten, with nothing posted in its place. A target the operator removed leaves an orphaned entry that nothing
 reads; a target the operator adds starts a new message at its next allowed
 event; and deleting the job drops the row and the ids with it (no DELETE is ever
 sent to Discord) — and the running process's copy too: `onJobDeleted` calls

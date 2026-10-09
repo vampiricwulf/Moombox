@@ -294,8 +294,8 @@ func TestLoadsFromTheStoreOnce(t *testing.T) {
 	st.rows["yt_1"] = map[string]string{"abc": "999"}
 	tr := newLifecycleTracker(st)
 
-	if id, ok := tr.messageID("yt_1", "abc"); !ok || id != "999" {
-		t.Fatalf("messageID = %q,%v — the stored id was not loaded", id, ok)
+	if id, _ := tr.messageID("yt_1", "abc"); id != "999" {
+		t.Fatalf("messageID = %q — the stored id was not loaded", id)
 	}
 	// Mutate the store behind the tracker's back: a second lookup must NOT
 	// re-read it.
@@ -314,8 +314,8 @@ func TestRecordSurvivesMissingRow(t *testing.T) {
 	tr := newLifecycleTracker(st)
 
 	tr.remember("yt_gone", "abc", "111")
-	if id, ok := tr.messageID("yt_gone", "abc"); !ok || id != "111" {
-		t.Errorf("in-memory id lost when the row write failed: %q,%v", id, ok)
+	if id, _ := tr.messageID("yt_gone", "abc"); id != "111" {
+		t.Errorf("in-memory id lost when the row write failed: %q", id)
 	}
 }
 
@@ -513,7 +513,7 @@ func TestTrackerCapsTrackedJobs(t *testing.T) {
 		t.Errorf("tracked jobs = %d, want <= %d", n, maxTrackedJobs)
 	}
 	// The newest must have survived the eviction, the oldest must not.
-	if _, ok := tr.messageID(fmt.Sprintf("yt_%d", maxTrackedJobs+99), "abc"); !ok {
+	if id, _ := tr.messageID(fmt.Sprintf("yt_%d", maxTrackedJobs+99), "abc"); id == "" {
 		t.Error("the most recently touched job was evicted")
 	}
 }
@@ -537,7 +537,7 @@ func TestNonEditableTransportFallsBack(t *testing.T) {
 	if got != 1 {
 		t.Errorf("plain sends = %d, want 1 — a non-editable transport must fall back, not drop", got)
 	}
-	if _, ok := m.tracker().messageID("yt_1", "abc"); ok {
+	if id, _ := m.tracker().messageID("yt_1", "abc"); id != "" {
 		t.Error("a fallback post must not record a message id")
 	}
 }
@@ -568,7 +568,7 @@ func TestPatch404RePostFailureForgetsTheID(t *testing.T) {
 	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "muxing", JobID: "yt_1"}), false); err == nil {
 		t.Fatal("a refused re-POST was reported as success")
 	}
-	if id, ok := m.tracker().messageID("yt_1", targetMsgKey(f.URL())); ok {
+	if id, _ := m.tracker().messageID("yt_1", targetMsgKey(f.URL())); id != "" {
 		t.Errorf("the stale id %q is still held — the next event would PATCH a ghost", id)
 	}
 	if got := st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())]; got != "STALE" {

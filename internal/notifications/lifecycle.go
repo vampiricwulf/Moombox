@@ -233,20 +233,34 @@ func (l *lifecycleTracker) jobLocked(jobID string) *lifecycleJob {
 	return j
 }
 
-// messageID returns the message this target edits for this job.
+// extraMsg is a second message one target holds for a job: one an old
+// spelling of its webhook opened (messageID), kept under that spelling's key.
+type extraMsg struct {
+	key, id string
+}
+
+// messageID returns the message this target edits for this job — "" when it
+// has none yet — and any other message of the job's this target rewrites
+// with it.
 //
 // legacy are the keys an older release stored this target's ids under
 // (legacyResolvedURL, manager.go). A job whose row still holds one was opened
 // before its webhook's spelling was canonicalised, and its next event must
 // edit that message, not open a second one beside it. The id is ADOPTED: it
-// moves to key in memory, and every legacy key leaves the map, so the job's
-// next row write (remember) stores it under the current key and drops the
-// old one — no write of its own, so the one-write-per-(job, target) budget
-// stands. Until then a restart reads the old key again and adopts it again.
-// Dropping the legacy keys even when key already holds an id matters too:
-// release closes the entry only once every key in the map is closed, and no
-// target will ever close a key nobody sends under any more.
-func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (string, bool) {
+// moves to key in memory and the legacy key leaves the map, so the job's next
+// row write (remember) stores it under the current key and drops the old one
+// — no write of its own, so the one-write-per-(job, target) budget stands.
+// Until then a restart reads the old key again and adopts it again. A legacy
+// key holding nothing, or the id key already holds, leaves the map too:
+// release closes the entry only once every key in the map is closed.
+//
+// A legacy key holding a DIFFERENT id is a second message: 2.8.9 and 2.8.10
+// built one target per spelling, so a webhook configured as "…/TOKEN" and
+// "…/TOKEN/" posted, and kept editing, one message per spelling for every
+// job. Dropping it orphaned it, reading "Downloading" for good. It stays under
+// its old key and is returned in extra: every edit rewrites it too, and the
+// terminal edit closes it (release) like the job's own message.
+func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (id string, extra []extraMsg) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	j := l.jobLocked(jobID)
@@ -254,13 +268,17 @@ func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (strin
 		if lk == "" || lk == key {
 			continue
 		}
-		if old := j.msgs[lk]; old != "" && j.msgs[key] == "" {
+		switch old := j.msgs[lk]; {
+		case old == "" || old == j.msgs[key]:
+			delete(j.msgs, lk)
+		case j.msgs[key] == "":
 			j.msgs[key] = old
+			delete(j.msgs, lk)
+		default:
+			extra = append(extra, extraMsg{key: lk, id: old})
 		}
-		delete(j.msgs, lk)
 	}
-	id := j.msgs[key]
-	return id, id != ""
+	return j.msgs[key], extra
 }
 
 // remember records a newly created message and persists the job's whole map.
@@ -351,18 +369,23 @@ func (l *lifecycleTracker) forget(jobID, key string) {
 // History per target, for the life of a 24/7 process. A target that filters
 // `finished` out keeps the entry alive until evictLocked, which is the same
 // bound a job that never reaches a terminal event already has.
-func (l *lifecycleTracker) release(jobID, key string) {
+//
+// keys are the target's key and the old-spelling keys of the second messages
+// its terminal edit closed (extraMsg).
+func (l *lifecycleTracker) release(jobID string, keys ...string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	j := l.jobs[jobID]
 	if j == nil {
 		return
 	}
-	delete(j.history, key)
 	if j.closed == nil {
 		j.closed = map[string]bool{}
 	}
-	j.closed[key] = true
+	for _, key := range keys {
+		delete(j.history, key)
+		j.closed[key] = true
+	}
 	for k := range j.msgs {
 		if !j.closed[k] {
 			return
@@ -575,6 +598,9 @@ type lifecyclePlan struct {
 	Manage bool
 	// MessageID is the message to PATCH. Empty means "create it".
 	MessageID string
+	// Extra are the job's other messages on this target, which every edit
+	// rewrites with the same body (messageID).
+	Extra []extraMsg
 	// AlsoSeparate marks a terminal event: edit the lifecycle message, then
 	// post the separate embed too (it carries the mention).
 	AlsoSeparate bool
@@ -595,8 +621,8 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 	if terminalLifecycleEvents[opts.Event] {
 		// Close an OPEN message; never open one. A job whose first word to
 		// this target is "failed" has no story to rewrite.
-		if id, ok := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...); ok {
-			return lifecyclePlan{Manage: true, MessageID: id, AlsoSeparate: true}
+		if id, extra := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...); id != "" {
+			return lifecyclePlan{Manage: true, MessageID: id, Extra: extra, AlsoSeparate: true}
 		}
 		// The lookup just created the entry, and this event is the end of the
 		// story: release it again rather than leave a slot (and the store read
@@ -605,8 +631,8 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 		m.tracker().release(opts.JobID, t.msgKey)
 		return lifecyclePlan{}
 	}
-	id, _ := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...)
-	return lifecyclePlan{Manage: true, MessageID: id}
+	id, extra := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...)
+	return lifecyclePlan{Manage: true, MessageID: id, Extra: extra}
 }
 
 // dispatchOne is the single decision point between the per-target FIFO sender
@@ -667,12 +693,13 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	}
 
 	lifecycleErr := m.postOrPatch(edit, tr, opts.JobID, t.msgKey, opts.Event, plan, body, once)
+	closedExtra, extraErr := m.patchExtra(edit, tr, opts.JobID, plan.Extra, body, once)
 
 	if plan.AlsoSeparate && !opts.EditOnly {
 		// The separate embed carries the mention and must go out even if the
 		// closing edit failed (owner ruling: two messages on failure).
 		if sepErr := sendPlain(t.sender, msg, once); sepErr != nil {
-			return errors.Join(lifecycleErr, sepErr)
+			return errors.Join(lifecycleErr, extraErr, sepErr)
 		}
 	}
 	// A delivered terminal edit ends this job's story for THIS target: drop its
@@ -680,9 +707,35 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	// closed). The PERSISTED id stays, so a Retry reloads it once and keeps
 	// editing the same message.
 	if lifecycleErr == nil && (plan.AlsoSeparate || opts.Event == "finished") {
-		tr.release(opts.JobID, t.msgKey)
+		tr.release(opts.JobID, append([]string{t.msgKey}, closedExtra...)...)
 	}
-	return lifecycleErr
+	return errors.Join(lifecycleErr, extraErr)
+}
+
+// patchExtra rewrites the job's other messages on this target (lifecyclePlan.
+// Extra) with the body its own message got, and returns the keys of those it
+// delivered. One that Discord answers "Unknown Message" is forgotten — there
+// is nothing left of it to close — and nothing is posted in its place: the
+// job's own message carries the story.
+func (m *Manager) patchExtra(edit editableSender, tr *lifecycleTracker, jobID string, extra []extraMsg, body []byte, once bool) (delivered []string, err error) {
+	for _, x := range extra {
+		var perr error
+		if once {
+			perr = edit.patchMessageOnce(x.id, body)
+		} else {
+			perr = edit.patchMessage(x.id, body)
+		}
+		switch {
+		case perr == nil:
+			delivered = append(delivered, x.key)
+		case errors.Is(perr, ErrUnknownMessage):
+			tr.forget(jobID, x.key)
+			m.logger.Info("an old spelling's lifecycle message is gone — no longer editing it", "jobID", jobID)
+		default:
+			err = errors.Join(err, perr)
+		}
+	}
+	return delivered, err
 }
 
 // sendPlain posts a message unchanged, honouring the queue's shutting-down

@@ -1,7 +1,9 @@
 package notifications
 
 import (
+	"io"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -107,7 +109,7 @@ func TestACanonicalSpellingCarriesNoOldKey(t *testing.T) {
 // ever close would otherwise hold until eviction.
 //
 // Mutant: messageID adopting the id but keeping the old key — the row keeps
-// it, and the entry outlives the job's terminal edit.
+// it.
 func TestAnAdoptedOldKeyLeavesTheRowOnItsNextWrite(t *testing.T) {
 	const id, tok = "123456789012345678", "abcdefTOKEN"
 	ptb := "https://ptb.discord.com/api/webhooks/" + id + "/" + tok
@@ -202,5 +204,163 @@ func TestADeleteDropsAnOldSpellingsKeyInOrder(t *testing.T) {
 				t.Errorf("A's queued cancel was %s %s, want a PATCH closing its message M_OLD_A", c.Method, c.Path)
 			}
 		})
+	}
+}
+
+// 2.8.9 and 2.8.10 built one target per spelling, so a webhook configured as
+// "…/TOKEN" and "…/TOKEN/" posted one lifecycle message per spelling for every
+// job, and a job open across the upgrade holds an id under each key. Folded
+// into one target, it kept editing the current key's message and dropped the
+// other spelling's key without ever touching its message, which read
+// "Downloading" for good. Every edit rewrites both now, and the terminal edit
+// closes both.
+//
+// Mutants: messageID dropping an old key that holds a different id — M_SLASH
+// is never edited; dispatchOne's release leaving the old key open — the
+// tracker keeps the job's entry after its terminal edit.
+func TestAnUpgradeKeepsEditingASecondSpellingsMessage(t *testing.T) {
+	const id, tok = "123456789012345678", "abcdefTOKEN"
+	plain := "https://discord.com/api/webhooks/" + id + "/" + tok
+	for _, terminal := range []string{"finished", "cancelled"} {
+		t.Run(terminal, func(t *testing.T) {
+			f := newFakeDiscord(t, okCreated("NEW"))
+			tgt := legacyKeyTarget(t, f, plain, plain+"/")
+			st := newMemStore()
+			const job = "dQw4w9WgXcQ"
+			st.rows[job] = map[string]string{targetMsgKey(plain): "M_PLAIN", targetMsgKey(plain + "/"): "M_SLASH"}
+			m := &Manager{logger: testLogger{}}
+			m.SetMessageStore(st)
+
+			for _, ev := range []string{"downloading", terminal} {
+				if err := m.dispatchOne(tgt, One(ev, "d", 0, nil, SendOptions{Event: ev, JobID: job}), false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := []string{
+				"PATCH /messages/M_PLAIN", "PATCH /messages/M_SLASH",
+				"PATCH /messages/M_PLAIN", "PATCH /messages/M_SLASH",
+			}
+			if terminal == "cancelled" {
+				want = append(want, "POST /") // the separate embed
+			}
+			c := f.calls()
+			if got := requestLines(c); !slices.Equal(got, want) {
+				t.Fatalf("requests = %v, want %v", got, want)
+			}
+			if got := statusValue(c[3].Body); got != lifecycleLabels[terminal] {
+				t.Errorf("the second message's last Status = %q, want %q", got, lifecycleLabels[terminal])
+			}
+			if n := m.tracker().trackedJobs(); n != 0 {
+				t.Errorf("tracker holds %d jobs after the terminal edit closed both messages, want 0", n)
+			}
+		})
+	}
+}
+
+// A second message Discord no longer has is forgotten, with nothing posted in
+// its place — the job's own message carries the story — and one whose edit
+// failed otherwise stays open, so the failure is reported and a later edit
+// can still close it.
+//
+// Mutants: patchExtra not forgetting a gone message — the next event PATCHes
+// it again; patchExtra reporting a gone message as a failure — the event
+// errors; patchExtra counting a failed edit as delivered — the entry is
+// released with the second message still open.
+func TestASecondSpellingsMessageThatIsGoneOrFails(t *testing.T) {
+	const id, tok = "123456789012345678", "abcdefTOKEN"
+	plain := "https://discord.com/api/webhooks/" + id + "/" + tok
+	const job = "dQw4w9WgXcQ"
+	setup := func(t *testing.T, status int, body string) (*Manager, notificationTarget, *fakeDiscord) {
+		t.Helper()
+		f := newFakeDiscord(t, func(n int, r recordedReq, rw http.ResponseWriter) {
+			if r.Path == "/messages/M_SLASH" {
+				rw.WriteHeader(status)
+				io.WriteString(rw, body)
+				return
+			}
+			okCreated("NEW")(n, r, rw)
+		})
+		st := newMemStore()
+		st.rows[job] = map[string]string{targetMsgKey(plain): "M_PLAIN", targetMsgKey(plain + "/"): "M_SLASH"}
+		m := &Manager{logger: testLogger{}}
+		m.SetMessageStore(st)
+		return m, legacyKeyTarget(t, f, plain, plain+"/"), f
+	}
+
+	t.Run("gone", func(t *testing.T) {
+		m, tgt, f := setup(t, http.StatusNotFound, `{"message":"Unknown Message","code":10008}`)
+		for _, ev := range []string{"downloading", "muxing"} {
+			if err := m.dispatchOne(tgt, One(ev, "d", 0, nil, SendOptions{Event: ev, JobID: job}), false); err != nil {
+				t.Fatalf("%s: %v", ev, err)
+			}
+		}
+		want := []string{"PATCH /messages/M_PLAIN", "PATCH /messages/M_SLASH", "PATCH /messages/M_PLAIN"}
+		if got := requestLines(f.calls()); !slices.Equal(got, want) {
+			t.Errorf("requests = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("refused", func(t *testing.T) {
+		m, tgt, _ := setup(t, http.StatusForbidden, `{"message":"Missing Permissions","code":50013}`)
+		if err := m.dispatchOne(tgt, One("finished", "d", 0, nil, SendOptions{Event: "finished", JobID: job}), false); err == nil {
+			t.Error("a refused edit of the second message was reported as success")
+		}
+		if n := m.tracker().trackedJobs(); n != 1 {
+			t.Errorf("tracker holds %d jobs, want the job kept while its second message is still open", n)
+		}
+	})
+}
+
+// An adopted id leaves its old key only in memory — the row keeps it until the
+// job's next write — so a re-read of the row brings the old key back holding
+// the very id the target now edits under its current key. That is the same
+// message, not a second one. Here the re-read follows a RetainJobs whose list
+// predates the job: the quick target's step drops its own key, and the slow
+// target's queued event re-reads the row.
+//
+// Mutant: messageID keeping an old key that holds the id key already holds —
+// the slow target's next event PATCHes M_OLD_A twice.
+func TestAnAdoptedIDReReadUnderItsOldKeyIsNotASecondMessage(t *testing.T) {
+	const id, tok = "123456789012345678", "abcdefTOKEN"
+	ptb := "https://ptb.discord.com/api/webhooks/" + id + "/" + tok
+	fA, release := gated(t, 1) // A: the job's downloading, then another job's slow request
+	fB := newFakeDiscord(t, createdInOrder)
+	tgtB := legacyKeyTarget(t, fB, "https://discord.com/api/webhooks/987654321098765432/"+tok)
+	st := newMemStore()
+	const job = "dQw4w9WgXcQ"
+	st.rows[job] = map[string]string{targetMsgKey(ptb): "M_OLD_A", tgtB.msgKey: "M_OLD_B"}
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	installTargets(t, m, legacyKeyTarget(t, fA, ptb), tgtB)
+
+	m.Send("Downloading", "x", TypeDownload, nil, SendOptions{Event: "downloading", JobID: job})
+	if !waitCalls(t, fA, 1, 3*time.Second) || !waitCalls(t, fB, 1, 3*time.Second) {
+		t.Fatal("the downloading edits never reached both targets")
+	}
+	m.Send("Found", "x", TypeInfo, nil, SendOptions{Event: "found", JobID: "otherJob123"})
+	if !waitCalls(t, fA, 2, 3*time.Second) {
+		t.Fatal("the other job's POST never reached A")
+	}
+	m.Send("Muxing", "x", TypeDownload, nil, SendOptions{Event: "muxing", JobID: job})
+	if !waitCalls(t, fB, 3, 3*time.Second) { // B: downloading, other job's found, muxing
+		t.Fatalf("B: %v", requestLines(fB.calls()))
+	}
+	m.RetainJobs(map[string]struct{}{"otherJob123": {}}) // taken before the job was added
+	tr := m.tracker()
+	waitFor(t, "B's step", func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		j := tr.jobs[job]
+		return j != nil && j.msgs[tgtB.msgKey] == ""
+	})
+	release()
+
+	if !waitCalls(t, fA, 3, 3*time.Second) {
+		t.Fatalf("A: %v", requestLines(fA.calls()))
+	}
+	drain(t, m)
+	want := []string{"PATCH /messages/M_OLD_A", "POST /", "PATCH /messages/M_OLD_A"}
+	if got := requestLines(fA.calls()); !slices.Equal(got, want) {
+		t.Errorf("A: %v, want %v — one edit of its one message per event", got, want)
 	}
 }
