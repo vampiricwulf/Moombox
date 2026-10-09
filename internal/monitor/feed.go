@@ -296,6 +296,14 @@ func (fm *FeedMonitor) SetOnChannelHealthy(fn func(channelID string)) {
 	fm.health.onHealthy = fn
 }
 
+// RestoreUnhealthy names the channels whose "not responding" alert a previous
+// process sent and never closed. Each is treated as a channel already past the
+// threshold: its first successful check fires the OnChannelHealthy callback
+// (the close), and failures stay silent until then. Call before Start.
+func (fm *FeedMonitor) RestoreUnhealthy(channelIDs []string) {
+	fm.health.restoreUnhealthy(channelIDs)
+}
+
 // NewFeedMonitor creates a new RSS feed monitor. The Store carries the
 // cfg+lock used to read channel list and interval settings; all reads
 // happen under configStore.Read so a config-reload doesn't race against

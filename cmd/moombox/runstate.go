@@ -66,6 +66,11 @@ type runState struct {
 	dlWorker  *worker.DownloadWorker
 	trimSvc   *worker.TrimService
 
+	// openAlerts is the persisted set of alerts sent and not yet closed
+	// (open_alerts.go), loaded in run() before any alerter is wired so each
+	// is seeded with what a previous run left open.
+	openAlerts *openAlerts
+
 	// --- Monitors ---
 	feedMon   *monitor.FeedMonitor
 	decapiMon *monitor.DecapiMonitor

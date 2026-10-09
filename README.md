@@ -730,6 +730,11 @@ list of event keys, and what each one fires on, is the event table in
 both settings UIs offer the same list as toggles — chips in the web dashboard,
 checkboxes in the TUI — so you rarely need to write one by hand.
 
+An alert that has an all-clear — disk space, the BotGuard sidecar, a channel
+that stopped answering, an authentication failure — remembers that it is open
+in `open-alerts.json` beside the database, so a restart in between does not
+swallow the "recovered" message: the first healthy check after it sends it.
+
 ### Mentions and dashboard links
 
 `mention` pings alongside the events a target is configured for — embeds can't mention on their

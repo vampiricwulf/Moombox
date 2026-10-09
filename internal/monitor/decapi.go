@@ -199,6 +199,14 @@ func (dm *DecapiMonitor) SetOnChannelHealthy(fn func(channelID string)) {
 	dm.health.onHealthy = fn
 }
 
+// RestoreUnhealthy names the channels whose "not responding" alert a previous
+// process sent and never closed. Each is treated as a channel already past the
+// threshold: its first successful check fires the OnChannelHealthy callback
+// (the close), and failures stay silent until then. Call before Start.
+func (dm *DecapiMonitor) RestoreUnhealthy(channelIDs []string) {
+	dm.health.restoreUnhealthy(channelIDs)
+}
+
 // NewDecapiMonitor creates a new DECAPI monitor. The Store carries the
 // cfg+lock used to read channel list and interval settings; all reads
 // happen under configStore.Read so a config-reload doesn't race against

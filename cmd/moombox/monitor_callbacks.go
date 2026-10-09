@@ -567,6 +567,7 @@ func channelHealthNotifiers(
 		if announced {
 			return // another monitor already reported this channel's outage
 		}
+		incidents.persist(channelID)
 		n.Send("Channel Not Responding",
 			fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
 			notifications.TypeWarning,
@@ -587,6 +588,7 @@ func channelHealthNotifiers(
 		if !fire {
 			return
 		}
+		incidents.persist(channelID)
 		log.Info("channel responding again", "platform", platform, "channel", channelID)
 		n.Send("Channel Responding Again",
 			fmt.Sprintf("A %s channel that stopped answering monitor checks is being reached again", platform),
@@ -608,10 +610,48 @@ func channelHealthNotifiers(
 type channelIncidents struct {
 	mu   sync.Mutex
 	sent map[string]bool
+
+	// state and platform are where the set is persisted (restoreFrom), so an
+	// outage open across a restart still gets its channel_healthy. nil state
+	// = memory only.
+	state    *openAlerts
+	platform string
 }
 
 func newChannelIncidents() *channelIncidents {
 	return &channelIncidents{sent: map[string]bool{}}
+}
+
+// restoreFrom seeds the set with the platform's channels whose alert a
+// previous process sent and never closed, persists every later open and close
+// to st, and returns the restored channel IDs. The caller hands those to every
+// monitor covering the platform (RestoreUnhealthy), whose trackers only fire
+// the healthy callback after a streak they saw cross the threshold — without
+// that, the restored outage would never be closed.
+func (c *channelIncidents) restoreFrom(st *openAlerts, platform string) []string {
+	ids := st.snapshot().Channels[platform]
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state, c.platform = st, platform
+	for _, id := range ids {
+		c.sent[id] = true
+	}
+	return ids
+}
+
+// persist writes one channel's membership. It is read inside the store's own
+// lock, so two monitors racing an alert and a close for the same channel leave
+// the file holding whichever is current.
+func (c *channelIncidents) persist(channelID string) {
+	c.mu.Lock()
+	st := c.state
+	c.mu.Unlock()
+	st.update(func(d *openAlertsDoc) {
+		c.mu.Lock()
+		open := c.sent[channelID]
+		c.mu.Unlock()
+		d.setChannel(c.platform, channelID, open)
+	})
 }
 
 // resumeOnRedetect decides what a live re-detection of an EXISTING job does.
@@ -751,8 +791,33 @@ type authFailureNotifier func(platform, title, desc string, ntype notifications.
 // family — the loudest thing Moombox sends — and no close at all. This map is
 // the only record of whether the operator was ever told, so the close reads it.
 func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, func(platform string) bool) {
+	return withPersistedAuthFailureCooldown(send, nil)
+}
+
+// withPersistedAuthFailureCooldown is withAuthFailureCooldown with the stamp
+// map persisted to st: seeded from the failures a previous process announced
+// and never closed — each keeping the time it was sent, so the cooldown runs
+// on across the restart — and written on every stamp and every close. The
+// close itself needs the cookie refresh service told about the same platforms
+// (RefreshService.SetUnrecoveredPlatforms), because the not-authenticated →
+// authenticated transition it rides happened, if at all, before this process
+// could see it. A nil st is the memory-only original.
+func withPersistedAuthFailureCooldown(send authFailureNotifier, st *openAlerts) (authFailureNotifier, func(platform string) bool) {
 	var mu sync.Mutex
 	last := make(map[string]time.Time)
+	for platform, at := range st.snapshot().Auth {
+		last[platform] = at
+	}
+	// persist writes one platform's stamp, read inside the store's lock so a
+	// stamp and a close racing for the same platform leave the current one.
+	persist := func(platform string) {
+		st.update(func(d *openAlertsDoc) {
+			mu.Lock()
+			at := last[platform]
+			mu.Unlock()
+			d.setAuth(platform, at)
+		})
+	}
 	notify := func(platform, title, desc string, ntype notifications.NotificationType) {
 		mu.Lock()
 		if time.Since(last[platform]) < 30*time.Minute {
@@ -761,10 +826,12 @@ func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, fun
 		}
 		last[platform] = time.Now()
 		mu.Unlock()
+		persist(platform)
 		send(platform, title, desc, ntype)
 	}
-	// A non-zero stamp means a failure was ANNOUNCED for this platform in this
-	// process. The close CONSUMES it: one close per failure episode, and the
+	// A non-zero stamp means a failure was ANNOUNCED for this platform — in
+	// this process, or in an earlier one whose close never came (the stamps
+	// seeded from st). The close CONSUMES it: one close per failure episode, and the
 	// next failure after a close is a new episode that announces at once
 	// rather than sitting inside the old one's cooldown. Clearing the stamp
 	// (rather than keeping a separate "already closed" bool) is what makes
@@ -772,11 +839,13 @@ func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, fun
 	// repeats INSIDE an episode, and a recovery ends the episode.
 	wasNotified := func(platform string) bool {
 		mu.Lock()
-		defer mu.Unlock()
 		if last[platform].IsZero() {
+			mu.Unlock()
 			return false
 		}
 		delete(last, platform)
+		mu.Unlock()
+		persist(platform)
 		return true
 	}
 	return notify, wasNotified
@@ -1248,12 +1317,12 @@ func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig,
 //
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
-	notifyAuthFailure, authFailureAnnounced := withAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
+	notifyAuthFailure, authFailureAnnounced := withPersistedAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
 		s.notifyMgr.Send(title, desc, ntype,
 			[]notifications.Field{{Name: "Platform", Value: platform, Inline: true}},
 			notifications.SendOptions{Event: "auth"},
 		)
-	})
+	}, s.openAlerts)
 
 	// Cooldown for auto-resume on broadcast re-detection: a restarted
 	// broadcast can be re-detected on every monitor cycle (as often as
@@ -1760,7 +1829,14 @@ func (s *runState) wireMonitorCallbacks() {
 	// Each monitor gets its own pair, and the two YouTube monitors share one
 	// incident set: the alert says no monitor reaches the channel, which is one
 	// incident however many monitors observe it (channelHealthNotifiers).
+	//
+	// Each set is seeded with the outages a previous run left open, and so is
+	// every monitor that can close one: whichever reaches the channel first
+	// sends the close, as it would have without the restart.
 	youtubeIncidents := newChannelIncidents()
+	restoredYouTube := youtubeIncidents.restoreFrom(s.openAlerts, "youtube")
+	s.feedMon.RestoreUnhealthy(restoredYouTube)
+	s.decapiMon.RestoreUnhealthy(restoredYouTube)
 	feedUnhealthy, feedHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", youtubeIncidents, s.decapiMon)
 	s.feedMon.SetOnChannelUnhealthy(feedUnhealthy)
 	s.feedMon.SetOnChannelHealthy(feedHealthy)
@@ -1769,7 +1845,9 @@ func (s *runState) wireMonitorCallbacks() {
 	s.decapiMon.SetOnChannelUnhealthy(decapiUnhealthy)
 	s.decapiMon.SetOnChannelHealthy(decapiHealthy)
 
-	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch", newChannelIncidents())
+	twitchIncidents := newChannelIncidents()
+	s.twitchMon.RestoreUnhealthy(twitchIncidents.restoreFrom(s.openAlerts, "twitch"))
+	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch", twitchIncidents)
 	s.twitchMon.SetOnChannelUnhealthy(twitchUnhealthy)
 	s.twitchMon.SetOnChannelHealthy(twitchHealthy)
 

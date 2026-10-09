@@ -62,6 +62,10 @@ type diskAlerts struct {
 	readFailing      bool
 	readFailCount    int
 	readFailNotified bool
+
+	// state is where the open alerts above are persisted (restoreFrom), so
+	// one open across a restart still gets its close. nil = memory only.
+	state *openAlerts
 }
 
 func newDiskAlerts(notify notifications.Sender, log interface {
@@ -71,6 +75,42 @@ func newDiskAlerts(notify notifications.Sender, log interface {
 	Error(msg string, args ...any)
 }) *diskAlerts {
 	return &diskAlerts{notify: notify, log: log}
+}
+
+// restoreFrom seeds the alerter with the disk alerts a previous process left
+// open and persists every later open and close to st. Called before the first
+// reading: a space alert comes back at its level with its repeat cooldown
+// running from when it was sent, so the first reading that clears the margin
+// sends "Disk Space Recovered"; an open "Disk Monitoring Failed" comes back as
+// a reported failure streak, so the first reading that succeeds sends
+// "Disk Monitoring Recovered" — each exactly as the same readings would have
+// without the restart.
+func (d *diskAlerts) restoreFrom(st *openAlerts) {
+	d.state = st
+	open := st.snapshot().Disk
+	if open == nil {
+		return
+	}
+	if open.Level == "warn" || open.Level == "critical" {
+		d.lastLevel, d.lastNotify = open.Level, open.NotifiedAt
+	}
+	if open.MonitoringFailed {
+		d.readFailing = true
+		d.readFailCount = diskReadFailuresBeforeAlert
+		d.readFailNotified = true
+	}
+}
+
+// persist writes the open set to the state store. A no-op without one, and
+// a write only when it changed (openAlerts.update).
+func (d *diskAlerts) persist() {
+	d.state.update(func(doc *openAlertsDoc) {
+		st := openDiskAlert{MonitoringFailed: d.readFailNotified}
+		if d.lastLevel != "" {
+			st.Level, st.NotifiedAt = d.lastLevel, d.lastNotify
+		}
+		doc.setDisk(st)
+	})
 }
 
 // absOutputDir names the directory an operator can act on. An operator with
@@ -110,6 +150,7 @@ func (d *diskAlerts) heldOpen(ds *routes.DiskStatus) bool {
 // are sent, in that order — they are separate incidents with separate alerts,
 // and collapsing them would leave one of the two alerts hanging.
 func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time.Time) {
+	defer d.persist()
 	if d.readFailing {
 		d.readFailing = false
 		d.readFailCount = 0
@@ -174,6 +215,7 @@ func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time
 
 // onReadFailure feeds one failed disk reading in (volume offline, I/O error).
 func (d *diskAlerts) onReadFailure(outputDir string) {
+	defer d.persist()
 	d.readFailCount++
 	if !d.readFailing {
 		d.log.Warn("[Disk] disk space check failed; gauge and low-disk alerts frozen until it recovers",

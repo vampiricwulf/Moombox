@@ -264,6 +264,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		tuiDiskStatusCh   = s.tuiDiskStatusCh
 	)
 
+	// The alerts a previous run sent and never closed, beside the database.
+	// Loaded ahead of every alerter's wiring — the channel and auth
+	// alerters in wireMonitorCallbacks, the sidecar's below it, the disk
+	// ticker and the cookie refresh further down — so each starts seeded and
+	// the first healthy observation sends the close.
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		s.openAlerts = loadOpenAlerts(openAlertsPath(c.Paths.DatabasePath), log)
+		s.openAlerts.dropUnmonitored(c)
+	})
+
 	// Register all routes. See routes_wiring.go.
 	importCleanup := s.wireRoutes()
 	defer importCleanup()
@@ -339,6 +349,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		if cfg.Cookies.AutoEnabled && len(cfg.Cookies.Platforms) > 0 {
 			cookieRefresh.SetExpectedPlatforms(cfg.Cookies.Platforms)
 		}
+		// An auth failure a previous run announced and never closed: the
+		// first check that finds the platform working sends its
+		// auth_recovered (withPersistedAuthFailureCooldown holds the stamp).
+		cookieRefresh.SetUnrecoveredPlatforms(s.openAlerts.authPlatforms())
 		cookieRefresh.Start(ctx)
 	} else {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
@@ -663,6 +677,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		var prevHeapMB float64
 		diskCheckCounter := 0
 		diskAlerter := newDiskAlerts(notifyMgr, log)
+		// Before the boot reading below, so a disk alert a previous run left
+		// open is closed by the first reading that clears it.
+		diskAlerter.restoreFrom(s.openAlerts)
 		// The boot-time reading (UpdateDiskStatus above) goes through the
 		// alert decision too: the ticker's first disk check is three ticks
 		// away, so a volume already full at boot was not announced for six

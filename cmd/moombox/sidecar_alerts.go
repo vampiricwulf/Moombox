@@ -64,6 +64,9 @@ type sidecarAlerts struct {
 	// shutdown. Unsubscribing cannot prevent the delivery; only the subscriber
 	// can refuse it.
 	stopped bool
+	// state is where downSent is persisted (restoreFrom), so an outage open
+	// across a restart still gets its sidecar_restored. nil = memory only.
+	state *openAlerts
 }
 
 func newSidecarAlerts(notify notifications.Sender, log interface {
@@ -75,10 +78,37 @@ func newSidecarAlerts(notify notifications.Sender, log interface {
 	return &sidecarAlerts{notify: notify, log: log, after: after}
 }
 
+// restoreFrom seeds downSent with an outage a previous process announced and
+// never closed, and persists every later open and close to st. Called before
+// the subscription: the immediate snapshot SubscribeHealth delivers is then
+// the first observation, and a healthy one sends sidecar_restored, while an
+// unhealthy one arms no second down alert — the outage was already reported.
+func (a *sidecarAlerts) restoreFrom(st *openAlerts) {
+	a.mu.Lock()
+	a.state = st
+	a.downSent = st.snapshot().SidecarDown
+	a.mu.Unlock()
+}
+
+// persist writes downSent. The value is read inside the store's own lock, so
+// of a down and a recovery racing to write, the one that writes last writes
+// the current value; a.mu is never held across the file write.
+func (a *sidecarAlerts) persist() {
+	a.mu.Lock()
+	st := a.state
+	a.mu.Unlock()
+	st.update(func(d *openAlertsDoc) {
+		a.mu.Lock()
+		d.SidecarDown = a.downSent
+		a.mu.Unlock()
+	})
+}
+
 // onHealth is the subscriber. It runs on the PUBLISHER's goroutine (the
 // supervisor loop, or startup) and must not block, which is why the only work
 // it does is arm or cancel a timer and hand a send to the notification
-// manager, whose Send queues and returns.
+// manager, whose Send queues and returns — plus, on the one transition that
+// closes an announced outage, rewriting the small open-alert state file.
 func (a *sidecarAlerts) onHealth(h sidecar.Health) {
 	a.mu.Lock()
 	if a.stopped {
@@ -109,6 +139,7 @@ func (a *sidecarAlerts) onHealth(h sidecar.Health) {
 	a.downSent = false
 	restarts := h.Restarts
 	a.mu.Unlock()
+	a.persist()
 
 	a.log.Info("BotGuard sidecar healthy again", "restarts", restarts)
 	a.notify.Send("BotGuard Sidecar Restored",
@@ -139,6 +170,7 @@ func (a *sidecarAlerts) fireDown(epoch uint64) {
 	a.downSent = true
 	h := a.last
 	a.mu.Unlock()
+	a.persist()
 
 	reason := h.Reason
 	if reason == "" {
@@ -190,6 +222,7 @@ func (s *runState) wireSidecarAlerts() func() {
 	a := newSidecarAlerts(s.notifyMgr, s.log, func(d time.Duration, f func()) stoppableTimer {
 		return time.AfterFunc(d, f)
 	})
+	a.restoreFrom(s.openAlerts)
 	unsub := sidecar.SubscribeHealth(a.onHealth)
 	return func() {
 		unsub()
