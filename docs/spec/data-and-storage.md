@@ -261,7 +261,7 @@ Index: `idx_gaps_job_id(job_id)`.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | TEXT | PRIMARY KEY (UUID) |
+| id | TEXT | PRIMARY KEY. `trim_<job id>_<Unix ms>`, not a UUID: the ID of the encode that wrote the file, given when the trim is prepared (`prepare`, `internal/worker/trim.go`) and carried by its `trim_status` frames before the row exists |
 | job_id | TEXT | NOT NULL, FK -> jobs(id) ON DELETE CASCADE |
 | start_time | REAL | Seconds |
 | end_time | REAL | Seconds |
