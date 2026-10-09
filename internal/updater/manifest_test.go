@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -346,6 +348,12 @@ func TestCheckForUpdateCarriesTheManifestURLs(t *testing.T) {
 // request's Host, so no handler reads the server variable.
 func runningRelease(t *testing.T, manifest []byte, manifestKey ed25519.PrivateKey, withManifestSig bool) *Updater {
 	t.Helper()
+	return runningReleaseAt(t, "2.0.0", manifest, manifestKey, withManifestSig)
+}
+
+// runningReleaseAt is runningRelease for a running version other than 2.0.0.
+func runningReleaseAt(t *testing.T, version string, manifest []byte, manifestKey ed25519.PrivateKey, withManifestSig bool) *Updater {
+	t.Helper()
 	assets, ok := currentPlatformAssets()
 	if !ok {
 		t.Skipf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -361,9 +369,9 @@ func runningRelease(t *testing.T, manifest []byte, manifestKey ed25519.PrivateKe
 	mux.HandleFunc("/manifest.sig", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Write(ed25519.Sign(manifestKey, manifest))
 	})
-	mux.HandleFunc("/repos/test/Moombox/releases/tags/v2.0.0", func(rw http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/test/Moombox/releases/tags/v"+version, func(rw http.ResponseWriter, r *http.Request) {
 		base := "http://" + r.Host
-		rel := githubRelease{TagName: "v2.0.0", Assets: []githubAsset{{Name: assets.sig, BrowserDownloadURL: base + "/sig"}}}
+		rel := githubRelease{TagName: "v" + version, Assets: []githubAsset{{Name: assets.sig, BrowserDownloadURL: base + "/sig"}}}
 		if manifest != nil {
 			rel.Assets = append(rel.Assets, githubAsset{Name: ManifestAsset, BrowserDownloadURL: base + "/manifest"})
 			if withManifestSig {
@@ -374,7 +382,7 @@ func runningRelease(t *testing.T, manifest []byte, manifestKey ed25519.PrivateKe
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	u, _ := newTestUpdater(t, "2.0.0", srv, func(bin, sig string) error {
+	u, _ := newTestUpdater(t, version, srv, func(bin, sig string) error {
 		return verifySignatureWithKey(pub, bin, sig)
 	})
 	return u
@@ -385,9 +393,11 @@ func runningRelease(t *testing.T, manifest []byte, manifestKey ed25519.PrivateKe
 // the key signed these bytes and nothing about which release they are — a
 // validly signed binary of another release or platform passed it. When the
 // running version's release publishes a signed manifest, the binary is now
-// held to it as ApplyUpdate holds a download; a release that publishes none
-// (every release before the manifest) still verifies, and says it checked the
-// signature alone.
+// held to it as ApplyUpdate holds a download; a release before the manifest
+// (FirstManifestVersion) that publishes none still verifies, and says it
+// checked the signature alone — the running 2.0.0 here is one.
+// TestVerifyCurrentSignatureHoldsAManifestReleaseToItsManifest covers a
+// release at or past it.
 //
 // THE MUTANTS, each failing the row named:
 //   - VerifyCurrentSignature reporting true without calling
@@ -411,7 +421,7 @@ func TestVerifyCurrentSignatureChecksTheReleaseManifest(t *testing.T) {
 		}
 	})
 
-	t.Run("a release with no manifest verifies by its signature alone", func(t *testing.T) {
+	t.Run("a release before the manifest verifies by its signature alone", func(t *testing.T) {
 		u := runningRelease(t, nil, nil, false)
 		manifest, err := u.VerifyCurrentSignature(context.Background())
 		if err != nil || manifest {
@@ -455,4 +465,154 @@ func TestVerifyCurrentSignatureChecksTheReleaseManifest(t *testing.T) {
 		delete(m.Platforms, key)
 		failed(t, runningRelease(t, manifestJSON(t, m), nil, true), "no entry for "+key)
 	})
+}
+
+// TestVerifyCurrentSignatureHoldsAManifestReleaseToItsManifest: the verify
+// action reported a release with no manifest as a signature-only check, in
+// yellow, whatever the running version. Every release from
+// FirstManifestVersion on is published with the signed manifest, so for one
+// of those the manifest missing, or its signature missing, is exactly what
+// deleting them to pass another release's validly signed binary looks like.
+// That now FAILS; a release before the manifest keeps the signature-only
+// result.
+//
+// THE MUTANTS, each failing the row named:
+//   - the releaseCarriesManifest branch dropped (if false) — "no manifest",
+//     "an unsigned manifest", "a later release", "a pre-release";
+//   - it taken for every version (if true) — "the last release before the
+//     manifest" (and TestVerifyCurrentSignatureChecksTheReleaseManifest's two
+//     signature-only rows);
+//   - releaseCarriesManifest comparing the whole version, pre-release suffix
+//     included — "a pre-release";
+//   - its >= 0 made > 0 — "no manifest", "an unsigned manifest", "a
+//     pre-release";
+//   - the manifestURL == "" test inverted — "no manifest", "an unsigned
+//     manifest", "a later release", "a pre-release" (each gets the other
+//     message).
+func TestVerifyCurrentSignatureHoldsAManifestReleaseToItsManifest(t *testing.T) {
+	running := []byte("current binary")
+	signedFor := func(version string) []byte {
+		return manifestJSON(t, platformManifest(t, version, "v"+version, running))
+	}
+	failed := func(t *testing.T, u *Updater, wantErr string) {
+		t.Helper()
+		manifest, err := u.VerifyCurrentSignature(context.Background())
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want a failure containing %q", manifest, err, wantErr)
+		}
+		if manifest {
+			t.Errorf("VerifyCurrentSignature reported the manifest checked beside its failure")
+		}
+	}
+	first := FirstManifestVersion
+
+	t.Run("its signed manifest binds the running binary", func(t *testing.T) {
+		manifest, err := runningReleaseAt(t, first, signedFor(first), nil, true).VerifyCurrentSignature(context.Background())
+		if err != nil || !manifest {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want the manifest checked and no error", manifest, err)
+		}
+	})
+
+	t.Run("no manifest", func(t *testing.T) {
+		failed(t, runningReleaseAt(t, first, nil, nil, false), "publishes no manifest ("+ManifestAsset+")")
+	})
+
+	t.Run("an unsigned manifest", func(t *testing.T) {
+		failed(t, runningReleaseAt(t, first, signedFor(first), nil, false),
+			"publishes its manifest without a signature ("+ManifestSignatureAsset+")")
+	})
+
+	t.Run("a later release", func(t *testing.T) {
+		failed(t, runningReleaseAt(t, "3.0.0", nil, nil, false), "publishes no manifest")
+	})
+
+	t.Run("a pre-release of the first release with the manifest", func(t *testing.T) {
+		failed(t, runningReleaseAt(t, first+"-rc.1", nil, nil, false), "publishes no manifest")
+	})
+
+	t.Run("the last release before the manifest", func(t *testing.T) {
+		manifest, err := runningReleaseAt(t, lastReleaseWithoutManifest, nil, nil, false).VerifyCurrentSignature(context.Background())
+		if err != nil || manifest {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want a signature-only verification", manifest, err)
+		}
+	})
+}
+
+// lastReleaseWithoutManifest is the last release cut before the manifest
+// pipeline: v2.8.10's bump commit precedes it.
+const lastReleaseWithoutManifest = "2.8.10"
+
+// TestReleaseCarriesManifest pins which running versions are held to their
+// release's manifest.
+//
+// THE MUTANTS, each failing the row named:
+//   - the comparison made on the whole version — "2.8.11-rc.1",
+//     "2.8.11-test.1";
+//   - >= 0 made > 0 — "2.8.11", "v2.8.11", "2.8.11-rc.1", "2.8.11-test.1";
+//   - an unparseable version not held to the manifest — "not-a-version";
+//   - FirstManifestVersion at or below 2.8.10 — "2.8.10".
+func TestReleaseCarriesManifest(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    bool
+	}{
+		{"2.0.0", false},
+		{"2.8.9", false},
+		{lastReleaseWithoutManifest, false},
+		{"v" + lastReleaseWithoutManifest, false},
+		{lastReleaseWithoutManifest + "-rc.1", false},
+		{FirstManifestVersion, true},
+		{"v" + FirstManifestVersion, true},
+		{FirstManifestVersion + "-rc.1", true},
+		{FirstManifestVersion + "-test.1", true},
+		{"2.9.0", true},
+		{"3.0.0", true},
+		{"not-a-version", true},
+	} {
+		if got := releaseCarriesManifest(tc.version); got != tc.want {
+			t.Errorf("releaseCarriesManifest(%q) = %v, want %v", tc.version, got, tc.want)
+		}
+	}
+}
+
+// TestFirstManifestVersionKeepsStepWithTheReleases ties FirstManifestVersion
+// to the version cmd/moombox/main.go declares, read as release.yml reads it.
+// Until a release past 2.8.10 is cut it must be the lowest number the next
+// release can have, the next patch: any higher, and that release, cut under
+// the next patch, would verify with its manifest removed. Once one is cut, it
+// must not be past the declared release.
+//
+// THE MUTANTS: FirstManifestVersion "2.8.10" (also failing
+// TestReleaseCarriesManifest) or "2.9.0", while main.go declares 2.8.10.
+func TestFirstManifestVersionKeepsStepWithTheReleases(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "cmd", "moombox", "main.go"))
+	if err != nil {
+		t.Fatalf("read cmd/moombox/main.go: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*version\s*=\s*"([^"]*)"`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("cmd/moombox/main.go declares no version")
+	}
+	declared, err := ParseVersionFull(string(m[1]))
+	if err != nil {
+		t.Fatalf("cmd/moombox/main.go declares %q: %v", m[1], err)
+	}
+	core := fmt.Sprintf("%d.%d.%d", declared.Major, declared.Minor, declared.Patch)
+
+	if CompareVersions(FirstManifestVersion, lastReleaseWithoutManifest) <= 0 {
+		t.Fatalf("FirstManifestVersion %s is not past %s, the last release cut without the manifest",
+			FirstManifestVersion, lastReleaseWithoutManifest)
+	}
+	if CompareVersions(core, lastReleaseWithoutManifest) <= 0 {
+		next := fmt.Sprintf("%d.%d.%d", declared.Major, declared.Minor, declared.Patch+1)
+		if FirstManifestVersion != next {
+			t.Errorf("main.go declares %s, so no release with the manifest has been cut: FirstManifestVersion is %s, want the next release's lowest number, %s",
+				m[1], FirstManifestVersion, next)
+		}
+		return
+	}
+	if CompareVersions(FirstManifestVersion, core) > 0 {
+		t.Errorf("FirstManifestVersion %s is past %s, the release main.go declares — set it to the release that first shipped the manifest",
+			FirstManifestVersion, m[1])
+	}
 }

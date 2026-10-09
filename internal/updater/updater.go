@@ -567,12 +567,15 @@ const PendingVersionSuffix = ".update-pending"
 // says only that the key signed these bytes, which another release's or
 // another platform's binary satisfies as well.
 //
-// manifest reports whether the second check ran: false, with a nil error,
-// for a release that publishes no signed manifest, where the .sig is all there
-// is to check — the UIs say so rather than call that a full verification.
-// Every release before the manifest is one; a binary that carries this check
-// shipped in a release that publishes one, so for it this means the release's
-// manifest assets are missing. Returns an error when either check fails.
+// From FirstManifestVersion on the manifest is the binding check. Every such
+// release publishes one, so a running version at or past it whose release
+// lacks the manifest, or publishes it unsigned, FAILS — deleting those assets
+// would otherwise be all it took for another release's validly signed binary
+// to pass. manifest reports whether the second check ran: false, with a nil
+// error, only for a version before FirstManifestVersion whose release
+// publishes no signed manifest, where the .sig is all there is to check — the
+// UIs say so rather than call that a full verification. Returns an error when
+// either check fails.
 func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, err error) {
 	tag := "v" + u.currentVersion
 
@@ -640,9 +643,8 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, er
 		return false, err
 	}
 
-	// The release's signed manifest, when it publishes one. Both assets or
-	// neither, as CheckForUpdate reads them: an unsigned manifest binds
-	// nothing.
+	// The release's signed manifest. Both assets or neither, as
+	// CheckForUpdate reads them: an unsigned manifest binds nothing.
 	var manifestURL, manifestSigURL string
 	for _, asset := range release.Assets {
 		switch {
@@ -653,7 +655,15 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, er
 		}
 	}
 	if manifestURL == "" || manifestSigURL == "" {
-		u.logger.Info("[Updater] Current binary signature verified; its release publishes no signed manifest",
+		if releaseCarriesManifest(u.currentVersion) {
+			if manifestURL == "" {
+				return false, fmt.Errorf("release %s publishes no manifest (%s), though every release from %s on is published with a signed one — the binary's signature is valid, but without the manifest it cannot be tied to this release",
+					tag, ManifestAsset, FirstManifestVersion)
+			}
+			return false, fmt.Errorf("release %s publishes its manifest without a signature (%s), though every release from %s on signs it — the binary's signature is valid, but an unsigned manifest cannot tie it to this release",
+				tag, ManifestSignatureAsset, FirstManifestVersion)
+		}
+		u.logger.Info("[Updater] Current binary signature verified; its release predates the signed manifest",
 			"version", u.currentVersion)
 		return false, nil
 	}

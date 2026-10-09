@@ -27,7 +27,8 @@ import (
 // platform's entry hashes to the downloaded bytes. The per-binary .sig files
 // are still published (clients that predate the manifest verify only them)
 // and still checked. VerifyCurrentSignature holds the running binary to its
-// own release's manifest the same way, when that release publishes one.
+// own release's manifest the same way, and from FirstManifestVersion on a
+// release without its signed manifest fails that check.
 
 // ManifestAsset is the release asset holding the manifest;
 // ManifestSignatureAsset is its detached Ed25519 signature, in the same raw
@@ -36,6 +37,40 @@ const (
 	ManifestAsset          = "moombox-manifest.json"
 	ManifestSignatureAsset = ManifestAsset + ".sig"
 )
+
+// FirstManifestVersion is the first release cut by the manifest pipeline
+// (release.yml's cmd/sign -manifest step). Every release from it on publishes
+// the signed manifest, so VerifyCurrentSignature fails a running version at
+// or past it whose release lacks the manifest or its signature; an earlier
+// version's release never had one and is verified by its .sig alone.
+//
+// 2.8.10 is the last release cut before the pipeline existed, and none has
+// been cut since, so this names the next release, at the lowest number it can
+// have. Keep it in step with the release process: if that release is cut
+// under another number, set this to it in the same bump commit. Set above the
+// release that first ships the manifest, it would let that release's verify
+// settle for the signature with the manifest removed; at or below 2.8.10, it
+// would fail every verify of a release that never had one.
+// TestFirstManifestVersionKeepsStepWithTheReleases checks it against the
+// version cmd/moombox/main.go declares.
+const FirstManifestVersion = "2.8.11"
+
+// releaseCarriesManifest reports whether version's release was cut by the
+// manifest pipeline: whether its MAJOR.MINOR.PATCH is at or past
+// FirstManifestVersion. The pre-release suffix is ignored: a pre-release of
+// that version (2.8.11-rc.1) is cut by the same pipeline, since release.yml
+// requires the tag to equal the version cmd/moombox/main.go declares and
+// main.go declares it only after the pipeline landed, though SemVer orders it
+// below the release. A version that does not parse is held to the manifest:
+// the check that fails closed.
+func releaseCarriesManifest(version string) bool {
+	v, err := ParseVersionFull(version)
+	if err != nil {
+		return true
+	}
+	core := fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+	return CompareVersions(core, FirstManifestVersion) >= 0
+}
 
 // maxManifestSize bounds the manifest a client reads into memory. The real
 // one is a few hundred bytes.
