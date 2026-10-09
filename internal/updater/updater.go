@@ -335,11 +335,21 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		"latest", remoteVersion,
 	)
 	// Still offered — the operator should hear a release exists, and see its
-	// notes — but ApplyUpdate will refuse it (verifiedManifestEntry).
+	// notes — but ApplyUpdate will refuse it (verifiedManifestEntry). Only a
+	// release before FirstManifestVersion is one to install by hand: from it
+	// on the manifest missing is a failure, and a binary installed by hand
+	// would fail VerifyCurrentSignature for the same assets.
 	if manifestURL == "" || manifestSigURL == "" {
-		u.logger.Warn("[Updater] Release publishes no signed manifest — it must be installed manually",
-			"latest", remoteVersion,
-		)
+		if releaseCarriesManifest(remoteVersion) {
+			u.logger.Warn("[Updater] Release publishes no signed manifest, though every release from FirstManifestVersion on does — it will be refused, and must not be installed by hand",
+				"latest", remoteVersion,
+				"firstManifestVersion", FirstManifestVersion,
+			)
+		} else {
+			u.logger.Warn("[Updater] Release publishes no signed manifest — it must be installed manually",
+				"latest", remoteVersion,
+			)
+		}
 	}
 
 	strippedBody := stripDownloadLinks(release.Body)

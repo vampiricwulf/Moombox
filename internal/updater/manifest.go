@@ -175,8 +175,25 @@ func (m *Manifest) platformEntry(goos, goarch string) (ManifestPlatform, error) 
 // verifies the signature with the updater's key, and returns the running
 // platform's entry for this release (entryFor). A release that publishes no
 // manifest is refused outright: there is nothing to bind its binary to it.
+//
+// How the refusal reads depends on the release. One before
+// FirstManifestVersion never had a manifest, and the operator is pointed at
+// its release page to install it by hand. One at or past it was published
+// with the signed manifest, so the manifest missing, or its signature, is
+// what deleting them to pass another release's validly signed binary looks
+// like: that is a failure, with no "update manually" — a binary installed by
+// hand would fail VerifyCurrentSignature for the very same assets. Every
+// release a binary carrying this code is offered is at or past it.
 func (u *Updater) verifiedManifestEntry(ctx context.Context, release *ReleaseInfo) (ManifestPlatform, error) {
 	if release.ManifestURL == "" || release.ManifestSignatureURL == "" {
+		if releaseCarriesManifest(release.Version) {
+			if release.ManifestURL == "" {
+				return ManifestPlatform{}, fmt.Errorf("release %s publishes no manifest (%s), though every release from %s on is published with a signed one — refused: without the manifest its binary cannot be tied to this release, so it must not be installed by hand either",
+					release.TagName, ManifestAsset, FirstManifestVersion)
+			}
+			return ManifestPlatform{}, fmt.Errorf("release %s publishes its manifest without a signature (%s), though every release from %s on signs it — refused: an unsigned manifest cannot tie its binary to this release, so it must not be installed by hand either",
+				release.TagName, ManifestSignatureAsset, FirstManifestVersion)
+		}
 		where := "its release page"
 		if release.ReleaseURL != "" {
 			where = release.ReleaseURL
