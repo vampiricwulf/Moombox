@@ -10,7 +10,9 @@
 //   - the GVS PO token (potoken.go): PoToken for an error, PoTokenURL for a
 //     URL, PoTokenText for text already flattened;
 //   - a credential inside a URL (url.go): URLOrigin for a URL whose secret can
-//     sit anywhere in it, such as a webhook URL.
+//     sit anywhere in it, such as a webhook URL; URLUserinfo for one whose
+//     only place for a secret is its user:password@, such as
+//     network.public_url.
 package redact
 
 // Marker replaces a secret wherever one is cut out.

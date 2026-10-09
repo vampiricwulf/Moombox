@@ -19,6 +19,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -618,7 +619,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	if cfg.Network.PublicURL != "" {
 		canonical, err := ValidatePublicURL(cfg.Network.PublicURL)
 		if err != nil {
-			fail("network.public_url %q is not usable: %v", cfg.Network.PublicURL, err)
+			// URLUserinfo: the value is quoted back, and a hand-edited
+			// https://user:password@host is refused for exactly the part
+			// that must not be — Load turns this into a Warn on every boot.
+			fail("network.public_url %q is not usable: %v", redact.URLUserinfo(cfg.Network.PublicURL), err)
 			if !reportOnly {
 				cfg.Network.PublicURL = ""
 			}

@@ -312,3 +312,55 @@ func TestNotificationKeysRoundTripThroughSave(t *testing.T) {
 		t.Error("target 2's enabled = false did not survive the round trip")
 	}
 }
+
+// TestPublicURLIssueCarriesNoUserinfo pins the userinfo half of the secrets
+// sweep: a hand-edited network.public_url = "https://user:password@host" is
+// refused for its userinfo, Load records the refusal in NormalizedOnLoad, and
+// the boot logs every entry there as a Warn (cmd/moombox/services.go) — with
+// the value quoted back whole, password and all. A value url.Parse refuses
+// was quoted a second time inside its parse error. The same error text is
+// the settings API's field error and the TUI form's message.
+//
+// Mutants (run):
+//   - validateOrNormalize quoting cfg.Network.PublicURL instead of
+//     redact.URLUserinfo(...): both rows' boot issue carries the password.
+//   - ValidatePublicURL wrapping url.Parse's *url.Error whole: the
+//     "unparseable" row's issue and error carry it (inside the parse error).
+func TestPublicURLIssueCarriesNoUserinfo(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"refused for its userinfo", "https://moombox:hunter2SECRET@dash.example.com/moombox"},
+		{"unparseable", "https://moombox:hunter2SECRET@dash example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte("[network]\npublic_url = \""+tc.value+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var issue string
+			for _, s := range cfg.NormalizedOnLoad {
+				if strings.Contains(s, "network.public_url") {
+					issue = s
+				}
+			}
+			if issue == "" {
+				t.Fatalf("no network.public_url entry in NormalizedOnLoad %q", cfg.NormalizedOnLoad)
+			}
+			if strings.Contains(issue, "SECRET") {
+				t.Errorf("the boot Warn's issue carries the password: %q", issue)
+			}
+			if !strings.Contains(issue, "<redacted>@dash") {
+				t.Errorf("issue = %q, want the value quoted with its userinfo cut", issue)
+			}
+			if cfg.Network.PublicURL != "" {
+				t.Errorf("public_url = %q, want it cleared", cfg.Network.PublicURL)
+			}
+			if _, err := ValidatePublicURL(tc.value); err == nil || strings.Contains(err.Error(), "SECRET") {
+				t.Errorf("ValidatePublicURL(%q) = %v, want an error that carries no password", tc.value, err)
+			}
+		})
+	}
+}

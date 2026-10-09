@@ -61,3 +61,32 @@ func isScheme(s string) bool {
 	}
 	return true
 }
+
+// URLUserinfo cuts the userinfo — user:password@ — out of a URL whose only
+// place for a credential it is, and keeps every other byte, so the reader
+// can still tell which value is meant: "https://<redacted>@dash.example.com".
+// It is the rule for a URL Moombox shows back to its operator, such as
+// network.public_url in a validation message; a URL whose credential can sit
+// anywhere — a webhook URL — takes URLOrigin instead.
+//
+// The userinfo is everything before the LAST '@' ahead of the query or the
+// fragment, after the "://" when there is one. Not the first '/': a password
+// typed with a '/' in it ends net/url's authority early, and the rest of it
+// would survive. A '@' further along the path costs only the path before it.
+// A URL with no '@' there is returned as is.
+func URLUserinfo(raw string) string {
+	start := 0
+	if i := strings.Index(raw, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	rest := raw[start:]
+	end := strings.IndexAny(rest, "?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	at := strings.LastIndexByte(rest[:end], '@')
+	if at < 0 {
+		return raw
+	}
+	return raw[:start] + Marker + "@" + rest[at+1:]
+}

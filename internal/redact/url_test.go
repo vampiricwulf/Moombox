@@ -51,3 +51,31 @@ func TestURLOrigin(t *testing.T) {
 		}
 	}
 }
+
+// TestURLUserinfo pins the userinfo-only rule: the user:password@ goes, every
+// other byte stays, so a validation message still names the value it means.
+//
+// Mutants (run):
+//   - cutting at the FIRST '@': the "two @" row keeps the half after it.
+//   - ending the authority at the first '/' (net/url's rule): the "password
+//     with a '/'" row keeps the rest of the password.
+//   - searching the query too: the "@ in the query" row loses its host.
+func TestURLUserinfo(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"no userinfo", "https://dash.example.com/moombox", "https://dash.example.com/moombox"},
+		{"user and password", "https://moombox:hunter2SECRET@dash.example.com/x", "https://<redacted>@dash.example.com/x"},
+		{"token as the user", "https://SECRETTOKEN@dash.example.com", "https://<redacted>@dash.example.com"},
+		{"two @", "https://SECRET@user:SECRET2@dash.example.com", "https://<redacted>@dash.example.com"},
+		{"password with a '/'", "https://u:SECRET/half@dash.example.com/x", "https://<redacted>@dash.example.com/x"},
+		{"@ in the query", "https://dash.example.com/x?to=a@b", "https://dash.example.com/x?to=a@b"},
+		{"no scheme", "u:SECRET@dash.example.com/x", "<redacted>@dash.example.com/x"},
+		{"unparseable", "https://u:SECRET@dash example.com", "https://<redacted>@dash example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := URLUserinfo(tc.in); got != tc.want {
+				t.Fatalf("URLUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

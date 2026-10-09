@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -108,6 +109,13 @@ func ValidatePublicURL(raw string) (canonical string, err error) {
 	}
 	u, err := url.Parse(s)
 	if err != nil {
+		// url.Parse's error quotes the whole value, a password in its
+		// userinfo with it, and this error is shown and logged: the boot
+		// line for a value Load replaced, the settings API's field error,
+		// the TUI form. Its cause alone says what is wrong.
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
+			err = uerr.Err
+		}
 		return "", fmt.Errorf("not a valid URL: %w", err)
 	}
 	scheme := strings.ToLower(u.Scheme)
