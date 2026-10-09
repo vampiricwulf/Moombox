@@ -54,7 +54,7 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 // holding fileMu. Audit reports/small-packages.md.
 //
 // Per-job log routing lives in the DATABASE (db.TrackJobForLogs /
-// db.RouteLogToJobs fed via Subscribe, served by db.GetJobLogs) — the
+// db.RouteLogToJobs fed via SetLineRouter, served by db.GetJobLogs) — the
 // logger once carried a parallel LogForJob/GetJobLogs buffer API, but
 // nothing in production ever wired it and it was removed 2026-07.
 type Logger struct {
@@ -120,6 +120,12 @@ type Logger struct {
 	// Pub/sub for log lines
 	subscribers []chan string
 	subMu       sync.RWMutex
+
+	// router receives every line log() emits, SYNCHRONOUSLY, on the goroutine
+	// that logged it — see SetLineRouter. An atomic pointer rather than a
+	// plain field because it is installed after New has published the logger
+	// through slog.SetDefault, while other goroutines are already logging.
+	router atomic.Pointer[func(line string)]
 
 	// Rate-limiting for broadcast drop warnings (prevents stderr spam
 	// when a subscriber is persistently slow)
@@ -494,7 +500,50 @@ func (l *Logger) log(level slog.Level, msg string, args ...any) {
 	// dashboard's shape, which is deliberately not the file's.
 	line := formatLogLine(now, level, msg, args...)
 	l.addToRingBuffer(line)
+	l.route(line)
 	l.broadcast(line)
+}
+
+// SetLineRouter installs fn to receive every line the logger emits, in the
+// ring-buffer / subscriber shape, SYNCHRONOUSLY: on the goroutine that logged
+// it, before Debug/Info/Warn/Error return. nil removes it. One router at a
+// time; a second call replaces the first.
+//
+// Per-job log routing (db.RouteLogToJobs) runs here and not behind
+// Subscribe, because whether a line belongs to a job is decided against the
+// routed set as it stands when the line is ROUTED, and the set changes
+// synchronously: a status write untracks a job that goes terminal inside
+// UpdateJobFields. A subscriber routes later, on its own goroutine — so
+// setJobError's "job error" line, logged just before its status=Error write,
+// lost the race to the untrack for 8 of 100 failed jobs and never reached the
+// log an operator opens after a failure (W24-11). Routed here, a line logged
+// before a status write is always routed before it.
+//
+// fn must be cheap and must not log: it runs inside every log call, and a log
+// line from inside it would recurse. It holds none of the logger's locks.
+func (l *Logger) SetLineRouter(fn func(line string)) {
+	if fn == nil {
+		l.router.Store(nil)
+		return
+	}
+	l.router.Store(&fn)
+}
+
+// route hands one line to the router, if one is installed. A panicking router
+// is reported on the diagnostic path and the log call returns normally: it
+// runs on whatever goroutine logged, recover handlers among them, and a
+// broken router must never turn a log line into a crash.
+func (l *Logger) route(line string) {
+	fn := l.router.Load()
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			l.diagf("logger: line router panicked: %v", r)
+		}
+	}()
+	(*fn)(line)
 }
 
 // logLineBuilderPool reuses strings.Builder instances across formatLogLine

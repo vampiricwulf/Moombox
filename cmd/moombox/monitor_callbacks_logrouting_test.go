@@ -1,10 +1,15 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/logger"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // logRoutingFixture opens a real database and wires the two production
@@ -157,5 +162,87 @@ func TestAChangeWithoutAColumnListStillReRoutes(t *testing.T) {
 	if got := db.GetJobLogs("vid0000003"); len(got) != 1 {
 		t.Errorf("a change with no column list left the revived job unrouted, holds %d lines — nil "+
 			"Changes means \"unspecified\", not \"nothing relevant\"", len(got))
+	}
+}
+
+// TestTheLineBeforeATerminalWriteReachesTheJobsOwnLog is W24-11, through the
+// production wiring: a real logger, wireLogForwarding, and the real routing
+// subscribers. setJobError logs "job error" and then writes status=Error; the
+// write untracks the job synchronously, inside UpdateJobFields. Routing used
+// to be a step of the log forwarder — a goroutine behind a Subscribe channel
+// — so it ran against a routed set the untrack had often already changed, and
+// the failed job's own log, the one an operator opens next, lacked the line
+// that says why (8 of 100 jobs at GOMAXPROCS=4, all of them at 1). Each job
+// is checked right after its write with nothing drained: the line has to be
+// in the buffer already.
+//
+// That race is lost only sometimes, so the second half takes the forwarder
+// out of it altogether, the way a forwarder that has fallen behind does: the
+// logger drops every line its full channel cannot take. Routing must not
+// care.
+//
+// Mutants this kills:
+//   - RouteLogToJobs moved back into the forwarder loop (and the
+//     SetLineRouter call dropped): the second half routes nothing, every
+//     time; the first half misses some jobs on most runs.
+//   - the SetLineRouter call dropped alone: nothing is routed at all.
+func TestTheLineBeforeATerminalWriteReachesTheJobsOwnLog(t *testing.T) {
+	db, s := logRoutingFixture(t)
+	log, err := logger.New(filepath.Join(t.TempDir(), "moombox.log"), "info", 1<<20, 1)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	log.SuppressStdout()
+	t.Cleanup(log.Close)
+	s.log = log
+	s.wsHub = web.NewWebSocketHub(log)
+
+	s.wireLogForwarding()
+	stopForwarder := sync.OnceFunc(func() {
+		log.Unsubscribe(s.logSub)
+		close(s.logSubDone)
+	})
+	// What shutdown does with them.
+	t.Cleanup(func() {
+		log.SetLineRouter(nil)
+		stopForwarder()
+	})
+
+	failJob := func(id string) bool {
+		t.Helper()
+		addJob(t, db, id, database.StatusDownloading)
+
+		// setJobError's order: the line, then the terminal write.
+		log.Error("job error", "jobID", id, "err", "boom")
+		if !db.UpdateJobFieldsUnless(id, database.StatusCancelled, map[string]any{
+			"status": database.StatusError, "error": "boom",
+		}) {
+			t.Fatalf("the Error write for %s did not apply", id)
+		}
+		routed := strings.Contains(strings.Join(db.GetJobLogs(id), "\n"), "job error")
+
+		// Control: the terminal write still ends the routing.
+		log.Info("after the terminal write", "jobID", id)
+		if logs := db.GetJobLogs(id); len(logs) > 0 && strings.Contains(logs[len(logs)-1], "after the terminal write") {
+			t.Fatalf("%s is still routed to after its Error write — a terminal ID left in the routed set is CORE-12", id)
+		}
+		return routed
+	}
+
+	const jobs = 50
+	missing := 0
+	for i := range jobs {
+		if !failJob(fmt.Sprintf("vid%07d", i)) {
+			missing++
+		}
+	}
+	if missing > 0 {
+		t.Errorf("%d of %d failed jobs lack their own \"job error\" line — routing must happen inside the log call", missing, jobs)
+	}
+
+	stopForwarder()
+	if !failJob("vidlagging") {
+		t.Error("with the forwarder out of the picture the failed job's own log lacks its \"job error\" line — " +
+			"per-job routing must not depend on a subscriber keeping up")
 	}
 }

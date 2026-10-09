@@ -975,3 +975,59 @@ func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
 		}
 	})
 }
+
+// TestLineRouterRunsInsideTheLogCall pins SetLineRouter's contract, which
+// per-job log routing depends on (W24-11): the router has seen the line by the
+// time Info returns — no channel, no goroutine — so a status write the caller
+// makes next can never untrack the job ahead of its own line. It sees the
+// ring-buffer shape, the one db.RouteLogToJobs matches job IDs in.
+//
+// Mutants this kills:
+//   - the route call dropped from log(): the router never sees the line.
+//   - SetLineRouter(nil) storing a pointer to the nil func: every later line
+//     panics inside route and leaves a diagnostic.
+//   - the recover dropped from route: the panicking router crashes the test.
+func TestLineRouterRunsInsideTheLogCall(t *testing.T) {
+	l, err := New("", "INFO", 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	l.SuppressStdout() // what the TUI does — diagf then lands in the ring
+
+	var routed []string // appended on this goroutine only: that is the contract
+	l.SetLineRouter(func(line string) { routed = append(routed, line) })
+
+	l.Info("job error", "jobID", "vid0000001")
+	if len(routed) != 1 {
+		t.Fatalf("the router saw %d lines by the time Info returned, want 1", len(routed))
+	}
+	if ring := l.GetRecentLines(); routed[0] != ring[len(ring)-1] {
+		t.Errorf("the router saw %q, the ring holds %q — it must see the ring-buffer shape", routed[0], ring[len(ring)-1])
+	}
+	l.Debug("below the level")
+	if len(routed) != 1 {
+		t.Errorf("a line below the level reached the router: %q", routed[len(routed)-1])
+	}
+
+	l.SetLineRouter(nil)
+	l.Info("after the router was removed")
+	if len(routed) != 1 {
+		t.Errorf("a removed router still saw %q", routed[len(routed)-1])
+	}
+	for _, line := range l.GetRecentLines() {
+		if strings.Contains(line, "line router panicked") {
+			t.Fatalf("removing the router left one that panics: %q", line)
+		}
+	}
+
+	l.SetLineRouter(func(string) { panic("router exploded") })
+	l.Info("logged through a broken router")
+	ring := strings.Join(l.GetRecentLines(), "\n")
+	if !strings.Contains(ring, "logged through a broken router") {
+		t.Errorf("a panicking router cost the ring its line:\n%s", ring)
+	}
+	if !strings.Contains(ring, "line router panicked: router exploded") {
+		t.Errorf("a panicking router left no diagnostic:\n%s", ring)
+	}
+}

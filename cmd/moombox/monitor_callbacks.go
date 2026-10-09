@@ -1983,31 +1983,8 @@ func (s *runState) wireMonitorCallbacks() {
 	// onJobsChange).
 	s.unsubWSJobsChange = s.db.OnJobsChange(s.onJobsChange)
 
-	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
-	s.logSub = s.log.Subscribe()
-	s.logSubDone = make(chan struct{})
-	logSub, logSubDone := s.logSub, s.logSubDone
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.log.Error("log forwarder panic", "panic", r)
-			}
-		}()
-		// Not `range logSub`: Unsubscribe never closes the channel (see
-		// Logger.Subscribe), so shutdown closes logSubDone after it.
-		for {
-			select {
-			case <-logSubDone:
-				return
-			case line, ok := <-logSub:
-				if !ok {
-					return
-				}
-				s.wsHub.BroadcastLog(line)
-				s.db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
-			}
-		}
-	}()
+	// Logger -> per-job buffers + WebSocket.
+	s.wireLogForwarding()
 
 	// Connectivity -> monitors + WebSocket: kick monitors on reconnect,
 	// broadcast state — and notify. The web/TUI broadcasts are ephemeral;
@@ -2050,6 +2027,50 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "connectivity_restored"},
 		)
 	})
+}
+
+// wireLogForwarding sends every log line to the per-job buffers and to the
+// dashboards.
+//
+// The per-job half is the logger's line router, which runs INSIDE the log
+// call (logger.SetLineRouter), not a step of the forwarder below. The routed
+// set changes synchronously — a status write untracks a job that goes
+// terminal inside UpdateJobFields (syncJobLogRoutingOnChange) — so a line
+// routed later, on the forwarder's goroutine, was matched against a set that
+// had already moved on: setJobError logs "job error" and then writes
+// status=Error, and for 8 of 100 failed jobs the line missed the failed job's
+// own log, the one an operator opens next (W24-11). Routed in the log call, a
+// line logged before a status write is routed before it, and the bracket
+// cleanupStagingAfterMux and RecoverAsides put around their last lines holds.
+// Nor does it depend on the forwarder keeping up any more: a line the logger
+// drops for a slow subscriber still reaches its job.
+func (s *runState) wireLogForwarding() {
+	s.log.SetLineRouter(s.db.RouteLogToJobs)
+
+	// Logger -> WebSocket: broadcast log lines.
+	s.logSub = s.log.Subscribe()
+	s.logSubDone = make(chan struct{})
+	logSub, logSubDone := s.logSub, s.logSubDone
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("log forwarder panic", "panic", r)
+			}
+		}()
+		// Not `range logSub`: Unsubscribe never closes the channel (see
+		// Logger.Subscribe), so shutdown closes logSubDone after it.
+		for {
+			select {
+			case <-logSubDone:
+				return
+			case line, ok := <-logSub:
+				if !ok {
+					return
+				}
+				s.wsHub.BroadcastLog(line)
+			}
+		}
+	}()
 }
 
 // syncJobLogRouting starts or stops per-job log routing for one job, by its

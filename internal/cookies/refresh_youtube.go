@@ -92,8 +92,8 @@ func youtubeGuideRequestBody() string {
 //     the in-memory ring buffer, which GET /api/logs serves to any authenticated
 //     client; the Web UI's live log stream (cmd/moombox's log-forwarder
 //     subscriber → wsHub.BroadcastLog → the frontend's "log" case); the per-job
-//     log buffers that same forwarder writes to the DATABASE; and the TUI log
-//     panel via its own subscriber.
+//     log buffers the logger's line router writes to the DATABASE; and the TUI
+//     log panel via its own subscriber.
 //
 // So that sink is conditional, persistent (file + DB), and remotely readable
 // — and DEBUG is exactly the level an operator raises to when their cookies

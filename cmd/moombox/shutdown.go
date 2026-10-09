@@ -141,6 +141,10 @@ func (s *runState) shutdown() bool {
 	// main loop, so in theory they're always populated at this point. Guard
 	// anyway so an early-exit shutdown path does not NPE).
 	if s.logSub != nil {
+		// The per-job line router goes with the forwarder it was wired beside
+		// (wireLogForwarding): lines logged after this reach the file, the
+		// ring and the TUI, not a database that is about to close.
+		s.log.SetLineRouter(nil)
 		s.log.Unsubscribe(s.logSub)
 		if s.logSubDone != nil {
 			close(s.logSubDone)
