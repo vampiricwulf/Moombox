@@ -646,7 +646,17 @@ a departed channel, which fires no per-job event (`cmd/moombox/monitor_callbacks
 A YouTube job's id is its video id, so the same id comes back on a re-add or a
 re-detection, and a process still holding the deleted job's id PATCHed its old
 message — far up the channel, where an edit notifies nobody — instead of opening
-a new one.
+a new one. Both drop in each target's delivery order, not at once
+(`forgetInOrder`, `internal/notifications/lifecycle.go`): a step goes onto every
+target's FIFO behind what it already holds, and drops only that target's id and
+History. Deleting an active job cancels it first, so its `cancelled` is already
+queued; dropped at once, a busy target dispatched that cancel with no id left
+and posted it plain, and the message read "Downloading" for good — and a POST
+in flight when the delete landed came back and remembered its id afresh, so a
+re-add PATCHed the deleted job's message after all. A removed target's queue
+still runs its steps after its in-flight delivery (the rest of its queue is
+discarded); a target whose queue has already exited — after shutdown — drops
+at once.
 
 The in-memory half — the message ids a running process is holding, and the
 History lines — is released when a job reaches its terminal edit, and capped at

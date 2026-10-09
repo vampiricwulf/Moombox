@@ -357,33 +357,83 @@ func (l *lifecycleTracker) release(jobID, key string) {
 	delete(l.touched, jobID)
 }
 
-// drop removes everything held for a job that no longer exists. Unlike
-// release it is not per target and leaves nothing to re-read: the row and the
-// ids it stored are gone. A YouTube job's id is its video id, so the same id
-// comes back on a re-add — or when a channel removed and re-added re-detects
-// it — and an entry kept from the deleted job used to PATCH that job's old
-// message, far up the channel where an edit notifies nobody, with the old
-// History carried over.
-func (l *lifecycleTracker) drop(jobID string) {
+// dropTarget removes what ONE target holds for a job that no longer exists,
+// and the job's entry once nothing is left in it. Unlike release it leaves
+// nothing to re-read: the row and the ids it stored are gone. A YouTube job's
+// id is its video id, so the same id comes back on a re-add — or when a
+// channel removed and re-added re-detects it — and an entry kept from the
+// deleted job used to PATCH that job's old message, far up the channel where
+// an edit notifies nobody, with the old History carried over.
+//
+// Per target, and run on that target's sender goroutine behind everything it
+// had queued (ForgetJob): see Manager.forgetInOrder for why.
+func (l *lifecycleTracker) dropTarget(jobID, key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.jobs, jobID)
-	delete(l.touched, jobID)
+	if j := l.jobs[jobID]; j != nil {
+		l.dropKeysLocked(jobID, j, func(k string) bool { return k == key })
+	}
 }
 
-// retain drops every job not in live: the bulk counterpart of drop, for the
-// deletes that fire no per-job event (a departed channel's prune). A job added
-// after the list was taken can lose its entry too; that costs only the
-// in-process History, as a release does — its stored ids are re-read on the
-// next touch.
-func (l *lifecycleTracker) retain(live map[string]struct{}) {
+// retainTarget is dropTarget for every job not in live: the bulk counterpart,
+// for the deletes that fire no per-job event (a departed channel's prune). A
+// job added after the list was taken can lose its entry too; that costs only
+// the in-process History, as a release does — its stored ids are re-read on
+// the next touch.
+func (l *lifecycleTracker) retainTarget(live map[string]struct{}, key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for id := range l.jobs {
+	for id, j := range l.jobs {
 		if _, ok := live[id]; !ok {
-			delete(l.jobs, id)
-			delete(l.touched, id)
+			l.dropKeysLocked(id, j, func(k string) bool { return k == key })
 		}
+	}
+}
+
+// drop is dropTarget, at once, for every key of a deleted job that no queue
+// will drop in order — the keys not in queued: a target no longer configured,
+// whose queue has gone, or none that ever held a message.
+func (l *lifecycleTracker) drop(jobID string, queued map[string]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if j := l.jobs[jobID]; j != nil {
+		l.dropKeysLocked(jobID, j, func(k string) bool { return !queued[k] })
+	}
+}
+
+// retain is drop for every job not in live: the at-once half of RetainJobs.
+func (l *lifecycleTracker) retain(live map[string]struct{}, queued map[string]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, j := range l.jobs {
+		if _, ok := live[id]; !ok {
+			l.dropKeysLocked(id, j, func(k string) bool { return !queued[k] })
+		}
+	}
+}
+
+// dropKeysLocked removes a job's message id, History and closed mark for
+// every key gone admits, then the job's entry once it holds no id and no
+// History for anyone. Caller holds l.mu.
+func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone func(key string) bool) {
+	for k := range j.msgs {
+		if gone(k) {
+			delete(j.msgs, k)
+		}
+	}
+	for k := range j.history {
+		if gone(k) {
+			delete(j.history, k)
+		}
+	}
+	for k := range j.closed {
+		if gone(k) {
+			delete(j.closed, k)
+		}
+	}
+	if len(j.msgs) == 0 && len(j.history) == 0 {
+		delete(l.jobs, jobID)
+		delete(l.touched, jobID)
 	}
 }
 
@@ -657,15 +707,60 @@ func (m *Manager) SetMessageStore(s MessageStore) {
 	m.tracker().setStore(s)
 }
 
-// ForgetJob drops the edit-mode state held for a deleted job (see drop).
+// ForgetJob drops the edit-mode state held for a deleted job (see dropTarget).
 // cmd/moombox calls it from its OnJobDeleted subscriber.
 func (m *Manager) ForgetJob(jobID string) {
-	m.tracker().drop(jobID)
+	if m == nil || jobID == "" {
+		return
+	}
+	tr := m.tracker()
+	queued := m.forgetInOrder(func(key string) { tr.dropTarget(jobID, key) })
+	tr.drop(jobID, queued)
 }
 
 // RetainJobs drops the edit-mode state of every job not in live (see
-// retain). cmd/moombox calls it from its OnJobsChange subscriber, which is
-// the only event a bulk delete fires.
+// retainTarget). cmd/moombox calls it from its OnJobsChange subscriber, which
+// is the only event a bulk delete fires.
 func (m *Manager) RetainJobs(live map[string]struct{}) {
-	m.tracker().retain(live)
+	if m == nil {
+		return
+	}
+	tr := m.tracker()
+	queued := m.forgetInOrder(func(key string) { tr.retainTarget(live, key) })
+	tr.retain(live, queued)
+}
+
+// forgetInOrder queues fn(key) on every target's FIFO — the live ones and any
+// retired one still finishing its delivery in flight — and returns the keys
+// it was queued for. The caller drops every other key at once.
+//
+// In order, not at once, because a deleted job can still have deliveries on
+// its way. Deleting an active job cancels it first, so its "cancelled" is
+// already queued when the delete lands; if the target was busy — another
+// job's request in flight, a rate-limit wait — that send was dispatched after
+// the drop, found neither the in-memory id nor the row, and posted plain: the
+// lifecycle message read "Downloading" for good. And a POST in flight when the
+// drop landed came back and remembered its id afresh, so a re-add of the same
+// video id PATCHed the deleted job's message — the very thing the drop is
+// for. Behind everything queued, the drop runs after both, and before any
+// send of a job re-added under the same id.
+func (m *Manager) forgetInOrder(fn func(key string)) map[string]bool {
+	m.targetsMu.RLock()
+	queues := make([]*targetQueue, 0, len(m.targets)+len(m.retiring))
+	queues = append(queues, m.targets...)
+	for _, q := range m.retiring {
+		queues = append(queues, q)
+	}
+	m.targetsMu.RUnlock()
+
+	queued := make(map[string]bool, len(queues))
+	for _, q := range queues {
+		if q.msgKey == "" {
+			continue
+		}
+		if q.enqueueControl(func() { fn(q.msgKey) }) {
+			queued[q.msgKey] = true
+		}
+	}
+	return queued
 }

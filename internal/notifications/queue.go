@@ -42,6 +42,11 @@ const dropWarnInterval = 5 * time.Second
 type queued struct {
 	msg  Message
 	tier Tier
+	// ctl, when set, makes this item a step for the sender to run rather than
+	// a message to deliver: enqueueControl's way of doing something to this
+	// target's edit-mode state AFTER every item queued before it. Never
+	// delivered, never shed (its tier is not TierLow), never discarded.
+	ctl func()
 }
 
 // targetQueue is one destination, its FIFO, and the single goroutine that
@@ -58,6 +63,10 @@ type targetQueue struct {
 	// on. Reload matches on it so a surviving target keeps this queue, its
 	// pending items, and the rate bucket its sender has learned.
 	key string
+	// msgKey is the target's targetMsgKey, the key its edit-mode message ids
+	// are held under — what Manager.forgetInOrder drops on this queue. Fixed
+	// for the queue's life: it is derived from key, and a survivor keeps both.
+	msgKey string
 	// shuttingDown is the Manager's flag, shared by pointer. When it is set,
 	// deliveries make a single attempt instead of running the retry ladder.
 	shuttingDown *atomic.Bool
@@ -76,6 +85,9 @@ type targetQueue struct {
 	items   []queued
 	closing bool // drain what is queued, then exit (Wait)
 	discard bool // drop what is queued, then exit (a removed target)
+	// exited is set by the pop that tells the goroutine to return: nothing
+	// appended after it would ever run, so enqueueControl refuses from then on.
+	exited bool
 
 	// The ping, as buildTargets resolved it. Guarded by mu like events,
 	// because a Reload swaps them on a surviving queue while Send reads them.
@@ -123,6 +135,7 @@ func newTargetQueue(t notificationTarget, logger interface {
 	q := &targetQueue{
 		sender:         t.sender,
 		key:            t.key,
+		msgKey:         t.msgKey,
 		events:         t.events,
 		mention:        t.mention,
 		mentionAllowed: t.mentionAllowed,
@@ -324,6 +337,37 @@ func (q *targetQueue) enqueue(it queued) {
 	q.signal()
 }
 
+// enqueueControl queues fn to run on this target's sender goroutine after
+// everything already queued — and after the delivery in flight — and reports
+// whether it will run. It refuses only once the goroutine has returned.
+//
+// Outside the policies that govern a message: past the cap (a step is not a
+// delivery, and shedding one would leave the state it exists to clear), onto a
+// queue draining for shutdown (the drain runs it), and onto a retired one
+// (pop's discard runs the steps it holds before the goroutine returns).
+func (q *targetQueue) enqueueControl(fn func()) bool {
+	q.mu.Lock()
+	if q.exited {
+		q.mu.Unlock()
+		return false
+	}
+	q.items = append(q.items, queued{ctl: fn})
+	q.mu.Unlock()
+	q.signal()
+	return true
+}
+
+// runControl runs one enqueueControl step. Its own recover for the reason
+// deliver has one: a panicking step must not take the sender with it.
+func (q *targetQueue) runControl(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			q.logger.Error("panic in notification queue step", "panic", fmt.Sprint(r))
+		}
+	}()
+	fn()
+}
+
 // noteDrop counts one shed notification and reports whether this is the moment
 // to say so — at most once per dropWarnInterval, carrying everything shed
 // since the last line. Called with q.mu HELD; the Warn itself belongs outside
@@ -372,10 +416,24 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		// A removed target reports the count and nothing else. The queued
 		// items belong to a webhook the operator has just deleted from their
 		// config; delivering them after the fact would be the opposite of what
-		// the edit asked for.
-		n := len(q.items)
+		// the edit asked for. Its queued STEPS still run: each clears state a
+		// delivery may have left (ForgetJob), and the in-flight delivery they
+		// were queued behind has finished.
+		var steps []func()
+		n := 0
+		for _, it := range q.items {
+			if it.ctl != nil {
+				steps = append(steps, it.ctl)
+				continue
+			}
+			n++
+		}
 		q.items = nil
+		q.exited = true
 		q.mu.Unlock()
+		for _, fn := range steps {
+			q.runControl(fn)
+		}
 		if n > 0 {
 			q.logger.Warn("notification target removed — discarding its queued notifications", "dropped", n)
 		}
@@ -388,6 +446,9 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		// a burst that sheds 1,743 items in 35ms is ONE window, and without
 		// this the log would claim it shed one.
 		closing := q.closing
+		if closing {
+			q.exited = true
+		}
 		nOldest, nNewest, report := q.flushDrops()
 		q.mu.Unlock()
 		if report {
@@ -451,6 +512,10 @@ func (q *targetQueue) deliver(it queued) {
 			q.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
 		}
 	}()
+	if it.ctl != nil {
+		q.runControl(it.ctl)
+		return
+	}
 	// Owner ruling: shutdown sends are single-attempt and the 15s force-exit
 	// stays — dispatch carries the flag through to the edit path too, because
 	// a 2s+5s retry ladder cannot finish inside a window the worker stop may
