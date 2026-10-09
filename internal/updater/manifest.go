@@ -26,7 +26,8 @@ import (
 // applied, that version is newer than the running one, and the running
 // platform's entry hashes to the downloaded bytes. The per-binary .sig files
 // are still published (clients that predate the manifest verify only them)
-// and still checked.
+// and still checked. VerifyCurrentSignature holds the running binary to its
+// own release's manifest the same way, when that release publishes one.
 
 // ManifestAsset is the release asset holding the manifest;
 // ManifestSignatureAsset is its detached Ed25519 signature, in the same raw
@@ -104,13 +105,25 @@ func ParseManifest(data []byte) (*Manifest, error) {
 // release (version and tag), the version is newer than currentVersion, and
 // it lists goos/goarch under the asset name the updater downloads there.
 func (m *Manifest) entryFor(release *ReleaseInfo, currentVersion, goos, goarch string) (ManifestPlatform, error) {
-	if strings.TrimPrefix(m.Version, "v") != strings.TrimPrefix(release.Version, "v") || m.Tag != release.TagName {
+	if !m.names(release.Version, release.TagName) {
 		return ManifestPlatform{}, fmt.Errorf("the signed manifest is for %s (%s), not the release being applied, %s (%s)",
 			m.Version, m.Tag, release.Version, release.TagName)
 	}
 	if CompareVersions(m.Version, currentVersion) <= 0 {
 		return ManifestPlatform{}, fmt.Errorf("the signed manifest's version %s is not newer than the running %s", m.Version, currentVersion)
 	}
+	return m.platformEntry(goos, goarch)
+}
+
+// names reports whether the manifest is for exactly version (with or without
+// its "v") and tag.
+func (m *Manifest) names(version, tag string) bool {
+	return strings.TrimPrefix(m.Version, "v") == strings.TrimPrefix(version, "v") && m.Tag == tag
+}
+
+// platformEntry returns goos/goarch's entry, refusing unless the manifest
+// lists it under the asset name the updater downloads there.
+func (m *Manifest) platformEntry(goos, goarch string) (ManifestPlatform, error) {
 	key := goos + "/" + goarch
 	p, ok := m.Platforms[key]
 	if !ok {
@@ -136,39 +149,71 @@ func (u *Updater) verifiedManifestEntry(ctx context.Context, release *ReleaseInf
 		return ManifestPlatform{}, fmt.Errorf("release %s publishes no signed manifest (%s), so it cannot be verified for automatic update — update manually: download it from %s and replace the binary",
 			release.TagName, ManifestAsset, where)
 	}
+	m, err := u.fetchVerifiedManifest(ctx, release.ManifestURL, release.ManifestSignatureURL)
+	if err != nil {
+		return ManifestPlatform{}, err
+	}
+	return m.entryFor(release, u.currentVersion, runtime.GOOS, runtime.GOARCH)
+}
 
+// verifyRunningAgainstManifest checks the running binary against the signed
+// manifest of the release it claims to be (tag, the running version): the
+// manifest must name exactly that release, list the running platform under
+// the asset the updater downloads there, and hash to the running binary's
+// bytes. The binary's own .sig says only that the key signed these bytes,
+// which a validly signed binary of another release or platform satisfies as
+// well; this is the check that tells them apart. There is no newer-than test:
+// the release checked is the running one.
+func (u *Updater) verifyRunningAgainstManifest(ctx context.Context, tag, manifestURL, sigURL string) error {
+	m, err := u.fetchVerifiedManifest(ctx, manifestURL, sigURL)
+	if err != nil {
+		return err
+	}
+	if !m.names(u.currentVersion, tag) {
+		return fmt.Errorf("release %s's signed manifest is for %s (%s), not the running %s", tag, m.Version, m.Tag, u.currentVersion)
+	}
+	p, err := m.platformEntry(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	if err := verifyFileSHA256(u.exePath, p.SHA256); err != nil {
+		return fmt.Errorf("running binary: %w", err)
+	}
+	return nil
+}
+
+// fetchVerifiedManifest downloads a release's manifest and its signature,
+// verifies the signature with the updater's key and parses the manifest. What
+// the manifest must then say is the caller's to check.
+func (u *Updater) fetchVerifiedManifest(ctx context.Context, manifestURL, sigURL string) (*Manifest, error) {
 	dir, err := os.MkdirTemp("", "moombox-manifest-*")
 	if err != nil {
-		return ManifestPlatform{}, fmt.Errorf("failed to create temp dir: %w", err)
+		return nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer os.RemoveAll(dir)
 	manifestPath := filepath.Join(dir, ManifestAsset)
 	sigPath := filepath.Join(dir, ManifestSignatureAsset)
 
-	if err := u.downloadFile(ctx, release.ManifestURL, manifestPath); err != nil {
-		return ManifestPlatform{}, fmt.Errorf("manifest download failed: %w", err)
+	if err := u.downloadFile(ctx, manifestURL, manifestPath); err != nil {
+		return nil, fmt.Errorf("manifest download failed: %w", err)
 	}
-	if err := u.downloadFile(ctx, release.ManifestSignatureURL, sigPath); err != nil {
-		return ManifestPlatform{}, fmt.Errorf("manifest signature download failed: %w", err)
+	if err := u.downloadFile(ctx, sigURL, sigPath); err != nil {
+		return nil, fmt.Errorf("manifest signature download failed: %w", err)
 	}
 	// Bounded before anything reads it whole — the signature check included.
 	if fi, err := os.Stat(manifestPath); err != nil {
-		return ManifestPlatform{}, err
+		return nil, err
 	} else if fi.Size() > maxManifestSize {
-		return ManifestPlatform{}, fmt.Errorf("manifest is %d bytes, over the %d-byte limit", fi.Size(), maxManifestSize)
+		return nil, fmt.Errorf("manifest is %d bytes, over the %d-byte limit", fi.Size(), maxManifestSize)
 	}
 	if err := u.verifySignature(manifestPath, sigPath); err != nil {
-		return ManifestPlatform{}, fmt.Errorf("manifest signature verification failed: %w", err)
+		return nil, fmt.Errorf("manifest signature verification failed: %w", err)
 	}
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return ManifestPlatform{}, fmt.Errorf("reading manifest: %w", err)
+		return nil, fmt.Errorf("reading manifest: %w", err)
 	}
-	m, err := ParseManifest(data)
-	if err != nil {
-		return ManifestPlatform{}, err
-	}
-	return m.entryFor(release, u.currentVersion, runtime.GOOS, runtime.GOARCH)
+	return ParseManifest(data)
 }
 
 // verifyFileSHA256 reports whether the file at path hashes to wantHex.

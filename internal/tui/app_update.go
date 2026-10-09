@@ -393,10 +393,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case signatureVerifyResultMsg:
-		if msg.Err != "" {
+		switch {
+		case msg.Err != "":
 			a.setFeedback("Signature verification failed: " + msg.Err)
-		} else {
-			a.setFeedback("Signature verified — binary is authentic")
+		case msg.Manifest:
+			a.setFeedbackWithSeverity("Signature and release manifest verified — binary is authentic", severitySuccess)
+		default:
+			// The .sig alone says the key signed these bytes, not that they
+			// are this release's: say which check ran, and in yellow, since
+			// the stronger one could not.
+			a.setFeedbackWithSeverity("Signature verified; its release publishes no signed manifest, so only the signature was checked", severityWarning)
 		}
 		return a, nil
 

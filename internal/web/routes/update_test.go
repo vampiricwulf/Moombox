@@ -698,3 +698,56 @@ func TestUpdateApplyOutlivesTheRequest(t *testing.T) {
 		t.Error("the apply ran under the request's cancelled context")
 	}
 }
+
+// TestUpdateVerifySaysWhetherTheManifestWasChecked: POST /api/update/verify
+// reports, beside verified, whether the running release's signed manifest was
+// checked too — false for a release that publishes none, which the dashboard
+// shows as a signature-only check rather than a full one. A failure is still
+// a 422 carrying the reason.
+//
+// Mutants: answer {"verified": true} alone — the manifest field is missing;
+// hard-code manifest true — the no-manifest row reads true.
+func TestUpdateVerifySaysWhetherTheManifestWasChecked(t *testing.T) {
+	orig := verifyCurrentSignature
+	t.Cleanup(func() { verifyCurrentSignature = orig })
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		manifest bool
+		err      error
+		status   int
+	}{
+		{"signature and manifest", true, nil, http.StatusOK},
+		{"signature alone", false, nil, http.StatusOK},
+		{"a failed check", false, errors.New("running binary: SHA-256 does not match"), http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifyCurrentSignature = func(*updater.Updater, context.Context) (bool, error) { return tc.manifest, tc.err }
+			r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/update/verify", nil))
+			if rec.Code != tc.status {
+				t.Fatalf("status %d, want %d (%s)", rec.Code, tc.status, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %q: %v", rec.Body.String(), err)
+			}
+			if tc.err != nil {
+				if msg, _ := body["error"].(string); !strings.Contains(msg, "SHA-256 does not match") {
+					t.Errorf("error %q does not carry the reason", msg)
+				}
+				return
+			}
+			if body["verified"] != true {
+				t.Errorf("verified = %v, want true", body["verified"])
+			}
+			if got, ok := body["manifest"].(bool); !ok || got != tc.manifest {
+				t.Errorf("manifest = %v (present %v), want %v", body["manifest"], ok, tc.manifest)
+			}
+		})
+	}
+}

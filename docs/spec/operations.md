@@ -322,7 +322,7 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 
 ### Signature Verification of Current Binary
 
-`VerifyCurrentSignature` allows verifying the running binary against its published signature. It fetches the `.sig` file for the current version's tag from GitHub, downloads it to a temp file, and verifies against the running executable. This is used for integrity checks (e.g., verifying the binary hasn't been tampered with post-install). Returns an error for local/dev builds that have no corresponding GitHub release.
+`VerifyCurrentSignature` allows verifying the running binary against its published release. It fetches the `.sig` file for the current version's tag from GitHub, downloads it to a temp file, and verifies against the running executable; then, when that release publishes the signed manifest (`moombox-manifest.json` and its `.sig`), it verifies the manifest and checks that it names the running release and that the running platform's entry hashes to the running executable — the `.sig` alone would also pass a validly signed binary of another release or platform. It reports whether the manifest was checked: a release that publishes none is verified by its `.sig` alone, and the Web (`manifest: false` from `POST /api/update/verify`) and the TUI (`R S`) say so in the warning colour instead of calling it the full check ([security.md](security.md) § Release Manifest). This is used for integrity checks (e.g., verifying the binary hasn't been tampered with post-install). Returns an error for local/dev builds that have no corresponding GitHub release.
 
 ### Error Handling
 

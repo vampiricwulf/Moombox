@@ -559,9 +559,21 @@ func keepBackupByLink(path, backup string) bool {
 // breadcrumb ignore it, and the next aware boot cleans it up.
 const PendingVersionSuffix = ".update-pending"
 
-// VerifyCurrentSignature downloads the .sig for the current version from GitHub
-// and verifies it against the running binary. Returns nil if the signature is valid.
-func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
+// VerifyCurrentSignature checks the running binary against the GitHub release
+// tagged with the running version. It verifies the binary's own .sig and then,
+// when that release publishes a signed manifest (ManifestAsset and its .sig),
+// that the manifest names this release and that the running platform's entry
+// hashes to the running binary (verifyRunningAgainstManifest). The .sig alone
+// says only that the key signed these bytes, which another release's or
+// another platform's binary satisfies as well.
+//
+// manifest reports whether the second check ran: false, with a nil error,
+// for a release that publishes no signed manifest, where the .sig is all there
+// is to check — the UIs say so rather than call that a full verification.
+// Every release before the manifest is one; a binary that carries this check
+// shipped in a release that publishes one, so for it this means the release's
+// manifest assets are missing. Returns an error when either check fails.
+func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, err error) {
 	tag := "v" + u.currentVersion
 
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s",
@@ -569,36 +581,36 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("User-Agent", "Moombox/"+u.currentVersion)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to fetch release: %w", err)
+		return false, fmt.Errorf("failed to fetch release: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("no release found for %s (local/dev build?)", tag)
+		return false, fmt.Errorf("no release found for %s (local/dev build?)", tag)
 	}
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
+		return false, fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return false, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
 
 	var release githubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return fmt.Errorf("failed to parse release: %w", err)
+		return false, fmt.Errorf("failed to parse release: %w", err)
 	}
 
 	// Find the platform-appropriate sig asset.
 	assets, ok := currentPlatformAssets()
 	if !ok {
-		return fmt.Errorf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+		return false, fmt.Errorf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	var signatureURL string
 	for _, asset := range release.Assets {
@@ -608,28 +620,49 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 		}
 	}
 	if signatureURL == "" {
-		return fmt.Errorf("no signature file in release %s (pre-signing release?)", tag)
+		return false, fmt.Errorf("no signature file in release %s (pre-signing release?)", tag)
 	}
 
 	// Download sig to temp file
 	sigFile, err := os.CreateTemp("", "moombox-verify-*.sig")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return false, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	sigPath := sigFile.Name()
 	sigFile.Close()
 	defer os.Remove(sigPath)
 
 	if err := u.downloadFile(ctx, signatureURL, sigPath); err != nil {
-		return fmt.Errorf("signature download failed: %w", err)
+		return false, fmt.Errorf("signature download failed: %w", err)
 	}
 
 	if err := u.verifySignature(u.exePath, sigPath); err != nil {
-		return err
+		return false, err
 	}
 
-	u.logger.Info("[Updater] Current binary signature verified", "version", u.currentVersion)
-	return nil
+	// The release's signed manifest, when it publishes one. Both assets or
+	// neither, as CheckForUpdate reads them: an unsigned manifest binds
+	// nothing.
+	var manifestURL, manifestSigURL string
+	for _, asset := range release.Assets {
+		switch {
+		case strings.EqualFold(asset.Name, ManifestAsset):
+			manifestURL = asset.BrowserDownloadURL
+		case strings.EqualFold(asset.Name, ManifestSignatureAsset):
+			manifestSigURL = asset.BrowserDownloadURL
+		}
+	}
+	if manifestURL == "" || manifestSigURL == "" {
+		u.logger.Info("[Updater] Current binary signature verified; its release publishes no signed manifest",
+			"version", u.currentVersion)
+		return false, nil
+	}
+	if err := u.verifyRunningAgainstManifest(ctx, tag, manifestURL, manifestSigURL); err != nil {
+		return false, err
+	}
+
+	u.logger.Info("[Updater] Current binary signature and release manifest verified", "version", u.currentVersion)
+	return true, nil
 }
 
 // CleanupOldBinary removes stale files left over from previous updates:

@@ -337,3 +337,122 @@ func TestCheckForUpdateCarriesTheManifestURLs(t *testing.T) {
 		t.Errorf("ManifestURL = %q for a release that has none", got.ManifestURL)
 	}
 }
+
+// runningRelease serves the GitHub release of the running version, v2.0.0:
+// the platform binary's .sig over the running binary ("current binary", as
+// newTestUpdater seeds it) by the trusted key, and — unless manifest is nil —
+// the manifest, signed by manifestKey (the trusted key when nil), with its
+// .sig asset listed only when withManifestSig. Asset URLs are built from the
+// request's Host, so no handler reads the server variable.
+func runningRelease(t *testing.T, manifest []byte, manifestKey ed25519.PrivateKey, withManifestSig bool) *Updater {
+	t.Helper()
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		t.Skipf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	pub, priv := generateTestKeyPair(t)
+	if manifestKey == nil {
+		manifestKey = priv
+	}
+	running := []byte("current binary")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) { rw.Write(ed25519.Sign(priv, running)) })
+	mux.HandleFunc("/manifest", func(rw http.ResponseWriter, _ *http.Request) { rw.Write(manifest) })
+	mux.HandleFunc("/manifest.sig", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Write(ed25519.Sign(manifestKey, manifest))
+	})
+	mux.HandleFunc("/repos/test/Moombox/releases/tags/v2.0.0", func(rw http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		rel := githubRelease{TagName: "v2.0.0", Assets: []githubAsset{{Name: assets.sig, BrowserDownloadURL: base + "/sig"}}}
+		if manifest != nil {
+			rel.Assets = append(rel.Assets, githubAsset{Name: ManifestAsset, BrowserDownloadURL: base + "/manifest"})
+			if withManifestSig {
+				rel.Assets = append(rel.Assets, githubAsset{Name: ManifestSignatureAsset, BrowserDownloadURL: base + "/manifest.sig"})
+			}
+		}
+		json.NewEncoder(rw).Encode(rel)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	u, _ := newTestUpdater(t, "2.0.0", srv, func(bin, sig string) error {
+		return verifySignatureWithKey(pub, bin, sig)
+	})
+	return u
+}
+
+// TestVerifyCurrentSignatureChecksTheReleaseManifest: the verify action (R S,
+// POST /api/update/verify) checked only the running binary's .sig, which says
+// the key signed these bytes and nothing about which release they are — a
+// validly signed binary of another release or platform passed it. When the
+// running version's release publishes a signed manifest, the binary is now
+// held to it as ApplyUpdate holds a download; a release that publishes none
+// (every release before the manifest) still verifies, and says it checked the
+// signature alone.
+//
+// THE MUTANTS, each failing the row named:
+//   - VerifyCurrentSignature reporting true without calling
+//     verifyRunningAgainstManifest — "another release's manifest", "another
+//     binary", "a stranger's key";
+//   - the names check dropped — "another release's manifest";
+//   - verifyFileSHA256 not called — "another binary";
+//   - true reported for a release with no manifest — "a release with no
+//     manifest";
+//   - only the manifest asset required, not its signature — "an unsigned
+//     manifest" (the empty signature URL fails the download).
+func TestVerifyCurrentSignatureChecksTheReleaseManifest(t *testing.T) {
+	running := []byte("current binary")
+	key := runtime.GOOS + "/" + runtime.GOARCH
+
+	t.Run("the release's manifest binds the running binary", func(t *testing.T) {
+		u := runningRelease(t, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", running)), nil, true)
+		manifest, err := u.VerifyCurrentSignature(context.Background())
+		if err != nil || !manifest {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want the manifest checked and no error", manifest, err)
+		}
+	})
+
+	t.Run("a release with no manifest verifies by its signature alone", func(t *testing.T) {
+		u := runningRelease(t, nil, nil, false)
+		manifest, err := u.VerifyCurrentSignature(context.Background())
+		if err != nil || manifest {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want a signature-only verification", manifest, err)
+		}
+	})
+
+	t.Run("an unsigned manifest is no manifest", func(t *testing.T) {
+		u := runningRelease(t, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", running)), nil, false)
+		manifest, err := u.VerifyCurrentSignature(context.Background())
+		if err != nil || manifest {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want a signature-only verification", manifest, err)
+		}
+	})
+
+	failed := func(t *testing.T, u *Updater, wantErr string) {
+		t.Helper()
+		manifest, err := u.VerifyCurrentSignature(context.Background())
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("VerifyCurrentSignature = (%v, %v), want a failure containing %q", manifest, err, wantErr)
+		}
+	}
+
+	t.Run("another release's manifest", func(t *testing.T) {
+		failed(t, runningRelease(t, manifestJSON(t, platformManifest(t, "1.5.0", "v1.5.0", running)), nil, true), "not the running 2.0.0")
+	})
+
+	t.Run("another binary than the release published", func(t *testing.T) {
+		failed(t, runningRelease(t, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", []byte("the published binary"))), nil, true),
+			"does not match the signed manifest")
+	})
+
+	t.Run("a manifest signed by a stranger's key", func(t *testing.T) {
+		_, stranger := generateTestKeyPair(t)
+		failed(t, runningRelease(t, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", running)), stranger, true),
+			"manifest signature verification failed")
+	})
+
+	t.Run("no entry for this platform", func(t *testing.T) {
+		m := platformManifest(t, "2.0.0", "v2.0.0", running)
+		delete(m.Platforms, key)
+		failed(t, runningRelease(t, manifestJSON(t, m), nil, true), "no entry for "+key)
+	})
+}

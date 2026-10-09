@@ -109,6 +109,9 @@ type (
 	}
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
+		// Manifest: the running release's signed manifest was checked too.
+		// False on success means the release publishes none.
+		Manifest bool
 	}
 	// releaseNotesFetchedMsg is the async result of OnFetchReleaseNotes,
 	// dispatched by the R N chord when no update is pending. Err empty
@@ -649,11 +652,11 @@ type App struct {
 	OnDeleteClientToken func(id string) error
 
 	// Update callbacks
-	OnCheckUpdate     func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
-	OnForceCheck      func()                           // force an immediate monitor poll of all sources
-	OnBackfillRescan  func()                           // force a feed-history backfill re-scan of all channels (R B)
-	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
-	OnVerifySignature func() error                     // verify current binary's signature
+	OnCheckUpdate     func() (*UpdateStatusMsg, error)  // manual check — returns nil if up to date
+	OnForceCheck      func()                            // force an immediate monitor poll of all sources
+	OnBackfillRescan  func()                            // force a feed-history backfill re-scan of all channels (R B)
+	OnApplyUpdate     func(version string) string       // returns error string (empty on success, process exits)
+	OnVerifySignature func() (manifest bool, err error) // verify current binary's signature, and its release's manifest when it has one
 	// OnDismissUpdate skips a pending version (the S key in the
 	// release-notes overlay); nil hides the key.
 	OnDismissUpdate func(tag string) error

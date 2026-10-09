@@ -471,11 +471,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback("Verifying signature...")
 			verifyFn := a.OnVerifySignature
 			return a, safeCmd(func() tea.Msg {
-				err := verifyFn()
+				manifest, err := verifyFn()
 				if err != nil {
 					return signatureVerifyResultMsg{Err: err.Error()}
 				}
-				return signatureVerifyResultMsg{}
+				return signatureVerifyResultMsg{Manifest: manifest}
 			})
 		}
 	case "R P":

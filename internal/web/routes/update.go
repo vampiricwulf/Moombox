@@ -169,6 +169,10 @@ var checkForUpdate = (*updater.Updater).CheckForUpdate
 // needs to see the context an apply runs under without replacing a binary.
 var applyUpdate = (*updater.Updater).ApplyUpdate
 
+// verifyCurrentSignature is (*updater.Updater).VerifyCurrentSignature, a seam
+// for the test that needs a verification to answer without reaching GitHub.
+var verifyCurrentSignature = (*updater.Updater).VerifyCurrentSignature
+
 // UpdateRoutes registers the update check/apply/dismiss API endpoints. The
 // Store carries the cfg + lock + savePath; /api/update/dismiss records the
 // pending tag as Updates.SkippedVersion through DismissUpdate, which persists
@@ -307,18 +311,22 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		}()
 	})
 
-	// POST /api/update/verify — verify current binary's signature
+	// POST /api/update/verify — verify the current binary's signature and,
+	// when its release publishes one, the signed manifest. manifest says
+	// whether that second check ran: false for a release that predates the
+	// manifest, which the dashboard reports as a signature-only check.
 	r.Post("/api/update/verify", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not available", http.StatusServiceUnavailable)
 			return
 		}
-		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
+		manifest, err := verifyCurrentSignature(deps.Updater, r.Context())
+		if err != nil {
 			deps.logUpdateFailure("Signature verification", err)
 			jsonError(w, "signature verification failed: "+err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
-		jsonResponse(w, map[string]any{"verified": true})
+		jsonResponse(w, map[string]any{"verified": true, "manifest": manifest})
 	})
 
 	// GET /api/update/release-notes?version=X.Y.Z fetches release notes

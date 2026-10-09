@@ -471,7 +471,7 @@ func (s *runState) runTUI() {
 			s.triggerRestart("TUI update")
 			return ""
 		}
-		app.OnVerifySignature = func() error {
+		app.OnVerifySignature = func() (bool, error) {
 			return s.upd.VerifyCurrentSignature(context.Background())
 		}
 		app.OnFetchReleaseNotes = func(version string) (string, string, error) {

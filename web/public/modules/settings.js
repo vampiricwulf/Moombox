@@ -451,9 +451,15 @@ export class SettingsController {
         try {
           const resp = await fetch("/api/update/verify", { method: "POST" });
           const data = await resp.json();
-          if (resp.ok && data.verified) {
-            result.textContent = "Signature valid";
+          if (resp.ok && data.verified && data.manifest) {
+            result.textContent = "Signature and release manifest valid";
             result.style.color = "var(--text-success)";
+          } else if (resp.ok && data.verified) {
+            // The signature alone says the key signed these bytes, not that
+            // they are this release's: a release with no signed manifest gets
+            // that said, and not in the full check's green.
+            result.textContent = "Signature valid — this release publishes no signed manifest, so only the signature was checked";
+            result.style.color = "var(--text-warning)";
           } else {
             result.textContent = data.error || "Verification failed";
             result.style.color = "var(--text-danger)";
