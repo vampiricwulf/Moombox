@@ -740,6 +740,8 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			bound.sender = q.sender
 			q.setDispatch(bound, func(msg Message, once bool) error {
 				return m.dispatchOne(bound, msg, once)
+			}, func(msg Message) func() {
+				return m.pinLifecycle(bound, msg)
 			})
 			modes = append(modes, struct {
 				q    *targetQueue

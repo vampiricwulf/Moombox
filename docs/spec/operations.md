@@ -699,7 +699,17 @@ The in-memory half — the message ids a running process is holding, and the
 History lines — is released when a job reaches its terminal edit, and capped at
 `maxTrackedJobs` for jobs that never do. That is a cache eviction, not a close:
 the persisted id is what survives, so a Retry after a release re-reads the row
-once and keeps editing the same message.
+once and keeps editing the same message. The row can be gone by the time a
+queued send is dispatched, though — deleting an active job queues its cancel
+first — so every send an edit-mode target will create, edit or close a message
+with pins its job's entry from the moment it is queued, loading it while the
+row is still there, until it leaves the queue by any route: delivered, shed,
+refused or discarded (`hold`, `internal/notifications/lifecycle.go`). The cap
+passes a pinned entry over, and may sit past `maxTrackedJobs` by as many jobs
+as the queues hold sends for. Without the pin an entry evicted — by a
+backfill's `found`s on any edit-mode target — before the cancel was queued, or
+while it waited behind a busy target, left the cancel with neither the id nor
+the row, and it posted plain beside a message that read "Downloading" for good.
 
 **During shutdown** every request on this path is single-attempt, like every
 other send: the owner's ruling caps a graceful shutdown at 15 s, and one

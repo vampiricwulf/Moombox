@@ -48,6 +48,18 @@ type queued struct {
 	// delivered, never shed (its tier is not TierLow), never discarded, and
 	// never counted toward notificationQueueCap (targetQueue.steps).
 	ctl func()
+	// unpin lets go of the job's tracker entry the item was pinned with at
+	// enqueue (targetQueue.pin) — nil when it was not. Every way an item
+	// leaves the queue lets go of it, exactly once (letGo): delivered, shed,
+	// refused or discarded. One missed keeps its job's entry for good.
+	unpin func()
+}
+
+// letGo releases the item's pin, if it holds one.
+func (it queued) letGo() {
+	if it.unpin != nil {
+		it.unpin()
+	}
 }
 
 // targetQueue is one destination, its FIFO, and the single goroutine that
@@ -109,6 +121,11 @@ type targetQueue struct {
 	// it did before edit mode existed. Guarded by mu like mention/events,
 	// because applyTargets rebinds it on a surviving queue.
 	dispatch func(msg Message, once bool) error
+	// pin is dispatch's twin at enqueue, bound with it: for a message
+	// dispatch will manage it pins the job's tracker entry until the item
+	// leaves the queue (Manager.pinLifecycle), and returns nil for any other.
+	// nil when no Manager bound one. Guarded by mu like dispatch.
+	pin func(msg Message) (unpin func())
 	// mode is the delivery mode dispatch was bound in, and editing whether
 	// this queue may still create or edit a lifecycle message: set by a bind
 	// in edit mode, and cleared only when a delivery starts under a
@@ -186,12 +203,22 @@ func newTargetQueue(t notificationTarget, logger interface {
 // mention the flush chose — and hands it to the ordinary FIFO. Named apart
 // from enqueue, which takes an already-built queued item and is what this
 // calls.
+//
+// It is also where an item is pinned (pin), before enqueue takes q.mu: the pin
+// can read the store, and enqueue lets go of an item it does not keep.
 func (q *targetQueue) enqueueBatch(msg Message) {
 	tier := TierNormal
 	if batchIsLowTier(msg.Embeds) {
 		tier = TierLow
 	}
-	q.enqueue(queued{msg: msg, tier: tier})
+	q.mu.Lock()
+	pin := q.pin
+	q.mu.Unlock()
+	var unpin func()
+	if pin != nil {
+		unpin = pin(msg)
+	}
+	q.enqueue(queued{msg: msg, tier: tier, unpin: unpin})
 }
 
 // signal nudges the draining goroutine without ever blocking the caller —
@@ -280,10 +307,11 @@ func (q *targetQueue) setMention(t notificationTarget) {
 // built notificationTarget, so a `mode` change would otherwise be accepted
 // by both UIs, written to the file, and ignored until restart. t is the
 // target fn was bound for; its mode and old-spelling keys move with fn, under
-// the same hold.
-func (q *targetQueue) setDispatch(t notificationTarget, fn func(msg Message, once bool) error) {
+// the same hold, and so does pin, the enqueue-side half of the same decision.
+func (q *targetQueue) setDispatch(t notificationTarget, fn func(msg Message, once bool) error, pin func(msg Message) (unpin func())) {
 	q.mu.Lock()
 	q.dispatch = fn
+	q.pin = pin
 	q.mode = normalizeTargetMode(t.mode)
 	q.legacyMsgKeys = t.legacyMsgKeys
 	if q.mode == ModeEdit {
@@ -347,6 +375,7 @@ func (q *targetQueue) enqueue(it queued) {
 	q.mu.Lock()
 	if q.closing || q.discard {
 		q.mu.Unlock()
+		it.letGo()
 		q.logger.Warn("dropping notification — the target is shutting down",
 			"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
@@ -367,6 +396,7 @@ func (q *targetQueue) enqueue(it queued) {
 	if victim < 0 {
 		nOldest, nNewest, warn := q.noteDrop(false)
 		q.mu.Unlock()
+		it.letGo()
 		if warn {
 			q.logger.Warn("notification queue full — shedding notifications",
 				"cap", notificationQueueCap, "dropped_newest", nNewest,
@@ -380,6 +410,7 @@ func (q *targetQueue) enqueue(it queued) {
 	q.items = append(q.items, it)
 	nOldest, nNewest, warn := q.noteDrop(true)
 	q.mu.Unlock()
+	dropped.letGo()
 	if warn {
 		q.logger.Warn("notification queue full — shedding notifications",
 			"cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
@@ -475,18 +506,22 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		// delivery may have left (ForgetJob), and the in-flight delivery they
 		// were queued behind has finished.
 		var steps []func()
-		n := 0
+		var dropped []queued
 		for _, it := range q.items {
 			if it.ctl != nil {
 				steps = append(steps, it.ctl)
 				continue
 			}
-			n++
+			dropped = append(dropped, it)
 		}
+		n := len(dropped)
 		q.items = nil
 		q.steps = 0
 		q.exited = true
 		q.mu.Unlock()
+		for _, it := range dropped {
+			it.letGo()
+		}
 		for _, fn := range steps {
 			q.runControl(fn)
 		}
@@ -575,6 +610,9 @@ func (q *targetQueue) deliver(it queued) {
 		q.runControl(it.ctl)
 		return
 	}
+	// After the dispatch, which reads the pinned entry, and deferred so a
+	// panicking one lets go too.
+	defer it.letGo()
 	// Owner ruling: shutdown sends are single-attempt and the 15s force-exit
 	// stays — dispatch carries the flag through to the edit path too, because
 	// a 2s+5s retry ladder cannot finish inside a window the worker stop may

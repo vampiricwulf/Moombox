@@ -146,7 +146,8 @@ func normalizeTargetMode(mode string) string {
 // and a write per event, which the cadence ruling does not allow.
 // The map is bounded: entries are released when a job's story ends (see
 // release) and, for jobs that never reach a terminal event, evicted
-// least-recently-touched first past maxTrackedJobs.
+// least-recently-touched first past maxTrackedJobs — never while a send the
+// entry is read for is still queued (hold).
 type lifecycleTracker struct {
 	// writeMu serialises the whole read-modify-write of a job's stored map
 	// against the store. UpdateNotificationMsgs replaces the WHOLE map, so
@@ -171,7 +172,16 @@ type lifecycleTracker struct {
 	// target's drop delete entries, and a mark lost with one let the deleted
 	// job's id land on a re-added job's row after all.
 	dropping map[string]map[string]int
-	log      interface {
+	// held counts, per job, the managed sends queued for it on an edit-mode
+	// target and not yet gone from their queue (hold). evictLocked passes a
+	// held job over: its row can be deleted before the send is dispatched —
+	// deleting an active job queues its cancel first — and an entry evicted
+	// meanwhile had nothing left to be rebuilt from.
+	//
+	// Beside jobs, like dropping: release and the drops delete entries a
+	// queued send still holds, and the count must outlive them.
+	held map[string]int
+	log  interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -189,7 +199,8 @@ type lifecycleJob struct {
 // maxTrackedJobs is the backstop for a job that never reaches a terminal
 // event. Past it the tracker drops its least-recently-touched entries; each
 // one costs a single store read to rebuild, and the message it was editing is
-// unaffected because the id is on the row.
+// unaffected because the id is on the row — while the row is there, which is
+// why a job with a managed send still queued is passed over (hold).
 const maxTrackedJobs = 512
 
 func newLifecycleTracker(store MessageStore) *lifecycleTracker {
@@ -198,6 +209,7 @@ func newLifecycleTracker(store MessageStore) *lifecycleTracker {
 		jobs:     map[string]*lifecycleJob{},
 		touched:  map[string]uint64{},
 		dropping: map[string]map[string]int{},
+		held:     map[string]int{},
 	}
 }
 
@@ -218,7 +230,7 @@ func (l *lifecycleTracker) jobLocked(jobID string) *lifecycleJob {
 	if j == nil {
 		j = &lifecycleJob{msgs: map[string]string{}, history: map[string][]string{}}
 		l.jobs[jobID] = j
-		l.evictLocked()
+		l.evictLocked(jobID)
 	}
 	if !j.loaded {
 		j.loaded = true
@@ -525,6 +537,49 @@ func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone fu
 	}
 }
 
+// hold pins a job's entry for one managed send queued for it (Manager.
+// pinLifecycle) until the returned func lets it go, which the queue calls
+// once the send has left it — delivered, shed, refused or discarded
+// (queued.letGo). Safe to call more than once.
+//
+// It loads the entry too when it is not in memory: the row still exists when
+// the send is queued, and may not when it is dispatched. Deleting an active
+// job is cancel, wait, delete, so its "cancelled" is queued when the row
+// goes; with its entry evicted — past maxTrackedJobs, by a backfill's
+// `found`s on any edit-mode target, before the cancel was queued or while it
+// waited behind a busy FIFO — the cancel found neither the id nor the row and
+// posted plain, and the message read "Downloading" for good. A ForgetJob step
+// cannot keep the entry instead: it is queued once the row has gone, and the
+// entry can be gone before that.
+//
+// The load is a store read on the Send caller's goroutine — a worker, a
+// monitor, an HTTP handler — and never a wait on Discord. The send's own
+// dispatch would have read the row anyway; this reads it first.
+func (l *lifecycleTracker) hold(jobID string) (letGo func()) {
+	l.mu.Lock()
+	l.held[jobID]++
+	l.jobLocked(jobID)
+	l.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if l.held[jobID]--; l.held[jobID] <= 0 {
+				delete(l.held, jobID)
+			}
+		})
+	}
+}
+
+// heldJobs is how many jobs have a managed send queued. Test-only reader, as
+// trackedJobs is: a pin no queue lets go keeps its job's entry for good.
+func (l *lifecycleTracker) heldJobs() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.held)
+}
+
 // trackedJobs is how many jobs the cache is holding. Test-only reader for the
 // eviction guarantees; nothing in the program calls it, and that is the point.
 func (l *lifecycleTracker) trackedJobs() int {
@@ -537,10 +592,19 @@ func (l *lifecycleTracker) trackedJobs() int {
 // cancelled outside the notifier, deleted, or filtered down to mid-lifecycle
 // keys only. Drops the least-recently-touched entries; each costs one store
 // read to rebuild. Caller holds l.mu.
-func (l *lifecycleTracker) evictLocked() {
+//
+// Never keep, the entry the caller is creating, and never a held job's
+// (hold): the map can then sit past the cap by the jobs with a send queued,
+// which the queues' own cap bounds. keep is the touch's own job — evicting
+// it would hand the caller an entry the map no longer holds, and whatever it
+// recorded there would be lost.
+func (l *lifecycleTracker) evictLocked(keep string) {
 	for len(l.jobs) > maxTrackedJobs {
 		oldestID, oldest := "", uint64(0)
 		for id, seq := range l.touched {
+			if id == keep || l.held[id] > 0 {
+				continue
+			}
 			if oldestID == "" || seq < oldest {
 				oldestID, oldest = id, seq
 			}
@@ -606,16 +670,41 @@ type lifecyclePlan struct {
 	AlsoSeparate bool
 }
 
+// managesLifecycle reports whether a send of opts on t is one an edit-mode
+// target creates, edits or closes a job's lifecycle message with — the cheap
+// half of planLifecycle and pinLifecycle, which no tracker call precedes.
+func managesLifecycle(t notificationTarget, opts SendOptions) bool {
+	if t.mode != ModeEdit || t.msgKey == "" || opts.JobID == "" || opts.Event == "" {
+		return false
+	}
+	return lifecycleEvents[opts.Event] || terminalLifecycleEvents[opts.Event]
+}
+
+// pinLifecycle pins the job's tracker entry (lifecycleTracker.hold) for one
+// message queued on t that dispatchOne will manage — a job's single-embed
+// lifecycle or terminal event, on an edit-mode target whose transport can
+// edit — and returns what lets it go. nil for any other message: dispatchOne
+// never reads the entry for one.
+func (m *Manager) pinLifecycle(t notificationTarget, msg Message) (letGo func()) {
+	if len(msg.Embeds) != 1 {
+		return nil
+	}
+	if _, editable := t.sender.(editableSender); !editable {
+		return nil
+	}
+	if opts := msg.Embeds[0].Opts; managesLifecycle(t, opts) {
+		return m.tracker().hold(opts.JobID)
+	}
+	return nil
+}
+
 // planLifecycle answers the POST-or-PATCH question for one queued send.
 func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecyclePlan {
-	if t.mode != ModeEdit || t.msgKey == "" || opts.JobID == "" || opts.Event == "" {
-		return lifecyclePlan{}
-	}
-	// The two cheap map lookups come BEFORE any tracker call: messageID creates
-	// the job's entry and does its one store read, so asking it about an event
-	// that can never manage a message would spend a SELECT and a tracker slot
-	// on nothing.
-	if !lifecycleEvents[opts.Event] && !terminalLifecycleEvents[opts.Event] {
+	// The cheap checks — two map lookups among them — come BEFORE any tracker
+	// call: messageID creates the job's entry and does its one store read, so
+	// asking it about an event that can never manage a message would spend a
+	// SELECT and a tracker slot on nothing.
+	if !managesLifecycle(t, opts) {
 		return lifecyclePlan{}
 	}
 	if terminalLifecycleEvents[opts.Event] {
