@@ -34,14 +34,22 @@ async function setup() {
   const chips = () => [...container.querySelector(".unified-filter-chips").children].map((c) => c.textContent);
   const tokens = () => h.app.filterBar.tasksFilterTokens.map((t) => JSON.parse(JSON.stringify(t)));
   const shown = () => h.app.filterBar.getFilteredJobs().map((j) => j.id);
-  /** One character at a time, `gap` ms apart — brisk typing is under the debounce. */
+  /**
+   * One character at a time at the caret, over any selection, as a browser
+   * types, `gap` ms apart — brisk typing is under the debounce.
+   */
   const type = (text, gap = 80) => {
     for (const ch of text) {
-      input.value += ch;
+      const at = input.selectionStart;
+      input.value = input.value.slice(0, at) + ch + input.value.slice(input.selectionEnd);
+      input.setSelectionRange(at + 1, at + 1);
       input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
       h.advance(gap);
     }
   };
+  /** Home, End, a click in the box or a Shift-selection: the caret moves, nothing is typed. */
+  const caretTo = (start, end = start) => input.setSelectionRange(start, end);
+  const caret = () => [input.selectionStart, input.selectionEnd];
   /** The operator stops typing for longer than the debounce. */
   const pause = () => h.advance(300);
   const enter = () =>
@@ -51,7 +59,7 @@ async function setup() {
     input.value = text;
     input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
   };
-  return { h, input, chips, tokens, shown, type, pause, enter, replace };
+  return { h, input, chips, tokens, shown, type, caretTo, caret, pause, enter, replace };
 }
 
 // A pause mid-token committed the half-typed token as a chip on the debounce
@@ -60,8 +68,9 @@ async function setup() {
 // which re-parses the whole text, showed it. A pause in `channel:mo` likewise
 // chipped an exact-match "mo" that matched nothing.
 //
-// Mutants: syncTokens' `open` always "" (the token being typed is settled on
-// the debounce too) — the first pause chips "" and the second "mo"; chippable
+// Mutants: syncTokens' `openStart` always the box's end (the token being typed
+// is settled on the debounce too) — the first pause chips "" and the second
+// "mo"; chippable
 // without its halfTyped check on a term — Enter on a bare `status:` chips "";
 // without it on an OR group's terms — Enter chips "live | "; Enter syncing
 // without `commit` — the open `status:live` stays in the box, unchipped.
@@ -145,6 +154,107 @@ test("a token closed by a space chips on the debounce; the open one stays as typ
   g.enter();
   assert.deepEqual(g.chips(), ["upcoming", "Shachi Too"]);
   assert.deepEqual(g.shown(), ["3"]);
+});
+
+// The token being typed is the caret's, not the box's last. Taken from the
+// end of the box, `status:` typed at Home in front of `karaoke night` made
+// `status:karaoke`, closed by the space that was already there, and the pause
+// chipped it and dropped `karaoke` from the box; `channel:` typed in front of
+// the `night ` the debounce leaves chipped "night". ` status:li` inserted
+// after `night` in `night karaoke` chipped "li", `karaoke` taken for the open
+// token, and the rewrite sent the caret to the end, so the `ve` typed next
+// made `karaokeve` and the list emptied; finishing a kept `status:` with a
+// word after it did the same.
+//
+// Mutants: openStart from the end of the box (`openToken(value)`) — every
+// case chips the half-typed token; openStart at the caret itself, the caret's
+// own token counted as settled — the mid-box `status:li` chips "li".
+test("the token being typed is the caret's, wherever it is in the box", { skip }, async () => {
+  const f = await setup();
+  f.type("karaoke night");
+  f.pause();
+  f.caretTo(0);
+  f.type("status:");
+  f.pause();
+  assert.deepEqual(f.chips(), [], "status:karaoke has the caret in it: still being typed");
+  assert.equal(f.input.value, "status:karaoke night", "and no word leaves the box");
+  assert.deepEqual(f.caret(), [7, 7]);
+
+  const g = await setup();
+  g.type("night status:live ");
+  g.pause();
+  assert.deepEqual(g.chips(), ["live"]);
+  assert.equal(g.input.value, "night ");
+  g.caretTo(0);
+  g.type("channel:");
+  g.pause();
+  assert.deepEqual(g.chips(), ["live"], "no chip from the channel: being typed");
+  assert.equal(g.input.value, "channel:night ");
+
+  const m = await setup();
+  m.type("night karaoke");
+  m.pause();
+  m.caretTo(5);
+  m.type(" status:li");
+  m.pause();
+  assert.deepEqual(m.chips(), [], "status:li is the token being typed, not karaoke after it");
+  assert.equal(m.input.value, "night status:li karaoke");
+  assert.deepEqual(m.caret(), [15, 15]);
+  m.type("ve");
+  m.pause();
+  assert.equal(m.input.value, "night status:live karaoke");
+  assert.deepEqual(m.shown(), ["1"], "the Live karaoke night job — as the TUI's / box reads the same text");
+  m.enter();
+  assert.deepEqual(m.chips(), ["live"], "Enter commits it");
+  assert.deepEqual(m.shown(), ["1"]);
+
+  const k = await setup();
+  k.type("status: night");
+  k.pause();
+  assert.deepEqual(k.chips(), [], "a valueless status: stays in the box");
+  k.caretTo(7);
+  k.type("li");
+  k.pause();
+  assert.deepEqual(k.chips(), []);
+  assert.equal(k.input.value, "status:li night");
+  k.type("ve");
+  k.pause();
+  assert.equal(k.input.value, "status:live night");
+  assert.deepEqual(k.shown(), ["1"]);
+});
+
+// A token the caret has left behind is closed and still chips on the
+// debounce, wherever it is in the box; the rewrite keeps the caret, and any
+// selection, in the text after it, which the box keeps as typed.
+//
+// Mutants: no setSelectionRange after the rewrite — the caret lands at the
+// end, and the `mori ` typed next joins karaoke; the selection's end restored
+// from its start — the Shift-selection collapses.
+test("a token closed mid-box chips, and the caret keeps its place", { skip }, async () => {
+  const f = await setup();
+  f.type("karaoke");
+  f.pause();
+  f.caretTo(0);
+  f.type("status:live night ");
+  f.pause();
+  assert.deepEqual(f.chips(), ["live"], "the space typed after status:live closed it");
+  assert.equal(f.input.value, "night karaoke");
+  assert.deepEqual(f.caret(), [6, 6], "still in front of karaoke");
+  f.type("mori ");
+  f.pause();
+  assert.equal(f.input.value, "night mori karaoke");
+  assert.deepEqual(f.shown(), ["1"]);
+
+  const g = await setup();
+  g.type("karaoke");
+  g.pause();
+  g.caretTo(0);
+  g.type("status:live ");
+  g.caretTo(12, 19); // Shift+End over karaoke, inside the debounce
+  g.pause();
+  assert.deepEqual(g.chips(), ["live"]);
+  assert.equal(g.input.value, "karaoke");
+  assert.deepEqual(g.caret(), [0, 7], "karaoke is still selected");
 });
 
 // A text-only OR group stays in the box, but every later sync carried it over

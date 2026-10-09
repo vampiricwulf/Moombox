@@ -143,6 +143,13 @@ export class FilterBarController {
      * debounce (`commit` false) the token still being typed stays in the box
      * as typed: a pause after `status:` committed an empty chip, cleared the
      * box, and the `live` typed next became a text term. Enter commits it.
+     *
+     * The token being typed is the caret's, not the box's last: typing
+     * `status:` in front of a word already in the box made `status:karaoke`,
+     * closed by the space that was there before, and the pause chipped it.
+     * Everything from the caret's token on stays in the box as typed, and a
+     * rewrite of the box keeps the caret where it was in that text: put at
+     * the end, it sent the rest of a word typed mid-box onto the last one.
      */
     const syncTokens = ({ commit = false } = {}) => {
       const chipTokens = getTokens().filter(isChip);
@@ -153,8 +160,12 @@ export class FilterBarController {
         renderDropdownItems();
         return;
       }
-      const open = commit ? "" : openToken(input.value);
-      const settledText = input.value.slice(0, input.value.length - open.length);
+      const value = input.value;
+      const caret = input.selectionStart;
+      const selEnd = input.selectionEnd;
+      const openStart = commit ? value.length : caret - openToken(value.slice(0, caret)).length;
+      const open = value.slice(openStart);
+      const settledText = value.slice(0, openStart);
       const newChips = [];
       const remainingText = [];
       for (const t of parseFilterQuery(settledText)) {
@@ -177,7 +188,7 @@ export class FilterBarController {
         return true;
       });
       setTokens(allTokens);
-      // Update input to show only remaining free text, and the open token
+      // Update input to show only remaining free text, and the open text
       // exactly as typed. On the debounce the settled text ended in a space,
       // so the box keeps one: the next word typed must not join the last.
       if (newChips.length > 0) {
@@ -185,6 +196,13 @@ export class FilterBarController {
         if (open) rest.push(open);
         else if (!commit && rest.length > 0) rest.push("");
         input.value = rest.join(" ");
+        // The caret and any selection lie in the open text, which ends the
+        // box unchanged: they keep their distance from its end. Enter leaves
+        // the caret at the end, where the value write put it.
+        if (!commit) {
+          const end = input.value.length;
+          input.setSelectionRange(end - (value.length - caret), end - (value.length - selEnd));
+        }
         renderChips();
       }
       updateClearBtn();

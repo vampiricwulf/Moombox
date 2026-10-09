@@ -110,8 +110,9 @@ export function parseFilterQuery(query) {
  * opened is still open — exactly as typed; "" once it is closed. A token is
  * open when one more character typed would join it, and that is the test:
  * appending one leaves the token count unchanged. The filter bar's debounce
- * chips only closed tokens, so a pause after `status:` does not commit an
- * empty chip and leave the `live` typed next as a text term.
+ * asks it of the text before the caret and chips only closed tokens, so a
+ * pause after `status:` does not commit an empty chip and leave the `live`
+ * typed next as a text term.
  * @param {string} query - the input's text, untrimmed (a trailing space closes)
  * @returns {string}
  */
