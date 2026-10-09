@@ -16,7 +16,7 @@ import (
 // heldProfileErr is the refusal singletonLockHolder
 // (internal/cookies/autocookies_chromium.go) gives for a SingletonLock that
 // names another machine, word for word: it is the sentence both R C's Last
-// cookie error and R F's failure carry, and the longest one either is handed.
+// cookie error and R F's skip line carry, and the longest one either is handed.
 func heldProfileErr(lock string) error {
 	return fmt.Errorf("%w by %s — a browser on that machine (pid %d there) holds its lock; close it there, or delete %q if no browser on %s is using that profile, and the next pass will run",
 		cookies.ErrProfileInUse, "desktop-pc", 4242, lock, "desktop-pc")
@@ -53,10 +53,11 @@ func drawnFrame(t *testing.T, width, height int, yt, tw bool, msg tea.Msg) []str
 // machine's browser holds the profile names the lock to delete, and the TUI
 // never showed it. R C's line and R F's failure were one row cut to the
 // terminal's width, and the path starts about 175 columns into R C's line
-// (150 into R F's), so at 80, 120, 160 and even 200 columns the row ended in
-// an ellipsis before or inside it. Both now wrap onto the rows above the status
-// bar: the quoted path is drawn whole on one row, the whole sentence is on
-// screen, and the block stays up 3 s per row it takes.
+// (150 into R F's, behind the "failed: " lead it had then), so at 80, 120,
+// 160 and even 200 columns the row ended in an ellipsis before or inside it.
+// Both now wrap onto the rows above the status bar: the quoted path is drawn
+// whole on one row, the whole sentence is on screen, and the block stays up
+// 3 s per row it takes.
 //
 // 60x20 is the smallest frame the TUI draws (minTermWidth, minTermHeight),
 // where the R C block needs 7 rows: more than a third of the terminal, which
@@ -64,10 +65,10 @@ func drawnFrame(t *testing.T, width, height int, yt, tw bool, msg tea.Msg) []str
 //
 // Mutants (checked): setWrappedFeedback leaving wrap false, or View ignoring
 // it — every leg loses the path; R C back on setFeedbackWithSeverity, or R F's
-// error arm back on setFeedback — that leg loses it; wrapFeedback breaking at
-// hyphens as ansi.Wrap does — at 60 columns the path splits at
-// "browser-profile"; feedbackRowCap at height/3 — at 60x20 the cap eats the
-// tail; the hold left at one row's 3 s — the hold assertion fails.
+// held-profile arm back on setFeedbackWithSeverity — that leg loses it;
+// wrapFeedback breaking at hyphens as ansi.Wrap does — at 60 columns the path
+// splits at "browser-profile"; feedbackRowCap at height/3 — at 60x20 the cap
+// eats the tail; the hold left at one row's 3 s — the hold assertion fails.
 func TestHeldProfileLockPathIsDrawnWhole(t *testing.T) {
 	const lock = "/home/brandon/moombox/browser-profile/SingletonLock"
 	held := heldProfileErr(lock)
@@ -84,8 +85,9 @@ func TestHeldProfileLockPathIsDrawnWhole(t *testing.T) {
 			{"R C", cookieRecheckResultMsg{
 				YouTube: cookies.RefreshOK, Twitch: cookies.RefreshOK, LastError: held.Error(),
 			}, "Cookies: YouTube OK, Twitch OK | Last cookie error: " + held.Error()},
-			{"R F", cookieForceRefreshResultMsg{Err: held},
-				"Browser cookie refresh failed: " + held.Error()},
+			// The sentence alone: a held profile is a skip, not a failure
+			// (TestHeldProfileIsASkipOnRF).
+			{"R F", cookieForceRefreshResultMsg{Err: held}, held.Error()},
 		} {
 			t.Run(fmt.Sprintf("%s/%dx%d", leg.name, size.w, size.h), func(t *testing.T) {
 				frame := drawnFrame(t, size.w, size.h, true, true, leg.msg)

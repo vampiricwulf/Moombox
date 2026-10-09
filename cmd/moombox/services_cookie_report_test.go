@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -134,5 +136,30 @@ func TestCookieRefreshReportFor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCookieRefreshErrorLine: a job-triggered refresh that skipped a profile
+// another browser holds (cookies.ErrProfileInUse) was logged as "auto cookie
+// refresh error". The pass declined and launched nothing, and its sentence
+// names the host and the lock to delete, so the line says "skipped" and carries
+// the sentence as the reason. Any other error keeps its line.
+//
+// Mutant (checked): the ErrProfileInUse arm removed — the held profile's line
+// is the error one again.
+func TestCookieRefreshErrorLine(t *testing.T) {
+	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
+	msg, attr := cookieRefreshErrorLine(held)
+	if msg != "automatic cookie refresh skipped — a browser holds the profile" {
+		t.Errorf("held profile: message %q, want the skip line", msg)
+	}
+	if attr.Key != "reason" || attr.Value.String() != held.Error() {
+		t.Errorf("held profile: attribute %s=%q, want reason=<the sentence>", attr.Key, attr.Value.String())
+	}
+
+	other := errors.New("start headless browser: exec: no such file")
+	msg, attr = cookieRefreshErrorLine(other)
+	if msg != "auto cookie refresh error" || attr.Key != "error" || attr.Value.String() != other.Error() {
+		t.Errorf("other error: %q %s=%q, want the error line unchanged", msg, attr.Key, attr.Value.String())
 	}
 }

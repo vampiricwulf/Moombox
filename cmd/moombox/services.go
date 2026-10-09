@@ -128,6 +128,23 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 	}
 }
 
+// cookieRefreshErrorLine is the worker's log line for a job-triggered refresh
+// that returned an error: the message, and the attribute carrying the error.
+// Beside cookieRefreshReportFor, and extracted for the same reason — the
+// closure that logs it needs the whole construction graph.
+//
+// A profile another browser holds (cookies.ErrProfileInUse) is a SKIP, not an
+// error: the pass declined and launched nothing, and its sentence names the
+// host to close the browser on and the lock to delete. It was logged as "auto
+// cookie refresh error"; it says "skipped" now, with the sentence as the
+// reason. Every other error keeps its line.
+func cookieRefreshErrorLine(err error) (string, slog.Attr) {
+	if errors.Is(err, cookies.ErrProfileInUse) {
+		return "automatic cookie refresh skipped — a browser holds the profile", slog.String("reason", err.Error())
+	}
+	return "auto cookie refresh error", slog.String("error", err.Error())
+}
+
 // twitchAuthLossHook wraps the platform-mark call in the goroutine its caller
 // requires, and returns the function wired into DownloadWorker.SetOnTwitchAuthLoss.
 //
@@ -1380,8 +1397,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}()
 
 		if err != nil {
-			log.Warn("auto cookie refresh error",
-				slog.String("platform", platform), slog.String("error", err.Error()))
+			msg, cause := cookieRefreshErrorLine(err)
+			log.Warn(msg, slog.String("platform", platform), cause)
 			return false
 		}
 		report := cookieRefreshReportFor(platform, result)

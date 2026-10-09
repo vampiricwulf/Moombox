@@ -88,10 +88,15 @@ func checkInUseStatus(t *testing.T, r http.Handler, lock string) {
 // route's sentence is what auto-status then publishes as lastError, the field
 // both UIs render.
 //
+// The refresh's 409 also carries cause "profile-in-use": the same status
+// answers a locked cookie DB, and only the held profile is a skip, which the
+// dashboard toasts as a warning rather than a failure.
+//
 // Mutants: delete either ErrProfileInUse arm in cookies.go — that route falls
 // to its default 500 and a generic sentence that names no host; hand
 // singletonLockHolder anything but the lock's own path in removeStaleLock —
-// no body or lastError carries it.
+// no body or lastError carries it; the refresh arm back on jsonError — its
+// body carries no cause.
 func TestProfileInUseReachesBothCookieRoutesVerbatim(t *testing.T) {
 	t.Run("auto-refresh", func(t *testing.T) {
 		svc, lock := heldProfileService(t)
@@ -103,11 +108,16 @@ func TestProfileInUseReachesBothCookieRoutesVerbatim(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status %d, want 409 (body %q)", rec.Code, rec.Body.String())
 		}
-		got := decodeErrorBody(t, rec)["error"]
+		body := decodeErrorBody(t, rec)
+		got := body["error"]
 		for _, want := range inUseWords(lock) {
 			if !strings.Contains(got, want) {
 				t.Errorf("409 body %q does not say %q — the operator has nothing to go and close, or to delete", got, want)
 			}
+		}
+		if body["cause"] != causeProfileInUse {
+			t.Errorf("409 cause = %q, want %q — without it the toast cannot tell this skip from a locked cookie DB",
+				body["cause"], causeProfileInUse)
 		}
 		checkInUseStatus(t, r, lock)
 	})

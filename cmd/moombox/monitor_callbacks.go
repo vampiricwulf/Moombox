@@ -978,6 +978,32 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 				notifications.TypeError)
 			return
 		}
+		// A profile another browser holds is a SKIP that says why, not a
+		// failure: the pass declined and launched nothing. The generic copy
+		// below called it "failed" and named replacing the cookies as the
+		// only way out, while the sentence names the host to close the
+		// browser on and the lock to delete, after which the next pass runs.
+		// Warn, as the disabled branch's "nothing was attempted" is.
+		//
+		// Everything else about the generic arm holds here and is kept: the
+		// verdict that fired this was conclusive, so the session IS dead and
+		// recordings that need it will fail until a pass can run or the
+		// cookies are replaced — which is why this still raises the re-login
+		// flag and still notifies at Error, the disabled branch's level for
+		// the same "nothing will restore it on its own".
+		if errors.Is(err, cookies.ErrProfileInUse) {
+			s.log.Warn("auto-cookie recovery skipped — a browser holds the profile",
+				"platform", platform, "reason", err)
+			if s.autoCookieSvc != nil {
+				s.autoCookieSvc.FlagManualRelogin(platform)
+			}
+			notify(platform, "Cookie Auto-Refresh Skipped",
+				fmt.Sprintf("Moombox is not authenticated to %s, and the automatic cookie refresh that would restore it "+
+					"was skipped: %s. Recordings that need an account will fail until that refresh can run or the "+
+					"cookies are replaced. "+cookieReplacementGuidance, platform, err.Error(), s.cookieFilePath()),
+				notifications.TypeError)
+			return
+		}
 		s.log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
 		// The recovery was fired by a CONCLUSIVE signed-out verdict and the
 		// automatic remedy for it failed, so a human has to sign in again. On an

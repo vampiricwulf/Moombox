@@ -120,3 +120,38 @@ test("a watched toggle that cannot reach the server says so", { skip }, async ()
   await h.flush();
   assert.match(said(h), /Failed to mark unwatched: Failed to fetch/);
 });
+
+// A profile another browser holds is a SKIP, not a failure: the pass declined
+// and launched nothing, and the sentence names the host to close the browser
+// on and the lock to delete. The refresh button toasted it red through the
+// generic error arm, while the Last cookie error line beside it draws the same
+// sentence in the warning colour and the TUI's R F shows it in yellow. The 409
+// it shares with a locked cookie DB tells the two apart by `cause`, never by
+// the prose, and the locked DB stays a failure.
+//
+// Mutants: the profile-in-use branch removed (the toast is danger again); the
+// branch keyed on the 409 alone (the locked cookie DB turns yellow too).
+test("a held profile on the browser refresh toasts its sentence as a warning", { skip }, async () => {
+  const held = 'browser profile in use by desktop-pc — a browser on that machine (pid 4242 there) holds its lock; ' +
+    'close it there, or delete "/profile/SingletonLock" if no browser on desktop-pc is using that profile, and the next pass will run';
+  const h = await harness.makeApp({
+    routes: {
+      "POST /api/cookies/auto-refresh": () =>
+        harness.response({ status: 409, body: { error: held, cause: "profile-in-use" } }),
+    },
+  });
+  await h.app.autoCookieRefresh();
+  await h.flush();
+  const last = h.toasts().at(-1);
+  assert.equal(last.textContent, held);
+  assert.equal(last.variant, "warning");
+
+  const locked = await harness.makeApp({
+    routes: { "POST /api/cookies/auto-refresh": refuse(409, "cookies.sqlite is locked by another process") },
+  });
+  await locked.app.autoCookieRefresh();
+  await locked.flush();
+  const failed = locked.toasts().at(-1);
+  assert.equal(failed.textContent, "cookies.sqlite is locked by another process");
+  assert.equal(failed.variant, "danger");
+});

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -514,10 +515,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// difference asserted, by TestRungThreeSentencesDivergeByDesign.
 			a.setFeedback("No browser profile found, running R C instead...")
 			return a, noProfileFallback
+		case errors.Is(msg.Err, cookies.ErrProfileInUse):
+			// A SKIP, not a failure: a browser the profile's SingletonLock
+			// names may still be running on it, so the pass declined and
+			// launched nothing. It went through the arm below as
+			// "<mechanism> failed: …", red on the scan's "failed", while the
+			// dashboard toasts this sentence as it stands and draws it as its
+			// Last cookie error in the warning colour. Verbatim, then, and
+			// yellow, stated because the sentence carries no marker the scan
+			// reads. Wrapped: it ends in the lock to delete.
+			a.setWrappedFeedback(msg.Err.Error(), severityWarning)
 		case msg.Err != nil:
-			// Wrapped: the error is a sentence written elsewhere, and a held
-			// profile's (ErrProfileInUse) ends in the lock to delete, which
-			// one row cut at the width never reached. Unstated, as before —
+			// Wrapped: the error is a sentence written elsewhere, whose tail
+			// one row cut at the width may never reach. Unstated, as before —
 			// the scan's "failed" sits in the lead and is never cut.
 			a.setWrappedFeedback(mechanismLabel+" failed: "+msg.Err.Error(), severityUnstated)
 		case !msg.Result.Ran:
@@ -1202,8 +1212,9 @@ func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
 // 3 s a one-row line gets is not.
 //
 // For a line carrying a sentence written elsewhere whose tail is the part to
-// act on: R C's line, whose LastError names a held profile's lock, and R F's
-// error arm, which carries the same sentence. Every other line keeps the one
+// act on: R C's line, whose LastError names a held profile's lock, R F's
+// held-profile arm, which is that sentence, and R F's error arm, which carries
+// whatever other sentence the pass failed with. Every other line keeps the one
 // ellipsized row — their prose is bounded, and tests pin it cut.
 //
 // It takes the pair in the order cookieRecheckFeedback returns it, so the call

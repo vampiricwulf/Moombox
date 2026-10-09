@@ -116,6 +116,41 @@ func TestCookieForceRefreshFeedback(t *testing.T) {
 	}
 }
 
+// TestHeldProfileIsASkipOnRF: a profile another browser holds
+// (cookies.ErrProfileInUse) is a skip that says why, not a failure — the pass
+// declined and launched nothing, and its sentence names the host to close the
+// browser on and the lock to delete. R F reported it through the generic error
+// arm as "Browser cookie refresh failed: …", which the "failed" substring
+// coloured red, while the dashboard's twin of the key toasts the sentence
+// itself and its Last cookie error line draws it in the warning colour. R F
+// now shows the sentence verbatim, in yellow, wrapped so the lock path is
+// drawn whole.
+//
+// Mutants (checked): the held-profile arm removed (the generic arm's
+// "failed: " lead and red come back); the arm stating severityUnstated (the
+// verbatim sentence has no marker the scan reads, so it renders green); the
+// arm on setFeedbackWithSeverity, one row cut to the width.
+func TestHeldProfileIsASkipOnRF(t *testing.T) {
+	held := heldProfileErr("/home/brandon/moombox/browser-profile/SingletonLock")
+	app := NewApp()
+	// The result RefreshCookiesDetailed hands back with it: declined, after
+	// choosing the browser branch.
+	app.Update(cookieForceRefreshResultMsg{
+		Result: cookies.RefreshResult{Mechanism: cookies.RefreshMechanismBrowser},
+		Err:    held,
+	})
+	if got := app.feedback.msg; got != held.Error() {
+		t.Errorf("R F line = %q, want the held profile's sentence verbatim, as the dashboard shows it: %q",
+			got, held.Error())
+	}
+	if got := feedbackColor(app.feedback.msg, app.feedback.sev); got != ColorYellow {
+		t.Errorf("R F line renders %v, want yellow — a skip, not a failure", got)
+	}
+	if !app.feedback.wrap {
+		t.Error("R F line is one row cut to the width — the lock path at its end would not be drawn")
+	}
+}
+
 // TestCookieForceRefreshFeedbackColour pins the severity each outcome renders
 // at, because the wording split is only half the fix: a decline that reads as
 // a red failure line is still an alarm the operator has to chase.

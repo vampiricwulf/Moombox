@@ -5,6 +5,7 @@ package cookies
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -276,9 +277,17 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	result, err := s.refreshCookiesDetailed(refreshCtx, gateExempt)
 	cancel()
 	ok := result.AnyVerified()
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrProfileInUse):
+		// A SKIP, not a failure: the pass declined and launched nothing
+		// (see refreshCookiesDetailed). It said "failed" on every tick for
+		// as long as the lock stood, beside a status line that says why the
+		// pass was skipped. The sentence rides as the reason: it names the
+		// host to close the browser on and the lock to delete.
+		s.logger.Warn("periodic auto-cookie refresh skipped — a browser holds the profile", "reason", err)
+	case err != nil:
 		s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
-	} else if ok {
+	case ok:
 		// Debug, and deliberately not "succeeded": RefreshCookies
 		// has just logged the one line that knows whether this pass
 		// RENEWED the credentials or merely found the previous ones

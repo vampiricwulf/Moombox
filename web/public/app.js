@@ -781,6 +781,15 @@ export class MoomboxApp {
         if (btn) btn.classList.remove("checking");
         await this.recheckCookies();
         return;
+      } else if (data.cause === "profile-in-use") {
+        // A SKIP, not a failure: a browser the profile's SingletonLock names
+        // may still be running on it, so the pass declined and launched
+        // nothing. The sentence as it stands — it names the host to close the
+        // browser on and the lock to delete — in the colour the Last cookie
+        // error line draws it in, as the TUI's R F does. Keyed on the cause,
+        // not the 409: a locked cookie DB answers the same status and is
+        // still a failure.
+        this.showToast(data.error, "warning");
       } else {
         this.showToast(data.error || `${mechanismLabel} failed`, "danger");
       }

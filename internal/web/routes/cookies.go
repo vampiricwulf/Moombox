@@ -214,6 +214,13 @@ const (
 	causeBrowserReadUnanswered = "browser-read-unanswered"
 )
 
+// causeProfileInUse is the `cause` a refresh that skipped a held profile
+// (cookies.ErrProfileInUse) reaches the frontend as. The same 409 also answers
+// a locked cookie DB and a blocked ladder, and only this one is a skip — the
+// pass declined and launched nothing — so the dashboard's toast needs the
+// machine half to draw it in the warning colour rather than as a failure.
+const causeProfileInUse = "profile-in-use"
+
 // jsonErrorCause is jsonError plus a machine-readable `cause`.
 //
 // Deliberately NOT a field on AutoCookieStatus, and not a widened jsonError.
@@ -652,9 +659,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// profile, held by a browser its SingletonLock names — on another
 			// machine, or under a pid that still answers. Verbatim, because the
 			// sentence names that machine, and "cookie refresh failed" would
-			// leave the operator nothing to close.
+			// leave the operator nothing to close. With a cause, because it is
+			// a SKIP the toast draws as a warning, where the locked DB beside
+			// it is still a failure.
 			case errors.Is(err, cookies.ErrProfileInUse):
-				jsonError(rw, err.Error(), http.StatusConflict)
+				jsonErrorCause(rw, err.Error(), causeProfileInUse, http.StatusConflict)
 			case errors.Is(err, cookies.ErrCookieDBUnreadable):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			// S9's abort: Moombox could not read the existing cookies.txt and
