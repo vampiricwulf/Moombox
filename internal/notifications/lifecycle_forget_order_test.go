@@ -315,8 +315,8 @@ func TestADropReachesARetiredTargetsInFlightPost(t *testing.T) {
 // rather than waiting on a queue nobody drains.
 //
 // Mutants: enqueueControl accepting a step on an exited queue, pop's closing
-// exit not marking the queue exited, or ForgetJob / RetainJobs skipping their
-// at-once drop / retain — the entry is never dropped.
+// exit not marking the queue exited, or forgetInOrder not running a refused
+// step at once — the entry is never dropped.
 func TestADropAfterShutdownHappensAtOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -663,4 +663,36 @@ func TestAPartlyDroppedEntryReReadsItsRow(t *testing.T) {
 		t.Errorf("the live job's next event on A was %s %s, want a PATCH of its message M0 (row %v)", c.Method, c.Path, st.NotificationMsgs(job))
 	}
 	release()
+}
+
+// A key no queue drops in order is dropped at once: here a target flipped to
+// separate mode since it recorded the job's id, which gets no step (editKeys)
+// and will never read the id again.
+//
+// Mutants: ForgetJob / RetainJobs skipping their at-once drop / retain — the
+// entry is never dropped.
+func TestAKeyNoQueueCoversIsDroppedAtOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		delete func(m *Manager, jobID string)
+	}{
+		{"ForgetJob", func(m *Manager, jobID string) { m.ForgetJob(jobID) }},
+		{"RetainJobs", func(m *Manager, _ string) { m.RetainJobs(map[string]struct{}{}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeDiscord(t, createdInOrder)
+			st := newMemStore()
+			m := editManager(t, f, st, nil)
+			const job = "dQw4w9WgXcQ"
+			run(t, m, job, "found")
+			waitFor(t, "id persisted", func() bool { return st.NotificationMsgs(job) != nil })
+			installTargets(t, m, editTarget(f, nil, ModeSeparate))
+			run(t, m, "otherJob123", "error") // the first delivery under the new mode
+
+			tc.delete(m, job)
+			if n := m.tracker().trackedJobs(); n != 0 {
+				t.Errorf("tracker holds %d jobs after the delete, want 0", n)
+			}
+		})
+	}
 }
