@@ -62,7 +62,7 @@ lipgloss.JoinVertical(lipgloss.Left, top, bottom)
 ## Moombox TUI Patterns
 
 ### Overlay Pattern
-All 10 overlays (dialogs, forms, pickers) follow this interface — embedded in `App`, not standalone `tea.Model`s:
+All 15 overlays (dialogs, forms, pickers) follow this interface — embedded in `App`, not standalone `tea.Model`s:
 ```go
 func (m *SomeOverlay) Open()              { m.visible = true; m.reset() }
 func (m *SomeOverlay) Close()             { m.visible = false }

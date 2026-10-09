@@ -4,6 +4,8 @@
 >
 > The scale tables were regenerated on 2026-10-04 with the script below. Since the 2026-09-25 pass `internal/notifications` grew from 3 to 11 source files and gained the `notificationtest` helper package (shared fakes for its tests), and `internal/worker` and `internal/config` each gained a file; no package was removed.
 >
+> The Totals section was refreshed on 2026-10-09 from the tracked files (`git ls-files`); the per-package table below still reads as of 2026-10-04.
+>
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
 > Regenerate the scale tables with:
@@ -87,9 +89,9 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 
 ### Totals
 
-- **cmd/:** ~8,670 lines across 25 source files (24 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 51 test files (~8,480 lines)
-- **internal/ packages:** ~124,500 lines across 325 source files in 33 packages
-- **Test code:** ~160,780 lines across 541 test files under `internal/`
+- **cmd/:** ~10,290 lines across 26 source files (25 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 82 test files (~12,260 lines)
+- **internal/ packages:** ~138,300 lines across 346 source files in 34 packages
+- **Test code:** ~198,540 lines across 756 test files under `internal/`
 - **Frontend:** ~22,110 lines across 27 files (~970 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 
 ## Entry Points
