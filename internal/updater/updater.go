@@ -66,14 +66,16 @@ type logger = interface {
 
 // ReleaseInfo holds information about an available update.
 type ReleaseInfo struct {
-	Version          string `json:"version"`                // "2.0.16" (stripped "v" prefix)
-	TagName          string `json:"tagName"`                // "v2.0.16"
-	DownloadURL      string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
-	SignatureURL     string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
-	ReleaseNotes     string `json:"releaseNotes"`           // stripped raw markdown (for TUI glamour rendering)
-	ReleaseNotesHtml string `json:"releaseNotesHtml"`       // sanitized HTML (for web UI innerHTML)
-	PublishedAt      string `json:"publishedAt"`
-	ReleaseURL       string `json:"releaseUrl,omitempty"` // GitHub release page (html_url) — clickable link for notifications
+	Version              string `json:"version"`                        // "2.0.16" (stripped "v" prefix)
+	TagName              string `json:"tagName"`                        // "v2.0.16"
+	DownloadURL          string `json:"downloadUrl"`                    // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
+	SignatureURL         string `json:"signatureUrl,omitempty"`         // asset browser_download_url for the matching .sig
+	ManifestURL          string `json:"manifestUrl,omitempty"`          // the signed release manifest (ManifestAsset); empty when the release publishes none, which ApplyUpdate refuses
+	ManifestSignatureURL string `json:"manifestSignatureUrl,omitempty"` // its signature (ManifestSignatureAsset)
+	ReleaseNotes         string `json:"releaseNotes"`                   // stripped raw markdown (for TUI glamour rendering)
+	ReleaseNotesHtml     string `json:"releaseNotesHtml"`               // sanitized HTML (for web UI innerHTML)
+	PublishedAt          string `json:"publishedAt"`
+	ReleaseURL           string `json:"releaseUrl,omitempty"` // GitHub release page (html_url) — clickable link for notifications
 }
 
 // assetNames bundles the GitHub release asset names for one platform.
@@ -308,13 +310,17 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("auto-update unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	var downloadURL, signatureURL string
+	var downloadURL, signatureURL, manifestURL, manifestSigURL string
 	for _, asset := range release.Assets {
 		switch {
 		case strings.EqualFold(asset.Name, assets.binary):
 			downloadURL = asset.BrowserDownloadURL
 		case strings.EqualFold(asset.Name, assets.sig):
 			signatureURL = asset.BrowserDownloadURL
+		case strings.EqualFold(asset.Name, ManifestAsset):
+			manifestURL = asset.BrowserDownloadURL
+		case strings.EqualFold(asset.Name, ManifestSignatureAsset):
+			manifestSigURL = asset.BrowserDownloadURL
 		}
 	}
 	if downloadURL == "" {
@@ -328,22 +334,36 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		"current", u.currentVersion,
 		"latest", remoteVersion,
 	)
+	// Still offered — the operator should hear a release exists, and see its
+	// notes — but ApplyUpdate will refuse it (verifiedManifestEntry).
+	if manifestURL == "" || manifestSigURL == "" {
+		u.logger.Warn("[Updater] Release publishes no signed manifest — it must be installed manually",
+			"latest", remoteVersion,
+		)
+	}
 
 	strippedBody := stripDownloadLinks(release.Body)
 	return &ReleaseInfo{
-		Version:          remoteVersion,
-		TagName:          release.TagName,
-		DownloadURL:      downloadURL,
-		SignatureURL:     signatureURL,
-		ReleaseNotes:     strippedBody,
-		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
-		PublishedAt:      release.PublishedAt,
-		ReleaseURL:       release.HTMLURL,
+		Version:              remoteVersion,
+		TagName:              release.TagName,
+		DownloadURL:          downloadURL,
+		SignatureURL:         signatureURL,
+		ManifestURL:          manifestURL,
+		ManifestSignatureURL: manifestSigURL,
+		ReleaseNotes:         strippedBody,
+		ReleaseNotesHtml:     renderReleaseNotesHtml(strippedBody),
+		PublishedAt:          release.PublishedAt,
+		ReleaseURL:           release.HTMLURL,
 	}, nil
 }
 
 // ApplyUpdate downloads the new binary and replaces the running executable,
 // keeping the running one at .old (on every platform).
+//
+// Nothing is placed unless the release's signed manifest names this release
+// and a version newer than the running one, and the downloaded binary both
+// carries a valid signature and hashes to the manifest's entry for this
+// platform (manifest.go). A release with no manifest is refused outright.
 //
 // **Rename window (Windows only)**: a running image cannot be renamed over,
 // so there the running exe is renamed to .old before .new is renamed into
@@ -363,6 +383,14 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("an update is already applied — restart pending")
 	}
 	if err := u.swapLeftBroken(); err != nil {
+		return err
+	}
+
+	// The signed manifest first: it is a few hundred bytes, and a release it
+	// refuses — no manifest, another version's, not newer, no entry for this
+	// platform — costs no binary download.
+	entry, err := u.verifiedManifestEntry(ctx, release)
+	if err != nil {
 		return err
 	}
 
@@ -396,7 +424,13 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
 	os.Remove(sigPath)
-	u.logger.Info("[Updater] Signature verified", "version", release.Version)
+	// The signature proves the key signed these bytes, not that they are
+	// this release's binary for this platform — the manifest's hash does.
+	if err := verifyFileSHA256(newPath, entry.SHA256); err != nil {
+		os.Remove(newPath)
+		return fmt.Errorf("manifest check failed: %w", err)
+	}
+	u.logger.Info("[Updater] Signature and manifest verified", "version", release.Version)
 
 	oldPath := u.exePath + ".old"
 	os.Remove(oldPath) // remove stale .old if exists

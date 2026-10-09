@@ -12,7 +12,7 @@ These are hard rules. They are not guidelines, suggestions, or aspirations. An A
 - **CSRF uses Origin/Referer validation, NOT CSRF tokens.** Moombox does not generate or validate CSRF tokens. It validates the Origin or Referer header on mutating requests (POST, PUT, DELETE) against the configured network_access level. This is sufficient because the server controls CORS preflight responses and does not grant cross-origin access to untrusted origins.
 - **TUI bypasses CSRF via the X-Internal-Token header.** The TUI is a same-process client that cannot send Origin/Referer headers. It sends a 16-byte random hex token (generated at server startup) in the `X-Internal-Token` header. The comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing side-channels.
 - **Loopback and private IPs skip authentication.** Requests from 127.0.0.1, ::1, and private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local addresses — plus 100.64.0.0/10 under `lan` only, see [Private IP Detection](#private-ip-detection)) bypass the AuthMiddleware entirely. Authentication is only enforced for external (non-local, non-LAN) clients when a password is configured.
-- **Ed25519 signature verification before binary swap.** Self-updates download a new binary and a `.sig` file. The binary is verified against the embedded Ed25519 public key before any file rename operations occur. An invalid signature aborts the update.
+- **Ed25519 signature verification before binary swap.** Self-updates download the release's signed manifest, a new binary and its `.sig` file. The manifest's signature, the binary's signature and the binary's SHA-256 against the manifest are all verified against the embedded Ed25519 public key before any file rename operations occur. Any failure aborts the update, and a release with no manifest is refused for auto-update (see [Release Manifest](#release-manifest)).
 - **X-Forwarded-For is ignored unless the direct peer is a declared trusted proxy.** `ExtractIP` never reads proxy headers — it is `net.SplitHostPort(r.RemoteAddr)` and nothing else. Every trust decision instead calls `EffectiveClientIP(store, r)`, which returns `ExtractIP(r)` unless the *direct peer* matches an entry in `network.trusted_proxies`; only then does it walk `X-Forwarded-For` right-to-left past trusted hops (rightmost-untrusted). `trusted_proxies` is empty by default, so the default posture is identical to never trusting the header. A client-forged `X-Forwarded-For` never matters: either the peer is untrusted and the header is ignored, or a trusted proxy appended the real address to the right of the forgery. See "Client IP Resolution and Trusted Proxies" below.
 - **Loopback-gated endpoints always use the direct peer address.** `LoopbackOnly`, `IsLoopbackRequest`, first-time password setup, the setup wizard, and the four cookie auto-setup endpoints call `ExtractIP` directly and MUST continue to. "Arrived over this machine's loopback interface" is a physical-access signal, and no forwarded header may ever confer it.
 - **All goroutines must have panic recovery.** Every goroutine in the application — HTTP handlers, background workers, database callbacks, monitor callbacks — must include a `defer func() { if r := recover(); r != nil { ... } }()` block. A panic in one subsystem must never crash the application. This is enforced at multiple layers: RecoveryMiddleware for HTTP, `safeCallJobUpdate`/`safeCallJobsChange` for database subscribers, and inline defers for all other goroutines.
@@ -681,22 +681,56 @@ Moombox self-updates are cryptographically signed to prevent binary tampering. T
 
 - **Public key** (embedded in binary): `71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb` (32 bytes, hex-encoded).
 - **Private key**: Stored as a GitHub Actions secret (`SIGNING_KEY`). Never embedded in the binary or committed to the repository.
-- **Signing tool**: `cmd/sign/main.go` — a standalone CLI tool used only in CI to sign the release binary.
+- **Signing tool**: `cmd/sign/main.go` — a standalone CLI tool used only in CI to sign the release binaries and to write and sign the release manifest (`-manifest`).
 
 ### Signature Format
 
 - Signature file extension: `.sig`
 - Contents: Raw 64-byte Ed25519 signature (not PEM, not base64 — raw bytes).
-- Signed data: The entire binary file contents.
+- Signed data: The entire file contents — each binary, and the release manifest (`moombox-manifest.json` → `moombox-manifest.json.sig`).
+
+### Release Manifest
+
+A binary's signature says only that the key signed those bytes. A validly signed OLDER binary, or another platform's, therefore verified against its own `.sig` as well as the right one did, and anyone able to answer the update check short of holding the key — a compromised GitHub account, a tampered response — could serve either under a newer tag. The manifest binds bytes to a release.
+
+`release.yml` writes one per release (`go run ./cmd/sign -manifest -version "$VERSION" -tag "$RELEASE_TAG"`, after the three binaries are signed) and signs it with the same key, with the same self-check against the embedded public key; a dry run writes and signs one too, for its `-dryrun` version and draft tag. It is JSON (`Manifest`, `internal/updater/manifest.go`):
+
+```json
+{
+  "version": "2.9.0",
+  "tag": "v2.9.0",
+  "platforms": {
+    "linux/amd64":   { "asset": "moombox-linux-amd64", "sha256": "<64 hex>" },
+    "linux/arm64":   { "asset": "moombox-linux-arm64", "sha256": "<64 hex>" },
+    "windows/amd64": { "asset": "Moombox.exe",         "sha256": "<64 hex>" }
+  }
+}
+```
+
+`BuildManifest` hashes every platform `releaseAssetMap` lists and fails when one is missing; `cmd/sign` reads what it wrote back through `ParseManifest` — the parser installs run — before signing. The per-binary `.sig` assets are still published: installs that predate the manifest verify only them.
+
+`ApplyUpdate` (`verifiedManifestEntry`, then the hash check after the binary's signature) refuses unless:
+
+1. the release publishes `moombox-manifest.json` and its `.sig` — a release without them is still OFFERED (the check reports it and its notes) but its apply is refused with an error telling the operator to update manually from the release page;
+2. the manifest (at most 64 KiB, checked before it is read) carries a valid signature by the embedded key;
+3. its `version` and `tag` are exactly the release being applied;
+4. that version is newer than the running one (`CompareVersions`, the ordering the check uses);
+5. it has an entry for the running `GOOS/GOARCH`, naming the asset the updater downloads there;
+6. the downloaded binary's own signature verifies, AND its SHA-256 equals that entry's.
+
+The manifest is fetched first, so a release it refuses costs no binary download. Pinned by `TestApplyUpdateBindsTheBinaryToTheSignedManifest` (`internal/updater/manifest_test.go`), which serves real signatures for each refusal: no manifest, a stranger's key, an older release's manifest and binary replayed, another tag, not newer, no entry, another platform's asset name, another platform's validly signed binary, an oversized manifest. `TestReleaseWorkflowPublishesTheSignedManifest` (`cmd/sign/main_test.go`) ties `release.yml`'s upload list and dry-run draft check to the asset names.
+
+**Not covered:** whoever holds the signing key can sign any manifest. `VerifyCurrentSignature` (`POST /api/update/verify`, `R S`) still checks only the running binary's `.sig`.
 
 ### Verification Flow
 
-1. Read the binary file into memory.
-2. Read the `.sig` file (must be exactly 64 bytes).
-3. Decode the embedded public key from hex.
+1. Download the manifest and its `.sig`; verify the signature (below) and the manifest's claims (above).
+2. Download the binary and its `.sig`.
+3. Read the binary file into memory and the `.sig` file (must be exactly 64 bytes); decode the embedded public key from hex.
 4. Call `ed25519.Verify(publicKey, binaryContents, signature)`.
-5. If verification fails: abort the update, log the error, do not modify any files.
-6. If verification succeeds: proceed with the binary swap.
+5. Hash the binary with SHA-256 and compare with the manifest's entry for this platform.
+6. If any step fails: abort the update, delete the downloads, do not modify the running binary.
+7. If all succeed: proceed with the binary swap.
 
 ### Binary Swap
 
@@ -708,7 +742,7 @@ The update process keeps the running binary at `<path>.old` and places the new o
 
 If the rename fails at step 3, the running binary is still at `<path>` on Linux (the link is removed); on Windows the `.old` file is renamed back to restore the original binary. After a successful swap, the application exits with code 42, and the launcher/supervisor respawns using the new binary.
 
-**Source:** `VerifySignature`, `SignBinary` in `internal/updater/signing.go`. Binary swap logic in `internal/updater/`.
+**Source:** `VerifySignature`, `SignBinary` in `internal/updater/signing.go`; `Manifest`, `BuildManifest`, `ParseManifest` and `verifiedManifestEntry` in `internal/updater/manifest.go`. Binary swap logic in `internal/updater/`.
 
 ---
 
@@ -806,5 +840,6 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **Source: [`internal/web/rate_limiter.go`](../../internal/web/rate_limiter.go)** — RateLimiter struct, sliding window algorithm, cleanup goroutine.
 - **Source: [`internal/web/tls.go`](../../internal/web/tls.go)** — LoadOrGenerateTLSConfig, self-signed certificate generation.
 - **Source: [`internal/updater/signing.go`](../../internal/updater/signing.go)** — Ed25519 verification and signing functions, embedded public key.
+- **Source: [`internal/updater/manifest.go`](../../internal/updater/manifest.go)** — the signed release manifest: format, builder, parser, and the checks `ApplyUpdate` makes against it.
 - **Source: [`cmd/moombox/main.go`](../../cmd/moombox/main.go)** — The rate-limit constants only.
 - **Source: [`cmd/moombox/services.go`](../../cmd/moombox/services.go)** — `initServices`: rate limiter instantiation with per-route limits, auth service wiring, and the `AuthMiddleware` registration that closes the chain.

@@ -5,6 +5,9 @@
 //	go run ./cmd/sign -genkey                  Generate a new Ed25519 key pair (prints to stdout)
 //	go run ./cmd/sign -genkey -out keys.txt    Generate key pair and write to keys.txt (mode 0o600)
 //	go run ./cmd/sign <file>                   Sign <file>, writes <file>.sig, and verify it
+//	go run ./cmd/sign -manifest -version 2.9.0 -tag v2.9.0 [-dir .]
+//	                                           Write the release manifest for the platform
+//	                                           binaries in -dir, sign it, and verify both
 //
 // Signing reads the private key from the SIGNING_KEY environment variable
 // (hex-encoded Ed25519 private key, 128 hex chars / 64 bytes).
@@ -14,9 +17,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/updater"
@@ -25,6 +33,10 @@ import (
 func main() {
 	genkey := flag.Bool("genkey", false, "generate a new Ed25519 key pair")
 	outPath := flag.String("out", "", "with -genkey, write key pair to this file (mode 0o600) instead of stdout")
+	manifest := flag.Bool("manifest", false, "write and sign the release manifest for the platform binaries in -dir")
+	version := flag.String("version", "", "with -manifest, the release version (no leading v)")
+	tag := flag.String("tag", "", "with -manifest, the release tag")
+	dir := flag.String("dir", ".", "with -manifest, the directory holding the platform binaries")
 	flag.Parse()
 
 	if *genkey {
@@ -33,7 +45,12 @@ func main() {
 	}
 
 	args := flag.Args()
-	if len(args) != 1 {
+	if *manifest {
+		if len(args) != 0 || *version == "" || *tag == "" {
+			fmt.Fprintln(os.Stderr, "usage: sign -manifest -version <version> -tag <tag> [-dir <dir>]")
+			os.Exit(1)
+		}
+	} else if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: sign [-genkey [-out <file>]] <file>")
 		os.Exit(1)
 	}
@@ -44,6 +61,16 @@ func main() {
 	if keyHex == "" {
 		fmt.Fprintln(os.Stderr, "error: SIGNING_KEY environment variable not set")
 		os.Exit(1)
+	}
+
+	if *manifest {
+		path, sigPath, err := writeSignedManifest(keyHex, *version, *tag, *dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Wrote %s → %s (verified against the updater's public key)\n", path, sigPath)
+		return
 	}
 
 	sigPath, err := signFile(keyHex, args[0])
@@ -120,4 +147,56 @@ func signFile(keyHex, path string) (string, error) {
 		return "", fmt.Errorf("SIGNING_KEY is not the private half of the updater's public key — %s would be rejected by every install: %w", sigPath, err)
 	}
 	return sigPath, nil
+}
+
+// writeManifest writes the release manifest for the platform binaries in dir
+// (updater.BuildManifest: version, tag, and every platform's asset name and
+// SHA-256) to dir/updater.ManifestAsset, and returns its path.
+//
+// What was written is read back through updater.ParseManifest — the parser an
+// installed Moombox runs — and must come back equal, so a manifest the
+// updater would refuse fails the release here rather than every install's
+// next update.
+func writeManifest(version, tag, dir string) (string, error) {
+	m, err := updater.BuildManifest(version, tag, dir)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, updater.ManifestAsset)
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", path, err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("reading %s back: %w", path, err)
+	}
+	if back, err := updater.ParseManifest(written); err != nil || !reflect.DeepEqual(back, m) {
+		os.Remove(path)
+		return "", fmt.Errorf("%s does not read back as written (%v)", path, err)
+	}
+	for _, k := range slices.Sorted(maps.Keys(m.Platforms)) {
+		fmt.Printf("  %-14s %s  %s\n", k, m.Platforms[k].SHA256, m.Platforms[k].Asset)
+	}
+	return path, nil
+}
+
+// writeSignedManifest is writeManifest followed by signFile, which verifies
+// the signature against the updater's public key. On any failure neither file
+// is left behind for the publish step to upload.
+func writeSignedManifest(keyHex, version, tag, dir string) (string, string, error) {
+	path, err := writeManifest(version, tag, dir)
+	if err != nil {
+		return "", "", err
+	}
+	sigPath, err := signFile(keyHex, path)
+	if err != nil {
+		os.Remove(path)
+		return "", "", err
+	}
+	return path, sigPath, nil
 }

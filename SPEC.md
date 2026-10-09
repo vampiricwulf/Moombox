@@ -16,7 +16,7 @@ Moombox is a standalone Go reimplementation. It is not a yt-dlp wrapper — it r
 
 What Moombox is not: it is not a general-purpose video downloader (it handles YouTube and Twitch only), not a hosted/multi-user service (single-operator deployment), and not designed for massive scale (it is a 24/7 appliance, not a batch processing system). macOS is not supported (deferred); Windows x64 and Linux x64/arm64 are the supported platforms.
 
-Deployment is a single binary plus FFmpeg on PATH. First-run triggers a setup wizard (in both the web dashboard and the TUI) that walks through FFmpeg installation, cookie configuration, channel setup, and optional password. Self-updates check GitHub Releases daily, verify Ed25519 signatures, apply a three-step binary swap, and restart via exit code 42. The launcher/supervisor pattern ensures clean restarts without process chain buildup.
+Deployment is a single binary plus FFmpeg on PATH. First-run triggers a setup wizard (in both the web dashboard and the TUI) that walks through FFmpeg installation, cookie configuration, channel setup, and optional password. Self-updates check GitHub Releases daily, verify Ed25519 signatures and a signed release manifest, apply a three-step binary swap, and restart via exit code 42. The launcher/supervisor pattern ensures clean restarts without process chain buildup.
 
 The application listens on port 774 by default. Configuration lives in `config.toml` searched in: current directory, `./config/`, `~/.config/moombox/`. The database is SQLite in WAL mode. Output files go to a configurable directory with per-channel subdirectories.
 
@@ -722,9 +722,9 @@ Optional. When enabled (`https_enabled = true`), uses configured cert/key paths.
 
 ### Update Signing
 
-Binary releases are signed with Ed25519. The public key is embedded in the binary at compile time. The private key is stored as a GitHub Actions secret and never leaves CI. During update: download new binary, download `.sig` file, verify Ed25519 signature of the binary against the embedded public key. If verification fails, the update is rejected and the downloaded file is deleted. The three-step binary swap: write new binary as `{exe}.new`, rename current `{exe}` to `{exe}.old`, rename `{exe}.new` to `{exe}`. The `.old` file is cleaned up on next startup by `CleanupOldBinary()`. This three-step approach is atomic on Windows (rename is atomic within the same volume) and allows rollback if something goes wrong.
+Binary releases are signed with Ed25519. The public key is embedded in the binary at compile time. The private key is stored as a GitHub Actions secret and never leaves CI. During update: download the release's signed manifest (`moombox-manifest.json`: version, tag, and each platform's asset name and SHA-256) and verify its signature; refuse unless it names the release being applied, a version newer than the running one, and this platform; then download the new binary and its `.sig` file, verify the Ed25519 signature of the binary against the embedded public key, and its SHA-256 against the manifest. A per-binary signature alone would accept a validly signed older binary or another platform's. If verification fails, the update is rejected and the downloaded file is deleted; a release with no manifest is refused for auto-update and must be installed manually. The three-step binary swap: write new binary as `{exe}.new`, rename current `{exe}` to `{exe}.old`, rename `{exe}.new` to `{exe}`. The `.old` file is cleaned up on next startup by `CleanupOldBinary()`. This three-step approach is atomic on Windows (rename is atomic within the same volume) and allows rollback if something goes wrong.
 
-The `cmd/sign/main.go` tool is used in CI to sign the binary. It reads the Ed25519 private key from an environment variable, signs the binary, writes the `.sig` file, and verifies it with `VerifySignature` against the embedded public key — a `SIGNING_KEY` that is not that key's private half fails the release instead of publishing signatures every install would reject. The `POST /api/update/verify` endpoint allows users to verify the signature of the currently running binary at any time.
+The `cmd/sign/main.go` tool is used in CI to sign the binaries and, with `-manifest`, to write and sign the release manifest. It reads the Ed25519 private key from an environment variable, signs the binary, writes the `.sig` file, and verifies it with `VerifySignature` against the embedded public key — a `SIGNING_KEY` that is not that key's private half fails the release instead of publishing signatures every install would reject. The `POST /api/update/verify` endpoint allows users to verify the signature of the currently running binary at any time.
 
 **Deep-dive:** [docs/spec/security.md](docs/spec/security.md)
 
@@ -744,7 +744,7 @@ Go 1.27 required (go.mod carries `toolchain go1.27.1` as the floor: an older loc
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/release.yml`) triggers on tag push, and runs the test workflow on the tagged commit before anything is published (a manual run is a dry run that publishes nothing). Builds Windows exe, generates `.syso` for icon/version, signs with Ed25519 (private key in GitHub secret), uploads binary + signature to GitHub Release. Release body is read from `RELEASE_NOTES.md` in the repo.
+GitHub Actions (`.github/workflows/release.yml`) triggers on tag push, and runs the test workflow on the tagged commit before anything is published (a manual run is a dry run that publishes nothing). Builds Windows exe, generates `.syso` for icon/version, signs with Ed25519 (private key in GitHub secret), writes and signs the release manifest, uploads binaries + signatures + manifest to GitHub Release. Release body is read from `RELEASE_NOTES.md` in the repo.
 
 ### Release Process
 
@@ -757,8 +757,8 @@ GitHub Actions (`.github/workflows/release.yml`) triggers on tag push, and runs 
 ### Self-Update Flow
 
 1. **Check** — Query GitHub Releases API for latest release. Compare semver against `version` constant. Skip if current is equal or newer.
-2. **Download** — Fetch `Moombox.exe` asset and `Moombox.exe.sig` signature asset.
-3. **Verify** — Ed25519 signature verification against embedded public key. Reject if invalid.
+2. **Download** — Fetch the signed release manifest, then the platform's binary asset (`Moombox.exe` / `moombox-linux-*`) and its `.sig` signature asset.
+3. **Verify** — Ed25519 signature verification of the manifest and the binary against the embedded public key, and the binary's SHA-256 against the manifest's entry for this platform. Reject if any check fails, or if the release has no manifest.
 4. **Swap** — Three-step rename: write downloaded binary as `{exe}.new`, rename current `{exe}` to `{exe}.old`, rename `{exe}.new` to `{exe}`.
 5. **Restart** — `triggerRestart("update")` exits with code 42. Launcher respawns, loading the new binary.
 6. **Cleanup** — On next startup, `CleanupOldBinary()` deletes `{exe}.old`.

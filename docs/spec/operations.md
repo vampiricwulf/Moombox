@@ -9,7 +9,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 - Build requires **Go 1.27**; `go.mod` carries `toolchain go1.27.1`, the floor local builds and CI auto-download; the Docker stage takes its patch from the floating `golang:1.27-bookworm` tag (`GOTOOLCHAIN=local` inside the image). Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI publishes on tag push only** (tags matching `v*`), and only after the test suite has passed on the tagged commit. The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
-- **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
+- **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected, and so are releases without a valid signed manifest (`moombox-manifest.json`) naming that release, a newer version and the binary's SHA-256 — those are installed by hand.
 - **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
 - **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. It always propagates, never crash-respawns, and the post-update rule never rolls back on it — the environment failed, not the new binary. Its timing decides nothing: the child waits for a keypress before exiting 3, so how long it "ran" measures the operator, not the binary (`classifyChildExit`, `cmd/moombox/launcher.go`).
 - **Version is set in `cmd/moombox/main.go`** as `var version = "x.y.z"`. CI overrides this via `-ldflags -X main.version=...` at build time.
@@ -194,7 +194,7 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 - **`release`** — the binaries; steps below.
 - **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push. It `needs` both `test` and `release`, so a failed build or signature check cannot leave a pushed `latest` image for a version that has no release.
 
-**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the six assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with six assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
+**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the eight assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with eight assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists — and so does the manifest step, which writes and signs a manifest for the dry run's `-dryrun` version and draft tag, so the manifest pipeline is exercised too. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
 
 #### Release job steps
 
@@ -212,9 +212,10 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 12. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`, verified against the updater's embedded public key before the step succeeds (see Signing Tool)
 13. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
 14. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
-15. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
-16. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 15 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`, with `fail_on_unmatched_files` so a missing asset fails the step instead of publishing without it. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases. One step for both modes: a tag push publishes under its tag; a dry run uploads to the draft described above.
-17. **Check and delete the draft** (dry run only) — requires a draft with six assets, and deletes it first so a failed check leaves nothing behind.
+15. **Write and sign the release manifest** — `go run ./cmd/sign -manifest -version "$VERSION" -tag "$RELEASE_TAG"` → `moombox-manifest.json` (the version, the tag, and each platform's asset name and SHA-256) and `moombox-manifest.json.sig`, self-checked like the binaries' (see Signing Tool, and [security.md](security.md) § Release Manifest for why the binaries' own signatures are not enough).
+16. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
+17. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 16 and 8 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`, `moombox-manifest.json` + `.sig`, with `fail_on_unmatched_files` so a missing asset fails the step instead of publishing without it. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases. One step for both modes: a tag push publishes under its tag; a dry run uploads to the draft described above.
+18. **Check and delete the draft** (dry run only) — requires a draft with eight assets, and deletes it first so a failed check leaves nothing behind. `TestReleaseWorkflowPublishesTheSignedManifest` (`cmd/sign/main_test.go`) holds that count to the upload list.
 
 Steps 5 and 6 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. The job used to cache them, and that cache never hit — a cache saved by one tag's run is not readable from another tag's (v2.8.3 through v2.8.10 all missed) — while its key left out `bgutil-sidecar/src` and the vendored ejs, so a hit would have shipped the previous sidecar JS under a new version number.
 
@@ -285,27 +286,29 @@ The `commit` variable is resolved at build time via ldflags, or at runtime from 
 
 ## Self-Update Flow
 
-The self-updater lives in `internal/updater/`. It checks GitHub Releases, downloads the new binary, verifies its signature, and replaces the running executable.
+The self-updater lives in `internal/updater/`. It checks GitHub Releases, verifies the release's signed manifest, downloads the new binary, verifies its signature and its SHA-256 against the manifest, and replaces the running executable.
 
 ### Step-by-Step
 
 1. **Check** (`updater.go: CheckForUpdate`) — Queries `https://api.github.com/repos/vampiricwulf/Moombox/releases/latest`. Compares the remote version against the current version using semver comparison. Returns `nil` if already up-to-date, or a `ReleaseInfo` struct if a newer version exists. HTTP timeout: 10 seconds. An up-to-date answer from any check — the periodic one, the Web's "Check for updates", the TUI's `R V` — withdraws a release still pending (`routes.ClearPendingUpdate`): it was pulled from GitHub, and its download no longer exists. Only the release pending when the check STARTED is withdrawn — another check can find one during this one's GitHub round trip. Both UIs drop the badge (`update_cleared`, and the TUI's tagged clear).
 
-2. **Download binary** (`updater.go: ApplyUpdate`) — Downloads the running platform's binary asset from the release — `Moombox.exe`, `moombox-linux-amd64` or `moombox-linux-arm64`, chosen by GOOS/GOARCH through `releaseAssetMap` — to `<exe-path>.new`. A separate client from the 10-second API client, since binaries are 78-87 MB: what ends a download is a STALL — no byte for `downloadStallTimeout` (60 s), response headers included — reported as "download stalled: no data for 1m0s". A total deadline only backstops it (`downloadMaxDuration`, 2 hours, about 12 KB/s for the largest binary). The Web's apply runs detached from its request (`context.WithoutCancel`): a browser stops waiting for the response long before a slow download ends (Firefox after 300 s), and the abort used to cancel the download with it; the dashboard now reads a lost response as "the update may still be downloading", and the restart follows when it lands. The 5-minute total deadline this used to carry killed every download slower than about 2.3 Mbit/s however steadily it was arriving.
+2. **Verify the manifest** (`manifest.go: verifiedManifestEntry`) — Before anything else is downloaded, fetches the release's `moombox-manifest.json` and `moombox-manifest.json.sig` (recorded by the check) to a temp directory, refuses one over 64 KiB, verifies its signature with the embedded public key, and refuses unless its version and tag are exactly the release being applied, that version is newer than the running one, and it has an entry for the running GOOS/GOARCH naming the asset step 3 downloads. A release that publishes no manifest is still reported by the check, but its apply is refused: "release vX publishes no signed manifest … update manually: download it from <release page> and replace the binary". See [security.md](security.md) § Release Manifest.
 
-3. **Download signature** — Downloads that asset's `.sig` (`Moombox.exe.sig`, `moombox-linux-amd64.sig`, …) to `<exe-path>.new.sig`.
+3. **Download binary** (`updater.go: ApplyUpdate`) — Downloads the running platform's binary asset from the release — `Moombox.exe`, `moombox-linux-amd64` or `moombox-linux-arm64`, chosen by GOOS/GOARCH through `releaseAssetMap` — to `<exe-path>.new`. A separate client from the 10-second API client, since binaries are 78-87 MB: what ends a download is a STALL — no byte for `downloadStallTimeout` (60 s), response headers included — reported as "download stalled: no data for 1m0s". A total deadline only backstops it (`downloadMaxDuration`, 2 hours, about 12 KB/s for the largest binary). The Web's apply runs detached from its request (`context.WithoutCancel`): a browser stops waiting for the response long before a slow download ends (Firefox after 300 s), and the abort used to cancel the download with it; the dashboard now reads a lost response as "the update may still be downloading", and the restart follows when it lands. The 5-minute total deadline this used to carry killed every download slower than about 2.3 Mbit/s however steadily it was arriving.
 
-4. **Verify** (`signing.go: VerifySignature`) — Reads the `.new` binary and `.new.sig` file. Verifies using the **embedded Ed25519 public key** (`71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb`). Signature must be exactly 64 bytes. On failure: `.new` and `.new.sig` files are deleted, error is returned to the caller.
+4. **Download signature** — Downloads that asset's `.sig` (`Moombox.exe.sig`, `moombox-linux-amd64.sig`, …) to `<exe-path>.new.sig`.
 
-5. **Replace** — remove a stale `.old` file if one exists, then keep the running binary at `.old` and place `.new` at the plain name:
+5. **Verify** (`signing.go: VerifySignature`, then `manifest.go: verifyFileSHA256`) — Reads the `.new` binary and `.new.sig` file. Verifies using the **embedded Ed25519 public key** (`71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb`). Signature must be exactly 64 bytes. Then hashes `.new` and compares it with the manifest's SHA-256 for this platform — a validly signed binary that is not the one this release published for this platform fails here. On failure: `.new` and `.new.sig` files are deleted, error is returned to the caller.
+
+6. **Replace** — remove a stale `.old` file if one exists, then keep the running binary at `.old` and place `.new` at the plain name:
    - **Linux**: `.old` is a hard link to the running binary (`keepBackupByLink`), and `current.new` -> `current` is one rename over it, so the plain name always holds the old binary or the new one — a kill or power loss mid-swap cannot leave it empty. If the rename fails, the link and `.new` are removed and the running binary is untouched. (A filesystem without hard links falls back to the Windows sequence.)
    - **Windows**, which cannot rename over a running image: `current.exe` -> `current.exe.old` (rename running binary out of the way), then `current.exe.new` -> `current.exe` (place new binary). For those milliseconds the plain name is empty. If the second rename fails: attempts rollback by renaming `.old` back to the current path. If rollback also fails, logs an error and writes `<exe>.update-broken` (binary may be in an inconsistent state; `.new` is kept).
 
-6. **Breadcrumb** — After a successful swap, `ApplyUpdate` writes `<exe-path>.update-pending` containing the target release tag. The next boot resolves it: a boot running that version deletes it (update landed); a boot running a *different* version alongside a failed-update marker (the launcher auto-rolled back — see below) records the tag as `updates.skipped_version` so automatic checks stop offering the broken release (a manual "Check for updates" still retries it deliberately), then deletes it. Binaries that predate the breadcrumb ignore it; stale copies are inert until the next aware boot cleans them up.
+7. **Breadcrumb** — After a successful swap, `ApplyUpdate` writes `<exe-path>.update-pending` containing the target release tag. The next boot resolves it: a boot running that version deletes it (update landed); a boot running a *different* version alongside a failed-update marker (the launcher auto-rolled back — see below) records the tag as `updates.skipped_version` so automatic checks stop offering the broken release (a manual "Check for updates" still retries it deliberately), then deletes it. Binaries that predate the breadcrumb ignore it; stale copies are inert until the next aware boot cleans them up.
 
-7. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary. Until it does, the process is restart-pending: a placed update latches the Updater's `applied` flag and every later `ApplyUpdate` in that process is refused ("an update is already applied — restart pending"). A second apply — `R U` pressed again inside the restart's grace window, or a TUI apply after a Web one — would otherwise make `.old` the binary the first apply had just placed, so the running binary, the only rollback artifact, would be gone from disk. A failed apply changed nothing and does not latch. The TUI drops its update badge and `R U` once an apply succeeds.
+8. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary. Until it does, the process is restart-pending: a placed update latches the Updater's `applied` flag and every later `ApplyUpdate` in that process is refused ("an update is already applied — restart pending"). A second apply — `R U` pressed again inside the restart's grace window, or a TUI apply after a Web one — would otherwise make `.old` the binary the first apply had just placed, so the running binary, the only rollback artifact, would be gone from disk. A failed apply changed nothing and does not latch. The TUI drops its update badge and `R U` once an apply succeeds.
 
-8. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, `.new.sig` and `.failed` files left by previous updates, interrupted downloads or an automatic rollback; on Windows it also sweeps an orphaned `~`. `<exe>.sig` is deliberately spared — Moombox never writes it, and it is the published signature asset a manual verifier leaves beside the binary.
+9. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, `.new.sig` and `.failed` files left by previous updates, interrupted downloads or an automatic rollback; on Windows it also sweeps an orphaned `~`. `<exe>.sig` is deliberately spared — Moombox never writes it, and it is the published signature asset a manual verifier leaves beside the binary.
 
 ### Automatic Rollback
 
@@ -331,6 +334,9 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 | Running on a platform `releaseAssetMap` does not list | Error returned ("auto-update unsupported on <os>/<arch>") |
 | No binary asset for this platform in the release | Error returned ("no <asset> asset found in release <tag>", e.g. "no moombox-linux-arm64 asset found in release v2.8.10") |
 | No `.sig` asset in release | Error returned ("no signature file found") |
+| No `moombox-manifest.json` (or its `.sig`) in release | Offered by the check (a Warn line says it must be installed manually); the apply is refused before any download ("… publishes no signed manifest … update manually") |
+| Manifest signature invalid, over 64 KiB, malformed, for another version or tag, not newer than the running version, or without this platform's entry | Refused before the binary is downloaded; error names the cause |
+| Binary's SHA-256 differs from the manifest's | `.new` cleaned up, error returned ("manifest check failed: … does not match the signed manifest's …") |
 | Download fails | `.new` file cleaned up, error returned |
 | Signature verification fails | `.new` and `.new.sig` cleaned up, error returned |
 | Rename of current binary fails | `.new` cleaned up, error returned |
@@ -444,7 +450,7 @@ After graceful shutdown completes, if `restartRequested` is true, the child proc
 
 **Location:** `cmd/sign/main.go`
 
-A standalone CLI tool used exclusively by CI to sign release binaries.
+A standalone CLI tool used exclusively by CI to sign release binaries and the release manifest.
 
 ### Usage
 
@@ -452,6 +458,11 @@ A standalone CLI tool used exclusively by CI to sign release binaries.
 # Sign a binary (reads SIGNING_KEY from environment)
 go run ./cmd/sign Moombox.exe
 # Output: Moombox.exe.sig (raw 64-byte Ed25519 signature)
+
+# Write the release manifest for the binaries in -dir (default .), sign it,
+# and verify both (reads SIGNING_KEY from environment)
+go run ./cmd/sign -manifest -version 2.9.0 -tag v2.9.0
+# Output: moombox-manifest.json + moombox-manifest.json.sig
 
 # Generate a new key pair (one-time setup)
 go run ./cmd/sign -genkey
@@ -464,6 +475,7 @@ go run ./cmd/sign -genkey
 - **Private key source:** `SIGNING_KEY` environment variable (hex-encoded, 128 hex chars / 64 bytes)
 - **Output:** `<input-path>.sig` containing the raw 64-byte signature
 - **Self-check:** after writing the `.sig`, the tool runs `VerifySignature` on it — the same call an installed Moombox makes, against the public key in the source tree being released. Ed25519 signs with any well-formed key, so a wrong or rotated `SIGNING_KEY` would otherwise produce a green release whose update every existing install refuses. On a mismatch the `.sig` is deleted and the tool exits non-zero, which fails the release before the publish step.
+- **Manifest (`-manifest`):** `updater.BuildManifest` hashes every platform binary `releaseAssetMap` lists (a missing one fails the step), the JSON is written to `moombox-manifest.json` and read back through `updater.ParseManifest` — the parser installs run — then signed and self-checked like a binary. On any failure neither file is left for the publish step.
 - **Public key location:** Embedded in `internal/updater/signing.go` as `updatePublicKeyHex`
 - **Key management:** Private key stored as a GitHub Actions secret. Never committed, never logged. The `-genkey` subcommand generates a fresh key pair for initial setup or rotation.
 
@@ -831,6 +843,7 @@ The script pulls each repository, displays new commits since the last pull, and 
 | `cmd/sign/main.go` | Signing tool |
 | `internal/updater/updater.go` | Update checker, binary downloader, apply logic |
 | `internal/updater/signing.go` | Ed25519 verification, embedded public key |
+| `internal/updater/manifest.go` | Signed release manifest: format, builder, parser, the checks `ApplyUpdate` makes |
 | `internal/notifications/manager.go` | Notification dispatch, event filtering, target management |
 | `internal/notifications/discord.go` | Discord webhook sender |
 | `internal/notifications/lifecycle.go` | Edit-in-place lifecycle messages: the event set, the per-(job, target) message-id store, the POST-or-PATCH decision, the Status/History rewrite |

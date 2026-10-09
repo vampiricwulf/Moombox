@@ -21,13 +21,18 @@ func swapTestServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Write(make([]byte, ed25519.SignatureSize))
 	})
+	serveManifest(mux, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", []byte("fresh moombox binary"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func swapRelease(srv *httptest.Server) *ReleaseInfo {
-	return &ReleaseInfo{Version: "2.0.0", TagName: "v2.0.0", DownloadURL: srv.URL + "/exe", SignatureURL: srv.URL + "/sig"}
+	return &ReleaseInfo{
+		Version: "2.0.0", TagName: "v2.0.0",
+		DownloadURL: srv.URL + "/exe", SignatureURL: srv.URL + "/sig",
+		ManifestURL: srv.URL + "/manifest", ManifestSignatureURL: srv.URL + "/manifest.sig",
+	}
 }
 
 // The swap used to rename the running exe to .old and then .new into place,

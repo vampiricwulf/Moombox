@@ -1,0 +1,332 @@
+package updater
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
+
+// platformManifest returns a manifest for version/tag listing every
+// releaseAssetMap platform, the way BuildManifest does, with the running
+// platform's entry hashing to body. Skips on a platform the updater does not
+// support — ApplyUpdate refuses there before any of this matters.
+func platformManifest(t *testing.T, version, tag string, body []byte) *Manifest {
+	t.Helper()
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		t.Skipf("auto-update unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	m := &Manifest{Version: version, Tag: tag, Platforms: map[string]ManifestPlatform{}}
+	for key, a := range releaseAssetMap {
+		other := sha256.Sum256([]byte("the " + key + " binary"))
+		m.Platforms[key] = ManifestPlatform{Asset: a.binary, SHA256: hex.EncodeToString(other[:])}
+	}
+	sum := sha256.Sum256(body)
+	m.Platforms[runtime.GOOS+"/"+runtime.GOARCH] = ManifestPlatform{Asset: assets.binary, SHA256: hex.EncodeToString(sum[:])}
+	return m
+}
+
+func manifestJSON(t *testing.T, m *Manifest) []byte {
+	t.Helper()
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	return data
+}
+
+// serveManifest registers /manifest and /manifest.sig. The signature is 64
+// zero bytes, for the tests that stub verifySignature; signedRelease below
+// serves a real one.
+func serveManifest(mux *http.ServeMux, data []byte) {
+	mux.HandleFunc("/manifest", func(rw http.ResponseWriter, _ *http.Request) { rw.Write(data) })
+	mux.HandleFunc("/manifest.sig", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Write(make([]byte, ed25519.SignatureSize))
+	})
+}
+
+// signedRelease is a release whose manifest and binary carry REAL signatures,
+// by a test key the updater is made to trust. exeHits counts binary
+// downloads, so a test can show a refusal came before one.
+type signedRelease struct {
+	srv     *httptest.Server
+	pub     ed25519.PublicKey
+	exeHits atomic.Int32
+}
+
+// newSignedRelease serves binary (signed by priv) at /exe and manifest
+// (signed by manifestKey, which may differ — the stranger-key case) at
+// /manifest.
+func newSignedRelease(t *testing.T, binary, manifest []byte, manifestKey ed25519.PrivateKey) *signedRelease {
+	t.Helper()
+	pub, priv := generateTestKeyPair(t)
+	if manifestKey == nil {
+		manifestKey = priv
+	}
+	sr := &signedRelease{pub: pub}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/exe", func(rw http.ResponseWriter, _ *http.Request) {
+		sr.exeHits.Add(1)
+		rw.Write(binary)
+	})
+	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) { rw.Write(ed25519.Sign(priv, binary)) })
+	mux.HandleFunc("/manifest", func(rw http.ResponseWriter, _ *http.Request) { rw.Write(manifest) })
+	mux.HandleFunc("/manifest.sig", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Write(ed25519.Sign(manifestKey, manifest))
+	})
+	sr.srv = httptest.NewServer(mux)
+	t.Cleanup(sr.srv.Close)
+	return sr
+}
+
+// updater returns an Updater running `current` that trusts sr's key.
+func (sr *signedRelease) updater(t *testing.T, current string) (*Updater, string) {
+	t.Helper()
+	return newTestUpdater(t, current, sr.srv, func(bin, sig string) error {
+		return verifySignatureWithKey(sr.pub, bin, sig)
+	})
+}
+
+func (sr *signedRelease) release(version, tag string) *ReleaseInfo {
+	return &ReleaseInfo{
+		Version: version, TagName: tag,
+		DownloadURL: sr.srv.URL + "/exe", SignatureURL: sr.srv.URL + "/sig",
+		ManifestURL: sr.srv.URL + "/manifest", ManifestSignatureURL: sr.srv.URL + "/manifest.sig",
+		ReleaseURL: "https://github.com/vampiricwulf/Moombox/releases/tag/" + tag,
+	}
+}
+
+// TestApplyUpdateBindsTheBinaryToTheSignedManifest drives ApplyUpdate with
+// real signatures: the genuine case, and each way a validly SIGNED artifact
+// used to pass while being the wrong one (D-U4). A per-binary signature says
+// only that the key signed these bytes, so an older release's binary, or
+// another platform's, verified as well as the right one.
+//
+// THE MUTANTS, each failing the row named:
+//   - ApplyUpdate without verifiedManifestEntry (or one returning no error
+//     for an empty ManifestURL) — "no manifest";
+//   - the manifest's signature not verified — "stranger's key";
+//   - the version comparison dropped from entryFor — "older release's
+//     manifest replayed";
+//   - the tag comparison dropped — "another tag";
+//   - the newer-than-running check dropped — "not newer";
+//   - the asset-name check dropped — "names another platform's asset";
+//   - verifyFileSHA256 not called — "another platform's binary";
+//   - the size bound dropped — "oversized".
+func TestApplyUpdateBindsTheBinaryToTheSignedManifest(t *testing.T) {
+	binary := []byte("the v2.0.0 binary for this platform")
+	older := []byte("the v1.5.0 binary for this platform")
+	other := []byte("the v2.0.0 binary for another platform")
+	key := runtime.GOOS + "/" + runtime.GOARCH
+
+	t.Run("the genuine release is applied", func(t *testing.T) {
+		sr := newSignedRelease(t, binary, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", binary)), nil)
+		u, exePath := sr.updater(t, "1.0.0")
+		if err := u.ApplyUpdate(context.Background(), sr.release("2.0.0", "v2.0.0")); err != nil {
+			t.Fatalf("ApplyUpdate: %v", err)
+		}
+		if !fileIs(exePath, string(binary)) {
+			t.Error("the verified binary was not placed")
+		}
+	})
+
+	refused := func(t *testing.T, sr *signedRelease, current string, release *ReleaseInfo, wantErr string, wantDownloads int32) {
+		t.Helper()
+		u, exePath := sr.updater(t, current)
+		err := u.ApplyUpdate(context.Background(), release)
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("ApplyUpdate = %v, want a refusal containing %q", err, wantErr)
+		}
+		if !fileIs(exePath, "current binary") {
+			t.Error("a refused update changed the running binary")
+		}
+		for _, suffix := range []string{".new", ".new.sig", ".old", PendingVersionSuffix} {
+			if _, statErr := os.Stat(exePath + suffix); statErr == nil {
+				t.Errorf("%s left behind by a refused update", suffix)
+			}
+		}
+		if got := sr.exeHits.Load(); got != wantDownloads {
+			t.Errorf("binary downloaded %d times, want %d", got, wantDownloads)
+		}
+	}
+
+	t.Run("no manifest", func(t *testing.T) {
+		sr := newSignedRelease(t, binary, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", binary)), nil)
+		rel := sr.release("2.0.0", "v2.0.0")
+		rel.ManifestURL, rel.ManifestSignatureURL = "", ""
+		refused(t, sr, "1.0.0", rel, "update manually", 0)
+	})
+
+	t.Run("a manifest signed by a stranger's key", func(t *testing.T) {
+		_, stranger := generateTestKeyPair(t)
+		sr := newSignedRelease(t, binary, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", binary)), stranger)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "manifest signature verification failed", 0)
+	})
+
+	t.Run("an older release's manifest replayed with its binary", func(t *testing.T) {
+		sr := newSignedRelease(t, older, manifestJSON(t, platformManifest(t, "1.5.0", "v1.5.0", older)), nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "not the release being applied", 0)
+	})
+
+	t.Run("a manifest for another tag", func(t *testing.T) {
+		sr := newSignedRelease(t, binary, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0-rebuilt", binary)), nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "not the release being applied", 0)
+	})
+
+	t.Run("a release not newer than the running one", func(t *testing.T) {
+		sr := newSignedRelease(t, older, manifestJSON(t, platformManifest(t, "1.5.0", "v1.5.0", older)), nil)
+		refused(t, sr, "2.0.0", sr.release("1.5.0", "v1.5.0"), "not newer", 0)
+	})
+
+	t.Run("no entry for this platform", func(t *testing.T) {
+		m := platformManifest(t, "2.0.0", "v2.0.0", binary)
+		delete(m.Platforms, key)
+		sr := newSignedRelease(t, binary, manifestJSON(t, m), nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "no entry for "+key, 0)
+	})
+
+	t.Run("this platform's entry names another platform's asset", func(t *testing.T) {
+		m := platformManifest(t, "2.0.0", "v2.0.0", binary)
+		p := m.Platforms[key]
+		p.Asset = "moombox-plan9-amd64"
+		m.Platforms[key] = p
+		sr := newSignedRelease(t, binary, manifestJSON(t, m), nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "moombox-plan9-amd64", 0)
+	})
+
+	t.Run("another platform's validly signed binary", func(t *testing.T) {
+		sr := newSignedRelease(t, other, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", binary)), nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "does not match the signed manifest", 1)
+	})
+
+	t.Run("an oversized manifest", func(t *testing.T) {
+		padded := append(manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", binary)), []byte(strings.Repeat(" ", maxManifestSize))...)
+		sr := newSignedRelease(t, binary, padded, nil)
+		refused(t, sr, "1.0.0", sr.release("2.0.0", "v2.0.0"), "over the", 0)
+	})
+}
+
+// TestParseManifestRefusesMalformedDocuments pins ParseManifest's shape
+// checks. THE MUTANTS: drop any one check — its row parses.
+func TestParseManifestRefusesMalformedDocuments(t *testing.T) {
+	good := `"platforms":{"linux/amd64":{"asset":"moombox-linux-amd64","sha256":"` + strings.Repeat("ab", 32) + `"}}`
+	for _, tc := range []struct{ name, doc string }{
+		{"not JSON", `{`},
+		{"no version", `{"tag":"v2.0.0",` + good + `}`},
+		{"no tag", `{"version":"2.0.0",` + good + `}`},
+		{"no platforms", `{"version":"2.0.0","tag":"v2.0.0","platforms":{}}`},
+		{"an entry with no asset", `{"version":"2.0.0","tag":"v2.0.0","platforms":{"linux/amd64":{"sha256":"` + strings.Repeat("ab", 32) + `"}}}`},
+		{"a short hash", `{"version":"2.0.0","tag":"v2.0.0","platforms":{"linux/amd64":{"asset":"a","sha256":"abcd"}}}`},
+		{"a hash that is not hex", `{"version":"2.0.0","tag":"v2.0.0","platforms":{"linux/amd64":{"asset":"a","sha256":"` + strings.Repeat("zz", 32) + `"}}}`},
+	} {
+		if _, err := ParseManifest([]byte(tc.doc)); err == nil {
+			t.Errorf("%s: ParseManifest accepted %s", tc.name, tc.doc)
+		}
+	}
+	if _, err := ParseManifest([]byte(`{"version":"2.0.0","tag":"v2.0.0",` + good + `,"later":"field"}`)); err != nil {
+		t.Errorf("a well-formed manifest with an unknown field was refused: %v", err)
+	}
+}
+
+// TestBuildManifestHashesEveryPlatformBinary pins what cmd/sign -manifest
+// writes: every releaseAssetMap platform, its asset name, the SHA-256 of the
+// file, and a document ParseManifest reads back unchanged.
+//
+// THE MUTANTS: skip a platform whose binary is missing instead of failing —
+// the missing-binary row passes; hash the asset NAME instead of the file —
+// the hash comparison fails; drop the version/tag check — the two empty rows
+// pass.
+func TestBuildManifestHashesEveryPlatformBinary(t *testing.T) {
+	dir := t.TempDir()
+	for _, a := range releaseAssetMap {
+		writeTempFile(t, dir, a.binary, []byte("bytes of "+a.binary))
+	}
+	if _, err := BuildManifest("", "v2.0.0", dir); err == nil {
+		t.Error("BuildManifest accepted an empty version")
+	}
+	if _, err := BuildManifest("2.0.0", "", dir); err == nil {
+		t.Error("BuildManifest accepted an empty tag")
+	}
+	m, err := BuildManifest("2.0.0", "v2.0.0", dir)
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	if m.Version != "2.0.0" || m.Tag != "v2.0.0" || len(m.Platforms) != len(releaseAssetMap) {
+		t.Fatalf("manifest = %+v", m)
+	}
+	for key, a := range releaseAssetMap {
+		sum := sha256.Sum256([]byte("bytes of " + a.binary))
+		if got := m.Platforms[key]; got.Asset != a.binary || got.SHA256 != hex.EncodeToString(sum[:]) {
+			t.Errorf("%s entry = %+v, want %s with the file's SHA-256", key, got, a.binary)
+		}
+	}
+	back, err := ParseManifest(manifestJSON(t, m))
+	if err != nil || !reflect.DeepEqual(back, m) {
+		t.Errorf("round trip = %+v, %v; want %+v", back, err, m)
+	}
+
+	os.Remove(filepath.Join(dir, releaseAssetMap["linux/arm64"].binary))
+	if _, err := BuildManifest("2.0.0", "v2.0.0", dir); err == nil {
+		t.Error("BuildManifest wrote a manifest with a platform's binary missing")
+	}
+}
+
+// TestCheckForUpdateCarriesTheManifestURLs: the check records the manifest
+// assets for the apply, and a release without them is still OFFERED — the
+// operator hears it exists and reads its notes — leaving the refusal to the
+// apply, which tells them to update by hand.
+//
+// THE MUTANTS: the two manifest cases dropped from the asset loop — the
+// first row's URLs are empty; an error returned for a missing manifest — the
+// second row fails.
+func TestCheckForUpdateCarriesTheManifestURLs(t *testing.T) {
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		t.Skipf("auto-update unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	serve := func(withManifest bool) *httptest.Server {
+		list := []githubAsset{
+			{Name: assets.binary, BrowserDownloadURL: "http://example.com/exe"},
+			{Name: assets.sig, BrowserDownloadURL: "http://example.com/sig"},
+		}
+		if withManifest {
+			list = append(list,
+				githubAsset{Name: ManifestAsset, BrowserDownloadURL: "http://example.com/manifest"},
+				githubAsset{Name: ManifestSignatureAsset, BrowserDownloadURL: "http://example.com/manifest.sig"})
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+			json.NewEncoder(rw).Encode(githubRelease{TagName: "v3.0.0", Assets: list})
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	u, _ := newTestUpdater(t, "2.0.0", serve(true), nil)
+	got, err := u.CheckForUpdate(context.Background())
+	if err != nil || got == nil {
+		t.Fatalf("CheckForUpdate = %+v, %v", got, err)
+	}
+	if got.ManifestURL != "http://example.com/manifest" || got.ManifestSignatureURL != "http://example.com/manifest.sig" {
+		t.Errorf("manifest URLs = %q, %q", got.ManifestURL, got.ManifestSignatureURL)
+	}
+
+	u, _ = newTestUpdater(t, "2.0.0", serve(false), nil)
+	got, err = u.CheckForUpdate(context.Background())
+	if err != nil || got == nil {
+		t.Fatalf("a release without a manifest: CheckForUpdate = %+v, %v — want it offered", got, err)
+	}
+	if got.ManifestURL != "" {
+		t.Errorf("ManifestURL = %q for a release that has none", got.ManifestURL)
+	}
+}

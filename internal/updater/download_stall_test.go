@@ -48,13 +48,23 @@ func trickleServer(t *testing.T, chunks int, gap, hold time.Duration) *httptest.
 	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Write(make([]byte, ed25519.SignatureSize))
 	})
+	// The bytes /exe sends: chunks of 4 KiB, the first opening with 0x7f.
+	body := make([]byte, chunks*(4<<10))
+	if chunks > 0 {
+		body[0] = 0x7f
+	}
+	serveManifest(mux, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", body)))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func trickleRelease(srv *httptest.Server) *ReleaseInfo {
-	return &ReleaseInfo{Version: "2.0.0", TagName: "v2.0.0", DownloadURL: srv.URL + "/exe", SignatureURL: srv.URL + "/sig"}
+	return &ReleaseInfo{
+		Version: "2.0.0", TagName: "v2.0.0",
+		DownloadURL: srv.URL + "/exe", SignatureURL: srv.URL + "/sig",
+		ManifestURL: srv.URL + "/manifest", ManifestSignatureURL: srv.URL + "/manifest.sig",
+	}
 }
 
 // A release binary is 78-87 MB, and the download used to carry a 5-minute

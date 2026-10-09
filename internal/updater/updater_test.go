@@ -365,6 +365,7 @@ func TestApplyUpdateEndToEnd(t *testing.T) {
 	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Write(make([]byte, ed25519.SignatureSize))
 	})
+	serveManifest(mux, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", []byte(newBody))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
@@ -382,12 +383,7 @@ func TestApplyUpdateEndToEnd(t *testing.T) {
 	}
 	u, exePath := newTestUpdater(t, "1.0.0", srv, verifier)
 
-	err := u.ApplyUpdate(context.Background(), &ReleaseInfo{
-		Version:      "2.0.0",
-		TagName:      "v2.0.0",
-		DownloadURL:  srv.URL + "/exe",
-		SignatureURL: srv.URL + "/sig",
-	})
+	err := u.ApplyUpdate(context.Background(), swapRelease(srv))
 	if err != nil {
 		t.Fatalf("ApplyUpdate: %v", err)
 	}
@@ -419,8 +415,9 @@ func TestApplyUpdateEndToEnd(t *testing.T) {
 	} else if string(pending) != "v2.0.0" {
 		t.Errorf("pending breadcrumb: want %q, got %q", "v2.0.0", string(pending))
 	}
-	if got := verifyCalls.Load(); got != 1 {
-		t.Errorf("verifier calls: want 1, got %d", got)
+	// Two signatures: the manifest's, then the binary's.
+	if got := verifyCalls.Load(); got != 2 {
+		t.Errorf("verifier calls: want 2, got %d", got)
 	}
 }
 
@@ -435,19 +432,20 @@ func TestApplyUpdateRollbackOnVerifyFailure(t *testing.T) {
 	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Write(make([]byte, ed25519.SignatureSize))
 	})
+	serveManifest(mux, manifestJSON(t, platformManifest(t, "2.0.0", "v2.0.0", []byte("tampered binary"))))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	verifier := func(string, string) error {
-		return errors.New("signature mismatch")
+	// The manifest's signature passes; the binary's does not.
+	verifier := func(binPath, _ string) error {
+		if strings.HasSuffix(binPath, ".new") {
+			return errors.New("signature mismatch")
+		}
+		return nil
 	}
 	u, exePath := newTestUpdater(t, "1.0.0", srv, verifier)
 
-	err := u.ApplyUpdate(context.Background(), &ReleaseInfo{
-		Version:      "2.0.0",
-		DownloadURL:  srv.URL + "/exe",
-		SignatureURL: srv.URL + "/sig",
-	})
+	err := u.ApplyUpdate(context.Background(), swapRelease(srv))
 	if err == nil {
 		t.Fatal("ApplyUpdate with bad signature: want error, got nil")
 	}
@@ -473,18 +471,12 @@ func TestApplyUpdateRollbackOnVerifyFailure(t *testing.T) {
 // TestApplyUpdateRefusesMissingSignature covers the explicit refusal
 // when ReleaseInfo.SignatureURL is empty — never apply unsigned binaries.
 func TestApplyUpdateRefusesMissingSignature(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(rw, "x")
-	}))
-	t.Cleanup(srv.Close)
-
+	srv := swapTestServer(t)
 	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
 
-	err := u.ApplyUpdate(context.Background(), &ReleaseInfo{
-		Version:      "2.0.0",
-		DownloadURL:  srv.URL,
-		SignatureURL: "",
-	})
+	unsigned := swapRelease(srv)
+	unsigned.SignatureURL = ""
+	err := u.ApplyUpdate(context.Background(), unsigned)
 	if err == nil {
 		t.Fatal("ApplyUpdate without signature URL: want error, got nil")
 	}
