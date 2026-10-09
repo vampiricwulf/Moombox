@@ -6,7 +6,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	gansi "charm.land/glamour/v2/ansi"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // releaseNotesOverlay is a modal that shows release notes for a pending
@@ -60,7 +63,7 @@ func (o *releaseNotesOverlay) open(tag, rawNotes string, width, height int) {
 }
 
 // applySize sizes the viewport for the given terminal dimensions and
-// re-renders the body at that width (glamour bakes its word wrap into the
+// re-renders the body at that width (renderBody bakes its word wrap into the
 // rendered text, so the content must be regenerated whenever the width
 // changes — resizing the viewport alone would leave the old wrap points).
 //
@@ -182,17 +185,21 @@ func (o *releaseNotesOverlay) View() string {
 // dark palette on a light terminal renders low-contrast body text, and
 // the app already routes the same signal into its huh themes, so the
 // release notes were the one themed surface ignoring it.
+//
+// Glamour renders UNWRAPPED and wrapReleaseNotes wraps its output. Glamour's
+// own wrap put a long bullet's continuation rows flush with the bullet, so
+// every release note — which is nothing but long bullets — read as a column
+// of ragged paragraphs with a dot on the first line of each. Glamour has no
+// hanging indent to ask for, so the wrap is done here, where the list items
+// can be told apart from everything else; see wrapReleaseNotes.
 func (o *releaseNotesOverlay) renderBody(width int) string {
 	if strings.TrimSpace(o.rawNotes) == "" {
 		return "No release notes available for this update."
 	}
-	style := "light"
-	if o.isDark {
-		style = "dark"
-	}
+	style := releaseNotesStyle(o.isDark)
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(style),
-		glamour.WithWordWrap(width),
+		glamour.WithStyles(style),
+		glamour.WithWordWrap(0), // off: wrapReleaseNotes wraps, below
 	)
 	if err != nil {
 		return o.rawNotes
@@ -201,5 +208,100 @@ func (o *releaseNotesOverlay) renderBody(width int) string {
 	if err != nil {
 		return o.rawNotes
 	}
-	return rendered
+	// The right margin glamour kept when it wrapped: it wrapped to the width
+	// less its document margin on BOTH sides and indented by one of them, so
+	// the text stopped a margin short of the edge. Same edge here, so a
+	// paragraph breaks where it always did.
+	margin := 0
+	if style.Document.Margin != nil {
+		margin = int(*style.Document.Margin)
+	}
+	limit := width - margin
+	if limit < 1 {
+		limit = width
+	}
+	return wrapReleaseNotes(rendered, limit)
+}
+
+// releaseNotesListMark tags the hanging-indent column of every list item in
+// glamour's output: U+E000, a private-use rune no release note contains,
+// appended to the bullet ("• "), the enumeration's ". " and a task's checkbox
+// so it lands exactly where the item's text begins. wrapReleaseNotes reads
+// the column off it and removes it before anything is shown.
+//
+// A mark rather than a pattern over the text because the text cannot tell a
+// list item from a code line that happens to begin "1. " — and code blocks
+// must wrap exactly as they did, with no hang.
+const releaseNotesListMark = "\uE000"
+
+// releaseNotesStyle is glamour's standard dark or light style with the list
+// mark added to every list-item prefix: the bullet, the enumeration's ". ",
+// and a task item's two checkboxes, which glamour draws in the bullet's place.
+// A copy: those are values inside the StyleConfig, so the package-level config
+// glamour's other users read is untouched.
+func releaseNotesStyle(dark bool) gansi.StyleConfig {
+	cfg := styles.LightStyleConfig
+	if dark {
+		cfg = styles.DarkStyleConfig
+	}
+	cfg.Item.BlockPrefix += releaseNotesListMark
+	cfg.Enumeration.BlockPrefix += releaseNotesListMark
+	cfg.Task.Ticked += releaseNotesListMark
+	cfg.Task.Unticked += releaseNotesListMark
+	return cfg
+}
+
+// wrapReleaseNotes wraps glamour's unwrapped output so no row is wider than
+// limit, ANSI-aware (lipgloss.Wrap carries a style across the rows it breaks),
+// breaking at spaces and hyphens — the rule glamour applied to paragraphs and
+// headings. Unwrapped, glamour emits one line per block line, so each line is
+// one heading, one paragraph, one code line or one list item, and it decides
+// where that line's continuation rows start:
+//
+//   - a list item continues UNDER ITS TEXT, at the column the list mark
+//     sits in — past the bullet, the "1. " or the checkbox, at any nesting
+//     depth;
+//   - everything else continues at the margin glamour indented the block by,
+//     the run of plain spaces ahead of the line's first escape sequence. That
+//     is where glamour's own wrap put it: a heading or paragraph continues at
+//     its first column, and a code line at the document margin rather than
+//     under the code, exactly as before.
+func wrapReleaseNotes(rendered string, limit int) string {
+	lines := strings.Split(rendered, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		hang := len(line) - len(strings.TrimLeft(line, " "))
+		if i := strings.Index(line, releaseNotesListMark); i >= 0 {
+			hang = ansi.StringWidth(line[:i])
+			line = strings.ReplaceAll(line, releaseNotesListMark, "")
+		}
+		out = append(out, hangingWrap(line, hang, limit)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+// hangingWrap breaks one line into rows no wider than limit: the first keeps
+// its leading hang columns, and every later one starts with hang spaces. A
+// hang that leaves no room for text (a box narrower than a bullet) is dropped,
+// so the narrowest overlay still never spills.
+func hangingWrap(line string, hang, limit int) []string {
+	if ansi.StringWidth(line) <= limit {
+		return []string{line}
+	}
+	if hang >= limit {
+		hang = 0
+	}
+	head := ansi.Truncate(line, hang, "")
+	// TruncateLeft drops the head's cells but keeps its escape sequences, so
+	// the body opens in the style it was in.
+	rows := strings.Split(lipgloss.Wrap(ansi.TruncateLeft(line, hang, ""), limit-hang, ""), "\n")
+	pad := strings.Repeat(" ", hang)
+	for i := range rows {
+		if i == 0 {
+			rows[i] = head + rows[i]
+		} else {
+			rows[i] = pad + rows[i]
+		}
+	}
+	return rows
 }

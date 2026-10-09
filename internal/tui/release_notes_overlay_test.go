@@ -45,10 +45,11 @@ func TestReleaseNotesOverlayKeepsEscHint(t *testing.T) {
 	}
 }
 
-// TestReleaseNotesOverlayReflowsOnResize: the overlay bakes glamour's word
-// wrap into its content at open() time, so a resize while it is open has to
-// re-render — otherwise the text stays wrapped for the old width. Scroll
-// position must survive the reflow.
+// TestReleaseNotesOverlayReflowsOnResize: the overlay bakes its word wrap
+// (wrapReleaseNotes, over glamour's unwrapped output) into its content at
+// open() time, so a resize while it is open has to re-render — otherwise the
+// text stays wrapped for the old width. Scroll position must survive the
+// reflow.
 func TestReleaseNotesOverlayReflowsOnResize(t *testing.T) {
 	o := newReleaseNotesOverlay()
 	o.open("v2.8.1", sampleNotes, 120, 24)
