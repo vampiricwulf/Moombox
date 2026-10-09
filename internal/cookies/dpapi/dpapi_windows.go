@@ -213,8 +213,7 @@ func ReadChromeCookiesStats(profilePath, originFilter string) ([]ChromeCookie, C
 		}
 	}
 
-	dsn := "file:" + cookiesPath + "?mode=ro&_pragma=busy_timeout(2000)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := openCookieDB(cookiesPath)
 	if err != nil {
 		return nil, stats, fmt.Errorf("open SQLite at %q: %w", cookiesPath, err)
 	}

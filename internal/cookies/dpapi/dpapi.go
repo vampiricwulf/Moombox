@@ -27,6 +27,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/vampiricwulf/Moombox/internal/sqliteuri"
 	_ "modernc.org/sqlite"
 )
 
@@ -235,6 +236,17 @@ const chromeDomainHashLen = 32
 // meta.version prefixes decrypted values with the domain hash.
 func chromeUsesHashPrefix(metaVersion int64) bool {
 	return metaVersion >= chromeHashPrefixMetaVersion
+}
+
+// openCookieDB opens a Chromium "Cookies" file read-only: mode=ro, so SQLite
+// never writes into the browser's live database, and a 2-second busy timeout
+// for a browser mid-flush. The path goes through sqliteuri.FileURI because
+// SQLite reads a "file:" DSN as a URI: a '#', '?' or %HH anywhere in the
+// profile path cut it short or decoded it, and the read failed against a file
+// that was not the profile's. It lives outside dpapi_windows.go so the open
+// is tested on every platform.
+func openCookieDB(cookiesPath string) (*sql.DB, error) {
+	return sql.Open("sqlite", sqliteuri.FileURI(cookiesPath)+"?mode=ro&_pragma=busy_timeout(2000)")
 }
 
 // readChromeMetaVersion reads `meta.version` from an open Chrome Cookies

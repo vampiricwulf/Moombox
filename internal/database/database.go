@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/sqliteuri"
 	_ "modernc.org/sqlite"
 )
 
@@ -189,7 +190,7 @@ func FileSchemaVersion(dbPath string) (int, error) {
 	if file == "" {
 		file = dbPath
 	}
-	sqlDB, err := sql.Open("sqlite", sqliteFileURI(file)+"?mode=ro&_pragma=busy_timeout(5000)")
+	sqlDB, err := sql.Open("sqlite", sqliteuri.FileURI(file)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return 0, err
 	}
@@ -199,28 +200,6 @@ func FileSchemaVersion(dbPath string) (int, error) {
 		return 0, err
 	}
 	return v, nil
-}
-
-// sqliteURIPathEscaper escapes the three characters SQLite's URI parser reads
-// in a "file:" path: '%' (a %HH escape), '?' (the query) and '#' (a fragment).
-var sqliteURIPathEscaper = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
-
-// sqliteFileURI is the "file:" URI that names dbPath literally. modernc opens
-// every "file:" DSN with SQLITE_OPEN_URI, so SQLite parses the path as a URI:
-// pasted in raw, a database_path of "/srv/Moombox #2/moombox.db" opened
-// whatever came before the '#' as the database, one with a '?' was cut there
-// and lost the busy_timeout pragma into the query, and "%41" was decoded to
-// "A". Only those three characters are escaped, so a path without them —
-// relative, with spaces, or a Windows one with a drive letter and backslashes
-// — reads exactly as before. A path that starts with "//" is given an empty
-// authority in front of it, or SQLite would read its first segment as a host
-// name and refuse it.
-func sqliteFileURI(dbPath string) string {
-	p := sqliteURIPathEscaper.Replace(dbPath)
-	if strings.HasPrefix(p, "//") {
-		p = "//" + p
-	}
-	return "file:" + p
 }
 
 // legacySQLitePath is the file an earlier release opened for dbPath, which
@@ -278,7 +257,7 @@ const sqliteHeader = "SQLite format 3\x00"
 
 // legacyDatabaseFile is the file an earlier release kept dbPath's database
 // in, when the upgrade would otherwise leave it behind, and "" when there is
-// none. Before sqliteFileURI, a database_path holding '#', '?' or a %HH escape
+// none. Before sqliteuri.FileURI, a database_path holding '#', '?' or a %HH escape
 // opened legacySQLitePath's file instead; opening the literal path after the
 // upgrade would create an empty database there, with no jobs and no history
 // (so the monitors and the backfill would queue the archived videos again),
@@ -322,7 +301,7 @@ func legacyDatabaseFile(dbPath string) (string, error) {
 // holdsJobsTable reports whether the database at path, opened read-only,
 // has a jobs table.
 func holdsJobsTable(path string) (bool, error) {
-	sqlDB, err := sql.Open("sqlite", sqliteFileURI(path)+"?mode=ro&_pragma=busy_timeout(5000)")
+	sqlDB, err := sql.Open("sqlite", sqliteuri.FileURI(path)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return false, err
 	}
@@ -343,7 +322,7 @@ func holdsJobsTable(path string) (bool, error) {
 // (5.6 s on Linux, where fsync is cheap). Nothing else about the test
 // database differs.
 func openDSN(dbPath string, underTest bool) string {
-	dsn := sqliteFileURI(dbPath) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	dsn := sqliteuri.FileURI(dbPath) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	if underTest {
 		dsn += "&_pragma=synchronous(OFF)"
 	}

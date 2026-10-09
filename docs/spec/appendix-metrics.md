@@ -27,7 +27,7 @@
 
 ## Test Baseline
 
-- **Packages:** 37 in `go list ./...`. `go test -count=1 ./...` reports **35 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
+- **Packages:** 38 in `go list ./...`. `go test -count=1 ./...` reports **36 ok / 0 fail**; the other two have no test files (`tools/sidecar-sig-probe`, `web`).
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
@@ -79,6 +79,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | notifications/notificationtest/ | ~140 | 1 | 1 | Shared fakes for the notification manager's tests |
 | disk/ | ~130 | 3 | 2 | Disk space queries: kernel32 on Windows, statfs on Linux |
 | httpx/ | ~110 | 1 | 1 | Shared keep-alive-tuned http.Client/Transport shapes |
+| sqliteuri/ | ~30 | 1 | 1 | The `file:` URI every SQLite open goes through — the job database and the browsers' cookie databases |
 | bgutils/embed/ | ~80 | 4 | 1 | go:embed boundary for the Node binaries + sidecar tarball |
 | stats/ | ~70 | 1 | 1 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |
 | webtest/ | ~70 | 1 | 1 | Shared goja harness for evaluating shipped Web UI JS (`settings.js`) from Go tests |
@@ -86,7 +87,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 ### Totals
 
 - **cmd/:** ~8,670 lines across 25 source files (24 in `cmd/moombox` — entry/launcher/adapters/wiring — plus the sign tool), plus 51 test files (~8,480 lines)
-- **internal/ packages:** ~124,240 lines across 321 source files in 31 packages
+- **internal/ packages:** ~124,270 lines across 322 source files in 32 packages
 - **Test code:** ~160,160 lines across 536 test files under `internal/`
 - **Frontend:** ~22,110 lines across 27 files (~970 KB) — `app.js`, `boot-theme.js`, `favicon.svg`, `index.html`, `login.html`, `login.js`, `moombox.css`, plus 20 ES modules under `web/public/modules/` (`chat-timeline.js`, `files.js`, `filter-bar.js`, `filter-engine.js`, `filter-parser.js`, `imports.js`, `job-details.js`, `log-panel.js`, `logout.js`, `nico-geometry.js`, `nico-lanes.js`, `nico-scheduler.js`, `player.js`, `segments.js`, `settings.js`, `setup.js`, `stats.js`, `trimmer.js`, `update-indicator.js`, `utils.js`)
 

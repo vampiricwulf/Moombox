@@ -9,9 +9,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/sqliteuri"
 )
 
-// legacyOpenDSN is openDSN as every release before sqliteFileURI built it:
+// legacyOpenDSN is openDSN as every release before sqliteuri.FileURI built it:
 // the path pasted into the URI raw.
 func legacyOpenDSN(dbPath string) string {
 	return fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", dbPath)
@@ -242,7 +244,7 @@ func TestOpenCreatesTheConfiguredPathWhenNoEarlierDatabaseIsThere(t *testing.T) 
 			}
 		},
 		"a database without jobs": func(t *testing.T, legacy string) {
-			raw, err := sql.Open("sqlite", sqliteFileURI(legacy))
+			raw, err := sql.Open("sqlite", sqliteuri.FileURI(legacy))
 			if err != nil {
 				t.Fatal(err)
 			}

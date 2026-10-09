@@ -13,6 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/vampiricwulf/Moombox/internal/sqliteuri"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -659,7 +660,11 @@ func isRetryableDBError(err error) bool {
 // queryFirefoxCookieDB opens the Firefox cookie database and reads all cookies.
 //
 // The DSN needs the `file:` prefix — without it modernc/sqlite strips the
-// entire query string and opens read-write with no busy timeout. mode=ro
+// entire query string and opens read-write with no busy timeout — and the
+// path escaped by sqliteuri.FileURI: SQLite reads a "file:" DSN as a URI, so
+// a '#', '?' or %HH in the profile path or in the temp directory the snapshot
+// lands in cut the path short or decoded it, and the read failed as "no such
+// table: moz_cookies", reported as a corrupt cookie database. mode=ro
 // guarantees we never write into the browser's live database (a read-write
 // open can perform WAL-index recovery writes), and
 // `_pragma=busy_timeout(2000)` (modernc's parameter syntax) hands SQLite the
@@ -670,7 +675,7 @@ func isRetryableDBError(err error) bool {
 func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 	var stats firefoxReadStats
 
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
+	db, err := sql.Open("sqlite", sqliteuri.FileURI(dbPath)+"?mode=ro&_pragma=busy_timeout(2000)")
 	if err != nil {
 		return nil, stats, fmt.Errorf("open cookies.sqlite: %w", err)
 	}

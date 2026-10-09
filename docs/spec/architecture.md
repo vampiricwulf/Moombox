@@ -208,12 +208,13 @@ internal/tui       (43 files, ~22,710) -- 2-over-1 panel layout, overlays, chord
 internal/goja       (5 files, ~1,470)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
 internal/connectivity (3 files, ~480)  -- reachability monitor (plain TCP dial); gates stream-end verdicts during outages
 internal/httpx      (1 file,  ~110)    -- shared keep-alive-tuned http.Client/Transport shapes
+internal/sqliteuri  (1 file,  ~30)     -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
 internal/disk       (3 files, ~130)    -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants  (1 file,  ~320)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (26 files, ~2,590)  -- HTTP helpers, formatters, YouTube URL parsing
 ```
 
-Total: approximately 124,200 lines of Go across 321 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
+Total: approximately 124,200 lines of Go across 322 source files under `internal/` (excluding tests, web assets, and `cmd/`). `appendix-metrics.md` is the maintained copy of these numbers and carries the script that regenerates them.
 
 ### Dependency Direction
 
@@ -231,11 +232,12 @@ The lists below are the `internal/` imports of each package as `go list -f '{{jo
 - `internal/twitch` imports: `constants`, `cookies`, `httpx`, `utils`
 - `internal/cipher` imports: `bgutils/sidecar`, `goja`, `httpx`, `utils`
 - `internal/bgutils` imports: `bgutils/sidecar`, `constants`, `goja`, `httpx`
-- `internal/cookies` imports: `constants`, `cookies/dpapi`, `httpx`, `utils`
+- `internal/cookies` imports: `constants`, `cookies/dpapi`, `httpx`, `sqliteuri`, `utils` (`cookies/dpapi` imports only `sqliteuri`)
 - `internal/engine` imports: `constants`, `httpx`, `utils` (e.g. `DownloadChunkSize` is `constants.DownloadChunkSize`)
 - `internal/chat` / `internal/notifications` import: `constants`/`config`, `httpx`, `utils`
 - `internal/utils` imports: `connectivity`, `constants`, `httpx`
-- `internal/database`, `internal/constants`, `internal/httpx`, `internal/connectivity` import nothing from internal
+- `internal/database` imports: `sqliteuri`
+- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri` import nothing from internal
 
 Cross-cutting concerns (logging, notifications, events) flow through callback closures wired in `cmd/moombox` (`services.go`, `monitor_callbacks.go`, `tui_wiring.go`), not through package imports.
 

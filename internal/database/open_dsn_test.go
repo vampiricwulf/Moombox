@@ -63,7 +63,7 @@ func TestOpenUnderGoTestRunsWithoutSyncing(t *testing.T) {
 // was decoded so the open failed, and "//tmp/..." was refused as a URI
 // authority.
 //
-// MUTANTS: drop any one of the three escapes from sqliteURIPathEscaper (that
+// MUTANTS: drop any one of the three escapes from sqliteuri.FileURI (that
 // row fails); drop the "//" authority prefix (the "//" row fails to open);
 // build openDSN or FileSchemaVersion from the raw path again (the rows fail
 // in Open, or in the FileSchemaVersion check).
@@ -144,29 +144,5 @@ func checkOpensAt(t *testing.T, openPath, want string) {
 	}
 	if v, err := FileSchemaVersion(openPath); err != nil || v != schemaVersion {
 		t.Errorf("FileSchemaVersion(%q) = %d, %v; want %d", openPath, v, err, schemaVersion)
-	}
-}
-
-// TestSQLiteFileURIChangesOnlyWhatSQLiteWouldMisread pins the other half of
-// the escaping: a path with none of '%', '?', '#' and no leading "//" is
-// passed through untouched, so the relative default and Windows paths (drive
-// letter, backslashes), which cannot be opened on this runner, read exactly
-// as they always have.
-//
-// MUTANT: url.PathEscape-style escaping of the whole path (the space, the
-// colon or the backslashes change).
-func TestSQLiteFileURIChangesOnlyWhatSQLiteWouldMisread(t *testing.T) {
-	t.Parallel()
-	for in, want := range map[string]string{
-		"./moombox.db":                   "file:./moombox.db",
-		`C:\Users\me\Moombox\moombox.db`: `file:C:\Users\me\Moombox\moombox.db`,
-		"/srv/My Moombox/moombox.db":     "file:/srv/My Moombox/moombox.db",
-		"/srv/Moombox #2/moombox.db":     "file:/srv/Moombox %232/moombox.db",
-		"/srv/a?b/100%/moombox.db":       "file:/srv/a%3Fb/100%25/moombox.db",
-		"//srv/moombox.db":               "file:////srv/moombox.db",
-	} {
-		if got := sqliteFileURI(in); got != want {
-			t.Errorf("sqliteFileURI(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
