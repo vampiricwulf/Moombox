@@ -76,31 +76,18 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	if totalSize <= 0 {
 		// The server really does not support Range requests — stream it.
 		// No reset here: the fallback resumes from d.bytesWritten with its
-		// own Range header and discards only if the server ignores it.
+		// own Range header, and discards only if the server ignores it or
+		// its answer states a total the partial is not a prefix of.
 		return d.runDirectDownloadFallback(ctx)
 	}
 
 	// A resumed partial is a prefix of ONE file, and the probe has just said
-	// how long the file behind this URL is. A total that differs from the one
-	// the sidecar was saved against — or that the partial already overruns —
-	// is a different file: a different rendition the selection picked this
-	// time, or a re-encode under the same itag. Appending to it was the
-	// splice the identity check alone could not catch on a URL without
-	// `clen`. Start it over, the way an identity mismatch in Start does for
+	// how long the file behind this URL is (differentFileReason). Start a
+	// different file over, the way an identity mismatch in Start does for
 	// this path.
-	if staged := d.bytesWritten.Load(); staged > 0 {
-		reason := ""
-		switch {
-		case d.directTotalSize > 0 && totalSize != d.directTotalSize:
-			reason = fmt.Sprintf("probed size %d is not the %d the resume state was saved against — a different file",
-				totalSize, d.directTotalSize)
-		case staged > totalSize:
-			reason = fmt.Sprintf("%d bytes staged but the probed size is %d — a different file", staged, totalSize)
-		}
-		if reason != "" {
-			if err := d.discardStagedMedia(reason); err != nil {
-				return err
-			}
+	if reason := d.differentFileReason(d.bytesWritten.Load(), totalSize, "the probe"); reason != "" {
+		if err := d.discardStagedMedia(reason); err != nil {
+			return err
 		}
 	}
 	d.directTotalSize = totalSize
@@ -259,6 +246,31 @@ func directShortFileError(answer string, offset, totalSize int64) error {
 		answer, offset, totalSize)
 }
 
+// differentFileReason says why staged bytes cannot be a prefix of a file whose
+// origin, asked by source, states it is total bytes long — or "" when they can
+// be, or when nothing is staged. A total that differs from the one the sidecar
+// was saved against, or that the partial already overruns, is a different
+// file: a different rendition the selection picked this time, or a re-encode
+// under the same itag. Appending to it was the splice the identity check
+// alone could not catch on a URL without `clen`.
+//
+// Both whole-file paths ask it of the first total they are told: the chunked
+// loop of its size probe, and the streaming fallback — which a failed probe
+// routes a resume into — of the Content-Range its resume Range is answered
+// with.
+func (d *SegmentDownloader) differentFileReason(staged, total int64, source string) string {
+	switch {
+	case staged <= 0:
+		return ""
+	case d.directTotalSize > 0 && total != d.directTotalSize:
+		return fmt.Sprintf("%s states a total of %d, not the %d the resume state was saved against — a different file",
+			source, total, d.directTotalSize)
+	case staged > total:
+		return fmt.Sprintf("%d bytes staged but %s states a total of %d — a different file", staged, source, total)
+	}
+	return ""
+}
+
 // discardStagedMedia is the ONLY place staged media is destroyed on purpose.
 // It reopens OutputFile O_TRUNC — not d.outputFile.Truncate, because Windows
 // refuses ftruncate on an O_APPEND handle ("Access is denied") and reopening
@@ -266,6 +278,11 @@ func directShortFileError(answer string, offset, totalSize int64) error {
 // counter and clears the resume sidecar. Start's deferred Close reads
 // d.outputFile at exit, so reassigning it is safe. No-op when nothing has
 // been written yet.
+//
+// It forgets the recorded total too: that was the length of the file just
+// discarded, and a checkpoint of whatever is fetched next must not hold it to
+// the old one's. The chunked loop records its probe's total straight after;
+// the streaming fallback, whose 200 may state none, records nothing.
 //
 // reason is logged: every discard must be attributable, because the guard in
 // Start (ErrStagedMediaPresent) exists precisely so that nothing else can do
@@ -283,6 +300,7 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 	}
 	d.outputFile = f
 	d.bytesWritten.Store(0)
+	d.directTotalSize = 0
 	d.ClearResume()
 	return nil
 }
@@ -291,8 +309,17 @@ func (d *SegmentDownloader) discardStagedMedia(reason string) error {
 // available. It still SENDS a Range from the resume offset: the fallback used
 // to open at byte 0 unconditionally, so a transient probe failure on a
 // resumed VOD threw the staged bytes away (sweep-2 ENGINE-6). Only a server
-// that answers 200 to that Range — i.e. one that is sending from byte 0 —
-// forces a discard, and that discard is explicit.
+// that answers 200 to that Range — i.e. one that is sending from byte 0 — or
+// whose answer names another file (below) forces a discard, and that discard
+// is explicit.
+//
+// A resume reaches this path when the size probe failed, so the check the
+// chunked loop makes of the probe's total — is the partial a prefix of this
+// file? — is made here of the total the answer itself states
+// (differentFileReason): a 206 or 416 naming another file discards the
+// partial and streams the file again from byte 0 (restartDirectFallback).
+// Without it an outage that failed the probe let a resume append one file's
+// tail to another's checkpoint, or finish a partial longer than the file.
 //
 // The whole transfer runs under the same read-progress (idle) deadline the
 // segment and chunk fetches use. It is the only bound this GET has: the
@@ -331,7 +358,13 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 		start, ok := parseContentRangeStart(resp.Header)
 		switch {
 		case ok && start == offset:
-			// The body continues where the file stops.
+			// The body continues where the file stops — when it is the same
+			// file, which the total this answer states settles.
+			if total, known := parseContentRangeTotal(resp.Header); known {
+				if reason := d.differentFileReason(offset, total, "the resume Range's 206"); reason != "" {
+					return d.restartDirectFallback(parent, resp, reason)
+				}
+			}
 		case ok && start == 0 && offset > 0:
 			// Same shape as the 200 below — the origin restarted from the
 			// top and labelled it honestly, so the staged bytes must go.
@@ -352,12 +385,27 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 		}
 	default:
 		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && offset > 0 {
-			// The resume offset is at or past EOF: the staged file already
-			// holds everything the origin has. This path knows no total, so
-			// the origin's word is all there is — the pre-arc fallback, which
-			// sent no Range, simply re-fetched the whole file. The chunked
-			// loop, which does know the total, reads a 416 below it as a
-			// short origin instead (directShortFileError).
+			// The resume offset is at or past EOF — complete only if the
+			// staged bytes are the whole file. The total a 416 may state
+			// (`bytes */<total>`) is held to the partial first, as a 206's
+			// is; without one, the total the sidecar was saved against is
+			// the length the file has. A known total other than the offset
+			// is the short origin the chunked loop reads a 416 below its
+			// total as (directShortFileError), and the sidecar is kept for a
+			// Resume whose probe settles it. Knowing neither — a legacy
+			// sidecar — the origin's word is all there is, as for the
+			// pre-arc fallback, which sent no Range and re-fetched the file.
+			total, known := parseContentRangeTotal(resp.Header)
+			if known {
+				if reason := d.differentFileReason(offset, total, "the resume Range's 416"); reason != "" {
+					return d.restartDirectFallback(parent, resp, reason)
+				}
+			} else {
+				total = d.directTotalSize
+			}
+			if total > 0 && total != offset {
+				return directShortFileError("416 Range Not Satisfiable", offset, total)
+			}
 			d.logger.Info("[Downloader] Resume offset is at or past EOF — staged file is already complete",
 				"offset", offset)
 			d.ClearResume()
@@ -429,4 +477,18 @@ func (d *SegmentDownloader) runDirectDownloadFallback(parent context.Context) er
 	// to its offset on the next run (sweep-2 B-M1).
 	d.ClearResume()
 	return nil
+}
+
+// restartDirectFallback answers a resume Range whose answer names a different
+// file (differentFileReason): the body it carries starts at the resume offset
+// of the wrong file, so none of it is usable. It closes that response,
+// discards the partial and streams the file again. The discard zeroes the
+// byte counter, so the second request sends no Range and nothing that leads
+// here can fire on it — one level deep at most.
+func (d *SegmentDownloader) restartDirectFallback(parent context.Context, resp *http.Response, reason string) error {
+	resp.Body.Close()
+	if err := d.discardStagedMedia(reason); err != nil {
+		return err
+	}
+	return d.runDirectDownloadFallback(parent)
 }

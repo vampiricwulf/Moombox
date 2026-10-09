@@ -821,6 +821,31 @@ func parseContentRangeStart(h http.Header) (int64, bool) {
 	return start, true
 }
 
+// parseContentRangeTotal extracts the complete length a Content-Range states
+// — the `<total>` of `bytes <start>-<end>/<total>`, and of the `bytes */<total>`
+// form a 416 may carry. A `*` total is unknown and returns ok=false, as do an
+// absent, non-`bytes` or unparsable header.
+//
+// The streaming fallback reads it because a failed size probe is how that path
+// is reached: the answer to its own resume Range is then the one statement of
+// the file's length it gets, and a resumed partial is held to it the way
+// runDirectDownload holds one to the probe (differentFileReason).
+func parseContentRangeTotal(h http.Header) (int64, bool) {
+	unit, spec, found := strings.Cut(strings.TrimSpace(h.Get("Content-Range")), " ")
+	if !found || !strings.EqualFold(unit, "bytes") {
+		return 0, false
+	}
+	_, totalStr, found := strings.Cut(strings.TrimSpace(spec), "/")
+	if !found {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(strings.TrimSpace(totalStr), 10, 64)
+	if err != nil || total < 0 {
+		return 0, false // "*" fails the parse: an unknown length
+	}
+	return total, true
+}
+
 // probeFileSize discovers the total file size using a Range: bytes=0-0 request.
 // Returns 0 if the server doesn't support Range requests or the size is unknown.
 //

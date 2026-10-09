@@ -364,6 +364,41 @@ func TestParseContentRangeStart(t *testing.T) {
 	}
 }
 
+// TestParseContentRangeTotal pins the total the streaming fallback holds a
+// resumed partial to: from a 206's range form and from the `bytes */<total>`
+// form a 416 may carry, and never from an unknown `*` length or a header that
+// is not a byte range.
+//
+// Mutant: dropping the `bytes` unit check — "items 1-2/3" reads as a total of
+// 3. Mutant: dropping `total < 0` — "bytes 8-15/-1" reads as a total.
+func TestParseContentRangeTotal(t *testing.T) {
+	for _, tc := range []struct {
+		header    string
+		wantTotal int64
+		wantOK    bool
+	}{
+		{"bytes 8-15/16", 16, true},
+		{"bytes */16", 16, true}, // the 416 shape states its total too
+		{"  bytes  8-15/16  ", 16, true},
+		{"bytes 8-15/*", 0, false}, // an unknown length
+		{"", 0, false},
+		{"items 1-2/3", 0, false},
+		{"bytes 8-15", 0, false},
+		{"bytes 8-15/abc", 0, false},
+		{"bytes 8-15/-1", 0, false},
+	} {
+		h := http.Header{}
+		if tc.header != "" {
+			h.Set("Content-Range", tc.header)
+		}
+		total, ok := parseContentRangeTotal(h)
+		if total != tc.wantTotal || ok != tc.wantOK {
+			t.Errorf("parseContentRangeTotal(%q) = (%d, %v), want (%d, %v)",
+				tc.header, total, ok, tc.wantTotal, tc.wantOK)
+		}
+	}
+}
+
 // TestStreamingFallbackAdoptsAnHonest206FromZero pins the review's ZZ2 origin:
 // a 206 that answers "bytes=8-" with "Content-Range: bytes 0-15/16" and the
 // WHOLE file is sending from byte 0 and saying so, which is the 200 case

@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,8 +71,8 @@ func headedBody(n int, fill byte) []byte {
 // Mutant: dropping `TotalSize: d.directTotalSize` from saveResume — the
 // sidecar records no total and the resume splices. Mutant: dropping
 // `d.directTotalSize = state.TotalSize` from Start — the same splice. Mutant:
-// dropping the `totalSize != d.directTotalSize` arm in runDirectDownload —
-// the same splice.
+// dropping the `total != d.directTotalSize` arm in differentFileReason — the
+// same splice.
 func TestDirectResumeRefusesADifferentTotal(t *testing.T) {
 	bodyA := headedBody(2*DownloadChunkSize+100, 'A')
 	bodyB := headedBody(3*DownloadChunkSize, 'B')
@@ -124,7 +127,7 @@ func TestDirectResumeRefusesADifferentTotal(t *testing.T) {
 // The loop never ran for it — the offset was past the total — so the old
 // partial "completed" as it stood.
 //
-// Mutant: dropping the `staged > totalSize` arm in runDirectDownload — Start
+// Mutant: dropping the `staged > total` arm in differentFileReason — Start
 // returns nil over rendition A's partial.
 func TestDirectResumeRefusesAPartialLongerThanTheFile(t *testing.T) {
 	staged := headedBody(3000, 'A')
@@ -148,5 +151,189 @@ func TestDirectResumeRefusesAPartialLongerThanTheFile(t *testing.T) {
 	if got, _ := os.ReadFile(out); !bytes.Equal(got, bodyB) {
 		t.Errorf("output is %d bytes with %d of the old partial — want the %d-byte file the origin serves",
 			len(got), bytes.Count(got, []byte("A")), len(bodyB))
+	}
+}
+
+// TestDifferentFileReason pins the rule both whole-file paths hold a resumed
+// partial to. Nothing staged has nothing to refuse — that is also what bounds
+// restartDirectFallback to one level, since its discard zeroes the counter
+// before it re-enters the fallback.
+//
+// Mutant: dropping the `staged <= 0` case — the nothing-staged row returns a
+// reason, and a fallback re-entered after a discard would restart forever.
+func TestDifferentFileReason(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		staged, recorded, total int64
+		want                    bool
+	}{
+		{"nothing staged", 0, 1000, 16, false},
+		{"the recorded total", 8, 16, 16, false},
+		{"another total than the recorded one", 8, 16, 32, true},
+		{"no recorded total, the partial within the file", 8, 0, 16, false},
+		{"no recorded total, the partial longer than the file", 8, 0, 4, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &SegmentDownloader{directTotalSize: tc.recorded}
+			if got := d.differentFileReason(tc.staged, tc.total, "the probe"); (got != "") != tc.want {
+				t.Errorf("differentFileReason(%d, %d) with %d recorded = %q, want a reason: %v",
+					tc.staged, tc.total, tc.recorded, got, tc.want)
+			}
+		})
+	}
+}
+
+// seedWholeFileResume stages a whole-file checkpoint — the bytes and the
+// sidecar Start validates — recording total as the length of the file they
+// are a prefix of (0: a legacy sidecar that recorded none).
+func seedWholeFileResume(t *testing.T, out string, staged []byte, total int64) {
+	t.Helper()
+	if err := os.WriteFile(out, staged, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := utils.ResumeStore[ResumeState]{Path: out + resumeFileSuffix}
+	if err := store.Save(ResumeState{BytesWritten: int64(len(staged)), TotalSize: total, Timestamp: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDirectFallbackResumeRefusesADifferentTotal pins the probed-total check
+// on the path a failed probe routes a resume into. The sidecar holds a
+// checkpoint of rendition A and A's total; the probe answers 503 throughout,
+// so the streaming fallback asks for the rest with a Range, and the 206 that
+// comes back states rendition B's total. That is a different file: the
+// partial is discarded and B streamed from byte 0, where the fallback used to
+// append B's tail to A's checkpoint and return nil over the splice.
+//
+// The restart breaks off part-way, and the checkpoint it leaves must not
+// carry A's total — it describes B's bytes now. A third run resumes B from it.
+//
+// Mutant: dropping the differentFileReason call from the fallback's 206 arm —
+// run 2 returns nil over A's checkpoint with B's tail appended. Mutant:
+// dropping `d.directTotalSize = 0` from discardStagedMedia — run 2's
+// checkpoint holds B's bytes to A's total.
+func TestDirectFallbackResumeRefusesADifferentTotal(t *testing.T) {
+	const totalA = 250_000
+	bodyB := headedBody(300_000, 'B')
+	out := filepath.Join(t.TempDir(), "video.mp4")
+	seedWholeFileResume(t, out, headedBody(100_000, 'A'), totalA)
+
+	var cut atomic.Bool
+	cut.Store(true)
+	serveB := serveRangeFile(bodyB)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch rng := r.Header.Get("Range"); {
+		case rng == "bytes=0-0":
+			w.WriteHeader(http.StatusServiceUnavailable) // the probe fails throughout
+		case rng == "" && cut.Load():
+			// The restart from byte 0 breaks off after 200 KB.
+			w.Header().Set("Content-Length", strconv.Itoa(len(bodyB)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(bodyB[:200_000])
+		default:
+			serveB(w, r)
+		}
+	}))
+	defer srv.Close()
+	run := func() error {
+		d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
+		d.delays = fastDelays()
+		d.directResumeIntervalOverride = 64 << 10
+		return d.Start(t.Context())
+	}
+
+	if err := run(); err == nil {
+		got, _ := os.ReadFile(out)
+		t.Fatalf("run 2 Start = nil over %d bytes holding %d of rendition A — want B from byte 0, cut by the break-off",
+			len(got), bytes.Count(got, []byte("A")))
+	}
+	var saved ResumeState
+	if data, err := os.ReadFile(out + resumeFileSuffix); err != nil {
+		t.Fatalf("the restart left no checkpoint: %v", err)
+	} else if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.BytesWritten <= 0 || saved.TotalSize == totalA {
+		t.Errorf("the restart's checkpoint = %+v — want B's bytes, not held to A's total %d", saved, totalA)
+	}
+
+	cut.Store(false)
+	if err := run(); err != nil {
+		t.Fatalf("run 3 Start: %v", err)
+	}
+	if got, _ := os.ReadFile(out); !bytes.Equal(got, bodyB) {
+		t.Errorf("output is %d bytes with %d of rendition A — want rendition B alone (%d bytes)",
+			len(got), bytes.Count(got, []byte("A")), len(bodyB))
+	}
+}
+
+// TestDirectFallbackResume416HoldsThePartialToItsFile pins the 416 arm of the
+// same check. A 416 at the resume offset used to read as "the staged file is
+// already complete" whatever any total said, so a resume whose probe failed
+// finished a partial of a longer file — or of a different, shorter one — as
+// the archive. The partial is complete only when the totals known agree it is
+// the whole file: a stated total naming another file restarts it, and a known
+// total the offset falls short of is a short origin — an error that keeps the
+// checkpoint for a Resume whose probe settles it.
+//
+// Mutant: dropping the `total > 0 && total != offset` return — both
+// short-origin rows return nil over the partial. Mutant: dropping the
+// differentFileReason call from the 416 arm — the shorter-file row fails as a
+// short origin instead of fetching the file. Mutant: `total != offset` →
+// `total > 0` — the at-the-total row fails over a complete file.
+func TestDirectFallbackResume416HoldsThePartialToItsFile(t *testing.T) {
+	staged := headedBody(100_000, 'A')
+	bodyB := headedBody(50_000, 'B')
+	for _, tc := range []struct {
+		name         string
+		recorded     int64  // the sidecar's TotalSize
+		contentRange string // the 416's, "" for none
+		wantErr      bool
+		want         []byte // the output file afterwards
+	}{
+		{"below the recorded total — a short origin", 250_000, "", true, staged},
+		{"a stated total past the offset — a short origin", 0, "bytes */250000", true, staged},
+		{"a stated total shorter than the partial — a different file, fetched", 0, "bytes */50000", false, bodyB},
+		{"at the recorded total — complete", int64(len(staged)), "", false, staged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "video.mp4")
+			seedWholeFileResume(t, out, staged, tc.recorded)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch rng := r.Header.Get("Range"); rng {
+				case "bytes=0-0":
+					w.WriteHeader(http.StatusServiceUnavailable) // the probe fails throughout
+				case "":
+					w.Header().Set("Content-Length", strconv.Itoa(len(bodyB)))
+					w.WriteHeader(http.StatusOK)
+					w.Write(bodyB)
+				default:
+					if tc.contentRange != "" {
+						w.Header().Set("Content-Range", tc.contentRange)
+					}
+					w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				}
+			}))
+			defer srv.Close()
+
+			d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL + "/video.mp4", OutputFile: out, IsDirectURL: true})
+			d.delays = fastDelays()
+			err := d.Start(t.Context())
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("Start = %v, want error %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "416") {
+				t.Errorf("error = %q, want it to name the 416", err)
+			}
+			if got, _ := os.ReadFile(out); !bytes.Equal(got, tc.want) {
+				t.Errorf("output is %d bytes (%d A, %d B), want %d bytes (%d A, %d B)",
+					len(got), bytes.Count(got, []byte("A")), bytes.Count(got, []byte("B")),
+					len(tc.want), bytes.Count(tc.want, []byte("A")), bytes.Count(tc.want, []byte("B")))
+			}
+			if _, statErr := os.Stat(out + resumeFileSuffix); (statErr == nil) != tc.wantErr {
+				t.Errorf("sidecar present = %v, want %v — an error keeps the checkpoint, a finished file clears it",
+					statErr == nil, tc.wantErr)
+			}
+		})
 	}
 }

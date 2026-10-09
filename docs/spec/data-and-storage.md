@@ -1151,7 +1151,10 @@ the file with fragments that reference a different `moov`.
    download is then held to its file once the probe answers: a total other
    than the recorded `TotalSize`, or a partial longer than the file, means a
    different file, and `runDirectDownload` starts over
-   (`internal/engine/downloader_direct.go`).
+   (`internal/engine/downloader_direct.go`). When the probe fails, the
+   streaming fallback holds it to the total its resume Range's answer states
+   instead, and a 416 short of the recorded `TotalSize` is an error that
+   keeps the sidecar, never a completed file.
 3. If validation fails, the resume file is discarded — but the staged
    bytes are not. NO caller truncates them. The shared no-truncate guard in
    `Start` (`internal/engine/downloader.go`) runs whenever the engine could
