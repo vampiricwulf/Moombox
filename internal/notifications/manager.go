@@ -9,9 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 )
 
 // discordWebhookRe validates standard Discord webhook URLs (HTTPS only).
@@ -33,28 +33,6 @@ import (
 // one, and its parse error quotes the whole URL, token and all — every send
 // logged it, and the test route answered it, while validation had passed.
 var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#\s\x00-\x1f\x7f]*)?$`)
-
-// redactURLForLog reduces an arbitrary notification URL to scheme://host for
-// log lines. Webhook URLs routinely embed secrets in their path or query
-// (Discord tokens, Slack /services/ paths, ntfy tokens) — a rejection log
-// that copies one verbatim ends up in every store that tails the log file.
-func redactURLForLog(raw string) string {
-	scheme, rest, ok := strings.Cut(raw, "://")
-	if !ok {
-		// No scheme — show only a short prefix, cut on a rune boundary so a
-		// multi-byte character at the edge doesn't log invalid UTF-8.
-		if len(raw) > 16 {
-			cut := 16
-			for cut > 0 && !utf8.RuneStart(raw[cut]) {
-				cut--
-			}
-			return raw[:cut] + "…<redacted>"
-		}
-		return raw
-	}
-	host, _, _ := strings.Cut(rest, "/")
-	return scheme + "://" + host + "/…<redacted>"
-}
 
 // NotificationType represents the visual style of a notification.
 type NotificationType int
@@ -377,7 +355,7 @@ type sender interface {
 // Audit reports/small-packages.md.
 //
 // Error messages never echo the URL (webhook paths are secrets) — callers
-// that log attach a redacted form themselves.
+// that log attach redact.URLOrigin's form themselves.
 func parseTarget(url string) (sender, error) {
 	switch {
 	case strings.HasPrefix(url, "discord://"):
@@ -537,7 +515,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		// Before parseTarget and before the dedupe, so a disabled entry can
 		// neither shadow its enabled twin nor warn about a URL nobody uses.
 		if !nc.IsEnabled() {
-			logger.Info("notification target disabled — skipping", "url", redactURLForLog(url))
+			logger.Info("notification target disabled — skipping", "url", redact.URLOrigin(url))
 			continue
 		}
 
@@ -545,8 +523,12 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		if err != nil {
 			// Redacted: even a near-valid URL carries a real secret; a
 			// rejection log that copies it verbatim ends up in every
-			// log-collection store that tails the file.
-			logger.Warn("rejected notification URL: "+err.Error(), "url", redactURLForLog(url))
+			// log-collection store that tails the file. Nothing validated
+			// this entry before here (config.Validate does not check
+			// notification URLs), so its secret can sit anywhere — the
+			// userinfo of an https URL, the authority of a tgram:// one —
+			// which is why URLOrigin keeps the scheme and host alone.
+			logger.Warn("rejected notification URL: "+err.Error(), "url", redact.URLOrigin(url))
 			continue
 		}
 
@@ -562,14 +544,14 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// than falling back to "all events".
 				if e == "" {
 					logger.Warn("notification target filters on empty event name — ignored",
-						"url", redactURLForLog(url))
+						"url", redact.URLOrigin(url))
 					continue
 				}
 				// A typo'd event name would otherwise be silently filtered
 				// forever — the allowlist never matches, no error anywhere.
 				if !KnownEvents[e] {
 					logger.Warn("notification target filters on unknown event — it will never match",
-						"event", e, "url", redactURLForLog(url))
+						"event", e, "url", redact.URLOrigin(url))
 				}
 				events[e] = true
 			}
@@ -609,7 +591,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			for _, e := range resolved {
 				if e == "" {
 					logger.Warn("notification target mentions on an empty event name — ignored",
-						"url", redactURLForLog(url))
+						"url", redact.URLOrigin(url))
 					continue
 				}
 				// Only an OPERATOR-written list is vocabulary-checked. The
@@ -617,7 +599,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// about our own defaults at every startup.
 				if nc.MentionEvents != nil && !KnownEvents[e] {
 					logger.Warn("notification target mentions on an unknown event — it will never match",
-						"event", e, "url", redactURLForLog(url))
+						"event", e, "url", redact.URLOrigin(url))
 				}
 				mentionEvents[e] = true
 			}

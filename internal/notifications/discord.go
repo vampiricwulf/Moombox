@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 )
 
 const (
@@ -565,7 +566,7 @@ func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool)
 		// url.Parse's error is a *url.Error quoting the whole URL — the
 		// webhook token — exactly like a transport error below.
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
-			return discordResponse{}, fmt.Errorf("create discord request: %s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+			return discordResponse{}, fmt.Errorf("create discord request: %s %s: %w", uerr.Op, redact.URLOrigin(uerr.URL), uerr.Err)
 		}
 		return discordResponse{}, fmt.Errorf("create discord request: %w", err)
 	}
@@ -579,7 +580,7 @@ func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool)
 		// log, SendTest's route response, retry-loop wrap all flow through
 		// here).
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
-			return discordResponse{}, fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+			return discordResponse{}, fmt.Errorf("%s %s: %w", uerr.Op, redact.URLOrigin(uerr.URL), uerr.Err)
 		}
 		return discordResponse{}, err
 	}

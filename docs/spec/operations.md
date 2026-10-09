@@ -503,6 +503,8 @@ Notifications are configured in the TOML config as an array of notification targ
 
 URL validation rejects non-HTTPS Discord webhook URLs and URLs with invalid ID/token structure. Unsupported URL schemes are logged as warnings and skipped.
 
+Every log line and error that names a notification URL carries `redact.URLOrigin`'s form of it (`internal/redact/url.go`), never the URL: an `http`/`https` URL is reduced to its scheme and host name (`https://discord.com/…<redacted>` — no userinfo, port, path, query or fragment), any other scheme to the scheme alone (`tgram://…<redacted>`), and a string with no `scheme://` to `…<redacted>`. The rule has to be that strict because nothing validates an entry before `buildTargets` logs it — `config.Validate` does not check notification URLs and a disabled entry is never parsed — so a hand-edited URL can carry its credential anywhere: in the userinfo (`https://user:password@host`, `ntfys://token@host`), in the authority (`tgram://<bot token>/<chat>`), in a query with no path before it, or in Discord's own webhook path. The same form replaces the URL in a Discord request's construction and transport errors (`DiscordWebhook.do`, `internal/notifications/discord.go`), which reach the queue's failure log and the test route's response.
+
 ### Target Options
 
 Each entry in the `[[notifications]]` array is a `NotificationConfig` (`internal/config/types.go`) and carries four options besides its URL and event filter:
