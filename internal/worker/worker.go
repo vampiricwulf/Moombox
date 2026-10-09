@@ -445,14 +445,11 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 		w.wg.Go(func() {
 			defer func() {
+				// processJob records its own panic (recordRunPanic), ahead
+				// of the Complete that ends the run; this one is what
+				// recording it panics into, and records it the same way.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					// Not over an outcome: the run may have finished or
-					// failed before it panicked, or the operator cancelled
-					// it while it ran — written unconditionally, that
-					// Cancelled came back as "internal panic". processJob
-					// runs no row that is already terminal, so whichever
-					// one it holds landed during this run and stands.
 					w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 						"status": database.StatusError,
 						"error":  fmt.Sprintf("internal panic: %v", r),
@@ -798,6 +795,19 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		// to admit the channel's next backlog VOD now rather than on its
 		// heartbeat. Coalesced + non-blocking; harmless when nothing freed.
 		w.scheduler.Wake()
+	}()
+	// Deferred after the Complete above, so it runs before it: Complete
+	// drops the run's user-cancel flag, and Start's recover — which used to
+	// record a panic alone — found nothing left to say a Cancel had flagged
+	// the run, so the Job Cancelled the cancel route left to it was never
+	// sent. Its own defer, not a recover inside the one above: a panic in
+	// the record goes on to Start's recover and still passes through the
+	// Complete.
+	var job *database.Job
+	defer func() {
+		if r := recover(); r != nil {
+			w.recordRunPanic(jobID, job, r)
+		}
 	}()
 
 	job, err := w.db.GetJob(jobID)
@@ -1311,6 +1321,39 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 		}
 	}
 	return false
+}
+
+// recordRunPanic records a processJob run that panicked, from processJob's own
+// recover — ahead of its deferred Complete, which drops the run's user-cancel
+// flag. job is the row the run read, nil when it panicked before reading one.
+//
+// Settled the way setJobError settles a failure (JobQueue.settle). A Cancel
+// that flagged the run first left its Job Cancelled to the run, so the run
+// ends as a cancelled one and sends it (handleCancellation) — unless the
+// run's own outcome landed over the Cancel: a Finished archive whose tail
+// panicked stands, as below. Otherwise the run is settled now, and a Cancel
+// from here on is its caller's to report.
+//
+// The panic's Error is not written over an outcome: the run may have finished
+// or failed before it panicked, or the operator cancelled it while it ran —
+// written unconditionally, that Cancelled came back as "internal panic".
+// processJob runs no row that is already terminal, so whichever one it holds
+// landed during this run and stands.
+func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) {
+	w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
+	if w.queue.settle(jobID) {
+		if row, _ := w.db.GetJob(jobID); row != nil && (row.Status == database.StatusCancelled || !row.IsTerminal()) {
+			if job == nil {
+				job = row
+			}
+			w.handleCancellation(job)
+			return
+		}
+	}
+	w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+		"status": database.StatusError,
+		"error":  fmt.Sprintf("internal panic: %v", r),
+	})
 }
 
 // handleCancellation handles a cancelled/shutdown job.
