@@ -54,18 +54,17 @@ func TwitchChannelQualityPreference(channels []config.ChannelConfig, login strin
 // once per start, before the worker reads a row; a no-op after the first,
 // since every row created since records one.
 //
-// The rule, per row: the row's own quality_preference when it recorded one —
-// the monitor and the Web add have written the creation preference there
-// beside twitch_quality all along, so it is the one record of it that
-// twitch_quality's overwrite could not reach — else its channel's current
-// quality_preference while the channel is still configured, else "best". A
-// VOD row is never matched to a channel: its URL names no login, and the
-// display name it carries is not one.
+// The rule, per row, is the one owner decision D-T9 states: its channel's
+// current quality_preference while the channel is still configured, else
+// "best". The row's own quality_preference is not consulted, though the
+// monitor and the Web add have written their creation preference there all
+// along: the decision names the channel's current setting, so a row created
+// while its channel was set to 720p re-selects at the 1080p60 the channel is
+// set to now, as the next broadcast's row will. A VOD row is never matched to
+// a channel: its URL names no login, and the display name it carries is not
+// one.
 func BackfillTwitchQualityPreferences(db *database.Database, channels []config.ChannelConfig) (int, error) {
 	return db.BackfillTwitchQualityPreference(func(j *database.Job) string {
-		if j.QualityPreference != "" {
-			return j.QualityPreference
-		}
 		if strings.Contains(j.URL, "twitch.tv/videos/") {
 			return "best"
 		}

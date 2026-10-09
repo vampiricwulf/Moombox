@@ -140,19 +140,24 @@ func TestTwitchChannelQualityPreference(t *testing.T) {
 }
 
 // TestBackfillTwitchQualityPreferencesRule pins the rule the startup backfill
-// applies to a row that predates the column: its own quality_preference when
-// it recorded one, else its channel's current preference while the channel is
-// configured, else "best" — and a VOD is never matched to a channel, since its
-// URL's first path segment is "videos", not a login.
+// applies to a row that predates the column, as owner decision D-T9 states
+// it: its channel's current preference while the channel is configured, else
+// "best" — and a VOD is never matched to a channel, since its URL's first path
+// segment is "videos", not a login. The row's own quality_preference, the
+// channel's setting when the row was created, is never consulted: tw_recorded
+// was created at 720p on a channel now set to 480p, and tw_away recorded
+// 1080p60 on a channel the config no longer holds.
 //
-// Mutants: the row's own quality_preference ignored (tw_recorded takes the
-// channel's 480p); the channel lookup dropped (tw_channel falls to "best");
-// the VOD guard dropped (tw_vvod is matched to the "videos" channel's 160p).
+// Mutants: the row's own quality_preference consulted first (the shipped rule
+// before this test: tw_recorded keeps 720p, tw_away keeps 1080p60); the
+// channel lookup dropped (tw_channel and tw_recorded fall to "best"); the VOD
+// guard dropped (tw_vvod is matched to the "videos" channel's 160p).
 func TestBackfillTwitchQualityPreferencesRule(t *testing.T) {
 	_, db := testWorkerSetup(t)
 	for _, j := range []*database.Job{
-		{ID: "tw_recorded", URL: "https://twitch.tv/streamer", QualityPreference: "1080p60"},
+		{ID: "tw_recorded", URL: "https://twitch.tv/streamer", QualityPreference: "720p"},
 		{ID: "tw_channel", URL: "https://twitch.tv/Streamer"},
+		{ID: "tw_away", URL: "https://twitch.tv/gone", QualityPreference: "1080p60"},
 		{ID: "tw_stranger", URL: "https://twitch.tv/someoneelse"},
 		{ID: "tw_vvod", URL: "https://www.twitch.tv/videos/123"},
 	} {
@@ -166,12 +171,13 @@ func TestBackfillTwitchQualityPreferencesRule(t *testing.T) {
 		{ID: "videos", Platform: "twitch", QualityPreference: "160p"},
 	}
 	n, err := BackfillTwitchQualityPreferences(db, channels)
-	if err != nil || n != 4 {
-		t.Fatalf("BackfillTwitchQualityPreferences = %d, %v; want 4, nil", n, err)
+	if err != nil || n != 5 {
+		t.Fatalf("BackfillTwitchQualityPreferences = %d, %v; want 5, nil", n, err)
 	}
 	for id, want := range map[string]string{
-		"tw_recorded": "1080p60",
+		"tw_recorded": "480p",
 		"tw_channel":  "480p",
+		"tw_away":     "best",
 		"tw_stranger": "best",
 		"tw_vvod":     "best",
 	} {

@@ -884,11 +884,11 @@ func (db *Database) migrateV20() error {
 // An empty value marks a row with no recorded preference: every YouTube row, and
 // every Twitch row that predates the column. The Twitch ones are backfilled at
 // startup rather than here, by BackfillTwitchQualityPreference, because the
-// rule needs the configured channels (the row's own quality_preference when it
-// recorded one, else its channel's current quality_preference while the
-// channel is still configured, else "best") and this package never reads the
-// config. New Twitch rows are always written non-empty, so that pass finds
-// only legacy rows and is a no-op on every start after the first.
+// rule needs the configured channels (the row's channel's current
+// quality_preference while the channel is still configured, else "best") and
+// this package never reads the config. New Twitch rows are always written
+// non-empty, so that pass finds only legacy rows and is a no-op on every start
+// after the first.
 func (db *Database) migrateV21() error {
 	ctx := db.getCtx()
 	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
