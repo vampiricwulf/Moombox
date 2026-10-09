@@ -685,7 +685,7 @@ go func() {
 
 **Download worker:**
 - Each `processJob` goroutine has panic recovery
-- On panic: sets job status to `Error` with message `"internal panic: <details>"`
+- On panic: sets job status to `Error` with message `"internal panic: <details>"` — unless the job already reached an outcome during the run (`UpdateJobFieldsUnlessTerminal`): an operator's Cancel that landed while it ran, or a finish or failure before the panic, stands
 
 ## Job Status Lifecycle
 

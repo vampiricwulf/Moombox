@@ -447,7 +447,13 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 			defer func() {
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					w.db.UpdateJobFields(jobID, map[string]any{
+					// Not over an outcome: the run may have finished or
+					// failed before it panicked, or the operator cancelled
+					// it while it ran — written unconditionally, that
+					// Cancelled came back as "internal panic". processJob
+					// runs no row that is already terminal, so whichever
+					// one it holds landed during this run and stands.
+					w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 						"status": database.StatusError,
 						"error":  fmt.Sprintf("internal panic: %v", r),
 					})
