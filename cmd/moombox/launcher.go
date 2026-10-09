@@ -103,19 +103,10 @@ func launchAndSupervise() {
 		}
 	}()
 
-	// firstAfterUpdate marks the next spawn as the first boot of a freshly
-	// applied update (set when an exit-42 restart found a .old binary —
-	// config restarts never create one). If that first boot fails quickly,
-	// the launcher PRESERVES the rollback artifact instead of deleting it
-	// on the way out, and leaves recovery instructions. One-shot: consumed
-	// by the next child exit regardless of outcome.
-	firstAfterUpdate := false
-	// updateArtifact is that update's rollback artifact, as handleUpdateRestart
-	// named it at the restart that armed firstAfterUpdate: the boot is judged
-	// and rolled back by this file, never by which names happen to be on disk
-	// when it exits. On Windows the launcher's own ~ image outlives the sweep
-	// of a second update's .old, and it is two versions back.
-	updateArtifact := ""
+	// boot is the one-shot record of a freshly applied update's first boot
+	// and of the rollback artifact its restart named. The loop drives it
+	// only through its methods (postUpdateBoot).
+	var boot postUpdateBoot
 	// Crash supervision state: consecutive abnormal exits (reset whenever a
 	// child survives launcherHealthyWindow) and the exit code that triggered
 	// the pending respawn (passed to the child so it can notify the operator
@@ -173,15 +164,13 @@ func launchAndSupervise() {
 		if startErr := cmd.Start(); startErr != nil {
 			starting.Store(false)
 			fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", startErr)
-			if firstAfterUpdate {
+			if boot.armed {
 				// The freshly-updated binary would not even start — restore
 				// the previous version and respawn it; fall back to keeping
 				// it on disk with manual instructions if that isn't possible.
-				if attemptAutoRollback(exePath, updateArtifact, -1) {
-					firstAfterUpdate = false
+				if boot.recoverFailedBoot(exePath, -1) {
 					continue
 				}
-				preserveUpdateRollback(exePath, updateArtifact, -1)
 				os.Exit(1)
 			}
 			deferDeleteOldLauncher(exePath)
@@ -211,24 +200,16 @@ func launchAndSupervise() {
 			}
 		}
 
-		action, wasFirstAfterUpdate := judgeChildExit(updateArtifact, firstAfterUpdate, wasRespawn,
-			code, ranFor, terminating.Load(), consecutiveCrashes)
-		firstAfterUpdate = false
+		action, wasFirstAfterUpdate := boot.judge(wasRespawn, code, ranFor, terminating.Load(), consecutiveCrashes)
 		switch action {
 		case childRestart:
 			// Update applied: rename .old → ~ on Windows so the .old name
 			// is free for the next update (returns the update's rollback
 			// artifact, "" when no .old existed, i.e. a config restart).
-			// Linux just reports .old. A config restart INSIDE a
-			// still-unproven update's window carries the one-shot forward,
-			// with the artifact it was armed with — otherwise it would
-			// silently drop rollback preservation for a binary that never
-			// proved itself.
-			if artifact := handleUpdateRestart(exePath); artifact != "" {
-				firstAfterUpdate, updateArtifact = true, artifact
-			} else {
-				firstAfterUpdate = wasFirstAfterUpdate && ranFor < postUpdateFailureWindow
-			}
+			// Linux just reports .old. restarted arms the next boot with
+			// that artifact, or carries a still-unproven boot forward
+			// across a config restart.
+			boot.restarted(handleUpdateRestart(exePath), wasFirstAfterUpdate, ranFor)
 			continue
 
 		case childPostUpdateFailure:
@@ -236,28 +217,21 @@ func launchAndSupervise() {
 			// KNOWN-GOOD fresh launch: not a crash respawn (no
 			// _MOOMBOX_CRASH_RESPAWN — the restored version didn't crash),
 			// and with a clean crash budget (any pre-update streak belonged
-			// to different circumstances). firstAfterUpdate is already false,
-			// so a quick death of the RESTORED binary hits the normal
+			// to different circumstances). judge has already disarmed the
+			// boot, so a quick death of the RESTORED binary hits the normal
 			// fail-fast path — no rollback ping-pong is possible. When the
-			// restore fails, fall back to preserving what's left with manual
-			// instructions. A boot whose artifact is already gone (it reached
-			// the milestone sweep before dying) never gets here: judgeChildExit
-			// sends it to crash supervision.
-			//
-			// A deterministic startup error (exitCodeStartupError) skips the
-			// rollback entirely: the environment, not the binary, is what
-			// failed. The artifact is still PRESERVED with instructions —
-			// this branch does not call deferDeleteOldLauncher — so a manual
-			// rollback stays one rename away, and because the next boot runs
-			// the SAME version the .update-pending breadcrumb names,
-			// shouldSkipPendingVersion is false and the release is not
-			// marked skipped.
-			if classifyPostUpdateExit(code) == postUpdateRollback && attemptAutoRollback(exePath, updateArtifact, code) {
+			// restore fails, or the code is a startup error,
+			// recoverFailedBoot preserves what's left with manual
+			// instructions; this branch does not call deferDeleteOldLauncher,
+			// so a manual rollback stays one rename away. A boot whose
+			// artifact is already gone (it reached the milestone sweep before
+			// dying) never gets here: judgeChildExit sends it to crash
+			// supervision.
+			if boot.recoverFailedBoot(exePath, code) {
 				crashRespawnCode = 0
 				consecutiveCrashes = 0
 				continue
 			}
-			preserveUpdateRollback(exePath, updateArtifact, code)
 			os.Exit(code)
 
 		case childPropagate:
@@ -327,11 +301,81 @@ func forwardStop(goos string, p stoppable) {
 	}
 }
 
+// postUpdateBoot is the launcher's one-shot record of a freshly applied
+// update's first boot, kept from the restart that applied the update to the
+// exit that judges the boot. launchAndSupervise holds one and drives it only
+// through judge, restarted and recoverFailedBoot. The loop spawns processes and
+// exits the launcher, so no test runs it; the bookkeeping that decides which
+// file a failed boot is judged and rolled back by lives here, where one does.
+type postUpdateBoot struct {
+	// armed marks the next spawn as the first boot of a freshly applied
+	// update (set when an exit-42 restart found a .old binary — config
+	// restarts never create one). If that boot fails quickly, the launcher
+	// rolls back to the artifact, or PRESERVES it with recovery instructions,
+	// instead of deleting it on the way out. Consumed by the next child exit
+	// regardless of outcome.
+	armed bool
+	// artifact is that update's rollback artifact, as handleUpdateRestart
+	// named it at the restart that armed the boot: the boot is judged and
+	// rolled back by this file, never by which names happen to be on disk
+	// when it exits. On Windows the launcher's own ~ image outlives the sweep
+	// of a second update's .old, and it is two versions back.
+	artifact string
+}
+
+// judge decides one child exit by the recorded artifact (judgeChildExit) and
+// consumes the one-shot: the next child is this update's first boot again
+// only if restarted carries it forward. wasFirst is judgeChildExit's report
+// of whether the exit still counted as that first boot.
+func (b *postUpdateBoot) judge(wasRespawn bool, code int, ranFor time.Duration, terminating bool, consecutiveCrashes int) (action childExitAction, wasFirst bool) {
+	action, wasFirst = judgeChildExit(b.artifact, b.armed, wasRespawn, code, ranFor, terminating, consecutiveCrashes)
+	b.armed = false
+	return action, wasFirst
+}
+
+// restarted records an exit-42 restart. artifact is handleUpdateRestart's
+// answer for it: a binary update arms the next boot with that artifact,
+// replacing whatever an earlier update recorded. A config restart ("") inside
+// a still-unproven update's window carries the one-shot forward with the
+// artifact it was armed with — otherwise it would silently drop rollback
+// preservation for a binary that never proved itself; past the window, or
+// after a boot that was no first boot (judge's wasFirst), the boot is not
+// armed.
+func (b *postUpdateBoot) restarted(artifact string, wasFirst bool, ranFor time.Duration) {
+	if artifact != "" {
+		b.armed, b.artifact = true, artifact
+		return
+	}
+	b.armed = wasFirst && ranFor < postUpdateFailureWindow
+}
+
+// recoverFailedBoot handles a first post-update boot that failed (code -1: the
+// binary would not even start): it rolls back to the recorded artifact and
+// reports true when the restored binary is to be respawned, as a known-good
+// fresh launch; it disarms the boot, so a quick death of the restored binary
+// takes the normal fail-fast path. When the restore fails it preserves what is
+// left with manual instructions (preserveUpdateRollback) and reports false,
+// and the launcher exits.
+//
+// A deterministic startup error (exitCodeStartupError) skips the rollback
+// entirely: the environment, not the binary, is what failed. The artifact is
+// still PRESERVED with instructions, and because the next boot runs the SAME
+// version the .update-pending breadcrumb names, shouldSkipPendingVersion is
+// false and the release is not marked skipped.
+func (b *postUpdateBoot) recoverFailedBoot(exePath string, code int) bool {
+	b.armed = false
+	if classifyPostUpdateExit(code) == postUpdateRollback && attemptAutoRollback(exePath, b.artifact, code) {
+		return true
+	}
+	preserveUpdateRollback(exePath, b.artifact, code)
+	return false
+}
+
 // judgeChildExit is the launcher loop's decision for one child exit: the facts
 // the loop holds, wired into classifyChildExit. Split out so the wiring is
 // under test as well as the classifier. It also reports whether the exit
-// still counts as a fresh update's first boot, which the restart arm carries
-// forward.
+// still counts as a fresh update's first boot, which postUpdateBoot.restarted
+// carries forward.
 //
 // A first boot of a fresh update whose rollback artifact is gone has nothing
 // to roll back to (postUpdatePastRollback): its exit is an ordinary crash, and

@@ -135,14 +135,19 @@ func TestHandleUpdateRestartReportsARenameItCouldNotDo(t *testing.T) {
 }
 
 // TestASecondUpdatesSweptOldIsPastRollback walks the second update of one
-// launcher lifetime through the launcher's own steps. The first update's
-// rename makes ~ the launcher's image; the second cannot rename over it, so
-// its artifact is .old; that boot's milestone sweeps .old and leaves ~, two
-// versions back. Re-deriving the artifact from the names on disk at the exit
-// found ~ and rolled back to it — N+2 to N, with N+1 gone.
+// launcher lifetime through the launcher's own steps: handleUpdateRestart
+// at each restart, its answer recorded and the exits judged by the loop's
+// postUpdateBoot. The first update's rename makes ~ the launcher's image; the
+// second cannot rename over it, so its artifact is .old; that boot's
+// milestone sweeps .old and leaves ~, two versions back. Re-deriving the
+// artifact from the names on disk at the exit found ~ and rolled back to it —
+// N+2 to N, with N+1 gone.
 //
-// Mutant: handleUpdateRestart returning exePath+"~" from the failed-rename
-// branch — the judgement finds ~ on disk and routes the crash to a rollback.
+// Mutants: handleUpdateRestart returning exePath+"~" from the failed-rename
+// branch — the second update's record names ~, whose judgement would route
+// the crash to a rollback; postUpdateBoot.judge handing judgeChildExit the
+// at-exit lookup (TestASecondUpdateIsJudgedByTheArtifactItsRestartRecorded's
+// first mutant) — the crash is routed to a rollback to ~.
 func TestASecondUpdatesSweptOldIsPastRollback(t *testing.T) {
 	exePath := filepath.Join(t.TempDir(), "moombox.exe")
 	write := func(path, body string) {
@@ -152,12 +157,14 @@ func TestASecondUpdatesSweptOldIsPastRollback(t *testing.T) {
 		}
 	}
 	captureLauncherWarnings(t)
+	var boot postUpdateBoot
 
 	// Update 1 (N → N+1): ApplyUpdate left N at .old.
 	write(exePath, "N+1")
 	write(exePath+".old", "N")
-	if got, want := handleUpdateRestart(exePath), exePath+"~"; got != want {
-		t.Fatalf("first update's artifact = %q, want %q", got, want)
+	boot.restarted(handleUpdateRestart(exePath), false, 0)
+	if want := exePath + "~"; boot.artifact != want {
+		t.Fatalf("first update's artifact = %q, want %q", boot.artifact, want)
 	}
 	// ~ is now the launcher's mapped image; an open handle denies the same
 	// delete-sharing (see TestHandleUpdateRestartReportsARenameItCouldNotDo).
@@ -167,20 +174,26 @@ func TestASecondUpdatesSweptOldIsPastRollback(t *testing.T) {
 	}
 	t.Cleanup(func() { held.Close() })
 
+	// The N+1 boot proves itself, then exits 42 to apply update 2.
+	action, first := boot.judge(false, exitCodeRestart, 10*time.Minute, false, 0)
+	if action != childRestart || !first {
+		t.Fatalf("the first boot's update restart = (%v, first %v), want a restart of the first boot", action, first)
+	}
+
 	// Update 2 (N+1 → N+2): ApplyUpdate left N+1 at .old.
 	write(exePath+".old", "N+1")
 	write(exePath, "N+2")
-	artifact := handleUpdateRestart(exePath)
-	if artifact != exePath+".old" {
-		t.Fatalf("second update's artifact = %q, want its .old", artifact)
+	boot.restarted(handleUpdateRestart(exePath), first, 10*time.Minute)
+	if boot.artifact != exePath+".old" {
+		t.Fatalf("second update's artifact = %q, want its .old", boot.artifact)
 	}
 
 	// The N+2 boot reaches its milestone: CleanupOldBinary sweeps .old (no
 	// process maps N+1 any more) and cannot delete ~. Then it crashes.
-	if err := os.Remove(artifact); err != nil {
+	if err := os.Remove(boot.artifact); err != nil {
 		t.Fatal(err)
 	}
-	action, first := judgeChildExit(artifact, true, false, 1, 30*time.Second, false, 0)
+	action, first = boot.judge(false, 1, 30*time.Second, false, 0)
 	if action != childCrash || first {
 		t.Errorf("a quick crash after the swept .old = (%v, first %v), want a supervised crash, not a rollback to ~", action, first)
 	}

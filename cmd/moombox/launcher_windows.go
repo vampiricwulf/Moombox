@@ -187,7 +187,7 @@ func handleUpdateRestart(exePath string) string {
 		launcherWarnf("warning: could not rename %s to %s (%v) — the previous binary stays at .old and remains the rollback target\n",
 			oldPath, exePath+"~", err)
 		// Still an update: a .old existed, so the launcher's one-shot
-		// post-update failure window must arm (launcher.go firstAfterUpdate).
+		// post-update failure window must arm (launcher.go postUpdateBoot).
 		// A failed rename changes which file is the artifact, never whether
 		// there was an update.
 		return oldPath
