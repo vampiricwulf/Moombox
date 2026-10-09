@@ -130,7 +130,7 @@ globalThis.__makeApp = function (jobs, parkedBaseline) {
     stats: { updateActiveIndicator() {}, updateDiskIndicator() {} },
     // The Arc I controllers handleMessage reaches: the log panel, the details
     // panel and the update indicator (each a no-op here, like the rest).
-    logPanel: { logs: [], renderLogs() {}, addLog() {} },
+    logPanel: { logs: [], renderLogs() {}, addLog() {}, setSnapshot() {} },
     details: { updateJobDetails() {}, _preserveStagingFields() {} },
     updates: { available: null, updateVersionIndicator() {} },
     _syncParkedBadge: globalThis.__syncParkedBadge,
