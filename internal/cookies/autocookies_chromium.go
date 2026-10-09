@@ -63,7 +63,17 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	// Nothing is launched on a profile another browser holds: the sign-in
 	// window would be a second browser on a live profile, and the refusal's
 	// sentence names the machine to go and close it on.
+	//
+	// RECORDED as well as returned, the way the refresh's ErrProfileInUse arm
+	// records it. StartSetup cleared lastError at its slot claim, before this
+	// sweep could run, and on a held profile that clear erased a line that is
+	// still true — every later refresh will skip for the same reason, and
+	// periodicTick runs none while no job is active, so nothing would put it
+	// back for as long as that lasts. The sweep has just judged the lock
+	// itself, so the sentence is this attempt's own finding, naming whoever
+	// holds it now.
 	if err := cleanChromiumLockFiles(s.profileDir); err != nil {
+		s.setError(err.Error())
 		return err
 	}
 

@@ -394,3 +394,54 @@ func TestChromiumSetupRefusesAProfileInUse(t *testing.T) {
 		t.Error("a refused setup left the setup slot held")
 	}
 }
+
+// TestARefusedSetupKeepsTheProfileInUseLine: StartSetup clears lastError at its
+// slot claim, before the Chromium launcher has judged the lock, so a refusal
+// that only RETURNED its sentence left the status both UIs read blank — after
+// a refresh had just recorded "in use by <host>", and while every later pass
+// would still skip for that reason. The refusal records what it found.
+//
+// The holder changes between the two steps, so the line the test reads must
+// be the setup's own finding, not the refresh's left standing.
+//
+// Mutant: drop the setError in startChromiumSetup's refusal — lastError is
+// empty after the refused setup.
+func TestARefusedSetupKeepsTheProfileInUseLine(t *testing.T) {
+	captureKills(t)
+	profileDir := t.TempDir()
+	lock := filepath.Join(profileDir, "SingletonLock")
+	symlinkLock(t, foreignLockHost+"-4242", lock)
+
+	cookiePath := ytAuthCookieFile(t)
+	jar := NewCookieJar()
+	if err := jar.Load(cookiePath); err != nil {
+		t.Fatalf("load the fixture cookie file: %v", err)
+	}
+	s := NewAutoCookieService(profileDir, cookiePath, jar, nopAutoCookieLogger{})
+	unlaunchable := filepath.Join(t.TempDir(), "not-a-browser")
+	s.detectBrowser = func() *DetectedBrowser {
+		return &DetectedBrowser{Type: "chrome", Path: unlaunchable, Name: "unlaunchable test browser"}
+	}
+
+	if _, err := s.RefreshCookiesDetailed(context.Background()); !errors.Is(err, ErrProfileInUse) {
+		t.Fatalf("RefreshCookiesDetailed = %v, want ErrProfileInUse", err)
+	}
+	if got := lastErrorSnapshot(s); !strings.Contains(got, "in use by "+foreignLockHost) {
+		t.Fatalf("precondition: the refresh recorded lastError = %q, want it to name %q", got, foreignLockHost)
+	}
+
+	// Another machine's browser holds it by the time the operator asks to
+	// sign in.
+	const nextHost = "moombox-third-host.invalid"
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	symlinkLock(t, nextHost+"-5151", lock)
+
+	if err := s.StartSetup("youtube"); !errors.Is(err, ErrProfileInUse) {
+		t.Fatalf("StartSetup = %v, want ErrProfileInUse", err)
+	}
+	if got := lastErrorSnapshot(s); !strings.Contains(got, "in use by "+nextHost) {
+		t.Errorf("lastError after the refused setup = %q, want it to name %q — the profile is still held, and the status both UIs read must still say by whom", got, nextHost)
+	}
+}

@@ -276,10 +276,11 @@ type AutoCookieService struct {
 	//     field. Callers: FinishSetup's empty-profile, read-failure, merge-abort,
 	//     mkdir, write and jar-load exits; the refresh's import failure, merge
 	//     abort, mkdir, write, jar-load, credential-loss and verification-failure
-	//     exits. Each of those is a conclusion the pass reached. (The refresh's
-	//     mkdir, write and jar-load exits were the last three silent ones; they
-	//     are the sweep's T1-8 and are pinned by
-	//     autocookies_refresh_lasterror_test.go.)
+	//     exits; and both Chromium launchers' ErrProfileInUse refusals — the
+	//     refresh's declined pass and the setup's refused start. Each of those is
+	//     a conclusion the pass reached. (The refresh's mkdir, write and jar-load
+	//     exits were the last three silent ones; they are the sweep's T1-8 and
+	//     are pinned by autocookies_refresh_lasterror_test.go.)
 	//
 	//     THE LAST THREE OF FINISHSETUP'S WERE MISSING until Arc 8 Task 12a fix
 	//     round 1, and the shape of the miss is worth keeping written down
@@ -314,7 +315,11 @@ type AutoCookieService struct {
 	//   - StartSetup, at the slot claim — CLEARS. Correct, and the one clear
 	//     that is about intent rather than evidence: a new setup attempt is
 	//     starting, the recorded message belongs to an attempt that is over, and
-	//     leaving it would make the wizard open under a stale red line.
+	//     leaving it would make the wizard open under a stale red line. The one
+	//     message that is NOT over by then is a held profile, and the clear runs
+	//     before the Chromium launcher has judged the lock — so that launcher's
+	//     refusal sets the line again, or a refused sign-in would erase "in use
+	//     by <host>" while every later refresh still skips for it.
 	//   - the "nothing to verify" branch of the same switch as the loss branch —
 	//     CLEARS. Reachability: no route to it has been found (it needs
 	//     fetchedRows == 0 with neither platform having had a credential, and
