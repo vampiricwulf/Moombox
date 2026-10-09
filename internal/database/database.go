@@ -271,7 +271,7 @@ func (db *Database) prepareStatements() error {
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, video_width, video_height, video_fps, file_size,
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
-		twitch_quality, twitch_quality_preference, twitch_category,
+		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
@@ -315,7 +315,7 @@ func intToBool(i int) bool {
 }
 
 // insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
-// executor (either *sql.DB or *sql.Tx), so the 45-column INSERT exists
+// executor (either *sql.DB or *sql.Tx), so the 44-column INSERT exists
 // once.
 //
 // channel_id and queue_priority are written on EVERY insert (spec §10):
@@ -333,12 +333,12 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
 		thumbnail_file, description_file,
-		twitch_quality, twitch_quality_preference, twitch_category, channel_avatar_url,
+		twitch_quality, twitch_category, channel_avatar_url,
 		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
 		quality_preference, channel_id, queue_priority, file_size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?)`,
+		?, ?, ?, ?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -348,7 +348,7 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		job.OutputFile, job.Filename, job.OutputDirectory,
 		job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
 		job.ThumbnailFile, job.DescriptionFile,
-		job.TwitchQuality, job.TwitchQualityPreference, job.TwitchCategory, job.ChannelAvatarURL,
+		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
 		job.QualityPreference, job.ChannelID, job.QueuePriority, job.FileSize)
@@ -653,7 +653,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.VideoWidth, &j.VideoHeight, &j.VideoFps, &j.FileSize,
 		&j.ChatStatus, &j.TotalChatMessages, &j.ChatFilename, &j.ChatFile,
 		&j.ThumbnailFile, &j.DescriptionFile,
-		&j.TwitchQuality, &j.TwitchQualityPreference, &j.TwitchCategory, &j.ChannelAvatarURL,
+		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,

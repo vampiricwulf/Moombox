@@ -569,19 +569,6 @@ func (s *runState) initServices(logLevelOverride string) error {
 	var dbCloseOnce sync.Once
 	s.closeDB = func() { dbCloseOnce.Do(func() { db.Close() }) }
 
-	// Schema v21 added twitch_quality_preference empty; give the Twitch rows
-	// that predate it the preference they were created with before the worker
-	// reads one (see worker.BackfillTwitchQualityPreferences). A no-op on
-	// every start after the first. A failure is logged, not fatal: an empty
-	// preference selects as "best", which is what most of those rows asked for.
-	var backfillChannels []config.ChannelConfig
-	s.configStore.Read(func(c *config.MoomboxConfig) { backfillChannels = slices.Clone(c.Channels) })
-	if n, err := worker.BackfillTwitchQualityPreferences(db, backfillChannels); err != nil {
-		log.Warn("Failed to backfill twitch_quality_preference", slog.String("error", err.Error()))
-	} else if n > 0 {
-		log.Info("Backfilled twitch_quality_preference on Twitch jobs that predate it", slog.Int("jobs", n))
-	}
-
 	// =========================================================================
 	// 3b. Connectivity monitor
 	// =========================================================================

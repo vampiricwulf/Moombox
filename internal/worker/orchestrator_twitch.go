@@ -41,7 +41,7 @@ type TwitchVariantInfo struct {
 	// For quality monitoring: re-fetches the master playlist and selects the best variant.
 	// Set by the worker for live streams so the orchestrator can detect quality changes.
 	FetchVariantsFn func(ctx context.Context) ([]twitch.TwitchHLSVariant, error)
-	QualityPref     string // the job's twitch_quality_preference, e.g. "1080p60" or "best"
+	QualityPref     string // the job's quality_preference, e.g. "1080p60" or "best"
 	MaxResolution   int    // from global config
 	Prefer60fps     bool   // from global config (prefer_60fps)
 }
@@ -49,11 +49,10 @@ type TwitchVariantInfo struct {
 // newTwitchVariantInfo builds the variant a Twitch capture runs on from the
 // one the stream processor selected, carrying the selection inputs every
 // re-selection during the capture repeats (selectFrom) — the job's
-// twitch_quality_preference and the job context's snapshot of
-// max_video_resolution and prefer_60fps. It read quality_preference until D-T9
-// gave the Twitch preference a column of its own, while the capture start read
-// twitch_quality: two columns for one input, which agreed only until the
-// stream start overwrote one of them.
+// quality_preference and the job context's snapshot of max_video_resolution
+// and prefer_60fps. The capture start reads the same column
+// (selectTwitchVariant); it used to read twitch_quality, two columns for one
+// input, which agreed only until the stream start overwrote one of them.
 // The live-only closures are the caller's to wire.
 func newTwitchVariantInfo(job *database.Job, v *twitch.TwitchHLSVariant, cfg *JobConfig) *TwitchVariantInfo {
 	return &TwitchVariantInfo{
@@ -62,7 +61,7 @@ func newTwitchVariantInfo(job *database.Job, v *twitch.TwitchHLSVariant, cfg *Jo
 		Width:         v.Width,
 		Height:        v.Height,
 		FPS:           v.FPS,
-		QualityPref:   job.TwitchQualityPreference,
+		QualityPref:   job.QualityPreference,
 		MaxResolution: cfg.MaxVideoResolution,
 		Prefer60fps:   cfg.Prefer60fps,
 	}

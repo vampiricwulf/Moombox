@@ -1473,11 +1473,6 @@ func TestFieldToColumnCoverage(t *testing.T) {
 		"trims":     true, // loaded via join
 		"segments":  true, // loaded via join
 		"channelId": true, // set at insert — feed affiliation never changes, and a partial write of "" would fake-empty a NULL
-		// Set at insert and never overwritten (D-T9): it is the preference
-		// every Twitch selection reads, and the column it replaced as one,
-		// twitch_quality, went wrong precisely by being rewritten. Kept off
-		// the map so no UpdateJobFields call can write it.
-		"twitchQualityPreference": true,
 	}
 
 	for field := range reflect.TypeFor[Job]().Fields() {

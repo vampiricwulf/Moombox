@@ -1278,10 +1278,10 @@ func membershipConfirmedNonMember(verdict youtube.SessionAuthState, hasAccess bo
 
 // newTwitchStreamJob is the row the Twitch monitor creates for a broadcast it
 // found on a configured channel: immediately Live (GQL just confirmed it), and
-// carrying the channel's quality_preference as its twitch_quality_preference —
-// the one write that column ever gets (D-T9). twitch_quality is left empty:
-// it names the variant the capture records, and nothing is recording yet.
-// quality_preference is still written beside it, as on every row.
+// carrying the channel's quality_preference — "best" when the channel names
+// none — as its own: the one preference every Twitch variant selection reads,
+// never overwritten. twitch_quality is left empty: it names the variant the
+// capture records (D-T9), and nothing is recording yet.
 func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, outputDir string, now time.Time) *database.Job {
 	stamp := now.UTC().Format(time.RFC3339)
 	title := info.ChannelDisplayName + " — " + info.Title
@@ -1289,22 +1289,21 @@ func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig,
 		title = info.ChannelDisplayName + " — " + stamp
 	}
 	return &database.Job{
-		ID:                      twitch.BuildJobID(info.StreamID, false),
-		VideoID:                 info.StreamID,
-		URL:                     "https://twitch.tv/" + info.ChannelLogin,
-		Title:                   title,
-		ChannelName:             info.ChannelDisplayName,
-		Platform:                "twitch",
-		Status:                  database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
-		ThumbnailURL:            info.ThumbnailURL,
-		ChannelAvatarURL:        info.ProfileImageURL,
-		TwitchCategory:          info.GameCategory,
-		TwitchQualityPreference: worker.TwitchJobQualityPreference(ch.QualityPreference),
-		QualityPreference:       ch.QualityPreference,
-		StreamStartTime:         info.StartedAt,
-		OutputDirectory:         outputDir,
-		CreatedAt:               stamp,
-		UpdatedAt:               stamp,
+		ID:                twitch.BuildJobID(info.StreamID, false),
+		VideoID:           info.StreamID,
+		URL:               "https://twitch.tv/" + info.ChannelLogin,
+		Title:             title,
+		ChannelName:       info.ChannelDisplayName,
+		Platform:          "twitch",
+		Status:            database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
+		ThumbnailURL:      info.ThumbnailURL,
+		ChannelAvatarURL:  info.ProfileImageURL,
+		TwitchCategory:    info.GameCategory,
+		QualityPreference: worker.TwitchJobQualityPreference(ch.QualityPreference),
+		StreamStartTime:   info.StartedAt,
+		OutputDirectory:   outputDir,
+		CreatedAt:         stamp,
+		UpdatedAt:         stamp,
 	}
 }
 

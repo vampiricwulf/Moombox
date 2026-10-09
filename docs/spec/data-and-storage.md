@@ -131,7 +131,7 @@ start_time, end_time, quality_preference, watched, resume_position, chat_offset,
 auto_retry_count, queue_priority, incomplete_tail, park_reason, park_identity
 ```
 
-All entries use identity mapping (Go key name == SQLite column name). `notification_msgs` is absent on purpose: `UpdateNotificationMsgs` writes it. So is `twitch_quality_preference`: it is written once, at insert, and the absence is what keeps any `UpdateJobFields` call from overwriting it (`TestFieldToColumnCoverage` lists it as set-at-insert).
+All entries use identity mapping (Go key name == SQLite column name). `notification_msgs` is absent on purpose: `UpdateNotificationMsgs` writes it.
 
 **Usage example:**
 
@@ -223,8 +223,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | chat_file | TEXT | NULL | Absolute path (added v2) |
 | thumbnail_file | TEXT | NULL | Absolute path (added v3) |
 | description_file | TEXT | NULL | Absolute path (added v3) |
-| twitch_quality | TEXT | NULL | The variant the capture is recording, by its playlist name ("chunked", "720p60"): written at the capture start, live and VOD (`StreamProcessor.startTwitchVariant`), and again whenever a split moves the capture to another variant (`recordVariant` in `ExecuteTwitch`). Empty until a capture starts. Both UIs show it as "Quality". Nothing selects from it — until D-T9 it was ALSO the preference: set to it at creation, overwritten at the stream start, and read back as the preference by the next selection |
-| twitch_quality_preference | TEXT | NOT NULL, '' | The quality a Twitch job was created to record (added v21, owner decision D-T9): the channel's or the manual add's `quality_preference`, `"best"` when none was named. Written once at insert by the Twitch monitor (`newTwitchStreamJob`, `cmd/moombox/monitor_callbacks.go`), the Web add and `moombox add` (`cliTwitchQualityPreference`, `cmd/moombox/addvideo.go`); never overwritten; the ONLY preference any Twitch variant selection is handed. `''` on YouTube rows, and on a Twitch row only before the startup backfill (`BackfillTwitchQualityPreferences`, `internal/worker/twitch_quality_preference.go`) has filled it |
+| twitch_quality | TEXT | NULL | The variant the capture is recording, by its playlist name ("chunked", "720p60"): written at the capture start, live and VOD (`StreamProcessor.startTwitchVariant`), and again whenever a split moves the capture to another variant (`recordVariant` in `ExecuteTwitch`). Empty until a capture starts. Both UIs show it as "Quality". Nothing selects from it — until D-T9 it was ALSO the preference: set to it at creation, overwritten at the stream start, and read back as the preference by the next selection. The preference is `quality_preference` |
 | twitch_category | TEXT | NULL | |
 | channel_avatar_url | TEXT | NULL | |
 | selected_video_itag | INTEGER | NULL | YouTube itag, -1 = audio-only |
@@ -232,7 +231,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | start_time | REAL | NULL | Trim start (seconds, float64) |
 | end_time | REAL | NULL | Trim end (seconds, float64) |
 | last_recheck_at | TEXT | NULL | RFC3339 |
-| quality_preference | TEXT | '' | e.g. "1080p60", "best" (added v5) |
+| quality_preference | TEXT | '' | The quality the job was created to record, e.g. "1080p60", "best" (added v5): the channel's setting, or the manual add's. Written at insert and never overwritten. Every variant selection reads it — on Twitch the capture start's, live and VOD, and every re-selection during the capture, never `twitch_quality`. A Twitch row records `"best"` when nothing was named: the Twitch monitor (`newTwitchStreamJob`, `cmd/moombox/monitor_callbacks.go`), the Web add, and `moombox add` (`newCLITwitchJob`, `cmd/moombox/addvideo.go`), which used to record none. An empty value — on a Twitch row from before that rule, or any YouTube row with no preference — selects as `"best"` |
 | watched | INTEGER | 0 | Boolean (0/1), watched status (added v8) |
 | resume_position | REAL | NULL | Playback resume position in seconds (added v8) |
 | chat_offset | REAL | 0 | Chat timing offset in seconds, can be negative (added v9, migrated from player_prefs) |
@@ -384,7 +383,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v18 | Added `park_reason TEXT NOT NULL DEFAULT ''` column to `jobs`: records WHY a job parked at `COOKIES?` so the credential-recovery sweeps can tell a dead-cookie park from a not-a-member one. No backfill — nothing on a pre-v18 row says retroactively which it was, so they keep `''` and therefore their existing resume behavior |
 | v19 | Added `park_identity TEXT NOT NULL DEFAULT ''` column to `jobs`: the account fingerprint a membership park was refused under, so a credential sweep can tell a real account change from a session rotation. No backfill — the value is a fingerprint of credentials as they were at park time and cannot be reconstructed afterwards |
 | v20 | Added `notification_msgs TEXT` (nullable) to `jobs`: the per-target Discord message ids an edit-mode notification target rewrites in place. No backfill — an id exists only once a message has been posted, and there is nothing to reconstruct for jobs that predate the column |
-| v21 | Added `twitch_quality_preference TEXT NOT NULL DEFAULT ''` to `jobs` (D-T9): the Twitch preference gets a column of its own and `twitch_quality` becomes the recorded variant alone. The backfill needs the configured channels, which this package never reads, so it runs at startup instead (`BackfillTwitchQualityPreferences`, called from `cmd/moombox/services.go` right after `database.Open`): each Twitch row with an empty value takes its channel's current `quality_preference` while the channel is still configured, else `"best"` — the D-T9 rule as decided: the row's own `quality_preference`, the channel's setting when the row was created, is not consulted (a VOD is never matched to a channel). Silent — no `updated_at` bump, no subscriber — and a no-op on every start after the first, since every new Twitch row is written non-empty |
+| v21 | A version bump with nothing to apply. Development builds' v21 added a `twitch_quality_preference` column to `jobs` (D-T9), filled at startup for older Twitch rows; before any release the Twitch preference was folded back into `quality_preference`, which every row already carried and the quality-split re-selections already read, and the column and both of its backfills went. The bump stays because a database those builds migrated reads 21, which a binary at 20 would refuse as a downgrade; such a database keeps the column, unread and harmless (`NOT NULL DEFAULT ''` fills it on every insert, none of which names it). Pinned by `TestMigrationV21UpgradesAV20Database` and `TestMigrationV21DevelopmentDatabaseKeepsWorking` (`internal/database/migrations_v21_test.go`) |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 

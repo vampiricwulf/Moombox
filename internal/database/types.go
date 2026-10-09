@@ -135,16 +135,11 @@ type Job struct {
 	// again whenever a split moves it to another variant. Both UIs show it as
 	// "Quality". It is NOT the preference and nothing selects from it — it used
 	// to be both, set to the preference at creation and read back as one by
-	// the next selection after the stream start had overwritten it.
-	TwitchQuality string `json:"twitchQuality,omitempty"`
-	// TwitchQualityPreference is the quality the job was created to record —
-	// the channel's quality_preference, or the manual add's — "best" when none
-	// was named. Written once at creation (schema v21 backfilled older rows)
-	// and never overwritten; the ONLY preference any Twitch variant selection
-	// is handed. Empty only on YouTube rows.
-	TwitchQualityPreference string `json:"twitchQualityPreference,omitempty"`
-	TwitchCategory          string `json:"twitchCategory,omitempty"`
-	ChannelAvatarURL        string `json:"channelAvatarUrl,omitempty"`
+	// the next selection after the stream start had overwritten it. The
+	// preference is QualityPreference, on Twitch rows as on YouTube ones.
+	TwitchQuality    string `json:"twitchQuality,omitempty"`
+	TwitchCategory   string `json:"twitchCategory,omitempty"`
+	ChannelAvatarURL string `json:"channelAvatarUrl,omitempty"`
 	// Recheck tracking
 	LastRecheckAt string `json:"lastRecheckAt,omitempty"`
 	// Advanced options
@@ -152,7 +147,13 @@ type Job struct {
 	SelectedAudioItag *int     `json:"selectedAudioItag,omitempty"`
 	StartTime         *float64 `json:"startTime,omitempty"`
 	EndTime           *float64 `json:"endTime,omitempty"`
-	// Quality monitoring
+	// QualityPreference is the quality the job was created to record: the
+	// channel's quality_preference, or the manual add's. Written at creation
+	// and never overwritten. Every variant selection reads it — on Twitch the
+	// capture start's and every re-selection during the capture, never
+	// TwitchQuality. A Twitch row records "best" when nothing was named; an
+	// empty value, which rows from before that rule can hold, selects as
+	// "best" too.
 	QualityPreference string `json:"qualityPreference,omitempty"`
 	// Watch tracking / player state
 	Watched        bool     `json:"watched"`

@@ -132,7 +132,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     thumbnail_file TEXT,
     description_file TEXT,
     twitch_quality TEXT,
-    twitch_quality_preference TEXT NOT NULL DEFAULT '',
     twitch_category TEXT,
     channel_avatar_url TEXT,
     selected_video_itag INTEGER,
@@ -719,9 +718,16 @@ func (db *Database) migrate() error {
 	}
 
 	if version < 21 {
-		if err := db.migrateV21(); err != nil {
-			return err
-		}
+		// Nothing to apply. Development builds' v21 added
+		// jobs.twitch_quality_preference, a second column for the preference
+		// a Twitch job was created to record; before any release that
+		// preference was folded back into quality_preference, which every
+		// row already carried, and the ALTER and its startup backfill went.
+		// The version bump stays: a database those builds migrated reads 21,
+		// and a binary back at 20 would refuse it as a downgrade. Such a
+		// database keeps the column, unread and harmless — nothing selects
+		// it, and its NOT NULL DEFAULT '' fills it on every insert, none of
+		// which names it — and nothing here drops it.
 		if err := db.writeUserVersion(21); err != nil {
 			return err
 		}
@@ -866,35 +872,6 @@ func (db *Database) migrateV20() error {
 	// written last), so a duplicate-column error is expected and benign.
 	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN notification_msgs TEXT`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v20 alter: %w", err)
-	}
-	return nil
-}
-
-// migrateV21 adds twitch_quality_preference to jobs: the quality a Twitch job
-// was created to record, written once at creation and never overwritten (owner
-// decision D-T9). twitch_quality had been doing both jobs — set to the
-// preference at creation, overwritten with the picked variant at stream start,
-// then read back as the preference by the next selection — so a job resumed
-// after a restart re-selected by the NAME of what it last recorded ("chunked",
-// "720p60") instead of what it was asked for. twitch_quality is now the
-// variant alone.
-//
-//	twitch_quality_preference TEXT NOT NULL DEFAULT ''
-//
-// An empty value marks a row with no recorded preference: every YouTube row, and
-// every Twitch row that predates the column. The Twitch ones are backfilled at
-// startup rather than here, by BackfillTwitchQualityPreference, because the
-// rule needs the configured channels (the row's channel's current
-// quality_preference while the channel is still configured, else "best") and
-// this package never reads the config. New Twitch rows are always written
-// non-empty, so that pass finds only legacy rows and is a no-op on every start
-// after the first.
-func (db *Database) migrateV21() error {
-	ctx := db.getCtx()
-	// Guarded ALTER: a crash mid-block re-runs the whole block (user_version is
-	// written last), so a duplicate-column error is expected and benign.
-	if _, err := db.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN twitch_quality_preference TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnErr(err) {
-		return fmt.Errorf("v21 alter: %w", err)
 	}
 	return nil
 }

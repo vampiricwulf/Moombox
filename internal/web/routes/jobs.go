@@ -761,25 +761,27 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				return
 			}
 
+			// quality_preference is the one preference every Twitch
+			// selection reads, "best" when the dialog named none;
+			// twitch_quality stays empty until a capture records a variant.
 			job := &database.Job{
-				ID:                      jobID,
-				VideoID:                 jobID,
-				URL:                     url,
-				Title:                   title,
-				ChannelName:             channelName,
-				Platform:                "twitch",
-				Status:                  database.StatusUpcoming,
-				ThumbnailURL:            thumbnailURL,
-				ChannelAvatarURL:        avatarURL,
-				StreamStartTime:         streamStartTime,
-				TwitchCategory:          twitchCategory,
-				TwitchQualityPreference: worker.TwitchJobQualityPreference(body.QualityPreference),
-				QualityPreference:       body.QualityPreference,
-				IsVod:                   isVod,
-				ManuallyAdded:           true,
-				OutputDirectory:         body.OutputDirectory,
-				CreatedAt:               now,
-				UpdatedAt:               now,
+				ID:                jobID,
+				VideoID:           jobID,
+				URL:               url,
+				Title:             title,
+				ChannelName:       channelName,
+				Platform:          "twitch",
+				Status:            database.StatusUpcoming,
+				ThumbnailURL:      thumbnailURL,
+				ChannelAvatarURL:  avatarURL,
+				StreamStartTime:   streamStartTime,
+				TwitchCategory:    twitchCategory,
+				QualityPreference: worker.TwitchJobQualityPreference(body.QualityPreference),
+				IsVod:             isVod,
+				ManuallyAdded:     true,
+				OutputDirectory:   body.OutputDirectory,
+				CreatedAt:         now,
+				UpdatedAt:         now,
 			}
 
 			added, err := db.AddJob(job)

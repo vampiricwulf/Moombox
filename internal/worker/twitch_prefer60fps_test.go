@@ -42,7 +42,7 @@ func TestTwitchCaptureStartHonoursPrefer60fps(t *testing.T) {
 		cfg := &config.MoomboxConfig{}
 		cfg.Downloader.Prefer60fps = tc.prefer60fps
 		sp := &StreamProcessor{cfg: cfg}
-		got := sp.selectTwitchVariant(sixtyBesideThirty(), &database.Job{ID: "tw_1", TwitchQualityPreference: "best"})
+		got := sp.selectTwitchVariant(sixtyBesideThirty(), &database.Job{ID: "tw_1", QualityPreference: "best"})
 		if got == nil || got.Name != tc.want {
 			t.Errorf("prefer_60fps=%v: capture start selected %v, want %s", tc.prefer60fps, got, tc.want)
 		}
@@ -61,7 +61,7 @@ func TestTwitchCaptureStartHonoursPrefer60fps(t *testing.T) {
 // newTwitchVariantInfo leaving MaxResolution unset (the 720 cap is lost and the
 // probe returns 1080).
 func TestTwitchReselectionCarriesPrefer60fps(t *testing.T) {
-	job := &database.Job{ID: "tw_1", TwitchQualityPreference: "best"}
+	job := &database.Job{ID: "tw_1", QualityPreference: "best"}
 	variant := newTwitchVariantInfo(job, &sixtyBesideThirty()[1], &JobConfig{Prefer60fps: false})
 	variant.FetchVariantsFn = func(context.Context) ([]twitch.TwitchHLSVariant, error) {
 		return sixtyBesideThirty(), nil

@@ -156,7 +156,7 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, video_width, video_height, video_fps, file_size,
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
-		twitch_quality, twitch_quality_preference, twitch_category,
+		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
@@ -370,68 +370,6 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 			Status: StatusError, ParkReason: ParkReasonTwitchEndUnconfirmed})
 	}
 	return out, rows.Err()
-}
-
-// BackfillTwitchQualityPreference records a twitch_quality_preference on every
-// Twitch row that has none — the rows that predate schema v21 — and reports
-// how many it wrote. prefFor decides each row's value from ID, VideoID, URL,
-// ChannelName and QualityPreference (the rule is the caller's, because it
-// needs the configured channels; see migrateV21); an empty answer is stored
-// as "best".
-//
-// Silent like the other single-column maintenance writes: no updated_at bump
-// and no subscriber, because it runs at startup before anything subscribes
-// and a backfill is not an event in any job's life. Collect-then-update, as
-// every backfill must be on a one-connection pool, and each UPDATE re-checks
-// the column is still empty so it can never overwrite a value written since.
-func (db *Database) BackfillTwitchQualityPreference(prefFor func(*Job) string) (int, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	ctx := db.getCtx()
-
-	rows, err := db.db.QueryContext(ctx,
-		`SELECT id, video_id, url, channel_name, quality_preference FROM jobs
-		 WHERE platform = 'twitch' AND twitch_quality_preference = ''`)
-	if err != nil {
-		return 0, err
-	}
-	var pending []*Job
-	for rows.Next() {
-		var id string
-		var videoID, url, channelName, pref sql.NullString
-		if err := rows.Scan(&id, &videoID, &url, &channelName, &pref); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		pending = append(pending, &Job{ID: id, VideoID: videoID.String, URL: url.String,
-			ChannelName: channelName.String, Platform: "twitch", QualityPreference: pref.String})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, err
-	}
-	rows.Close()
-
-	written := 0
-	for _, j := range pending {
-		pref := prefFor(j)
-		if pref == "" {
-			pref = "best"
-		}
-		res, err := db.db.ExecContext(ctx,
-			`UPDATE jobs SET twitch_quality_preference = ? WHERE id = ? AND twitch_quality_preference = ''`,
-			pref, j.ID)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("BackfillTwitchQualityPreference: update failed", "jobID", j.ID, "err", err)
-			}
-			continue
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			written++
-		}
-	}
-	return written, nil
 }
 
 // QueuedChannels returns the distinct channel IDs that currently have Queued

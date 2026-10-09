@@ -105,35 +105,13 @@ func addVideo(input, configPath string) {
 			os.Exit(1)
 		}
 
-		var jobID, jobURL, channelName string
-		if tw.Type == utils.TwitchVOD {
-			jobID = "tw_v" + tw.Value
-			jobURL = "https://www.twitch.tv/videos/" + tw.Value
-			channelName = "Manual"
-		} else {
-			jobID = tw.Value // Will be resolved by the worker
-			jobURL = "https://www.twitch.tv/" + tw.Value
-			channelName = tw.Value
-		}
-
+		job := newCLITwitchJob(cfg.Channels, tw, now)
+		jobID, jobURL := job.ID, job.URL
 		if db.JobExists(jobID) {
 			fmt.Printf("Job already exists: %s\n", jobID)
 			return
 		}
 
-		job := &database.Job{
-			ID:                      jobID,
-			VideoID:                 jobID,
-			URL:                     jobURL,
-			Title:                   "Manual Add",
-			ChannelName:             channelName,
-			Platform:                "twitch",
-			Status:                  database.StatusUpcoming,
-			ManuallyAdded:           true,
-			TwitchQualityPreference: cliTwitchQualityPreference(cfg.Channels, tw),
-			CreatedAt:               now,
-			UpdatedAt:               now,
-		}
 		added, err := db.AddJob(job)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to add job: %v\n", err)
@@ -194,12 +172,40 @@ func addVideo(input, configPath string) {
 	notifyMgr.Wait()
 }
 
-// cliTwitchQualityPreference is the twitch_quality_preference `moombox add`
-// writes on a Twitch job, the one write that column ever gets (D-T9). The
-// command takes no quality flag, so a live channel the config holds records
-// that channel's quality_preference — what the monitor records for the same
-// broadcast — and a VOD, or a channel the config does not hold, records
-// "best". The row used to carry no preference at all.
+// newCLITwitchJob is the row `moombox add` creates for a Twitch channel or VOD
+// target: Upcoming and manually added — a channel's job ID is its login until
+// the worker resolves the broadcast — and carrying the quality_preference
+// every Twitch variant selection reads (cliTwitchQualityPreference).
+// twitch_quality is left empty until a capture records a variant.
+func newCLITwitchJob(channels []config.ChannelConfig, tw *utils.TwitchTarget, now string) *database.Job {
+	job := &database.Job{
+		Title:             "Manual Add",
+		Platform:          "twitch",
+		Status:            database.StatusUpcoming,
+		ManuallyAdded:     true,
+		QualityPreference: cliTwitchQualityPreference(channels, tw),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	if tw.Type == utils.TwitchVOD {
+		job.ID = "tw_v" + tw.Value
+		job.URL = "https://www.twitch.tv/videos/" + tw.Value
+		job.ChannelName = "Manual"
+	} else {
+		job.ID = tw.Value // Will be resolved by the worker
+		job.URL = "https://www.twitch.tv/" + tw.Value
+		job.ChannelName = tw.Value
+	}
+	job.VideoID = job.ID
+	return job
+}
+
+// cliTwitchQualityPreference is the quality_preference `moombox add` writes
+// on a Twitch job, the one write that column gets. The command takes no
+// quality flag, so a live channel the config holds records that channel's
+// quality_preference — what the monitor records for the same broadcast — and
+// a VOD, or a channel the config does not hold, records "best". The row used
+// to carry no preference at all, which selects as "best" too.
 func cliTwitchQualityPreference(channels []config.ChannelConfig, tw *utils.TwitchTarget) string {
 	if tw == nil || tw.Type == utils.TwitchVOD {
 		return worker.TwitchJobQualityPreference("")

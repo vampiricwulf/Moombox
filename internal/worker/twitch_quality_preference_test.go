@@ -24,39 +24,45 @@ func ladder() []twitch.TwitchHLSVariant {
 	}
 }
 
-// TestTwitchSelectionReadsOnlyThePreference is D-T9's read half. The row is
-// the shape a restart meets: an earlier run started on the source and wrote
-// its name to twitch_quality, the job was created to record 720p, and
-// quality_preference is empty — as it is on a row older than that column,
-// which the startup backfill gives its channel's preference. Every selection,
-// the capture start's and every re-selection's, must pick 720p.
+// TestTwitchSelectionReadsOnlyThePreference: every Twitch selection — the
+// capture start's and every re-selection's — reads the job's
+// quality_preference and nothing else. The rows are the shapes a restart
+// meets: an earlier run started on the source and wrote its name to
+// twitch_quality, and the job was created to record 720p; and a row from
+// before Twitch rows always named a preference, its quality_preference empty,
+// which an earlier run recorded at 720p60 — empty selects as "best".
 //
-// Mutants: selectTwitchVariant reading job.TwitchQuality (its "chunked"
-// matches the source by name, so the capture restarts at 1080p); reading
-// job.QualityPreference (empty selects "best", the source);
-// newTwitchVariantInfo reading either of them (the re-selections pick the
-// source, so the first probe reports a quality change).
+// Mutants: selectTwitchVariant reading job.TwitchQuality (the first row's
+// "chunked" matches the source by name, so the capture restarts at 1080p, and
+// the second row's "720p60" pins 720p); newTwitchVariantInfo reading it (the
+// re-selections follow the same names, so the first probe reports a quality
+// change).
 func TestTwitchSelectionReadsOnlyThePreference(t *testing.T) {
-	job := &database.Job{ID: "tw_1", Platform: "twitch",
-		TwitchQuality: "chunked", TwitchQualityPreference: "720p", QualityPreference: ""}
-
 	sp := &StreamProcessor{cfg: &config.MoomboxConfig{}}
-	if got := sp.selectTwitchVariant(ladder(), job); got == nil || got.Name != "720p60" {
-		t.Errorf("capture start selected %v, want 720p60 — the job's preference, not the variant an earlier run recorded", got)
-	}
-	info := newTwitchVariantInfo(job, &ladder()[1], &JobConfig{})
-	if info.QualityPref != "720p" {
-		t.Errorf("TwitchVariantInfo.QualityPref = %q, want the job's twitch_quality_preference", info.QualityPref)
-	}
-	if got := info.selectFrom(ladder()); got == nil || got.Name != "720p60" {
-		t.Errorf("re-selection picked %v, want 720p60", got)
+	for _, tc := range []struct {
+		job  *database.Job
+		want string
+	}{
+		{&database.Job{ID: "tw_1", Platform: "twitch", TwitchQuality: "chunked", QualityPreference: "720p"}, "720p60"},
+		{&database.Job{ID: "tw_2", Platform: "twitch", TwitchQuality: "720p60", QualityPreference: ""}, "chunked"},
+	} {
+		if got := sp.selectTwitchVariant(ladder(), tc.job); got == nil || got.Name != tc.want {
+			t.Errorf("%s: capture start selected %v, want %s — the job's preference, not the variant an earlier run recorded", tc.job.ID, got, tc.want)
+		}
+		info := newTwitchVariantInfo(tc.job, &ladder()[1], &JobConfig{})
+		if info.QualityPref != tc.job.QualityPreference {
+			t.Errorf("%s: TwitchVariantInfo.QualityPref = %q, want the job's quality_preference %q", tc.job.ID, info.QualityPref, tc.job.QualityPreference)
+		}
+		if got := info.selectFrom(ladder()); got == nil || got.Name != tc.want {
+			t.Errorf("%s: re-selection picked %v, want %s", tc.job.ID, got, tc.want)
+		}
 	}
 }
 
 // TestStartTwitchVariantRecordsThePick: the capture start writes the variant
 // it picked to twitch_quality — the column both UIs show as "Quality" — in the
 // same write as the caller's extra fields, live and VOD alike, and leaves the
-// preference alone.
+// preference, quality_preference, alone.
 //
 // Mutants: the twitch_quality entry dropped from startTwitchVariant's write
 // (the VOD row keeps the empty value it was created with); the extra fields
@@ -65,7 +71,7 @@ func TestStartTwitchVariantRecordsThePick(t *testing.T) {
 	_, db := testWorkerSetup(t)
 	for _, id := range []string{"tw_vod", "tw_live"} {
 		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, Platform: "twitch",
-			Status: database.StatusUpcoming, TwitchQualityPreference: "720p"}); err != nil {
+			Status: database.StatusUpcoming, QualityPreference: "720p"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -83,8 +89,8 @@ func TestStartTwitchVariantRecordsThePick(t *testing.T) {
 		if j.TwitchQuality != "720p60" {
 			t.Errorf("%s twitch_quality = %q, want the picked variant 720p60", id, j.TwitchQuality)
 		}
-		if j.TwitchQualityPreference != "720p" {
-			t.Errorf("%s twitch_quality_preference = %q, want it untouched", id, j.TwitchQualityPreference)
+		if j.QualityPreference != "720p" {
+			t.Errorf("%s quality_preference = %q, want it untouched", id, j.QualityPreference)
 		}
 		if j.Status != wantStatus {
 			t.Errorf("%s status = %q, want %q", id, j.Status, wantStatus)
@@ -100,9 +106,8 @@ func TestStartTwitchVariantRecordsThePick(t *testing.T) {
 	}
 }
 
-// TestTwitchJobQualityPreferenceIsNeverEmpty: an empty column is the mark of a
-// row that predates it — the backfill keys on it — so a new row may not
-// write one.
+// TestTwitchJobQualityPreferenceIsNeverEmpty: every Twitch row created now
+// names its preference, "best" when nothing was named.
 //
 // Mutant: TwitchJobQualityPreference returning the preference unchanged.
 func TestTwitchJobQualityPreferenceIsNeverEmpty(t *testing.T) {
@@ -135,55 +140,6 @@ func TestTwitchChannelQualityPreference(t *testing.T) {
 	} {
 		if got := TwitchChannelQualityPreference(channels, login); got != want {
 			t.Errorf("TwitchChannelQualityPreference(%q) = %q, want %q", login, got, want)
-		}
-	}
-}
-
-// TestBackfillTwitchQualityPreferencesRule pins the rule the startup backfill
-// applies to a row that predates the column, as owner decision D-T9 states
-// it: its channel's current preference while the channel is configured, else
-// "best" — and a VOD is never matched to a channel, since its URL's first path
-// segment is "videos", not a login. The row's own quality_preference, the
-// channel's setting when the row was created, is never consulted: tw_recorded
-// was created at 720p on a channel now set to 480p, and tw_away recorded
-// 1080p60 on a channel the config no longer holds.
-//
-// Mutants: the row's own quality_preference consulted first (the shipped rule
-// before this test: tw_recorded keeps 720p, tw_away keeps 1080p60); the
-// channel lookup dropped (tw_channel and tw_recorded fall to "best"); the VOD
-// guard dropped (tw_vvod is matched to the "videos" channel's 160p).
-func TestBackfillTwitchQualityPreferencesRule(t *testing.T) {
-	_, db := testWorkerSetup(t)
-	for _, j := range []*database.Job{
-		{ID: "tw_recorded", URL: "https://twitch.tv/streamer", QualityPreference: "720p"},
-		{ID: "tw_channel", URL: "https://twitch.tv/Streamer"},
-		{ID: "tw_away", URL: "https://twitch.tv/gone", QualityPreference: "1080p60"},
-		{ID: "tw_stranger", URL: "https://twitch.tv/someoneelse"},
-		{ID: "tw_vvod", URL: "https://www.twitch.tv/videos/123"},
-	} {
-		j.VideoID, j.Platform, j.Status = j.ID, "twitch", database.StatusFinished
-		if _, err := db.AddJob(j); err != nil {
-			t.Fatal(err)
-		}
-	}
-	channels := []config.ChannelConfig{
-		{ID: "streamer", Platform: "twitch", QualityPreference: "480p"},
-		{ID: "videos", Platform: "twitch", QualityPreference: "160p"},
-	}
-	n, err := BackfillTwitchQualityPreferences(db, channels)
-	if err != nil || n != 5 {
-		t.Fatalf("BackfillTwitchQualityPreferences = %d, %v; want 5, nil", n, err)
-	}
-	for id, want := range map[string]string{
-		"tw_recorded": "480p",
-		"tw_channel":  "480p",
-		"tw_away":     "best",
-		"tw_stranger": "best",
-		"tw_vvod":     "best",
-	} {
-		j, _ := db.GetJob(id)
-		if j.TwitchQualityPreference != want {
-			t.Errorf("%s backfilled to %q, want %q", id, j.TwitchQualityPreference, want)
 		}
 	}
 }

@@ -68,8 +68,8 @@ func sameBroadcastStart(knownStartISO, currentStartISO string) bool {
 }
 
 // selectTwitchVariant is the selection a Twitch capture starts on, live and
-// VOD alike: the job's twitch_quality_preference — never twitch_quality, which
-// names the variant an earlier run recorded (D-T9) — under the downloader's
+// VOD alike: the job's quality_preference — never twitch_quality, which names
+// the variant an earlier run recorded (D-T9) — under the downloader's
 // max_video_resolution and prefer_60fps, both read fresh from the config. The
 // re-selections that follow during the capture (the quality probe, every
 // downloader restart) make the same call through TwitchVariantInfo.selectFrom,
@@ -86,7 +86,7 @@ func (sp *StreamProcessor) selectTwitchVariant(variants []twitch.TwitchHLSVarian
 		maxRes = c.Downloader.MaxVideoResolution
 		prefer60fps = c.Downloader.Prefer60fps
 	})
-	return twitch.SelectBestVariant(variants, job.TwitchQualityPreference, maxRes, prefer60fps)
+	return twitch.SelectBestVariant(variants, job.QualityPreference, maxRes, prefer60fps)
 }
 
 // startTwitchVariant selects the variant a capture starts on and records it:

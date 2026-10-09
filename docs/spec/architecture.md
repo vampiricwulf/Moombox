@@ -828,7 +828,8 @@ The primary data model. See `internal/database/types.go` for the complete struct
 - `AllowNonStream` (bool): True if non-stream content should be downloaded as VOD.
 - `SelectedVideoItag` / `SelectedAudioItag` (*int): Manual format override. -1 = skip track.
 - `StartTime` / `EndTime` (*float64): Post-download trim boundaries in seconds.
-- `QualityPreference` (string): e.g., `"1080p60"`, `"720p"`, `"best"`, `"audio_only"`.
+- `QualityPreference` (string): e.g., `"1080p60"`, `"720p"`, `"best"`, `"audio_only"`. The quality the job was created to record, set at insert and never overwritten; every variant selection reads it, Twitch's included (a Twitch row records `"best"` when none was named, and an empty value selects as `"best"`).
+- `TwitchQuality` (string): the Twitch variant the capture is recording, by its playlist name — written at the capture start and on every split that moves to another variant, shown as "Quality", and never selected from.
 - `Gaps` ([]Gap): Missing segment ranges detected during download.
 - `Segments` ([]Segment): Part records for multi-part downloads — quality splits (both platforms) and Twitch live gap splits. Each row carries the part's video path and (Twitch) its per-part chat file.
 - `Trims` ([]TrimRecord): Clips created from this job.
