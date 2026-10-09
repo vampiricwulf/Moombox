@@ -119,6 +119,19 @@ func (w *DownloadWorker) refreshVodInfo(ctx context.Context, job *database.Job) 
 // the orchestrator itself) and anything that is not a VOD pass through
 // untouched. The error is the re-extraction's, for processJob to handle as it
 // handles stream processing's own.
+//
+// Stale is a precaution, not a verdict: an extraction an hour old, or whose
+// URLs lapse within the hour, still downloads while its URLs live. So a
+// re-extraction that fails transiently (classifyProbeErr: a blip, a 429 or
+// 5xx, whatever it cannot place) while every format URL the extraction holds
+// has yet to expire leaves the extraction in place, and the download goes
+// ahead on it (vodURLsUnexpired). That failure used to end the run — a VOD
+// whose URLs still worked ended in Error over a fetch it did not need — and
+// an expiry the download then runs into is the whole-file and post-live
+// downloaders' to refresh (OnCredentialRefresh), as one partway through any
+// long transfer is. A verdict on the video (vodRefreshVerdict), a definitive
+// refusal, a cancel, or URLs that have expired or carry no expiry to read
+// still return the error.
 func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.Job, result *StreamProcessResult, extractedAt time.Time) error {
 	if !result.IsVod || job.Platform == "twitch" || !vodInfoStale(result.VideoInfo, extractedAt, time.Now()) {
 		return nil
@@ -127,8 +140,35 @@ func (w *DownloadWorker) refreshStaleVodInfo(ctx context.Context, job *database.
 		"jobID", job.ID, "extracted", extractedAt.UTC().Format(time.RFC3339))
 	info, err := w.refreshVodInfo(ctx, job)
 	if err != nil {
+		if ctx.Err() == nil && !isVodRefreshVerdict(err) && classifyProbeErr(err) == classNetwork &&
+			vodURLsUnexpired(result.VideoInfo, time.Now()) {
+			w.logger.Warn("VOD re-extraction failed; downloading on the stale extraction, whose URLs have not expired",
+				"jobID", job.ID, "err", err)
+			return nil
+		}
 		return err
 	}
 	result.VideoInfo = info
 	return nil
+}
+
+// vodURLsUnexpired reports whether every format URL info holds states an
+// expiry still ahead of now, and at least one does. A URL with no expiry to
+// read cannot be vouched for, so it answers false.
+func vodURLsUnexpired(info *youtube.VideoInfo, now time.Time) bool {
+	if info == nil {
+		return false
+	}
+	vouched := false
+	for _, f := range info.Formats {
+		if f.URL == "" {
+			continue
+		}
+		exp, ok := formatURLExpiry(f.URL)
+		if !ok || !exp.After(now) {
+			return false
+		}
+		vouched = true
+	}
+	return vouched
 }

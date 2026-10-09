@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -75,6 +76,105 @@ func TestStaleVodExtractionIsRefreshedAfterSlotWait(t *testing.T) {
 	}
 	if len(mp4sIn(t, outputDir)) != 1 {
 		t.Errorf("outputs = %v", mp4sIn(t, outputDir))
+	}
+}
+
+// TestStaleVodRefreshFailureKeepsUnexpiredURLs is W20-23 through processJob: a
+// VOD whose URLs lapse within the hour is re-extracted once its slots are
+// held, and that re-extraction fails on a blip. The URLs it already holds
+// still serve the file, so the download goes ahead on them and the job
+// finishes — it used to end in Error over a fetch it did not need.
+//
+// Mutant: return the re-extraction's error unconditionally from
+// refreshStaleVodInfo — the job ends in Error.
+func TestStaleVodRefreshFailureKeepsUnexpiredURLs(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	w.orchestrator.SetFfmpegPath(ffmpegPath)
+	w.orchestrator.routedCipher = stubCipherSolver{}
+	_, outputDir := muxFixtureJob(t, w, db, "j-valid")
+	db.UpdateJobFields("j-valid", map[string]any{"status": database.StatusUpcoming})
+
+	full := filepath.Join(t.TempDir(), "full.mp4")
+	writeMuxFixture(t, ffmpegPath, full, 3)
+	body, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := serveWholeFile(t, body)
+	w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+		// Good for 55 more minutes: inside vodInfoMaxAge, so stale.
+		return &StreamProcessResult{ShouldDownload: true, IsVod: true, VideoInfo: vodInfoAt(srv.URL, time.Now().Add(55*time.Minute).Unix(), len(body))}, nil
+	}
+	var refreshed atomic.Int32
+	w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+		refreshed.Add(1)
+		return nil, dialRefused
+	}
+
+	w.processJob(context.Background(), "j-valid")
+
+	row, _ := db.GetJob("j-valid")
+	if row.Status != database.StatusFinished {
+		t.Fatalf("status = %s (%q), want Finished on the extraction's own URLs", row.Status, row.Error)
+	}
+	if refreshed.Load() != 1 {
+		t.Errorf("re-extractions = %d, want 1", refreshed.Load())
+	}
+	if len(mp4sIn(t, outputDir)) != 1 {
+		t.Errorf("outputs = %v", mp4sIn(t, outputDir))
+	}
+}
+
+// TestStaleVodRefreshFailureFallsBackOnlyWhileTheURLsLive pins when a failed
+// re-extraction leaves the stale extraction in place: a transient failure,
+// with every format URL still unexpired. Anything else returns the error as
+// before — URLs already expired or with no expiry to read, a verdict on the
+// video, a definitive refusal, a cancel.
+//
+// Mutants: drop the `!ok` in vodURLsUnexpired — the no-expiry row keeps its
+// extraction; `!exp.After(now)` → `false` — the expired row does; drop
+// `!isVodRefreshVerdict(err)` — the verdict row does; drop the classNetwork
+// test — the 404 row does; drop `ctx.Err() == nil` — the cancelled row does;
+// make vodURLsUnexpired answer `true` for no URL at all — the URL-less row
+// does.
+func TestStaleVodRefreshFailureFallsBackOnlyWhileTheURLsLive(t *testing.T) {
+	now := time.Now()
+	future := now.Add(4 * time.Hour).Unix()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name     string
+		info     *youtube.VideoInfo
+		err      error
+		ctx      context.Context
+		wantKept bool
+	}{
+		{"a blip, URLs good for hours", vodInfoAt("https://r1.googlevideo.com", future, 1), dialRefused, context.Background(), true},
+		{"a 429, URLs good for hours", vodInfoAt("https://r1.googlevideo.com", future, 1), errors.New("full fetch failed: ANDROID_VR API error: HTTP 429"), context.Background(), true},
+		{"a blip, URLs expired", vodInfoAt("https://r1.googlevideo.com", 1, 1), dialRefused, context.Background(), false},
+		{"a blip, no expiry to read", &youtube.VideoInfo{Formats: []youtube.Format{{Itag: 136, URL: "https://example.invalid/v.mp4"}}}, dialRefused, context.Background(), false},
+		{"a blip, no URL at all", &youtube.VideoInfo{Formats: []youtube.Format{{Itag: 136}}}, dialRefused, context.Background(), false},
+		{"a verdict on the video", vodInfoAt("https://r1.googlevideo.com", future, 1), &vodRefreshVerdict{err: errors.New("This video is private")}, context.Background(), false},
+		{"a definitive refusal", vodInfoAt("https://r1.googlevideo.com", future, 1), errors.New("full fetch failed: web API error: HTTP 404"), context.Background(), false},
+		{"a cancel", vodInfoAt("https://r1.googlevideo.com", future, 1), dialRefused, cancelled, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := testWorkerSetup(t)
+			w.refreshVodInfoFn = func(context.Context, *database.Job) (*youtube.VideoInfo, error) {
+				return nil, tc.err
+			}
+			result := &StreamProcessResult{IsVod: true, VideoInfo: tc.info}
+			// Two hours old: stale by age whatever the URLs say.
+			err := w.refreshStaleVodInfo(tc.ctx, &database.Job{ID: "j", Platform: "youtube"}, result, now.Add(-2*time.Hour))
+			if tc.wantKept {
+				if err != nil || result.VideoInfo != tc.info {
+					t.Errorf("refreshStaleVodInfo = %v; want nil with the stale extraction kept", err)
+				}
+			} else if err == nil {
+				t.Errorf("refreshStaleVodInfo = nil; want the re-extraction's error")
+			}
+		})
 	}
 }
 
