@@ -107,6 +107,14 @@ type LogViewerModel struct {
 	searchQuery string          // current active search query (empty = no highlights)
 	searchRegex *regexp.Regexp  // compiled search pattern (cached, recompiled only on query change)
 	matchCount  int             // number of matches for the current query
+	// matches is the byte ranges applySearchHighlights last handed the
+	// viewport, and matchRows[i] the display row matches[i] starts on — the
+	// row bubbles files it under (one per "\n" before it). searchStep needs
+	// both: the viewport keeps its selected match private, so whether any
+	// match is on screen has to be worked out here, and re-anchoring the
+	// selection on the view means handing the same ranges back.
+	matches   [][]int
+	matchRows []int
 }
 
 // NewLogViewerModel creates a new log viewer model.
@@ -301,8 +309,7 @@ func (m *LogViewerModel) Clear() {
 	m.searchInput.SetValue("")
 	m.searchQuery = ""
 	m.searchRegex = nil
-	m.matchCount = 0
-	m.viewport.ClearHighlights()
+	m.clearSearchMatches()
 	m.rebuildFiltered()
 	// setAutoScroll (not a direct field assignment) so the viewport height
 	// is recalculated when this un-pauses — it owns the pause-hint row (see
@@ -474,6 +481,10 @@ func (m *LogViewerModel) updateViewportContent() {
 	// One funnel for every content change — the render cache keys on this.
 	m.contentSeq++
 	if len(m.filtered) == 0 {
+		// A placeholder is not searched: an active query matches nothing in
+		// it, and the ranges found in the content it replaced would point
+		// past its end (searchStep hands them back to the viewport).
+		m.clearSearchMatches()
 		// Lines exist but the level filter hides them all: say so, rather
 		// than "No logs yet." under a header reading "Logs (0) [WARN+]".
 		if len(m.lines) > 0 && m.level != LogLevelAll {
@@ -501,7 +512,9 @@ func (m *LogViewerModel) updateViewportContent() {
 	// is the jump Enter wants (it calls applySearchHighlights directly), but
 	// here the content merely changed, and a reader paused above the latest
 	// lines was carried down to the next match on every new line. The offset
-	// is the reader's, so it is put back.
+	// is the reader's, so it is put back — which leaves the viewport's
+	// selection on that unseen match below, and searchStep is what keeps n
+	// from stepping past it.
 	if m.searchQuery != "" {
 		top := m.viewport.YOffset()
 		m.applySearchHighlights()
@@ -597,8 +610,7 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 				// Empty query — clear search
 				m.searchQuery = ""
 				m.searchRegex = nil
-				m.matchCount = 0
-				m.viewport.ClearHighlights()
+				m.clearSearchMatches()
 				m.resizeViewport()
 				return nil, true
 			}
@@ -634,16 +646,15 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		case keyEsc:
 			m.searchQuery = ""
 			m.searchRegex = nil
-			m.matchCount = 0
-			m.viewport.ClearHighlights()
+			m.clearSearchMatches()
 			return nil, true
 		case "n":
-			m.viewport.HighlightNext()
+			m.searchStep(true)
 			m.invalidate() // the selected-highlight index is bubbles-private
 			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
 		case "N":
-			m.viewport.HighlightPrevious()
+			m.searchStep(false)
 			m.invalidate() // the selected-highlight index is bubbles-private
 			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
@@ -665,7 +676,7 @@ func (m *LogViewerModel) StartSearch() tea.Cmd {
 // and sets highlight ranges.
 func (m *LogViewerModel) applySearchHighlights() {
 	if m.searchRegex == nil {
-		m.matchCount = 0
+		m.clearSearchMatches()
 		return
 	}
 	// The content is the buffer AFTER hard-wrapping, so a match that straddles
@@ -675,12 +686,86 @@ func (m *LogViewerModel) applySearchHighlights() {
 	// only affects a query long enough to span the panel's own width.
 	content := m.viewport.GetContent()
 	matches := m.searchRegex.FindAllStringIndex(content, -1)
-	m.matchCount = len(matches)
-	if len(matches) > 0 {
-		m.viewport.SetHighlights(matches)
-	} else {
-		m.viewport.ClearHighlights()
+	if len(matches) == 0 {
+		m.clearSearchMatches()
+		return
 	}
+	m.matchCount = len(matches)
+	m.matches = matches
+	m.matchRows = m.matchRows[:0]
+	row, from := 0, 0
+	for _, mt := range matches {
+		row += strings.Count(content[from:mt[0]], "\n")
+		from = mt[0]
+		m.matchRows = append(m.matchRows, row)
+	}
+	m.viewport.SetHighlights(matches)
+}
+
+// clearSearchMatches forgets the matches of a search that no longer applies
+// (Esc, an empty Enter, Clear) or of content that cannot be searched (the
+// empty and filtered-empty placeholders).
+func (m *LogViewerModel) clearSearchMatches() {
+	m.matchCount = 0
+	m.matches = nil
+	m.matchRows = m.matchRows[:0]
+	m.viewport.ClearHighlights()
+}
+
+// searchStep is n (forward) and N: select the next or previous match and
+// bring it on screen.
+//
+// The viewport's own HighlightNext/HighlightPrevious step from the match it
+// has selected, and it re-selects on every scroll and every SetHighlights:
+// the first match at or below the top row, ON SCREEN OR NOT. A reader who
+// scrolled to a stretch with no match on screen — with ↓/PgDn, or simply
+// paused there while a new line re-applied the highlights (the rebuild puts
+// the reader's offset back, W24-12) — therefore had the first match BELOW
+// the view selected without ever seeing it, and n stepped past it: from
+// line 20 with matches at 10, 50, 60 and 90, n went to 60, and with only 10
+// and 50 it wrapped up to 10, skipping the one match below. N, with nothing
+// below the view, stepped from "none selected" to the second-to-last match
+// and skipped the last one above.
+//
+// So the selection is used only while a match is on screen — the one bubbles
+// highlights as selected is then one the reader can see. With none on screen
+// n goes to the first match below the view (wrapping to the first of all)
+// and N to the last match above it (wrapping to the last of all), whatever
+// the viewport had selected.
+func (m *LogViewerModel) searchStep(forward bool) {
+	if len(m.matchRows) == 0 {
+		return
+	}
+	top := m.viewport.YOffset()
+	// below is the index of the first match at or below the top row — the
+	// one SetHighlights selects at this offset — or len when there is none.
+	below, _ := slices.BinarySearch(m.matchRows, top)
+	onScreen := below < len(m.matchRows) && m.matchRows[below] < top+m.viewport.Height()
+	if onScreen {
+		if forward {
+			m.viewport.HighlightNext()
+		} else {
+			m.viewport.HighlightPrevious()
+		}
+		return
+	}
+	// Re-anchor: SetHighlights selects the first match below the view and
+	// scrolls to it, which is n's answer outright. With nothing below it
+	// selects none, and stepping from none reaches the first match (n's wrap)
+	// and, back from there, the last (N's).
+	m.viewport.SetHighlights(m.matches)
+	if forward {
+		if below == len(m.matchRows) {
+			m.viewport.HighlightNext()
+		}
+		return
+	}
+	m.viewport.SetYOffset(top) // N scrolls from the reader's place, not the match below it
+	if below == len(m.matchRows) {
+		m.viewport.HighlightNext()
+		m.viewport.SetYOffset(top)
+	}
+	m.viewport.HighlightPrevious()
 }
 
 // resizeViewport recalculates viewport height accounting for the search bar
