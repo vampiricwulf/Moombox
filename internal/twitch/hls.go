@@ -356,16 +356,25 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 // rankAtChosenSize use, so a portrait stream's 720p is its 720x1280
 // rendition. An fps suffix ("720p60", targetFPS > 0) keeps the renditions of
 // that size at targetFPS-1 and up when there are any; the rest is
-// rankAtChosenSize's ranking, prefer60fps included — codec, frame rate,
-// source, bandwidth.
+// rankAtChosenSize's ranking — codec, frame rate, source, bandwidth — with
+// prefer60fps for the frame rate when there is no suffix, and the suffix's
+// own rate when there is one (50 and up for a suffix of 50 or more), the
+// rule vodSelectionBounds applies to a YouTube VOD.
 //
 // It used to match the raw height and take the highest bandwidth, so a
 // portrait stream's 720p matched nothing (its 720x1280 transcode is 1280
 // high) and the preference fell to whatever lay below it, and a suffix-less
 // "720p" ignored prefer_60fps and the codec, which the size the cap chooses
-// has been ranked by since D-Y2.
+// has been ranked by since D-Y2. When the ranking first took prefer60fps over,
+// a "1080p60" whose size had no 59 fps rendition fell back to it as well, so
+// with prefer_60fps off a 50 fps broadcast's source lost to the 30 fps
+// transcode beside it, though the preference had asked for the high rate
+// outright.
 func selectVariantByHeight(variants []TwitchHLSVariant, targetHeight, targetFPS int, prefer60fps bool) *TwitchHLSVariant {
 	if targetFPS > 0 {
+		// The suffix asks for its rate whatever prefer_60fps says, at the
+		// fallback below as much as in the filter.
+		prefer60fps = targetFPS >= 50
 		if match := rankWhere(variants, prefer60fps, func(v *TwitchHLSVariant) bool {
 			return utils.CapDimension(v.Width, v.Height) == targetHeight && v.FPS >= float64(targetFPS)-1
 		}); match != nil {

@@ -78,11 +78,20 @@ func TestHeightPreferenceRanksLikeTheChosenSize(t *testing.T) {
 // when the size offers no such rate. The descent keeps it: "1080p60" on a
 // ladder whose largest size is 720 still asks for 60 fps there.
 //
+// The fallback ranks the frame rate by the suffix too, not by prefer_60fps: a
+// 50 fps broadcast has no 59 fps rendition for "1080p60" to keep, and with
+// prefer_60fps off the fallback took the 30 fps transcode beside its source,
+// at the size named and at the size the descent came down to. A YouTube VOD
+// takes the 50 fps stream for the same preference (vodSelectionBounds), and
+// the YouTube live selectors take it by their bandwidth fallback.
+//
 // Mutants: the suffix filter dropped from selectVariantByHeight (prefer_60fps
 // off takes 720p30 for a 720p60 preference, and for the descent's); the
 // fallback to the whole size dropped (neither 720 nor 480 has a 60 fps
 // rendition, so nothing matches and the source comes back);
-// selectNextLowerVariant passing no fps (the descent takes 720p30).
+// selectNextLowerVariant passing no fps (the descent takes 720p30); the
+// suffix's rate not set over prefer60fps in selectVariantByHeight (the 50 fps
+// ladder takes 1080p30, and 720p30 under a 720 cap).
 func TestHeightPreferenceFPSSuffix(t *testing.T) {
 	ladder := []TwitchHLSVariant{
 		{Name: "chunked", Bandwidth: 8000000, Width: 1920, Height: 1080, FPS: 60, VideoCodec: "avc1", IsSource: true},
@@ -102,5 +111,18 @@ func TestHeightPreferenceFPSSuffix(t *testing.T) {
 	noTenEighty := []TwitchHLSVariant{ladder[1], ladder[2], ladder[3]}
 	if got := SelectBestVariant(noTenEighty, "1080p60", 0, false); got == nil || got.Name != "720p60" {
 		t.Errorf("1080p60 descending to 720 selected %v, want 720p60 — the suffix still asks for 60 fps", got)
+	}
+
+	fifty := []TwitchHLSVariant{
+		{Name: "chunked", Bandwidth: 6000000, Width: 1920, Height: 1080, FPS: 50, VideoCodec: "avc1", IsSource: true},
+		{Name: "1080p30", Bandwidth: 4500000, Width: 1920, Height: 1080, FPS: 30, VideoCodec: "avc1"},
+		{Name: "720p50", Bandwidth: 3000000, Width: 1280, Height: 720, FPS: 50, VideoCodec: "avc1"},
+		{Name: "720p30", Bandwidth: 2000000, Width: 1280, Height: 720, FPS: 30, VideoCodec: "avc1"},
+	}
+	if got := SelectBestVariant(fifty, "1080p60", 0, false); got == nil || got.Name != "chunked" {
+		t.Errorf("1080p60 on a 50 fps ladder with prefer_60fps off selected %v, want the 50 fps source — the suffix ranks the fallback", got)
+	}
+	if got := SelectBestVariant(fifty, "1080p60", 720, false); got == nil || got.Name != "720p50" {
+		t.Errorf("1080p60 under a 720 cap on a 50 fps ladder with prefer_60fps off selected %v, want 720p50 — the descent ranks by the suffix too", got)
 	}
 }
