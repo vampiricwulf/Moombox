@@ -27,9 +27,10 @@ var bootSweepClaimed func(jobID string)
 //     written, so the aside is footage that already exists beside the archive;
 //   - the staging dir of a Finished job whose archive file(s) exist, when
 //     cleanupStagingAfterMux would have deleted it (decideStagingCleanup says
-//     removeStaging). Its own cleanup did not run or did not finish — the
-//     process died between the Finished write and the RemoveAll, or Windows
-//     held a handle on a file in it.
+//     removeStaging) and no aside marked recovered is left in it. Its own
+//     cleanup did not run or did not finish — the process died between the
+//     Finished write and the RemoveAll, or Windows held a handle on a file in
+//     it.
 //
 // Every deletion is logged with its path and the reason. Anything that is not
 // provable — a job row that cannot be read or is gone, an archive that is not
@@ -88,8 +89,18 @@ func (w *DownloadWorker) reclaimJobLeftovers(jobID, stagingDir string) {
 	}
 	// A recovered aside is redundant whatever became of its row: the proof is
 	// the sibling on disk, not the job.
-	w.removeVerifiedRecoveredAsides(jobID, stagingDir)
+	keptAside := w.removeVerifiedRecoveredAsides(jobID, stagingDir)
 	if job == nil || job.Status != database.StatusFinished {
+		return
+	}
+	// decideStagingCleanup does not see a marked aside (stagedRestartAsides
+	// skips it as already muxed), which is right straight after a finalize
+	// that has just written its sibling and wrong here: one this sweep could
+	// not prove redundant may be the only copy of that footage, and the
+	// RemoveAll below would take it with the directory.
+	if keptAside {
+		w.logger.Debug("boot cleanup: keeping a finished job's staging; a set-aside recording marked recovered is still in it",
+			"path", stagingDir, "jobID", jobID)
 		return
 	}
 	if missing := missingArchiveFile(w.db, job); missing != "" {
@@ -151,7 +162,12 @@ func nonEmptyFile(path string) bool {
 // one runs inside a finalize that has just written the siblings, this one at
 // boot, where the sibling may since have been moved or deleted, and then the
 // aside is the only copy left and stays.
-func (w *DownloadWorker) removeVerifiedRecoveredAsides(jobID, stagingDir string) {
+//
+// kept reports whether a marked aside is still on disk when it returns — its
+// sibling missing or empty, its marker unreadable, or its removal failed — so
+// the caller leaves the rest of the directory alone too: nothing else in the
+// sweep counts a marked aside as footage (stagedRestartAsides skips it).
+func (w *DownloadWorker) removeVerifiedRecoveredAsides(jobID, stagingDir string) (kept bool) {
 	dirs := []string{stagingDir}
 	for _, sd := range segDirsOf(stagingDir, true) {
 		dirs = append(dirs, sd.dir)
@@ -167,31 +183,47 @@ func (w *DownloadWorker) removeVerifiedRecoveredAsides(jobID, stagingDir string)
 				continue
 			}
 			aside := filepath.Join(dir, name)
-			marker := aside + asideRecoveredMarker
-			raw, err := os.ReadFile(marker)
-			if err != nil {
-				continue
-			}
-			sibling := strings.TrimSpace(string(raw))
-			if sibling == "" || !nonEmptyFile(sibling) {
-				w.logger.Debug("boot cleanup: keeping a recovered set-aside recording; the sibling its marker names is not on disk",
-					"aside", aside, "sibling", sibling, "jobID", jobID)
-				continue
-			}
-			removed := true
-			for _, p := range []string{aside, engine.StagedRestartSidecar(aside), marker} {
-				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-					w.logger.Warn("boot cleanup: could not remove a recovered set-aside recording's leftover",
-						"path", p, "jobID", jobID, "err", err)
-					removed = false
-					break
-				}
-			}
-			if removed {
-				w.logger.Info("boot cleanup: removed a set-aside recording already recovered beside the archive",
-					"path", aside, "jobID", jobID,
-					"reason", "its recovered marker names a sibling that is on disk: "+sibling)
+			w.removeVerifiedRecoveredAside(jobID, aside)
+			// An aside still here is one this sweep could not prove
+			// redundant, or could not remove. A marker whose aside is already
+			// gone (its removal went through, the marker's did not) keeps
+			// nothing: what is left is not footage.
+			if fileExists(aside) {
+				kept = true
 			}
 		}
 	}
+	return kept
+}
+
+// removeVerifiedRecoveredAside is removeVerifiedRecoveredAsides for one aside
+// whose recovered marker sits beside it.
+func (w *DownloadWorker) removeVerifiedRecoveredAside(jobID, aside string) {
+	marker := aside + asideRecoveredMarker
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		return
+	}
+	sibling := strings.TrimSpace(string(raw))
+	if sibling == "" || !nonEmptyFile(sibling) {
+		w.logger.Debug("boot cleanup: keeping a recovered set-aside recording; the sibling its marker names is not on disk",
+			"aside", aside, "sibling", sibling, "jobID", jobID)
+		return
+	}
+	for _, p := range []string{aside, engine.StagedRestartSidecar(aside), marker} {
+		remove := os.Remove
+		if p == aside {
+			// The seam the finalize's own aside removals use, so a test can
+			// hold the aside the way a Windows handle does.
+			remove = removeAsideFile
+		}
+		if err := remove(p); err != nil && !os.IsNotExist(err) {
+			w.logger.Warn("boot cleanup: could not remove a recovered set-aside recording's leftover",
+				"path", p, "jobID", jobID, "err", err)
+			return
+		}
+	}
+	w.logger.Info("boot cleanup: removed a set-aside recording already recovered beside the archive",
+		"path", aside, "jobID", jobID,
+		"reason", "its recovered marker names a sibling that is on disk: "+sibling)
 }

@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -250,6 +252,92 @@ func TestBootSweepRemovesRecoveredAsidesWhoseSiblingExists(t *testing.T) {
 	}
 	if strings.TrimSpace(readFileOr(t, noSibling+asideRecoveredMarker)) == "" {
 		t.Error("the kept marker lost its content")
+	}
+}
+
+// TestBootSweepKeepsAFinishedStagingWithAnUnprovenMarkedAside: a Finished
+// job's staging that is otherwise redundant still holds a set-aside recording
+// marked recovered, which decideStagingCleanup does not count (it skips marked
+// asides as already muxed). When the sweep cannot prove that aside redundant —
+// the sibling its marker names was moved or deleted, in the root or in a seg_N
+// dir — or cannot remove it, the aside may be the only copy of that footage,
+// and the whole dir stays for the orphan sweep. A marker whose aside is already
+// gone holds nothing back.
+//
+// Mutants: drop the keptAside return (the missing-sibling and held asides are
+// deleted with their dirs); set kept for every marker without asking whether
+// its aside is still on disk (the marker-only dir survives); remove the aside
+// with os.Remove instead of removeAsideFile (the held aside is deleted, and its
+// dir with it).
+func TestBootSweepKeepsAFinishedStagingWithAnUnprovenMarkedAside(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		asideDir string // "" for the root, else a part dir under it
+		sibling  bool   // the sibling the marker names is on disk
+		noAside  bool   // only the marker and the resume twin are left
+		held     bool   // the aside's removal fails
+		wantGone bool
+	}{
+		{name: "the sibling is missing", wantGone: false},
+		{name: "a part's sibling is missing", asideDir: "seg_1", wantGone: false},
+		{name: "the aside cannot be removed", sibling: true, held: true, wantGone: false},
+		{name: "only the marker is left", noAside: true, wantGone: true},
+		{name: "the sibling is on disk", sibling: true, wantGone: true},
+		{name: "a part's sibling is on disk", asideDir: "seg_1", sibling: true, wantGone: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db, log, stagingBase := bootSweepWorker(t)
+			outputDir := t.TempDir()
+			archive := filepath.Join(outputDir, "x.mp4")
+			writeFixtureFile(t, archive, "archive")
+			sibling := filepath.Join(outputDir, "x.restart-1700000000.mp4")
+			if tc.sibling {
+				writeFixtureFile(t, sibling, "recovered")
+			}
+			if _, err := db.AddJob(&database.Job{ID: "j-fin", VideoID: "j-fin", Status: database.StatusFinished, OutputFile: archive}); err != nil {
+				t.Fatal(err)
+			}
+			staging := filepath.Join(stagingBase, "j-fin")
+			if tc.asideDir == "" {
+				writeFixtureFile(t, filepath.Join(staging, "video.mp4"), "\x00\x00\x00\x18ftypdash")
+			} else {
+				// Finished as two parts, each muxed to its own file: the
+				// rest of this dir is as redundant as the root case's.
+				for i, dir := range []string{staging, filepath.Join(staging, tc.asideDir)} {
+					writeFixtureFile(t, filepath.Join(dir, "video_stream"), "\x00\x00\x00\x18ftypdash")
+					partFile := filepath.Join(outputDir, fmt.Sprintf("x - part%d.mp4", i+1))
+					writeFixtureFile(t, partFile, "part")
+					if err := db.AddSegment(&database.Segment{JobID: "j-fin", SegmentIndex: i, Filename: filepath.Base(partFile), FilePath: partFile}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			aside := filepath.Join(staging, tc.asideDir, "video_stream.restart-1700000000")
+			if !tc.noAside {
+				writeFixtureFile(t, aside, "set aside footage")
+			}
+			writeFixtureFile(t, engine.StagedRestartSidecar(aside), `{"lastSeq":1}`)
+			writeFixtureFile(t, aside+asideRecoveredMarker, sibling)
+			if tc.held {
+				removeAsideFile = func(p string) error {
+					if p == aside {
+						return errors.New("the process cannot access the file because it is being used by another process")
+					}
+					return os.Remove(p)
+				}
+				t.Cleanup(func() { removeAsideFile = os.Remove })
+			}
+
+			w.reclaimBootLeftovers()
+
+			_, err := os.Stat(staging)
+			if gone := os.IsNotExist(err); gone != tc.wantGone {
+				t.Fatalf("staging removed = %v, want %v; log: %v", gone, tc.wantGone, log.lines)
+			}
+			if !tc.wantGone && !fileExists(aside) {
+				t.Errorf("%s was deleted — nothing proved it redundant, and it may be the only copy", aside)
+			}
+		})
 	}
 }
 
