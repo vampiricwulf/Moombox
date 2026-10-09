@@ -101,7 +101,7 @@ A status transition decided on a status read earlier must not be written uncondi
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
 Backlog VODs only: enter as `Queued` and are admitted to `Upcoming` by the worker's per-channel archive-slots scheduler, which admits none while offline or while the output volume is at or past `disk_critical_percent` (live/upcoming and newly published content never waits in `Queued`); a backlog VOD parked in `COOKIES?` returns to `Queued` (when its feed row still exists), not `Upcoming`, so a cookie repair re-admits it through the same pacing.
-Error paths: any → `Error`, `Cancelled`, or `COOKIES?`. One automatic way out of `Error`: a live Twitch capture that stopped with its broadcast's end unconfirmed (`park_reason` `twitch_end_unconfirmed`) is muxed once the Twitch monitor confirms the broadcast over, exactly as the Mux action would, once.
+Error paths: any → `Error`, `Cancelled`, or `COOKIES?`. Two automatic ways out of `Error`, both the Twitch monitor's and never both for one row: a Twitch job that failed with `TwitchOfflineErrMsg` before any segment was downloaded is re-initialised to `Upcoming` when the monitor finds the same broadcast live, within `MaxTwitchAutoRetries` (`isRecoverableTwitchError` → `AutoReinitializeJob`); and a live Twitch capture that stopped with its broadcast's end unconfirmed (`park_reason` `twitch_end_unconfirmed`, which `isRecoverableTwitchError` refuses) is muxed once the Twitch monitor confirms the broadcast over, exactly as the Mux action would, once.
 
 `JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings. Optional numerics use pointers.
 
