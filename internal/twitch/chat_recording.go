@@ -631,9 +631,59 @@ func (cd *ChatDownloader) noteRollUnwritten(n int) {
 	cd.mu.Unlock()
 }
 
-// rollUnwrittenErr is the verdict noteRollUnwritten's count puts on Start's
-// exit: nil while every roll wrote its boundary batch, otherwise the error
-// naming how many messages are in no part file. Start returns it from the
+// spillOnInterruptedExit is Start's interrupted exit over a final flush that
+// could not write the pending batch: a part file still unreadable, a full disk
+// (the append put the file's end back). That exit can be the one a job
+// finalizes on — ExecuteTwitch's outage finalize ends chat with Stop() and
+// records its verdict — and it used to save the sidecar and return nil with
+// the batch in memory alone: the row read chat "finished", nothing wrote the
+// batch afterwards, and the staging cleanup deleted the sidecar. The batch is
+// now spilled beside the part, as the stream-end drain spills it, and the
+// returned error reports the capture incomplete. A shutdown discards that
+// verdict.
+//
+// A spilled batch also leaves the downloader, counted with the boundary
+// batches a roll could not write (rollUnwritten): an in-process relaunch keeps
+// the in-memory state, and would otherwise write the batch to the part as well
+// as the spill; and the count, which the sidecar Start saves next carries
+// across a restart, keeps every later end of the capture incomplete, where a
+// clean one would let the cleanup delete the spill. Like noteRollUnwritten's
+// messages they leave the job total, and the part's count with them. A spill
+// that fails leaves the batch pending, for a relaunch's flush to retry.
+//
+// Under flushMu, as every other writer of the pending batch is, so a roll
+// cannot drain it between the snapshot and the removal.
+func (cd *ChatDownloader) spillOnInterruptedExit(flushErr error) error {
+	cd.flushMu.Lock()
+	defer cd.flushMu.Unlock()
+	cd.mu.Lock()
+	n := len(cd.messages)
+	pending := append([]TwitchChatMessage(nil), cd.messages...)
+	path := cd.outputPath
+	cd.mu.Unlock()
+	if n == 0 || path == "" {
+		return nil
+	}
+	if dumpErr := dumpLostChatBatch(path, pending); dumpErr != nil {
+		cd.logger.Error("twitch chat: could not spill the unwritten messages; they stay pending",
+			"path", path, "messages", n, "err", dumpErr)
+	} else {
+		cd.mu.Lock()
+		cd.messages = cd.messages[n:]
+		cd.fileCount = max(cd.fileCount-n, 0)
+		cd.totalCount = max(cd.totalCount-n, 0)
+		cd.rollUnwritten += n
+		cd.mu.Unlock()
+		cd.logger.Error("twitch chat: final flush failed on an interrupted exit; unwritten messages spilled for recovery",
+			"path", path+".lostbatch.json", "messages", n)
+	}
+	return fmt.Errorf("twitch chat: final flush failed, %d messages not written to %s: %w", n, path, flushErr)
+}
+
+// rollUnwrittenErr is the verdict rollUnwritten's count puts on Start's exit:
+// nil while the count is zero, otherwise the error naming how many messages
+// are in no part file — a boundary batch a roll could not write, or a batch an
+// interrupted exit spilled (spillOnInterruptedExit). Start returns it from the
 // stream-end drain and from an interrupted exit alike, because both can be
 // the exit a job finalizes on.
 func (cd *ChatDownloader) rollUnwrittenErr() error {
@@ -643,7 +693,7 @@ func (cd *ChatDownloader) rollUnwrittenErr() error {
 	if unwritten <= 0 {
 		return nil
 	}
-	return fmt.Errorf("twitch chat: %d messages could not be written to their part at a part boundary; see the part's chat.json.lostbatch.json", unwritten)
+	return fmt.Errorf("twitch chat: %d messages could not be written to their part file, at a part boundary or an interrupted exit; see the part's chat.json.lostbatch.json", unwritten)
 }
 
 // resolveEmotesCached resolves third-party emotes (7TV/BTTV/FFZ) once per

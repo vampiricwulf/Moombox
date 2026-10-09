@@ -223,3 +223,67 @@ func TestOutageFinalizeKeepsABoundarySpill(t *testing.T) {
 		t.Errorf("the staging cleanup deleted the boundary spill: %v", err)
 	}
 }
+
+// TestOutageFinalizeSpillsAFailedFinalFlush: the outage finalize ends chat
+// with Stop() and records the verdict of Start's interrupted exit, and that
+// exit ignored a final flush that could not write the pending messages. They
+// stayed in memory, which nothing wrote afterwards; the row read chat
+// "finished" counting them, and the staging cleanup deleted the sidecar. The
+// exit now spills them beside the part and reports the capture incomplete, so
+// the cleanup keeps the spill, and the row's total follows what the part
+// files hold.
+//
+// The job resumes into a second part (seg_1) with a directory where that
+// part's chat file belongs: the chat can neither read it nor write over it, so
+// every flush holds the messages the fake IRC delivers. A later part, so the
+// mux counts the directory as no chat rather than failing a copy of it — that
+// would read "incomplete" for a reason of its own.
+//
+// Mutant: Start's interrupted-exit arm not calling spillOnInterruptedExit —
+// the row reads "finished" with 2 messages and nothing is spilled.
+func TestOutageFinalizeSpillsAFailedFinalFlush(t *testing.T) {
+	at := time.Now().Add(-time.Minute)
+	fakeIRC(t, privmsg("tail-1", at), privmsg("tail-2", at.Add(time.Second)), func() {})
+
+	srv, first := liveTwitchWindow(t)
+	h := newEndVerdictHarness(t, "tw_outage_flushfail")
+	// The recovery finds the broadcast over: the outage finalize.
+	h.variant.RecheckStreamFn = func(context.Context) (*twitch.TwitchStreamInfo, error) {
+		return &twitch.TwitchStreamInfo{IsLive: false}, nil
+	}
+	staging := h.jobCtx.StagingDir
+	partChat := filepath.Join(staging, "seg_1", "chat.json")
+	if err := os.MkdirAll(partChat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.chat = twitch.NewChatDownloader(twitch.ChatDownloaderOptions{ChannelLogin: "testchan", StreamID: "s1",
+		OutputPath: filepath.Join(staging, "chat.json")}, &discardLogger{})
+
+	fresh, err := outageThenRecover(t, h, srv, first)
+	if err != nil || fresh.Status != database.StatusFinished {
+		t.Fatalf("the outage finalize ended as err=%v status=%s, want it Finished — this test is about its chat verdict",
+			err, fresh.Status)
+	}
+	if fresh.ChatStatus != chatStatusIncomplete {
+		t.Errorf("chat_status = %q after an outage finalize whose final flush could not write its messages, want %q",
+			fresh.ChatStatus, chatStatusIncomplete)
+	}
+	if n := fresh.TotalChatMessages; n == nil {
+		t.Error("total_chat_messages unset, want 0: no part file holds a message")
+	} else if *n != 0 {
+		t.Errorf("total_chat_messages = %d, want 0: no part file holds a message", *n)
+	}
+
+	h.w.cleanupStagingAfterMux(h.job.ID, staging)
+	raw, err := os.ReadFile(partChat + ".lostbatch.json")
+	if err != nil {
+		t.Fatalf("no spill of the unwritten messages after the cleanup: %v", err)
+	}
+	var spilled []twitch.TwitchChatMessage
+	if err := json.Unmarshal(raw, &spilled); err != nil {
+		t.Fatalf("the spill does not parse: %v", err)
+	}
+	if len(spilled) != 2 {
+		t.Errorf("the spill holds %d messages, want the 2 the IRC delivered", len(spilled))
+	}
+}

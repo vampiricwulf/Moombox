@@ -449,6 +449,11 @@ func TestAPartAdoptedAtItsFirstFlushKeepsItsClock(t *testing.T) {
 // never lower it, the header read 6 over an array of 4 for good. The sidecar
 // now counts what the file holds.
 //
+// The spill is blocked (a directory in its place), so the batch is still
+// pending when the exit saves: an interrupted exit that can spill it takes it
+// out of the downloader first (spillOnInterruptedExit), and the save would
+// then have nothing pending to leave out.
+//
 // Mutant: save fileCount/totalCount without subtracting the pending messages
 // in saveResumeState — the sidecar says 5 and the header 6 over 4.
 func TestAnExitAfterAFailedFlushSavesTheFilesCount(t *testing.T) {
@@ -458,6 +463,9 @@ func TestAnExitAfterAFailedFlushSavesTheFilesCount(t *testing.T) {
 		cd.addMessage(damageTestMessage("m", i))
 	}
 	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".lostbatch.json", 0o755); err != nil {
 		t.Fatal(err)
 	}
 	real := appendChatMessages
@@ -531,6 +539,182 @@ func TestAFailedFinalFlushIsReportedNotDropped(t *testing.T) {
 	if _, err := os.Stat(chatResumePath(path)); err != nil {
 		t.Errorf("the sidecar was not kept: %v", err)
 	}
+}
+
+// TestAFailedFinalFlushOnAnInterruptedExitIsSpilledAndReported: Start's
+// interrupted exit — Stop(), which is how ExecuteTwitch's outage finalize ends
+// chat before it records that exit's verdict — ignored a final flush that
+// could not write the pending batch. It saved the sidecar and returned nil
+// with the batch in memory alone: the row read chat "finished", nothing wrote
+// the batch afterwards, and the staging cleanup deleted the sidecar. The exit
+// now spills the batch beside the part, as the stream-end drain does, and
+// reports the capture incomplete. The spilled batch leaves the downloader for
+// the rollUnwritten count, so a relaunched Start cannot write it to the part a
+// second time, and every later end — of that relaunch, or of the run a
+// restart resumes from the sidecar — still reports it. A spill that fails
+// leaves the batch pending, and the relaunch writes it.
+//
+// Mutants: drop the spillOnInterruptedExit call in Start's interrupted arm, or
+// return nil from it — Start returns nil and nothing is spilled; leave the
+// spilled batch in cd.messages — the relaunch writes it to the part too; drop
+// the rollUnwritten increment — the relaunch's end and the resumed run's end
+// read clean; drop the fileCount/totalCount decrement — MessageCount keeps the
+// spilled batch; save the sidecar ahead of the spill — the resumed run's end
+// reads clean; take the batch out when the spill itself failed — the
+// relaunch has nothing to write.
+func TestAFailedFinalFlushOnAnInterruptedExitIsSpilledAndReported(t *testing.T) {
+	endStream := func(t *testing.T, cd *ChatDownloader) error {
+		t.Helper()
+		cd.mu.Lock()
+		cd.streamEnded = true
+		cd.mu.Unlock()
+		return cd.Start(cancelledContext(t))
+	}
+	wantFlushFailed := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "final flush failed") {
+			t.Errorf("the interrupted exit = %v, want the failed final flush reported", err)
+		}
+	}
+	wantSpilled := func(t *testing.T, path, prefix string, n int) {
+		t.Helper()
+		raw, err := os.ReadFile(path + ".lostbatch.json")
+		if err != nil {
+			t.Errorf("the unwritten messages were not spilled: %v", err)
+			return
+		}
+		var spilled []TwitchChatMessage
+		if err := json.Unmarshal(raw, &spilled); err != nil {
+			t.Fatalf("the spill does not parse: %v", err)
+		}
+		got := 0
+		for _, m := range spilled {
+			if strings.HasPrefix(m.ID, prefix) {
+				got++
+			}
+		}
+		if got != n {
+			t.Errorf("the spill holds %d of the %d unwritten messages", got, n)
+		}
+	}
+	// partHolds counts the messages with prefix in the part file.
+	partHolds := func(t *testing.T, path, prefix string) int {
+		t.Helper()
+		n := 0
+		for _, m := range readDamageTestFile(t, path).Messages {
+			if strings.HasPrefix(m.ID, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	failAppends := func(t *testing.T) (restore func()) {
+		t.Helper()
+		real := appendChatMessages
+		t.Cleanup(func() { appendChatMessages = real })
+		appendChatMessages = func(string, []TwitchChatMessage, int, utils.ChatFileLogger) error {
+			return fmt.Errorf("%w: disk full", utils.ErrChatFilePartialWrite)
+		}
+		return func() { appendChatMessages = real }
+	}
+	// partWithHistory is a part file holding 3 messages, with its sidecar,
+	// and the downloader that wrote them.
+	partWithHistory := func(t *testing.T) (*ChatDownloader, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "chat.json")
+		cd := newTestChatDownloader(t, path)
+		for i := range 3 {
+			cd.addMessage(damageTestMessage("old", i))
+		}
+		if err := cd.flush(); err != nil {
+			t.Fatal(err)
+		}
+		cd.saveResumeState()
+		return cd, path
+	}
+
+	// The part file still cannot be read at the exit, so the final flush
+	// holds the batch rather than write over the history it cannot see.
+	t.Run("unread part", func(t *testing.T) {
+		cd, path, unlock := startOnUnreadPart(t)
+		before := cd.MessageCount()
+		for i := range 5 {
+			cd.addMessage(damageTestMessage("tail", i))
+		}
+		cd.Stop()
+		wantFlushFailed(t, cd.Start(cancelledContext(t)))
+		wantSpilled(t, path, "tail", 5)
+		if got := cd.MessageCount(); got != before {
+			t.Errorf("MessageCount %d after the exit spilled 5, want %d", got, before)
+		}
+
+		// A relaunch in this process keeps the in-memory state. The part is
+		// readable again, so it is adopted; the spilled batch must not follow
+		// it in, and the end still reports the batch.
+		unlock()
+		err := endStream(t, cd)
+		if err == nil || !strings.Contains(err.Error(), "5 messages could not be written") {
+			t.Errorf("the relaunch's end = %v, want the 5 spilled messages reported", err)
+		}
+		if n := partHolds(t, path, "tail"); n != 0 {
+			t.Errorf("the part holds %d of the spilled messages as well, want 0", n)
+		}
+	})
+
+	// A full disk: the append puts the file's end back and the batch stays
+	// pending. A restart resumes from the sidecar the exit saved.
+	t.Run("full disk, then a restart", func(t *testing.T) {
+		cd, path := partWithHistory(t)
+		restore := failAppends(t)
+		for i := range 3 {
+			cd.addMessage(damageTestMessage("tail", i))
+		}
+		cd.Stop()
+		wantFlushFailed(t, cd.Start(cancelledContext(t)))
+		wantSpilled(t, path, "tail", 3)
+		restore()
+
+		resumed := newTestChatDownloader(t, path)
+		_ = resumed.Start(cancelledContext(t))
+		err := endStream(t, resumed)
+		if err == nil || !strings.Contains(err.Error(), "3 messages could not be written") {
+			t.Errorf("the resumed run's end = %v, want the 3 spilled messages reported", err)
+		}
+		if n := partHolds(t, path, "old"); n != 3 {
+			t.Errorf("the part holds %d of its 3 messages", n)
+		}
+	})
+
+	// The spill cannot be written either: the batch stays pending, and the
+	// relaunch, with the disk back, writes it to the part.
+	t.Run("the spill fails too", func(t *testing.T) {
+		cd, path := partWithHistory(t)
+		restore := failAppends(t)
+		for i := range 3 {
+			cd.addMessage(damageTestMessage("tail", i))
+		}
+		spill := path + ".lostbatch.json"
+		if err := os.Mkdir(spill, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		before := cd.MessageCount()
+		cd.Stop()
+		wantFlushFailed(t, cd.Start(cancelledContext(t)))
+		if got := cd.MessageCount(); got != before {
+			t.Errorf("MessageCount %d after a spill that failed, want %d: the batch is still pending", got, before)
+		}
+		restore()
+		if err := os.Remove(spill); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := endStream(t, cd); err != nil {
+			t.Errorf("the relaunch's end = %v, want nil: it wrote the batch", err)
+		}
+		if n := partHolds(t, path, "tail"); n != 3 {
+			t.Errorf("the part holds %d of the 3 pending messages after the relaunch, want 3", n)
+		}
+	})
 }
 
 // A roll with nothing pending drains nothing, so writeBatch's salvage never

@@ -346,7 +346,7 @@ type ChatDownloader struct {
 	streamEnded      bool  // set by MarkStreamEnded — distinguishes drain from interruption
 	totalCount       int   // cumulative across all part files (job-level metric)
 	fileCount        int   // messages belonging to the CURRENT part file (header count)
-	rollUnwritten    int   // boundary messages RollFile could not write to the part it closed (job-level; sidecar-carried like totalCount)
+	rollUnwritten    int   // messages in no part file: boundary batches RollFile could not write to the part it closed, and a batch an interrupted exit spilled (job-level; sidecar-carried like totalCount)
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
 	// partUnread records that the part file existed at Start but could not be
@@ -1530,6 +1530,15 @@ func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 			// to chat.json instead of rewriting it from scratch (clearing
 			// here used to destroy all previously archived chat), and skip
 			// emote enrichment: enriched files must not receive appends.
+			//
+			// A final flush that could not write the pending batch is
+			// spilled and reported first, so the sidecar saved next carries
+			// the count and leaves the batch out (spillOnInterruptedExit).
+			if flushErr != nil {
+				if err := cd.spillOnInterruptedExit(flushErr); err != nil && retErr == nil {
+					retErr = err
+				}
+			}
 			cd.saveResumeState()
 			// A boundary spill is reported here too, not only at the
 			// stream's end. ExecuteTwitch's outage finalize — the broadcast
