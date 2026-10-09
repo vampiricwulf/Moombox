@@ -895,14 +895,17 @@ func TestRotationFailureRemindsHourly(t *testing.T) {
 // io.MultiWriter, which returns at the first writer's error, and the
 // switchable writer passed os.Stdout's error on unchanged: the file stopped
 // getting lines for the rest of the run while the ring buffer looked normal.
+// A pipe whose reader went away is the Unix shape that kills the process
+// instead (brokenpipe_unix_test.go).
 //
 // New captures os.Stdout at construction, as production does, so the test
 // swaps it first. A closed *os.File fails every write with os.ErrClosed on
 // every platform. The first phase is the mid-run shape (stdout works, then
 // dies); the second a stdout that was dead from the start.
 //
-// Mutant: switchableWriter.Write returning the inner writer's error again —
-// both phases lose their lines from the file.
+// Mutant: io.MultiWriter(l.stdout, l) in place of lineSinks again — both
+// phases lose their lines from the file. lineSinks guards it twice over (file
+// first, no early return), so each half has its own test below.
 func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
 	swapStdout := func(f *os.File) {
 		t.Helper()
@@ -974,6 +977,72 @@ func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
 			}
 		}
 	})
+}
+
+// sinkProbe is an io.Writer standing in for a sink, for the lineSinks tests.
+type sinkProbe func(p []byte) (int, error)
+
+func (f sinkProbe) Write(p []byte) (int, error) { return f(p) }
+
+// TestTheFileHasTheLineBeforeStdoutIsTouched: lineSinks writes moombox.log
+// first, so a stdout write that never returns — a pipe whose reader stopped
+// reading, a console paused with Ctrl+S — or that takes the process down with
+// it cannot take the line it was handed along.
+//
+// Mutant: lineSinks.Write writing stdout ahead of the file — the probe finds
+// the line not yet on disk.
+func TestTheFileHasTheLineBeforeStdoutIsTouched(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "moombox.log")
+	l, err := New(logPath, "INFO", 1<<20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk []bool
+	l.stdout.w = sinkProbe(func(p []byte) (int, error) {
+		data, err := os.ReadFile(logPath)
+		onDisk = append(onDisk, err == nil && strings.Contains(string(data), string(p)))
+		return len(p), nil
+	})
+	l.Info("first line")
+	l.Warn("second line", "n", 2)
+	l.Close()
+
+	if len(onDisk) != 2 {
+		t.Fatalf("stdout was written %d times, want once per line (2)", len(onDisk))
+	}
+	for i, ok := range onDisk {
+		if !ok {
+			t.Errorf("line %d reached stdout before it was in moombox.log", i+1)
+		}
+	}
+}
+
+// TestAFailingFileWriteNeverCostsStdoutALine is the other half of lineSinks:
+// with the file written first, a failed write to it — a full disk, a handle
+// the OS took away — must not keep the line off the console, where it is the
+// one place the operator still sees it.
+//
+// Mutant: lineSinks.Write returning at the file's error — stdout gets nothing.
+func TestAFailingFileWriteNeverCostsStdoutALine(t *testing.T) {
+	l, err := New(filepath.Join(t.TempDir(), "moombox.log"), "INFO", 1<<20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var echoed strings.Builder
+	l.stdout.w = &echoed
+	l.fileMu.Lock()
+	l.file.Close() // every write to it now fails with os.ErrClosed
+	l.fileMu.Unlock()
+
+	l.Info("while the file fails", "n", 1)
+	l.Error("while the file fails", "n", 2)
+	l.Close()
+
+	for _, want := range []string{"n=1", "n=2"} {
+		if !strings.Contains(echoed.String(), want) {
+			t.Errorf("stdout is missing the line %q logged while moombox.log failed:\n%s", want, echoed.String())
+		}
+	}
 }
 
 // TestLineRouterRunsInsideTheLogCall pins SetLineRouter's contract, which

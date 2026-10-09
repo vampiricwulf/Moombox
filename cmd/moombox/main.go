@@ -16,6 +16,7 @@ import (
 
 	isatty "github.com/mattn/go-isatty"
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/updater"
@@ -118,6 +119,14 @@ const (
 )
 
 func main() {
+	// First, before anything writes: on Unix a stdout or stderr pipe whose
+	// reader went away (an ssh session without a pty that dropped, a
+	// `| tee` that exited) kills the process inside the write unless SIGPIPE
+	// is asked for. The launcher writes its crash-supervision and rollback
+	// notices to stderr and the child its banner to stdout, all without (or
+	// before) a Logger, which asks for itself (logger.SurviveBrokenPipes).
+	logger.SurviveBrokenPipes()
+
 	configPath := flag.String("config", "", "Path to config file")
 	logLevel := flag.String("log-level", "", "Override the log level for this run only, without saving it (DEBUG, INFO, WARN, ERROR)")
 	showVersion := flag.Bool("version", false, "Show version and exit")

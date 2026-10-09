@@ -22,18 +22,36 @@ type switchableWriter struct {
 	enabled atomic.Bool
 }
 
-// Write never reports a failure of the inner writer. Stdout is the
-// best-effort sink: a hung-up SSH tty (EIO), a closed fd 1 (EBADF) or a
-// console-less Windows child's invalid handle fails EVERY write for the rest
-// of the run, and io.MultiWriter stops at the first writer's error — so
-// passing it on kept every line out of moombox.log, the only persistent log,
-// while the ring buffer looked normal (W24-10). Logger.Write swallows a
-// failed reopen for the same reason.
 func (sw *switchableWriter) Write(p []byte) (int, error) {
 	if !sw.enabled.Load() {
 		return len(p), nil
 	}
-	_, _ = sw.w.Write(p)
+	return sw.w.Write(p)
+}
+
+// lineSinks fans each formatted line out to moombox.log first and stdout
+// second, and no sink's failure keeps the line from another. The file goes
+// first so the line is on disk before stdout is touched at all.
+//
+// io.MultiWriter once did this job with stdout first, and it returns at the
+// first writer's error: a stdout that fails every write for the rest of the
+// run — a hung-up SSH tty (EIO), a closed fd 1 (EBADF), a console-less
+// Windows child's invalid handle, a pipe whose reader went away (EPIPE, see
+// SurviveBrokenPipes) — kept every line out of moombox.log, the only
+// persistent log, while the ring buffer looked normal (W24-10). The same
+// writer with the file first would hand the bug to stdout instead: a full
+// disk would keep every line off the console. Logger.Write swallows a failed
+// reopen for the same reason.
+type lineSinks struct {
+	file   io.Writer // nil in the stdout + ring-buffer only mode (no file path)
+	stdout io.Writer
+}
+
+func (s lineSinks) Write(p []byte) (int, error) {
+	if s.file != nil {
+		_, _ = s.file.Write(p)
+	}
+	_, _ = s.stdout.Write(p)
 	return len(p), nil
 }
 
@@ -239,22 +257,21 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 		fmt.Fprintln(os.Stderr, "logger: no file path configured — log output goes to stdout + ring buffer only")
 	}
 
-	// Create multi-writer (stdout + file)
-	// Stdout goes through a switchable writer so it can be suppressed
-	// when the TUI is running (the TUI log panel uses Subscribe() instead).
-	// io.MultiWriter stops at the first writer that errors, so the stdout
-	// sink must never return one: the switchable writer swallows stdout's
-	// failures — a dead stdout must never cost the file a line.
+	// The sinks: the file, then stdout (lineSinks — a dead stdout must never
+	// cost the file a line). Stdout goes through a switchable writer so it
+	// can be suppressed when the TUI is running (the TUI log panel uses
+	// Subscribe() instead). On Unix a stdout pipe whose reader went away
+	// would kill the process inside that write rather than fail it, so the
+	// logger asks for SIGPIPE before anything can log.
+	SurviveBrokenPipes()
 	l.stdout = &switchableWriter{w: os.Stdout}
 	l.stdout.enabled.Store(true)
 	l.stderrGate = &switchableWriter{w: os.Stderr}
 	l.stderrGate.enabled.Store(true)
-	var writers []io.Writer
-	writers = append(writers, l.stdout)
+	sinks := lineSinks{stdout: l.stdout}
 	if l.file != nil {
-		writers = append(writers, l)
+		sinks.file = l
 	}
-	multi := io.MultiWriter(writers...)
 
 	// Custom handler with timestamp formatting. Use the attribute's own
 	// time value rather than time.Now(): log() stamps the record with the
@@ -278,7 +295,7 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 			return a
 		},
 	}
-	l.handler = slog.NewTextHandler(multi, opts)
+	l.handler = slog.NewTextHandler(sinks, opts)
 	// Route the process-global slog default through the FULL pipeline (level
 	// gate, file, ring buffer, subscribers, TUI-safe stderr gating) via the
 	// bridge — not through l.handler directly, which would feed the file but
@@ -857,7 +874,7 @@ func (l *Logger) RestoreStdout() {
 // into the ring buffer + subscribers so it surfaces in the TUI log panel
 // instead of scribbling over the alternate screen. Deliberately does NOT go
 // through slog/l.Write: rotate() calls this while holding fileMu, and the
-// multi-writer path would re-enter Write and deadlock. MUST NOT be called
+// lineSinks path would re-enter Write and deadlock. MUST NOT be called
 // from inside broadcast (it re-enters broadcast on the suppressed path, and
 // a recursive subMu.RLock deadlocks against a queued writer) — the
 // broadcast-drop warning ring-appends directly instead.

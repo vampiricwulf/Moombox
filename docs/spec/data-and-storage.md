@@ -1265,12 +1265,14 @@ The `Logger` wraps Go's `slog` package with file rotation, a ring buffer for rec
 
 ### Multi-Writer Output
 
-Log output is sent to both:
+Log output is sent to both, in this order:
 
-1. **Stdout** via a `switchableWriter` that can be toggled off when the TUI is running (BubbleTea owns the alternate screen; raw writes would corrupt the display). `SuppressStdout()` / `RestoreStdout()` control this.
-2. **Log file** via the Logger itself (which implements `io.Writer` with rotation).
+1. **Log file** via the Logger itself (which implements `io.Writer` with rotation).
+2. **Stdout** via a `switchableWriter` that can be toggled off when the TUI is running (BubbleTea owns the alternate screen; raw writes would corrupt the display). `SuppressStdout()` / `RestoreStdout()` control this.
 
-**Stdout is best effort and can never cost the file a line.** `io.MultiWriter` stops at the first writer that returns an error, and stdout is the first, so the `switchableWriter` swallows every error of the stdout write and reports the full length written. Otherwise a stdout that fails every write for the rest of the run — the hung-up tty of an SSH session that started `moombox --headless` and logged out (EIO), a process started with fd 1 closed (EBADF), a console-less Windows child's invalid handle — kept every line out of `moombox.log`, the only persistent log, while the ring buffer and the dashboard looked normal.
+**Stdout is best effort and can never cost the file a line.** The `lineSinks` fan-out writes the file first, so the line is on disk before stdout is touched, and ignores each sink's error, so neither keeps the line from the other. `io.MultiWriter(stdout, file)` once did the job, and it returns at the first writer's error: a stdout that fails every write for the rest of the run — the hung-up tty of an SSH session that started `moombox --headless` and logged out (EIO), a process started with fd 1 closed (EBADF), a console-less Windows child's invalid handle — kept every line out of `moombox.log`, the only persistent log, while the ring buffer and the dashboard looked normal. The same writer with the file first would have handed the bug to the console: a full disk would keep every line off it.
+
+**A broken pipe is an error, not a death sentence (Unix).** When stdout or stderr is a pipe whose reader went away — an `ssh host moombox --headless` session without a pty that dropped, a `| tee` that exited, and the launcher's child, which inherits the launcher's fd 1 — the Go runtime kills a process that writes to it, from inside the write, unless the process asked for SIGPIPE; a parent that started it with SIGPIPE ignored does not change that. No error would ever reach the sinks, and the process — every later line, every recording in progress — would be gone. `SurviveBrokenPipes` asks for SIGPIPE (`signal.Notify` on a channel nobody reads; not `signal.Ignore`, which FFmpeg and the Node sidecar would inherit across exec), so the write fails with EPIPE like any other and the sinks swallow it. `New` calls it, and `main` calls it before anything else, for the launcher's crash-supervision and rollback notices and the child's startup banner, which are written without a Logger. Windows has no SIGPIPE: a broken pipe there is an ordinary write error.
 
 ### File Rotation
 
