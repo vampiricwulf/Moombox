@@ -79,10 +79,12 @@ func TwitchBroadcastOver(job *database.Job, info *twitch.TwitchStreamInfo) bool 
 // the same broadcast still live — leaves the row as it is for the next poll.
 //
 // Then the mux itself runs exactly as the Mux action's does (muxJob), behind
-// the job's previous run (afterJobExit), and ONCE: autoMuxNow clears the
-// marker before it starts, so a mux that fails leaves the row in Error with an
-// error saying so and nothing re-runs it. A second call while one is in flight
-// for the job is dropped.
+// the job's previous run (afterJobExit), and ONCE: the marker is cleared as
+// the mux starts, so a mux that fails leaves the row in Error with an error
+// saying so and nothing re-runs it. One that could not start because another
+// operation holds the job's staging was never attempted, and keeps the row
+// for the next poll (autoMuxNow). A second call while one is in flight for the
+// job is dropped.
 func (w *DownloadWorker) AutoMuxEndedBroadcast(jobID string) {
 	if _, busy := w.autoMuxPending.LoadOrStore(jobID, struct{}{}); busy {
 		return
@@ -143,9 +145,21 @@ func endUnconfirmedRow(job *database.Job) bool {
 }
 
 // autoMuxNow claims the row and muxes it. Under autoMuxMu so the re-check and
-// the claim are one step: the marker is cleared BEFORE the mux starts, which
-// is what makes this run once per failure — a mux that fails leaves an Error
-// row without the marker, so no later poll offers it again.
+// the claim are one step. The marker is cleared BEFORE the mux runs, which is
+// what makes this run once per failure — a mux that fails leaves an Error row
+// without the marker, so no later poll offers it again. muxJob clears it, in
+// the same write that moves the row to Muxing, once it holds the job's staging
+// claim; a mux that cannot start for any other reason (nothing staged) is
+// cleared with the failure it writes.
+//
+// The one refusal that is not a failure is ErrStagingBusy: another operation —
+// a set-aside recovery (A S, recover-asides), which leaves the row in Error
+// while it runs — holds the job's staging, and no mux was attempted. The row
+// keeps its marker and its own error, and the next poll that finds the
+// broadcast over tries again. Clearing the marker first, as this used to,
+// spent the job's one automatic mux on that refusal and wrote "automatic mux
+// failed" over the download error; once the recovery let go, nothing archived
+// the main recording.
 func (w *DownloadWorker) autoMuxNow(jobID string) {
 	w.autoMuxMu.Lock()
 	defer w.autoMuxMu.Unlock()
@@ -153,14 +167,20 @@ func (w *DownloadWorker) autoMuxNow(jobID string) {
 	if err != nil || job == nil || !endUnconfirmedRow(job) {
 		return // retried, reinitialized, muxed or deleted meanwhile
 	}
-	w.db.UpdateJobFields(jobID, map[string]any{"park_reason": database.ParkReasonNone})
 	w.logger.Info("Twitch broadcast confirmed over — muxing the capture its failed download kept in staging",
 		"jobID", jobID)
-	if err := w.muxJob(jobID, autoMuxFailure); err != nil {
+	err = w.muxJob(jobID, autoMuxFailure)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrStagingBusy):
+		w.logger.Info("automatic Twitch mux deferred — another operation holds the job's staging; the next poll retries",
+			"jobID", jobID, "err", err)
+	default:
 		w.logger.Warn("automatic Twitch mux could not start", "jobID", jobID, "err", err)
 		w.db.UpdateJobFields(jobID, map[string]any{
-			"status": database.StatusError,
-			"error":  autoMuxFailure(err),
+			"status":      database.StatusError,
+			"park_reason": database.ParkReasonNone,
+			"error":       autoMuxFailure(err),
 		})
 	}
 }

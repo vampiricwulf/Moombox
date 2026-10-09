@@ -142,9 +142,9 @@ func latchedJob(t *testing.T, w *DownloadWorker, db *database.Database, jobID st
 // the Mux action muxes it — Finished — and the marker is gone, so nothing
 // offers it again.
 //
-// Mutants: autoMuxNow not clearing the marker (the Finished row still carries
-// it); AutoMuxEndedBroadcast skipping the confirmation (the liveness seam is
-// never asked).
+// Mutants: muxJob's Muxing write not clearing the marker (the Finished row
+// still carries it); AutoMuxEndedBroadcast skipping the confirmation (the
+// liveness seam is never asked).
 func TestAutoMuxArchivesAConfirmedEndOnce(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	latchedJob(t, w, db, "tw_11", 10, true)
@@ -208,10 +208,10 @@ func TestAutoMuxWaitsForAConfirmedEnd(t *testing.T) {
 // — so a later poll does not try again, in a loop or at all; the operator's Mux
 // is the retry. An unmarked Error row is never touched.
 //
-// Mutants: autoMuxNow clearing the marker only after a successful mux (the
-// failed row is confirmed again on the next poll); the failure written
-// without autoMuxFailure's wording; endUnconfirmedRow ignoring the marker
-// (the unmarked row is confirmed and muxed).
+// Mutants: autoMuxNow's failure write leaving the marker (the failed row is
+// confirmed again on the next poll); the failure written without
+// autoMuxFailure's wording; endUnconfirmedRow ignoring the marker (the
+// unmarked row is confirmed and muxed).
 func TestAutoMuxFailureIsFinalAndSaysSo(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	latchedJob(t, w, db, "tw_13", 0, true) // nothing staged: the mux cannot start
@@ -242,6 +242,46 @@ func TestAutoMuxFailureIsFinalAndSaysSo(t *testing.T) {
 	}
 	if got := asked.Load(); got != 1 {
 		t.Errorf("confirmations = %d, want 1 — neither the unmarked row nor the already-failed one is a candidate", got)
+	}
+}
+
+// TestAutoMuxRefusedByABusyStagingIsNotSpent: a set-aside recovery (A S,
+// recover-asides) holds the job's staging claim and leaves the row in Error
+// while it runs. An automatic mux that meets it is refused before anything is
+// muxed — that is not the failed mux D-T4's "once" is about. The row must keep
+// its marker and its own error, and the next poll after the recovery lets go
+// archives the main recording.
+//
+// Mutants: autoMuxNow clearing the marker before muxJob, as it used to (the
+// refusal spends it: the row reads "automatic mux ... failed" and the second
+// poll never muxes); the ErrStagingBusy arm dropped (the refusal is written as
+// a final failure).
+func TestAutoMuxRefusedByABusyStagingIsNotSpent(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	latchedJob(t, w, db, "tw_21", 10, true)
+	w.twitchLiveness = func(context.Context, string) (*twitch.TwitchStreamInfo, error) { return nil, nil }
+
+	release, err := w.claimJobOperation("tw_21", opRecoverAsides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.AutoMuxEndedBroadcast("tw_21")
+	w.wg.Wait()
+	release()
+
+	j, _ := db.GetJob("tw_21")
+	if j.Status != database.StatusError || j.ParkReason != database.ParkReasonTwitchEndUnconfirmed ||
+		j.Error != "HLS playlist fetch failed" {
+		t.Errorf("after the refused auto-mux the row = %s / %q / %q, want it untouched (Error, still marked, its own error)",
+			j.Status, j.ParkReason, j.Error)
+	}
+
+	// The next poll, the recovery done: the broadcast is still over.
+	w.AutoMuxEndedBroadcast("tw_21")
+	w.wg.Wait()
+	if j, _ = db.GetJob("tw_21"); j.Status != database.StatusFinished || j.ParkReason != database.ParkReasonNone {
+		t.Errorf("after the next poll the row = %s / %q (error %q), want Finished and unmarked — "+
+			"the refusal spent the job's one automatic mux", j.Status, j.ParkReason, j.Error)
 	}
 }
 
