@@ -157,10 +157,11 @@ func TestSchedulerDiskGateHoldsThroughFailedReading(t *testing.T) {
 }
 
 // TestSchedulerReadsDiskOnlyWithBacklog: a sweep with nothing Queued takes no
-// disk reading — the heartbeat would otherwise query the volume once a
-// minute on every install, backlog or none.
+// disk reading while the gate is open — the heartbeat would otherwise query
+// the volume once a minute on every install, backlog or none.
 //
-// Mutant: drop the len(channels) > 0 condition — the idle sweep reads.
+// Mutant: read on every sweep (len(channels) > 0 || true) — the idle sweep
+// reads.
 func TestSchedulerReadsDiskOnlyWithBacklog(t *testing.T) {
 	s, _, _ := testSchedulerSetup(t, 1)
 	d := &fakeDisk{}
@@ -168,6 +169,52 @@ func TestSchedulerReadsDiskOnlyWithBacklog(t *testing.T) {
 	s.sweep()
 	if d.reads != 0 {
 		t.Errorf("an idle sweep took %d disk readings, want 0", d.reads)
+	}
+}
+
+// TestSchedulerClosedDiskGateReadsWithoutBacklog: a closed gate reads the
+// disk on every sweep, backlog or none, so it reopens on the reading that
+// clears the threshold even when nothing waits for it. Read only with a
+// backlog, a close outlived its incident: the operator cancelled the queued
+// backlog and freed space, the disk alert closed, and the backlog a later
+// scan queued at 94% — inside the margin, with no critical reading since the
+// volume cleared — waited on the close from before. Once reopened, an idle
+// sweep reads nothing again.
+//
+// Mutant: read only with a backlog (drop `|| s.diskHeld`) — the idle sweeps
+// take no reading and the new backlog is held at 94%.
+func TestSchedulerClosedDiskGateReadsWithoutBacklog(t *testing.T) {
+	s, db, log := testSchedulerSetup(t, 1)
+	d := &fakeDisk{used: 99}
+	s.readDisk = d.read
+	queueBacklog(t, db, "UC_idle", "idle_a")
+	s.sweep() // 99%: closes
+	if n := log.enqueueCount(); n != 0 {
+		t.Fatalf("admitted %d at 99%%, want 0", n)
+	}
+
+	// The operator cancels the backlog and frees space.
+	if !db.UpdateJobFieldsIf("idle_a", database.StatusQueued, map[string]any{"status": database.StatusCancelled}) {
+		t.Fatal("cancel of the queued backlog did not apply")
+	}
+	d.used = 50
+	reads := d.reads
+	s.sweep()
+	if d.reads != reads+1 {
+		t.Errorf("the closed gate took %d readings in a sweep with no backlog, want 1", d.reads-reads)
+	}
+	reads = d.reads
+	s.sweep()
+	if d.reads != reads {
+		t.Errorf("the reopened gate took %d readings in a sweep with no backlog, want 0", d.reads-reads)
+	}
+
+	// Usage climbs back to 94%, below the threshold, and a scan queues more.
+	d.used = 94
+	queueBacklog(t, db, "UC_idle", "idle_b")
+	s.sweep()
+	if n := log.enqueueCount(); n != 1 {
+		t.Errorf("admitted %d at 94%% after the volume had cleared to 50%%, want 1: the gate held on a close from an incident that ended", n)
 	}
 }
 

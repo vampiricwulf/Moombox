@@ -38,7 +38,8 @@ func judgeDisk(dir string, ds *disk.DiskSpace, thresholds config.DiskConfig) dis
 // ClearOfCritical, the rule an open disk_critical alert steps down on — so
 // backlog admission stops on exactly the reading that sends disk_critical and
 // resumes on the one that ends it, with no setting of its own. The scheduler
-// calls it once per admission sweep that has a backlog to admit.
+// calls it once per admission sweep that has a backlog to admit, and once per
+// sweep while the gate is closed.
 //
 // Read fresh rather than from the dashboard's last reading: that one is up to
 // six minutes old, and in six minutes of admissions a volume that has just

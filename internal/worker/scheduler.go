@@ -275,9 +275,15 @@ func (s *Scheduler) sweep() {
 		s.log.Error("scheduler: QueuedChannels failed", "err", err)
 		return
 	}
-	// No admissions onto a full disk either. Read only when there is a
-	// backlog to admit: an idle install pays no disk query per heartbeat.
-	if len(channels) > 0 && s.diskGateClosed() {
+	// No admissions onto a full disk either. Read when there is a backlog
+	// to admit, and on every sweep while the gate is closed: an idle install
+	// pays no disk query per heartbeat, and a closed gate follows the volume
+	// through a stretch with nothing Queued. Read only with a backlog, a
+	// close outlived its incident — the operator cancelled the backlog and
+	// freed space, the alert closed, and the backlog a later scan queued at
+	// 94% waited on the close from before, inside the margin, with no
+	// critical reading since.
+	if (len(channels) > 0 || s.diskHeld) && s.diskGateClosed() {
 		return
 	}
 	now := time.Now()
