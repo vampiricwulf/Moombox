@@ -57,11 +57,17 @@ func dumpLostChatBatch[T any](path string, batch []T) error {
 // test replaces it to make an append fail the way a full disk does.
 var appendChatMessages = utils.AppendChatMessages[TwitchChatMessage]
 
+// writeChatFile is utils.WriteChatFileAtomic for the IRC writer's full-file
+// writes (writeFullChatFileTo); a test replaces it to land a message while a
+// write is in flight, or to fail one the way a full disk does.
+var writeChatFile = utils.WriteChatFileAtomic[*TwitchChatData]
+
 // flush writes pending messages to the current part file, serialized with
 // every other write to it by flushMu. A non-nil return means some are still
 // pending because the write failed. A part still waiting for its video's
 // first segment (baseAwaitPath) keeps its messages pending instead, up to
-// ircPartBaseWait; see holdForPartBaseLocked.
+// ircPartBaseWait; see holdForPartBaseLocked. A part whose first segment was
+// reported after that is rebased first; see rebaseLatePartLocked.
 func (cd *ChatDownloader) flush() error {
 	cd.flushMu.Lock()
 	defer cd.flushMu.Unlock()
@@ -81,9 +87,11 @@ func (cd *ChatDownloader) flushFinal() error {
 // for its video's first segment (AwaitPartBase) and has no file yet, so
 // writing now would put a header and offsets on disk against a base that is
 // about to move, and one file must keep one epoch. Past ircPartBaseWait, or on
-// the final flush, the wait is given up and the local-clock base stands: a
-// video that has not produced a first segment by then may never produce one,
-// and the chat must reach disk regardless. Caller holds cd.mu.
+// the final flush, the messages stop waiting — the chat must reach disk even
+// when the video takes minutes to produce a first segment, or never does — and
+// go out on the local-clock base, but the part stays open to its report
+// (baseLatePath): one that arrives later rebases the whole file at the next
+// flush or roll (rebaseLatePartLocked). Caller holds cd.mu.
 func (cd *ChatDownloader) holdForPartBaseLocked(final bool) bool {
 	if cd.baseAwaitPath == "" || cd.baseAwaitPath != cd.outputPath || cd.flushedToDisk || cd.partUnread {
 		return false
@@ -92,15 +100,77 @@ func (cd *ChatDownloader) holdForPartBaseLocked(final bool) bool {
 		return true
 	}
 	cd.baseAwaitPath = ""
-	cd.logger.Info("twitch chat: no first-segment time from the part's video; keeping the local-clock base",
-		"channel", cd.channelLogin, "path", cd.outputPath, "waited", time.Since(cd.baseAwaitSince).Round(time.Second))
+	cd.baseLatePath = cd.outputPath
+	cd.logger.Info("twitch chat: no first-segment time from the part's video yet; writing on the local-clock base",
+		"channel", cd.channelLogin, "path", cd.outputPath, "waited", time.Since(cd.baseAwaitSince).Round(time.Second),
+		"finalFlush", final)
 	return false
+}
+
+// rebaseLatePartLocked moves the current part's file onto the base its video
+// reported AFTER the file went to disk (SettlePartBase's late arm, lateBaseMs):
+// the part's wait ran past ircPartBaseWait — an ad break the engine skipped at
+// the part's start, say — so its first messages were written on the
+// provisional local-clock base. That base is not the part's: D-T8 keeps the
+// local clock only for a playlist with no program date-times.
+//
+// The file is rewritten WHOLE, its history and the pending batch together,
+// every offset recomputed from the message's own timestamp, and the header
+// carrying the reported base — one atomic write, so the file holds one epoch
+// before it and one after, never two. Only then do recordingStartMs and the
+// messages that arrived during the write move onto the new base, in one cd.mu
+// section with the swap, the way SettlePartBase rebases a held batch. A write
+// that fails changes nothing — the file and the in-memory base still agree on
+// the provisional base — and the next flush tries again. Caller holds flushMu.
+func (cd *ChatDownloader) rebaseLatePartLocked() {
+	cd.mu.Lock()
+	base, path := cd.lateBaseMs, cd.outputPath
+	if base == 0 || path == "" || cd.partUnread {
+		cd.mu.Unlock()
+		return
+	}
+	snapshotLen := len(cd.messages)
+	msgs := make([]TwitchChatMessage, snapshotLen)
+	copy(msgs, cd.messages)
+	count := cd.fileCount
+	provisional := cd.recordingStartMs.Load()
+	cd.mu.Unlock()
+
+	written, err := rewriteChatFileWithHistory(path, msgs, cd.logger, func(merged []TwitchChatMessage) error {
+		for i := range merged {
+			merged[i].OffsetMs = merged[i].TimestampMs - base
+		}
+		return cd.writeFullChatFileTo(path, merged, len(merged), base)
+	})
+	if err != nil {
+		cd.logger.Warn("twitch chat: could not rebase the part onto its first segment's time yet; retrying next flush",
+			"channel", cd.channelLogin, "path", path, "err", err)
+		return
+	}
+
+	cd.mu.Lock()
+	cd.lateBaseMs = 0
+	cd.recordingStartMs.Store(base)
+	cd.messages = cd.messages[snapshotLen:]
+	for i := range cd.messages {
+		cd.messages[i].OffsetMs = cd.messages[i].TimestampMs - base
+	}
+	// The file now holds the batch too; the counters follow the file, as
+	// flushLocked's do after a salvage rewrite.
+	if delta := written - count; delta != 0 {
+		cd.fileCount += delta
+		cd.totalCount = max(cd.totalCount+delta, 0)
+	}
+	cd.mu.Unlock()
+	cd.logger.Info("twitch chat: part rebased onto its first segment's program date-time after the wait",
+		"channel", cd.channelLogin, "path", path, "baseMs", base, "shiftMs", provisional-base, "messages", written)
 }
 
 // flushLocked writes pending messages to the current part file. Caller must
 // hold flushMu. A non-nil return means the batch is still pending. final is
 // flushFinal's: see holdForPartBaseLocked.
 func (cd *ChatDownloader) flushLocked(final bool) error {
+	cd.rebaseLatePartLocked()
 	cd.mu.Lock()
 	if cd.holdForPartBaseLocked(final) {
 		cd.mu.Unlock()
@@ -281,7 +351,7 @@ func (cd *ChatDownloader) writeFullChatFileTo(path string, msgs []TwitchChatMess
 		// A whole-second base prints exactly as RFC3339 did.
 		chatData.RecordingStartTime = time.UnixMilli(startMs).UTC().Format(time.RFC3339Nano)
 	}
-	return utils.WriteChatFileAtomic(path, &chatData)
+	return writeChatFile(path, &chatData)
 }
 
 // pruneDedup trims the dedup to keep only the most recent chatDedupMax entries.
@@ -348,6 +418,11 @@ func (cd *ChatDownloader) rollFile(newOutputPath, newRecordingStart string, awai
 		newBaseMs = t.UnixMilli()
 	}
 
+	// A late report still pending for the part being closed is applied
+	// first, so the drain below appends to a file already on the reported
+	// base, with the base it then holds.
+	cd.rebaseLatePartLocked()
+
 	// Before the boundary section, while outputPath is still the old part:
 	// the adoption reads and seeds it by that path, and rebases the pending
 	// batch onto the old part's own clock.
@@ -379,6 +454,10 @@ func (cd *ChatDownloader) rollFile(newOutputPath, newRecordingStart string, awai
 	// below against its provisional base, which is now its base for good.
 	oldAwaited := cd.baseAwaitPath == oldPath
 	cd.baseAwaitPath = ""
+	// A late base the rebase above could not write dies with the part: the
+	// closed file keeps the provisional base its drain is written against.
+	oldLateUnwritten := cd.lateBaseMs != 0
+	cd.baseLatePath, cd.lateBaseMs = "", 0
 	if awaitBase {
 		cd.baseAwaitPath = newOutputPath
 		cd.baseAwaitSince = time.Now()
@@ -386,6 +465,10 @@ func (cd *ChatDownloader) rollFile(newOutputPath, newRecordingStart string, awai
 	cd.mu.Unlock()
 	if oldAwaited && len(batch) > 0 {
 		cd.logger.Info("twitch chat: part closed before its video reported a first segment; keeping its local-clock base",
+			"channel", cd.channelLogin, "path", oldPath)
+	}
+	if oldLateUnwritten {
+		cd.logger.Warn("twitch chat: part closed before its late first-segment time could be written; keeping its local-clock base",
 			"channel", cd.channelLogin, "path", oldPath)
 	}
 
@@ -457,10 +540,12 @@ func (cd *ChatDownloader) rollFile(newOutputPath, newRecordingStart string, awai
 // AwaitPartBase marks the current part's offset base PROVISIONAL: the local
 // clock at the part's start, standing in until the part's video reports the
 // program date-time of the first segment it writes (SettlePartBase). Until
-// then the periodic flush holds the part's messages, so the part file's header
-// is written once, with the base its offsets were computed against (owner
-// decision D-T8). For the job's first part — RollFileAwaitingBase is the same
-// mark for every later one — and called before Start.
+// then the periodic flush holds the part's messages, up to ircPartBaseWait, so
+// the part file's header is written with the base its offsets were computed
+// against (owner decision D-T8); a report that comes after the wait rewrites
+// the whole file onto it (rebaseLatePartLocked). For the job's first part —
+// RollFileAwaitingBase is the same mark for every later one — and called
+// before Start.
 //
 // A part that already has a file keeps that file's base whatever arrives
 // later, the "one file, one epoch" rule adoptPartRecordingBase states, so the
@@ -488,18 +573,27 @@ func (cd *ChatDownloader) AwaitPartBase() {
 // held batch onto an adopted file's base — so the ones held and the ones still
 // to come share one clock, and the first write puts that clock in the header.
 //
+// A report that comes after the wait ran out (ircPartBaseWait) still counts:
+// the part's first messages are on disk by then, on the provisional base, so
+// the base is only recorded here (lateBaseMs) and the next flush or roll
+// rewrites the file onto it whole (rebaseLatePartLocked) — not here, on the
+// download goroutine, which must not block on a write.
+//
 // A zero time — the playlist carries no program date-times — ends the wait on
 // the provisional base, today's local-clock behaviour. A report for any part
 // other than the one waiting is ignored: a late report from a downloader that
-// has since been replaced, a part already rolled away, a part whose wait ran
-// out, or one whose file is already on disk (one file, one epoch).
+// has since been replaced, a part already rolled away, or one whose file was
+// on disk before it began to wait — a resumed part, adopted at Start (one
+// file, one epoch).
 func (cd *ChatDownloader) SettlePartBase(path string, programDateTime time.Time) {
 	cd.mu.Lock()
-	if path == "" || cd.baseAwaitPath != path || cd.outputPath != path || cd.flushedToDisk || cd.partUnread {
+	waiting := cd.baseAwaitPath == path && !cd.flushedToDisk
+	late := cd.baseLatePath == path
+	if path == "" || cd.outputPath != path || cd.partUnread || (!waiting && !late) {
 		cd.mu.Unlock()
 		return
 	}
-	cd.baseAwaitPath = ""
+	cd.baseAwaitPath, cd.baseLatePath = "", ""
 	if programDateTime.IsZero() {
 		cd.mu.Unlock()
 		cd.logger.Debug("twitch chat: the part's playlist carries no program date-time; keeping the local-clock base",
@@ -508,6 +602,13 @@ func (cd *ChatDownloader) SettlePartBase(path string, programDateTime time.Time)
 	}
 	provisional := cd.recordingStartMs.Load()
 	base := programDateTime.UnixMilli()
+	if cd.flushedToDisk {
+		cd.lateBaseMs = base
+		cd.mu.Unlock()
+		cd.logger.Info("twitch chat: the part's first-segment time arrived after its file was written; rebasing the file",
+			"channel", cd.channelLogin, "path", path, "baseMs", base, "shiftMs", provisional-base)
+		return
+	}
 	cd.recordingStartMs.Store(base)
 	for i := range cd.messages {
 		cd.messages[i].OffsetMs = cd.messages[i].TimestampMs - base

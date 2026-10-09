@@ -71,13 +71,17 @@ const (
 	// keeps trying at this slow cadence for as long as the job runs; Stop,
 	// MarkStreamEnded and RetryNow cut a wait short (see wake).
 	ircExhaustedRetry = 2 * time.Minute
-	// ircPartBaseWait bounds how long a part's chat waits for its video to
-	// report the first segment's #EXT-X-PROGRAM-DATE-TIME (AwaitPartBase,
-	// SettlePartBase) before the provisional local-clock base stands and the
-	// held messages are written against it. The report normally lands within
-	// a playlist round trip of the part's start; the bound only matters when
-	// the video cannot get a first segment at all, and it caps what a crash
-	// during the wait could lose to the messages of this one window.
+	// ircPartBaseWait bounds how long a part's chat holds its messages in
+	// memory while it waits for its video to report the first segment's
+	// #EXT-X-PROGRAM-DATE-TIME (AwaitPartBase, SettlePartBase). The report
+	// normally lands within a playlist round trip of the part's start; an ad
+	// break the engine skips at the start delays it by the break's length.
+	// Past the bound the held messages go to disk on the provisional
+	// local-clock base, so a crash during a long wait loses this one window
+	// at most — but the bound does not give up on the report. One that
+	// arrives later still rebases the part file, whole and atomically, onto
+	// the first segment's time (rebaseLatePartLocked): owner decision D-T8
+	// keeps the local clock only for a playlist with no program date-times.
 	ircPartBaseWait = 60 * time.Second
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
 	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
@@ -320,6 +324,15 @@ type ChatDownloader struct {
 	// Guarded by cd.mu.
 	baseAwaitPath  string
 	baseAwaitSince time.Time
+	// baseLatePath names the part whose wait ran past ircPartBaseWait, so
+	// its file went to disk on the provisional base. A report that arrives
+	// for it after all (SettlePartBase) is still the part's real base:
+	// lateBaseMs holds it until the next flush or roll rewrites the file onto
+	// it whole (rebaseLatePartLocked) — never in between, and never on the
+	// download goroutine that reports it. 0 when nothing is pending. Both
+	// guarded by cd.mu.
+	baseLatePath string
+	lateBaseMs   int64
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.

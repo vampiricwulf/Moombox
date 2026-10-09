@@ -72,9 +72,10 @@ func TestPartBaseSettlesOnTheFirstSegmentsTime(t *testing.T) {
 
 // TestPartBaseKeepsOneEpochPerFile: a report that is not for the part waiting
 // changes nothing — one for another path (a downloader since replaced), one
-// after the part's file is on disk, one after the wait has been given up — and
-// a zero time (no PDT in the playlist) releases the wait on the provisional
-// base, which is today's behaviour.
+// after a zero time ended the wait and the part's file went to disk, one for a
+// resumed part whose file was there before it waited — and a zero time (no
+// PDT in the playlist) releases the wait on the provisional base, which is
+// today's behaviour.
 //
 // Mutants: SettlePartBase ignoring the path check (the stale report moves the
 // base); ignoring the flushedToDisk check (the adopted part's new message is
@@ -137,8 +138,10 @@ func TestPartBaseKeepsOneEpochPerFile(t *testing.T) {
 }
 
 // TestPartBaseWaitIsBounded: a part whose video never reports a first segment
-// must still reach disk. Past ircPartBaseWait the provisional base stands, and
-// the final flush on Start's exit never waits at all.
+// must still reach disk. Past ircPartBaseWait its messages go out on the
+// provisional base, and the final flush on Start's exit never waits at all. A
+// report that does come later still rebases the file; see
+// TestLatePartBaseRebasesTheWrittenPart.
 //
 // Mutants: holdForPartBaseLocked ignoring the wait's bound (the part never
 // reaches disk); ignoring final (Start's exit leaves the held messages in
@@ -247,5 +250,230 @@ func TestPartBaseKeepsItsMilliseconds(t *testing.T) {
 	}
 	if d := readChatData(t, chatPath); d.Messages[0].OffsetMs != 39_750 {
 		t.Errorf("offset = %d, want 39750", d.Messages[0].OffsetMs)
+	}
+}
+
+// writeChatFileHook replaces writeChatFile for one test. hook runs in place of
+// each full-file write; it returns the real write's result or its own error.
+func writeChatFileHook(t *testing.T, hook func(path string, data *TwitchChatData, real func(string, *TwitchChatData) error) error) {
+	t.Helper()
+	real := writeChatFile
+	t.Cleanup(func() { writeChatFile = real })
+	writeChatFile = func(path string, data *TwitchChatData) error { return hook(path, data, real) }
+}
+
+// pastTheWait leaves a part whose wait ran out: one message ("m1", at
+// pdtHeldMsgTime) is on disk against the provisional base, the way the
+// periodic flush writes it once ircPartBaseWait has passed.
+func pastTheWait(t *testing.T, path string) *ChatDownloader {
+	t.Helper()
+	cd := newTestChatDownloader(t, path)
+	cd.delays.partBaseWait = 20 * time.Millisecond
+	cd.SetRecordingStartTime(pdtProvisional.Format(time.RFC3339))
+	cd.AwaitPartBase()
+	cd.addMessage(pdtMessage("m1", pdtHeldMsgTime))
+	time.Sleep(40 * time.Millisecond)
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if d := readChatData(t, path); d.RecordingStartTime != pdtProvisional.Format(time.RFC3339) || len(d.Messages) != 1 {
+		t.Fatalf("precondition: header %q with %d messages, want the provisional base and 1",
+			d.RecordingStartTime, len(d.Messages))
+	}
+	return cd
+}
+
+// TestLatePartBaseRebasesTheWrittenPart is the review finding on D-T8: a part
+// whose video reports its first segment after ircPartBaseWait — an ad break
+// the engine skips at the part's start — has a program date-time all the
+// same, and D-T8 keeps the local clock only for a playlist with none. The wait
+// gave up and the file went to disk on the provisional base, so the report is
+// applied by rewriting the file whole: the header and every offset move to
+// the first segment's time in one write, so the file never holds two epochs.
+// The report itself only records the base; the flush does the write.
+//
+// A message lands while the rewrite is in flight (m3): it was offset against
+// the provisional base, and must move with the rest.
+//
+// Mutants: holdForPartBaseLocked not marking the part (baseLatePath) when it
+// gives up, SettlePartBase's late arm not recording lateBaseMs, or flushLocked
+// not calling rebaseLatePartLocked (each: the header keeps the provisional
+// base, m1 reads 10000); the messages that arrived during the write not
+// rebased (m3 reads 30000); recordingStartMs not stored after the write (m4
+// reads 40000).
+func TestLatePartBaseRebasesTheWrittenPart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat.json")
+	cd := pastTheWait(t, path)
+	cd.addMessage(pdtMessage("m2", pdtLaterMsgTime)) // pending, on the provisional base
+
+	cd.SettlePartBase(path, pdtFirstFrame) // the first CONTENT segment, past the bound
+	if d := readChatData(t, path); d.RecordingStartTime != pdtProvisional.Format(time.RFC3339) {
+		t.Fatalf("SettlePartBase wrote the file (header %q) — it runs on the download goroutine", d.RecordingStartTime)
+	}
+
+	landed := false
+	writeChatFileHook(t, func(path string, data *TwitchChatData, real func(string, *TwitchChatData) error) error {
+		if !landed {
+			landed = true
+			cd.addMessage(pdtMessage("m3", pdtFirstFrame.Add(60*time.Second)))
+		}
+		return real(path, data)
+	})
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cd.flush(); err != nil { // m3, which arrived during the rewrite
+		t.Fatal(err)
+	}
+	cd.addMessage(pdtMessage("m4", pdtFirstFrame.Add(70*time.Second)))
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	d := readChatData(t, path)
+	if d.RecordingStartTime != pdtFirstFrame.Format(time.RFC3339) {
+		t.Errorf("header recordingStartTime = %q, want the first segment's %q — a reported PDT is the part's base, however late",
+			d.RecordingStartTime, pdtFirstFrame.Format(time.RFC3339))
+	}
+	want := []int64{40_000, 50_000, 60_000, 70_000}
+	if len(d.Messages) != len(want) || d.MessageCount != len(want) {
+		t.Fatalf("part holds %d messages (header count %d), want %d", len(d.Messages), d.MessageCount, len(want))
+	}
+	for i, w := range want {
+		if got := d.Messages[i].OffsetMs; got != w {
+			t.Errorf("message %q offset = %d, want %d — offsets count from the part's first frame",
+				d.Messages[i].ID, got, w)
+		}
+	}
+}
+
+// TestLatePartBaseWriteFailureKeepsOneEpoch: a rewrite that fails must leave
+// the file and the in-memory base agreeing on the provisional base — the
+// pending batch is then appended on that base, as it would have been — and
+// the next flush tries again.
+//
+// Mutants: rebaseLatePartLocked going on to the swap after a failed write
+// (m2 is appended under the provisional header at 50000); lateBaseMs cleared
+// before the write instead of after it (the retry never happens and the
+// header keeps the provisional base).
+func TestLatePartBaseWriteFailureKeepsOneEpoch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat.json")
+	cd := pastTheWait(t, path)
+	cd.addMessage(pdtMessage("m2", pdtLaterMsgTime))
+	cd.SettlePartBase(path, pdtFirstFrame)
+
+	fail := true
+	writeChatFileHook(t, func(path string, data *TwitchChatData, real func(string, *TwitchChatData) error) error {
+		if fail {
+			return os.ErrPermission
+		}
+		return real(path, data)
+	})
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	d := readChatData(t, path)
+	if d.RecordingStartTime != pdtProvisional.Format(time.RFC3339) || len(d.Messages) != 2 || d.Messages[1].OffsetMs != 20_000 {
+		t.Fatalf("after the failed rewrite: header %q, messages %+v; want the provisional base and m2 at 20000",
+			d.RecordingStartTime, d.Messages)
+	}
+
+	fail = false
+	if err := cd.flush(); err != nil {
+		t.Fatal(err)
+	}
+	d = readChatData(t, path)
+	if d.RecordingStartTime != pdtFirstFrame.Format(time.RFC3339) || len(d.Messages) != 2 ||
+		d.Messages[0].OffsetMs != 40_000 || d.Messages[1].OffsetMs != 50_000 {
+		t.Errorf("after the retry: header %q, messages %+v; want %q with offsets 40000 and 50000",
+			d.RecordingStartTime, d.Messages, pdtFirstFrame.Format(time.RFC3339))
+	}
+}
+
+// TestRollFileAppliesALatePartBase: a late report still pending when the part
+// closes is written into the closed file before its boundary drain, so the
+// part leaves on its first segment's time; one whose rewrite fails dies with
+// the part instead of reaching the next one.
+//
+// Mutants: rollFile not calling rebaseLatePartLocked (the closed header keeps
+// the provisional base); rollFile not clearing lateBaseMs (the next part's
+// first flush rewrites it onto the closed part's PDT).
+func TestRollFileAppliesALatePartBase(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("applied", func(t *testing.T) {
+		first := filepath.Join(dir, "a", "chat.json")
+		cd := pastTheWait(t, first)
+		cd.addMessage(pdtMessage("m2", pdtLaterMsgTime))
+		cd.SettlePartBase(first, pdtFirstFrame)
+		if closed := cd.RollFileAwaitingBase(filepath.Join(dir, "a", "seg_1", "chat.json"),
+			pdtFirstFrame.Add(time.Hour).Format(time.RFC3339)); closed != first {
+			t.Fatalf("RollFileAwaitingBase closed %q, want %q", closed, first)
+		}
+		d := readChatData(t, first)
+		if d.RecordingStartTime != pdtFirstFrame.Format(time.RFC3339) || len(d.Messages) != 2 ||
+			d.Messages[0].OffsetMs != 40_000 || d.Messages[1].OffsetMs != 50_000 {
+			t.Errorf("closed part: header %q, messages %+v; want %q with offsets 40000 and 50000",
+				d.RecordingStartTime, d.Messages, pdtFirstFrame.Format(time.RFC3339))
+		}
+	})
+
+	t.Run("unwritten", func(t *testing.T) {
+		first := filepath.Join(dir, "b", "chat.json")
+		second := filepath.Join(dir, "b", "seg_1", "chat.json")
+		cd := pastTheWait(t, first)
+		cd.SettlePartBase(first, pdtFirstFrame)
+		fail := true
+		writeChatFileHook(t, func(path string, data *TwitchChatData, real func(string, *TwitchChatData) error) error {
+			if fail {
+				return os.ErrPermission
+			}
+			return real(path, data)
+		})
+		nextBase := pdtFirstFrame.Add(time.Hour)
+		cd.RollFile(second, nextBase.Format(time.RFC3339))
+		fail = false
+		// Two flushes: the first creates the next part's file, and only a
+		// file on disk can be rewritten onto a stale base.
+		for i, id := range []string{"n1", "n2"} {
+			cd.addMessage(pdtMessage(id, nextBase.Add(time.Duration(5*(i+1))*time.Second)))
+			if err := cd.flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if d := readChatData(t, first); d.RecordingStartTime != pdtProvisional.Format(time.RFC3339) {
+			t.Errorf("closed part's header = %q, want the provisional base it was written on", d.RecordingStartTime)
+		}
+		d := readChatData(t, second)
+		if d.RecordingStartTime != nextBase.Format(time.RFC3339) || len(d.Messages) != 2 ||
+			d.Messages[0].OffsetMs != 5_000 || d.Messages[1].OffsetMs != 10_000 {
+			t.Errorf("next part: header %q, messages %+v; want its own base %q with offsets 5000 and 10000 — "+
+				"the closed part's late base reached it", d.RecordingStartTime, d.Messages, nextBase.Format(time.RFC3339))
+		}
+	})
+}
+
+// TestLatePartBaseAfterTheFinalFlush: the final flush at the chat's exit writes
+// a waiting part on the provisional base, but the part stays open to its
+// report — the orchestrator rolls parts whether or not the chat runs, and a
+// roll writes a pending late base into the part it closes.
+//
+// Mutant: holdForPartBaseLocked marking the part (baseLatePath) on the
+// periodic flush only (the header keeps the provisional base).
+func TestLatePartBaseAfterTheFinalFlush(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "chat.json")
+	cd := newTestChatDownloader(t, first)
+	cd.SetRecordingStartTime(pdtProvisional.Format(time.RFC3339))
+	cd.AwaitPartBase()
+	cd.addMessage(pdtMessage("m1", pdtHeldMsgTime))
+	if err := cd.flushFinal(); err != nil {
+		t.Fatal(err)
+	}
+	cd.SettlePartBase(first, pdtFirstFrame)
+	cd.RollFile(filepath.Join(dir, "seg_1", "chat.json"), pdtFirstFrame.Add(time.Hour).Format(time.RFC3339))
+	if d := readChatData(t, first); d.RecordingStartTime != pdtFirstFrame.Format(time.RFC3339) || d.Messages[0].OffsetMs != 40_000 {
+		t.Errorf("header %q, offset %d; want %q and 40000",
+			d.RecordingStartTime, d.Messages[0].OffsetMs, pdtFirstFrame.Format(time.RFC3339))
 	}
 }
