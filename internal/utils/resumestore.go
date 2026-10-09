@@ -53,10 +53,14 @@ type ResumeStore[T any] struct {
 // means losing the archive: its adoption rule (adoptExistingChatFile,
 // internal/chat/downloader.go) makes a LIVE/upcoming run adopt the chat.json
 // already on disk and append to it, so a corrupt sidecar now costs only the
-// saved continuation and dedup window. A REPLAY run is not adopted — it
-// re-reads the archive from the top — so there a corrupt sidecar still means a
-// full rewrite, which for a replay is the intended behaviour rather than a
-// loss.
+// saved continuation and dedup window. A REPLAY run is not adopted — it pages
+// the replay from the top again — so there a corrupt sidecar costs the run its
+// position, and no longer the archive: THE RE-RUN RULE (Start's doc comment in
+// that file) sends a replay that finds an archive and no usable sidecar to
+// <chat.json>.rerun, which replaces the archive only if the run completes or
+// holds at least as many messages (finishReplayRerun). Only an archive whose
+// header counts no message, or cannot be read, is still rewritten in place
+// (beginReplayRerun).
 func (s ResumeStore[T]) Save(state T) error {
 	if s.Path == "" {
 		return nil
