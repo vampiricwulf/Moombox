@@ -15,6 +15,10 @@ import (
 // rather than read a directory being deleted under it.
 const opBootCleanup = "boot cleanup"
 
+// bootSweepClaimed, when set, is called with each job ID whose staging claim
+// the boot sweep took. A test seam; nil in production.
+var bootSweepClaimed func(jobID string)
+
 // reclaimBootLeftovers deletes, once per start, the staging leftovers that are
 // PROVABLY redundant, and nothing else:
 //
@@ -60,12 +64,24 @@ func (w *DownloadWorker) reclaimJobLeftovers(jobID, stagingDir string) {
 	if outputClaimOwner(stagingDir) != "" {
 		return
 	}
+	// An active row is skipped BEFORE the claim is taken, never under it: the
+	// sweep runs beside enqueueExistingJobs, whose restart mux of a Muxing
+	// row takes this same claim, and a refusal there falls back to resetting
+	// the row to Downloading — the re-download that truncated a complete
+	// recording (sweep-2 ENGINE-1).
+	if job, err := w.db.GetJob(jobID); err != nil || (job != nil && IsActiveJobStatus(job.Status)) {
+		return
+	}
 	release, err := w.claimJobOperation(jobID, opBootCleanup)
 	if err != nil {
 		return
 	}
 	defer release()
+	if bootSweepClaimed != nil {
+		bootSweepClaimed(jobID)
+	}
 
+	// Read again under the claim: the row may have been revived since.
 	job, err := w.db.GetJob(jobID)
 	if err != nil || (job != nil && IsActiveJobStatus(job.Status)) {
 		return

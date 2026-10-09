@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -189,7 +190,7 @@ func TestBootSweepRemovesOnlyStagingTheCleanupWouldHave(t *testing.T) {
 //
 // Mutants: drop the sibling check (the missing-sibling aside is deleted); scan
 // the root only (the seg_1 aside survives); move the call below the row
-// check (the row-less dir keeps its aside); drop the active-row skip (the
+// check (the row-less dir keeps its aside); drop both active-row checks (the
 // Downloading job's aside is deleted); drop the reason from the Info line.
 func TestBootSweepRemovesRecoveredAsidesWhoseSiblingExists(t *testing.T) {
 	w, db, log, stagingBase := bootSweepWorker(t)
@@ -249,6 +250,71 @@ func TestBootSweepRemovesRecoveredAsidesWhoseSiblingExists(t *testing.T) {
 	}
 	if strings.TrimSpace(readFileOr(t, noSibling+asideRecoveredMarker)) == "" {
 		t.Error("the kept marker lost its content")
+	}
+}
+
+// TestBootSweepNeverClaimsAnActiveJob: the sweep runs beside
+// enqueueExistingJobs, whose restart mux of a Muxing row takes the same
+// per-job claim — and a refused restart mux falls back to resetting the row to
+// Downloading, the re-download that truncated a complete recording. So an
+// active row is skipped before the claim is taken, never under it; a row that
+// is not active is claimed.
+//
+// Mutant: take the claim before the active check (the Muxing row is claimed).
+func TestBootSweepNeverClaimsAnActiveJob(t *testing.T) {
+	w, db, _, stagingBase := bootSweepWorker(t)
+	for id, status := range map[string]database.JobStatus{
+		"j-muxing":   database.StatusMuxing,
+		"j-finished": database.StatusFinished,
+	} {
+		if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, Status: status}); err != nil {
+			t.Fatal(err)
+		}
+		writeFixtureFile(t, filepath.Join(stagingBase, id, "video_stream"), "\x00\x00\x00\x18ftypdash")
+	}
+	var claimed []string
+	bootSweepClaimed = func(id string) { claimed = append(claimed, id) }
+	t.Cleanup(func() { bootSweepClaimed = nil })
+
+	w.reclaimBootLeftovers()
+
+	if slices.Contains(claimed, "j-muxing") {
+		t.Error("the sweep took the staging claim of a Muxing row — a restart mux asking for it then falls back to a re-download")
+	}
+	if !slices.Contains(claimed, "j-finished") {
+		t.Errorf("claimed = %v; the Finished row was never considered", claimed)
+	}
+}
+
+// TestBootSweepRereadsTheRowUnderTheClaim: a row revived between the sweep's
+// first look and its claim (a Reinitialize, a Resume) is active by the time
+// anything is deleted, and its staging — now the new run's — is left alone.
+//
+// Mutant: drop the active check from the read under the claim (the revived
+// job's staging, and the recovered aside in it, are deleted).
+func TestBootSweepRereadsTheRowUnderTheClaim(t *testing.T) {
+	w, db, _, stagingBase := bootSweepWorker(t)
+	archive := filepath.Join(t.TempDir(), "x.mp4")
+	writeFixtureFile(t, archive, "archive")
+	sibling := filepath.Join(t.TempDir(), "x.restart-1700000000.mp4")
+	writeFixtureFile(t, sibling, "recovered")
+	staging := filepath.Join(stagingBase, "j-revived")
+	writeFixtureFile(t, filepath.Join(staging, "video.mp4"), "\x00\x00\x00\x18ftypdash")
+	aside := filepath.Join(staging, "video_stream.restart-1700000000")
+	writeFixtureFile(t, aside, "set aside")
+	writeFixtureFile(t, aside+asideRecoveredMarker, sibling)
+	if _, err := db.AddJob(&database.Job{ID: "j-revived", VideoID: "j-revived", Status: database.StatusFinished, OutputFile: archive}); err != nil {
+		t.Fatal(err)
+	}
+	bootSweepClaimed = func(id string) {
+		db.UpdateJobFields(id, map[string]any{"status": database.StatusDownloading})
+	}
+	t.Cleanup(func() { bootSweepClaimed = nil })
+
+	w.reclaimBootLeftovers()
+
+	if !fileExists(filepath.Join(staging, "video.mp4")) || !fileExists(aside) {
+		t.Error("the sweep deleted from a staging dir whose row was revived before it acted")
 	}
 }
 
