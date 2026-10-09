@@ -523,7 +523,10 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 
 // CancelJob cancels a job and writes its status Cancelled. Returns true when an actively-processing run was
 // flagged — that run's handleCancellation emits the "cancelled"
-// notification, so callers that notify should skip their own emission.
+// notification, so callers that notify should skip their own emission. A
+// run that has already settled its outcome (a failure recorded, a backlog
+// requeue — JobQueue.settle) is not flagged and answers false: it no longer
+// reads the flag, and the caller sends the notification itself.
 func (w *DownloadWorker) CancelJob(jobID string) bool {
 	flagged := w.queue.Cancel(jobID)
 	w.db.UpdateJobFields(jobID, map[string]any{
@@ -1491,8 +1494,13 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// cancels the run and writes Cancelled — was overwritten by this write:
 	// the job showed Error, sent Job Failed, and the Job Cancelled the cancel
 	// route had left to this run (the run was flagged) was never sent. The
-	// operator's verdict stands, and the run ends as a cancelled one.
-	if !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
+	// operator's verdict stands, and the run ends as a cancelled one: when a
+	// Cancel flagged it before this failure settled (JobQueue.settle) —
+	// though its Cancelled write may not have landed yet — or when the row
+	// already reads Cancelled — the cancel route writes before it flags.
+	// Settled here, a Cancel from now on is its caller's to report: this
+	// run's tail no longer reads the flag.
+	if w.queue.settle(job.ID) || !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
 		"status":        status,
 		"error":         errMsg,
 		"park_reason":   reason,

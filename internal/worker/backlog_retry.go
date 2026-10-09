@@ -99,9 +99,12 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 	w.queue.ReleaseSlots(job.ID)
 	w.scheduler.holdUntil(job.ID, time.Now().Add(delay))
 	// Never over an operator's Cancel, which the scheduler would then have
-	// admitted again — the job downloading after all. Not requeued, the
-	// failure goes to setJobError, which leaves the Cancel standing too.
-	if !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
+	// admitted again — the job downloading after all: not when one flagged
+	// this run before the requeue settled (JobQueue.settle), and not over a
+	// Cancelled row. Not requeued, the failure goes to setJobError, which
+	// ends the run as a cancelled one. Requeued, the run is settled, and a
+	// Cancel of the Queued row is its caller's to report.
+	if w.queue.settle(job.ID) || !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
 		"status": database.StatusQueued,
 		"error":  "",
 	}) {

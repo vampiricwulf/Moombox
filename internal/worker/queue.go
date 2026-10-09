@@ -48,6 +48,7 @@ type JobQueue struct {
 	holdingLifecycle map[string]bool          // tracks which jobs hold lifecycle slots
 	droppedLogged    map[string]struct{}      // jobs whose backlog drop has been logged
 	cancelled        map[string]bool          // tracks user-initiated cancellations (vs shutdown)
+	settled          map[string]bool          // runs past reporting a Cancel (settle)
 	notify           chan struct{}
 	dlNotify         chan struct{} // signaling for download slot availability
 	lifeNotify       chan struct{} // signaling for lifecycle slot availability
@@ -82,6 +83,7 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 		holdingLifecycle:   make(map[string]bool),
 		droppedLogged:      make(map[string]struct{}),
 		cancelled:          make(map[string]bool),
+		settled:            make(map[string]bool),
 		notify:             make(chan struct{}, 1),
 		dlNotify:           make(chan struct{}, 1),
 		lifeNotify:         make(chan struct{}, 1),
@@ -383,8 +385,10 @@ func (q *JobQueue) Complete(jobID string) {
 
 		// Drop any unconsumed user-cancel flag so it can't leak or
 		// misclassify the job's next run (WasCancelled normally consumes it,
-		// but error paths can finish a run without ever reading it).
+		// but a run that finishes its download ends without reading it), and
+		// the settled mark with it: the job's next run reports its own.
 		delete(q.cancelled, jobID)
+		delete(q.settled, jobID)
 
 		// Signal that the processing goroutine has returned.
 		ch := q.done[jobID]
@@ -400,10 +404,11 @@ func (q *JobQueue) Complete(jobID string) {
 }
 
 // Cancel cancels a specific job (user-initiated). Returns true when it
-// flagged an actively-processing run — that run's handleCancellation will
-// emit the "cancelled" notification, so notifying callers (the cancel
-// route) skip their own emission; previously one user cancel produced two
-// embeds for an in-flight job.
+// flagged an actively-processing run that had not yet settled its outcome
+// (settle) — that run's handleCancellation will emit the "cancelled"
+// notification, so notifying callers (the cancel route) skip their own
+// emission; previously one user cancel produced two embeds for an in-flight
+// job.
 func (q *JobQueue) Cancel(jobID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -414,11 +419,17 @@ func (q *JobQueue) Cancel(jobID string) bool {
 	// classify — the entry would leak forever and, worse, misclassify a
 	// future run of the same job (a later shutdown interruption would read
 	// the stale flag and flip a resumable job to Cancelled).
+	//
+	// Nor a run that has settled its outcome (settle): it is past the point
+	// of reporting a cancel, so this one is its caller's to report. Its
+	// context is cancelled all the same.
 	flagged := false
 	if cancel, ok := q.processing[jobID]; ok {
-		q.cancelled[jobID] = true
+		if !q.settled[jobID] {
+			q.cancelled[jobID] = true
+			flagged = true
+		}
 		cancel()
-		flagged = true
 	}
 	// Also remove from pending
 	for i, pj := range q.pending {
@@ -432,13 +443,49 @@ func (q *JobQueue) Cancel(jobID string) bool {
 }
 
 // WasCancelled returns true if the job was explicitly cancelled by the user
-// (as opposed to being stopped by shutdown). Clears the flag after reading.
+// (as opposed to being stopped by shutdown). Clears the flag after reading,
+// and settles the run (settle): it is ending either way, so a Cancel that
+// arrives after this is its caller's to report — the cancel route writes
+// Cancelled before it flags, and that write alone can end a run here.
 func (q *JobQueue) WasCancelled(jobID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if _, ok := q.processing[jobID]; ok {
+		q.settled[jobID] = true
+	}
 	if q.cancelled[jobID] {
 		delete(q.cancelled, jobID)
 		return true
+	}
+	return false
+}
+
+// settle marks the point past which jobID's run no longer reports a Cancel,
+// and reports whether one flagged it first. A run calls it as it records its
+// outcome — setJobError's failure, a backlog requeue — and WasCancelled does
+// it for a run ending as cancelled or interrupted.
+//
+// Flagged first (true), the run must end as a cancelled one
+// (handleCancellation, which consumes the flag) and send the Job Cancelled
+// that Cancel's caller left to it. Otherwise the run is settled: Cancel no
+// longer flags it and answers false, so its caller — the cancel route, the
+// TUI — sends that notification itself.
+//
+// The queue's lock decides which came first. Read and written apart, the
+// flag and the outcome left a window either way: a run that recorded its
+// failure after CancelJob's flag and before its Cancelled write sent Job
+// Failed for the operator's Cancel, and the Job Cancelled never went; a
+// Cancel that flagged a run already past reading the flag — a failure's
+// tail, which an automatic cookie refresh can hold for minutes, or a
+// requeue — was reported by nobody, since its caller had left it to the run.
+func (q *JobQueue) settle(jobID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.cancelled[jobID] {
+		return true
+	}
+	if _, ok := q.processing[jobID]; ok {
+		q.settled[jobID] = true
 	}
 	return false
 }

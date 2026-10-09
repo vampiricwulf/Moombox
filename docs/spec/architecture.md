@@ -538,8 +538,9 @@ The `JobQueue` implements a two-tier concurrency model:
 - `ReleaseDownloadSlot(jobID)`: Frees the download slot. Signals waiting jobs.
 - `ReleaseSlots(jobID)`: Frees the lifecycle and download slots (if held) without ending the run. `setJobError` and `handleCancellation` call it before their tails (notifications, an automatic cookie refresh), so the next download need not wait on them.
 - `Complete(jobID)`: Ends the run — frees any slot still held, cancels the per-job context, unregisters it and closes its `Done` channel. Called once per run, by `processJob`'s defer, when the goroutine returns. An early call used to unregister a run still in its tail, so a re-enqueue in that window started a second run, which the first run's deferred `Complete` then tore down; whatever re-enqueues a job from inside its own run (the automatic cookie refresh's resume, `AutoReinitializeJob`) now waits for the exit through `afterJobExit`.
-- `Cancel(jobID)`: User-initiated cancellation. Sets `cancelled` flag, cancels context, removes from pending queue.
-- `WasCancelled(jobID) -> bool`: Returns and clears the cancellation flag. Used to distinguish user cancellation from shutdown.
+- `Cancel(jobID)`: User-initiated cancellation. Sets `cancelled` flag, cancels context, removes from pending queue. Returns whether it flagged a run — and a run that has settled its outcome is not flagged (`settle`, below), so its caller sends the Job Cancelled notification itself.
+- `WasCancelled(jobID) -> bool`: Returns and clears the cancellation flag. Used to distinguish user cancellation from shutdown. Settles the run.
+- `settle(jobID) -> bool`: The point past which a run no longer reports a Cancel. `setJobError` and the backlog requeue call it as they record their outcome, and it reports whether a Cancel flagged the run first — the run then ends as a cancelled one (`handleCancellation`) and sends the Job Cancelled its canceller left to it. Otherwise the run is settled, and `Cancel` no longer flags it. The queue's lock decides which came first: checked and written apart, a failure written between `CancelJob`'s flag and its `Cancelled` write sent Job Failed for the operator's Cancel, and a Cancel that flagged a run already past reading the flag — a failure's tail, which an automatic cookie refresh can hold for minutes, or a requeue — was reported by nobody.
 
 **Signaling:**
 - `notify` channel (capacity 1): signals that a pending job is available
@@ -554,7 +555,7 @@ The worker-owned `Scheduler` (`internal/worker/scheduler.go`) admits backlog (`Q
 - Single goroutine, woken by `Wake()` (backlog-job creation, job completion, a cookie repair that returns parked backlog to `Queued`) or the worker's 60s heartbeat; wake signals coalesce through a capacity-1 channel
 - One admission sweep per wake: for each channel with `Queued` rows, admit `archive_slots − in-flight backlog jobs`, newest `published` first
 - Admission writes `status = Upcoming` durably FIRST (the in-flight count observes the DB), then enqueues in the JobQueue — a crash between the two steps self-heals because startup recovery re-enqueues `Upcoming` rows
-- The admission write is a compare-and-set on `Queued` (`UpdateJobFieldsIf`, `internal/database/database.go`). Written unconditionally, it overwrote an operator's Cancel that landed between `NextQueuedJobs` and the write, and the cancelled job downloaded after all. A row that left `Queued` in that window is not admitted and takes no slot: the next row the query returned gets it, or the next sweep does — not a re-query or a `Wake`, which a database that cannot write would turn into a spin. The worker's own failure writes take the same care: `setJobError` and the backlog requeue write with `UpdateJobFieldsUnless(..., Cancelled, ...)`, and a failure that finds the row Cancelled ends the run as a cancelled one (`handleCancellation`, so the Job Cancelled notification the cancel route left to the run is sent) instead of turning it into Error or back into `Queued`
+- The admission write is a compare-and-set on `Queued` (`UpdateJobFieldsIf`, `internal/database/database.go`). Written unconditionally, it overwrote an operator's Cancel that landed between `NextQueuedJobs` and the write, and the cancelled job downloaded after all. A row that left `Queued` in that window is not admitted and takes no slot: the next row the query returned gets it, or the next sweep does — not a re-query or a `Wake`, which a database that cannot write would turn into a spin. The worker's own failure writes take the same care: `setJobError` and the backlog requeue write with `UpdateJobFieldsUnless(..., Cancelled, ...)`, and a failure that a Cancel flagged first (`JobQueue.settle`), or that finds the row Cancelled, ends the run as a cancelled one (`handleCancellation`) instead of turning it into Error or back into `Queued`. The Job Cancelled notification is sent once either way: by the run when the Cancel flagged it first, and by the cancel route or the TUI when the run had already settled
 - `resolveSlots` is injected by `cmd/moombox` against the live config store, so per-channel `archive_slots` overrides hot-reload
 - A **disabled** channel resolves to 0 slots, so disabling it PAUSES its queued backlog (owner decision O-J, 2026-09-17). Every discovery path already reads `enabled = false` as a pause — the feed, DECAPI and Twitch monitors skip the channel, and the backfill keeps it in `active` while never scanning it — and the resolver was the one place that did not, so a disabled channel went on starting downloads M at a time. In-flight jobs are untouched: they have already left `Queued`, and this number is an admission budget rather than a kill switch. A channel with **no config entry at all** still gets the global default, so a removed channel's leftover `Queued` rows are not stranded.
 - **No admissions during an outage.** A sweep admits nothing while the connectivity monitor (`Scheduler.conn`, the worker's `Connectivity`) reports offline, and `Run` subscribes to its `OnStateChange` so the moment it reports online again is a wake. An admission made offline is a backlog VOD sent to fail its first fetch, and each one that failed freed its slot for the next: a channel's whole `Queued` backlog drained into Error in the minutes the network was down, and the archive pass never re-creates a video it has history for
@@ -739,6 +740,7 @@ Upcoming -----> Live ------> Downloading ------> Muxing ------> Finished
 
 - **User cancellation:** `WasCancelled(jobID)` returns true. Status set to `Cancelled`. Notification sent.
 - **Shutdown cancellation:** `WasCancelled(jobID)` returns false. Status is preserved (not changed). Job will resume on next startup.
+- **Cancel of a settled run:** a run that has recorded its outcome — `setJobError`'s failure, a backlog requeue, or the end of a cancelled or interrupted run — is settled (`JobQueue.settle`), and a Cancel that reaches it in what is left of the run is not flagged: `CancelJob` answers false and its caller (the cancel route, the TUI) sends the notification. That covers a Cancel of a `COOKIES?` row whose run is still in its automatic cookie refresh, of a row just requeued to `Queued`, and the cancel route's own order — it writes `Cancelled` before it calls `CancelJob`, and that write alone can end the run first.
 
 This distinction is critical: on shutdown, jobs in `Downloading` status keep that status so they are re-enqueued on restart. User cancellations are permanent.
 
@@ -799,7 +801,7 @@ cookiesStatusError(err)  ->  StatusCookies      // errors.Is against ErrCookiesR
                                                 //   twitch.ErrTwitchAuthExpired, twitch.ErrSubscriberOnly
 anything else            ->  StatusError
 ```
-Cancellation is not an error class: `handleCancellation` asks the queue whether the user cancelled (`WasCancelled`) and writes `Cancelled`, or leaves the status untouched on a shutdown so the job resumes on restart. A Cancel that lands after `processJob` last read its context reaches `setJobError` all the same, with the failure the run was already returning; its write (`UpdateJobFieldsUnless(..., Cancelled, ...)`) does not apply over the `Cancelled` row, and it hands the run to `handleCancellation` instead of recording Error or sending Job Failed. The error's text becomes the job's `error` column, and `park_reason`/`park_identity` are written on every error transition so the credential sweeps can tell a dead-cookie park from a membership one.
+Cancellation is not an error class: `handleCancellation` asks the queue whether the user cancelled (`WasCancelled`) and writes `Cancelled`, or leaves the status untouched on a shutdown so the job resumes on restart. A Cancel that lands after `processJob` last read its context reaches `setJobError` all the same, with the failure the run was already returning. When it flagged the run before the failure settled (`JobQueue.settle`) — its `Cancelled` write may still be on the way — or its write already reads `Cancelled` (`UpdateJobFieldsUnless(..., Cancelled, ...)` does not apply over it), `setJobError` hands the run to `handleCancellation` instead of recording Error or sending Job Failed. A Cancel after that finds the run settled and is its caller's to report. The error's text becomes the job's `error` column, and `park_reason`/`park_identity` are written on every error transition so the credential sweeps can tell a dead-cookie park from a membership one.
 
 ### Notification and Recovery Suppression
 
@@ -853,7 +855,7 @@ Key methods:
 - `Start(ctx)`: Main loop. Blocks (run in goroutine). Enqueues existing pending jobs, then dequeues and processes.
 - `Stop()`: Signals stop, waits up to 10 seconds for in-flight jobs.
 - `EnqueueJob(jobID)`: Adds a job to the queue with priority from its current status.
-- `CancelJob(jobID)`: User-initiated cancellation.
+- `CancelJob(jobID) -> bool`: User-initiated cancellation. True when it flagged a run that will send the Job Cancelled notification; false — no run, or one that has settled its outcome — leaves it to the caller.
 - `SetParallelDownloads(n)`: Runtime update of max concurrent downloads.
 
 ### worker.StreamProcessor
@@ -883,8 +885,8 @@ Key methods:
 - `ReleaseDownloadSlot(jobID)`: Non-blocking slot release.
 - `ReleaseSlots(jobID)`: Free the slots, keep the run registered.
 - `Complete(jobID)`: End the run — free all slots, cancel context, close `Done`.
-- `Cancel(jobID)`: User cancellation.
-- `WasCancelled(jobID) -> bool`: Check and clear cancellation flag.
+- `Cancel(jobID) -> bool`: User cancellation; flags only a run that has not settled its outcome.
+- `WasCancelled(jobID) -> bool`: Check and clear cancellation flag, and settle the run.
 - `SetMaxDownloads(n)`: Runtime update.
 - `ActiveCount() -> int`: Current download slots in use.
 - `LifecycleCount() -> int`: Jobs holding a lifecycle slot — downloading + muxing.

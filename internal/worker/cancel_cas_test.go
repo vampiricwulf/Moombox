@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -58,9 +59,10 @@ func TestSchedulerAdmissionLeavesACancelStanding(t *testing.T) {
 // Failed, and never sent the Job Cancelled the cancel route had left to this
 // run. The Cancel stands and the run ends as a cancelled one.
 //
-// Mutants: write the failure with UpdateJobFields — the row ends in Error;
-// return without handleCancellation when the write does not apply — the
-// Job Cancelled the route left to this run is never sent.
+// Mutant: return without handleCancellation when the failure is not
+// recorded — the Job Cancelled the route left to this run is never sent.
+// (The write's own guard is TestFailureOverTheRoutesCancelLeavesItToTheRoute's:
+// here the flag settles it first.)
 func TestSetJobErrorLeavesACancelStanding(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
@@ -120,5 +122,198 @@ func TestBacklogRequeueLeavesACancelStanding(t *testing.T) {
 	}
 	if w.scheduler.held("rq_cancel", time.Now()) {
 		t.Error("the cancelled job is still held for a requeue that did not happen")
+	}
+}
+
+// runningJob adds a Downloading job and dequeues it, so the queue holds a run
+// for it as processJob would: a Cancel flags only a run in flight.
+func runningJob(t *testing.T, w *DownloadWorker, db *database.Database, id string) *database.Job {
+	t.Helper()
+	job := &database.Job{
+		ID: id, VideoID: id, URL: "u", Platform: "youtube", Title: "Cancel Me",
+		ChannelName: "Chan", Status: database.StatusDownloading,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	w.queue.Enqueue(job.ID, database.StatusDownloading)
+	if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
+		t.Fatal("Dequeue returned no job")
+	}
+	return job
+}
+
+// TestFailureBetweenCancelsTwoHalvesEndsTheRunCancelled: CancelJob flags the
+// run, then writes Cancelled (the TUI's order). A run already past its
+// context check whose failure landed between the two found the row still
+// Downloading, recorded Error and sent Job Failed; CancelJob then wrote
+// Cancelled over it, the row kept the failure's text, and the Job Cancelled
+// the TUI had left to the flagged run was never sent. The flag now settles
+// it: the run ends as a cancelled one.
+//
+// Mutant: drop setJobError's settle — Error and Job Failed for the
+// operator's Cancel, and no Job Cancelled.
+func TestFailureBetweenCancelsTwoHalvesEndsTheRunCancelled(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+	job := runningJob(t, w, db, "half_cancel")
+
+	if !w.queue.Cancel(job.ID) { // CancelJob's first half
+		t.Fatal("Cancel did not flag the run")
+	}
+	w.setJobError(job, errors.New("download: connection reset by peer"))
+	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // its second
+
+	if row, _ := db.GetJob(job.ID); row.Status != database.StatusCancelled || row.Error != "" {
+		t.Errorf("row = %s %q, want Cancelled with no failure on it", row.Status, row.Error)
+	}
+	if n := len(rec.ByEvent("error")); n != 0 {
+		t.Errorf("sent %d Job Failed for an operator's Cancel", n)
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 1 {
+		t.Errorf("sent %d Job Cancelled, want the 1 the TUI left to the run", n)
+	}
+}
+
+// TestFailureOverTheRoutesCancelLeavesItToTheRoute: the cancel route writes
+// Cancelled, then calls CancelJob (the Web's order), and the write alone
+// cancels the download. A failure that reached setJobError in between found
+// no flag, left the row alone and sent nothing; CancelJob then flagged the
+// still-registered run, so the route left Job Cancelled to a run already past
+// sending it, and nobody sent it. The failure settles the run: CancelJob
+// answers false and the route sends it.
+//
+// Mutants: write the failure with UpdateJobFields — Error over the Cancel,
+// and Job Failed; let Cancel flag a settled run — CancelJob answers true and
+// nobody sends Job Cancelled.
+func TestFailureOverTheRoutesCancelLeavesItToTheRoute(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+	job := runningJob(t, w, db, "route_cancel")
+
+	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // the route's write
+	w.setJobError(job, errors.New("download: connection reset by peer"))
+	if w.CancelJob(job.ID) {
+		t.Error("CancelJob flagged a run that had settled its outcome: the route leaves Job Cancelled to a run that will not send it")
+	}
+
+	if row, _ := db.GetJob(job.ID); row.Status != database.StatusCancelled || row.Error != "" {
+		t.Errorf("row = %s %q, want the Cancel standing", row.Status, row.Error)
+	}
+	if n := len(rec.Calls()); n != 0 {
+		t.Errorf("the run sent %d notifications, want none (the route sends Job Cancelled)", n)
+	}
+}
+
+// TestRunEndedByTheRoutesWriteLeavesTheCancelToTheRoute is the same order
+// reaching handleCancellation instead: the route's Cancelled write stops the
+// download, the run ends with no flag to read — an interruption, which
+// sends nothing — and CancelJob then flagged it. Reading the flag settles the
+// run, so CancelJob answers false and the route sends Job Cancelled.
+//
+// Mutant: WasCancelled without the settle — CancelJob answers true, and
+// nobody sends it.
+func TestRunEndedByTheRoutesWriteLeavesTheCancelToTheRoute(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+	job := runningJob(t, w, db, "route_interrupt")
+
+	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled})
+	w.handleCancellation(job)
+	if w.CancelJob(job.ID) {
+		t.Error("CancelJob flagged a run that had already ended: nobody sends Job Cancelled")
+	}
+	if n := len(rec.Calls()); n != 0 {
+		t.Errorf("the run sent %d notifications, want none", n)
+	}
+}
+
+// TestCancelInAFailuresTailIsTheCallersToReport: setJobError parks the job in
+// COOKIES? and then waits on the automatic cookie refresh, up to two minutes,
+// with the run still registered — and both UIs offer Cancel on a COOKIES?
+// row. That Cancel flagged the run, its caller left Job Cancelled to it, and
+// the run, past reading the flag, never sent it. Settled by its failure, the
+// run is not flagged: CancelJob answers false and the caller sends it.
+//
+// Mutants: drop setJobError's settle — the parked run is flagged; let
+// Cancel flag a settled run — the same.
+func TestCancelInAFailuresTailIsTheCallersToReport(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+	rec := notificationtest.New()
+	w.notifier = rec
+	job := runningJob(t, w, db, "tail_cancel")
+
+	flagged := true
+	w.OnCookieRefreshNeeded = func(string) bool {
+		flagged = w.CancelJob(job.ID) // the operator cancels the COOKIES? row
+		return false
+	}
+	w.setJobError(job, fmt.Errorf("%w: sign in to confirm", ErrCookiesRequired))
+
+	if flagged {
+		t.Error("CancelJob flagged a run in its failure's tail: its caller leaves Job Cancelled to a run that will not send it")
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 0 {
+		t.Errorf("the run sent %d Job Cancelled, want none (its caller sends it)", n)
+	}
+}
+
+// TestBacklogRequeueBetweenCancelsTwoHalvesEndsTheRunCancelled is the TUI's
+// order against the backlog requeue: the flag landed after processJob's
+// context check and before CancelJob's Cancelled write, the requeue found the
+// row still in flight and wrote Queued, and the flag was never read — no
+// Job Cancelled. The flag settles it: no requeue, no hold, and the run ends
+// as a cancelled one through setJobError. Once requeued, the run is settled,
+// and a Cancel of its Queued row is the caller's to report.
+//
+// Mutant: drop requeueBacklog's settle — the job is requeued over the flag,
+// nobody sends Job Cancelled, and a later Cancel is flagged.
+func TestBacklogRequeueBetweenCancelsTwoHalvesEndsTheRunCancelled(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	rec := notificationtest.New()
+	w.notifier = rec
+	backlogRetryJob(t, db, "rq_half", 1, true)
+	job, _ := db.GetJob("rq_half")
+	w.queue.Enqueue(job.ID, database.StatusUpcoming)
+	if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
+		t.Fatal("Dequeue returned no job")
+	}
+
+	w.queue.Cancel(job.ID) // CancelJob's first half
+	requeued, err := w.requeueBacklogAfterTransientFailure(job, dialRefused)
+	if !requeued {
+		w.setJobError(job, err) // processJob's path
+	}
+	db.UpdateJobFields(job.ID, map[string]any{"status": database.StatusCancelled}) // its second
+
+	if requeued {
+		t.Error("requeued a backlog job the operator had cancelled")
+	}
+	if w.scheduler.held(job.ID, time.Now()) {
+		t.Error("the cancelled job is held for a requeue that did not happen")
+	}
+	if n := len(rec.ByEvent("cancelled")); n != 1 {
+		t.Errorf("sent %d Job Cancelled, want the 1 the TUI left to the run", n)
+	}
+
+	// A run that did requeue has settled.
+	backlogRetryJob(t, db, "rq_settled", 1, true)
+	job2, _ := db.GetJob("rq_settled")
+	w.queue.Enqueue(job2.ID, database.StatusUpcoming)
+	if _, _, ok := w.queue.Dequeue(context.Background()); !ok {
+		t.Fatal("Dequeue returned no job")
+	}
+	if ok, _ := w.requeueBacklogAfterTransientFailure(job2, dialRefused); !ok {
+		t.Fatal("the transient failure was not requeued")
+	}
+	if w.CancelJob(job2.ID) {
+		t.Error("CancelJob flagged a requeued run: its caller leaves Job Cancelled to a run that will not send it")
 	}
 }
