@@ -102,7 +102,7 @@ function shoelaceDialog(h, dlg) {
  * The real dashboard paths — a job card's click, the details dialog's Trim
  * button, the trim dialog's Create and Cancel — with the trim POST held open
  * until the test answers it. `answer(id, spec)` releases the request job `id`
- * made with a response spec.
+ * made with a response spec; `started(id)` is the route's 202.
  */
 async function trimRace() {
   const pending = {};
@@ -143,6 +143,11 @@ async function trimRace() {
   return { h, click, openDetails, openTrim, submit, answer };
 }
 
+const started = (jobId) => response({
+  status: 202,
+  body: { trim: { id: `trim_${jobId}`, jobId, startTime: 10, endTime: 20, progress: 0 } },
+});
+
 // Mutant: act on the answer whatever the dialog (drop `!session.signal.aborted`).
 test("a late trim answer leaves another job's trim dialog alone", { skip }, async () => {
   const r = await trimRace();
@@ -152,7 +157,7 @@ test("a late trim answer leaves another job's trim dialog alone", { skip }, asyn
   assert.equal(r.h.app.trimmer.job, null, "closing the dialog destroyed it");
   await r.openTrim("B");
   r.h.app.trimmer.startMarker = 30;
-  await r.answer("A", { trim: { id: "tA", jobId: "A" } });
+  await r.answer("A", started("A"));
   assert.equal(r.h.el("trim-dialog").open, true, "job A's answer closed job B's trim dialog");
   assert.equal(r.h.app.trimmer.job?.id, "B");
   assert.equal(r.h.app.trimmer.startMarker, 30, "job B's markers were lost");
@@ -171,14 +176,18 @@ test("a late trim answer leaves the next dialog's Create button alone", { skip }
   assert.equal(create.disabled, false, "job B's dialog opened with job A's Create still busy");
   assert.equal(create.loading, false);
   await r.submit(30, 40);
-  await r.answer("A", { trim: { id: "tA", jobId: "A" } });
+  await r.answer("A", started("A"));
   assert.equal(create.disabled, true, "job A's answer re-enabled Create while job B's request is out");
   assert.equal(create.loading, true);
 });
 
 const failed = () => response({ status: 500, body: { error: "Failed to create trim" } });
 
-// Mutant: clear the selection whatever it is (drop `this.app.selectedJobId === job.id`).
+// The request no longer selects its job (it did so that a refetch could
+// redraw the dialog; the result now arrives keyed to the job), so its failure
+// has no selection to give back.
+//
+// Mutant: put back the failure arm's `this.app.selectedJobId = null`.
 test("a late failed trim keeps another job's selection", { skip }, async () => {
   const r = await trimRace();
   await r.openTrim("A");
@@ -189,20 +198,9 @@ test("a late failed trim keeps another job's selection", { skip }, async () => {
   await r.answer("A", failed());
   assert.equal(r.h.app.selectedJobId, "C", "job A's failed trim cleared job C's selection");
   assert.equal(r.h.el("details-dialog").open, true);
-
-  // …or job B's own trim is out, holding B selected so that its answer can
-  // refresh B's details.
-  const r2 = await trimRace();
-  await r2.openTrim("A");
-  await r2.submit(10, 20);
-  await r2.click(r2.h.el("trim-cancel-btn"));
-  await r2.openTrim("B");
-  await r2.submit(30, 40);
-  await r2.answer("A", failed());
-  assert.equal(r2.h.app.selectedJobId, "B", "job A's failed trim cleared the selection job B's trim holds");
 });
 
-// Mutant: clear the selection while its details are open (drop `!el.details?.open`).
+// Mutant: put back the failure arm's `this.app.selectedJobId = null`.
 test("a late failed trim keeps its own job's reopened details selected", { skip }, async () => {
   const r = await trimRace();
   await r.openTrim("A");
@@ -214,13 +212,72 @@ test("a late failed trim keeps its own job's reopened details selected", { skip 
 });
 
 // The undisturbed path, which the guards must keep: the answer closes its own
-// dialog and reopens its job's details.
+// dialog and reopens its job's details, and says the trim runs on.
+//
+// Mutant: drop showJobDetails from the answer (the details stay closed).
 test("a trim answer closes its own dialog and reopens its job's details", { skip }, async () => {
   const r = await trimRace();
   await r.openTrim("A");
   await r.submit(10, 20);
-  await r.answer("A", { trim: { id: "tA", jobId: "A" } });
+  await r.answer("A", started("A"));
   assert.equal(r.h.el("trim-dialog").open, false);
   assert.equal(r.h.el("details-dialog").open, true);
   assert.equal(r.h.app.selectedJobId, "A");
+  assert.match(said(r.h), /Trim started — it keeps running if you leave this page/);
+});
+
+// ── A trim's result reaches the page as trim_status ───────────────────────
+//
+// The trim runs on the server, detached from the request that started it
+// (internal/worker TrimService.StartTrim), so its outcome is a WebSocket frame
+// keyed to its job — never to whichever dialog is open when it lands.
+
+const trimRecord = (id, jobId, start, end) => ({
+  id, jobId, startTime: start, endTime: end, duration: end - start, fileSize: 2048,
+  filename: `ch/trim/${jobId} [${start}s-${end}s].mp4`, createdAt: "2026-09-05T11:30:00Z",
+});
+const trimStatus = (h, payload) => h.app.handleMessage({ type: "trim_status", payload });
+const trimsShown = (h) => [...h.el("details-trims").querySelectorAll(".trim-item [data-delete-trim]")].map((b) => b.dataset.trimId);
+
+// Mutants: drop handleTrimStatus's merge of the frame's record (job A's
+// section never lists it); drop _syncTrims's `selectedJobId !== job.id`
+// guard (job A's trim is drawn into job B's open dialog).
+test("a finished trim lands in its own job's Trims section and nowhere else", { skip }, async () => {
+  const r = await trimRace();
+  await r.openDetails("B");
+  trimStatus(r.h, { id: "tA", jobId: "A", state: "finished", startTime: 10, endTime: 20, trim: trimRecord("tA", "A", 10, 20) });
+  assert.deepEqual(trimsShown(r.h), [], "job A's trim was drawn into job B's details");
+  assert.match(said(r.h), /Trim 0:10 – 0:20 of "title A" created/);
+
+  await r.openDetails("A");
+  assert.deepEqual(trimsShown(r.h), ["tA"]);
+  // With A's own details open, the next one is drawn in place.
+  trimStatus(r.h, { id: "tA2", jobId: "A", state: "finished", startTime: 30, endTime: 40, trim: trimRecord("tA2", "A", 30, 40) });
+  assert.deepEqual(trimsShown(r.h), ["tA", "tA2"]);
+  // The OnTrimsChanged job_update for the same trim, landing after it, adds
+  // nothing twice.
+  trimStatus(r.h, { id: "tA2", jobId: "A", state: "finished", startTime: 30, endTime: 40, trim: trimRecord("tA2", "A", 30, 40) });
+  assert.deepEqual(trimsShown(r.h), ["tA", "tA2"]);
+});
+
+// Mutant: handle "finished" alone (return early on "failed").
+test("a failed trim says so, naming its job", { skip }, async () => {
+  const r = await trimRace();
+  trimStatus(r.h, { id: "tB", jobId: "B", state: "failed", startTime: 70, endTime: 80, error: "Could not create the trim; the log has the reason" });
+  assert.match(said(r.h), /Trim 1:10 – 1:20 of "title B" failed: Could not create the trim; the log has the reason/);
+});
+
+// A trim added or deleted from the other UI reaches this page only as the
+// job_update OnTrimsChanged sends; the open dialog redraws its section when
+// that list moved.
+//
+// Mutant: drop the _syncTrims call from updateJobDetails.
+test("a job_update whose trims moved redraws the open Trims section", { skip }, async () => {
+  const r = await trimRace();
+  await r.openDetails("A");
+  assert.deepEqual(trimsShown(r.h), []);
+  r.h.app.handleMessage({ type: "job_update", payload: { ...finishedJob("A"), trims: [trimRecord("tX", "A", 5, 9)] } });
+  assert.deepEqual(trimsShown(r.h), ["tX"]);
+  r.h.app.handleMessage({ type: "job_update", payload: { ...finishedJob("A"), trims: [] } });
+  assert.deepEqual(trimsShown(r.h), []);
 });

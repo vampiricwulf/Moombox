@@ -367,8 +367,66 @@ export class JobDetailsController {
       errorDiv.appendChild(document.createTextNode(" " + job.error));
     }
 
+    // A trim added or deleted elsewhere (the other UI, a trim that finished
+    // on the server) arrives as a job_update whose trims list moved; the
+    // section is redrawn only then, never on a progress tick.
+    this._syncTrims(job);
+
     // Update button visibility
     this.updateDetailsButtons(job);
+  }
+
+  /**
+   * The dialog's Trims section for `job`. Its own method, inside its own
+   * wrapper (#details-trims, display: contents), so a trim's result can
+   * redraw it in place without rebuilding the dialog — the embed, the logs —
+   * around it.
+   */
+  _trimsSectionHtml(job) {
+    const trims = Array.isArray(job.trims) ? job.trims : [];
+    if (trims.length === 0) return "";
+    const esc = (v) => this.app.escapeHtml(v);
+    const rows = trims.map((trim) => {
+      const range = `${esc(this.app.formatTimestamp(trim.startTime))} - ${esc(this.app.formatTimestamp(trim.endTime))}`;
+      const duration = `${esc(Math.floor(trim.duration))}s`;
+      const size = trim.fileSize ? esc(this.app.formatBytes(trim.fileSize)) : '?';
+      return `
+              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
+                <span>
+                  <strong>${range}</strong> (${duration}, ${size})
+                </span>
+                <sl-button size="small" variant="danger" data-delete-trim data-job-id="${esc(job.id)}" data-trim-id="${esc(trim.id)}">
+                  Delete
+                </sl-button>
+              </div>
+            `;
+    }).join('');
+    return `
+      <sl-details summary="Trims (${esc(trims.length)})" open class="details-section">
+        <div class="trim-list">
+          ${rows}
+        </div>
+      </sl-details>
+      `;
+  }
+
+  /** What the Trims section shows, as one comparable string. */
+  _trimsKey(job) {
+    return (Array.isArray(job.trims) ? job.trims : []).map((t) => t.id).join("|");
+  }
+
+  /**
+   * Redraw the open dialog's Trims section when it is showing `job` and what
+   * it should list has changed since it was drawn (or always, with force).
+   */
+  _syncTrims(job, { force = false } = {}) {
+    if (!job || this.app.selectedJobId !== job.id) return;
+    const wrap = document.getElementById("details-trims");
+    if (!wrap) return;
+    const key = this._trimsKey(job);
+    if (!force && wrap.dataset.trimsKey === key) return;
+    wrap.dataset.trimsKey = key;
+    wrap.innerHTML = this._trimsSectionHtml(job);
   }
 
   updateDetailsButtons(job) {
@@ -653,27 +711,7 @@ export class JobDetailsController {
       </div>
       ` : ""}
 
-      ${job.trims && job.trims.length > 0 ? `
-      <sl-details summary="Trims (${this.app.escapeHtml(job.trims.length)})" open class="details-section">
-        <div class="trim-list">
-          ${job.trims.map(trim => {
-            const range = `${this.app.escapeHtml(this.app.formatTimestamp(trim.startTime))} - ${this.app.escapeHtml(this.app.formatTimestamp(trim.endTime))}`;
-            const duration = `${this.app.escapeHtml(Math.floor(trim.duration))}s`;
-            const size = trim.fileSize ? this.app.escapeHtml(this.app.formatBytes(trim.fileSize)) : '?';
-            return `
-              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
-                <span>
-                  <strong>${range}</strong> (${duration}, ${size})
-                </span>
-                <sl-button size="small" variant="danger" data-delete-trim data-job-id="${this.app.escapeHtml(job.id)}" data-trim-id="${this.app.escapeHtml(trim.id)}">
-                  Delete
-                </sl-button>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </sl-details>
-      ` : ""}
+      <div id="details-trims" class="details-trims" data-trims-key="${this.app.escapeHtml(this._trimsKey(job))}">${this._trimsSectionHtml(job)}</div>
 
       ${(() => {
         const asides = Array.isArray(job.asides) ? job.asides : [];

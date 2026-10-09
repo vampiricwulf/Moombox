@@ -535,19 +535,17 @@ export class TrimController {
     // elements, and this dialog's own listener signal, which destroy()
     // aborts. Read from `this` instead, a late answer for job A closed job
     // B's trim dialog, or threw on the emptied refs and cleared the
-    // selection under job C's open details.
+    // selection under job C's open details. The trim's own result comes
+    // later, as trim_status frames keyed to the job (app.handleTrimStatus).
     const job = this.job;
     const el = this._el;
     const session = this._abort;
     el.submitBtn.loading = true;
     el.submitBtn.disabled = true;
-    // Restore selectedJobId so _refreshJobDetails can update the details content.
-    // It was cleared when the details dialog was hidden to open the trim dialog.
-    this.app.selectedJobId = job.id;
-    let created = false;
+    let started = false;
     try {
       await this.app.createTrim(job.id, startTime, endTime);
-      created = true;
+      started = true;
     } catch {
       // Error already shown by createTrim().
     } finally {
@@ -559,17 +557,16 @@ export class TrimController {
         el.submitBtn.disabled = false;
       }
     }
-    if (created && !session.signal.aborted) {
-      // Reopen details dialog to show updated trims. el, not this._el:
-      // destroy() clears _el on sl-after-hide, which fires before the
-      // timeout under prefers-reduced-motion.
+    if (started && !session.signal.aborted) {
+      // Back to the job's details, where its Trims section takes the
+      // result. The row as this page holds it now: job_update may have
+      // replaced the one the dialog opened with.
       el.dialog.hide();
-      setTimeout(() => el.details?.show(), 100);
-    } else if (this.app.selectedJobId === job.id && !el.details?.open) {
-      // No details dialog is showing this job — leaving it selected would
-      // have jobs_update call updateJobDetails() on empty content. Only this
-      // job's selection: another job's open details keep theirs.
-      this.app.selectedJobId = null;
+      setTimeout(() => {
+        const current = this.app.jobs.find((j) => j.id === job.id)
+          || this.app.archivedJobs.find((j) => j.id === job.id) || job;
+        this.app.details.showJobDetails(current);
+      }, 100);
     }
   }
 }

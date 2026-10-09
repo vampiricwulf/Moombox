@@ -1333,6 +1333,19 @@ func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig,
 	}
 }
 
+// trimStatusFrames is the trim service's event hook: each worker.TrimEvent
+// goes out as one trim_status frame, the payload exactly the event (its id,
+// jobId, range, progress and state, then the record or the reason). A
+// function of its own so the frame's name is pinned without a dialled
+// socket (trim_status_test.go).
+func trimStatusFrames(hub interface {
+	Broadcast(msgType string, payload any)
+}) func(worker.TrimEvent) {
+	return func(ev worker.TrimEvent) {
+		hub.Broadcast("trim_status", ev)
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -1947,6 +1960,16 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.wsHub.BroadcastJobUpdate(job)
 	})
+
+	// Trim service -> WebSocket: a dashboard trim runs detached from the
+	// request that started it, so its outcome reaches the page as
+	// trim_status frames (worker.TrimEvent: "running", then "finished" with
+	// the record or "failed" with a reason). A finish lands after the
+	// OnTrimsChanged job_update above — AddTrim notifies synchronously,
+	// before the service announces the trim.
+	if s.trimSvc != nil {
+		s.trimSvc.SetOnEvent(trimStatusFrames(s.wsHub))
+	}
 
 	// OnJobDeleted subscriber: send a targeted job_deleted WS event so the
 	// frontend drops the row immediately. This replaces the prior full-list

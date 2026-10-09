@@ -429,13 +429,14 @@ Shutdown is triggered by context cancellation (from signal handler, restart trig
 ### Order
 
 1. **Stop monitors** — TwitchMonitor, DecapiMonitor, FeedMonitor (prevents new job creation)
-2. **Stop download worker** — Waits for active downloads to save state (resume files)
-3. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 15-second force-exit, not `Wait`'s 30-second timeout: step 2 can legitimately spend 12 of those seconds (`worker.StopBudget`) waiting out in-flight jobs and their muxes, so the drain gets whatever is left — as little as 3 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
-4. **Stop cookie services** — CookieRefresh, AutoCookies
-5. **Cleanup PO token provider** — Releases Goja VMs
-6. **Stop web server** — Closes HTTP listener and WebSocket connections
-7. **Unsubscribe event listeners** — Log forwarder, WebSocket job update subscribers
-8. **Close database** — Flushes pending writes, closes SQLite connection
+2. **Stop the trim service** — `TrimService.Stop` cancels every trim it runs (a dashboard's detached one, a TUI's in-process one), waits up to 2 seconds for each to remove its `.partial.mp4`, and refuses any trim asked for after it. A stopped trim sends no `trim_error`: nothing failed
+3. **Stop download worker** — Waits for active downloads to save state (resume files)
+4. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 15-second force-exit, not `Wait`'s 30-second timeout: step 3 can legitimately spend 12 of those seconds (`worker.StopBudget`) waiting out in-flight jobs and their muxes, so the drain gets whatever is left — as little as 3 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
+5. **Stop cookie services** — CookieRefresh, AutoCookies
+6. **Cleanup PO token provider** — Releases Goja VMs
+7. **Stop web server** — Closes HTTP listener and WebSocket connections
+8. **Unsubscribe event listeners** — Log forwarder, WebSocket job update subscribers
+9. **Close database** — Flushes pending writes, closes SQLite connection
 
 Each service stop is wrapped in `stopService(name, fn)` which provides:
 - Panic recovery (one failing service cannot block shutdown of others)
@@ -535,7 +536,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `connectivity_restored` | Global connectivity restored — fires the "Outage Alert": start/end as Discord dynamic timestamps plus the duration. Deliberately the ONLY global-outage event: a lost-connectivity webhook has no connectivity to deliver over, so there is no `connectivity_lost` (removed in v2.8; stale filter entries warn at startup and strip on the next UI save) |
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |
-| `trim_error` | Trim operation failed |
+| `trim_error` | A trim failed: a Trim Video from either UI that broke (FFmpeg, the disk or the database failed — not a refusal, which the requester is told, nor one a stop cut short), or a post-download trim that did not produce its file for any reason |
 | `disk_warning` | Disk usage reached the warning threshold (also fired for monitoring-read failures) |
 | `disk_critical` | Disk usage reached the critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
 | `disk_ok` | Disk usage fell back under the warning threshold after a warning or critical alert was sent ("Disk Space Recovered"), or disk monitoring recovered after a read-failure alert ("Disk Monitoring Recovered"). Success-coloured; the close of the `disk_warning`/`disk_critical` family. Targets filtering on `disk_warning` also receive it, via the manager's event alias, so an incident that was reported always gets an end. A reading that closes both incidents at once sends both embeds — two alerts, two closes |

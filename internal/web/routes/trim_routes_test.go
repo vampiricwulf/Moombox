@@ -2,14 +2,17 @@ package routes
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -264,5 +267,100 @@ func TestTrimServiceAnswersCarryTheirReason(t *testing.T) {
 	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/no-such-job/trims/t1", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("delete trim of unknown job: want 404, got %d", rec.Code)
+	}
+}
+
+// TestTrimCreateOutlivesThePageThatAskedForIt: a dashboard trim used to run
+// its whole encode under req.Context(), so a reload, a closed tab or a
+// dropped connection killed FFmpeg mid-encode — and left the partial output
+// in trim/ under the finished trim's name, with no row, no trim_error and no
+// page left to toast. The route now starts the trim as the trim service's
+// own task and answers 202 at once with its id; the trim finishes after the
+// page is gone.
+//
+// Mutant: run the encode in the handler (`trimSvc.CreateTrim(req.Context(),
+// …)`) — the answer waits for the gated encode, the page gives up, and the
+// trim dies with its request.
+func TestTrimCreateOutlivesThePageThatAskedForIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stand-in for FFmpeg")
+	}
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	out := filepath.Join(dir, "out", "Title [page12345].mp4")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("src"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	length := 600
+	if _, err := db.AddJob(&database.Job{ID: "page12345", VideoID: "page12345", URL: "u",
+		Status: database.StatusFinished, OutputFile: out, Filename: "Title [page12345].mp4", LengthSeconds: &length}); err != nil {
+		t.Fatal(err)
+	}
+	// A stand-in FFmpeg that opens its output, then waits for the gate (30 s
+	// at most, so nothing it is left running outlives the test).
+	gate := filepath.Join(dir, "gate")
+	ff := filepath.Join(dir, "ffmpeg")
+	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\nprintf partial > \"$out\"\n" +
+		"i=0; while [ ! -e '" + gate + "' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n" +
+		"printf whole > \"$out\"\n"
+	if err := os.WriteFile(ff, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc := worker.NewTrimService(db, ff, silentLogger{})
+	t.Cleanup(svc.Stop)
+	r := chi.NewRouter()
+	TrimRoutes(r, db, svc, nil)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	// The page: it waits two seconds for its answer, then is gone.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]float64{"startTime": 60, "endTime": 300})
+	req, _ := http.NewRequestWithContext(ctx, "POST", srv.URL+"/api/jobs/page12345/trims", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if werr := os.WriteFile(gate, nil, 0o644); werr != nil {
+			t.Error(werr)
+		}
+		t.Fatalf("the trim request got no answer while the encode ran: %v", err)
+	}
+	var answer struct {
+		Trim worker.TrimTask `json:"trim"`
+	}
+	decodeErr := json.NewDecoder(resp.Body).Decode(&answer)
+	resp.Body.Close()
+	cancel() // the tab is closed
+	if resp.StatusCode != http.StatusAccepted || decodeErr != nil || answer.Trim.ID == "" {
+		t.Fatalf("answer: %d %+v (decode: %v), want 202 with the trim's id", resp.StatusCode, answer, decodeErr)
+	}
+
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trimFile := filepath.Join(dir, "out", "trim", "page12345 [60s-300s].mp4")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rows, _ := db.GetTrimsForJob("page12345")
+		if len(rows) == 1 {
+			if rows[0].ID != answer.Trim.ID {
+				t.Errorf("the stored trim is %q, the route answered %q", rows[0].ID, answer.Trim.ID)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the trim never finished once its page was gone")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b, _ := os.ReadFile(trimFile); string(b) != "whole" {
+		t.Errorf("%s holds %q, want the whole encode", filepath.Base(trimFile), b)
 	}
 }

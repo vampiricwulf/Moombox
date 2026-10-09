@@ -312,6 +312,11 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to get job for trim", slog.String("jobID", jobID))
 			return "", "Failed to get job"
 		}
+		// context.Background(): the dialog's "Continue in background" must
+		// not stop the trim, and the trim service bounds every trim by its
+		// own lifetime anyway (TrimService.Stop, at shutdown). A trim that
+		// broke has already sent trim_error from the service; the dialog's own
+		// line below is the TUI's feedback beside it.
 		record, err := s.trimSvc.CreateTrim(context.Background(), job, startSec, endSec, onProgress)
 		if err != nil {
 			s.log.Error("Failed to create trim", slog.String("jobID", jobID), slog.String("error", err.Error()))

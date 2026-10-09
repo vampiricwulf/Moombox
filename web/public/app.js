@@ -1412,6 +1412,10 @@ export class MoomboxApp {
         this.handleBackfillStatus(p);
         break;
 
+      case "trim_status":
+        this.handleTrimStatus(p);
+        break;
+
       case "update_available":
         this.updates.available = p;
         this.updates.updateVersionIndicator();
@@ -1492,6 +1496,34 @@ export class MoomboxApp {
       delete this.backfillStatus[p.channel];
     }
     this.settings.updateChannelBackfillBadge(p.channel);
+  }
+
+  /**
+   * A trim_status frame: a trim the server runs (worker.TrimEvent). It is
+   * keyed to the job and trim it names, never to whatever dialog is open —
+   * the dialog that asked may be long gone, or the trim may have been asked
+   * for by the other UI. "finished" carries the stored record: it is merged
+   * into the job this page holds (the OnTrimsChanged job_update normally
+   * lands first; this makes the order not matter) and the job's open Trims
+   * section is redrawn. Each outcome is toasted on every page, naming the
+   * job: after a reload no page can tell which trims it asked for.
+   */
+  handleTrimStatus(p) {
+    if (!p?.id || !p.jobId) return;
+    if (p.state !== "finished" && p.state !== "failed") return;
+    const job = this.jobs.find((j) => j.id === p.jobId) || this.archivedJobs.find((j) => j.id === p.jobId);
+    const range = `${formatTimestamp(p.startTime)} – ${formatTimestamp(p.endTime)}`;
+    const of = job?.title ? ` of "${job.title}"` : "";
+    if (p.state === "finished") {
+      if (job && p.trim?.id) {
+        const trims = Array.isArray(job.trims) ? job.trims : [];
+        if (!trims.some((t) => t.id === p.trim.id)) job.trims = [...trims, p.trim];
+      }
+      this.showToast(`Trim ${range}${of} created`, "success");
+    } else {
+      this.showToast(`Trim ${range}${of} failed: ${p.error || "Failed to create trim"}`, "danger");
+    }
+    if (job) this.details._syncTrims(job);
   }
 
   /**
@@ -3038,9 +3070,11 @@ export class MoomboxApp {
         throw new Error(error.error || 'Failed to create trim');
       }
 
+      // 202: the trim runs on the server, detached from this request — a
+      // reload or a closed tab no longer stops it. Its result arrives as
+      // trim_status frames (handleTrimStatus).
       const { trim } = await response.json();
-      this.showToast('Trim created successfully', 'success');
-      await this.details._refreshJobDetails(jobId);
+      this.showToast('Trim started — it keeps running if you leave this page', 'primary');
       return trim;
     } catch (error) {
       this.showToast(error.message, 'danger');

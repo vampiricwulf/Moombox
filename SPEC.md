@@ -517,6 +517,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `connectivity` — Network reachability changed (payload: `{online}`)
 - `backfill_status` — Per-channel backfill scan progress (payload: `{channel, tab, pages, state}`)
+- `trim_status` — A trim the trim service runs, from either UI (payload: `{id, jobId, startTime, endTime, progress, state, trim?, error?}`; `state`: running, then finished with the stored `trim` record or failed with an `error` written for the user)
 - `pong` — Reply to the client's `ping` (payload: none)
 
 That list is the whole wire protocol: the hub's own `Broadcast` helpers in `internal/web/websocket.go` (`job_update`, `job_progress`, `jobs_update`, `job_deleted`, `check_timers`, `connectivity`, `log`), the four `cmd/moombox` callers (`update_available`, `disk_status`, `backfill_status`, `config_update`), the `initial_state` snapshot the hub marshals on connect, and the `pong` reply.
@@ -777,7 +778,7 @@ When the main context is cancelled (Ctrl+C, SIGTERM, or restart trigger):
 
 1. 15-second force-exit timer starts (it must outlast the worker's 12-second stop budget — see `forceExitAfter` in `cmd/moombox/shutdown.go`)
 2. Notifications switch to single-attempt delivery
-3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor
+3. Stop TwitchMonitor, DecapiMonitor, FeedMonitor, then the TrimService (cancels the trims it runs and waits up to 2 s for each to remove its partial file)
 4. Stop DownloadWorker (waits up to 10 s for active downloads to save resume state, then cancels in-flight muxes)
 5. Flush pending notifications
 6. Stop CookieRefresh and AutoCookieService

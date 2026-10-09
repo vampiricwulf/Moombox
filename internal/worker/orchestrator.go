@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -660,81 +661,70 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Post-download trim: if job has startTime/endTime, create a trimmed version
 	if (jobCtx.Job.StartTime != nil || jobCtx.Job.EndTime != nil) && ctx.Err() == nil {
-		o.logger.Info("creating post-download trim",
-			"jobID", jobCtx.Job.ID,
-			"startTime", jobCtx.Job.StartTime,
-			"endTime", jobCtx.Job.EndTime)
-
-		trimService := NewTrimService(o.db, o.ffmpegPathValue(), o.logger)
-		if o.notifier != nil {
-			trimService.SetNotifier(o.notifier)
-		}
-		startSec := 0.0
-		if jobCtx.Job.StartTime != nil {
-			startSec = *jobCtx.Job.StartTime
-		}
-		// Re-fetch job FIRST: muxAndFinalize set output_file and probed
-		// length_seconds after jobCtx.Job was last refreshed, so for a live
-		// recording with only StartTime set, the stale row would compute
-		// endSec == 0 and silently skip the requested trim.
-		freshJob, _ := o.db.GetJob(jobCtx.Job.ID)
-		if freshJob != nil && freshJob.Status == database.StatusFinished {
-			endSec := 0.0
-			if jobCtx.Job.EndTime != nil {
-				endSec = *jobCtx.Job.EndTime
-			} else if freshJob.LengthSeconds != nil {
-				endSec = float64(*freshJob.LengthSeconds)
-			}
-			if endSec > startSec {
-				_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
-				if trimErr != nil {
-					o.logger.Error("post-download trim failed", "err", trimErr, "jobID", jobCtx.Job.ID)
-					o.sendTrimFailed(jobCtx.Job, trimErr)
-				}
-			}
-		}
+		o.postDownloadTrim(ctx, jobCtx.Job)
 	}
 
 	return nil
 }
 
+// postDownloadTrim creates the trim a job asked for when it was added
+// (StartTime/EndTime), once its recording is finalized. A method of its own
+// so its failure sends can be asserted without running a download.
+func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *database.Job) {
+	o.logger.Info("creating post-download trim",
+		"jobID", job.ID,
+		"startTime", job.StartTime,
+		"endTime", job.EndTime)
+
+	trimService := NewTrimService(o.db, o.ffmpegPathValue(), o.logger)
+	if o.notifier != nil {
+		trimService.SetNotifier(o.notifier)
+	}
+	startSec := 0.0
+	if job.StartTime != nil {
+		startSec = *job.StartTime
+	}
+	// Re-fetch job FIRST: muxAndFinalize set output_file and probed
+	// length_seconds after jobCtx.Job was last refreshed, so for a live
+	// recording with only StartTime set, the stale row would compute
+	// endSec == 0 and silently skip the requested trim.
+	freshJob, _ := o.db.GetJob(job.ID)
+	if freshJob == nil || freshJob.Status != database.StatusFinished {
+		return
+	}
+	endSec := 0.0
+	if job.EndTime != nil {
+		endSec = *job.EndTime
+	} else if freshJob.LengthSeconds != nil {
+		endSec = float64(*freshJob.LengthSeconds)
+	}
+	if endSec <= startSec {
+		return
+	}
+	_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
+	if trimErr == nil {
+		return
+	}
+	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
+	// The service sends Trim Failed itself for a trim that broke. A refusal
+	// (the range the job asked for) it leaves to its caller to answer, and a
+	// run cut short by this context it does not count as a failure — but
+	// nobody asked for this trim from a dialog, so both are told here: one
+	// Trim Failed per failed post-download trim, as before.
+	if _, refused := errors.AsType[*TrimRefusedError](trimErr); refused || ctx.Err() != nil {
+		o.sendTrimFailed(job, trimErr)
+	}
+}
+
 // sendTrimFailed is the "Trim Failed" embed for a post-download trim that did
-// not produce a file.
+// not produce a file, through the builder TrimService sends it with.
 //
 // A method rather than the inline block it was, for the same reason
 // sendMuxingStarting is one: the only caller sits at the end of
 // ExecuteWithChat, past the whole download, so nothing could assert on the
 // embed it built — and the options it built by hand named no job.
-//
-// `trim_error` is never a lifecycle event (it stays its own post, and it is
-// one of the events that can still ping an edit-mode target), but the
-// footer's platform, the author line and the dashboard deep link are the
-// job's either way, and the deep link needs JobID and Author together.
 func (o *DownloadOrchestrator) sendTrimFailed(job *database.Job, trimErr error) {
-	if o.notifier == nil || job == nil {
-		return
-	}
-	f := NotifyFacts(job)
-	// Title and channel are job-supplied text, escaped as every builder in
-	// internal/notifications and the worker's own Job Failed send escape
-	// them; the Error field below already was.
-	o.notifier.Send("Trim Failed",
-		fmt.Sprintf("Failed to create trim for \"%s\"", notifications.EscapeMarkdown(job.Title)),
-		notifications.TypeError,
-		[]notifications.Field{
-			{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
-			{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
-			{Name: "Error", Value: notifications.EscapeMarkdown(trimErr.Error())},
-		},
-		notifications.SendOptions{
-			URL:       f.URL,
-			Thumbnail: f.ThumbnailURL,
-			Event:     "trim_error",
-			Author:    notifyAuthor(f),
-			Platform:  f.Platform,
-			JobID:     f.ID,
-		},
-	)
+	sendTrimFailed(o.notifier, job, trimErr)
 }
 
 // attachTrackerAndProgress attaches the progress tracker to whatever

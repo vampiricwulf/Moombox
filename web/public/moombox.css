@@ -806,6 +806,13 @@ sl-badge.status.cookies::part(base) {
     gap: var(--sl-spacing-x-small);
 }
 
+/* The Trims section's wrapper exists only so a trim's result can redraw the
+   section in place (job-details.js _syncTrims): no box of its own, so an
+   empty one adds no gap to the dialog's column. */
+.details-trims {
+    display: contents;
+}
+
 .details-row {
     display: flex;
     gap: var(--sl-spacing-small);

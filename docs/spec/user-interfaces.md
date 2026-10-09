@@ -53,7 +53,7 @@ The file structure:
 | `web/public/modules/nico-scheduler.js` | ~185 | `NicoScheduler` — the niconico overlay's cursor/anchor/pending-list/drop-count state machine and the `NICO_*` tuning constants (`player.js` imports them). Pure; covered by `web/tests/nico-scheduler.test.mjs`. |
 | `web/public/modules/setup.js` | ~1,470 | First-run setup wizard. Walks the user through initial configuration, FFmpeg installation, yt-dlp plugin setup, and cookie capture. |
 | `web/public/modules/settings.js` | ~3,220 | Settings dialog. Covers full config editing, channel management, cookie management, integration settings. |
-| `web/public/modules/trimmer.js` | ~510 | Trim clip creation UI. Lets the user define start/end timestamps on a finished recording and create a trimmed clip. |
+| `web/public/modules/trimmer.js` | ~570 | Trim clip creation UI. Lets the user define start/end timestamps on a finished recording and start a trimmed clip; the trim runs on the server, and its result reaches the job's details as `trim_status` frames. |
 | `web/public/modules/stats.js` | ~190 | Statistics dashboard. Displays job counts, sizes, durations, and other aggregate metrics. |
 | `web/public/modules/imports.js` | ~270 | Zip archive import. Upload a zip file containing video/chat/metadata to create a job from external content. |
 | `web/public/modules/filter-parser.js` | ~130 | Filter query parser. Booru-style tag syntax: `status:active`, `channel:"name"`, `platform:youtube`, negation (`-tag`), OR groups (`a\|b`), quoting for spaces. Go twin: `internal/jobfilter`. |
@@ -600,6 +600,7 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
 | `backfill_status` | `{ channel, tab, pages, state }` | Feed-history backfill scan progress per channel (`state`: scanning / error / done / idle). Active scans are also seeded via `initial_state`. |
+| `trim_status` | `{ id, jobId, startTime, endTime, progress, state, trim?, error? }` (`worker.TrimEvent`) | A trim the trim service runs — the dashboard's detached ones and the TUI's in-process ones alike, through the hook `trimStatusFrames` (`cmd/moombox/monitor_callbacks.go`) installs. `running` as it starts; then exactly one of `finished`, carrying the stored `trim` record (the `job_update` OnTrimsChanged sends lands first; the client merges the record either way), or `failed`, carrying a reason written for the user — "Moombox stopped before the trim finished" for one a stop cut short, which sends no `trim_error`. The client (`handleTrimStatus`, `web/public/app.js`) keys the frame to its job, never to whichever dialog is open: it toasts the outcome naming the job and redraws that job's Trims section when its details are the ones open. |
 | `update_available` | Release info (`version`, `tagName`, `releaseNotes`, `releaseNotesHtml`, `publishedAt`, …) | A check found a release newer than the running version |
 | `update_cleared` | `{ tagName }` | The pending release was withdrawn: skipped (`POST /api/update/dismiss`), or a check found nothing newer than the running version, so the release was pulled. A dashboard drops its badge only when the tag names the release it shows — a clear racing a newly-found release names the older tag |
 | `pong` | Empty | Response to client `ping` messages |
@@ -932,7 +933,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/api/jobs/{id}/trims` | Create a trim clip. Body contains start/end seconds. |
+| `POST` | `/api/jobs/{id}/trims` | Start a trim clip. Body `{ startTime, endTime }` in seconds. A refusal (the job's state, the range, a duplicate, a trim of the job already running) answers 400 or 409 with its reason; a failure to set the trim up answers 500 and sends `trim_error`. Otherwise **202** `{ trim: { id, jobId, startTime, endTime, progress } }` at once: the encode runs as the trim service's own task (`TrimService.StartTrim`), bounded by the service's lifetime rather than the request's, so a reload or a closed tab no longer stops it. Its outcome arrives as `trim_status` frames, and the stored record carries the id answered here. |
 | `DELETE` | `/api/jobs/{id}/trims/{trimId}` | Delete a trim clip. |
 
 ### Files

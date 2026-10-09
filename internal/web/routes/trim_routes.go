@@ -15,7 +15,8 @@ import (
 
 // TrimRoutes registers trim-related API routes.
 // rl bounds trim creation (an FFmpeg process per call); nil leaves it
-// unbounded.
+// unbounded. POST answers 202 with the trim it started ({trim: TrimTask}):
+// the encode runs as the trim service's own task, not the request's.
 func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService, rl *web.RateLimiter) {
 	// POST /api/jobs/:id/trims
 	r.With(limitedBy(rl)).Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
@@ -56,7 +57,13 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 			return
 		}
 
-		record, err := trimSvc.CreateTrim(req.Context(), job, *body.StartTime, *body.EndTime, nil)
+		// Started, not run: the encode is the trim service's own task, so a
+		// page closed or reloaded mid-encode no longer kills it (it was bound
+		// to req.Context(), and FFmpeg died with the tab). The checks a
+		// request can fail run before the answer; the outcome reaches the
+		// dashboard as trim_status frames, and a trim that broke sends
+		// trim_error.
+		task, err := trimSvc.StartTrim(job, *body.StartTime, *body.EndTime)
 		if err != nil {
 			// A refusal the user can act on (the job's state, the range, a
 			// duplicate, a trim already running) is shown as written: the
@@ -77,7 +84,11 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 			return
 		}
 
-		jsonResponse(rw, map[string]any{"trim": record})
+		// Content-Type before the explicit WriteHeader — headers set after it
+		// are dropped for non-gzip clients (jsonResponse's own Set is too late).
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusAccepted)
+		jsonResponse(rw, map[string]any{"trim": task})
 	})
 
 	// DELETE /api/jobs/:id/trims/:trimId

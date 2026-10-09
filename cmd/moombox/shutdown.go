@@ -21,7 +21,7 @@ const forceExitAfter = worker.StopBudget + 3*time.Second
 // shutdown runs the orderly stop sequence after run()'s main event loop
 // exits (either via Ctrl-C / SIGTERM, TUI quit, or triggerRestart). Order
 // is consumers-first so producers keep firing into live consumers until the
-// consumers drain: monitors → worker → notifications → cookie refresh →
+// consumers drain: monitors → trims → worker → notifications → cookie refresh →
 // PO-token provider → web server → log/DB unsubscribe → database. A
 // force-exit timer (forceExitAfter) closes rate limiters, the database and
 // the logger and exits as a backstop — with exitCodeRestart when a restart is
@@ -95,6 +95,16 @@ func (s *runState) shutdown() bool {
 	stopService("TwitchMonitor", s.twitchMon.Stop)
 	stopService("DecapiMonitor", s.decapiMon.Stop)
 	stopService("FeedMonitor", s.feedMon.Stop)
+
+	// 1b. Stop the trim service: cancels the trims it runs — a dashboard's
+	// detached one, a TUI's in-process one — and waits (briefly: a killed
+	// FFmpeg exits at once) for each to remove its partial file. Ahead of the
+	// worker, whose stop can take its whole budget, so the wait never eats
+	// into the force-exit margin. A stopped trim sends nothing; it did not
+	// fail.
+	if s.trimSvc != nil {
+		stopService("TrimService", s.trimSvc.Stop)
+	}
 
 	// 2. Stop worker (waits for active downloads to save state)
 	stopService("DownloadWorker", s.dlWorker.Stop)
