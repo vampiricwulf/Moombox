@@ -571,12 +571,13 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// The RELATIVE-path columns must count too: imported jobs set ONLY
 		// Filename/ChatFilename (no absolute OutputFile/ChatFile), so
 		// without these their perfectly valid files would be offered as
-		// orphans — and deleting them leaves a broken Finished job.
-		if job.Filename != "" {
-			known(filepath.Join(absOutputDir, job.Filename))
-		}
-		if job.ChatFilename != "" {
-			known(filepath.Join(absOutputDir, job.ChatFilename))
+		// orphans — and deleting them leaves a broken Finished job. They
+		// are relative to the JOB's output directory, not the global one
+		// (rowRelativeLocations).
+		for _, rel := range []string{job.Filename, job.ChatFilename} {
+			for _, p := range rowRelativeLocations(job, rel, absOutputDir) {
+				known(p)
+			}
 		}
 		// Include part (quality/gap split) files so they aren't flagged as
 		// orphans — both the videos and their per-part chat files.
@@ -765,21 +766,43 @@ func trimFileLocations(tr database.TrimRecord, job *database.Job, absOutputDir s
 	if filepath.IsAbs(tr.Filename) {
 		return []string{tr.Filename}
 	}
+	paths := rowRelativeLocations(job, tr.Filename, absOutputDir)
 	if job == nil {
-		return []string{filepath.Join(absOutputDir, tr.Filename)}
+		return paths
 	}
-	var paths []string
-	if job.OutputDirectory != "" {
-		if abs, err := filepath.Abs(job.OutputDirectory); err == nil && abs != absOutputDir {
-			paths = append(paths, filepath.Join(abs, tr.Filename))
-		}
-	}
-	paths = append(paths, filepath.Join(absOutputDir, tr.Filename))
 	name := filepath.Base(tr.Filename)
 	for _, dir := range trimDirsOf(job) {
 		paths = append(paths, filepath.Join(dir, name))
 	}
 	return paths
+}
+
+// rowRelativeLocations returns the absolute paths a column a row stores
+// relative to its JOB's output directory can name — a trim row's filename,
+// and the job's own filename and chat_filename: under the job's
+// output_directory when it has one, the directory the player, the chat route
+// and Open Folder join them to; and under the current global directory as
+// well, for trimFileLocations' reason (a moved archive tree with
+// paths.output_directory repointed at it, while the job still names the old
+// tree). A job that is gone, or has no directory of its own, has only the
+// global one. An empty column names nothing.
+//
+// The sweep joined the job's relative columns to the global directory alone
+// (the class of W23-07, which trims had), so a file that a job under a
+// per-channel or per-job output_directory names only by its relative column —
+// no absolute output_file or chat_file naming the same spelling — was listed
+// as an orphan, and Delete removed the archive the player still plays.
+func rowRelativeLocations(job *database.Job, rel, absOutputDir string) []string {
+	if rel == "" {
+		return nil
+	}
+	var paths []string
+	if job != nil && job.OutputDirectory != "" {
+		if abs, err := filepath.Abs(job.OutputDirectory); err == nil && abs != absOutputDir {
+			paths = append(paths, filepath.Join(abs, rel))
+		}
+	}
+	return append(paths, filepath.Join(absOutputDir, rel))
 }
 
 // appendOrphanedSiblings attaches each recovered set-aside recording to the

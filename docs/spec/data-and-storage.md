@@ -211,15 +211,15 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | thumbnail_url | TEXT | NULL | |
 | description | TEXT | NULL | |
 | output_file | TEXT | NULL | Absolute path to final output file |
-| filename | TEXT | NULL | Basename only |
-| output_directory | TEXT | NULL | Directory path |
+| filename | TEXT | NULL | The archive's path relative to the job's output directory (`output_directory` when set, else the global one), the template's subdirectories included; for a job that finalized as parts, the base the parts share, without an extension. The player, the chat route and Open Folder join it to that directory, and so does the orphan sweep — to the current global directory as well (`rowRelativeLocations`, `internal/worker/orphans.go`), which still finds it after the archive tree is moved and `paths.output_directory` repointed |
+| output_directory | TEXT | NULL | The job's own output directory: a per-channel or per-job override, or the global one as it stood at creation, which the monitor and an import store when the channel has none of its own. `filename` and `chat_filename` are relative to it |
 | video_width | INTEGER | NULL | Pixels |
 | video_height | INTEGER | NULL | Pixels |
 | video_fps | INTEGER | NULL | |
 | file_size | INTEGER | NULL | Bytes (int64 in Go) |
 | chat_status | TEXT | NULL | `pending` / `downloading` / `finished` / `unavailable` / `incomplete`; the terminal value comes from the downloader's OUTCOME (`chatStatusForOutcome`, `internal/worker/orchestrator_chat.go`), not its message count — `incomplete` means the capture stopped short, or that finalize could not copy it beside the archive (`copyAssets`, `internal/worker/orchestrator_mux.go`): either way the archive lacks a whole chat, and the value is what makes the staging cleanup keep the capture rather than delete it. A part whose chat cannot be copied is not recorded at all, so its `seg_N` stays unmuxed and shielded until a retry. `pending` until the capture actually starts (both platforms; a Twitch VOD's download-slot wait included), then `downloading`. A user cancel settles a still-running value (`cancelledChatStatus`, `internal/worker/worker.go`): `downloading` becomes `incomplete` and `pending` is cleared; a shutdown leaves it for the capture to resume |
 | total_chat_messages | INTEGER | NULL | |
-| chat_filename | TEXT | NULL | Basename |
+| chat_filename | TEXT | NULL | The chat archive's path relative to the job's output directory, resolved as `filename` is |
 | chat_file | TEXT | NULL | Absolute path (added v2) |
 | thumbnail_file | TEXT | NULL | Absolute path (added v3) |
 | description_file | TEXT | NULL | Absolute path (added v3) |

@@ -628,3 +628,76 @@ func TestScanTrimOrphansReportsOnlyUnreferencedClips(t *testing.T) {
 		t.Errorf("the sweep offered %s, which a trim record references by absolute path", abs)
 	}
 }
+
+// A job's filename and chat_filename are relative to the JOB's output
+// directory — its output_directory when it has one, which is where the
+// player, the chat route and Open Folder join them — but the sweep joined
+// them to the global directory alone, the class of W23-07. A job under a
+// per-channel directory inside the global one, whose row names its archive
+// and chat only by those columns, had both listed as orphans, and Delete
+// removed the files the player still plays.
+//
+// The global directory stays a candidate as well (rowRelativeLocations, the
+// rule trimFileLocations already had): after the archive tree is moved and
+// paths.output_directory repointed at it, the job's pinned directory names
+// the old tree and only the global one finds the files.
+//
+// Mutants:
+//   - rowRelativeLocations without the job's own directory (the old rule):
+//     the per-channel archive and chat are offered.
+//   - rowRelativeLocations with the job's directory in place of the global
+//     one rather than as well: the moved archive is offered.
+//   - scanOutputOrphans resolving filename alone, not chat_filename: the
+//     per-channel chat is offered.
+func TestOutputSweepResolvesRelativeColumnsAgainstTheJobsDirectory(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "output")
+	write := func(p string) string {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// A per-channel directory inside the global one.
+	chanDir := filepath.Join(outputDir, "ChannelA")
+	chanRel := filepath.Join("2026", "Title [relvid00001]")
+	archive := write(filepath.Join(chanDir, chanRel+".mp4"))
+	chat := write(filepath.Join(chanDir, chanRel+".chat.json"))
+	stray := write(filepath.Join(chanDir, "2026", "stray.mp4"))
+	if _, err := db.AddJob(&database.Job{
+		ID: "relvid00001", VideoID: "relvid00001", URL: "u", Platform: "youtube", Title: "t",
+		Status: database.StatusFinished, OutputDirectory: chanDir,
+		Filename: chanRel + ".mp4", ChatFilename: chanRel + ".chat.json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A job pinned to a tree that has since moved to the global directory.
+	movedRel := filepath.Join("ChannelB", "Title [relvid00002]")
+	moved := write(filepath.Join(outputDir, movedRel+".mp4"))
+	if _, err := db.AddJob(&database.Job{
+		ID: "relvid00002", VideoID: "relvid00002", URL: "u", Platform: "youtube", Title: "t",
+		Status: database.StatusFinished, OutputDirectory: filepath.Join(root, "old-output"),
+		Filename: movedRel + ".mp4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{
+		OutputDirectory:  outputDir,
+		StagingDirectory: filepath.Join(root, "staging"),
+	}}
+	for _, p := range []string{archive, chat, moved} {
+		if typ := orphanTypeOf(t, db, cfg, p); typ != "" {
+			t.Errorf("%s is offered as a %q orphan while its job's relative column names it", filepath.Base(p), typ)
+		}
+	}
+	if typ := orphanTypeOf(t, db, cfg, stray); typ != "output" {
+		t.Errorf("a stray MP4 beside the archive is offered as %q, want \"output\"", typ)
+	}
+}
