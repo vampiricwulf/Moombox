@@ -169,6 +169,101 @@ func TestOrphanSweepResolvesTrimsWhereTheTrimServiceWroteThem(t *testing.T) {
 	}
 }
 
+// A job carries an output_directory far more often than an override implies:
+// the monitor and an import store the global directory there at creation when
+// the channel has none of its own. When the operator then moves the archive
+// tree and repoints paths.output_directory at it, the archive stays owned —
+// its relative filename joins the new global directory — but every spelling
+// of its trim the sweep tried named the old tree: the job's pinned directory,
+// and beside its absolute output_file. So each trim of every such job was
+// listed as an "output" orphan and Delete removed the file its row names; with
+// the old path left as a link to the new tree (which keeps the player
+// working), it was listed all the same and each Delete was refused. The trim
+// is made with the real CreateTrim, so the row is the one the service writes.
+//
+// Mutants:
+//   - trimFileLocations resolving against the job's own output_directory in
+//     place of the global one rather than as well (the replacement this fixes):
+//     both cases offer the trim, and the plain move deletes it.
+//   - the global-directory candidate kept only for a job with no
+//     output_directory: the same.
+func TestOrphanSweepKeepsTrimsOwnedAfterTheOutputTreeMoves(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+
+	for _, tc := range []struct {
+		name, id string
+		link     bool // the old path left as a link to the new tree
+	}{
+		{name: "tree moved", id: "mvvid000001"},
+		{name: "tree moved, old path left as a link", id: "mvvid000002", link: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, db := testWorkerSetup(t)
+			root := t.TempDir()
+			oldDir, newDir := filepath.Join(root, "old"), filepath.Join(root, "new")
+			rel := filepath.Join("ChannelA", "20260101 Stream ["+tc.id+"].mp4")
+			src := filepath.Join(oldDir, rel)
+			writeTrimSource(t, ffmpegPath, src, "3")
+			job := &database.Job{
+				ID: tc.id, VideoID: tc.id, URL: "u", Platform: "youtube", Title: "t",
+				Status: database.StatusFinished, OutputFile: src, Filename: rel,
+				OutputDirectory: oldDir, // the global directory, as the monitor pins it
+			}
+			if _, err := db.AddJob(job); err != nil {
+				t.Fatal(err)
+			}
+			ts := NewTrimService(db, ffmpegPath, discardLogger{})
+			rec, err := ts.CreateTrim(t.Context(), job, 0.5, 2, nil)
+			if err != nil {
+				t.Fatalf("CreateTrim: %v", err)
+			}
+
+			if err := os.Rename(oldDir, newDir); err != nil {
+				t.Fatal(err)
+			}
+			if tc.link {
+				if err := os.Symlink(newDir, oldDir); err != nil {
+					t.Skipf("cannot create a directory link here: %v", err)
+				}
+			}
+			cfg := &config.MoomboxConfig{Paths: config.PathsConfig{
+				OutputDirectory:  newDir,
+				StagingDirectory: filepath.Join(root, "staging"),
+			}}
+			archive := filepath.Join(newDir, rel)
+			trimFile := filepath.Join(newDir, rec.Filename)
+			if _, err := os.Stat(trimFile); err != nil {
+				t.Fatalf("the moved trim is not where its row resolves against the new global directory: %v", err)
+			}
+
+			if typ := orphanTypeOf(t, db, cfg, archive); typ != "" {
+				t.Fatalf("the moved archive is offered as %q — the case needs it owned", typ)
+			}
+			if typ := orphanTypeOf(t, db, cfg, trimFile); typ != "" {
+				t.Errorf("the sweep offers a trim its row still names, as %q (row %q)", typ, rec.Filename)
+			}
+			if err := DeleteOrphanedFile(trimFile, db, cfg); err == nil {
+				t.Errorf("DeleteOrphanedFile removed a trim its row still names")
+			}
+			if _, err := os.Stat(trimFile); err != nil {
+				t.Fatalf("the trim is gone: %v", err)
+			}
+
+			// Owned because a row names it, not because of where it is: with
+			// the row gone the file is offered and deletable.
+			if err := ts.DeleteTrim(tc.id, rec.ID); err != nil {
+				t.Fatalf("DeleteTrim: %v", err)
+			}
+			if typ := orphanTypeOf(t, db, cfg, trimFile); typ == "" {
+				t.Errorf("the deleted trim's file is not offered")
+			}
+			if err := DeleteOrphanedFile(trimFile, db, cfg); err != nil {
+				t.Errorf("DeleteOrphanedFile refused the deleted trim's file: %v", err)
+			}
+		})
+	}
+}
+
 // A directory is a trims directory because the trim service writes into it
 // — "trim" beside a job's output, or the directory a trim row resolves to —
 // never because of its name. The sweep read every directory NAMED "trim" as

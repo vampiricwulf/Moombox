@@ -740,14 +740,24 @@ func trimDirsOf(job *database.Job) []string {
 // trimFileLocations returns the absolute paths a trim row can name. The row
 // stores its file relative to the JOB's output directory — "trim/<name>"
 // under the directory of the job's relative filename (CreateTrim) — which is
-// the job's own output_directory when it has one (a per-channel or per-job
-// override; buildJobContext) and the global one otherwise; so that is the
-// base it resolves against, not absOutputDir alone. The file was written
-// beside the job's output, or beside the part the range began in, so those
-// spellings count too: they still find it after the global output directory
-// moves, when the relative name resolves somewhere it never was. A row whose
-// job is gone resolves against the global directory, all it has; an absolute
-// row is its own answer.
+// the job's own output_directory when it has one and the global one
+// otherwise; so that is the first base it resolves against. A job carries an
+// output_directory far more often than an override implies: the monitor and
+// an import store the global directory there at creation when the channel has
+// none of its own (resolveOutputDir, cmd/moombox), and buildJobContext writes
+// under it from then on. The file was written beside the job's output, or
+// beside the part the range began in, so those spellings count too.
+//
+// The current global directory is a candidate as well, added to those rather
+// than replaced by them: it is what owned these files before the job's own
+// directory was read, and it is the only spelling that still finds a trim
+// after the operator moves the archive tree and repoints
+// paths.output_directory at it — the job's pinned directory and its absolute
+// output_file both still name the old tree, while the archive (its relative
+// filename joined to the global directory) stays owned. Without it every such
+// trim was listed as an orphan and Delete removed the file its row names.
+// A row whose job is gone resolves against the global directory, all it has;
+// an absolute row is its own answer.
 func trimFileLocations(tr database.TrimRecord, job *database.Job, absOutputDir string) []string {
 	if tr.Filename == "" {
 		return nil
@@ -755,18 +765,19 @@ func trimFileLocations(tr database.TrimRecord, job *database.Job, absOutputDir s
 	if filepath.IsAbs(tr.Filename) {
 		return []string{tr.Filename}
 	}
-	base := absOutputDir
-	if job != nil && job.OutputDirectory != "" {
-		if abs, err := filepath.Abs(job.OutputDirectory); err == nil {
-			base = abs
+	if job == nil {
+		return []string{filepath.Join(absOutputDir, tr.Filename)}
+	}
+	var paths []string
+	if job.OutputDirectory != "" {
+		if abs, err := filepath.Abs(job.OutputDirectory); err == nil && abs != absOutputDir {
+			paths = append(paths, filepath.Join(abs, tr.Filename))
 		}
 	}
-	paths := []string{filepath.Join(base, tr.Filename)}
-	if job != nil {
-		name := filepath.Base(tr.Filename)
-		for _, dir := range trimDirsOf(job) {
-			paths = append(paths, filepath.Join(dir, name))
-		}
+	paths = append(paths, filepath.Join(absOutputDir, tr.Filename))
+	name := filepath.Base(tr.Filename)
+	for _, dir := range trimDirsOf(job) {
+		paths = append(paths, filepath.Join(dir, name))
 	}
 	return paths
 }
