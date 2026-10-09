@@ -26,7 +26,15 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 	}
 
 	// Read stderr fully before cmd.Wait() per Go docs
-	var lastErr string
+	//
+	// The failure carries the tail runFFmpeg's does, not just the last line:
+	// that line is usually FFmpeg's closing "Conversion failed!", and the one
+	// that says why comes before it — a disk that filled mid-mux says "Error
+	// writing trailer: No space left on device" there, and the worker's
+	// isDiskFull reads it from this text. With the last line alone, a trimmed
+	// backlog mux that ran out of space ended in Error instead of going back
+	// to Queued to wait for it.
+	tail := &cappedBuffer{maxSize: 4 * ffmpegStderrTail, keepSize: 2 * ffmpegStderrTail}
 	scanner := bufio.NewScanner(stderr)
 	scanner.Split(scanFFmpegLines)
 	for scanner.Scan() {
@@ -35,9 +43,8 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 			pct := min((t/totalDuration)*100, 100)
 			progressFn(pct)
 		}
-		// Keep tail of stderr for error reporting
 		if strings.TrimSpace(line) != "" {
-			lastErr = line
+			tail.Write([]byte(line + "\n"))
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
@@ -52,8 +59,9 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 		if ctx.Err() != nil {
 			return fmt.Errorf("ffmpeg cancelled: %w", ctx.Err())
 		}
-		m.logger.Error("ffmpeg failed", "stderr", lastErr)
-		return fmt.Errorf("ffmpeg: %w (stderr: %s)", err, lastErr)
+		stderrText := stderrTail(strings.TrimSuffix(tail.String(), "\n"))
+		m.logger.Error("ffmpeg failed", "stderr", stderrText)
+		return fmt.Errorf("ffmpeg: %w (stderr: %s)", err, stderrText)
 	}
 
 	progressFn(100)

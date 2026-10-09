@@ -103,6 +103,44 @@ func TestIsDiskFullOnFFmpegWritingToAFullDisk(t *testing.T) {
 	}
 }
 
+// TestIsDiskFullOnATrimmedMuxThatFillsTheDisk is the same through the mux a
+// trim with progress takes (engine runFFmpegWithProgress), onto a disk that
+// fills mid-mux: MPEG-TS buffers its header, so the write that fails is the
+// trailer's, and FFmpeg says so on a line before its closing "Conversion
+// failed!". That runner kept the last line alone, so the failure read as
+// nothing in particular and a trimmed backlog mux that ran out of space ended
+// in Error. Linux only: /dev/full answers every write with ENOSPC.
+//
+// Mutant: keep only FFmpeg's last stderr line in runFFmpegWithProgress — the
+// failure reads as something else.
+func TestIsDiskFullOnATrimmedMuxThatFillsTheDisk(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs /dev/full")
+	}
+	ffmpegPath, _ := requireFFmpegTools(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.mp4")
+	writeMuxFixture(t, ffmpegPath, src, 3)
+	out := filepath.Join(dir, "out.ts")
+	if err := os.Symlink("/dev/full", out); err != nil {
+		t.Skipf("cannot link to /dev/full: %v", err)
+	}
+
+	progressed := false
+	err := engine.NewMuxer(ffmpegPath, discardLogger{}).Mux(context.Background(), src, "", out, &engine.TrimOptions{
+		TrimStartOffset: 0.5, TrimDuration: 2, ProgressFn: func(float64) { progressed = true },
+	})
+	if err == nil {
+		t.Fatal("muxing onto /dev/full succeeded")
+	}
+	if !progressed {
+		t.Fatalf("the mux reported no progress, so it did not run through the progress runner: %v", err)
+	}
+	if !isDiskFull(fmt.Errorf("mux: %w", err)) {
+		t.Errorf("isDiskFull = false for a trimmed mux that filled the disk: %v", err)
+	}
+}
+
 // diskFullVodJob adds an admitted VOD of channel UC_full with its output
 // directory, and its feed_items partner when backlog.
 func diskFullVodJob(t *testing.T, db *database.Database, id string, priority int) {
