@@ -39,13 +39,14 @@ func importAnsweredWith(t *testing.T, a *App, status int, body string) importRes
 
 // W25-01: an import that re-adopted the identical files a deleted row left in
 // imports/, or took " (2)" beside a different file, says so on the feedback
-// line, whole — the note ends in the file names — in yellow for a rename and
-// green for a re-adoption. A plain import keeps "Imported: <title>".
+// line, whole — the note ends in the file names — in yellow for a rename or a
+// chat left out (W25-04) and green for a re-adoption. A plain import keeps
+// "Imported: <title>".
 //
-// Mutants: importFileCmd not decoding import.note (the plain line);
-// Renamed not set from import.renamed, or the update ignoring it (green for
-// a rename); setFeedback in place of setWrappedFeedback (the note is cut to
-// one row).
+// Mutants: importFileCmd not decoding import.note (the plain line); Warn not
+// set from import.renamed or from import.unpairedChats, or the update
+// ignoring it (green for a warning); setFeedback in place of
+// setWrappedFeedback (the note is cut to one row).
 func TestImportOutcomeReachesTheFeedbackLine(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -56,6 +57,8 @@ func TestImportOutcomeReachesTheFeedbackLine(t *testing.T) {
 			severityWarning, `imported as "a (2).mp4"`},
 		{"re-adopted", `{"title":"Stream","import":{"readopted":["a.mp4"],"note":"kept the identical copy already in imports/: a.mp4"}}`,
 			severitySuccess, "kept the identical copy"},
+		{"a chat left out", `{"title":"Stream","import":{"unpairedChats":["B.chat.json"],"note":"left out B.chat.json: a chat is imported only beside the video its name matches"}}`,
+			severityWarning, "left out B.chat.json"},
 		{"plain", `{"title":"Stream","import":{}}`, severityUnstated, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

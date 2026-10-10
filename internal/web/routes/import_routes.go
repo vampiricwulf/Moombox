@@ -3,6 +3,7 @@ package routes
 import (
 	"archive/zip"
 	"cmp"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,9 +15,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +29,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
@@ -189,79 +193,30 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			}
 		}
 
-		// Scan for video and chat files
-		videoExts := map[string]bool{".mp4": true, ".mkv": true, ".webm": true, ".ts": true}
-		var videoFile, chatFile *zip.File
-
-		for _, f := range zipReader.File {
-			if f.FileInfo().IsDir() {
-				continue
-			}
-			name := strings.ToLower(f.Name)
-			ext := filepath.Ext(name)
-
-			if videoFile == nil && videoExts[ext] {
-				videoFile = f
-			}
-			if chatFile == nil && strings.HasSuffix(name, ".chat.json") {
-				chatFile = f
-			}
-		}
-
-		// Fallback: look for any .json with messages array
-		if chatFile == nil {
-			for _, f := range zipReader.File {
-				if f.FileInfo().IsDir() {
-					continue
-				}
-				name := strings.ToLower(f.Name)
-				if !strings.HasSuffix(name, ".json") {
-					continue
-				}
-				if f.UncompressedSize64 > 10*1024*1024 {
-					continue // Skip large JSON files
-				}
-				rc, err := f.Open()
-				if err != nil {
-					continue
-				}
-				data, err := io.ReadAll(rc)
-				rc.Close()
-				if err != nil {
-					continue
-				}
-				var parsed struct {
-					Messages []struct {
-						OffsetMs json.Number `json:"offsetMs"`
-					} `json:"messages"`
-				}
-				if json.Unmarshal(data, &parsed) == nil && len(parsed.Messages) > 0 {
-					chatFile = f
-					break
-				}
-			}
-		}
-
-		if videoFile == nil {
-			jsonError(rw, "no video file found in zip (.mp4, .mkv, .webm, .ts)", http.StatusBadRequest)
+		// The recording the zip holds: one video, or the parts of one split
+		// recording; its chats paired by name. Anything else is refused,
+		// naming the videos — the import used to take the first video and,
+		// separately, the first chat, so a second recording was dropped
+		// without a word and the first could be imported under another
+		// video's id, title and chat (W25-04).
+		rec, err := scanImportRecording(zipReader.File)
+		if err != nil {
+			jsonError(rw, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		// Derive metadata
-		videoFilename := filepath.Base(zipEntryName(videoFile))
-		videoExt := filepath.Ext(videoFilename)
-		videoBasename := strings.TrimSuffix(videoFilename, videoExt)
 
 		// The id the file name carries, and the title it yields: the name
 		// WITHOUT that id, since the output name appends " [id]" itself and
 		// keeping it doubled the id in both the title and the file
-		// ("video [id] [id].mp4").
-		videoID, nameTitle := importNameID(videoBasename)
+		// ("video [id] [id].mp4"). A split recording's parts share one name,
+		// less their " - partN".
+		videoID, nameTitle := importNameID(filepath.Base(rec.stem))
 
-		// Read optional chat metadata for videoId/title/channel
+		// Metadata — id, title, channel, platform — comes only from a chat
+		// paired with this recording by name.
 		var meta importChatMeta
-		if chatFile != nil {
-			if rc, err := chatFile.Open(); err == nil {
+		if metaChat := rec.metaChat(); metaChat != nil {
+			if rc, err := metaChat.Open(); err == nil {
 				meta = readImportChatMeta(rc)
 				rc.Close()
 			}
@@ -359,13 +314,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// outright when the entry turned out damaged or the insert failed,
 		// and replaced it without a word when a different file came in under
 		// the same name (W25-01).
-		files := []*importFile{{entry: videoFile, kind: "video", suffix: videoExt}}
-		if chatFile != nil {
-			// A chat that cannot be written fails the import like the video:
-			// the zip carried it, and a 201 without it said the archive was
-			// imported when its chat was gone (W25-02).
-			files = append(files, &importFile{entry: chatFile, kind: "chat", suffix: ".chat.json"})
-		}
+		//
+		// A chat that cannot be written fails the import like a video: the
+		// zip carried it, and a 201 without it said the archive was imported
+		// when its chat was gone (W25-02).
+		files := rec.files()
 		// What this request extracted and did not place goes on the way out,
 		// on every failure path and through a panic the recovery middleware
 		// catches. Only those temporary files: never a placed or adopted one.
@@ -403,20 +356,43 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			jsonError(rw, "failed to check imports/ for the archive's name", http.StatusInternalServerError)
 			return
 		}
-		videoOutName := filepath.Join("imports", stem+videoExt)
-		chatOutName := ""
-		absChat := ""
-		if chatFile != nil {
-			chatOutName = filepath.Join("imports", filepath.Base(files[1].dest))
-			absChat, _ = filepath.Abs(files[1].dest)
-		}
-
 		// The row a recording gets, so an import is not a second-class job:
 		// absolute output/chat paths, the pinned output directory the
 		// relative names resolve against, and the size (Stats' recorded
-		// total and the details dialog's size line both read it).
-		absVideo, _ := filepath.Abs(files[0].dest)
-		fileSize := &files[0].size
+		// total and the details dialog's size line both read it). A split
+		// recording is stored as the finalize stores one
+		// (finalizeMultiSegmentJob): filename the parts' shared name with no
+		// extension, output_file the first part, the parts' total size, and
+		// a segment row per part.
+		videos := importVideoFiles(files)
+		absVideo, _ := filepath.Abs(videos[0].dest)
+		videoOutName := filepath.Join("imports", filepath.Base(videos[0].dest))
+		var totalSize int64
+		for _, v := range videos {
+			totalSize += v.size
+		}
+		var segments []*database.Segment
+		if len(videos) > 1 {
+			videoOutName = filepath.Join("imports", stem)
+			var ffmpegPath string
+			store.Read(func(c *config.MoomboxConfig) { ffmpegPath = c.Paths.FfmpegPath })
+			ffprobePath := engine.NewMuxer(ffmpegPath, logger).FFprobePath()
+			for _, v := range videos {
+				seg := importSegment(videoID, v, files)
+				// The player lays the parts on one timeline by their
+				// durations; a part it cannot read plays, but not seekably
+				// across the others.
+				if seg.DurationSeconds = importProbeDuration(req.Context(), ffprobePath, v.tmp); seg.DurationSeconds <= 0 {
+					logger.Warn("import: could not read a part's duration", "part", seg.Filename)
+				}
+				segments = append(segments, seg)
+			}
+		}
+		chatOutName, absChat := "", ""
+		if c := importJobChat(files); c != nil {
+			chatOutName = filepath.Join("imports", filepath.Base(c.dest))
+			absChat, _ = filepath.Abs(c.dest)
+		}
 
 		// Create job
 		job := &database.Job{
@@ -436,10 +412,18 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			OutputFile:      absVideo,
 			ChatFile:        absChat,
 			OutputDirectory: outputDir,
-			FileSize:        fileSize,
+			FileSize:        &totalSize,
 			ManuallyAdded:   true,
 			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+		}
+		var totalSeconds float64
+		for _, s := range segments {
+			totalSeconds += s.DurationSeconds
+		}
+		if totalSeconds > 0 {
+			length := int(totalSeconds)
+			job.LengthSeconds = &length
 		}
 
 		added, err := db.AddJob(job)
@@ -456,6 +440,16 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			// none, and its temporary files go with the deferred cleanup.
 			jsonError(rw, "job already exists for video ID: "+videoID, http.StatusConflict)
 			return
+		}
+
+		// A split recording's parts, on rows of their own beside the job's.
+		for _, s := range segments {
+			if err := db.AddSegment(s); err != nil {
+				logger.Error("import: could not record a part", "id", videoID, "part", s.Filename, "err", err)
+				db.DeleteJob(videoID) // its segment rows go with it (ON DELETE CASCADE)
+				jsonError(rw, "failed to create job", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Into place, now that a row names them.
@@ -486,7 +480,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// set afterwards are silently dropped for non-gzip clients.
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusCreated)
-		jsonResponse(rw, importResponse{Job: job, Import: newImportOutcome(baseStem, files)})
+		jsonResponse(rw, importResponse{Job: job, Import: newImportOutcome(baseStem, files, rec.unpairedChats)})
 	})
 
 	return func() { importRL.Close() }
@@ -500,7 +494,8 @@ type importResponse struct {
 }
 
 // importOutcome tells the dashboard and the TUI what became of the names the
-// import found taken. Every field is empty for an import that took free ones.
+// import found taken, and of a chat it found no video for. Every field is
+// empty for an import that took free names and every chat.
 type importOutcome struct {
 	// Readopted names the files that were already in imports/ holding
 	// exactly the imported bytes: the row names them, and they were not
@@ -509,6 +504,9 @@ type importOutcome struct {
 	// Renamed lists the files whose name held a different file: that file
 	// was left alone, and the import took the first free " (n)" name.
 	Renamed []importRename `json:"renamed,omitempty"`
+	// UnpairedChats names the zip's chat archives whose name matches none of
+	// its videos: a chat is paired by name only, so these were not imported.
+	UnpairedChats []string `json:"unpairedChats,omitempty"`
 	// Note is the outcome in one line, the words both clients show.
 	Note string `json:"note,omitempty"`
 }
@@ -521,10 +519,13 @@ type importRename struct {
 }
 
 // newImportOutcome reports where each file landed against the name it was
-// meant to have, baseStem plus its suffix.
-func newImportOutcome(baseStem string, files []*importFile) importOutcome {
-	var out importOutcome
+// meant to have, baseStem plus its suffix, and the chats left out.
+func newImportOutcome(baseStem string, files []*importFile, unpairedChats []string) importOutcome {
+	out := importOutcome{UnpairedChats: unpairedChats}
 	var notes []string
+	if len(unpairedChats) > 0 {
+		notes = append(notes, "left out "+strings.Join(unpairedChats, ", ")+": a chat is imported only beside the video its name matches")
+	}
 	for _, f := range files {
 		name := filepath.Base(f.dest)
 		switch {
@@ -542,13 +543,259 @@ func newImportOutcome(baseStem string, files []*importFile) importOutcome {
 	return out
 }
 
+// importVideoExts are the extensions an import takes for a video.
+var importVideoExts = map[string]bool{".mp4": true, ".mkv": true, ".webm": true, ".ts": true}
+
+// importPartRe is a split recording's part, its name less the extension: the
+// finalize names each "<name> - part<N>" with N from 1 (muxSegment,
+// internal/worker/orchestrator_mux.go).
+var importPartRe = regexp.MustCompile(`^(.+) - part([1-9][0-9]*)$`)
+
+// importPart is one video of the recording a zip holds.
+type importPart struct {
+	video *zip.File
+	stem  string    // its entry name less the extension
+	ext   string    // its extension, as the entry spells it
+	num   int       // the part number its name carries; 0 for a recording in one file
+	chat  *zip.File // "<stem>.chat.json": this part's own chat (a split Twitch capture's)
+}
+
+// importRecording is what a zip holds: one recording, in one file or in the
+// parts the finalize splits one into, and the chats paired with it by name.
+type importRecording struct {
+	stem  string       // the entry name its files share, less any " - partN" and the extension
+	parts []importPart // in part order
+	chat  *zip.File    // "<stem>.chat.json": the recording's own chat
+	// unpairedChats are the zip's .chat.json entries named after no video.
+	unpairedChats []string
+}
+
+// scanImportRecording finds the recording in a zip's entries. A zip with
+// more than one video is accepted only when they are the parts of one split
+// recording, named as the finalize names them; any other is refused with the
+// videos named. A chat belongs to the video whose name it carries —
+// "<name>.chat.json", or a "<name>.json" holding a messages array — and to
+// nothing else: never to a video just because it is the only chat there.
+func scanImportRecording(entries []*zip.File) (*importRecording, error) {
+	var videos []importPart
+	chats := map[string]*zip.File{}
+	jsons := map[string]*zip.File{}
+	var chatOrder []string
+	for _, f := range entries {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		name := zipEntryName(f)
+		lower := strings.ToLower(name)
+		switch ext := filepath.Ext(lower); {
+		case importVideoExts[ext]:
+			videos = append(videos, importPart{video: f, stem: name[:len(name)-len(ext)], ext: name[len(name)-len(ext):]})
+		case strings.HasSuffix(lower, ".chat.json"):
+			if stem := name[:len(name)-len(".chat.json")]; chats[stem] == nil {
+				chats[stem] = f
+				chatOrder = append(chatOrder, stem)
+			}
+		case ext == ".json":
+			if stem := name[:len(name)-len(".json")]; jsons[stem] == nil {
+				jsons[stem] = f
+			}
+		}
+	}
+	if len(videos) == 0 {
+		return nil, errors.New("no video file found in zip (.mp4, .mkv, .webm, .ts)")
+	}
+
+	rec := &importRecording{stem: videos[0].stem, parts: videos}
+	if len(videos) > 1 {
+		seen := map[int]bool{}
+		for i, v := range videos {
+			m := importPartRe.FindStringSubmatch(v.stem)
+			n := 0
+			if m != nil {
+				n, _ = strconv.Atoi(m[2])
+			}
+			if m == nil || n == 0 || seen[n] || (i > 0 && m[1] != rec.stem) {
+				return nil, importMultipleRecordingsError(videos)
+			}
+			rec.stem, videos[i].num, seen[n] = m[1], n, true
+		}
+		slices.SortFunc(rec.parts, func(a, b importPart) int { return a.num - b.num })
+	}
+
+	paired := map[string]bool{}
+	pair := func(stem string) *zip.File {
+		if c := chats[stem]; c != nil {
+			paired[stem] = true
+			return c
+		}
+		if j := jsons[stem]; j != nil && importJSONIsChat(j) {
+			return j
+		}
+		return nil
+	}
+	rec.chat = pair(rec.stem)
+	if len(rec.parts) > 1 {
+		for i := range rec.parts {
+			rec.parts[i].chat = pair(rec.parts[i].stem)
+		}
+	}
+	for _, stem := range chatOrder {
+		if !paired[stem] {
+			rec.unpairedChats = append(rec.unpairedChats, filepath.Base(stem)+".chat.json")
+		}
+	}
+	return rec, nil
+}
+
+// importMultipleRecordingsError refuses a zip whose videos are not the parts
+// of one recording, naming them (the first ten).
+func importMultipleRecordingsError(videos []importPart) error {
+	var names []string
+	for _, v := range videos {
+		names = append(names, filepath.Base(v.stem)+v.ext)
+	}
+	if len(names) > 10 {
+		names = append(names[:10], fmt.Sprintf("and %d more", len(names)-10))
+	}
+	return fmt.Errorf("the zip holds more than one recording: %s — import one recording per zip "+
+		"(a split recording's parts are named \"<name> - part1\", \"<name> - part2\"…)", strings.Join(names, ", "))
+}
+
+// importJSONIsChat reports whether a ".json" entry is a chat archive: a
+// messages array with at least one message. Anything past 10 MB is not read.
+func importJSONIsChat(f *zip.File) bool {
+	if f.UncompressedSize64 > 10*1024*1024 {
+		return false
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return false
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return false
+	}
+	var parsed struct {
+		Messages []struct {
+			OffsetMs json.Number `json:"offsetMs"`
+		} `json:"messages"`
+	}
+	return json.Unmarshal(data, &parsed) == nil && len(parsed.Messages) > 0
+}
+
+// metaChat is the chat an import reads the recording's id, title, channel
+// and platform from: its own, else its first part's.
+func (r *importRecording) metaChat() *zip.File {
+	if r.chat != nil {
+		return r.chat
+	}
+	for _, p := range r.parts {
+		if p.chat != nil {
+			return p.chat
+		}
+	}
+	return nil
+}
+
+// files lists what the import writes, videos first in part order: each part
+// keeps its " - partN" in its suffix, and each chat follows its video's name.
+func (r *importRecording) files() []*importFile {
+	var files, chats []*importFile
+	for _, p := range r.parts {
+		partSuffix := p.stem[len(r.stem):] // " - partN", or "" for a recording in one file
+		files = append(files, &importFile{entry: p.video, kind: "video", suffix: partSuffix + p.ext, part: p.num})
+		if p.chat != nil {
+			chats = append(chats, &importFile{entry: p.chat, kind: "chat", suffix: partSuffix + ".chat.json", part: p.num})
+		}
+	}
+	if r.chat != nil {
+		chats = append([]*importFile{{entry: r.chat, kind: "chat", suffix: ".chat.json"}}, chats...)
+	}
+	return append(files, chats...)
+}
+
+// importVideoFiles is the videos of files, in part order.
+func importVideoFiles(files []*importFile) []*importFile {
+	var videos []*importFile
+	for _, f := range files {
+		if f.kind == "video" {
+			videos = append(videos, f)
+		}
+	}
+	return videos
+}
+
+// importJobChat is the chat the job row names: the recording's own, else its
+// first part's — the finalize's rule for a split recording whose parts carry
+// their own chats.
+func importJobChat(files []*importFile) *importFile {
+	var first *importFile
+	for _, f := range files {
+		if f.kind != "chat" {
+			continue
+		}
+		if f.part == 0 {
+			return f
+		}
+		if first == nil {
+			first = f
+		}
+	}
+	return first
+}
+
+// importSegment is a split recording's part as the finalize records one: its
+// index (the part number less one), file, size and own chat. The duration is
+// the caller's to probe.
+func importSegment(jobID string, video *importFile, files []*importFile) *database.Segment {
+	abs, _ := filepath.Abs(video.dest)
+	size := video.size
+	seg := &database.Segment{
+		JobID:        jobID,
+		SegmentIndex: video.part - 1,
+		Filename:     filepath.Base(video.dest),
+		FilePath:     abs,
+		FileSize:     &size,
+	}
+	for _, f := range files {
+		if f.kind == "chat" && f.part == video.part {
+			seg.ChatFile, _ = filepath.Abs(f.dest)
+		}
+	}
+	return seg
+}
+
+// importProbeDuration reads a file's duration in seconds with ffprobe; 0 when
+// it cannot (no ffprobe, or a file it cannot read). A variable so a test can
+// stand one in.
+var importProbeDuration = func(ctx context.Context, ffprobePath, file string) float64 {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, ffprobePath, "-v", "quiet", "-print_format", "json", "-show_format", file).Output()
+	if err != nil {
+		return 0
+	}
+	var probe struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if json.Unmarshal(out, &probe) != nil {
+		return 0
+	}
+	d, _ := strconv.ParseFloat(probe.Format.Duration, 64)
+	return d
+}
+
 // importFile is one file an import writes into imports/: a zip entry,
 // extracted to a temporary name and then placed under the chosen stem plus
 // its suffix — or adopted, when that name already holds the same bytes.
 type importFile struct {
 	entry  *zip.File
 	kind   string // "video" or "chat": what a failure names
-	suffix string // what follows the stem: ".mp4", ".chat.json"
+	suffix string // what follows the stem: ".mp4", ".chat.json", " - part2.mp4"
+	part   int    // the split recording's part it belongs to; 0 for the whole
 
 	tmp  string // this request's extraction; "" once placed or removed
 	size int64

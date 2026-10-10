@@ -525,7 +525,7 @@ Press **A A** to open the Add Video dialog. By default it's in quick-add mode �
 
 - **Quick Add** — Paste a YouTube or Twitch URL and press Enter
 - **Advanced** — 5-step wizard: URL, Video Format, Audio Format, Timestamps, Confirm
-- **Import** — Upload a `.zip` archive with video + optional chat JSON
+- **Import** — Upload a `.zip` archive holding one recording (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it
 
 ## Web Dashboard
 
@@ -539,7 +539,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
   - Sidebar chat panel with auto-scroll and search (togglable); click a timestamp to jump the video to 3 s before that message
   - Super Chat and membership cards, Twitch sub/raid notices (other Twitch events as dimmer ones) and cheer chips in the sidebar; emoji support
   - Multi-segment playback with cross-segment seeking for quality-split recordings
-- **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback in the Player tab
+- **Imports tab** — Upload `.zip` archives holding one recording each (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it, for playback in the Player tab. YouTube and Moombox Twitch archives are both recognised; re-importing an archive whose files are still in `output/imports/` re-adopts identical files and never overwrites a different one
 - **Stats tab** — Disk usage, archive size, platform breakdown, job counts, and recent activity
 - **Logs tab** — Live log viewer
 - **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup

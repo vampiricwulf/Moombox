@@ -608,9 +608,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Note != "" {
 			// The server's sentence about a taken name ends in the names
 			// themselves, so it is read whole rather than cut to a row; a
-			// rename is a warning, a re-adoption a success.
+			// rename or a left-out chat is a warning, a re-adoption a success.
 			sev := severitySuccess
-			if msg.Renamed {
+			if msg.Warn {
 				sev = severityWarning
 			}
 			a.setWrappedFeedback("Imported: "+msg.Title+" — "+msg.Note, sev)

@@ -288,12 +288,14 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		// "import" is what became of a name already taken in imports/
 		// (importOutcome, internal/web/routes/import_routes.go): a
 		// byte-identical file re-adopted, or a different one left alone
-		// while this archive took " (2)".
+		// while this archive took " (2)" — and any chat left out for
+		// matching no video's name.
 		var result struct {
 			Title  string `json:"title"`
 			Import struct {
-				Renamed []json.RawMessage `json:"renamed"`
-				Note    string            `json:"note"`
+				Renamed       []json.RawMessage `json:"renamed"`
+				UnpairedChats []string          `json:"unpairedChats"`
+				Note          string            `json:"note"`
 			} `json:"import"`
 		}
 		if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
@@ -307,7 +309,11 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		if importedTitle == "" {
 			importedTitle = "archive"
 		}
-		return importResultMsg{Title: importedTitle, Note: result.Import.Note, Renamed: len(result.Import.Renamed) > 0}
+		return importResultMsg{
+			Title: importedTitle,
+			Note:  result.Import.Note,
+			Warn:  len(result.Import.Renamed) > 0 || len(result.Import.UnpairedChats) > 0,
+		}
 	}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 }
 

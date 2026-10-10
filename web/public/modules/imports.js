@@ -234,7 +234,8 @@ export class ImportController {
         progressBar.value = 100;
         // `import` says what became of a name already taken in imports/
         // (import_routes.go importOutcome): a byte-identical file re-adopted,
-        // or a different one left alone while this archive took " (2)".
+        // or a different one left alone while this archive took " (2)" — and
+        // any chat left out for matching no video's name.
         let outcome = null;
         try { outcome = JSON.parse(xhr.responseText).import || null; } catch {}
         const note = outcome && outcome.note ? outcome.note : "";
@@ -244,8 +245,11 @@ export class ImportController {
           // next file or Clear, rather than going with the 1.5 s reset.
           statusText.textContent = `Import complete — ${note}`;
           submitBtn.style.display = "none";
-          const renamed = Array.isArray(outcome.renamed) && outcome.renamed.length > 0;
-          this.app.showToast(`Archive imported — ${note}`, renamed ? "warning" : "success");
+          // A rename, or a chat left out for matching no video's name, is a
+          // warning; files re-adopted as they were are a success.
+          const listed = (k) => Array.isArray(outcome[k]) && outcome[k].length > 0;
+          const warn = listed("renamed") || listed("unpairedChats");
+          this.app.showToast(`Archive imported — ${note}`, warn ? "warning" : "success");
         } else {
           statusText.textContent = "Import complete!";
           this.app.showToast("Archive imported successfully", "success");

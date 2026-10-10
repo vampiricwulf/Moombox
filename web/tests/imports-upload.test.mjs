@@ -121,6 +121,23 @@ test("an import's outcome note is shown and kept", { skip }, async () => {
   assert.equal(h.el("import-submit-btn").style.display, "none", "the same archive can be sent again");
 });
 
+// W25-04: a chat the zip carried but named after no video was left out; the
+// note says so, as a warning. A re-adoption alone is a success.
+//
+// Mutants: warning only for a rename (the left-out chat toasts as a
+// success); warning for every note (the re-adoption toasts as a warning).
+test("a left-out chat warns; a re-adoption does not", { skip }, async () => {
+  const h = await harness.makeApp();
+  const left = 'left out Recording B.chat.json: a chat is imported only beside the video its name matches';
+  await importAnswered(h, 201, { id: "imp_0a1b2c3d", import: { unpairedChats: ["Recording B.chat.json"], note: left } });
+  assert.ok(h.toasts().some((t) => t.textContent.includes(left) && t.variant === "warning"), "the left-out chat did not warn");
+
+  const h2 = await harness.makeApp();
+  const kept = "kept the identical copy already in imports/: Stream [dQw4w9WgXcQ].mp4";
+  await importAnswered(h2, 201, { id: "dQw4w9WgXcQ", import: { readopted: ["Stream [dQw4w9WgXcQ].mp4"], note: kept } });
+  assert.ok(h2.toasts().some((t) => t.textContent.includes(kept) && t.variant === "success"), "the re-adoption did not toast as a success");
+});
+
 // A plain import keeps its old behaviour: a success toast and the reset.
 test("an import with nothing to report resets as before", { skip }, async () => {
   const h = await harness.makeApp();

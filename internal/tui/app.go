@@ -139,13 +139,14 @@ type (
 		Err     string
 	}
 	// importResultMsg is the A Z upload's answer. Note is the server's own
-	// line for a name it found taken in imports/ (re-adopted or renamed), and
-	// Renamed says the archive took a " (n)" name beside a different file.
+	// line for a name it found taken in imports/ (re-adopted or renamed) or a
+	// chat it left out, and Warn says the line is a warning: the archive took
+	// a " (n)" name beside a different file, or a chat matched no video.
 	importResultMsg struct {
-		Title   string
-		Err     string
-		Note    string
-		Renamed bool
+		Title string
+		Err   string
+		Note  string
+		Warn  bool
 	}
 	// cookieImportResultMsg is the async result of OnImportCookieFile (E I).
 	// The whole cookies.ImportResult, not a bool: the overlay words each
