@@ -34,6 +34,18 @@ func TestReportFetchOutcome(t *testing.T) {
 	if f.fails != 1 || f.oks != 1 {
 		t.Fatalf("cancelled: want unchanged fails=1 oks=1, got fails=%d oks=%d", f.fails, f.oks)
 	}
+	// A transient answer reached the service: success, not "network down"
+	// (probeVote). Mutant killed: reporting by give-up class again, which
+	// sent this 429 to ReportFailure.
+	reportFetchOutcome(fmt.Errorf("full fetch failed: failed to extract any player response: ANDROID_VR API error: HTTP 429"), "probe/youtube")
+	if f.fails != 1 || f.oks != 2 {
+		t.Fatalf("429: want fails=1 oks=2, got fails=%d oks=%d", f.fails, f.oks)
+	}
+	// What cannot be placed is no evidence either way.
+	reportFetchOutcome(fmt.Errorf("something weird happened"), "probe/youtube")
+	if f.fails != 1 || f.oks != 2 {
+		t.Fatalf("unknown: want unchanged fails=1 oks=2, got fails=%d oks=%d", f.fails, f.oks)
+	}
 }
 
 type atomicCountingReporter struct{ fails, oks atomic.Int64 }

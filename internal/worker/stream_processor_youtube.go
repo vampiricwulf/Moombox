@@ -284,10 +284,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.stopEarlyChat(chatDl)
 				return cancelledResult(), nil
 			}
+			counted := newCount != consecutiveErrors
 			consecutiveErrors = newCount // unchanged for network-class failures
-			if report == reportFailure {
-				// Network-class failure: the internet/service is unreachable.
-				// Keep waiting through the outage — the count did not advance.
+			if !counted {
+				// Network-class failure: a transport error or a transient
+				// answer (429, 403, 5xx). Keep waiting through it — the count
+				// did not advance. What the oracle heard is probeVote's call.
 				sp.logger.Debug("probe network error — not counting, still waiting", "videoID", job.VideoID, "err", probeErr)
 			} else {
 				sp.logger.Warn("probe error (definitive)", "videoID", job.VideoID, "err", probeErr, "consecutive", consecutiveErrors)

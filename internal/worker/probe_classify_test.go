@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/url"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 func TestClassifyProbeErr(t *testing.T) {
@@ -141,8 +143,95 @@ func TestApplyProbeError(t *testing.T) {
 	}
 
 	// An unknown error defaults to network (asymmetric default): even one below
-	// the threshold, it must not count or give up.
-	if c, giveUp, report, _ := applyProbeError(errors.New("mystery"), maxConsecutiveProbeErrors-1); c != maxConsecutiveProbeErrors-1 || giveUp || report != reportFailure {
-		t.Fatalf("unknown: want count unchanged, giveUp=false, report=failure; got count=%d giveUp=%v report=%v", c, giveUp, report)
+	// the threshold, it must not count or give up. Nor is it evidence the
+	// network is down, so the oracle hears nothing.
+	if c, giveUp, report, _ := applyProbeError(errors.New("mystery"), maxConsecutiveProbeErrors-1); c != maxConsecutiveProbeErrors-1 || giveUp || report != reportNone {
+		t.Fatalf("unknown: want count unchanged, giveUp=false, report=none; got count=%d giveUp=%v report=%v", c, giveUp, report)
+	}
+
+	// A transient answer from the service (a 429) does not count either, but
+	// it reached the service: the oracle hears success, not "network down".
+	if c, giveUp, report, _ := applyProbeError(fmt.Errorf("ANDROID_VR API error: HTTP 429"), 2); c != 2 || giveUp || report != reportSuccess {
+		t.Fatalf("429: want count unchanged, giveUp=false, report=success; got count=%d giveUp=%v report=%v", c, giveUp, report)
+	}
+}
+
+// TestProbeVoteOnlyTransportFailuresVoteDown pins what a failed probe or fetch
+// tells the connectivity oracle. It used to be the give-up class itself, so
+// every "transient, do not count" answer — YouTube's 429 rate limit and 403
+// bot wall, a 5xx, Twitch's GQL 429/401 — was reported as the network being
+// down: a few waiting rooms answered that way plus one unrelated transport
+// blip met the passive threshold, and the whole process went offline with the
+// internet reachable (Twitch captures cancelled, monitors paused, an Outage
+// Alert). An HTTP answer is proof the network is up; only a failure to reach
+// the service at all may vote "down", and what cannot be placed votes nothing.
+//
+// Mutants this kills:
+//   - applyProbeError/reportFetchOutcome reporting by class again → the
+//     answered rows vote failure (TestApplyProbeError's 429 row too)
+//   - the httpAnswerRe arm dropped → the YouTube and "gql http" rows fall to
+//     reportNone (or to failure where the head says "timeout")
+//   - each Twitch phrase dropped → its row votes none
+//   - the url.Error recursion dropped → the redirect-refusal row votes failure
+//   - the net.Error arm dropped → the token-less transport row votes none
+//   - the cancel arm dropped → the cancelled-dial row votes failure
+//   - the mismatch arms dropped → the substitution rows vote none
+//   - the " — " cut dropped → the body-only row votes failure
+//   - the default returning failure → the unknown rows vote failure
+//   - TestReportFetchOutcome: reportFetchOutcome reporting by class again
+//
+// Equivalent mutants: dropping the DeadlineExceeded arm (context's deadline
+// error is itself a net.Error) and dropping the io.EOF arm (an EOF's text
+// always carries the "eof" token) change no verdict; both stay as the
+// structured statement of what the string fallback only approximates.
+func TestProbeVoteOnlyTransportFailuresVoteDown(t *testing.T) {
+	dial := &url.Error{Op: "Post", URL: "https://gql.twitch.tv/gql", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "gql.twitch.tv"}}}
+	cases := []struct {
+		name string
+		err  error
+		want probeReport
+	}{
+		// Transport failures: the service was never reached.
+		{"url-wrapped dial error", dial, reportFailure},
+		{"twitch's real wrap of a dial error", fmt.Errorf("twitch stream info: %w", fmt.Errorf("gql exhausted 3 retries: %w", fmt.Errorf("gql request (StreamInfo): %w", dial))), reportFailure},
+		{"youtube's real wrap of a dial error", fmt.Errorf("full fetch failed: %w", fmt.Errorf("failed to extract any player response: %w", dial)), reportFailure},
+		{"dns error", &net.DNSError{Err: "no such host", Name: "x"}, reportFailure},
+		{"a transport error with no token in its text", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("wsarecv: an established connection was aborted by the software in your host machine")}, reportFailure},
+		{"request deadline", context.DeadlineExceeded, reportFailure},
+		{"cut mid-response", fmt.Errorf("read body: %w", io.ErrUnexpectedEOF), reportFailure},
+		{"flattened dial timeout", errors.New("dial tcp 142.250.0.1:443: i/o timeout"), reportFailure},
+		{"flattened unreachable", errors.New("dial tcp: lookup www.youtube.com: network is unreachable"), reportFailure},
+
+		// Answers from the service: the network is up.
+		{"youtube 429", errors.New("ANDROID_VR API error: HTTP 429"), reportSuccess},
+		{"youtube 403", errors.New("ANDROID_VR API error: HTTP 403"), reportSuccess},
+		{"youtube 401", errors.New("TV_DOWNGRADED API error: HTTP 401"), reportSuccess},
+		{"youtube 503", errors.New("WEB API error: HTTP 503"), reportSuccess},
+		{"youtube 404", errors.New("WEB API error: HTTP 404"), reportSuccess},
+		{"youtube 404 whose body says timeout", errors.New("Innertube API error: HTTP 404 — DEADLINE_EXCEEDED: Backend timeout"), reportSuccess},
+		{"the worker's wrap of a 503", errors.New("full fetch failed: failed to extract any player response: ANDROID_VR API error: HTTP 503"), reportSuccess},
+		{"twitch gql 503", errors.New("gql exhausted 3 retries: gql http 503 (StreamInfo): 0 bytes"), reportSuccess},
+		{"twitch gql 504 says timeout after the status", errors.New("gql http 504 (StreamInfo): gateway timeout"), reportSuccess},
+		{"twitch rate limited", errors.New("gql exhausted 3 retries: gql rate limited (429) (StreamInfo): 12 bytes"), reportSuccess},
+		{"twitch auth failure", errors.New("twitch stream info: gql auth failure (401) (StreamInfo): 40 bytes"), reportSuccess},
+		{"twitch gql-level error", errors.New("gql error (StreamInfo): service timeout"), reportSuccess},
+		{"twitch batch error", errors.New("gql batch error (Batch): failed integrity check"), reportSuccess},
+		{"youtube substitution", fmt.Errorf("failed to extract any player response: %w", &youtube.VideoIDMismatchError{Requested: "aaaaaaaaaaa", Got: "bbbbbbbbbbb"}), reportSuccess},
+		{"every client substituted", fmt.Errorf("probe: %w", youtube.ErrAllClientsMismatched), reportSuccess},
+		{"a redirect refused after an answer", &url.Error{Op: "Get", URL: "https://x", Err: errors.New("stopped after 10 redirects")}, reportNone},
+
+		// Neither: no vote.
+		{"cancelled", context.Canceled, reportNone},
+		{"a dial cancelled by the caller", &url.Error{Op: "Get", URL: "https://x", Err: &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}}, reportNone},
+		{"unknown", errors.New("something weird happened"), reportNone},
+		{"a playability verdict", errors.New("LOGIN_REQUIRED: Sign in to confirm your age"), reportNone},
+		{"body-only timeout token", errors.New("player response unusable — upstream timeout"), reportNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := probeVote(tc.err); got != tc.want {
+				t.Errorf("probeVote(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

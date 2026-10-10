@@ -317,8 +317,9 @@ func TestNewMonitorWithIntervalClamps(t *testing.T) {
 // its network I/O — so no ReportSuccess / ReportFailure ever fires again and
 // poll() is the only live path. Pre-fix, poll() read the non-pruning
 // isTriggered() and stayed offline forever even after the active probe
-// recovered. Post-fix, poll() uses IsTriggeredPruned(), so the aged-out latch
-// clears and the monitor returns online once the active probe agrees.
+// recovered. Since W27-08 a passing active probe clears the latch outright
+// (TestMonitor_PassingProbeClearsPassiveLatch), aged out or not, so the
+// monitor returns online on the first poll the probe passes.
 func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	var checkOnline atomic.Bool
 	checkOnline.Store(true)
@@ -358,5 +359,92 @@ func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
 	}
 	if m.passive.isTriggered() {
 		t.Fatal("passive latch should have been cleared by the pruning poll")
+	}
+}
+
+// TestMonitor_PassingProbeClearsPassiveLatch pins that the active probe
+// outranks the passive tracker. The tracker infers an outage from requests
+// that failed; a probe that reaches its targets is direct proof the network
+// is up. poll() used to go online only when the probe passed AND the latch
+// was clear, so a latch set while the internet was reachable — failures from
+// two subsystems with nothing wrong with the link — held the process offline
+// (Twitch captures cancelled, monitors paused, an Outage Alert on the way
+// back) until the failures aged out of the 30 s window, through every poll
+// the probe passed.
+//
+// Mutants this kills:
+//   - poll() not calling Clear → still offline after the passing poll
+//   - Clear dropping the latch but keeping the failures → the next single
+//     failure re-trips at once
+//   - Clear called on a FAILING probe too → the latch a real outage set is
+//     gone, so the ReportSuccess edge that brings the monitor back without
+//     waiting for a poll never fires
+func TestMonitor_PassingProbeClearsPassiveLatch(t *testing.T) {
+	var reachable atomic.Bool
+	reachable.Store(true)
+	m := newTestMonitor(func() bool { return reachable.Load() })
+	var mu sync.Mutex
+	var transitions []bool
+	m.OnStateChange(func(online bool) {
+		mu.Lock()
+		transitions = append(transitions, online)
+		mu.Unlock()
+	})
+
+	// Five waiting-room failures plus one unrelated blip: the passive
+	// threshold (5 failures, 2 tags) trips at once.
+	for range 5 {
+		m.ReportFailure("probe/youtube")
+	}
+	m.ReportFailure("monitor/decapi")
+	if m.IsOnline() {
+		t.Fatal("setup: the passive threshold did not trip")
+	}
+
+	// The internet is reachable: the next poll clears the latch and goes
+	// back online, inside the failure window.
+	m.poll()
+	if !m.IsOnline() {
+		t.Fatal("a poll whose probe reached its targets left the monitor offline on the passive latch alone")
+	}
+	if m.passive.isTriggered() {
+		t.Error("the passing probe did not clear the passive latch")
+	}
+	mu.Lock()
+	got := append([]bool(nil), transitions...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] || !got[1] {
+		t.Errorf("transitions = %v, want [false true]", got)
+	}
+
+	// The failures before the clear are gone with it: one more failure is
+	// one failure, not the sixth of a tripped set.
+	m.ReportFailure("monitor/feed")
+	if !m.IsOnline() {
+		t.Error("one failure after the clear re-tripped the latch — Clear kept the failures it overruled")
+	}
+
+	// A latch set by a real outage is not the probe's to clear: with the
+	// probe failing too, the latch survives the poll, so the triggered →
+	// cleared edge of ReportSuccess still restores the monitor at once.
+	m2 := newTestMonitor(func() bool { return reachable.Load() })
+	reachable.Store(false)
+	for range 3 {
+		m2.ReportFailure("engine/fetch")
+	}
+	for range 3 {
+		m2.ReportFailure("monitor/feed")
+	}
+	if m2.IsOnline() {
+		t.Fatal("setup: the outage did not trip the passive threshold")
+	}
+	m2.poll()
+	if !m2.passive.isTriggered() {
+		t.Fatal("a poll whose probe FAILED cleared the passive latch")
+	}
+	m2.ReportSuccess("engine/fetch")
+	m2.ReportSuccess("monitor/feed")
+	if !m2.IsOnline() {
+		t.Error("ReportSuccess clearing the latch did not restore the monitor")
 	}
 }

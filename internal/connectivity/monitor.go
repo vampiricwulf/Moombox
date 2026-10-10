@@ -190,14 +190,24 @@ func (m *Monitor) ReportSuccess(tag string) {
 
 func (m *Monitor) poll() {
 	online := m.checkFn()
-	// IsTriggeredPruned (not IsTriggered) so aged-out failures clear the latch
-	// here in the polling loop. During an outage every subsystem gates off its
-	// network I/O once we go offline, so nothing else ever feeds the passive
-	// tracker again — poll() is the only live path, and a non-pruning read
-	// would keep the latch stuck true forever, pinning us offline even after
-	// the active probe recovers.
-	passiveOffline := m.passive.IsTriggeredPruned()
-	nowOnline := online && !passiveOffline
+	if online {
+		// The active probe reached a target: direct proof the network is up,
+		// and it outranks the passive tracker, which only infers an outage
+		// from requests that failed. So a passing probe clears the passive
+		// latch rather than being overruled by it. Before, poll() went online
+		// only when the probe passed AND the latch was clear, so a latch set
+		// while the internet was reachable — a burst of failures from two
+		// subsystems with nothing wrong with the link — held the process
+		// offline (Twitch captures cancelled, monitors paused, an Outage
+		// Alert on the way back) until the failures aged out, however often
+		// the probe got through. A latch set by a real outage is not touched
+		// here: the probe fails too. Failures after the clear count afresh,
+		// so the passive tracker still trips ReportFailure's fast path.
+		if m.passive.Clear() && m.logger != nil {
+			m.logger.Debug("connectivity probe reached its targets — cleared the passive offline latch")
+		}
+	}
+	nowOnline := online
 
 	wasOnline := m.online.Load()
 

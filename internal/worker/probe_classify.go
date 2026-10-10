@@ -6,7 +6,10 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
+
+	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
 // probeErrClass categorizes a probe/fetch error so the upcoming-stream wait
@@ -39,12 +42,10 @@ const (
 // and the cost model says a missed classification must only ever delay giving
 // up, never wrongly error a waiting stream.
 //
-// The same classNetwork branch also returns reportFailure, so the waiting-room
-// loop tells the connectivity oracle the NETWORK failed (reportProbeResult
-// -> connReporter.ReportFailure) for what is really a YouTube-side
-// substitution. Accepted: the oracle runs its own active probes, and the probe
-// throttling that report buys is the right behaviour while YouTube is serving
-// substitutes anyway.
+// This class decides the give-up counter ONLY. What the connectivity oracle is
+// told is probeVote's separate verdict: classNetwork means "do not count", and
+// most of what it covers — a 429, a 403 bot wall, a 5xx, a substitution — is
+// an answer from the service, which proves the network is up.
 func classifyProbeErr(err error) probeErrClass {
 	if err == nil {
 		return classServer
@@ -115,24 +116,101 @@ const (
 	reportSuccess             // ReportSuccess: the request reached the service
 )
 
+// httpAnswerRe matches the status a platform client flattens an HTTP answer
+// into: YouTube's "<client> API error: HTTP 429", Twitch's "gql http 503".
+var httpAnswerRe = regexp.MustCompile(`\bhttp [1-5][0-9][0-9]\b`)
+
+// probeVote is what a failed probe or fetch tells the connectivity oracle,
+// kept apart from classifyProbeErr's give-up class. The two used to be one
+// switch, so everything "transient — do not count" was also reported as "the
+// network is down": a 429 rate limit, a 403 bot wall, a 5xx, an expired
+// Twitch token, a YouTube substitution. Each of those is an ANSWER from the
+// service. Enough waiting rooms answered that way, plus one unrelated
+// transport blip, met the passive threshold and took the whole process
+// offline — every Twitch live capture cancelled, every monitor paused, an
+// Outage Alert sent — with the internet fully reachable.
+//
+// So only a failure to reach the service at all votes "down": a transport
+// error (net.Error in the chain, a request deadline with no answer, a
+// connection cut mid-response), or one of their tokens in a wrap that
+// flattened the type away. An HTTP status in the error's head, a GQL-level
+// error and a substitution vote "up", since the request reached the service.
+// Anything else casts no vote: an error that cannot be placed is not evidence
+// either way.
+func probeVote(err error) probeReport {
+	if err == nil {
+		return reportSuccess
+	}
+	if errors.Is(err, context.Canceled) {
+		return reportNone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return reportFailure
+	}
+	// url.Error is itself a net.Error, so look through it: what it wraps is
+	// the verdict.
+	if urlErr, ok := errors.AsType[*url.Error](err); ok && urlErr.Err != nil {
+		return probeVote(urlErr.Err)
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return reportFailure
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return reportFailure
+	}
+	// YouTube answered, with a player response for another video.
+	if _, ok := errors.AsType[*youtube.VideoIDMismatchError](err); ok {
+		return reportSuccess
+	}
+	if errors.Is(err, youtube.ErrAllClientsMismatched) {
+		return reportSuccess
+	}
+
+	// String fallback, over the same head classifyProbeErr reads: the text
+	// after " — " is YouTube's own message, and may well say "timeout".
+	msg := strings.ToLower(err.Error())
+	if i := strings.Index(msg, " — "); i >= 0 {
+		msg = msg[:i]
+	}
+	switch {
+	case httpAnswerRe.MatchString(msg),
+		strings.Contains(msg, "gql rate limited ("), // 429 (internal/twitch/api.go)
+		strings.Contains(msg, "gql auth failure ("), // 401/403
+		strings.Contains(msg, "gql error ("),        // an HTTP 200 carrying GQL errors
+		strings.Contains(msg, "gql batch error ("):
+		return reportSuccess
+	case strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "network is unreachable"),
+		strings.Contains(msg, "no route to host"),
+		strings.Contains(msg, "tls"),
+		strings.Contains(msg, "eof"):
+		return reportFailure
+	}
+	return reportNone
+}
+
 // reportFetchOutcome reports a confirmatory/secondary full-fetch error's
-// reachability signal to the passive oracle (network-class → failure;
-// server-class → success, since the request reached the service) WITHOUT
-// touching the wait loop's give-up counter, which the lightweight probe owns.
-// A cancelled context is not a connectivity signal, so it is not reported.
+// reachability signal to the passive oracle (probeVote: a transport failure
+// → failure; an answer from the service → success) WITHOUT touching the wait
+// loop's give-up counter, which the lightweight probe owns. A cancelled
+// context, or an error probeVote cannot place, is not reported.
 func reportFetchOutcome(err error, tag string) {
-	switch classifyProbeErr(err) {
-	case classNetwork:
+	switch probeVote(err) {
+	case reportFailure:
 		reportProbeResult(tag, true)
-	case classServer:
+	case reportSuccess:
 		reportProbeResult(tag, false)
 	}
 }
 
 // applyProbeError folds a probe error into the wait loop's running error count.
 // It returns the new count, whether the loop should give up (definitive
-// failures reached maxConsecutiveProbeErrors), how to feed the passive tracker,
-// and whether the context was cancelled.
+// failures reached maxConsecutiveProbeErrors), how to feed the passive tracker
+// (probeVote — not the class: a transient 429 still reached the service), and
+// whether the context was cancelled.
 //
 // Network-class failures NEVER advance the count — they are transient, so the
 // loop keeps waiting through an outage; only definitive (server-class) failures
@@ -144,9 +222,9 @@ func applyProbeError(err error, consecutiveErrors int) (count int, giveUp bool, 
 	case classCancelled:
 		return consecutiveErrors, false, reportNone, true
 	case classNetwork:
-		return consecutiveErrors, false, reportFailure, false
+		return consecutiveErrors, false, probeVote(err), false
 	default: // classServer
 		count = consecutiveErrors + 1
-		return count, count >= maxConsecutiveProbeErrors, reportSuccess, false
+		return count, count >= maxConsecutiveProbeErrors, probeVote(err), false
 	}
 }

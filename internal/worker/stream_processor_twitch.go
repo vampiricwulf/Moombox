@@ -852,8 +852,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			if cancelled {
 				return nil, nil
 			}
+			counted := newCount != consecutiveErrors
 			consecutiveErrors = newCount // unchanged for network-class failures
-			if report == reportFailure {
+			if !counted {
 				sp.logger.Debug("probe network error — not counting, still waiting", "channel", login, "err", err)
 			} else {
 				sp.logger.Warn("probe error (definitive)", "channel", login, "err", err, "consecutive", consecutiveErrors)

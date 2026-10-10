@@ -114,6 +114,20 @@ func (pt *PassiveTracker) ShouldTriggerOffline() bool {
 	return true
 }
 
+// Clear drops every recorded failure and the latch with them, and reports
+// whether the latch was set. Monitor.poll calls it when its active probe
+// reaches a target: that is direct proof the network is up, which outranks
+// the tracker's inference from failed requests. Failures recorded after it
+// count afresh.
+func (pt *PassiveTracker) Clear() (wasTriggered bool) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	wasTriggered = pt.triggered
+	pt.failures = pt.failures[:0]
+	pt.triggered = false
+	return wasTriggered
+}
+
 // isTriggered reads the cached latch state without pruning — the raw latch
 // the tests pin. Production reads IsTriggeredPruned(): this may see a stale
 // `true` for some time after the failure window has aged out, since pruneOld
@@ -127,12 +141,13 @@ func (pt *PassiveTracker) isTriggered() bool {
 
 // IsTriggeredPruned prunes aged-out failures — which clears the latch when
 // the survivors no longer meet the trigger threshold — and then returns the
-// latch state. This is the correct call for a background poller
-// (Monitor.poll) that does not otherwise feed the tracker: IsTriggered()
-// reads the cached latch WITHOUT pruning, so a latch set during an outage
-// would never clear once every subsystem gates off its network I/O (no
-// ReportSuccess / ReportFailure / ShouldTriggerOffline fires) — pinning the
-// monitor offline forever even after the active probe recovers.
+// latch state. This is the correct read for a background poller that does
+// not otherwise feed the tracker: IsTriggered() reads the cached latch
+// WITHOUT pruning, so a latch set during an outage would never clear once
+// every subsystem gates off its network I/O (no ReportSuccess /
+// ReportFailure / ShouldTriggerOffline fires). Monitor.poll no longer reads
+// the latch at all — a passing active probe clears it (Clear), and a failing
+// one is offline whatever it says.
 func (pt *PassiveTracker) IsTriggeredPruned() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
