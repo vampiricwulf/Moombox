@@ -3,8 +3,11 @@ package routes
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -195,12 +198,17 @@ func TestSetupCompleteRejectsValidationFailure(t *testing.T) {
 func TestSetupCompleteAcceptsAbsolutePaths(t *testing.T) {
 	f := newSetupFixture(t)
 
+	// The two directories a complete creates are absolute paths in the
+	// temp dir — on either OS — rather than /srv/… and C:\…, which the
+	// complete now really creates (and refuses when it cannot).
+	media := t.TempDir()
+	outputDir := filepath.Join(media, "moombox")
 	body, _ := json.Marshal(map[string]any{
 		"paths": map[string]any{
-			"database_path":     "/var/lib/moombox/moombox.db",
+			"database_path":     `C:\Moombox\moombox.db`,
 			"log_file_path":     "/var/log/moombox.log",
-			"output_directory":  "/srv/media/moombox",
-			"staging_directory": `C:\Moombox\staging`,
+			"output_directory":  outputDir,
+			"staging_directory": filepath.Join(media, "staging"),
 		},
 		"cookies": map[string]any{"cookie_file": "/etc/moombox/cookies.txt"},
 	})
@@ -214,8 +222,8 @@ func TestSetupCompleteAcceptsAbsolutePaths(t *testing.T) {
 	}
 	var got string
 	f.store.Read(func(c *config.MoomboxConfig) { got = c.Paths.OutputDirectory })
-	if got != "/srv/media/moombox" {
-		t.Errorf("output_directory = %q, want /srv/media/moombox", got)
+	if got != outputDir {
+		t.Errorf("output_directory = %q, want %q", got, outputDir)
 	}
 
 	f2 := newSetupFixture(t)
@@ -348,6 +356,8 @@ func TestSetupCompletePersistsNetworkConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	cfg := config.Defaults()
+	cfg.Paths.OutputDirectory = filepath.Join(dir, "output")
+	cfg.Paths.StagingDirectory = filepath.Join(dir, "staging")
 	store := config.NewStore(cfg, configPath)
 
 	auth := web.NewAuthService()
@@ -430,6 +440,50 @@ func TestSetupCompleteStripsInstallYtdlpKeyBeforeValidation(t *testing.T) {
 	f.store.Read(func(c *config.MoomboxConfig) { port = c.Network.Port })
 	if port != 1234 {
 		t.Errorf("port: want 1234, got %d", port)
+	}
+}
+
+// TestSetupCompleteRefusesAnUncreatableDirectory pins W26-13 on the Web
+// wizard's side: an output or staging directory that cannot be created (here
+// its parent is a regular file) used to be discarded after the save, the
+// route answered {"success":true} and restarted, and the first recording
+// downloaded in full before failing at mux. Now the directories are made
+// before anything is saved and a failure is a 400 detailed under the field;
+// nothing is saved.
+//
+// Mutants killed: discarding config.MakeSetupDirs' error in setup_routes.go
+// (200, config saved); MakeSetupDirs ignoring MkdirAll's error; keying the
+// staging directory's failure under the output directory's field.
+func TestSetupCompleteRefusesAnUncreatableDirectory(t *testing.T) {
+	for _, key := range []string{"output_directory", "staging_directory"} {
+		t.Run(key, func(t *testing.T) {
+			f := newSetupFixture(t)
+			blocker := filepath.Join(t.TempDir(), "not-a-dir")
+			if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			rec := postSetupComplete(t, f.router, map[string]any{
+				"paths": map[string]any{key: filepath.Join(blocker, "sub")},
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("an uncreatable %s: %d, want 400 (body %s)", key, rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				Details map[string]string `json:"details"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Details["paths."+key] == "" || len(resp.Details) != 1 {
+				t.Errorf("details %v, want the failure under paths.%s alone", resp.Details, key)
+			}
+			var loaded bool
+			f.store.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
+			if _, err := os.Stat(f.store.SavePath()); loaded || !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the setup was saved (ConfigLoaded=%v, config.toml stat %v)", loaded, err)
+			}
+		})
 	}
 }
 

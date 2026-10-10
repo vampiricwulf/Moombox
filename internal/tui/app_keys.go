@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -197,17 +196,17 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				if cfg == nil {
 					return setupSaveResultMsg{Err: "no config to save"}
 				}
+				// The output and staging directories first, before
+				// anything is saved: one that cannot be created is
+				// reported in the wizard, which stays open to correct the
+				// path — the Web wizard's 400 (config.MakeSetupDirs).
+				if err := config.MakeSetupDirs(cfg.Paths.OutputDirectory, cfg.Paths.StagingDirectory); err != nil {
+					return setupSaveResultMsg{Err: err.Error()}
+				}
 				if onComplete != nil {
 					if err := onComplete(cfg); err != nil {
 						return setupSaveResultMsg{Err: err.Error()}
 					}
-				}
-				// Create output/staging directories (matches web API behavior)
-				if cfg.Paths.OutputDirectory != "" {
-					os.MkdirAll(cfg.Paths.OutputDirectory, 0o755)
-				}
-				if cfg.Paths.StagingDirectory != "" {
-					os.MkdirAll(cfg.Paths.StagingDirectory, 0o755)
 				}
 				// Post-save: install yt-dlp plugin if requested
 				if installYtdlp && onInstall != nil {

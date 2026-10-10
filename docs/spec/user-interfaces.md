@@ -1104,7 +1104,7 @@ Both UIs implement a setup wizard that runs on first launch, i.e. when no config
 
 The Web UI implementation is in `modules/setup.js`. The TUI implementation is in `setup_wizard.go` (using `huh` forms).
 
-**Completing setup.** The Web wizard saves through `POST /api/setup/complete` (`internal/web/routes/setup_routes.go`); the TUI's saves in the `save` action's command (`internal/tui/app_keys.go`) through `OnComplete`. Setup completes once: the Web route repeats its "setup already completed" check under the store lock, so two overlapping completes cannot both apply.
+**Completing setup.** The Web wizard saves through `POST /api/setup/complete` (`internal/web/routes/setup_routes.go`); the TUI's saves in the `save` action's command (`internal/tui/app_keys.go`) through `OnComplete`. Setup completes once: the Web route repeats its "setup already completed" check under the store lock, so two overlapping completes cannot both apply. Both wizards create the output and staging directories **before** saving anything (`MakeSetupDirs`, `internal/config/pathcheck.go`), and one that cannot be created — a parent that is a file, a missing drive, no permission — refuses the setup: the Web route answers 400 with the failure detailed under `paths.output_directory` or `paths.staging_directory`, the TUI wizard stays open with it on its error line. Both used to discard the failure and report "Setup complete", and since nothing at boot creates the output directory the first recording downloaded in full and only then failed at mux.
 
 ### Job Lifecycle Visualization
 

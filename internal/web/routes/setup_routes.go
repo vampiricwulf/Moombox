@@ -2,9 +2,10 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -139,6 +140,40 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 			}
 		}
 
+		// The output and staging directories the setup names — the body's,
+		// or the config's for one it leaves out — are created before
+		// anything is saved, outside the lock (I/O). One that cannot be
+		// created refuses the setup under its field, as a validation error
+		// is (config.MakeSetupDirs).
+		var outputDir, stagingDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			outputDir, stagingDir = c.Paths.OutputDirectory, c.Paths.StagingDirectory
+		})
+		if paths, ok := updates["paths"].(map[string]any); ok {
+			if v, ok := paths["output_directory"].(string); ok {
+				outputDir = v
+			}
+			if v, ok := paths["staging_directory"].(string); ok {
+				stagingDir = v
+			}
+		}
+		if err := config.MakeSetupDirs(outputDir, stagingDir); err != nil {
+			var dirErr *config.SetupDirError
+			if !errors.As(err, &dirErr) {
+				jsonError(rw, "failed to create directories", http.StatusInternalServerError)
+				return
+			}
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(rw).Encode(map[string]any{
+				"error": "Validation failed",
+				"details": map[string]string{
+					dirErr.Key: fmt.Sprintf("could not create %q: %v", dirErr.Path, dirErr.Err),
+				},
+			})
+			return
+		}
+
 		setupCompleteBeforeLock()
 		mu.Lock()
 
@@ -187,23 +222,11 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		// Save succeeded — apply to live config
 		*cfg = cfgCopy
 
-		// Snapshot directories for mkdir after unlock
-		outputDir := cfg.Paths.OutputDirectory
-		stagingDir := cfg.Paths.StagingDirectory
-
 		// Snapshot values needed after unlock
 		port := cfg.Network.Port
 		httpsEnabled := cfg.Network.HTTPSEnabled
 
 		mu.Unlock()
-
-		// Create directories if specified (outside lock — I/O)
-		if outputDir != "" {
-			os.MkdirAll(outputDir, 0o755)
-		}
-		if stagingDir != "" {
-			os.MkdirAll(stagingDir, 0o755)
-		}
 
 		// Send response before yt-dlp install / restart to avoid client timeout
 		jsonResponse(rw, map[string]any{"success": true})

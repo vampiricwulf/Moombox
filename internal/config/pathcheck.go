@@ -1,6 +1,10 @@
 package config
 
-import "strings"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
 
 // PathHasTraversal reports whether p contains a ".." path segment.
 //
@@ -59,6 +63,45 @@ func PathHasTraversal(p string) bool {
 }
 
 func isPathSeparator(r rune) bool { return r == '/' || r == '\\' }
+
+// SetupDirError is MakeSetupDirs' refusal: the directory that could not be
+// created, by its config key (paths.output_directory or
+// paths.staging_directory, the key the Web wizard's 400 is detailed under).
+type SetupDirError struct {
+	Key  string
+	Path string
+	Err  error
+}
+
+func (e *SetupDirError) Error() string {
+	return fmt.Sprintf("%s: could not create %q: %v", e.Key, e.Path, e.Err)
+}
+
+func (e *SetupDirError) Unwrap() error { return e.Err }
+
+// MakeSetupDirs creates the output and staging directories a first-run setup
+// names, before either wizard saves anything — the Web one's POST
+// /api/setup/complete and the TUI one's save command. A directory that
+// cannot be created (a parent that is a file, a missing drive, no
+// permission) refuses the setup with a *SetupDirError, so the operator
+// corrects the path in the wizard. Both wizards discarded the error and
+// reported "Setup complete": nothing at boot creates the output directory,
+// so the first recording downloaded in full and only then failed at mux.
+// An empty path is skipped; Validate requires both anyway.
+func MakeSetupDirs(outputDir, stagingDir string) error {
+	for _, d := range []struct{ key, path string }{
+		{"paths.output_directory", outputDir},
+		{"paths.staging_directory", stagingDir},
+	} {
+		if d.path == "" {
+			continue
+		}
+		if err := os.MkdirAll(d.path, 0o755); err != nil {
+			return &SetupDirError{Key: d.key, Path: d.path, Err: err}
+		}
+	}
+	return nil
+}
 
 func isDriveLetter(c byte) bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
