@@ -261,10 +261,16 @@ func TestSearchStepWalksTheMatchesOnScreen(t *testing.T) {
 // and from line 020 with the next matches at 50 and 60, Enter selected 60.
 // With no match at or below the top it goes to the first match of all.
 //
+// A match on the view's bottom row is on screen too. The search bar, open
+// while the query is typed, hides that row, and Enter brought the selected
+// match on screen before giving the row back — so the view jumped to make
+// the match its top row.
+//
 // Mutants: Enter stepping on unconditionally (the old HighlightNext) — both
 // "on screen" rows move the view to the match after the one shown; dropping
 // the step for nothing below — the "nothing below" row stays on line 030
-// with no match on screen.
+// with no match on screen; resizeViewport after applySearchHighlights again
+// — the bottom-row cases (the panel's and O L's) jump to the match.
 func TestSearchEnterLandsOnTheFirstMatchAtTheTop(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -275,6 +281,7 @@ func TestSearchEnterLandsOnTheFirstMatchAtTheTop(t *testing.T) {
 		next    string // the top row after a following n, when it moves
 	}{
 		{name: "a match on screen", hits: []int{30, 60}, at: 25, wantTop: "line 025", want: "line 030 needle", next: "line 060 needle"},
+		{name: "a match on the bottom row", hits: []int{35, 70}, at: 25, wantTop: "line 025", want: "line 035 needle", next: "line 070 needle"},
 		{name: "a match below the view", hits: []int{50, 60}, at: 20, wantTop: "line 050 needle", want: "line 050 needle"},
 		{name: "nothing below", hits: []int{10, 15}, at: 30, wantTop: "line 010 needle", want: "line 010 needle"},
 	}
@@ -297,6 +304,9 @@ func TestSearchEnterLandsOnTheFirstMatchAtTheTop(t *testing.T) {
 			}
 			if m.autoScroll || !strings.HasSuffix(topRow(m), fmt.Sprintf("line %03d", tc.at)) {
 				t.Fatalf("setup: the reader must be paused at line %03d, top %q", tc.at, topRow(m))
+			}
+			if bottom := tc.at + m.viewport.Height() - 1; tc.name == "a match on the bottom row" && !slices.Contains(tc.hits, bottom) {
+				t.Fatalf("setup: the view's bottom row is line %03d, not a match", bottom)
 			}
 			m.StartSearch()
 			typeSearch(m, "needle")
@@ -344,6 +354,37 @@ func TestSearchEnterLandsOnTheFirstMatchAtTheTop(t *testing.T) {
 		a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		if got := topRow(v); got != before {
 			t.Errorf("Enter moved the overlay from %q to %q — it skipped the match on screen", before, got)
+		}
+	})
+
+	// The query names the one line on the overlay's bottom row, read off the
+	// view once the reader has paused.
+	t.Run("O L, a match on the bottom row", func(t *testing.T) {
+		a, logs := jobLogApp(t)
+		for i := range 150 {
+			logs.append("job1", jobLine("job1", i))
+		}
+		openJobLog(t, a, "job1")
+		v := a.jobLog.log
+		for v.viewport.YOffset() > 95 {
+			a.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+		}
+		rows := strings.Split(stripANSI(v.viewport.View()), "\n")
+		bottom := strings.TrimRight(rows[len(rows)-1], " ")
+		_, query, ok := strings.Cut(bottom, "worker: ")
+		if v.autoScroll || !ok || !strings.HasSuffix(query, " fetched") {
+			t.Fatalf("setup: the reader must be paused with a segment line on the bottom row, got %q", bottom)
+		}
+		before := topRow(v)
+		for _, r := range "/" + query {
+			a.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		}
+		a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		if v.matchCount != 1 {
+			t.Fatalf("setup: %q must match exactly the bottom row, matched %d", query, v.matchCount)
+		}
+		if got := topRow(v); got != before {
+			t.Errorf("Enter moved the overlay from %q to %q although the match it showed (%q) was on its bottom row", before, got, query)
 		}
 	})
 }

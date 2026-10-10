@@ -622,9 +622,15 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			}
 			m.searchQuery = query
 			m.searchRegex, _ = regexp.Compile("(?i)" + regexp.QuoteMeta(query))
+			// The search bar's row back first: SetHighlights brings the match
+			// it selects on screen, and measured against the viewport the bar
+			// had shortened, a match on the bottom row the reader saw before
+			// pressing / read as off screen — the view jumped to make it the
+			// top row. SetHeight leaves the offset alone, so top is the
+			// reader's either way.
+			m.resizeViewport()
 			top := m.viewport.YOffset()
 			m.applySearchHighlights()
-			m.resizeViewport()
 			// Land on the first match at or below the top of the view — the
 			// rule n and N follow (searchStep). SetHighlights has selected that
 			// one already and brought it on screen; stepping on from it, as
