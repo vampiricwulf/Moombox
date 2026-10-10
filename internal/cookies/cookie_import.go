@@ -622,12 +622,22 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	// limit would nag them about work already done. Process-local; the next
 	// conclusive check re-raises it. Same rule, same wording, as
 	// FinishSetupDetailed's clear.
+	//
+	// A platform whose pasted rows are now on disk is one the operator
+	// supplied in this run, which a first-run setup's CarryCookieFileTo
+	// carries; a rolled-back or rejected paste is not.
 	s.mu.Lock()
 	if result.YouTubeAccepted {
 		s.needsRelogin["youtube"] = false
 	}
 	if result.TwitchAccepted {
 		s.needsRelogin["twitch"] = false
+	}
+	if result.YouTubeOutcome == ImportInstalled {
+		s.noteSuppliedLocked("youtube")
+	}
+	if result.TwitchOutcome == ImportInstalled {
+		s.noteSuppliedLocked("twitch")
 	}
 	s.mu.Unlock()
 

@@ -1212,10 +1212,11 @@ func (s *runState) httpsEnabled() bool {
 	return enabled
 }
 
-// carrySetupCookies is both setup wizards' CarryCookies: the cookies the
-// running cookie service wrote — at the cookie file this run booted with, where
-// a browser login in the wizard saved them — carried into cookieFile, the one
-// the wizard is about to save (cookies.AutoCookieService.CarryCookieFileTo).
+// carrySetupCookies is both setup wizards' CarryCookies: the cookies this run
+// supplied — a browser login in the wizard or an import, which the running
+// cookie service wrote at the cookie file this run booted with — carried into
+// cookieFile, the one the wizard is about to save, and nothing when no login
+// or import ran (cookies.AutoCookieService.CarryCookieFileTo).
 func (s *runState) carrySetupCookies(cookieFile string) error {
 	if s.autoCookieSvc == nil {
 		return nil

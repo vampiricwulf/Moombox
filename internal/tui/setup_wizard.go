@@ -286,12 +286,14 @@ type SetupWizardModel struct {
 	OnRestart          func()
 	OnCheckFFmpeg      func() (valid bool, version string) // returns FFmpeg status
 	OnHashPassword     func(password string) (string, error)
-	// OnCarryCookies carries the cookies the running cookie service wrote —
-	// a browser login run on the Cookie Login step — into the cookie file
-	// the setup saves, before it is saved: the Cookies step names a cookie
-	// file of its own, and the restart loaded an empty jar from it although
-	// the login had been reported Done. The Web wizard's CarryCookies
-	// (internal/web/routes/setup_routes.go); nil carries nothing.
+	// OnCarryCookies carries the cookies this run supplied — a browser login
+	// run on the Cookie Login step, which the running cookie service wrote
+	// at its boot-time path — into the cookie file the setup saves, before
+	// it is saved: the Cookies step names a cookie file of its own, and the
+	// restart loaded an empty jar from it although the login had been
+	// reported Done. With no login it leaves that file alone. The Web
+	// wizard's CarryCookies (internal/web/routes/setup_routes.go); nil
+	// carries nothing.
 	OnCarryCookies func(cookieFile string) error
 }
 

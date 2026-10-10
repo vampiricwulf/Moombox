@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,26 +319,40 @@ func tightenCookieDirOnce(dir string) {
 	}()
 }
 
-// CarryCookieFileTo carries the cookies this service writes — at the cookie
-// file it was built with, the boot-time cookies.cookie_file — into newPath,
-// the cookie file a first-run setup is about to save. Both wizards call it
-// before they save (the Web one's POST /api/setup/complete, the TUI one's
-// save command): a browser login run in the wizard wrote to the boot-time
-// path, the Advanced step lets the operator name another cookie file beside
-// that login, and the restart then loaded an empty jar from the new path
-// although the wizard had reported the login Done. One rule for both: the
-// cookies the run was using are the cookies the restart loads.
+// CarryCookieFileTo carries the cookies the operator supplied in this run —
+// a browser login FinishSetupDetailed accepted, an import ImportCookies
+// installed, both written at the cookie file this service was built with, the
+// boot-time cookies.cookie_file — into newPath, the cookie file a first-run
+// setup is about to save. Both wizards call it before they save (the Web one's
+// POST /api/setup/complete, the TUI one's save command): the Advanced step
+// lets the operator name another cookie file beside the login, and the
+// restart then loaded an empty jar from the new path although the wizard had
+// reported the login Done. One rule for both: what was signed in to in this
+// run is what the restart loads.
 //
-// The cookies are merged into newPath when a file is already there, the
+// Only the rows of the platforms supplied in this run (suppliedThisRun) are
+// carried, never the boot-time file as a whole: it can hold another install's
+// session — an earlier install's ./cookies.txt, a second instance started
+// with -config in the same folder — and a setup that ran no login, or signed
+// in to one platform only, must not put that over the cookies the operator's
+// own file holds. Nothing supplied is nothing carried: newPath is left exactly
+// as it is.
+//
+// The carried rows are merged into newPath when a file is already there, the
 // carried ones winning a clash (they are what the wizard just signed in to),
 // the same merge every cookie writer uses; an unreadable newPath is refused
 // rather than overwritten (ErrCookieFileUnreadable). The refresh sidecar goes
-// with them when it is newer than newPath's own. The boot-time file is left
-// where it is. Nothing to carry — no boot-time file, an empty one, or newPath
-// naming the same file — is not an error.
+// with them when it is newer than newPath's own, naming as verified only the
+// carried platforms the boot-time sidecar names and newPath's own for the
+// rest. The boot-time file is left where it is. Nothing to carry — no
+// boot-time file, no row of a supplied platform in it, or newPath naming the
+// same file — is not an error.
 func (s *AutoCookieService) CarryCookieFileTo(newPath string) error {
 	from := s.cookiePath
-	if from == "" || newPath == "" || sameFilePath(from, newPath) {
+	s.mu.Lock()
+	supplied := maps.Clone(s.suppliedThisRun)
+	s.mu.Unlock()
+	if len(supplied) == 0 || from == "" || newPath == "" || sameFilePath(from, newPath) {
 		return nil
 	}
 	data, err := readCookieFile(from)
@@ -347,23 +362,27 @@ func (s *AutoCookieService) CarryCookieFileTo(newPath string) error {
 	if err != nil {
 		return fmt.Errorf("read the cookies to carry from %s: %w", from, err)
 	}
-	if strings.TrimSpace(string(data)) == "" {
+	var carried []string
+	for _, row := range netscapeDataRows(string(data)) {
+		if supplied[cookieRowPlatform(row)] {
+			carried = append(carried, row)
+		}
+	}
+	if len(carried) == 0 {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
 		return fmt.Errorf("create the directory for %s: %w", newPath, err)
 	}
-	merged := string(data)
 	existing, err := readCookieFile(newPath)
 	switch {
 	case err == nil:
-		if strings.TrimSpace(string(existing)) != "" {
-			merged = mergeCookieFiles(string(existing), merged)
-		}
 	case errors.Is(err, fs.ErrNotExist):
+		existing = nil
 	default:
 		return fmt.Errorf("%w — refusing to overwrite %s (%w)", ErrCookieFileUnreadable, newPath, err)
 	}
+	merged := mergeCookieFiles(string(existing), strings.Join(carried, "\n"))
 	if err := writeCookieFile(newPath, []byte(merged), 0o600); err != nil {
 		return err
 	}
@@ -371,10 +390,36 @@ func (s *AutoCookieService) CarryCookieFileTo(newPath string) error {
 	if err != nil || fromMeta == nil {
 		return nil // the sidecar is advisory; the next refresh writes one
 	}
-	if toMeta, err := LoadMeta(newPath); err == nil && toMeta != nil && !fromMeta.LastRefresh.After(toMeta.LastRefresh) {
+	toMeta, err := LoadMeta(newPath)
+	if err != nil {
+		toMeta = nil
+	}
+	if toMeta != nil && !fromMeta.LastRefresh.After(toMeta.LastRefresh) {
 		return nil
 	}
-	return SaveMeta(newPath, *fromMeta)
+	meta := CookieMeta{LastRefresh: fromMeta.LastRefresh}
+	for _, platform := range fromMeta.Platforms {
+		if supplied[strings.ToLower(platform)] {
+			meta.Platforms = append(meta.Platforms, platform)
+		}
+	}
+	if toMeta != nil {
+		for _, platform := range toMeta.Platforms {
+			if !supplied[strings.ToLower(platform)] {
+				meta.Platforms = append(meta.Platforms, platform)
+			}
+		}
+	}
+	return SaveMeta(newPath, meta)
+}
+
+// noteSuppliedLocked records platform as one whose cookies the operator
+// supplied in this run (suppliedThisRun). Caller holds s.mu.
+func (s *AutoCookieService) noteSuppliedLocked(platform string) {
+	if s.suppliedThisRun == nil {
+		s.suppliedThisRun = map[string]bool{}
+	}
+	s.suppliedThisRun[platform] = true
 }
 
 // sameFilePath reports whether a and b name the same file: the same absolute

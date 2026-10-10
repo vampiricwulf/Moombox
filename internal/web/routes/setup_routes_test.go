@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -552,9 +553,16 @@ func TestSetupCompleteStoresThePasswordAsTyped(t *testing.T) {
 // before anything is saved, and a carry that fails refuses the setup under
 // cookies.cookie_file with nothing saved.
 //
+// With production's CarryCookies — the boot-time cookie service's
+// CarryCookieFileTo — a setup that ran no browser login leaves the cookie
+// file it names exactly as it was (the W27 review): the boot-time
+// ./cookies.txt held an older session, and the carry put it over the
+// operator's fresh export.
+//
 // Mutants killed: not calling CarryCookies; calling it with the config's
 // cookie file when the body names another; calling it after the save;
-// ignoring its error.
+// ignoring its error; CarryCookieFileTo carrying the boot-time file whole
+// whatever this run supplied (the "no login" case).
 func TestSetupCompleteCarriesTheLoginCookiesIntoTheSavedCookieFile(t *testing.T) {
 	newFixture := func(t *testing.T, carry func(f *setupFixture, cookieFile string) error) *setupFixture {
 		t.Helper()
@@ -613,6 +621,31 @@ func TestSetupCompleteCarriesTheLoginCookiesIntoTheSavedCookieFile(t *testing.T)
 	if loaded {
 		t.Error("the setup was saved although its cookies could not be carried")
 	}
+
+	t.Run("no login", func(t *testing.T) {
+		dir := t.TempDir()
+		boot := filepath.Join(dir, "cookies.txt")
+		if err := os.WriteFile(boot, []byte("# Netscape HTTP Cookie File\n"+
+			".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSAPISID\told-install-session\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		chosen := filepath.Join(dir, "fresh-export.txt")
+		fresh := "# Netscape HTTP Cookie File\n" +
+			".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSAPISID\tfresh-export-session\n"
+		if err := os.WriteFile(chosen, []byte(fresh), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		svc := cookies.NewAutoCookieService(t.TempDir(), boot, cookies.NewCookieJar(), nopRouteLogger{})
+		f := newFixture(t, func(_ *setupFixture, cookieFile string) error { return svc.CarryCookieFileTo(cookieFile) })
+		if rec := postSetupComplete(t, f.router, map[string]any{
+			"cookies": map[string]any{"cookie_file": chosen},
+		}); rec.Code != http.StatusOK {
+			t.Fatalf("setup/complete: %d (body %s)", rec.Code, rec.Body.String())
+		}
+		if got, err := os.ReadFile(chosen); err != nil || string(got) != fresh {
+			t.Errorf("a setup that ran no login rewrote the chosen cookie file (%v):\n%s", err, got)
+		}
+	})
 }
 
 // postSetupComplete sends body to /api/setup/complete from loopback, as the

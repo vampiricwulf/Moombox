@@ -346,6 +346,16 @@ type AutoCookieService struct {
 	needsRelogin   AutoCookieReloginRequired
 	targetPlatform string // "youtube" or "twitch"
 
+	// suppliedThisRun is the set of platforms whose cookies the operator put
+	// in the cookie file during this process: a browser login
+	// FinishSetupDetailed ACCEPTED, or an import whose rows ImportCookies
+	// installed. CarryCookieFileTo carries those platforms' rows and nothing
+	// else — the file at the boot path can hold another install's session
+	// (an earlier install, a second instance in the same folder), and a
+	// first-run setup that ran no login must leave the cookie file it names
+	// alone. Only ever grows; never cleared by cleanup().
+	suppliedThisRun map[string]bool
+
 	// The two lifecycle flags. Kept together and apart from the state above
 	// because they are DECISIONS — an abort was asked for, the service was
 	// shut down — rather than descriptions of a browser, and because cleanup()

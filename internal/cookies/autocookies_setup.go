@@ -431,9 +431,11 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 	s.mu.Lock()
 	if ytAuth {
 		s.needsRelogin["youtube"] = false
+		s.noteSuppliedLocked("youtube")
 	}
 	if twAuth {
 		s.needsRelogin["twitch"] = false
+		s.noteSuppliedLocked("twitch")
 	}
 	s.mu.Unlock()
 

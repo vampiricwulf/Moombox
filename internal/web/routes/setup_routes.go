@@ -19,11 +19,12 @@ type SetupDeps struct {
 	Auth           *web.AuthService
 	OnInstallYtdlp func(port int, httpsEnabled bool)
 	OnRestart      func()
-	// CarryCookies carries the cookies the running cookie service wrote —
-	// a browser login the wizard just ran — into the cookie file the setup
-	// saves, before it is saved (cookies.AutoCookieService.CarryCookieFileTo,
-	// the rule the TUI wizard's save command follows too). Nil carries
-	// nothing.
+	// CarryCookies carries the cookies this run supplied — a browser login
+	// the wizard just ran, which the running cookie service wrote at its
+	// boot-time path — into the cookie file the setup saves, before it is
+	// saved, and leaves that file alone when no login ran
+	// (cookies.AutoCookieService.CarryCookieFileTo, the rule the TUI
+	// wizard's save command follows too). Nil carries nothing.
 	CarryCookies func(cookieFile string) error
 }
 
