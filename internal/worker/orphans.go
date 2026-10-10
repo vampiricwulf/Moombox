@@ -520,7 +520,22 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 	// itself an orphan and the siblings are folded into ITS entry below.
 	siblingsByStem := map[string]*orphanedSiblings{}
 
-	err = filepath.Walk(absOutputDir, func(path string, info os.FileInfo, err error) error {
+	// The root is walked with a trailing separator. filepath.Walk Lstats its
+	// root, and an output directory that is itself a symlink — or, on
+	// Windows, a junction — read as one entry that is not a directory: the
+	// sweep listed nothing in the tree. The separator resolves the root's
+	// own link (POSIX path resolution, which os.Lstat follows on Windows as
+	// well) and nothing else: every path the walk hands back is joined onto
+	// the configured spelling, which filepath.Join cleans of the separator
+	// again — the spelling the rows store, RelPath is taken against and the
+	// delete's containment check accepts on both sides. A link below the
+	// root is still not followed: the delete refuses what one pointing out
+	// of the tree reaches.
+	walkRoot := absOutputDir
+	if !strings.HasSuffix(walkRoot, string(filepath.Separator)) {
+		walkRoot += string(filepath.Separator)
+	}
+	err = filepath.Walk(walkRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip errors
 		}
