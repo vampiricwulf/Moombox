@@ -68,7 +68,7 @@ func TestImportSplitRecordingIsOneJob(t *testing.T) {
 	if job.ID != "dQw4w9WgXcQ" || job.Title != "Stream" || job.ChannelName != "Chan" {
 		t.Errorf("id %q title %q channel %q", job.ID, job.Title, job.ChannelName)
 	}
-	if job.Filename != "imports/Stream [dQw4w9WgXcQ]" {
+	if job.Filename != filepath.FromSlash("imports/Stream [dQw4w9WgXcQ]") {
 		t.Errorf("filename %q, want the parts' shared name", job.Filename)
 	}
 	if want := filepath.Join(imports, "Stream [dQw4w9WgXcQ] - part1.mp4"); job.OutputFile != want {
@@ -80,7 +80,7 @@ func TestImportSplitRecordingIsOneJob(t *testing.T) {
 	if job.LengthSeconds == nil || *job.LengthSeconds != 230 {
 		t.Errorf("lengthSeconds %v, want 230", job.LengthSeconds)
 	}
-	if job.ChatFilename != "imports/Stream [dQw4w9WgXcQ].chat.json" {
+	if job.ChatFilename != filepath.FromSlash("imports/Stream [dQw4w9WgXcQ].chat.json") {
 		t.Errorf("chatFilename %q", job.ChatFilename)
 	}
 
@@ -298,7 +298,7 @@ func TestImportCutsTheExtensionFromTheNameAsWritten(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
 	}
-	if want := "imports/Stream [dQw4w9WgXcQ].mKv"; job.Filename != want || job.Title != "Stream" {
+	if want := filepath.FromSlash("imports/Stream [dQw4w9WgXcQ].mKv"); job.Filename != want || job.Title != "Stream" {
 		t.Errorf("filename %q title %q, want %q / Stream", job.Filename, job.Title, want)
 	}
 }
@@ -469,7 +469,7 @@ func TestImportPairsALongJSONChatByName(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
 	}
-	if job.ChatFilename != "imports/Long Stream [dQw4w9WgXcQ].chat.json" || job.Title != "Long Stream" || job.ChannelName != "Chan" {
+	if job.ChatFilename != filepath.FromSlash("imports/Long Stream [dQw4w9WgXcQ].chat.json") || job.Title != "Long Stream" || job.ChannelName != "Chan" {
 		t.Errorf("chat %q title %q channel %q: the %d-byte chat named after the video was not imported",
 			job.ChatFilename, job.Title, job.ChannelName, b.Len())
 	}

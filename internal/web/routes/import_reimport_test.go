@@ -192,7 +192,7 @@ func TestImportTakesASuffixBesideADifferentFile(t *testing.T) {
 		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
 	}
 	r := decodeImportResult(t, rec.Body.Bytes())
-	if want := "imports/Stream [dQw4w9WgXcQ] (2).mp4"; r.Filename != want {
+	if want := filepath.FromSlash("imports/Stream [dQw4w9WgXcQ] (2).mp4"); r.Filename != want {
 		t.Errorf("filename %q, want %q", r.Filename, want)
 	}
 	if got, _ := os.ReadFile(r.OutputFile); string(got) != "CLIP-RECORDING" {

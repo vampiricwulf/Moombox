@@ -109,7 +109,7 @@ func TestImportTakesTheLastBracketedID(t *testing.T) {
 	if job.Title != "[Holo-Live3D] Anniversary Concert" {
 		t.Errorf("title %q, want the name less its trailing id", job.Title)
 	}
-	if want := "imports/[Holo-Live3D] Anniversary Concert [dQw4w9WgXcQ].mp4"; job.Filename != want {
+	if want := filepath.FromSlash("imports/[Holo-Live3D] Anniversary Concert [dQw4w9WgXcQ].mp4"); job.Filename != want {
 		t.Errorf("filename %q, want %q", job.Filename, want)
 	}
 }
