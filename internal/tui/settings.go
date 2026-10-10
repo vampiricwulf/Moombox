@@ -763,27 +763,32 @@ type settingsParsed struct {
 // a parallel-downloads count, a webhook target or anything else changed on
 // the dashboard meanwhile.
 //
-// All of it runs under the store's write lock, the checks included: the
-// merged result — the edited fields over the live config as it stands now —
-// is what every check validates and what is written, so no write can land
-// between the two. It reports false, with the overlay's error set and
-// nothing written, when a check refuses.
+// It runs under the store's write lock, the checks included: the merged
+// result — the edited fields over the live config as it stands now — is
+// what every check validates and what is written, so no write can land
+// between the two. The one check that touches the filesystem is the
+// exception (checkBrowserUnlocked): it stats the merged browser_path, which
+// on an unreachable share or a hung mount blocks for as long as the
+// filesystem does, and every config reader in the process would wait that
+// long behind the write lock. It runs first, with no lock held, on the pair
+// the merge produces at that moment, and the checks under the lock use its
+// answer only for that same pair. It reports false, with the overlay's
+// error set and nothing written, when a check refuses.
 func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 	if m.cfg == nil {
 		return settingsWrite{}, false
 	}
+	edited := m.editedKeys()
+	browser := m.checkBrowserUnlocked(edited)
+
 	mu := m.configStore.RWMutex()
 	mu.Lock()
 	defer mu.Unlock()
 
 	live := make(map[string]string, len(m.values))
 	loadSettingsValues(live, m.cfg)
-	edited := m.editedKeys()
-	merged := maps.Clone(live)
-	for _, k := range edited {
-		merged[k] = m.values[k]
-	}
-	p, msg := validateSettingsValues(merged, m.cfg.Network.PasswordHash)
+	merged := m.mergeEdited(live, edited)
+	p, msg := validateSettingsValues(merged, m.cfg.Network.PasswordHash, browser.check)
 	if msg != "" {
 		m.errorMsg = msg
 		m.status = saveError
@@ -821,6 +826,75 @@ func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 	return w, true
 }
 
+// mergeEdited lays the fields the operator edited over live — the live
+// config in the overlay's own form — and returns the result as a new map.
+func (m *SettingsModel) mergeEdited(live map[string]string, edited []string) map[string]string {
+	merged := maps.Clone(live)
+	for _, k := range edited {
+		merged[k] = m.values[k]
+	}
+	return merged
+}
+
+// quickBrowserCheck is the browser check a save runs: the static checks and
+// a stat of the file. The full cookies.ValidateBrowserPath spawns the
+// browser and waits up to 10s for --version, which would freeze the
+// BubbleTea event loop; the dashboard runs that one through its async
+// endpoint. A variable so a test can stand in for a slow filesystem.
+var quickBrowserCheck = cookies.ValidateBrowserPathQuick
+
+// browserVerdict is quickBrowserCheck's answer for one browser_path /
+// browser_type pair (settingsBrowserPair's form), taken with no lock held.
+type browserVerdict struct {
+	path, typ string
+	err       error
+}
+
+// browserMovedMsg refuses a save whose merged browser pair is not the one
+// checkBrowserUnlocked checked: the dashboard changed the half the operator
+// did not edit between the check and the write lock. Pressing Save again
+// checks the new pair.
+const browserMovedMsg = "Browser settings changed while saving — press Save again"
+
+// check is validateSettingsValues' browser check: the verdict taken for the
+// pair it was taken for, and a refusal for any other, which no check has
+// passed. It never touches the filesystem, so it is safe under the lock.
+func (b browserVerdict) check(path, typ string) string {
+	if path != b.path || typ != b.typ {
+		return browserMovedMsg
+	}
+	if b.err != nil {
+		return "Invalid browser: " + b.err.Error()
+	}
+	return ""
+}
+
+// checkBrowserUnlocked runs quickBrowserCheck on the browser pair a save
+// would validate — the edited fields over the live config as it stands now —
+// holding the store's read lock only to copy the live values, and not while
+// the check stats the file. An empty path, or a path with no type, is left
+// to validateSettingsValues, which refuses the second without the
+// filesystem.
+func (m *SettingsModel) checkBrowserUnlocked(edited []string) browserVerdict {
+	live := make(map[string]string, len(m.values))
+	mu := m.configStore.RWMutex()
+	mu.RLock()
+	loadSettingsValues(live, m.cfg)
+	mu.RUnlock()
+	var b browserVerdict
+	b.path, b.typ = settingsBrowserPair(m.mergeEdited(live, edited))
+	if b.path != "" && b.typ != "" {
+		b.err = quickBrowserCheck(b.path, b.typ)
+	}
+	return b
+}
+
+// settingsBrowserPair is the browser_path / browser_type pair of v as the
+// checks read it and the write stores it: trimmed.
+func settingsBrowserPair(v map[string]string) (path, typ string) {
+	return strings.TrimSpace(v["browser_path"]), strings.TrimSpace(v["browser_type"])
+}
+
 // editedKeys returns, sorted, the fields whose value differs from the one
 // Open loaded: the fields the operator edited.
 func (m *SettingsModel) editedKeys() []string {
@@ -836,8 +910,11 @@ func (m *SettingsModel) editedKeys() []string {
 
 // validateSettingsValues runs every check a save makes over v, the merged
 // values, and returns the first refusal's message — "" when v passes —
-// with what the checks parsed. passwordHash is the live dashboard password.
-func validateSettingsValues(v map[string]string, passwordHash string) (settingsParsed, string) {
+// with what the checks parsed. passwordHash is the live dashboard password,
+// and checkBrowser answers for v's browser pair, with the refusal's message
+// or "": applyValues hands it the verdict checkBrowserUnlocked took before
+// the write lock, so nothing here touches the filesystem.
+func validateSettingsValues(v map[string]string, passwordHash string, checkBrowser func(path, typ string) string) (settingsParsed, string) {
 	var p settingsParsed
 
 	// Validate port
@@ -897,18 +974,15 @@ func validateSettingsValues(v map[string]string, passwordHash string) (settingsP
 	}
 	p.publicURL = publicURL
 
-	// Validate browser_path if set.
-	// Static checks only — the full ValidateBrowserPath spawns a subprocess
-	// and waits up to 10s for --version, which would freeze the BubbleTea
-	// event loop. The web UI runs the full check via the async HTTP endpoint.
-	browserPath := strings.TrimSpace(v["browser_path"])
-	browserType := strings.TrimSpace(v["browser_type"])
+	// Validate browser_path if set: quickBrowserCheck's static checks, by
+	// way of checkBrowser.
+	browserPath, browserType := settingsBrowserPair(v)
 	if browserPath != "" {
 		if browserType == "" {
 			return p, "browser_type required when browser_path is set"
 		}
-		if err := cookies.ValidateBrowserPathQuick(browserPath, browserType); err != nil {
-			return p, "Invalid browser: " + err.Error()
+		if msg := checkBrowser(browserPath, browserType); msg != "" {
+			return p, msg
 		}
 	}
 
