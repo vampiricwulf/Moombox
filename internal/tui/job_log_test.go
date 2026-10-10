@@ -387,6 +387,9 @@ func testJobLogKeys(t *testing.T, title string) {
 	if a.jobLog.log.matchCount != 2 || !strings.Contains(stripANSI(a.View().Content), "[/needle] (2 matches)") {
 		t.Fatalf("the search must find both of the job's matches, got %d", a.jobLog.log.matchCount)
 	}
+	// Enter landed on segment 90's match, on screen in the following view;
+	// n wraps to segment 30's, and the walk is measured from there.
+	text("n")
 	first := a.jobLog.log.View()
 	text("n")
 	if a.jobLog.log.View() == first {

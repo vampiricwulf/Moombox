@@ -11,7 +11,7 @@ import (
 
 // searchedPanel is a focused 100-line log panel whose lines named in hits
 // carry "needle", with that search applied by / and Enter — which, from the
-// following view, jumps to the first match.
+// following view, lands on a match it shows, or else on the first of all.
 func searchedPanel(t *testing.T, hits ...int) *LogViewerModel {
 	t.Helper()
 	m := NewLogViewerModel()
@@ -162,6 +162,9 @@ func TestSearchStepThroughTheAppAfterANewLine(t *testing.T) {
 			a.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 		}
 		a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		// Enter lands on segment 120's match, on screen at the foot of the
+		// following view; n wraps to the first, segment 20's, and ↓ leaves it.
+		a.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 		for range 15 {
 			a.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 		}
@@ -249,4 +252,98 @@ func TestSearchStepWalksTheMatchesOnScreen(t *testing.T) {
 	if m.viewport.View() != frames[0] {
 		t.Error("a second N must step back to the first match")
 	}
+}
+
+// TestSearchEnterLandsOnTheFirstMatchAtTheTop: Enter lands on the first match
+// at or below the top of the view — the rule n and N follow. SetHighlights
+// selects that match itself, and Enter then stepped on from it: a reader
+// paused on a screen that showed line 030's match was carried to line 060's,
+// and from line 020 with the next matches at 50 and 60, Enter selected 60.
+// With no match at or below the top it goes to the first match of all.
+//
+// Mutants: Enter stepping on unconditionally (the old HighlightNext) — both
+// "on screen" rows move the view to the match after the one shown; dropping
+// the step for nothing below — the "nothing below" row stays on line 030
+// with no match on screen.
+func TestSearchEnterLandsOnTheFirstMatchAtTheTop(t *testing.T) {
+	cases := []struct {
+		name    string
+		hits    []int
+		at      int    // the reader's top row when they search
+		wantTop string // the top row after Enter
+		want    string // the match the view must show
+		next    string // the top row after a following n, when it moves
+	}{
+		{name: "a match on screen", hits: []int{30, 60}, at: 25, wantTop: "line 025", want: "line 030 needle", next: "line 060 needle"},
+		{name: "a match below the view", hits: []int{50, 60}, at: 20, wantTop: "line 050 needle", want: "line 050 needle"},
+		{name: "nothing below", hits: []int{10, 15}, at: 30, wantTop: "line 010 needle", want: "line 010 needle"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewLogViewerModel()
+			m.SetSize(120, 15)
+			m.SetFocused(true)
+			batch := make([]string, 0, 100)
+			for i := range 100 {
+				l := fmt.Sprintf("2026-10-09 12:00:00 INFO worker: line %03d", i)
+				if slices.Contains(tc.hits, i) {
+					l += " needle"
+				}
+				batch = append(batch, l)
+			}
+			m.AddLines(batch)
+			for m.viewport.YOffset() > tc.at {
+				m.ScrollUp()
+			}
+			if m.autoScroll || !strings.HasSuffix(topRow(m), fmt.Sprintf("line %03d", tc.at)) {
+				t.Fatalf("setup: the reader must be paused at line %03d, top %q", tc.at, topRow(m))
+			}
+			m.StartSearch()
+			typeSearch(m, "needle")
+			m.HandleSearchKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+			if got := topRow(m); !strings.HasSuffix(got, tc.wantTop) {
+				t.Errorf("Enter from line %03d moved the view to %q, want it on %q", tc.at, got, tc.wantTop)
+			}
+			if view := stripANSI(m.viewport.View()); !strings.Contains(view, tc.want) {
+				t.Errorf("Enter from line %03d must show %q:\n%s", tc.at, tc.want, view)
+			}
+			// Enter selected that match, not merely showed it: n goes on to
+			// the one after it.
+			if tc.next != "" {
+				m.HandleSearchKey(tea.KeyPressMsg{Code: 'n', Text: "n"})
+				if got := topRow(m); !strings.HasSuffix(got, tc.next) {
+					t.Errorf("n after Enter went to %q, want %q", got, tc.next)
+				}
+			}
+		})
+	}
+
+	// O L reads its job's lines in the log panel's own viewer, so Enter there
+	// follows the same rule.
+	t.Run("O L, a match on screen", func(t *testing.T) {
+		a, logs := jobLogApp(t)
+		for i := range 150 {
+			line := jobLine("job1", i)
+			if i == 100 || i == 140 {
+				line += " needle"
+			}
+			logs.append("job1", line)
+		}
+		openJobLog(t, a, "job1")
+		v := a.jobLog.log
+		for v.viewport.YOffset() > 95 {
+			a.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+		}
+		if v.autoScroll || !strings.Contains(stripANSI(v.viewport.View()), "segment 100 fetched needle") {
+			t.Fatalf("setup: the reader must be paused with segment 100's match on screen, top %q", topRow(v))
+		}
+		before := topRow(v)
+		for _, r := range "/needle" {
+			a.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		}
+		a.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		if got := topRow(v); got != before {
+			t.Errorf("Enter moved the overlay from %q to %q — it skipped the match on screen", before, got)
+		}
+	})
 }

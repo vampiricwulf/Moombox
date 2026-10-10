@@ -622,10 +622,18 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			}
 			m.searchQuery = query
 			m.searchRegex, _ = regexp.Compile("(?i)" + regexp.QuoteMeta(query))
+			top := m.viewport.YOffset()
 			m.applySearchHighlights()
 			m.resizeViewport()
-			// Jump to first match
-			m.viewport.HighlightNext()
+			// Land on the first match at or below the top of the view — the
+			// rule n and N follow (searchStep). SetHighlights has selected that
+			// one already and brought it on screen; stepping on from it, as
+			// Enter did, skipped a match the reader was looking at. With none
+			// at or below the top it selected none, and the step reaches the
+			// first match of all, as n wraps.
+			if below, _ := slices.BinarySearch(m.matchRows, top); below == len(m.matchRows) {
+				m.viewport.HighlightNext()
+			}
 			m.invalidate() // the selected-highlight index is bubbles-private
 			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
