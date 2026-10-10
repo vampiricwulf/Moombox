@@ -457,6 +457,17 @@ func interceptUpgrades(store *config.Store, router http.Handler, wsHandler http.
 	})
 }
 
+// serverHandler is the http.Server's handler: the router, with WebSocket
+// upgrades taken ahead of it (interceptUpgrades) when a handler for them is
+// installed, all of it inside outermostRecovery.
+func (s *Server) serverHandler() http.Handler {
+	var handler http.Handler = s.router
+	if s.wsHandler != nil {
+		handler = interceptUpgrades(s.configStore, s.router, s.wsHandler)
+	}
+	return outermostRecovery(s.logger, handler)
+}
+
 // Start begins listening for HTTP connections.
 func (s *Server) Start(ctx context.Context) error {
 	port := s.cfg.Network.Port
@@ -473,14 +484,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	var handler http.Handler = s.router
-	if s.wsHandler != nil {
-		handler = interceptUpgrades(s.configStore, s.router, s.wsHandler)
-	}
-
 	s.server = &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           s.serverHandler(),
 		ReadHeaderTimeout: 30 * time.Second, // Protects against slowloris; clears deadline after headers are read
 		WriteTimeout:      0,                // Disable for WebSocket and video streaming
 		IdleTimeout:       120 * time.Second,
@@ -1024,6 +1030,54 @@ func RecoveryMiddleware(logger interface {
 			next.ServeHTTP(rw, r)
 		})
 	}
+}
+
+// outermostRecovery is the server's own outermost handler (serverHandler),
+// for a panic every recover inside it misses: chi's RequestID and
+// DrainMiddleware run ahead of RecoveryMiddleware by design, and
+// interceptUpgrades' own gates (ipAllowedByNetworkAccess,
+// externalHostRefused) ahead of the router and of HandleUpgrade's recover.
+// Such a panic reached net/http's own recover, which writes its report to
+// the server's ErrorLog — discarded — so it was logged nowhere, and the
+// client saw its connection dropped.
+//
+// Logged here as RecoveryMiddleware logs one: the panic value, the method,
+// the path (never the query, which can carry a token), the peer and the
+// bounded, argument-free panicStack. No request ID: RequestID, inside, has
+// not necessarily run. The client gets the same 500 when nothing has
+// reached it yet; when something has, the panic goes back to net/http as
+// http.ErrAbortHandler, which drops the connection without a report of its
+// own. A handler that panics with http.ErrAbortHandler itself is aborting on
+// purpose, and passes through untouched and unlogged.
+func outermostRecovery(logger interface {
+	Error(msg string, args ...any)
+}, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &recoveryWriter{ResponseWriter: w}
+		defer func() {
+			rvr := recover()
+			if rvr == nil {
+				return
+			}
+			if rvr == http.ErrAbortHandler {
+				panic(rvr)
+			}
+			logger.Error("panic recovered outside the HTTP middleware chain",
+				"panic", rvr,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remoteAddr", r.RemoteAddr,
+				"stack", panicStack(),
+			)
+			if rw.headersSent {
+				panic(http.ErrAbortHandler)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"Internal server error"}`))
+		}()
+		next.ServeHTTP(rw, r)
+	})
 }
 
 // OpenPathCommand builds the command that hands `target` — a URL or a

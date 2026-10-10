@@ -674,6 +674,7 @@ go func() {
 - Returns HTTP 500 with a JSON error body
 - Logs the panic with the stack that raised it (`panicStack` in `internal/web/server.go`): one `stack` field on the same line, innermost frame first from the frame that panicked, `function (file:line)` per frame, at most 32 frames and a count of the rest — no argument values, so nothing from the request beyond the method, path, peer and request ID the line already carries
 - The WebSocket upgrade never reaches it (`interceptUpgrades` takes it ahead of the router); `HandleUpgrade`'s own recover logs the same `stack` field
+- Neither do chi's `RequestID`, `DrainMiddleware` or `interceptUpgrades`' own gates, which run ahead of it; `outermostRecovery`, the server's outermost handler (`serverHandler` in `internal/web/server.go`), logs a panic there with the same `stack` field and answers 500 when nothing was written (re-panicking `http.ErrAbortHandler` when something was) — the server's `ErrorLog` is discarded, so `net/http`'s own recover would log it nowhere
 
 **Database subscriber callbacks:**
 - `safeCallJobUpdate(fn, job)` wraps each `OnJobUpdate` subscriber call
