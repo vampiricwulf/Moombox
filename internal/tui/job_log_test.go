@@ -582,3 +582,61 @@ func TestJobLogFitsTheTerminal(t *testing.T) {
 		}
 	}
 }
+
+// TestJobLogResumingAtTheFootShowsTheLastLine: a paused view that reaches the
+// foot of the log — ↓ or PgDn onto the last row, n onto a match there, N
+// wrapping to one — follows the log again, and the pause hint's row goes back
+// to the viewport. The viewport grew a row but kept its offset, which had
+// been the bottom of the shorter one, so the view sat one row past the end:
+// the last line one row up and a blank row under it. On the log panel the
+// next line's redisplay healed it; the overlay re-reads an unchanged buffer
+// without redisplaying anything, so the blank row stayed. resizeViewport now
+// clamps the offset.
+//
+// Mutant: drop the SetYOffset clamp in resizeViewport — every row ends one
+// row past the bottom, with a blank row under segment 119's line.
+func TestJobLogResumingAtTheFootShowsTheLastLine(t *testing.T) {
+	type key = tea.KeyPressMsg
+	r := func(c rune) key { return key{Code: c, Text: string(c)} }
+	search := []key{r('/'), r('n'), r('e'), r('e'), r('d'), r('l'), r('e'), {Code: tea.KeyEnter}}
+	cases := []struct {
+		name string
+		keys []key
+	}{
+		{"down back to the foot", []key{{Code: tea.KeyUp}, {Code: tea.KeyDown}, {Code: tea.KeyDown}}},
+		{"PgDn back to the foot", []key{{Code: tea.KeyPgUp}, {Code: tea.KeyPgDown}, {Code: tea.KeyPgDown}}},
+		// Enter lands on segment 90's match in the following view; N goes
+		// up to segment 30's, and n — or N, wrapping — comes back to 90's,
+		// which is in the last screenful.
+		{"n back to a match at the foot", append(slices.Clone(search), r('N'), r('n'))},
+		{"N wrapping to a match at the foot", append(slices.Clone(search), r('N'), r('N'))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, logs := jobLogApp(t)
+			for i := range 120 {
+				line := jobLine("job1", i)
+				if i == 30 || i == 90 {
+					line += " needle"
+				}
+				logs.append("job1", line)
+			}
+			openJobLog(t, a, "job1")
+			for _, k := range tc.keys {
+				a.Update(k)
+			}
+			lv := a.jobLog.log
+			if !lv.autoScroll {
+				t.Fatal("setup: the keys must bring the view back to the foot")
+			}
+			a.jobLog.SetLines(logs.get("job1")) // the overlay's poll: an unchanged buffer
+			if lv.viewport.PastBottom() {
+				t.Errorf("the view is past the end: offset %d over 120 rows in a %d-row viewport", lv.viewport.YOffset(), lv.viewport.Height())
+			}
+			rows := strings.Split(stripANSI(lv.viewport.View()), "\n")
+			if last := rows[len(rows)-1]; !strings.Contains(last, "segment 119 fetched") {
+				t.Errorf("the viewport's last row is %q, want segment 119's line", last)
+			}
+		})
+	}
+}

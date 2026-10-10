@@ -626,8 +626,8 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			// it selects on screen, and measured against the viewport the bar
 			// had shortened, a match on the bottom row the reader saw before
 			// pressing / read as off screen — the view jumped to make it the
-			// top row. SetHeight leaves the offset alone, so top is the
-			// reader's either way.
+			// top row. The resize moves the offset only off a row past the
+			// end, so top is the reader's either way.
 			m.resizeViewport()
 			top := m.viewport.YOffset()
 			m.applySearchHighlights()
@@ -799,6 +799,14 @@ func (m *LogViewerModel) resizeViewport() {
 		contentH = max(contentH-1, 1) // pause hint takes 1 line (see View)
 	}
 	m.viewport.SetHeight(contentH)
+	// SetHeight leaves the offset alone, and a taller viewport's bottom is a
+	// smaller offset: a paused view brought to its foot (↓, PgDn, n, N)
+	// follows again, the pause hint's row goes back to the viewport, and
+	// the offset that was the bottom a row ago is one row past it — the last
+	// line a row up and a blank row under it, until the next line's
+	// redisplay, and in the O L overlay, which redisplays nothing on an
+	// unchanged read, for good. SetYOffset clamps.
+	m.viewport.SetYOffset(m.viewport.YOffset())
 }
 
 // UpdateSearchInput delegates a tea.Msg to the search textinput when searching.
