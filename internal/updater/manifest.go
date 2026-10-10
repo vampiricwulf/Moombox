@@ -44,21 +44,19 @@ const (
 // or past it whose release lacks the manifest or its signature; an earlier
 // version's release never had one and is verified by its .sig alone.
 //
-// 2.8.10 is the last release cut before the pipeline existed, and none has
-// been cut since, so this names the next release, at the lowest number it can
-// have. Keep it in step with the release process: if that release is cut
-// under another number, set this to it in the same bump commit. Set above the
-// release that first ships the manifest, it would let that release's verify
-// settle for the signature with the manifest removed; at or below 2.8.10, it
-// would fail every verify of a release that never had one.
+// 2.8.10 is the last release cut before the pipeline existed, and 2.9.0 the
+// first cut by it. Set above the release that first shipped the manifest, it
+// would let that release's verify settle for the signature with the manifest
+// removed; at or below 2.8.10, it would fail every verify of a release that
+// never had one.
 // TestFirstManifestVersionKeepsStepWithTheReleases checks it against the
 // version cmd/moombox/main.go declares.
-const FirstManifestVersion = "2.8.11"
+const FirstManifestVersion = "2.9.0"
 
 // releaseCarriesManifest reports whether version's release was cut by the
 // manifest pipeline: whether its MAJOR.MINOR.PATCH is at or past
 // FirstManifestVersion. The pre-release suffix is ignored: a pre-release of
-// that version (2.8.11-rc.1) is cut by the same pipeline, since release.yml
+// that version (2.9.0-rc.1) is cut by the same pipeline, since release.yml
 // requires the tag to equal the version cmd/moombox/main.go declares and
 // main.go declares it only after the pipeline landed, though SemVer orders it
 // below the release. A version that does not parse is held to the manifest:

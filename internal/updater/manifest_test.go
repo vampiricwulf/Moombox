@@ -710,9 +710,10 @@ const lastReleaseWithoutManifest = "2.8.10"
 // release's manifest.
 //
 // THE MUTANTS, each failing the row named:
-//   - the comparison made on the whole version — "2.8.11-rc.1",
-//     "2.8.11-test.1";
-//   - >= 0 made > 0 — "2.8.11", "v2.8.11", "2.8.11-rc.1", "2.8.11-test.1";
+//   - the comparison made on the whole version — "2.9.0-rc.1",
+//     "2.9.0-test.1";
+//   - >= 0 made > 0 — "2.9.0" (both rows), "v2.9.0", "2.9.0-rc.1",
+//     "2.9.0-test.1";
 //   - an unparseable version not held to the manifest — "not-a-version";
 //   - FirstManifestVersion at or below 2.8.10 — "2.8.10".
 func TestReleaseCarriesManifest(t *testing.T) {
@@ -747,7 +748,8 @@ func TestReleaseCarriesManifest(t *testing.T) {
 // must not be past the declared release.
 //
 // THE MUTANTS: FirstManifestVersion "2.8.10" (also failing
-// TestReleaseCarriesManifest) or "2.9.0", while main.go declares 2.8.10.
+// TestReleaseCarriesManifest) or "2.9.1", while main.go declares 2.9.0 (and,
+// before 2.9.0 was declared, "2.9.0" while main.go declared 2.8.10).
 func TestFirstManifestVersionKeepsStepWithTheReleases(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "..", "cmd", "moombox", "main.go"))
 	if err != nil {
