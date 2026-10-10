@@ -144,3 +144,25 @@ test("a cancelled upload's late upload event leaves the running upload alone", {
   assert.equal(cancelShown(h), true, "a stale event hid the running upload's Cancel");
   assert.notEqual(h.el("import-status-text").textContent, "Importing…");
 });
+
+// The upload "progress" listener had no such check: a cancelled upload's late
+// progress event wrote its own percentage over the running upload's bar and
+// status line.
+//
+// Mutant: dropping the `this._activeXhr !== xhr` check in the upload
+// "progress" listener — the stale 90% replaces the running upload's 10%.
+test("a cancelled upload's late progress event leaves the running upload's progress alone", { skip }, async () => {
+  const h = await harness.makeApp();
+  const stale = await startUpload(h);
+  h.el("import-cancel-btn").click();
+  assert.equal(stale.aborted, true, "precondition: the first upload was cancelled");
+
+  const running = await startUpload(h, "b.zip");
+  for (const fn of running.uploadListeners.progress || []) fn({ lengthComputable: true, loaded: 1, total: 10 });
+  const shown = h.el("import-status-text").textContent;
+  assert.match(shown, /^Uploading\.\.\. 10% /, "precondition: the running upload's progress is shown");
+
+  for (const fn of stale.uploadListeners.progress || []) fn({ lengthComputable: true, loaded: 9, total: 10 });
+  assert.equal(h.el("import-status-text").textContent, shown, "a stale progress event rewrote the running upload's status line");
+  assert.equal(h.el("import-progress-bar").value, 10, "a stale progress event moved the running upload's bar");
+});

@@ -230,7 +230,10 @@ export class ImportController {
       return;
     }
 
+    // A cancelled upload's late event must not write over the running one's
+    // bar and status line — the same check as the upload "load" below.
     xhr.upload.addEventListener("progress", (e) => {
+      if (this._activeXhr !== xhr) return;
       if (e.lengthComputable) {
         const pct = Math.round((e.loaded / e.total) * 100);
         progressBar.value = pct;
