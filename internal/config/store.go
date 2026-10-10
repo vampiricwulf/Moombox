@@ -144,6 +144,46 @@ func (s *Store) UpdateIfLoaded(fn func(*MoomboxConfig)) (applied bool, err error
 	return true, s.Update(fn)
 }
 
+// ErrSetupCompleted refuses a first-run setup's save once one has been
+// saved: the config is loaded, and setup completes once.
+var ErrSetupCompleted = errors.New("setup already completed")
+
+// CompleteFirstRun saves next as the first-run setup's config and makes it
+// the live config — once. It is the save both setup wizards end in (the Web
+// one's POST /api/setup/complete through CompleteFirstRunLocked, the TUI
+// one's OnComplete), and it refuses with ErrSetupCompleted when the live
+// config is already loaded: on a first run in TUI mode both wizards are open
+// at once (the TUI's, and the dashboard tab the boot opens), and whichever
+// saved second used to save over the other's config.toml and schedule a
+// second restart. The check and the save are made under the one write lock,
+// and the live config is marked loaded by the same save, so of two completes
+// one applies and the other is refused, whichever wizard each is.
+//
+// next becomes the live config whole. On a first run nothing was read from
+// a file, so the live config's in-memory fields (LoadedFrom, the load-time
+// lists) are empty and the copy loses nothing; a later writer — an
+// UpdateIfLoaded the restart's drain runs — then saves what the wizard saved
+// rather than the defaults it replaced. A failed save leaves the live config
+// as it was.
+func (s *Store) CompleteFirstRun(next *MoomboxConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.CompleteFirstRunLocked(next)
+}
+
+// CompleteFirstRunLocked is CompleteFirstRun for a caller already holding the
+// write lock (RWMutex().Lock()).
+func (s *Store) CompleteFirstRunLocked(next *MoomboxConfig) error {
+	if s.cfg.ConfigLoaded {
+		return ErrSetupCompleted
+	}
+	if err := Save(next, s.SavePath()); err != nil {
+		return err
+	}
+	*s.cfg = *next
+	return nil
+}
+
 // SetSavePath installs or overrides the path used by Update for auto-save.
 // Useful when the path is negotiated after NewStore (first-run wizard,
 // test harnesses). Stored via atomic.Pointer so SavePath() can read it

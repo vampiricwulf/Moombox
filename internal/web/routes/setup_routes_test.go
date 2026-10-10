@@ -670,8 +670,8 @@ func postSetupComplete(t *testing.T, router http.Handler, body map[string]any) *
 // and both restarted. Held together at the lock, exactly one is applied; the
 // other is refused and the saved port is the applied one's.
 //
-// Mutant killed: dropping the ConfigLoaded recheck under the lock (both
-// answer 200).
+// Mutant killed: dropping the ConfigLoaded check under the lock
+// (config.Store.CompleteFirstRunLocked — both answer 200).
 func TestSetupCompleteGuardHoldsForOverlappingCompletes(t *testing.T) {
 	f := newSetupFixture(t)
 
@@ -720,4 +720,66 @@ func TestSetupCompleteGuardHoldsForOverlappingCompletes(t *testing.T) {
 	if port != 7001+applied {
 		t.Errorf("saved port %d, want %d — the refused complete's settings reached the config", port, 7001+applied)
 	}
+}
+
+// TestSetupCompletesOnceAcrossBothWizards pins the W27 review of W26-11: on
+// a first run in TUI mode the TUI wizard and the dashboard tab the boot opens
+// are both open, and the TUI's OnComplete saved its config with no first-run
+// check and left the live config unloaded. So a TUI save landing while a Web
+// complete was on its way to the lock passed the Web route's recheck, and the
+// Web settings were saved over the TUI's; and a TUI save after a Web complete
+// saved over the Web's config.toml. Both now end in CompleteFirstRun — the
+// one check and the one flag under the one lock (the TUI's OnComplete is
+// store.CompleteFirstRun, cmd/moombox/tui_wiring.go) — so whichever saves
+// second is refused, in either order, and config.toml keeps the first.
+//
+// Mutants killed: the route saving without CompleteFirstRunLocked's check
+// (the Web complete after the TUI's answers 200, port 7200 saved); the route
+// not marking the live config loaded (the TUI save after the Web's applies).
+func TestSetupCompletesOnceAcrossBothWizards(t *testing.T) {
+	tuiConfig := func() *config.MoomboxConfig {
+		c := config.Defaults()
+		c.Network.Port = 7100
+		return c
+	}
+	savedPort := func(t *testing.T, f *setupFixture) int {
+		t.Helper()
+		onDisk, err := config.Load(f.store.SavePath())
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		return onDisk.Network.Port
+	}
+
+	t.Run("TUI first", func(t *testing.T) {
+		f := newSetupFixture(t)
+		prev := setupCompleteBeforeLock
+		setupCompleteBeforeLock = func() {
+			if err := f.store.CompleteFirstRun(tuiConfig()); err != nil {
+				t.Errorf("the TUI wizard's save: %v", err)
+			}
+		}
+		t.Cleanup(func() { setupCompleteBeforeLock = prev })
+
+		rec := postSetupComplete(t, f.router, map[string]any{"network": map[string]any{"port": 7200}})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "setup already completed") {
+			t.Errorf("the Web complete after the TUI's: %d %s, want 400 setup already completed", rec.Code, rec.Body.String())
+		}
+		if port := savedPort(t, f); port != 7100 {
+			t.Errorf("config.toml port %d, want the TUI wizard's 7100", port)
+		}
+	})
+
+	t.Run("Web first", func(t *testing.T) {
+		f := newSetupFixture(t)
+		if rec := postSetupComplete(t, f.router, map[string]any{"network": map[string]any{"port": 7001}}); rec.Code != http.StatusOK {
+			t.Fatalf("web setup/complete: %d %s", rec.Code, rec.Body.String())
+		}
+		if err := f.store.CompleteFirstRun(tuiConfig()); !errors.Is(err, config.ErrSetupCompleted) {
+			t.Errorf("the TUI wizard's save after the Web's: %v, want config.ErrSetupCompleted", err)
+		}
+		if port := savedPort(t, f); port != 7001 {
+			t.Errorf("config.toml port %d, want the Web wizard's 7001", port)
+		}
+	})
 }

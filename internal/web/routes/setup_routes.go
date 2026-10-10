@@ -209,19 +209,6 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		setupCompleteBeforeLock()
 		mu.Lock()
 
-		// The first-run guard again, now under the lock. The read at the
-		// top runs before the body is validated and the password hashed,
-		// and two completes that overlapped there — the tab Moombox opens
-		// on boot and a second one — both passed it: each applied and saved
-		// its settings over the other's, and each scheduled a restart. Save
-		// sets ConfigLoaded, so whichever takes the lock second finds setup
-		// done.
-		if cfg.ConfigLoaded {
-			mu.Unlock()
-			jsonError(rw, "setup already completed", http.StatusBadRequest)
-			return
-		}
-
 		// Work on a copy so the live config isn't modified if save fails
 		cfgCopy := *cfg
 
@@ -243,16 +230,25 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		// Apply config updates to copy (same schema as PUT /config)
 		applyConfigUpdates(&cfgCopy, updates)
 
-		// Save the copy directly via config.Save so a save failure leaves
-		// the live cfg untouched. Only assign back on success.
-		if err := config.Save(&cfgCopy, store.SavePath()); err != nil {
+		// Save the copy and make it the live config, once: the first-run
+		// guard again, now under the lock, in the save the TUI wizard's
+		// OnComplete ends in too (config.Store.CompleteFirstRun). The read
+		// at the top runs before the body is validated and the password
+		// hashed, and two completes that overlapped there — the tab
+		// Moombox opens on boot and a second one, or the TUI wizard's —
+		// both passed it: each applied and saved its settings over the
+		// other's, and each scheduled a restart. Whichever takes the lock
+		// second now finds setup done and changes nothing. A save failure
+		// leaves the live cfg untouched.
+		if err := store.CompleteFirstRunLocked(&cfgCopy); err != nil {
 			mu.Unlock()
+			if errors.Is(err, config.ErrSetupCompleted) {
+				jsonError(rw, err.Error(), http.StatusBadRequest)
+				return
+			}
 			jsonError(rw, "failed to save config", http.StatusInternalServerError)
 			return
 		}
-
-		// Save succeeded — apply to live config
-		*cfg = cfgCopy
 
 		// Snapshot values needed after unlock
 		port := cfg.Network.Port

@@ -236,3 +236,60 @@ func TestSetupSaveRefusesAnUncreatableDirectory(t *testing.T) {
 		t.Error("the staging directory was created for a setup that was refused at its output directory")
 	}
 }
+
+// TestSetupSaveAfterTheWebWizardCompletedChangesNothing pins the W27 review
+// of W26-11 on the TUI's side: on a first run in TUI mode the dashboard tab
+// the boot opens shows the Web wizard too, and the TUI wizard stays on screen
+// through the restart's drain after a Web complete. Its save ran with no
+// first-run check — Use Defaults saved over the Web wizard's config.toml and
+// scheduled a second restart. Now the save command stops before anything
+// when the config is already loaded: no directories made, no cookies
+// carried, OnComplete not called, and the wizard says why; OnComplete
+// (config.Store.CompleteFirstRun) refuses it again under the store lock.
+//
+// Mutant killed: the save command without its first-run check (the cookies
+// are carried and the directories made before OnComplete refuses).
+func TestSetupSaveAfterTheWebWizardCompletedChangesNothing(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	store := config.NewStore(config.Defaults(), filepath.Join(dir, "config.toml"))
+	webCfg := config.Defaults()
+	webCfg.Network.Port = 7001
+	if err := store.CompleteFirstRun(webCfg); err != nil { // the Web wizard's save
+		t.Fatalf("the Web wizard's save: %v", err)
+	}
+
+	app := NewApp()
+	app.SetConfigStore(store)
+	completed, carried := false, false
+	app.SetSetupCallbacks(
+		func(c *config.MoomboxConfig) error { completed = true; return store.CompleteFirstRun(c) },
+		nil, nil, nil, nil, nil,
+	)
+	app.SetupWizCarryCookies(func(string) error { carried = true; return nil })
+	app.setupWiz.Open()
+	app.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	app.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, cmd := app.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter}) // Use Defaults
+	if cmd == nil {
+		t.Fatal("Use Defaults issued no save command")
+	}
+	res, _ := cmd().(setupSaveResultMsg)
+	if res.Err != config.ErrSetupCompleted.Error() || completed || carried {
+		t.Errorf("save result %q, OnComplete ran %v, cookies carried %v — want refused before either", res.Err, completed, carried)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "output")); err == nil {
+		t.Error("the output directory was made for a save refused as already completed")
+	}
+	onDisk, err := config.Load(store.SavePath())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if onDisk.Network.Port != 7001 {
+		t.Errorf("config.toml port %d after the refused TUI save, want the Web wizard's 7001", onDisk.Network.Port)
+	}
+	app.Update(res)
+	if !strings.Contains(app.setupWiz.errorMsg, "setup already completed") {
+		t.Errorf("the wizard says %q, want it to say setup was already completed", app.setupWiz.errorMsg)
+	}
+}

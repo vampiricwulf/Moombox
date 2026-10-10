@@ -719,12 +719,10 @@ func (s *runState) runTUI() {
 
 	// Wire setup wizard callbacks (OnComplete saves config, OnInstallYtdlp writes plugin)
 	app.SetSetupCallbacks(
-		func(updatedCfg *config.MoomboxConfig) error {
-			mu := s.configStore.RWMutex()
-			mu.Lock()
-			defer mu.Unlock()
-			return config.Save(updatedCfg, s.configPath)
-		},
+		// The Web wizard's save too: once, under the store lock, and the
+		// live config marked loaded — a Web complete that lands after it is
+		// refused, and one that landed before refuses this.
+		s.configStore.CompleteFirstRun,
 		func(port int, httpsEnabled bool) {
 			if err := routes.InstallYtdlpPlugin(port, httpsEnabled); err != nil {
 				s.log.Error("Failed to install yt-dlp plugin from setup", slog.String("error", err.Error()))

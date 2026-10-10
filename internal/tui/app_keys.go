@@ -193,9 +193,23 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			onComplete := a.setupWiz.OnComplete
 			onInstall := a.setupWiz.OnInstallYtdlp
 			onCarryCookies := a.setupWiz.OnCarryCookies
+			store := a.configStore
 			return a, safeCmd(func() tea.Msg {
 				if cfg == nil {
 					return setupSaveResultMsg{Err: "no config to save"}
+				}
+				// Setup completes once. On a first run in TUI mode the
+				// dashboard tab the boot opens shows the Web wizard too,
+				// and once it has saved nothing here may run: no
+				// directories made, no cookies carried. The Web route's
+				// first guard; OnComplete (config.Store.CompleteFirstRun)
+				// makes the check again under the store lock.
+				if store != nil {
+					var loaded bool
+					store.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
+					if loaded {
+						return setupSaveResultMsg{Err: config.ErrSetupCompleted.Error()}
+					}
 				}
 				// The output and staging directories first, before
 				// anything is saved: one that cannot be created is
