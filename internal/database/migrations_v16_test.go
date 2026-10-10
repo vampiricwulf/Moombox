@@ -16,6 +16,11 @@ func newTestDB(t *testing.T) *Database {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// Closed before TempDir removes the directory (cleanups run last-in,
+	// first-out): Windows cannot delete a database file still open, and a
+	// test that forgets its own defer db.Close() would fail there on
+	// cleanup. Close is idempotent, so the tests that do close it are fine.
+	t.Cleanup(func() { db.Close() })
 	return db
 }
 

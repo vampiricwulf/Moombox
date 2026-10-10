@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -335,7 +336,9 @@ func TestOpenRefusesAnEarlierDatabaseItCannotRead(t *testing.T) {
 		db.Close()
 		t.Fatalf("Open(%q) succeeded beside an unreadable database at %q", configured, legacy)
 	}
-	if !strings.Contains(err.Error(), configured) || !strings.Contains(err.Error(), legacy) {
+	// The error quotes each path with %q, which doubles a Windows path's
+	// backslashes: look for the paths as quoted.
+	if !strings.Contains(err.Error(), strconv.Quote(configured)) || !strings.Contains(err.Error(), strconv.Quote(legacy)) {
 		t.Errorf("Open error %q does not name %q and %q", err, configured, legacy)
 	}
 	if _, statErr := os.Stat(configured); statErr == nil {
