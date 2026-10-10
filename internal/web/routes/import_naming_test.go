@@ -131,6 +131,38 @@ func TestImportKeepsAnImportedArchivesPlaceholderID(t *testing.T) {
 	}
 }
 
+// A placeholder id names no video, so a row carrying one gets no thumbnail:
+// it got i.ytimg.com/vi/imp_…/maxresdefault.jpg, which 404s — whether the
+// import minted the placeholder or took an earlier import's from the name. A
+// real id keeps its thumbnail.
+//
+// Mutants: the placeholder check dropped (the i.ytimg URL is back on both
+// placeholder rows); every YouTube import's thumbnail dropped (the real id
+// loses its own).
+func TestImportPlaceholderRowHasNoThumbnail(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, wantThumb string
+	}{
+		{"minted", "Some recording.mp4", ""},
+		{"from an earlier import's name", "Stream [imp_0a1b2c3d].mp4", ""},
+		{"a real id", "Stream [dQw4w9WgXcQ].mp4", "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportFixture(t)
+			rec, job := importZip(t, f, makeImportZip(t, map[string][]byte{tc.file: []byte("v")}))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+			}
+			if tc.wantThumb == "" && !importPlaceholderRe.MatchString(job.ID) {
+				t.Fatalf("setup: id %q is not a placeholder", job.ID)
+			}
+			if job.ThumbnailURL != tc.wantThumb {
+				t.Errorf("thumbnailUrl %q, want %q", job.ThumbnailURL, tc.wantThumb)
+			}
+		})
+	}
+}
+
 func TestImportNameID(t *testing.T) {
 	for _, tc := range []struct{ stem, id, rest string }{
 		{"a [AAAAAAAAAAA] b [BBBBBBBBBBB]", "BBBBBBBBBBB", "a [AAAAAAAAAAA] b"},

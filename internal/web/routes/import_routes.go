@@ -286,7 +286,9 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// (twitch.tv/videos/<id>) — a live capture's stream id names none,
 		// so that row carries no URL rather than a wrong one, and neither
 		// client derives one for it (streamURL, the TUI's; streamUrl, the
-		// dashboard's).
+		// dashboard's). A placeholder id names no video: no thumbnail,
+		// which was an i.ytimg.com URL that 404s. Its watch URL stays on
+		// the row, and both clients withhold it (isImportPlaceholderID).
 		platform := "youtube"
 		videoURL := "https://www.youtube.com/watch?v=" + videoID
 		thumbnailURL := "https://i.ytimg.com/vi/" + videoID + "/maxresdefault.jpg"
@@ -296,6 +298,8 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			if twitchVOD != "" {
 				videoURL, isVod = "https://www.twitch.tv/videos/"+twitchVOD, true
 			}
+		} else if importPlaceholderRe.MatchString(videoID) {
+			thumbnailURL = ""
 		}
 
 		// Check for duplicate (use JobExists to match TS - checks ALL jobs, not just active)
@@ -1215,12 +1219,21 @@ var importTwitchIDRe = regexp.MustCompile(`^` + importTwitchIDPattern + `$`)
 
 // importNameIDRe is a bracketed id in an archive's file name: a YouTube video
 // id; a Moombox Twitch job's id (importTwitchIDPattern); or the "imp_"
-// placeholder an earlier import minted (randomHex(4), the shape the
-// dashboard's isImportPlaceholderId and the TUI's isImportPlaceholderID
-// read), so re-importing an imported archive keeps its id. Every shape is
+// placeholder an earlier import minted (importPlaceholderPattern), so
+// re-importing an imported archive keeps its id. Every shape is
 // path-safe — the id is interpolated into the output name. The id is its
 // first group.
-var importNameIDRe = regexp.MustCompile(`\[(` + importTwitchIDPattern + `|imp_[0-9a-f]{8}|[a-zA-Z0-9_-]{11})\]`)
+var importNameIDRe = regexp.MustCompile(`\[(` + importTwitchIDPattern + `|` + importPlaceholderPattern + `|[a-zA-Z0-9_-]{11})\]`)
+
+// importPlaceholderPattern is the stand-in id an import mints for an archive
+// that carries none of its own: "imp_" and randomHex(4)'s eight lowercase hex
+// digits — the shape the dashboard's isImportPlaceholderId and the TUI's
+// isImportPlaceholderID read. Eight on purpose: a YouTube id is eleven
+// characters, so "imp_" and seven could be one and "imp_" and eight never is.
+const importPlaceholderPattern = `imp_[0-9a-f]{8}`
+
+// importPlaceholderRe is a whole id of importPlaceholderPattern's shape.
+var importPlaceholderRe = regexp.MustCompile(`^` + importPlaceholderPattern + `$`)
 
 // importNameID returns the id a file name's stem carries and the stem without
 // it. The id is the LAST bracketed one: Moombox ("${title} [${id}]") and

@@ -12,7 +12,7 @@ import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { JobDetailsController } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, isImportPlaceholderId, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -2217,7 +2217,11 @@ export class MoomboxApp {
     const statusClass = job.status.toLowerCase().replace("?", "");
     const isTwitch = job.platform === "twitch";
     const rawVideoId = job.videoId || job.id;
-    const ytThumb = `https://i.ytimg.com/vi/${encodeURIComponent(rawVideoId)}/mqdefault.jpg`;
+    // An import's placeholder id names no video, so it has no remote
+    // thumbnail: the i.ytimg.com one built here, or stored on the row by an
+    // import before the server stopped writing one, is a 404.
+    const placeholder = isImportPlaceholderId(rawVideoId);
+    const ytThumb = placeholder ? "" : `https://i.ytimg.com/vi/${encodeURIComponent(rawVideoId)}/mqdefault.jpg`;
     const twitchAvatarFallback = isTwitch && job.channelAvatarUrl ? job.channelAvatarUrl : "";
     // Prefer the locally-stored thumbnail (downloaded during mux). The
     // remote URL still feeds the data-fallback so the img onerror
@@ -2225,7 +2229,7 @@ export class MoomboxApp {
     // missing for any reason (mux stage hadn't finished yet, file got
     // hand-deleted, etc.).
     const localThumb = job.thumbnailFile ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail` : "";
-    const remoteThumb = job.thumbnailUrl || (isTwitch ? twitchAvatarFallback : ytThumb);
+    const remoteThumb = (placeholder ? "" : job.thumbnailUrl) || (isTwitch ? twitchAvatarFallback : ytThumb);
     const thumbnailUrl = localThumb || remoteThumb;
     const fallbackThumb = localThumb ? remoteThumb : (isTwitch ? twitchAvatarFallback : ytThumb);
     // The Twitch channel-avatar fallback is a square image; render it in

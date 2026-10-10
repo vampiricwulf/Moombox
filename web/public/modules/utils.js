@@ -986,8 +986,9 @@ export function streamUrl(job) {
  * isImportPlaceholderId reports whether a videoId is the stand-in the ZIP
  * import mints when the archive carries no YouTube id: "imp_" and the eight
  * lowercase hex digits of randomHex(4) (internal/web/routes/import_routes.go).
- * Such a job's url, thumbnail and embed all point at a video that does not
- * exist, so the details dialog shows neither the embed nor the URL. Exactly
+ * Such a job's url and embed would point at a video that does not exist, so
+ * the details dialog shows neither the embed nor the URL, and the task list
+ * asks i.ytimg.com for no thumbnail (renderJobItem). Exactly
  * eight digits on purpose: a real YouTube id is eleven characters, so
  * "imp_" + 7 could be one and "imp_" + 8 never is.
  * @param {string|undefined} videoId

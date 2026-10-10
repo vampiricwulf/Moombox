@@ -186,3 +186,27 @@ test("a native Twitch capture keeps its embed, its Stream URL row and Open URL",
   h.app.openJobUrl();
   assert.deepEqual(opened, ["https://www.twitch.tv/somestreamer"]);
 });
+
+// The task list asked i.ytimg.com for a placeholder id's thumbnail: the row's
+// thumbnailUrl, which the import stored until it stopped writing one, or —
+// with none stored — the list's own mqdefault.jpg fallback built from the id.
+// Both 404 for a video that does not exist; the card now has no image.
+//
+// MUTANT: the placeholder check dropped from the stored thumbnailUrl (an older
+// import's card loads its i.ytimg URL). MUTANT: dropped from the built
+// fallback (a new import's card builds mqdefault.jpg for imp_…). MUTANT: no
+// i.ytimg fallback for any id (the real id below loses its thumbnail).
+test("an imported job's card asks for no thumbnail", { skip }, async () => {
+  const h = await harness.makeApp();
+  const rows = {
+    "an older import, its i.ytimg URL stored": { ...imported(), thumbnailFile: undefined },
+    "a new import, nothing stored": { ...imported(), thumbnailFile: undefined, thumbnailUrl: "" },
+  };
+  for (const [name, job] of Object.entries(rows)) {
+    const html = h.app.renderJobItem(job);
+    assert.ok(!html.includes("ytimg"), `${name}: the card asks i.ytimg.com for a placeholder`);
+    assert.ok(!html.includes("<img"), `${name}: the card has an image for no video`);
+  }
+  const real = h.app.renderJobItem({ ...inputs.JOBS.Finished, videoId: "dQw4w9WgXcQ", thumbnailFile: undefined, thumbnailUrl: "" });
+  assert.ok(real.includes('src="https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"'), "a real id keeps the list's own thumbnail");
+});
