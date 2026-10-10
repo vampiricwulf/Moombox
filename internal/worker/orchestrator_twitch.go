@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,8 +41,38 @@ type TwitchVariantInfo struct {
 	// For quality monitoring: re-fetches the master playlist and selects the best variant.
 	// Set by the worker for live streams so the orchestrator can detect quality changes.
 	FetchVariantsFn func(ctx context.Context) ([]twitch.TwitchHLSVariant, error)
-	QualityPref     string // from channel config, e.g. "1080p60" or "best"
+	QualityPref     string // the job's quality_preference, e.g. "1080p60" or "best"
 	MaxResolution   int    // from global config
+	Prefer60fps     bool   // from global config (prefer_60fps)
+}
+
+// newTwitchVariantInfo builds the variant a Twitch capture runs on from the
+// one the stream processor selected, carrying the selection inputs every
+// re-selection during the capture repeats (selectFrom) — the job's
+// quality_preference and the job context's snapshot of max_video_resolution
+// and prefer_60fps. The capture start reads the same column
+// (selectTwitchVariant); it used to read twitch_quality, two columns for one
+// input, which agreed only until the stream start overwrote one of them.
+// The live-only closures are the caller's to wire.
+func newTwitchVariantInfo(job *database.Job, v *twitch.TwitchHLSVariant, cfg *JobConfig) *TwitchVariantInfo {
+	return &TwitchVariantInfo{
+		URL:           v.URL,
+		Name:          v.Name,
+		Width:         v.Width,
+		Height:        v.Height,
+		FPS:           v.FPS,
+		QualityPref:   job.QualityPreference,
+		MaxResolution: cfg.MaxVideoResolution,
+		Prefer60fps:   cfg.Prefer60fps,
+	}
+}
+
+// selectFrom picks this capture's variant out of a fresh master playlist, by
+// the same rule and the same inputs the capture started on — the quality
+// probe and refreshBestVariant both call it, so a re-selection cannot drift
+// from the first selection on any of the three.
+func (v *TwitchVariantInfo) selectFrom(variants []twitch.TwitchHLSVariant) *twitch.TwitchHLSVariant {
+	return twitch.SelectBestVariant(variants, v.QualityPref, v.MaxResolution, v.Prefer60fps)
 }
 
 // ExecuteTwitch runs the Twitch download pipeline (B3).
@@ -83,8 +114,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	// DB listener for cancellation (B6)
 	var userCancelled atomic.Bool
+	// The ID is read once, here: the callback runs on whichever goroutine
+	// wrote the row, and muxAndFinalize replaces jobCtx.Job with a fresh read
+	// while those writes continue, so reading jobCtx.Job inside it was a race.
+	jobID := jobCtx.Job.ID
 	unsubscribe := o.db.OnJobUpdate(func(updatedJob *database.Job) {
-		if updatedJob.ID == jobCtx.Job.ID && updatedJob.Status == database.StatusCancelled {
+		if updatedJob.ID == jobID && updatedJob.Status == database.StatusCancelled {
 			userCancelled.Store(true)
 			callCancel()
 		}
@@ -95,10 +130,21 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// the downloader stops fetching against a dead network. The session loop
 	// below then waits for restoration and resumes the SAME job instead of
 	// finalizing it (one job per broadcast).
+	//
+	// Live only. A VOD has no live edge to lose and no broadcast to
+	// re-verify, so the engine's IsOnline wiring waits an outage out in place
+	// and the download carries on from where it stopped, as on the YouTube
+	// paths. Cancelling it ended the job in Error, and the only way on from
+	// there — Retry — downloaded the whole VOD again.
 	var offlineCancelled atomic.Bool
-	if o.conn != nil {
+	// finalizing switches the offline cancel off once the session loop is
+	// over: muxing and the chat drain need no network, and a blip there used
+	// to cancel the final mux — a complete recording landing in Error, a
+	// split job finishing without its last part.
+	var finalizing atomic.Bool
+	if o.conn != nil && !isVod {
 		unregisterConn := o.conn.OnStateChange(func(online bool) {
-			if !online {
+			if !online && !finalizing.Load() {
 				offlineCancelled.Store(true)
 				callCancel()
 			}
@@ -123,10 +169,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Send "Twitch Download Starting" notification
 	if o.notifier != nil {
 		dlType := "Live Stream"
-		desc := fmt.Sprintf("Now live — beginning download: %s", jobCtx.Job.Title)
+		desc := fmt.Sprintf("Now live — beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		if isVod {
 			dlType = "VOD"
-			desc = fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title)
+			desc = fmt.Sprintf("Beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		}
 		qualityLabel := variant.Name
 		if variant.Height > 0 {
@@ -137,12 +183,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			qualityLabel = fmt.Sprintf("%s (%dp%s)", variant.Name, variant.Height, fpsStr)
 		}
 		startFields := []notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 			{Name: "Quality", Value: qualityLabel, Inline: true},
 			{Name: "Type", Value: dlType, Inline: true},
 		}
 		if jobCtx.Job.TwitchCategory != "" {
-			startFields = append(startFields, notifications.Field{Name: "Category", Value: jobCtx.Job.TwitchCategory, Inline: true})
+			startFields = append(startFields, notifications.Field{Name: "Category", Value: notifications.EscapeMarkdown(jobCtx.Job.TwitchCategory), Inline: true})
 		}
 		// The YouTube twin of this send (orchestrator.go) carries the same
 		// three identity fields off the same mapper, for the same reason:
@@ -173,19 +219,22 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Pre-download Twitch thumbnail to staging while stream is still live
 	// (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
 	if jobCtx.Job.ThumbnailURL != "" {
+		// Read here, not in the goroutine: it is not waited for, and
+		// muxAndFinalize replaces jobCtx.Job when a short VOD gets there first.
+		thumbURL, stagingDir := jobCtx.Job.ThumbnailURL, jobCtx.StagingDir
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					o.logger.Error("panic in thumbnail download", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+					o.logger.Error("panic in thumbnail download", "panic", fmt.Sprint(r), "jobID", jobID)
 				}
 			}()
 			thumbCtx, thumbCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer thumbCancel()
-			thumbPath := filepath.Join(jobCtx.StagingDir, "thumbnail.jpg")
-			if strings.Contains(jobCtx.Job.ThumbnailURL, ".webp") {
-				thumbPath = filepath.Join(jobCtx.StagingDir, "thumbnail.webp")
+			thumbPath := filepath.Join(stagingDir, "thumbnail.jpg")
+			if strings.Contains(thumbURL, ".webp") {
+				thumbPath = filepath.Join(stagingDir, "thumbnail.webp")
 			}
-			DownloadFileMinSize(thumbCtx, jobCtx.Job.ThumbnailURL, thumbPath, 1000, o.logger)
+			DownloadFileMinSize(thumbCtx, thumbURL, thumbPath, 1000, o.logger)
 		}()
 	}
 
@@ -194,11 +243,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	segmentStartTime := time.Now().Unix()
 	var segmentMuxWg sync.WaitGroup // tracks background segment mux goroutines
 	defer segmentMuxWg.Wait()       // ensure all background muxes finish before returning
+	// Rounded, not truncated: a 59.94 variant is "1080p60" here as it is in
+	// the playlist's own naming (see qualityInfoFromVariant).
+	fps := int(math.Round(variant.FPS))
 	currentQuality := QualityInfo{
 		Width:  variant.Width,
 		Height: variant.Height,
-		FPS:    int(variant.FPS),
-		Label:  FormatQualityLabel(variant.Height, int(variant.FPS)),
+		FPS:    fps,
+		Label:  FormatQualityLabel(variant.Height, fps),
 	}
 	qualityChangeCh := make(chan QualityInfo, 1)
 
@@ -220,15 +272,34 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 	}()
 
+	// irc is the live IRC chat downloader when present (nil for VOD chat or
+	// chat-off) — per-part chat rolling below is live-IRC only. Direct
+	// concrete assertion per audit reports/worker.md Finding 59.
+	irc, _ := twitchChatDl.(*twitch.ChatDownloader)
+
+	chatPathFor := func(stagingDir string) string { return filepath.Join(stagingDir, "chat.json") }
+
 	// Helper to create the HLS downloader for a variant — the single
 	// construction point for the engine options, so per-field drift between
 	// branches can't happen. startSeq -1 means "resume state / playlist
 	// window decides"; forceStartSeq passes an exact orchestrator-captured
 	// position (same-quality recovery appends from oldSeq; gap splits seed
 	// the next part from CurrentSeq so nothing already written re-downloads).
+	//
+	// The live IRC chat's part base is pinned here too (D-T8): a downloader
+	// that starts its part's video file reports the program date-time of the
+	// first segment it writes, and that is the part's chat base — the chat
+	// file of the SAME part directory, so a late report from a downloader
+	// since replaced can only reach the part it belonged to.
 	createDownloader := func(variantURL, stagingDir string, startSeq int, forceStartSeq bool) (*engine.SegmentDownloader, string) {
 		videoPath := filepath.Join(stagingDir, "video_stream")
+		var onFirstSegment func(time.Time)
+		if irc != nil {
+			partChat := chatPathFor(stagingDir)
+			onFirstSegment = func(pdt time.Time) { irc.SettlePartBase(partChat, pdt) }
+		}
 		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{
+			OnFirstSegment: onFirstSegment,
 			BaseURL:        variantURL,
 			OutputFile:     videoPath,
 			StartSeq:       startSeq,
@@ -276,7 +347,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if err != nil {
 			return nil, err
 		}
-		best := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+		best := variant.selectFrom(variants)
 		if best == nil {
 			return nil, fmt.Errorf("no suitable Twitch variant")
 		}
@@ -317,6 +388,21 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Usher refuses, but the final playlist window still serves the tail).
 	currentVariantURL := variant.URL
 
+	// recordVariant keeps twitch_quality naming the variant the capture is
+	// recording (D-T9). The stream processor wrote the start's pick; every
+	// adoption of a refreshed variant below — a quality split, a gap or
+	// init-change split, a same-quality restart, a post-outage resume — goes
+	// through here, and only a different name is written. A quality split
+	// used to leave the row naming the variant the job had split away from.
+	recordedVariant := variant.Name
+	recordVariant := func(v *twitch.TwitchHLSVariant) {
+		if v.Name == recordedVariant {
+			return
+		}
+		recordedVariant = v.Name
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"twitch_quality": v.Name})
+	}
+
 	videoDl, videoPath := createDownloader(currentVariantURL, curStagingDir, -1, false)
 
 	// Deferred Close mirrors ExecuteWithChat: any exit that skips the
@@ -324,11 +410,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger, jobCtx.Config.ProgressInterval)
 	defer tracker.Close()
 	tracker.AttachVideoDownloader(videoDl)
-
-	// irc is the live IRC chat downloader when present (nil for VOD chat or
-	// chat-off) — per-part chat rolling below is live-IRC only. Direct
-	// concrete assertion per audit reports/worker.md Finding 59.
-	irc, _ := twitchChatDl.(*twitch.ChatDownloader)
 
 	// Register the live IRC downloader so a Twitch credential change can reach
 	// it MID-JOB (Arc 10 R5). Until now this object was reachable only through
@@ -348,8 +429,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		defer unregisterChat()
 	}
 
-	chatPathFor := func(stagingDir string) string { return filepath.Join(stagingDir, "chat.json") }
-
 	// startChat launches (or relaunches, after an outage killed the IRC
 	// reconnect loop) the chat downloader. Runs on parentCtx so a session
 	// restart doesn't tear chat down — shutdown/user-cancel paths Stop() it
@@ -368,7 +447,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 		if vod, ok := twitchChatDl.(*twitch.VodChatDownloader); ok {
 			vod.SetOnProgress(func(count int) { tracker.SetChatCount(count) })
+			vod.SetIsOnline(connIsOnline(o.conn))
 		}
+		// The stream processor wrote "pending"; this is where the capture
+		// actually starts, as the YouTube downloader's OnStart marks it.
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+			"chat_status": "downloading",
+		})
 		done := make(chan struct{})
 		chatDone = done
 		go func() {
@@ -379,7 +464,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 					// mid-capture has not finished, and recording nothing here
 					// would leave a previous run's verdict standing.
 					chatRec.record(fmt.Errorf("panic in Twitch chat downloader: %v", r))
-					o.logger.Error("panic in Twitch chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+					o.logger.Error("panic in Twitch chat downloader", "jobID", jobID, "panic", fmt.Sprint(r))
 				}
 			}()
 			chatRec.record(twitchChatDl.Start(parentCtx))
@@ -387,7 +472,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	}
 	if twitchChatDl != nil {
 		if irc != nil {
-			// Recording start time for IRC chat offset calculation (matches TS).
+			// Recording start time for IRC chat offset calculation (matches
+			// TS) — provisional for a part whose video starts fresh, below.
 			irc.SetRecordingStartTime(time.Now().UTC().Format(time.RFC3339))
 			// A job resumed into a later part keeps chat aligned with video:
 			// redirect chat output (created at the staging root by the stream
@@ -395,6 +481,16 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			// resume state, so it continues that part's file.
 			if curStagingDir != jobCtx.StagingDir {
 				irc.RollFile(chatPathFor(curStagingDir), time.Now().UTC().Format(time.RFC3339))
+			}
+			// A part with no staged video starts its file with the first
+			// segment the downloader writes, and that segment's program
+			// date-time becomes the chat's base (D-T8): the local clock here
+			// is later than the part's first frame by however far behind the
+			// live edge the playlist window starts. A RESUMED part's video
+			// started long ago and reports nothing; its chat keeps the base
+			// its file was written with (adoptPartRecordingBase).
+			if !partResumed {
+				irc.AwaitPartBase()
 			}
 		}
 		startChat()
@@ -442,7 +538,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		var closedChat string
 		var enrich func(context.Context)
 		if irc != nil && nextDir != curStagingDir {
-			closedChat = irc.RollFile(chatPathFor(nextDir), time.Now().UTC().Format(time.RFC3339))
+			// The next part's video always starts a fresh file, so its chat
+			// waits for that file's first segment (D-T8).
+			closedChat = irc.RollFileAwaitingBase(chatPathFor(nextDir), time.Now().UTC().Format(time.RFC3339))
 			if closedChat != "" {
 				closed := closedChat
 				enrich = func(c context.Context) { irc.EnrichFile(c, closed) }
@@ -483,7 +581,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	// outageFinalize marks "finalize what was captured" exits: the broadcast
 	// ended (or became unreachable/another broadcast) while connectivity was
-	// down, or a VOD hit an outage. The post-loop dispatch uses it to pick
+	// down. The post-loop dispatch uses it to pick
 	// the finalize path over the terminal preserve-staging path — the
 	// offlineCancelled flag can't serve that role since the outage handler
 	// consumes it on entry.
@@ -493,9 +591,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// download failed while nothing said the broadcast was over. Finalizing
 	// there marked the job Finished and processJob then deleted the staging
 	// dir — with the resume sidecar in it (sweep-2 ENGINE-7). Returning the
-	// error instead leaves the job in Error with staging intact, which is
-	// what a Retry or a monitor re-enqueue needs. Not "resumable": /resume
-	// refuses every non-YouTube job.
+	// error instead leaves the job in Error with staging intact, so Mux can
+	// still archive what was captured. Nothing continues the capture from
+	// there — /resume refuses every non-YouTube job, Retry starts over with
+	// fresh staging and the monitor recovers offline flaps only — which is
+	// why the in-loop variant refresh retries before taking this exit. What
+	// the monitor does do, for a LIVE capture's latch (markEndUnconfirmed), is
+	// mux that staging itself once it confirms the broadcast over (D-T4,
+	// AutoMuxEndedBroadcast), so the archive no longer waits on the operator.
 	var unconfirmedEndErr error
 
 	// latchIfUnconfirmed takes that latch unless the broadcast is CONFIRMED
@@ -506,12 +609,23 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// unknown and the job must land in Error with its staging and resume
 	// sidecar intact. Only a confirmed end falls through to finalize.
 	//
-	// The guards keep the sites honest: a VOD has no live verdict to ask
-	// for, an unwired CheckStreamFn can contradict nothing, a nil cause is
-	// not a failure, and a dead ctx means we are shutting down rather than
-	// judging a broadcast.
+	// The guards keep the sites honest: a nil cause is not a failure, a dead
+	// ctx means we are shutting down rather than judging a broadcast, and an
+	// unwired CheckStreamFn can contradict nothing. A VOD latches on any
+	// failure without asking: it has no live end to confirm — its only
+	// confirmed end is the download completing — so finalizing a failed one
+	// marked a truncated file Finished and then deleted its staging.
 	latchIfUnconfirmed := func(ctx context.Context, cause error) bool {
-		if isVod || variant.CheckStreamFn == nil || cause == nil || ctx.Err() != nil {
+		if cause == nil || ctx.Err() != nil {
+			return false
+		}
+		if isVod {
+			o.logger.Warn("Twitch VOD download failed before its end — keeping staging for recovery",
+				"jobID", jobCtx.Job.ID, "err", cause)
+			unconfirmedEndErr = cause
+			return true
+		}
+		if variant.CheckStreamFn == nil {
 			return false
 		}
 		stillLive, checkErr := variant.CheckStreamFn(ctx)
@@ -520,7 +634,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 		o.logger.Warn("Twitch download ended without a confirmed stream end — keeping staging for recovery",
 			"jobID", jobCtx.Job.ID, "stillLive", stillLive, "checkErr", checkErr)
-		unconfirmedEndErr = cause
+		// Marked (D-T4): the row this leaves in Error is the one the Twitch
+		// monitor muxes automatically once it confirms the broadcast over.
+		unconfirmedEndErr = markEndUnconfirmed(cause)
 		return true
 	}
 
@@ -544,14 +660,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// ends, the broadcast changes, or a terminal interrupt arrives.
 sessionLoop:
 	for {
-		// Each session decides its own verdict. A latch taken in a session
-		// that then RESUMED after a connectivity outage is stale: the check
-		// that failed did so because the monitor cancelled the session from
-		// inside the re-verify's own 5-35 s window, and the resumed session
-		// may run to a clean, confirmed end. Carrying it forward marked a
-		// completed capture Error and skipped its final mux (fix round 1).
-		unconfirmedEndErr = nil
-
 		// Quality- and gap-aware download loop
 		for ctx.Err() == nil {
 
@@ -611,6 +719,24 @@ sessionLoop:
 
 				// Re-fetch master playlist FIRST to determine if quality actually changed.
 				newVariant, fetchErr := refreshBestVariant(ctx)
+				confirmedOver := false
+				if fetchErr != nil && !isGap && !isInitChange {
+					// Nothing else carries this capture on: the exit below
+					// leaves the job in Error, and neither Retry (it wipes
+					// staging) nor the monitor (it recovers offline flaps
+					// only) continues it. A usher 5xx or a token blip
+					// outlasts a single request often enough to be worth
+					// riding out — footage the window drops meanwhile is
+					// recorded as a gap split once the successor starts.
+					newVariant, confirmedOver, fetchErr = o.retryVariantRefresh(ctx, refreshBestVariant, fetchErr,
+						func(c context.Context) bool {
+							if variant.CheckStreamFn == nil {
+								return false
+							}
+							live, err := variant.CheckStreamFn(c)
+							return err == nil && !live
+						}, jobCtx.Job.ID)
+				}
 				if fetchErr != nil {
 					if isGap || isInitChange {
 						// Refresh failing right after a gap (or an init-segment
@@ -653,9 +779,17 @@ sessionLoop:
 					// refresh. Logged beside fetchErr because the pair is the
 					// whole story of why this job is about to stop, and
 					// neither half is logged anywhere else on this path.
+					if ctx.Err() != nil {
+						break // an outage or a shutdown mid-retry, not a verdict
+					}
 					o.logger.Error("failed to refresh Twitch variants",
 						"err", fetchErr, "downloadErr", dlErr, "jobID", jobCtx.Job.ID)
-					if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
+					if confirmedOver {
+						// The retry's own status check already confirmed the
+						// end; a second one would only delay the finalize.
+						o.logger.Info("Twitch broadcast confirmed over during the variant refresh retries; finalizing captured parts",
+							"jobID", jobCtx.Job.ID)
+					} else if !latchIfUnconfirmed(ctx, fmt.Errorf("refresh Twitch variants: %w", fetchErr)) {
 						o.logger.Info("Twitch broadcast confirmed over after the failed variant refresh; finalizing captured parts",
 							"jobID", jobCtx.Job.ID)
 					}
@@ -686,6 +820,7 @@ sessionLoop:
 					}
 					currentQuality = newQuality
 					currentVariantURL = newVariant.URL
+					recordVariant(newVariant)
 					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
@@ -724,6 +859,7 @@ sessionLoop:
 					}
 					currentQuality = newQuality
 					currentVariantURL = newVariant.URL
+					recordVariant(newVariant)
 					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
@@ -739,6 +875,7 @@ sessionLoop:
 						"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 
 					currentVariantURL = newVariant.URL
+					recordVariant(newVariant)
 					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, videoDl.CurrentSeq(), true)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
@@ -757,13 +894,27 @@ sessionLoop:
 						"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
 						"jobID", jobCtx.Job.ID)
 				}
+				// A kept part ends exactly where its data stops, so the
+				// successor is seeded from CurrentSeq like the gap and
+				// init-change splits — Twitch's variants share one sequence
+				// numbering. Seeding -1 replayed the playlist window, so the
+				// first seconds of the new part repeated the closed part's
+				// last ones. A discarded short part leaves nothing to
+				// repeat: the window replay keeps whatever it still holds of
+				// the dropped span, at the new quality.
+				nextSeq, forceSeq := -1, false
+				if !shortSegment {
+					nextSeq = videoDl.CurrentSeq()
+					forceSeq = nextSeq > 0
+				}
 				if err := advanceToNewPart(!shortSegment, segmentEndTime); err != nil {
 					latchPartFailure(err)
 					break
 				}
 				currentQuality = newQuality
 				currentVariantURL = newVariant.URL
-				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, -1, false)
+				recordVariant(newVariant)
+				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, forceSeq)
 				tracker.AttachVideoDownloader(videoDl)
 				drainQualityCh()
 				continue
@@ -788,20 +939,25 @@ sessionLoop:
 		if !isOutage {
 			break sessionLoop
 		}
-		if isVod {
-			// VODs keep the pre-existing finalize-on-outage behavior: a VOD
-			// has no live edge to chase, and an exact resume is possible on
-			// a later retry — holding a download slot through an unbounded
-			// wait buys nothing.
-			outageFinalize = true
-			break sessionLoop
-		}
-
 		// ---- Connectivity outage (live): pause, then resume the same job ----
 		// The flag is consumed HERE; a re-drop at any later point in the
 		// recovery sets it again, and the checks below route back to the
 		// wait instead of finalizing mid-broadcast.
 		offlineCancelled.Store(false)
+		// Each session decides its own verdict, and the outage ends this
+		// one's. A latch it took is stale: the check that failed did so
+		// because the monitor cancelled the session from inside the
+		// re-verify's own 5-35 s window. Discarded HERE, on entry, rather
+		// than when the next session starts, because the recovery below has
+		// two ways out that never start one — the broadcast ended during the
+		// outage, or a failed refresh whose re-verify confirms it over — and
+		// both finalize. A latch carried into the resumed session marked a
+		// capture it completed cleanly Error and skipped its final mux (fix
+		// round 1); carried into those finalize exits, it turned a
+		// broadcast the recovery confirmed over into a marked Error exit
+		// that never muxed its last part. Only a latch the recovery itself
+		// takes, or the resumed session's own, reaches the exit below.
+		unconfirmedEndErr = nil
 		// The pause instant, stamped where the flag is consumed. NOT sent:
 		// a "download paused, connectivity lost" embed has no connectivity to
 		// travel over, so its three attempts and ~7 s of backoff delivered it
@@ -846,12 +1002,22 @@ sessionLoop:
 			// Back online — is the SAME broadcast still live? A broadcast
 			// that ended (or restarted) during the outage finalizes this
 			// job; the monitor picks a new broadcast up as its own job.
-			stillLive, info := o.recheckTwitchBroadcast(parentCtx, variant)
+			stillLive, info, recheckErr := o.recheckTwitchBroadcast(parentCtx, variant)
 			if parentCtx.Err() != nil || userCancelled.Load() {
 				break sessionLoop
 			}
 			if o.conn != nil && !o.conn.IsOnline() {
 				continue recoverLoop // dropped again mid-recheck
+			}
+			if recheckErr != nil {
+				// Online, and still no answer about the broadcast: the
+				// verdict is unknown, so the job keeps its staging and lands
+				// in Error rather than finishing over a capture that may be
+				// half of a broadcast still running.
+				o.logger.Warn("Twitch broadcast could not be rechecked after the outage — keeping staging for recovery",
+					"err", recheckErr, "jobID", jobCtx.Job.ID)
+				unconfirmedEndErr = markEndUnconfirmed(fmt.Errorf("recheck Twitch broadcast after outage: %w", recheckErr))
+				break sessionLoop
 			}
 			if !stillLive || !o.sameTwitchBroadcast(jobCtx.Job.ID, info) {
 				o.logger.Info("Twitch broadcast ended or changed during outage; finalizing captured parts",
@@ -860,15 +1026,35 @@ sessionLoop:
 				break sessionLoop
 			}
 
-			// Variant URLs are short-lived — refresh before resuming.
+			// Variant URLs are short-lived — refresh before resuming. A failed
+			// refresh says nothing about the broadcast (a usher 5xx, a token
+			// blip): retry, then re-verify exactly as the in-loop refresh
+			// does (sweep-2 R2) — only a confirmed end finalizes.
 			var fetchErr error
-			newVariant, fetchErr = refreshBestVariant(parentCtx)
+			for attempt := range postOutageRefreshAttempts {
+				if newVariant, fetchErr = refreshBestVariant(parentCtx); fetchErr == nil || parentCtx.Err() != nil {
+					break
+				}
+				if o.conn != nil && !o.conn.IsOnline() {
+					break
+				}
+				if attempt < postOutageRefreshAttempts-1 {
+					utils.Sleep(parentCtx, time.Duration(attempt+1)*postOutageRetryDelay)
+				}
+			}
 			if fetchErr != nil {
+				if parentCtx.Err() != nil || userCancelled.Load() {
+					break sessionLoop
+				}
 				if o.conn != nil && !o.conn.IsOnline() {
 					continue recoverLoop // dropped again mid-refresh
 				}
 				o.logger.Error("failed to refresh Twitch variants after outage", "err", fetchErr, "jobID", jobCtx.Job.ID)
-				outageFinalize = true
+				if !latchIfUnconfirmed(parentCtx, fmt.Errorf("refresh Twitch variants after outage: %w", fetchErr)) {
+					o.logger.Info("Twitch broadcast confirmed over after the failed post-outage refresh; finalizing captured parts",
+						"jobID", jobCtx.Job.ID)
+					outageFinalize = true
+				}
 				break sessionLoop
 			}
 			break // recovered
@@ -905,17 +1091,22 @@ sessionLoop:
 		// (short outage, playlist still covers our position: zero loss, no
 		// split) and ErrGapDetected (the inner loop splits to a new part).
 		currentVariantURL = newVariant.URL
+		recordVariant(newVariant)
 		videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, -1, false)
 		tracker.AttachVideoDownloader(videoDl)
 		drainQualityCh()
 		if twitchChatDl != nil && !twitchChatDl.IsRunning() {
 			startChat()
+		} else if r, ok := twitchChatDl.(interface{ RetryNow() }); ok {
+			// Still running, so possibly waiting out a reconnect backoff that
+			// the outage stretched to its slow cadence: reconnect now.
+			r.RetryNow()
 		}
 
 		o.logger.Info("Twitch download resumed after connectivity outage",
 			"part", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Resumed",
-			fmt.Sprintf("Connectivity restored, resuming download: %s", jobCtx.Job.Title),
+			fmt.Sprintf("Connectivity restored, resuming download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title)),
 			notifications.TypeDownload, "connectivity_resume", currentQuality, segmentIndex+1,
 			twitchOutageField(pausedAt))
 	}
@@ -937,7 +1128,15 @@ sessionLoop:
 	// chat was Stop()'d, the file on disk is complete through its last flush,
 	// and the job is going to Error with staging intact, so waiting out
 	// chatWaitTimeout buys nothing. A Retry re-runs the whole capture.
-	if unconfirmedEndErr != nil && ctx.Err() == nil {
+	//
+	// Gated on the JOB's context and the user's cancel, not on the session's:
+	// the post-outage exits (a recheck that never answers, a refresh that
+	// keeps failing on a live broadcast) latch from the recovery loop, where
+	// the session context is the one the outage cancelled. Gated on that,
+	// they fell through to the shutdown path and returned "context canceled"
+	// — the row read Error with that text, and lost the end-unconfirmed mark
+	// the automatic mux keys on (D-T4).
+	if unconfirmedEndErr != nil && parentCtx.Err() == nil && !userCancelled.Load() {
 		segmentMuxWg.Wait()
 		if twitchChatDl != nil {
 			if twitchChatDl.IsRunning() {
@@ -983,20 +1182,23 @@ sessionLoop:
 			}
 			return ctx.Err()
 		}
-		// The stream became unrecoverable while connectivity was down — the
-		// broadcast ended/changed (live) or the VOD download was cut off:
-		// finalize everything captured up to the outage.
+		// The broadcast ended or changed while connectivity was down: finalize
+		// everything captured up to the outage. Live only — outageFinalize is
+		// set by the session loop's outage branch, which a VOD never reaches
+		// (its offline cancel is not registered; the engine waits the outage
+		// out instead).
 		o.logger.Warn("Twitch download cut off by connectivity outage, finalizing captured data", "jobID", jobCtx.Job.ID)
 
-		desc := fmt.Sprintf("Connectivity lost during download: %s", jobCtx.Job.Title)
-		if !isVod {
-			desc = fmt.Sprintf("Broadcast ended while connectivity was down: %s", jobCtx.Job.Title)
-		}
+		desc := fmt.Sprintf("Broadcast ended while connectivity was down: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Finalizing — Connectivity Lost",
 			desc, notifications.TypeDownload, "connectivity_split", currentQuality, segmentIndex+1)
 
 		// Stop chat (resume state is preserved by the interrupted-exit path;
-		// the file on disk is complete through the last flush).
+		// the file on disk is complete through the last flush). That exit's
+		// verdict is what resolveChatOutcome records below, so it carries a
+		// batch a part roll spilled (rollUnwritten), and one its own final
+		// flush could not write (spilled there), exactly as the stream-end
+		// drain's does: incomplete, and the cleanup keeps the spill.
 		if twitchChatDl != nil {
 			twitchChatDl.Stop()
 		}
@@ -1008,7 +1210,15 @@ sessionLoop:
 	// able to reach this FFmpeg (owner decision O-E). context.Background()
 	// here used to survive the child's exit and keep writing into a staging
 	// dir the respawned child re-muxes with -y.
-	muxCtx := ctx
+	// The finalize runs on a session of its own: only a user cancel or the
+	// job's own context (shutdown, deletion) can end it, never an offline
+	// transition (finalizing, above) — it needs no network. The fresh
+	// session is what covers the moment between the session loop's exit and
+	// the flag: an offline cancel landing there cancelled the loop's session,
+	// which nothing below uses.
+	finalizing.Store(true)
+	finalCtx, _ := newSession()
+	muxCtx := finalCtx
 	if outageFinalize {
 		muxCtx = o.muxRoot()
 	}
@@ -1043,7 +1253,7 @@ sessionLoop:
 		// path keeps the two-minute cut.
 		var outcome error
 		if isVod {
-			outcome = o.resolveVodChatOutcome(ctx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
+			outcome = o.resolveVodChatOutcome(finalCtx, twitchChatDl, &chatRec, chatDone, jobCtx.Job)
 		} else {
 			outcome = o.resolveChatOutcome(twitchChatDl, &chatRec, chatDone, chatWaitTimeout, chatShutdownGrace)
 		}
@@ -1108,11 +1318,15 @@ sessionLoop:
 // orchestrator's QualityInfo shape — the one place the label formatting and
 // FPS rounding for Twitch variants live.
 func qualityInfoFromVariant(v *twitch.TwitchHLSVariant) QualityInfo {
+	// math.Round, not a bare int conversion: Twitch advertises NTSC rates
+	// (59.94, 29.97), and truncating labelled that content "1080p59" while
+	// the playlist's own variant name (internal/twitch/hls.go) says 1080p60.
+	fps := int(math.Round(v.FPS))
 	return QualityInfo{
 		Width:  v.Width,
 		Height: v.Height,
-		FPS:    int(v.FPS),
-		Label:  FormatQualityLabel(v.Height, int(v.FPS)),
+		FPS:    fps,
+		Label:  FormatQualityLabel(v.Height, fps),
 	}
 }
 
@@ -1125,7 +1339,7 @@ func (o *DownloadOrchestrator) buildTwitchProbeFn(variant *TwitchVariantInfo) fu
 			return nil, err
 		}
 
-		best := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+		best := variant.selectFrom(variants)
 		if best == nil {
 			return nil, fmt.Errorf("no variant found")
 		}
@@ -1165,7 +1379,7 @@ func (o *DownloadOrchestrator) sendTwitchSessionNotification(
 		return
 	}
 	fields := []notifications.Field{
-		{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+		{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 		{Name: "Quality", Value: quality.Label, Inline: true},
 		{Name: "Part", Value: fmt.Sprintf("%d", partNo), Inline: true},
 	}
@@ -1282,38 +1496,93 @@ func (o *DownloadOrchestrator) waitForOnline(ctx context.Context) error {
 
 // recheckTwitchBroadcast fetches stream liveness with brief retries — the
 // first requests after connectivity restoration commonly fail while DNS and
-// routes settle. Returns (false, nil) when the stream is offline or info
-// stays unreachable through the retry budget.
-func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, variant *TwitchVariantInfo) (bool, *twitch.TwitchStreamInfo) {
+// routes settle. err is non-nil when no attempt got an answer (or ctx ended):
+// the verdict is UNKNOWN, which the caller must not read as "offline" — that
+// reading finalized a still-live broadcast as Finished, and the monitor then
+// never re-archived the rest of it. With no check wired at all the answer is
+// a plain "not live", as latchIfUnconfirmed treats it.
+func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, variant *TwitchVariantInfo) (live bool, info *twitch.TwitchStreamInfo, err error) {
 	const attempts = 4
+	var lastErr error
 	for i := range attempts {
 		if ctx.Err() != nil {
-			return false, nil
+			return false, nil, ctx.Err()
 		}
 		switch {
 		case variant.RecheckStreamFn != nil:
 			info, err := variant.RecheckStreamFn(ctx)
 			if err == nil {
-				return info != nil && info.IsLive, info
+				return info != nil && info.IsLive, info, nil
 			}
+			lastErr = err
 			o.logger.Debug("post-outage stream recheck failed, retrying", "attempt", i+1, "err", err)
 		case variant.CheckStreamFn != nil:
 			live, err := variant.CheckStreamFn(ctx)
 			if err == nil {
-				return live, nil
+				return live, nil, nil
 			}
+			lastErr = err
 			o.logger.Debug("post-outage stream check failed, retrying", "attempt", i+1, "err", err)
 		default:
-			return false, nil
+			return false, nil, nil
 		}
 		// No sleep after the final attempt — there is no retry left to wait
-		// for, and the caller is deciding whether to finalize the job.
+		// for, and the caller is deciding what to do with the job.
 		if i < attempts-1 {
-			utils.Sleep(ctx, time.Duration(3*(i+1))*time.Second)
+			utils.Sleep(ctx, time.Duration(i+1)*postOutageRetryDelay)
 		}
 	}
-	return false, nil
+	return false, nil, lastErr
 }
+
+// retryVariantRefresh retries a master-playlist refresh that failed inside
+// the download loop with err, pausing longer before each attempt
+// (liveRefreshAttempts tries in all, counting the one that already failed),
+// and returns the last error when none succeeds. It gives up at once when
+// ctx ends — an outage or a shutdown is the session loop's to handle — and
+// when ended (nil-safe) confirms the broadcast over before a pause: a
+// variant list that is gone because the stream ended is the commonest way
+// here, and riding out the whole schedule only held an ended capture in
+// Downloading for another ~100 s. confirmedOver reports that exit.
+func (o *DownloadOrchestrator) retryVariantRefresh(ctx context.Context,
+	refresh func(context.Context) (*twitch.TwitchHLSVariant, error), err error,
+	ended func(context.Context) bool, jobID string) (best *twitch.TwitchHLSVariant, confirmedOver bool, _ error) {
+	for attempt := 1; attempt < liveRefreshAttempts; attempt++ {
+		if ended != nil && ended(ctx) {
+			return nil, true, err
+		}
+		o.logger.Warn("Twitch variant refresh failed, retrying",
+			"attempt", attempt, "of", liveRefreshAttempts, "err", err, "jobID", jobID)
+		if sleepErr := utils.Sleep(ctx, time.Duration(attempt)*liveRefreshRetryDelay); sleepErr != nil {
+			return nil, false, sleepErr
+		}
+		if best, err = refresh(ctx); err == nil {
+			o.logger.Info("Twitch variant refresh recovered", "attempt", attempt+1, "jobID", jobID)
+			return best, false, nil
+		}
+		if ctx.Err() != nil {
+			return nil, false, err
+		}
+	}
+	return nil, false, err
+}
+
+// liveRefreshAttempts bounds retryVariantRefresh: with liveRefreshRetryDelay
+// steps of 10 s the last attempt lands about 100 s after the first failure.
+const liveRefreshAttempts = 5
+
+// liveRefreshRetryDelay is retryVariantRefresh's backoff step: the n-th retry
+// waits n steps. A variable so tests need not sleep it out.
+var liveRefreshRetryDelay = 10 * time.Second
+
+// postOutageRefreshAttempts is how many times the recovery tries the master
+// playlist once the broadcast is confirmed live again — the same settling
+// window recheckTwitchBroadcast gives the liveness check.
+const postOutageRefreshAttempts = 3
+
+// postOutageRetryDelay is the backoff step of both post-outage retry loops:
+// the n-th retry waits n steps. A variable so tests need not sleep it out.
+var postOutageRetryDelay = 3 * time.Second
 
 // sameTwitchBroadcast reports whether info refers to the broadcast this job
 // has been recording, by the shared sameBroadcastStart identity rule against

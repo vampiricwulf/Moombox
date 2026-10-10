@@ -8,15 +8,73 @@ package database
 // affected cells) can use Changes; those that only care about the
 // full job can ignore it.
 //
-// This is the foundation for the DECISIONS #21 event-based subscriber
-// migration. Today only UpdateJobFields emits JobChange events; future
-// work will extend AddJob/DeleteJob/AddTrim/DeleteTrim to emit
-// JobAdded/JobDeleted/TrimsChanged events through a similar API,
-// letting subscribers apply diffs locally instead of re-fetching the
-// full list every time.
+// This is the foundation of the DECISIONS #21 event-based subscriber
+// model: UpdateJobFields emits JobChange, and AddJob / DeleteJob /
+// AddTrim / DeleteTrim emit the targeted JobAdded / JobDeleted /
+// TrimsChanged events below, so subscribers apply diffs locally instead
+// of re-fetching the full list. Only the two bulk writers,
+// BatchSetWatched and DeleteJobsAndHistoryForChannel, still dispatch a
+// full-list OnJobsChange.
+//
+// Job is the row GetJob returns — gaps, trims and segments included — for
+// every change but a progress tick (IsProgressOnlyChange), whose Job carries
+// the jobs row alone. Both UIs replace the row they hold with Job, and the
+// read-back once skipped the child rows for every write: a status
+// transition, a rename or a Mark Watched replaced a row that had them with
+// one that did not (the fields are omitempty, so the JSON lost the keys),
+// and the details lost their Parts, Trims and Gaps, the trimmer its parts,
+// until a reload. A tick moves no child row, and it is the ~60 Hz path, so
+// it does not pay three more queries under the write lock; nothing replaces
+// a row with a tick's Job — the dashboard merges the slim job_progress frame
+// built from it, and the TUI reads it into its progress store.
 type JobChange struct {
 	Job     *Job
 	Changes []string // schema column names from fieldToColumn that were written
+}
+
+// progressColumns are the schema columns a download's ~60 Hz progress tick
+// writes (internal/worker/progress.go ProgressTracker.maybeUpdate and the two
+// activity writers) and that nothing else writes alone. A JobChange whose
+// every column is in this set carries no state transition, so the dashboard
+// is sent the slim job_progress frame instead of the whole row
+// (cmd/moombox/job_progress.go), and the read-back leaves the child rows out.
+//
+// total_video_seq / total_audio_seq are here although O-O's field list does not
+// name them: maybeUpdate writes them on every tick that the stream has
+// reported, so omitting them would classify every real tick as a transition and
+// leave the whole change inert.
+//
+// "status" is deliberately ABSENT: a status change re-sorts the list and can
+// cross the archive boundary, which is what job_update is for.
+var progressColumns = map[string]bool{
+	"progress":            true,
+	"percent":             true,
+	"eta":                 true,
+	"speed":               true,
+	"last_video_seq":      true,
+	"total_video_seq":     true,
+	"last_audio_seq":      true,
+	"total_audio_seq":     true,
+	"total_chat_messages": true,
+}
+
+// IsProgressOnlyChange reports whether every column in changes is a progress
+// column — whether a JobChange is a progress tick.
+//
+// An empty (or nil) set is NOT progress-only. UpdateJobFields never produces
+// one for a real write — it refuses a call with no known field and strips only
+// updated_at from the list — so an empty set means "a change we cannot
+// classify", and the safe answer for that is the full row.
+func IsProgressOnlyChange(changes []string) bool {
+	if len(changes) == 0 {
+		return false
+	}
+	for _, col := range changes {
+		if !progressColumns[col] {
+			return false
+		}
+	}
+	return true
 }
 
 // JobAdded is the event payload delivered to OnJobAdded subscribers when
@@ -24,10 +82,7 @@ type JobChange struct {
 // caller passed in (post-write — CreatedAt / UpdatedAt populated).
 //
 // Second event type in the DECISIONS #21 lifecycle-event set, paired with
-// AddJob. Coexists with OnJobsChange during migration: AddJob fires both
-// so consumers can move at their own pace. Once every consumer has
-// migrated, AddJob will stop firing OnJobsChange and the full-list
-// dispatch on insert goes away.
+// AddJob, which fires only this (no OnJobsChange).
 type JobAdded struct {
 	Job *Job
 }
@@ -41,8 +96,8 @@ type JobAdded struct {
 // payload variant if a future consumer needs it.
 //
 // Third event type in the DECISIONS #21 lifecycle-event set, paired with
-// DeleteJob. Coexists with OnJobsChange during migration on the same
-// terms as JobAdded.
+// DeleteJob, which fires only this (no OnJobsChange). UpdateJobFields also
+// fires it when its read-back finds the row gone.
 type JobDeleted struct {
 	JobID string
 }
@@ -55,10 +110,10 @@ type JobDeleted struct {
 // re-renders) just need the ID.
 //
 // Fourth event type in the DECISIONS #21 lifecycle-event set, paired
-// with AddTrim and DeleteTrim. Coexists with OnJobsChange during
-// migration. Unlike JobAdded/JobDeleted, the parent job's lifecycle is
-// untouched — only its trim list changed; subscribers maintaining a
-// jobs-only view can ignore TrimsChanged events.
+// with AddTrim and DeleteTrim, which fire only this (no OnJobsChange).
+// Unlike JobAdded/JobDeleted, the parent job's lifecycle is untouched —
+// only its trim list changed; subscribers maintaining a jobs-only view
+// can ignore TrimsChanged events.
 type TrimsChanged struct {
 	JobID string
 }
@@ -220,12 +275,7 @@ func (db *Database) OnJobChange(fn func(*JobChange)) func() {
 // existed). Returns an unsubscribe function that removes the
 // callback.
 //
-// Coexists with OnJobsChange during the DECISIONS #21 migration —
-// AddJob currently fires both so consumers can pick the granularity
-// that fits. Subscribers that only need to know "a new job exists"
-// should prefer OnJobAdded; those that maintain a sorted full-list
-// view stay on OnJobsChange until further lifecycle events
-// (JobDeleted, TrimsChanged) ship.
+// AddJob fires only this event; OnJobsChange does not see inserts.
 func (db *Database) OnJobAdded(fn func(*JobAdded)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -251,12 +301,9 @@ func (db *Database) OnJobAdded(fn func(*JobAdded)) func() {
 // notify about). Returns an unsubscribe function that removes the
 // callback.
 //
-// Coexists with OnJobsChange during the DECISIONS #21 migration —
-// DeleteJob currently fires both so consumers can pick the granularity
-// that fits. Subscribers that only need to remove an entry from a local
-// map by ID should prefer OnJobDeleted; those maintaining a sorted
-// full-list view stay on OnJobsChange until further lifecycle events
-// (TrimsChanged) ship.
+// DeleteJob fires only this event. A bulk channel prune
+// (DeleteJobsAndHistoryForChannel) does NOT fire it per job; it
+// dispatches one OnJobsChange instead.
 func (db *Database) OnJobDeleted(fn func(*JobDeleted)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -281,11 +328,8 @@ func (db *Database) OnJobDeleted(fn func(*JobDeleted)) func() {
 // (does NOT fire when DeleteTrim's lookup of the parent job_id finds
 // no matching trim row). Returns an unsubscribe function.
 //
-// Coexists with OnJobsChange during the DECISIONS #21 migration —
-// AddTrim/DeleteTrim currently fire both. Subscribers that only render
-// trim information for a known job (e.g. TUI detail panel) should
-// prefer OnTrimsChanged so they don't need to re-render unrelated
-// jobs on every trim mutation.
+// AddTrim/DeleteTrim fire only this event; OnJobsChange does not see
+// trim mutations.
 func (db *Database) OnTrimsChanged(fn func(*TrimsChanged)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -305,8 +349,12 @@ func (db *Database) OnTrimsChanged(fn func(*TrimsChanged)) func() {
 	}
 }
 
-// OnJobsChange registers a callback for job add/delete events.
-// Returns an unsubscribe function that removes the callback.
+// OnJobsChange registers a callback for full-list refreshes. Only the bulk
+// writers dispatch it — BatchSetWatched and DeleteJobsAndHistoryForChannel,
+// where a per-job event would fan out into hundreds of callbacks. Single-row
+// inserts, deletes and trim changes arrive through OnJobAdded, OnJobDeleted
+// and OnTrimsChanged instead. Returns an unsubscribe function that removes
+// the callback.
 func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
@@ -380,24 +428,25 @@ func (db *Database) notifyJobUpdate(job *Job, changes []string) {
 // the dispatch step entirely — also saves the SELECT cost when no one's
 // listening) and when the SELECT itself errors. An empty DB with
 // subscribers returns an explicit empty slice, NOT nil — subscribers
-// need to know "the list is now empty" (e.g. when DeleteJob removes the
-// last row) so they can update their views. dispatchJobsChange's
+// need to know "the list is now empty" (e.g. when
+// DeleteJobsAndHistoryForChannel removes the last rows) so they can update
+// their views. dispatchJobsChange's
 // nil-check then correctly distinguishes "skip" (nil) from "dispatch
 // the empty list" ([]*Job{}).
 // Audit reports/database.md C2.
-func (db *Database) snapshotJobsChange() []*Job {
+func (db *Database) snapshotJobsChange() jobsSnapshot {
 	db.subMu.RLock()
 	n := len(db.onJobsChange)
 	db.subMu.RUnlock()
 	if n == 0 {
-		return nil
+		return jobsSnapshot{}
 	}
 	jobs, err := db.getAllJobsUnlocked()
 	if err != nil {
 		if db.logger != nil {
 			db.logger.Error("snapshotJobsChange: failed to read jobs", "err", err)
 		}
-		return nil
+		return jobsSnapshot{}
 	}
 	if jobs == nil {
 		// getAllJobsUnlocked returns a nil slice when no rows match —
@@ -405,7 +454,17 @@ func (db *Database) snapshotJobsChange() []*Job {
 		// caller's dispatchJobsChange fires with the empty list.
 		jobs = []*Job{}
 	}
-	return jobs
+	// Numbered here, under db.mu (every caller holds it), so the order of
+	// the numbers is the order the snapshots were read in.
+	db.jobsChangeSeq++
+	return jobsSnapshot{jobs: jobs, seq: db.jobsChangeSeq}
+}
+
+// jobsSnapshot is one OnJobsChange full list and its place in write order.
+// A zero value (nil jobs) means "nothing to dispatch".
+type jobsSnapshot struct {
+	jobs []*Job
+	seq  uint64
 }
 
 // dispatchJobsChange fans out the OnJobsChange callbacks. Caller MUST
@@ -415,7 +474,13 @@ func (db *Database) snapshotJobsChange() []*Job {
 // Per-callback invocations run sequentially in a fresh goroutine so the
 // caller's write path returns immediately. A top-level recover guards
 // the goroutine itself; safeCallJobsChange recovers per-callback panics.
-func (db *Database) dispatchJobsChange(jobs []*Job) {
+//
+// Those goroutines are not ordered, so each one checks its snapshot's
+// sequence number under jobsChangeMu and stands down if a newer snapshot has
+// already gone out: subscribers replace their whole job list from this, and
+// an older one arriving last resurrected deleted jobs and reverted toggles.
+func (db *Database) dispatchJobsChange(snap jobsSnapshot) {
+	jobs := snap.jobs
 	if jobs == nil {
 		return
 	}
@@ -437,6 +502,12 @@ func (db *Database) dispatchJobsChange(jobs []*Job) {
 				db.logger.Error("dispatchJobsChange goroutine panic", "panic", r)
 			}
 		}()
+		db.jobsChangeMu.Lock()
+		defer db.jobsChangeMu.Unlock()
+		if snap.seq <= db.jobsChangeDelivered {
+			return // a newer full list has already been delivered
+		}
+		db.jobsChangeDelivered = snap.seq
 		for _, fn := range subs {
 			db.safeCallJobsChange(fn, jobs)
 		}

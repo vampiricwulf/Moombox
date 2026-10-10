@@ -124,13 +124,16 @@ var launcherWarnf = func(format string, args ...any) {
 // cleanupOrphans removes any stale `~` files left over from a prior
 // session. Runs once at launcher startup, before the supervised child
 // is spawned. The .exe~ may exist if a prior launcher exited before
-// the deferred ping/del fired (system shutdown during the 11s window,
+// the deferred ping/del fired (system shutdown during deferDeleteOldLauncher's ~4s wait,
 // antivirus blocked the cmd, etc.). Now-unlocked, removable.
 //
 // EXCEPT while a failed-update marker is present: then the ~ file is the
 // deliberately-preserved rollback binary the marker's recovery
 // instructions point at — a user who simply relaunches after a failed
-// update must not have the launcher destroy their way back.
+// update must not have the launcher destroy their way back. The marker does
+// not stand forever: the boot of a LATER update that landed deletes it
+// (clearSupersededFailureMarker), after which `~` is just the image that
+// update replaced and this sweep takes it again.
 func cleanupOrphans(exePath string) {
 	for _, marker := range []string{exePath + ".update-failed", exePath + ".update-broken"} {
 		if _, err := os.Stat(marker); err == nil {
@@ -145,13 +148,29 @@ func cleanupOrphans(exePath string) {
 // rename the just-superseded .old to ~ to free the .old name for the
 // next update. The ~ file is then deferred-cleaned on launcher exit.
 //
-// Returns whether this restart followed a binary update (.old existed) —
-// config-change restarts never create .old, so this is the launcher's
-// only signal that the NEXT child is the first boot of a fresh update.
-func handleUpdateRestart(exePath string) bool {
+// Returns that update's rollback artifact — the file the binary it replaced
+// now survives as — or "" when no .old existed: config-change restarts never
+// create .old, so this is the launcher's only signal that the NEXT child is
+// the first boot of a fresh update. The artifact is
+//
+//   - `~` when the rename succeeded: every first update of a launcher lifetime,
+//     and therefore the ordinary path.
+//   - `.old` when it failed (the ~ name was still held by this launcher's
+//     mapped image, which is the second update of one launcher lifetime). It
+//     is then the version that was running a moment ago; the ~ file is the
+//     one BEFORE it, so restoring ~ would roll back two versions and the
+//     restored child's CleanupOldBinary would delete the real previous binary
+//     on its way up.
+//
+// The launcher records the answer for the boot it arms and judges that boot
+// by it, never by which names are on disk when it exits: once this update's
+// first boot reaches the milestone and its CleanupOldBinary sweeps that
+// .old, the ~ file is still there, and it stands for nothing this update can
+// roll back to.
+func handleUpdateRestart(exePath string) string {
 	oldPath := exePath + ".old"
 	if _, statErr := os.Stat(oldPath); statErr != nil {
-		return false
+		return ""
 	}
 	if err := os.Rename(oldPath, exePath+"~"); err != nil {
 		// REPORTED, not discarded. A stale ~ file on its own does NOT fail
@@ -162,47 +181,25 @@ func handleUpdateRestart(exePath string) bool {
 		// launcher lifetime that file is this launcher's own mapped image,
 		// which denies delete-sharing, and which the child's CleanupOldBinary
 		// could not delete for the same reason. The .old that then stays behind
-		// is the version that was running a moment ago, and
-		// rollbackArtifactPath prefers it for exactly that reason. This line is
-		// how the operator learns the name shuffle did not happen.
+		// is the version that was running a moment ago, and it is this
+		// update's artifact for exactly that reason. This line is how the
+		// operator learns the name shuffle did not happen.
 		launcherWarnf("warning: could not rename %s to %s (%v) — the previous binary stays at .old and remains the rollback target\n",
 			oldPath, exePath+"~", err)
-	}
-	// True either way: a .old existed, so this restart follows a BINARY update
-	// and the launcher's one-shot post-update failure window must arm
-	// (launcher.go firstAfterUpdate). A failed rename changes which file is the
-	// artifact, never whether there was an update.
-	return true
-}
-
-// rollbackArtifactPath is where the previous version's binary survives after an
-// update on this platform, in preference order:
-//
-//   - `.old`, when handleUpdateRestart could NOT rename it away (the ~ name was
-//     still held by this launcher's mapped image). It is then the version that
-//     was running a moment ago; the ~ file is the one BEFORE it, so restoring ~
-//     would roll back two versions and the restored child's CleanupOldBinary
-//     would delete the real previous binary on its way up.
-//   - `~` otherwise — the successful-rename case, i.e. every first update of a
-//     launcher lifetime and therefore the ordinary path. Also what a caller
-//     gets when neither file exists, so preserveUpdateRollback's written
-//     instructions keep naming the ~ file exactly as they always have.
-//
-// Referenced in recovery instructions when the first post-update boot fails.
-func rollbackArtifactPath(exePath string) string {
-	oldPath := exePath + ".old"
-	if _, err := os.Stat(oldPath); err == nil {
+		// Still an update: a .old existed, so the launcher's one-shot
+		// post-update failure window must arm (launcher.go postUpdateBoot).
+		// A failed rename changes which file is the artifact, never whether
+		// there was an update.
 		return oldPath
 	}
 	return exePath + "~"
 }
 
-// setSysProcAttr applies Windows-only CreationFlags so the spawned
-// process doesn't open a visible console window. Used for any
-// fire-and-forget background spawn.
-func setSysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
-}
+// keepAsideByLink always declines on Windows, where attemptAutoRollback moves
+// the broken binary aside instead: renaming the previous one over it needs
+// delete access to it, which a scanner still holding the fresh download
+// denies, and only the move aside can be retried around that.
+func keepAsideByLink(exePath, failedPath string) bool { return false }
 
 // deferDeleteOldLauncher schedules deletion of the .exe~ file via a
 // detached cmd /c invocation that uses ping as a sleep mechanism,
@@ -211,16 +208,8 @@ func setSysProcAttr(cmd *exec.Cmd) {
 // 4s is generous headroom). The launcher's startup cleanupOrphans
 // is the safety net if this somehow doesn't fire.
 //
-// Args are passed variadically — NOT joined into a single string —
-// because Go's syscall.EscapeArg targets CRT-style parsing (compatible
-// with CommandLineToArgvW), which disagrees with cmd.exe on quotes.
-// Joining `... & del /f /q "%s" ...` into one arg makes Go wrap the
-// whole string in quotes and escape the inner literal " as \", which
-// cmd then mis-parses (cmd uses "" for embedded quotes, not \"). del
-// receives a mangled path and >nul 2>nul swallows the failure. With
-// variadic args, tokens like `>nul`, `&`, `2>nul` go through unquoted
-// as bare cmd operators, and oldPath only gets quoted by Go if it
-// actually contains spaces — both cases cmd parses correctly.
+// The command line is fixed text (deferDeleteCmdLine) and the path reaches
+// del through an environment variable — see deferDeleteCommand.
 //
 // History: tried timeout.exe earlier — it errors out unconditionally
 // when stdin is redirected (per Microsoft docs), which it always is
@@ -247,9 +236,40 @@ func deferDeleteOldLauncher(exePath string) {
 	if _, err := os.Stat(oldPath); err != nil {
 		return // no .exe~ file to clean up
 	}
+	cleanup := deferDeleteCommand(oldPath)
+	cleanup.Start() // fire-and-forget; we exit shortly anyway
+}
+
+// oldLauncherEnv names the environment variable that carries the old
+// launcher's path to the deferred del.
+const oldLauncherEnv = "MOOMBOX_OLD_LAUNCHER"
+
+// deferDeleteCmdLine is the whole command line the deferred cleanup runs.
+// The path is never part of it: cmd expands the variable inside the quotes,
+// does not expand the value a second time, and reads every character of it
+// literally there — a Windows path cannot contain '"'.
+const deferDeleteCmdLine = `cmd /C ping 127.0.0.1 -n 5 >nul & del /f /q "%` + oldLauncherEnv + `%" >nul 2>nul`
+
+// deferDeleteCommand builds the deferred cleanup for oldPath.
+//
+// The path used to be one of cmd's arguments, and Go quotes an argument only
+// when it contains a space, a tab or a quote. An install directory like
+// D:\Tools&Apps reached cmd bare, cmd split the line at its '&', and
+// `del /f /q D:\Tools` — del on a directory deletes every file in it, /q
+// suppresses the prompt and >nul 2>nul the output — emptied the parent
+// directory without a word. Quoting the path in the command line would still
+// leave a '%NAME%' inside it to cmd's expansion; the variable leaves nothing
+// of the path for cmd to parse. CmdLine is set because Go escapes an inner
+// '"' as \", which cmd does not read as a quote; Windows ignores Args once
+// CmdLine is set.
+func deferDeleteCommand(oldPath string) *exec.Cmd {
 	cleanup := exec.Command("cmd", "/C",
 		"ping", "127.0.0.1", "-n", "5", ">nul", "&",
-		"del", "/f", "/q", oldPath, ">nul", "2>nul")
-	setSysProcAttr(cleanup)
-	cleanup.Start() // fire-and-forget; we exit shortly anyway
+		"del", "/f", "/q", "%"+oldLauncherEnv+"%", ">nul", "2>nul")
+	cleanup.Env = append(os.Environ(), oldLauncherEnv+"="+oldPath)
+	cleanup.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: createNoWindow,
+		CmdLine:       deferDeleteCmdLine,
+	}
+	return cleanup
 }

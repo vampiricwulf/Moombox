@@ -5,20 +5,21 @@
 // process, pipes JSON-RPC requests to it via stdin/stdout, and consumes
 // PO tokens that pass Google's BotGuard timing fingerprint check (which
 // our pure-goja path can't satisfy because the interpreter runs ~100x
-// faster than V8 -- see docs/investigations/botguard-option-2-results.md).
+// faster than V8 -- see "Why a Sidecar" in docs/spec/platform-services.md).
 //
 // Lifecycle:
 //
 //	s := sidecar.New(sidecar.Config{Logger: log})
-//	if err := s.Start(ctx); err != nil { /* fall back to goja */ }
+//	if err := s.Start(ctx); err != nil { /* outage: the supervisor retries */ }
 //	defer s.Stop()
 //
 //	token, err := s.GeneratePoToken(ctx, contentBinding)
 //
 // Crash safety: child is pinned to a Windows Job Object so it dies when
-// Moombox does. Internal readPump goroutine watches stdout for EOF and
-// marks the sidecar unhealthy on parent crash so callers can short-circuit
-// to the fallback path.
+// Moombox does. In the other direction, the readPump goroutine watches
+// stdout for EOF and marks the sidecar unhealthy when the CHILD dies (a
+// crash, a V8 OOM-abort) so callers short-circuit at once and the
+// supervisor brings it back.
 package sidecar
 
 import (
@@ -35,6 +36,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // Logger is the structured logging interface Moombox uses everywhere.
@@ -70,11 +72,13 @@ type Config struct {
 	ExposeGC       bool
 	// OnUnhealthy, when non-nil, is called ONCE each time the sidecar goes
 	// from healthy to unhealthy for a reason other than Stop — stdout EOF
-	// after a crash or a V8 OOM-abort, or a readPump panic. It runs ON THE
-	// readPump GOROUTINE with the health flag already flipped and the pending
-	// requests already drained, so it MUST NOT block: the Supervisor wired to
-	// it does a non-blocking channel send and nothing else. A panic in the
-	// callback is recovered and logged rather than taking the pump down.
+	// after a crash or a V8 OOM-abort, a readPump panic, or a stdin write the
+	// child has not drained within RequestTimeout. It runs ON THE GOROUTINE
+	// THAT NOTICED (readPump, or the stall watchdog's timer) with the health
+	// flag already flipped and the pending requests already drained, so it
+	// MUST NOT block: the Supervisor wired to it does a non-blocking channel
+	// send and nothing else. A panic in the callback is recovered and logged
+	// rather than taking that goroutine down.
 	OnUnhealthy func(reason string)
 	Logger      Logger
 }
@@ -95,8 +99,18 @@ type Sidecar struct {
 	cacheDir string
 
 	// Stdin write serialization. Goroutines calling GeneratePoToken in
-	// parallel must not interleave their JSON lines on the wire.
-	writeMu sync.Mutex
+	// parallel must not interleave their JSON lines on the wire. A one-slot
+	// channel rather than a sync.Mutex so that waiting for it can be given
+	// up when the waiter's context ends: the holder may be a write the child
+	// has stopped draining (see writeRequest), and a mutex would queue every
+	// later call — Stop's own shutdown RPC included — behind it for as long
+	// as the kernel keeps that write blocked.
+	writeSem chan struct{}
+	// childGen counts the children startLocked has spawned. A write's stall
+	// watchdog records the generation it was armed against and condemns no
+	// other: a callback delayed across a restart must not mark the
+	// replacement child unhealthy for the old child's wedge.
+	childGen atomic.Uint64
 
 	// Request multiplexing.
 	nextReqID atomic.Uint64
@@ -115,6 +129,20 @@ type Sidecar struct {
 	readyOnce sync.Once
 	readyCh   chan struct{}
 	readyErr  error // set inside readyOnce.Do before close(readyCh)
+
+	// stderrTail keeps the child's last few stderr lines (stderrPump), so a
+	// child that dies before ready can say why: Node's own fatal errors —
+	// a module that will not load, a missing shared library — are
+	// unprefixed and logged at Debug, and "sidecar exited before ready" was
+	// all the operator was told. Reset at every start.
+	stderrMu   sync.Mutex
+	stderrTail []string
+	// reextracted latches the one re-extraction a child that died before
+	// ready earns: a tree that is broken under a valid stamp (a payload cut
+	// short by a crash) is never re-extracted otherwise, while one that
+	// still fails after a fresh extraction is the environment, not the
+	// files, and is not rewritten again every retry.
+	reextracted atomic.Bool
 
 	// Lifecycle. stopping signals to readPump/stderrPump that a teardown is
 	// under way and they should exit silently rather than mark unhealthy.
@@ -176,8 +204,9 @@ func New(cfg Config) *Sidecar {
 		cfg.RequestTimeout = 90 * time.Second
 	}
 	s := &Sidecar{
-		cfg:     cfg,
-		pending: make(map[uint64]chan rpcResponse),
+		cfg:      cfg,
+		pending:  make(map[uint64]chan rpcResponse),
+		writeSem: make(chan struct{}, 1),
 	}
 	s.start = s.startLocked
 	return s
@@ -187,8 +216,9 @@ func New(cfg Config) *Sidecar {
 // subprocess pinned to a Windows Job Object, and waits for the sidecar
 // to emit a `ready` notification on stdout signaling that server.js has
 // finished its synchronous init (jsdom module load + JSDOM construction).
-// Returns an error if extraction, launch, or the ready handshake fails;
-// the caller should fall back to the goja path on error.
+// Returns an error if extraction, launch, or the ready handshake fails.
+// A failed start is an outage like a crash: PotProvider answers mints with
+// errSidecarDown and the Supervisor retries on its ladder.
 func (s *Sidecar) Start(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
@@ -211,6 +241,13 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	if s.cmd != nil {
 		return errors.New("sidecar: already started")
 	}
+	// A start whose context has already ended is over before it begins. It
+	// used to extract, spawn Node and only then see the cancelled handshake,
+	// spending the 2 s teardown grace of a quitting process's shutdown budget
+	// on a child nobody would use.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	cacheDir, err := s.resolveCacheDir()
 	if err != nil {
@@ -220,6 +257,9 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 
 	if err := extractIfNeeded(cacheDir); err != nil {
 		return fmt.Errorf("extract sidecar payload: %w", err)
+	}
+	if err := ctx.Err(); err != nil { // extraction can take seconds
+		return err
 	}
 
 	nodeExe := filepath.Join(cacheDir, nodeBinaryName())
@@ -261,19 +301,23 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 		return fmt.Errorf("start node: %w", err)
 	}
 
-	// Under writeMu, mirroring Restart's own reset of the same fields:
+	// Under the write slot, mirroring Restart's own reset of the same fields:
 	// writeRequest reads s.stdin under that lock, and a caller stalled
 	// between its healthy.Load() and writeRequest can span the whole restart
 	// window. The race detector cannot see it (the stall has to cross the
 	// ladder's 5 s floor), which is exactly why the lock is the fix rather
-	// than an argument that it cannot happen.
-	s.writeMu.Lock()
+	// than an argument that it cannot happen. Uncancellable on purpose: the
+	// only holder that can keep us waiting is a write stranded on the child
+	// teardownLocked has just killed, and that returns the moment the kernel
+	// reports the broken pipe.
+	s.writeSem <- struct{}{}
 	s.cmd = cmd
 	s.stdin = stdin
 	s.stdout = stdout
 	s.stderr = stderr
 	s.readyCh = make(chan struct{})
-	s.writeMu.Unlock()
+	s.childGen.Add(1)
+	<-s.writeSem
 
 	// Pin the child to a Job Object so it dies when Moombox dies. On
 	// Linux processJob is a no-op — PR_SET_PDEATHSIG (configured before
@@ -288,10 +332,13 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 			job = nil
 		}
 	}
-	s.writeMu.Lock()
+	s.writeSem <- struct{}{}
 	s.job = job
-	s.writeMu.Unlock()
+	<-s.writeSem
 
+	s.stderrMu.Lock()
+	s.stderrTail = nil
+	s.stderrMu.Unlock()
 	s.pumpsDone.Add(2)
 	go s.readPump()
 	go s.stderrPump()
@@ -308,12 +355,18 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	select {
 	case <-s.readyCh:
 		if s.readyErr != nil {
-			_ = s.teardownLocked()
-			return fmt.Errorf("ready: %w", s.readyErr)
+			_ = s.teardownLocked() // joins the pumps: the stderr tail is complete
+			if !s.reextracted.Swap(true) {
+				if err := os.Remove(filepath.Join(cacheDir, "version.txt")); err == nil {
+					s.cfg.Logger.Warn("sidecar exited before ready; its extracted files will be rewritten on the next start",
+						"cacheDir", cacheDir)
+				}
+			}
+			return fmt.Errorf("ready: %w%s", s.readyErr, s.stderrTailSuffix())
 		}
 	case <-readyCtx.Done():
 		_ = s.teardownLocked()
-		return fmt.Errorf("ready: %w", readyCtx.Err())
+		return fmt.Errorf("ready: %w%s", readyCtx.Err(), s.stderrTailSuffix())
 	}
 
 	s.healthy.Store(true)
@@ -503,7 +556,9 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	// pumps — so afterwards nothing else touches the fields reset below.
 	_ = s.teardownLocked()
 
-	s.writeMu.Lock()
+	// Uncancellable, like startLocked's: teardownLocked killed the child, so
+	// a writer still holding the slot is about to get its broken pipe back.
+	s.writeSem <- struct{}{}
 	s.cmd = nil
 	s.stdin = nil
 	s.stdout = nil
@@ -514,7 +569,7 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 	s.readyErr = nil
 	s.stopping.Store(false)
 	s.healthy.Store(false)
-	s.writeMu.Unlock()
+	<-s.writeSem
 
 	s.pendingMu.Lock()
 	s.pending = make(map[uint64]chan rpcResponse)
@@ -543,8 +598,9 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 }
 
 // IsHealthy reports whether the sidecar is currently usable. False after
-// Start fails, after Stop is called, or after the readPump observes
-// stdout EOF (parent crash recovery).
+// Start fails, after Stop is called, after readPump observes stdout EOF (the
+// child died), or after a stdin write stalled past RequestTimeout (the child
+// stopped reading — see writeRequest).
 func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
 
 // CacheDir returns the directory where the sidecar's Node binary and JS
@@ -699,8 +755,10 @@ func (s *Sidecar) TriggerGC(ctx context.Context) (TriggerGCResult, error) {
 	return result, nil
 }
 
-// Stats holds the sidecar's internal counters. Useful for diagnostics
-// surfaced in /api/pot.
+// Stats holds the sidecar's internal counters as getStats reports them.
+// Nothing in production reads them today — the tests exercise the
+// round-trip — and CachedSessions is always 0: server.js keeps no session
+// cache (that layer lives in PotProvider) and only ever resets the counter.
 type Stats struct {
 	CachedMinters  int `json:"cachedMinters"`
 	CachedSessions int `json:"cachedSessions"`
@@ -837,7 +895,7 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 		s.pendingMu.Unlock()
 	}()
 
-	if err := s.writeRequest(rpcRequest{ID: id, Method: method, Params: params}); err != nil {
+	if err := s.writeRequest(ctx, rpcRequest{ID: id, Method: method, Params: params}); err != nil {
 		return err
 	}
 
@@ -862,25 +920,96 @@ func (s *Sidecar) callRaw(ctx context.Context, method string, params map[string]
 	return s.call(ctx, method, params, nil)
 }
 
-func (s *Sidecar) writeRequest(req rpcRequest) error {
+// lockWrite takes the stdin write slot, or gives up when ctx ends first. The
+// field resets in startLocked and Restart take the slot directly instead,
+// because waiting out a stranded write is their point: they run after
+// teardownLocked has killed the child that was holding it up.
+func (s *Sidecar) lockWrite(ctx context.Context) error {
+	select {
+	case s.writeSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// unlockWrite releases the slot lockWrite took.
+func (s *Sidecar) unlockWrite() { <-s.writeSem }
+
+// writeRequest serialises one request line onto the child's stdin. ctx bounds
+// BOTH the wait for the write slot and the write itself. A child that has
+// stopped reading stdin — V8 wedged, or a solveCipher preprocess running
+// synchronously on its event loop — lets the pipe fill, and a SolveCipher
+// line carrying the player JS is ~3 MB, so the Write blocks until the child
+// drains it or dies. The write therefore runs on its own goroutine, which
+// keeps the slot until the kernel lets the Write return, while the caller
+// is free to leave at ctx.Done(). Leaving does not cancel the line: it still
+// lands whole, and the next writer still waits behind it.
+//
+// A Write that outlasts RequestTimeout is the same failure as a request
+// wedged inside V8 and is handled the same way: the sidecar is marked
+// unhealthy so the supervisor replaces the child, and killing the child is
+// what frees the stranded writer. (Closing our end is not enough everywhere:
+// on Windows an anonymous pipe's WriteFile in progress outlives CloseHandle
+// on the parent's side and returns only once the child's end is gone.)
+func (s *Sidecar) writeRequest(ctx context.Context, req rpcRequest) error {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if s.stdin == nil {
+	if err := s.lockWrite(ctx); err != nil {
+		return err
+	}
+	stdin := s.stdin
+	if stdin == nil {
 		// Between a crash and the supervisor's Restart there is no pipe. A
 		// caller that passed the healthy check microseconds before
 		// markUnhealthy flipped it must get an error, not a nil dereference.
+		s.unlockWrite()
 		return errors.New("sidecar: not running")
 	}
-	if _, err := s.stdin.Write(data); err != nil {
-		return fmt.Errorf("stdin write: %w", err)
+	gen := s.childGen.Load()
+
+	done := make(chan error, 1)
+	go func() {
+		var werr error
+		defer func() {
+			if r := recover(); r != nil {
+				werr = fmt.Errorf("stdin write panic: %v", r)
+			}
+			s.unlockWrite()
+			done <- werr
+		}()
+		if s.cfg.RequestTimeout > 0 {
+			stall := time.AfterFunc(s.cfg.RequestTimeout, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.cfg.Logger.Error("sidecar: stall watchdog panic", "panic", fmt.Sprint(r))
+					}
+				}()
+				// Only the child this write was armed against, and not one
+				// a teardown is already taking down.
+				if s.childGen.Load() != gen || s.stopping.Load() {
+					return
+				}
+				s.markUnhealthy("stdin write stalled for " + s.cfg.RequestTimeout.String())
+			})
+			defer stall.Stop()
+		}
+		_, werr = stdin.Write(data)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("stdin write: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // readPump drains stdout line-by-line. Each line is either a notification
@@ -958,8 +1087,16 @@ func (s *Sidecar) readPump() {
 		}
 	}
 
-	if err := scanner.Err(); err != nil && !s.stopping.Load() {
-		s.cfg.Logger.Warn("sidecar: stdout scanner error", "err", err)
+	// Scan stops on the child's exit (a real EOF) or on an error of its own —
+	// a line past the 1 MiB cap, a read failure — with the child possibly
+	// still alive. The reason is what the dashboard, the Discord embed and
+	// the supervisor log all show, so it says which.
+	reason := "stdout EOF"
+	if err := scanner.Err(); err != nil {
+		reason = "stdout read: " + err.Error()
+		if !s.stopping.Load() {
+			s.cfg.Logger.Warn("sidecar: stdout scanner error", "err", err)
+		}
 	}
 
 	// If stdout EOF'd before the sidecar emitted ready, unblock Start with
@@ -971,7 +1108,7 @@ func (s *Sidecar) readPump() {
 	})
 
 	if !s.stopping.Load() {
-		s.markUnhealthy("stdout EOF")
+		s.markUnhealthy(reason)
 	}
 }
 
@@ -996,6 +1133,9 @@ func (s *Sidecar) stderrPump() {
 		if line == "" {
 			continue
 		}
+		if !isHarmlessJSDOMStderr(line) {
+			s.noteStderr(line)
+		}
 		switch {
 		case strings.HasPrefix(line, "[bgutil-sidecar:error]"):
 			// Real server.js error — operator should see this.
@@ -1017,6 +1157,70 @@ func (s *Sidecar) stderrPump() {
 			s.cfg.Logger.Debug("sidecar stderr", "line", line)
 		}
 	}
+	// The scanner stops on a line past its 1 MiB cap. Returning there left
+	// the pipe undrained, and a child that kept writing to stderr blocked on
+	// the full pipe — a wedge only the 90 s request timeout ever noticed.
+	// Keep draining, unread, until the child closes it.
+	if err := scanner.Err(); err != nil {
+		if !s.stopping.Load() {
+			s.cfg.Logger.Warn("sidecar: stderr line too long to log; discarding the rest of its stderr", "err", err)
+		}
+		_, _ = io.Copy(io.Discard, s.stderr)
+	}
+}
+
+// stderrTailLines and stderrTailLineBytes bound what stderrTail keeps.
+const (
+	stderrTailLines     = 6
+	stderrTailLineBytes = 300
+)
+
+// noteStderr adds one stderr line to stderrTail, keeping the last few. A
+// Node fatal error ends in stack frames, a "{ code: … }" block and a
+// "Node.js vX" footer; kept, those pushed the line that says what went wrong
+// out of the tail, so they are not kept.
+func (s *Sidecar) noteStderr(line string) {
+	if !informativeStderr(line) {
+		return
+	}
+	if len(line) > stderrTailLineBytes {
+		cut := stderrTailLineBytes
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut] + "…"
+	}
+	s.stderrMu.Lock()
+	defer s.stderrMu.Unlock()
+	s.stderrTail = append(s.stderrTail, line)
+	if len(s.stderrTail) > stderrTailLines {
+		s.stderrTail = s.stderrTail[len(s.stderrTail)-stderrTailLines:]
+	}
+}
+
+// informativeStderr reports whether a stderr line says something beyond a
+// stack frame or a bracket — see noteStderr.
+func informativeStderr(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "at ") || strings.HasPrefix(t, "Node.js v") {
+		return false
+	}
+	return strings.Trim(t, "{}^ ") != ""
+}
+
+// stderrTailSuffix renders stderrTail for an error that ends a start: empty
+// when the child said nothing, else " — the child said: …".
+func (s *Sidecar) stderrTailSuffix() string {
+	s.stderrMu.Lock()
+	defer s.stderrMu.Unlock()
+	if len(s.stderrTail) == 0 {
+		return ""
+	}
+	parts := make([]string, len(s.stderrTail))
+	for i, l := range s.stderrTail {
+		parts[i] = strings.TrimSpace(l)
+	}
+	return " — the child said: " + strings.Join(parts, " | ")
 }
 
 // isHarmlessJSDOMStderr reports whether a stderr line is known JSDOM
@@ -1059,7 +1263,10 @@ func (s *Sidecar) drainPending(reason string) {
 	defer s.pendingMu.Unlock()
 	for id, ch := range s.pending {
 		select {
-		case ch <- rpcResponse{ID: id, Error: "sidecar unhealthy: " + reason}:
+		// call() prefixes every response error with "sidecar: ", as it does
+		// the child's own, so the caller reads "sidecar: unhealthy: stdout
+		// EOF" — one prefix, not the doubled "sidecar: sidecar unhealthy: …".
+		case ch <- rpcResponse{ID: id, Error: "unhealthy: " + reason}:
 		default:
 		}
 	}

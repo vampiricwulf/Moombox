@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
@@ -57,10 +58,12 @@ func effectiveLogLevel(configured, override string) string {
 // the TS waitForKeypress() in index.ts — only blocks on a TTY so scripted
 // runs / CI aren't held up.
 func waitForKeypress() {
-	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
+	// The prompt comes after the TTY check: under Docker or systemd it would
+	// be a false line in the very log an operator reads after the crash.
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		return
 	}
+	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
 	reader := bufio.NewReader(os.Stdin)
 	reader.ReadByte()
 }
@@ -86,26 +89,110 @@ func resolveOutputDir(ch *config.ChannelConfig, store *config.Store) string {
 	return dir
 }
 
-// nopLogger is a no-op logger for CLI commands where full logging isn't needed.
-type nopLogger struct{}
-
-func (n *nopLogger) Debug(_ string, _ ...any) {}
-func (n *nopLogger) Info(_ string, _ ...any)  {}
-func (n *nopLogger) Warn(_ string, _ ...any)  {}
-func (n *nopLogger) Error(_ string, _ ...any) {}
+// loadConfig loads the configuration for the -config flag's value and returns
+// it with the path every later save must target. An empty flagPath runs
+// config.Load's search (cwd, ./config/, ~/.config/moombox/); a named one is
+// the only file considered.
+func loadConfig(flagPath string) (*config.MoomboxConfig, string, error) {
+	cfg, err := config.Load(flagPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, storePathFor(flagPath, cfg), nil
+}
 
 // storePathFor is the file every later save must target: the one config.Load
 // actually read, and — only when nothing was found anywhere — the path that was
-// asked for (the -config flag, or the cwd default main.go computes). So a
-// config found in ./config/ is written back to ./config/ instead of being
-// forked into a fresh ./config.toml that shadows it on the next boot, while a
-// -config path that does not exist yet is still CREATED where it was named.
+// asked for (the -config flag), else <cwd>/config.toml. So a config found in
+// ./config/ is written back to ./config/ instead of being forked into a fresh
+// ./config.toml that shadows it on the next boot, while a -config path that
+// does not exist yet is still CREATED where it was named.
 func storePathFor(flagPath string, cfg *config.MoomboxConfig) string {
 	if cfg.LoadedFrom != "" {
 		return cfg.LoadedFrom
 	}
-	return flagPath
+	if flagPath != "" {
+		return flagPath
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to get working directory: %v\n", err)
+	}
+	return filepath.Join(cwd, "config.toml")
 }
+
+// updateCheckTiming is runUpdateCheckLoop's schedule.
+type updateCheckTiming struct {
+	initialDelay time.Duration // before the boot check, so it does not slow startup
+	period       time.Duration // between scheduled checks
+	poll         time.Duration // how often the toggle is re-read for a false→true flip
+}
+
+// runUpdateCheckLoop runs the auto-update check: once shortly after boot, then
+// every period, each only while enabled() — re-read every time, so disabling
+// the toggle in either settings UI stops an armed schedule without a restart.
+// It also re-reads the toggle every poll and checks at once when it has
+// turned ON: enabling it at runtime used to do nothing until the next daily
+// tick, up to a day later. Polling the store rather than wiring a callback
+// covers every writer of the flag — the web Settings save
+// (config_routes.go) and the TUI's — and any added later. (The dismiss route
+// is not one: it records SkippedVersion and leaves the toggle alone.)
+// Returns when ctx ends.
+func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), t updateCheckTiming) {
+	select {
+	case <-time.After(t.initialDelay):
+	case <-ctx.Done():
+		return
+	}
+	wasEnabled := enabled()
+	if wasEnabled {
+		check()
+	}
+	ticker := time.NewTicker(t.period)
+	defer ticker.Stop()
+	poll := time.NewTicker(t.poll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if wasEnabled = enabled(); wasEnabled {
+				check()
+			}
+		case <-poll.C:
+			on := enabled()
+			if on && !wasEnabled {
+				check()
+			}
+			wasEnabled = on
+		}
+	}
+}
+
+// announceUpdateCleared tells both UIs that the pending release tagged tag is
+// withdrawn — skipped, or found to be no newer than the running version — so
+// they drop the badge their own copy of it lights.
+//
+// The TAG travels with the clear, as an UpdateStatusMsg with an empty Version
+// for the TUI and an update_cleared event for the dashboards. Each holds its
+// own copy of the pending release and drops it only when the clear names the
+// release it is showing — otherwise a clear racing a newly-found release would
+// blank the badge for an update that is still there. This is the ONLY
+// producer of either, so the tag is always set.
+func announceUpdateCleared(wsHub *web.WebSocketHub, tuiCh chan<- tui.UpdateStatusMsg, tag string) {
+	if wsHub != nil {
+		wsHub.Broadcast("update_cleared", map[string]string{"tagName": tag})
+	}
+	select {
+	case tuiCh <- tui.UpdateStatusMsg{TagName: tag}:
+	default:
+	}
+}
+
+// checkForUpdate is (*updater.Updater).CheckForUpdate, a seam for the tests of
+// the periodic and TUI checks, which need a check to answer without GitHub.
+var checkForUpdate = (*updater.Updater).CheckForUpdate
 
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
 //
@@ -124,13 +211,24 @@ func checkAndBroadcastUpdate(
 	configStore *config.Store,
 	lastNotifiedTag *string,
 ) {
-	release, err := upd.CheckForUpdate(ctx)
+	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
+	release, err := checkForUpdate(upd, ctx)
 	if err != nil {
+		// A check cut short by shutdown is not a failure worth a warning.
+		if ctx.Err() != nil {
+			log.Debug("[Updater] Check cancelled", slog.String("error", err.Error()))
+			return
+		}
 		log.Warn("[Updater] Check failed", slog.String("error", err.Error()))
 		return
 	}
 	if release == nil {
-		return // already up to date
+		// Already up to date — and so a release still pending names one that
+		// was pulled.
+		if tag := routes.ClearPendingUpdate(seen); tag != "" {
+			announceUpdateCleared(wsHub, tuiCh, tag)
+		}
+		return
 	}
 
 	var enabled bool
@@ -270,8 +368,50 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 		failureMarkerPresent
 }
 
-// cookieFilePath returns the configured Netscape cookie file path for use in
-// operator-facing messages, or a short prose stand-in when none is set.
+// clearSupersededFailureMarker deletes the <exe>.update-failed marker once a
+// LATER update has applied successfully, and returns the path it removed (""
+// when it removed nothing).
+//
+// "Later" and "successfully" are both read off the .update-pending breadcrumb
+// (pendingPath), which ApplyUpdate writes only after a swap that worked:
+// pendingTag naming this binary's own version means the update landed and
+// this boot of it got past the first-successful-boot milestone, and a
+// breadcrumb NEWER than the marker means that update was applied after the
+// failure the marker records. A marker written after the breadcrumb is this
+// very update's own failure — a first launch that failed with no rollback
+// possible, then a relaunch that came up — and stays for the operator.
+//
+// The marker is what keeps the Windows launcher's hands off the old launcher
+// image (`~`): cleanupOrphans and deferDeleteOldLauncher both decline while
+// it exists, because after a failed update `~` is the rollback binary its
+// instructions point at. A later successful update makes those instructions
+// stale — `~` is now simply the image this update replaced — so a marker left
+// in place kept every later update's `~` on disk, and kept arming
+// shouldSkipPendingVersion for a failure long since resolved. The
+// .update-broken marker is not touched: a swap that failed both ways refuses
+// every apply (swapLeftBroken), so no later update can supersede it.
+func clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersion string) (string, error) {
+	if pendingTag == "" || pendingTag != "v"+currentVersion {
+		return "", nil
+	}
+	marker := exePath + ".update-failed"
+	mi, err := os.Stat(marker)
+	if err != nil {
+		return "", nil
+	}
+	pi, err := os.Stat(pendingPath)
+	if err != nil || !mi.ModTime().Before(pi.ModTime()) {
+		return "", nil
+	}
+	if err := os.Remove(marker); err != nil {
+		return "", err
+	}
+	return marker, nil
+}
+
+// cookieFilePath returns the Netscape cookie file the services use — the
+// jar's, falling back to the setting — for operator-facing messages, or a
+// short prose stand-in when none is set.
 //
 // Auth-failure guidance used to say only "re-run cookie setup from Settings",
 // which is a dead end wherever the interactive browser login cannot run — it
@@ -281,8 +421,15 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 // guess at the environment: a Docker operator reads "/data/cookies.txt" and
 // knows which host file to replace.
 func (s *runState) cookieFilePath() string {
+	// The jar's path first: the services read and write the file they loaded
+	// at boot, and cookies.cookie_file is restart-required — saved without
+	// the restart it names a file nothing touches, so advice to replace it
+	// sent the operator to the wrong file.
 	var path string
-	if s.configStore != nil {
+	if s.jar != nil {
+		path = s.jar.GetFilePath()
+	}
+	if path == "" && s.configStore != nil {
 		s.configStore.Read(func(c *config.MoomboxConfig) { path = c.Cookies.CookieFile })
 	}
 	if path == "" {

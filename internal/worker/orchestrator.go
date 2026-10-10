@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,11 +56,10 @@ func connIsOnline(c Connectivity) func() bool {
 
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
-	// muxer and ffmpegPath are both guarded by muxerMu: paths.ffmpeg_path is
-	// hot-reloadable, and SetFfmpegPath swaps the pair while downloads run.
-	// Read them through mux() / ffmpegPathValue(), never directly.
+	// muxer is guarded by muxerMu: paths.ffmpeg_path is hot-reloadable, and
+	// SetFfmpegPath swaps it while downloads run. Read it through mux(),
+	// never directly.
 	muxer        *engine.Muxer
-	ffmpegPath   string
 	muxerMu      sync.RWMutex
 	db           *database.Database
 	queue        *JobQueue
@@ -73,7 +73,14 @@ type DownloadOrchestrator struct {
 	// ONE registry to both). ExecuteTwitch registers into it; cmd/moombox
 	// broadcasts through the worker's accessor. nil is inert.
 	twitchChats *twitchChatRegistry
-	logger      logger
+	// trims is the trim service both UIs use (DownloadWorkerDeps.TrimService),
+	// which the post-download trim runs through. It built a TrimService of its
+	// own, whose one-trim-per-job slot the shared one could not see: a
+	// dashboard trim of the range the post-download trim was encoding started
+	// beside it, both FFmpegs wrote the same .partial.mp4, and the clip stored
+	// was unplayable. Nor did the dashboard see that trim running.
+	trims  *TrimService
+	logger logger
 	// muxRootCtx parents every mux that must OUTLIVE its job's own context —
 	// the background part muxes, the connectivity-outage finalize and the
 	// off-queue restart mux, all of which used context.Background() and were
@@ -96,7 +103,6 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 	muxRootCtx, muxRootCancel := context.WithCancel(context.Background())
 	return &DownloadOrchestrator{
 		muxer:         engine.NewMuxer(ffmpegPath, logger),
-		ffmpegPath:    ffmpegPath,
 		db:            db,
 		queue:         queue,
 		cipherSolver:  cs,
@@ -112,13 +118,13 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 
 // SetFfmpegPath rebuilds the muxer for a new ffmpeg path (config hot-reload),
 // mirroring TrimService.SetFfmpegPath. Downloads already in flight keep the
-// muxer they captured; new muxes, probes, part merges and post-download trims
-// see the new binary.
+// muxer they captured; new muxes, probes and part merges see the new binary.
+// A post-download trim runs through the shared trim service, which the same
+// reload re-points on its own (cmd/moombox applyFfmpegPath).
 func (o *DownloadOrchestrator) SetFfmpegPath(path string) {
 	m := engine.NewMuxer(path, o.logger)
 	o.muxerMu.Lock()
 	o.muxer = m
-	o.ffmpegPath = path
 	o.muxerMu.Unlock()
 }
 
@@ -129,19 +135,8 @@ func (o *DownloadOrchestrator) mux() *engine.Muxer {
 	return o.muxer
 }
 
-// ffmpegPathValue returns the current ffmpeg path under the read lock.
-func (o *DownloadOrchestrator) ffmpegPathValue() string {
-	o.muxerMu.RLock()
-	defer o.muxerMu.RUnlock()
-	return o.ffmpegPath
-}
-
-// Execute runs the full download pipeline for a YouTube job.
-func (o *DownloadOrchestrator) Execute(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) error {
-	return o.ExecuteWithChat(ctx, jobCtx, videoInfo, isVod, nil)
-}
-
-// ExecuteWithChat runs the full download pipeline, optionally with a pre-started chat downloader.
+// ExecuteWithChat runs the full download pipeline for a YouTube job,
+// optionally with a pre-started chat downloader.
 func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool, existingChat *chat.ChatDownloader) error {
 	o.logger.Info("starting download", "videoID", jobCtx.Job.VideoID, "isVod", isVod)
 
@@ -151,7 +146,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if existingChat != nil {
 			existingChat.Stop()
 		}
-		return nil
+		return ErrCancelled
 	}
 
 	// Subscribe to job status changes for cancellation. Job deletion is
@@ -161,9 +156,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	jobCtx2, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The ID is read once, here: the callback runs on whichever goroutine
+	// wrote the row, and muxAndFinalize replaces jobCtx.Job with a fresh read
+	// while those writes continue, so reading jobCtx.Job inside it was a race.
+	jobID := jobCtx.Job.ID
 	unsubscribe := o.db.OnJobUpdate(func(updatedJob *database.Job) {
-		if updatedJob.ID == jobCtx.Job.ID && updatedJob.Status == database.StatusCancelled {
-			o.logger.Info("cancel detected via DB listener", "jobID", jobCtx.Job.ID)
+		if updatedJob.ID == jobID && updatedJob.Status == database.StatusCancelled {
+			o.logger.Info("cancel detected via DB listener", "jobID", jobID)
 			cancel()
 		}
 	})
@@ -183,13 +182,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// Send "Download Starting" notification
 	if o.notifier != nil {
 		dlType := "Live Stream"
-		desc := fmt.Sprintf("Now live — beginning download: %s", jobCtx.Job.Title)
+		desc := fmt.Sprintf("Now live — beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		if isVod {
 			dlType = "VOD"
-			desc = fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title)
+			desc = fmt.Sprintf("Beginning download: %s", notifications.EscapeMarkdown(jobCtx.Job.Title))
 		}
 		startFields := []notifications.Field{
-			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Channel", Value: notifications.EscapeMarkdown(jobCtx.Job.ChannelName), Inline: true},
 			{Name: "Type", Value: dlType, Inline: true},
 		}
 		// Include scheduled start time if available
@@ -297,6 +296,12 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// not treat the resumed part as a discardable <10s span (the
 		// session-local timer doesn't measure the part's true age).
 		startPartResumed = discoverStagingMedia(strategyCtx.StagingDir) != nil
+	} else if err := o.claimStagingRootForVod(jobCtx); err != nil {
+		// A VOD run records from the start into the staging ROOT. On a job
+		// that already split into parts the root is part 0's, and the
+		// finalize ignored — then deleted — the complete download written
+		// there (vod_supersede.go).
+		return fmt.Errorf("prepare staging for the from-the-start download: %w", err)
 	}
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
@@ -422,7 +427,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 					// mid-capture has not finished, and recording nothing here
 					// would leave a previous run's verdict standing.
 					chatRec.record(fmt.Errorf("panic in YouTube chat downloader: %v", r))
-					o.logger.Error("panic in YouTube chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+					o.logger.Error("panic in YouTube chat downloader", "jobID", jobID, "panic", fmt.Sprint(r))
 				}
 			}()
 			chatRec.record(chatDl.Start(ctx))
@@ -470,10 +475,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		var incomplete bool
 		var vSeq, vHead, aSeq, aHead int
 		if err == nil {
-			// false: the VOD refresh loop never takes the live loop's
-			// wait-for-resume branch — that evidence only applies to
-			// runLiveStreamDownload's own call site below.
-			incomplete, vSeq, vHead, aSeq, aHead = o.finalizeIncompleteTail(jobCtx.Job.ID, result, false)
+			// The incomplete_tail flag and, on a split job's claimed root,
+			// whether the download may supersede the parts — one verdict,
+			// written before the Muxing status below so a restart mux finds
+			// it too.
+			incomplete, vSeq, vHead, aSeq, aHead = o.settleVodDownload(jobCtx, result)
 		}
 
 		// Set 100% progress after VOD download completes (finishVodWithChat equivalent)
@@ -496,7 +502,22 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 					progressStr += fmt.Sprintf(" C: %d", chatCount)
 				}
 			}
+			// Close the tracker BEFORE this write, not at Finalize below: a
+			// replay-chat tick landing between the two would re-render the
+			// line (maybeUpdate stops at the closed flag, and only persists
+			// the chat count from then on). Finalize still runs after and
+			// flushes the gaps; Close is idempotent.
+			tracker.Close()
+			// Muxing now, not after the chat wait below — the live branch
+			// writes it before that wait too, for the same reason. A VOD's chat
+			// replay can page for hours after the media is complete, and a
+			// restart in that window found the row still Downloading,
+			// re-probed it and downloaded the whole recording again (setting
+			// the complete one aside). As Muxing, enqueueExistingJobs re-muxes
+			// it from staging (muxOnRestart) — or, for an incomplete tail,
+			// still sends it back through the refresh loop.
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"status":   database.StatusMuxing,
 				"progress": progressStr,
 				"percent":  percent,
 			})
@@ -533,6 +554,17 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// and is never overwritten by a flag write.
 		if err == nil {
 			o.finalizeIncompleteTail(jobCtx.Job.ID, result, waitedForResume)
+			// Muxing now, as the VOD branch does and for the same reason: the
+			// engine cleared the resume sidecar the moment it saw the stream
+			// end, and the chat wait below can hold this row for minutes. A
+			// restart in that window found it still Downloading, re-probed a
+			// stream now post-live, set the complete recording aside and
+			// downloaded it again from the start. As Muxing,
+			// enqueueExistingJobs re-muxes it from staging (muxOnRestart) — or,
+			// for an incomplete tail, sends it back through the refresh loop.
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"status": database.StatusMuxing,
+			})
 		}
 	}
 
@@ -627,78 +659,110 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Post-download trim: if job has startTime/endTime, create a trimmed version
 	if (jobCtx.Job.StartTime != nil || jobCtx.Job.EndTime != nil) && ctx.Err() == nil {
-		o.logger.Info("creating post-download trim",
-			"jobID", jobCtx.Job.ID,
-			"startTime", jobCtx.Job.StartTime,
-			"endTime", jobCtx.Job.EndTime)
-
-		trimService := NewTrimService(o.db, o.ffmpegPathValue(), o.logger)
-		if o.notifier != nil {
-			trimService.SetNotifier(o.notifier)
-		}
-		startSec := 0.0
-		if jobCtx.Job.StartTime != nil {
-			startSec = *jobCtx.Job.StartTime
-		}
-		// Re-fetch job FIRST: muxAndFinalize set output_file and probed
-		// length_seconds after jobCtx.Job was last refreshed, so for a live
-		// recording with only StartTime set, the stale row would compute
-		// endSec == 0 and silently skip the requested trim.
-		freshJob, _ := o.db.GetJob(jobCtx.Job.ID)
-		if freshJob != nil && freshJob.Status == database.StatusFinished {
-			endSec := 0.0
-			if jobCtx.Job.EndTime != nil {
-				endSec = *jobCtx.Job.EndTime
-			} else if freshJob.LengthSeconds != nil {
-				endSec = float64(*freshJob.LengthSeconds)
-			}
-			if endSec > startSec {
-				_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
-				if trimErr != nil {
-					o.logger.Error("post-download trim failed", "err", trimErr, "jobID", jobCtx.Job.ID)
-					o.sendTrimFailed(jobCtx.Job, trimErr)
-				}
-			}
-		}
+		o.postDownloadTrim(ctx, jobCtx.Job)
 	}
 
 	return nil
 }
 
+// postDownloadTrim creates the trim a job asked for when it was added
+// (StartTime/EndTime), once its recording is finalized. A method of its own
+// so its failure sends can be asserted without running a download.
+//
+// It runs through o.trims, the service both UIs use, so it holds the job's
+// trim slot like any other trim (a dashboard or TUI trim of the job is
+// refused while it encodes), shows in RunningTrims and trim_status, and
+// TrimService.Stop reaches it.
+func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *database.Job) {
+	o.logger.Info("creating post-download trim",
+		"jobID", job.ID,
+		"startTime", job.StartTime,
+		"endTime", job.EndTime)
+
+	if o.trims == nil {
+		// Unreachable from cmd/moombox, which always hands the worker its
+		// trim service; a worker built without one says so, not nothing.
+		o.failPostDownloadTrim(job, errors.New("no trim service to run the trim"))
+		return
+	}
+	startSec := 0.0
+	if job.StartTime != nil {
+		startSec = *job.StartTime
+	}
+	// Re-fetch job FIRST: muxAndFinalize set output_file and probed
+	// length_seconds after jobCtx.Job was last refreshed, so for a live
+	// recording with only StartTime set, the stale row would compute
+	// endSec == 0 and skip the requested trim.
+	freshJob, err := o.db.GetJob(job.ID)
+	if err != nil {
+		o.failPostDownloadTrim(job, fmt.Errorf("read the job: %w", err))
+		return
+	}
+	if freshJob == nil {
+		o.logger.Info("post-download trim skipped: the job was deleted", "jobID", job.ID)
+		return
+	}
+	// Every way out from here that makes no trim says so. A start past the
+	// end of the recording, an unknown length or a row no longer Finished
+	// used to return in silence, and the trim the job asked for simply never
+	// appeared. A row no longer Finished, and an end given at or before the
+	// start, the service refuses with its own reason, sent below.
+	var endSec float64
+	switch {
+	case job.EndTime != nil:
+		endSec = *job.EndTime
+	case freshJob.LengthSeconds != nil && *freshJob.LengthSeconds > 0:
+		endSec = float64(*freshJob.LengthSeconds)
+		if endSec <= startSec {
+			o.failPostDownloadTrim(job, refuseTrim("start time (%s) is at or past the end of the recording (%s)",
+				trimSeconds(startSec), trimSeconds(endSec)))
+			return
+		}
+	default:
+		o.failPostDownloadTrim(job, refuseTrim("the recording's length is unknown, so a trim with no end time cannot be made"))
+		return
+	}
+	_, trimErr := o.trims.CreateTrim(ctx, freshJob, startSec, endSec, nil)
+	if trimErr == nil {
+		return
+	}
+	// The service sends Trim Failed itself for a trim that broke. A refusal
+	// (the range the job asked for, or a trim of the job already running) it
+	// leaves to its caller to answer, and a run cut short — by this context,
+	// or by the service's Stop at shutdown, which leaves this context live —
+	// it does not count as a failure. But nobody asked for this trim from a
+	// dialog, so both are told here: one Trim Failed per failed post-download
+	// trim, as before.
+	_, refused := errors.AsType[*TrimRefusedError](trimErr)
+	if refused || errors.Is(trimErr, errTrimInterrupted) {
+		o.failPostDownloadTrim(job, trimErr)
+		return
+	}
+	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
+}
+
+// failPostDownloadTrim logs a post-download trim that made no file and sends
+// Trim Failed for it — unless the job is gone: a job deleted before its trim
+// ran, or while it ran (its context is cancelled, so the trim stops), is one
+// whoever deleted it wants none of.
+func (o *DownloadOrchestrator) failPostDownloadTrim(job *database.Job, trimErr error) {
+	if fresh, err := o.db.GetJob(job.ID); err == nil && fresh == nil {
+		o.logger.Info("post-download trim dropped: the job was deleted", "jobID", job.ID, "err", trimErr)
+		return
+	}
+	o.logger.Error("post-download trim failed", "err", trimErr, "jobID", job.ID)
+	o.sendTrimFailed(job, trimErr)
+}
+
 // sendTrimFailed is the "Trim Failed" embed for a post-download trim that did
-// not produce a file.
+// not produce a file, through the builder TrimService sends it with.
 //
 // A method rather than the inline block it was, for the same reason
 // sendMuxingStarting is one: the only caller sits at the end of
 // ExecuteWithChat, past the whole download, so nothing could assert on the
 // embed it built — and the options it built by hand named no job.
-//
-// `trim_error` is never a lifecycle event (it stays its own post, and it is
-// one of the events that can still ping an edit-mode target), but the
-// footer's platform, the author line and the dashboard deep link are the
-// job's either way, and the deep link needs JobID and Author together.
 func (o *DownloadOrchestrator) sendTrimFailed(job *database.Job, trimErr error) {
-	if o.notifier == nil || job == nil {
-		return
-	}
-	f := NotifyFacts(job)
-	o.notifier.Send("Trim Failed",
-		fmt.Sprintf("Failed to create trim for \"%s\"", job.Title),
-		notifications.TypeError,
-		[]notifications.Field{
-			{Name: "Channel", Value: job.ChannelName, Inline: true},
-			{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
-			{Name: "Error", Value: notifications.EscapeMarkdown(trimErr.Error())},
-		},
-		notifications.SendOptions{
-			URL:       f.URL,
-			Thumbnail: f.ThumbnailURL,
-			Event:     "trim_error",
-			Author:    notifyAuthor(f),
-			Platform:  f.Platform,
-			JobID:     f.ID,
-		},
-	)
+	sendTrimFailed(o.notifier, job, trimErr)
 }
 
 // attachTrackerAndProgress attaches the progress tracker to whatever
@@ -941,17 +1005,13 @@ func incompleteProgressString(vSeq, vHead, aSeq, aHead, chatCount int) (string, 
 // "discard fresh, keep the old incomplete result" fallback is the default,
 // not the exception.
 //
-// Identity comparison is necessarily conservative: DownloadResult carries
-// no itag/codec identity for the three strategies this loop actually
-// refreshes through — DownloadHls, DownloadDash, and DownloadManifestlessDash
-// all populate only VideoWidth/VideoHeight/VideoFps (VideoFormat/AudioFormat
-// are exclusively set by the whole-file VOD strategy, which never reaches
-// this loop — see each strategy's Download function). So video identity is
-// compared on the width/height/fps tuple, a workable proxy since a real
-// itag swap virtually always changes the encoded resolution or frame rate.
-// VideoFormat/AudioFormat.Itag are compared too whenever BOTH sides happen
-// to carry them (cheap struct-field reads, no new plumbing) so a future
-// strategy that does populate them gets the stronger check for free.
+// Video identity is the width/height/fps tuple AND, for the two DASH
+// strategies, the itags they record (VideoItag/AudioItag — HLS variants carry
+// none): the tuple alone let a same-size codec swap through (avc1 299 and vp9
+// 303 are both 1080p60), and audio was never compared at all, so a refresh
+// that lost the opus itag appended AAC fragments onto the opus/webm
+// audio_stream. VideoFormat/AudioFormat.Itag are compared too whenever BOTH
+// sides carry them.
 func refreshFormatMatches(old, fresh *DownloadResult) bool {
 	if old == nil || fresh == nil {
 		return false
@@ -970,5 +1030,19 @@ func refreshFormatMatches(old, fresh *DownloadResult) bool {
 	if old.HasAudio && old.AudioFormat != nil && fresh.AudioFormat != nil && old.AudioFormat.Itag != fresh.AudioFormat.Itag {
 		return false
 	}
-	return true
+	return !streamIdentityChanged(old, fresh)
+}
+
+// streamIdentityChanged reports whether fresh would write a different
+// rendition into either stream than old does: a video or audio itag both
+// sides know and that differs. An unknown itag (0 — HLS, or a stream one side
+// does not have) decides nothing. The live loop splits on it exactly as on a
+// quality change, since a refreshed downloader continues the current part's
+// files and the engine's append path cannot tell codecs apart.
+func streamIdentityChanged(old, fresh *DownloadResult) bool {
+	if old == nil || fresh == nil {
+		return false
+	}
+	return (old.VideoItag != 0 && fresh.VideoItag != 0 && old.VideoItag != fresh.VideoItag) ||
+		(old.AudioItag != 0 && fresh.AudioItag != 0 && old.AudioItag != fresh.AudioItag)
 }

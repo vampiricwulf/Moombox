@@ -1073,6 +1073,56 @@ func TestHasActiveJob(t *testing.T) {
 	}
 }
 
+// A manually added Twitch job for an offline channel is
+// `tw_manual_<login>_<ns>` with no stream ID, so only its ID names the
+// channel it waits on. Logins carry underscores, which a LIKE pattern would
+// read as wildcards, and one login can be a prefix of another.
+//
+// Mutants: a prefix match on the login (foo matches foo_bar's job), and the
+// terminal-status filter dropped (a finished job is returned).
+func TestManualTwitchJobs(t *testing.T) {
+	t.Parallel()
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	add := func(id string, st JobStatus) {
+		t.Helper()
+		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Platform: "twitch", Status: st,
+			StreamStartTime: "2026-10-05T12:00:00Z"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("tw_manual_foo_bar_1700000000000000001", StatusUpcoming)
+	add("tw_manual_done_1700000000000000002", StatusFinished)
+	add("tw_4242", StatusLive)
+
+	for _, tc := range []struct {
+		login string
+		want  int
+	}{
+		{"foo_bar", 1},
+		{"Foo_Bar", 1},
+		{"foo", 0},
+		{"done", 0},
+		{"4242", 0},
+	} {
+		got, err := db.ManualTwitchJobs(tc.login)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != tc.want {
+			t.Errorf("ManualTwitchJobs(%q) = %d jobs, want %d", tc.login, len(got), tc.want)
+		}
+	}
+	got, _ := db.ManualTwitchJobs("foo_bar")
+	if len(got) == 1 && (got[0].Status != StatusUpcoming || got[0].StreamStartTime != "2026-10-05T12:00:00Z") {
+		t.Errorf("ManualTwitchJobs returned %+v, want its status and stream start", *got[0])
+	}
+}
+
 func TestWatchedAndResumePosition(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1670,12 +1720,12 @@ func TestDeleteJobsAndHistoryForChannel(t *testing.T) {
 	seed("other_channel", StatusQueued, &otherCh) // pruned status, different channel
 	seed("null_channel", StatusQueued, nil)       // pruned status, NULL channel_id
 
-	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, pruneStatuses)
+	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, pruneStatuses, nil)
 	if err != nil {
 		t.Fatalf("DeleteJobsAndHistoryForChannel: %v", err)
 	}
 	if deleted != len(doomed) {
-		t.Errorf("deleted = %d, want %d (the jobs statement's RowsAffected)", deleted, len(doomed))
+		t.Errorf("deleted = %d, want %d (the rows the jobs statement deleted)", deleted, len(doomed))
 	}
 
 	assertState := func(id string, wantJob, wantHistory bool) {
@@ -1735,7 +1785,7 @@ func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
 	defer uD()
 
 	// Empty statuses: a pure no-op — zero deleted, no error, no dispatch.
-	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, nil)
+	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, nil, nil)
 	if err != nil || deleted != 0 {
 		t.Fatalf("empty statuses: deleted=%d err=%v, want 0, nil", deleted, err)
 	}
@@ -1746,7 +1796,7 @@ func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
 		// expected
 	}
 
-	deleted, err = db.DeleteJobsAndHistoryForChannel(chID, []JobStatus{StatusQueued})
+	deleted, err = db.DeleteJobsAndHistoryForChannel(chID, []JobStatus{StatusQueued}, nil)
 	if err != nil {
 		t.Fatalf("DeleteJobsAndHistoryForChannel: %v", err)
 	}
@@ -1776,5 +1826,58 @@ func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
 		t.Errorf("OnJobDeleted must not fire on prune; got %q", ev.JobID)
 	case <-time.After(200 * time.Millisecond):
 		// expected
+	}
+}
+
+// TestDeleteJobsAndHistoryForChannelDropsItsRowsLogs pins where a channel
+// prune's deleted rows lose their per-job logs: in the delete itself, before
+// it returns and with no subscriber involved. It used to be the OnJobsChange
+// subscriber's prune of every id missing from the list the delete handed over
+// — a list read at commit and delivered later, on a goroutine, so a job added
+// in between lost the routing its own OnJobAdded had set up (cmd/moombox's
+// TestABulkWritesOlderListLeavesALaterJobsLogRouting drives that interleaving).
+// Rows the prune did not delete keep both their buffers and their routing,
+// and so does an id no row holds yet.
+//
+// Mutants: dropping the clearJobLogsOf call — the deleted row keeps its buffer
+// and is still routed to; clearing every id missing from the post-delete list
+// instead of the deleted ones — "routed-elsewhere" loses its routing.
+func TestDeleteJobsAndHistoryForChannelDropsItsRowsLogs(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+
+	chID, otherCh := "UC_logs_pruned", "UC_logs_kept"
+	seed := func(id string, status JobStatus, ch *string) {
+		t.Helper()
+		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: "u", Status: status, ChannelID: ch}); err != nil {
+			t.Fatalf("AddJob(%s): %v", id, err)
+		}
+		db.TrackJobForLogs(id) // what OnJobAdded's subscriber does for a live row
+	}
+	seed("doomed", StatusQueued, &chID)
+	seed("kept-started", StatusDownloading, &chID)
+	seed("kept-other", StatusQueued, &otherCh)
+	db.TrackJobForLogs("routed-elsewhere")
+	for _, id := range []string{"doomed", "kept-started", "kept-other", "routed-elsewhere"} {
+		db.RouteLogToJobs("first line, job " + id)
+	}
+
+	if n, err := db.DeleteJobsAndHistoryForChannel(chID, []JobStatus{StatusQueued}, nil); err != nil || n != 1 {
+		t.Fatalf("DeleteJobsAndHistoryForChannel = %d, %v; want 1, nil", n, err)
+	}
+
+	if got := db.GetJobLogs("doomed"); got != nil {
+		t.Errorf("the deleted row keeps its buffer: %q", got)
+	}
+	db.RouteLogToJobs("a later line, job doomed")
+	if got := db.GetJobLogs("doomed"); got != nil {
+		t.Errorf("the deleted row is still routed to: %q", got)
+	}
+	for _, id := range []string{"kept-started", "kept-other", "routed-elsewhere"} {
+		db.RouteLogToJobs("second line, job " + id)
+		if got := db.GetJobLogs(id); len(got) != 2 {
+			t.Errorf("%s holds %d lines after the prune, want 2 (its buffer and its routing kept): %q", id, len(got), got)
+		}
 	}
 }

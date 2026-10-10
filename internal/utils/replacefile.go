@@ -2,6 +2,8 @@ package utils
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -15,11 +17,21 @@ import (
 // growing pause (about a second in total) before the last error is returned.
 // Every other error is returned on the first attempt, and elsewhere than
 // Windows this is exactly os.Rename.
+//
+// A successful replace also fsyncs path's directory (syncDir): the callers
+// fsync the file's bytes, but the entry that names it lives in the directory,
+// and without that a power loss shortly after could bring back the old file —
+// or, for the muxed archive, leave the database pointing at a name the rename
+// never made durable.
 func ReplaceFile(tmp, path string) error {
 	delay := replaceFileFirstDelay
 	for attempt := 1; ; attempt++ {
 		err := renameFile(tmp, path)
-		if err == nil || attempt >= replaceFileAttempts || !isTransientReplaceError(err) {
+		if err == nil {
+			syncDirectory(filepath.Dir(path))
+			return nil
+		}
+		if attempt >= replaceFileAttempts || !isTransientReplaceError(err) {
 			return err
 		}
 		replaceFileSleep(delay)
@@ -38,10 +50,27 @@ const (
 	replaceFileMaxDelay   = 400 * time.Millisecond
 )
 
-// Seams for the tests: the rename itself, the platform classifier and the
-// pause. Production never reassigns them.
+// syncDir fsyncs a directory so the entries renamed into it are durable.
+// Best-effort: a filesystem that refuses a directory fsync changes nothing
+// the rename already did. A no-op on Windows, where a directory cannot be
+// opened for an fsync.
+func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = f.Sync()
+	f.Close()
+}
+
+// Seams for the tests: the rename itself, the platform classifier, the pause
+// and the directory sync. Production never reassigns them.
 var (
 	renameFile              = os.Rename
 	isTransientReplaceError = transientReplaceError
 	replaceFileSleep        = time.Sleep
+	syncDirectory           = syncDir
 )

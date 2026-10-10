@@ -50,10 +50,21 @@ test("formatBytes: each unit boundary", () => {
   assert.equal(formatBytes(1024 * 1024 * 1024 * 1024), "1.0TB");
 });
 
+// Zero and every negative read "0B", as the TUI's utils.FormatFileSize reads
+// them (TestFormatFileSizeBelowZeroReadsLikeTheWeb pins the Go half with the
+// same rows): the disk card's used figure is total minus free, and a reading
+// that does not add up must not print a minus sign in one UI and not the other.
+//
+// Mutant: the `bytes < 0` floor dropped — every negative row prints its raw
+// byte count.
 test("formatBytes: invalid inputs coerce to 0B", () => {
   assert.equal(formatBytes(null), "0B");
   assert.equal(formatBytes(NaN), "0B");
+  assert.equal(formatBytes(0), "0B");
+  assert.equal(formatBytes(-1), "0B");
   assert.equal(formatBytes(-100), "0B");
+  assert.equal(formatBytes(-2048), "0B");
+  assert.equal(formatBytes(-(2 ** 40)), "0B");
 });
 
 test("formatDurationSeconds", () => {
@@ -104,10 +115,10 @@ test("safePlay swallows a rejected play() promise and tolerates a void return", 
 test("applyChannelOverrides: values set, blanks clear, existing preserved", () => {
   const existing = { id: "UC1", name: "N", num_desc_lookbehind: 5, output_directory: "D:/old", archive_window_days: 7, archive_slots: 2 };
   const r = applyChannelOverrides({ ...existing }, {
-    numDescLookbehind: undefined, outputDirectory: "", archiveWindowDays: 14, archiveSlots: 4,
+    outputDirectory: "", archiveWindowDays: 14, archiveSlots: 4,
   });
   assert.equal(r.error, null);
-  assert.equal("num_desc_lookbehind" in r.channel, false, "blank clears the key");
+  assert.equal(r.channel.num_desc_lookbehind, 5, "the retired key, not on the dialog, rides through");
   assert.equal("output_directory" in r.channel, false, "blank clears the key");
   assert.equal(r.channel.archive_window_days, 14);
   assert.equal(r.channel.archive_slots, 4);
@@ -116,8 +127,6 @@ test("applyChannelOverrides: values set, blanks clear, existing preserved", () =
 
 test("applyChannelOverrides: rejects out-of-range and non-integer values", () => {
   const cases = [
-    [{ numDescLookbehind: -1 }, /lookbehind/i],
-    [{ numDescLookbehind: 1.5 }, /lookbehind/i],
     [{ archiveWindowDays: 0 }, /window/i],
     [{ archiveWindowDays: 3651 }, /window/i],
     [{ archiveSlots: 0 }, /slots/i],
@@ -127,7 +136,7 @@ test("applyChannelOverrides: rejects out-of-range and non-integer values", () =>
     const r = applyChannelOverrides({ id: "UC1" }, ov);
     assert.match(r.error ?? "", re, JSON.stringify(ov));
   }
-  const ok = applyChannelOverrides({ id: "UC1" }, { numDescLookbehind: 0, archiveWindowDays: 3650, archiveSlots: 100, outputDirectory: " D:/x " });
+  const ok = applyChannelOverrides({ id: "UC1" }, { archiveWindowDays: 3650, archiveSlots: 100, outputDirectory: " D:/x " });
   assert.equal(ok.error, null);
   assert.equal(ok.channel.output_directory, "D:/x", "trimmed");
 });
@@ -275,7 +284,8 @@ test("channelTermsForSave: clearing an edited field removes terms", () => {
 
 // streamUrl mirrors internal/tui/app_actions.go streamURL (the TUI's O C
 // chord): an explicit url wins; else YouTube watch URL; Twitch VOD strips the
-// tw_v prefix; Twitch live needs a channel name.
+// tw_v prefix; Twitch live with no url has no page — its channelName is no
+// login (an import's "Import", or a display name).
 test("streamUrl: explicit url wins over derivation", () => {
   assert.equal(streamUrl({ url: "https://example/x", videoId: "abc", platform: "youtube" }), "https://example/x");
 });
@@ -285,8 +295,11 @@ test("streamUrl: youtube derives the watch URL", () => {
 test("streamUrl: twitch VOD strips the tw_v prefix", () => {
   assert.equal(streamUrl({ videoId: "tw_v123456", platform: "twitch", isVod: true }), "https://www.twitch.tv/videos/123456");
 });
-test("streamUrl: twitch live is the channel page, empty without a channel", () => {
-  assert.equal(streamUrl({ videoId: "live1", platform: "twitch", channelName: "somestreamer" }), "https://www.twitch.tv/somestreamer");
+// MUTANT: derive twitch.tv/<channelName> again — an imported capture's
+// "Import" is somebody else's channel.
+test("streamUrl: twitch live is its url, none without one", () => {
+  assert.equal(streamUrl({ videoId: "tw_1", platform: "twitch", url: "https://www.twitch.tv/somestreamer" }), "https://www.twitch.tv/somestreamer");
+  assert.equal(streamUrl({ videoId: "tw_1", platform: "twitch", channelName: "Import" }), "");
   assert.equal(streamUrl({ videoId: "live1", platform: "twitch" }), "");
   assert.equal(streamUrl({ platform: "youtube" }), "");
   assert.equal(streamUrl(null), "");

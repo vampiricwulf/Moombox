@@ -7,7 +7,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,9 +175,7 @@ type FeedMonitor struct {
 	OnSchedule func(nextCheckAt int64)
 	// OnVideoFound is fired by the ARCHIVE step (archive.go) for every item
 	// the §10 decision table admits. The disposition tells the host HOW to
-	// create the job (spec §10's creator table); Plan 4 implements those
-	// semantics — until then the host maps every disposition to today's
-	// Upcoming+enqueue behavior (see the PLAN4 marker in monitor_callbacks.go).
+	// create the job (spec §10's creator table).
 	OnVideoFound func(videoID, title, url string, channel *config.ChannelConfig, d JobDisposition)
 	ProbeVideo   VideoProbeFunc
 	// ProbeVideoAuth is the AUTHENTICATED probe used only for members-only
@@ -192,9 +189,10 @@ type FeedMonitor struct {
 	// The status probes (ANDROID_VR/TV) carry no microformat and therefore
 	// no publish dates; when a vod-family probe returns dateless on a row
 	// whose own date is only an estimate (coarse/assumed), the walk calls
-	// this once — an anonymous WEB player fetch — to date the row. The
-	// ladder makes the upgrade one-time per video. Nil disables the second
-	// phase (rows with rankable dates still classify; see applyProbe).
+	// this once — a WEB player fetch carrying the jar's credentials — to
+	// date the row. The ladder makes the upgrade one-time per video. Nil
+	// disables the second phase (rows with rankable dates still classify;
+	// see applyProbe).
 	ProbeDate       func(ctx context.Context, videoID string) (publishedAt, precision string, err error)
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
@@ -241,6 +239,17 @@ type FeedMonitor struct {
 	// on its own account never draws on it. Guarded by fm.mu.
 	membershipLivenessTries int
 
+	// carriedNew keeps the "new" standing the STORE step gives a video in the
+	// cycle that first stores it (§10's DispositionNewVOD) past that cycle,
+	// until a job exists for it or newVODCarry passes: channel ID → video ID
+	// → the cycle that stored it. Without it, one failed probe in that cycle
+	// (or a spent walk budget, or a failed date fetch) made a brand-new VOD
+	// backlog the next cycle — Queued at priority 1 behind the channel's
+	// archive slots, which newly published content never waits on.
+	// In-process only: a restart in between still makes it backlog. Guarded
+	// by fm.mu.
+	carriedNew map[string]map[string]time.Time
+
 	// FetchRSS overrides the RSS feed fetch (fm.fetchFeed's real HTTP GET)
 	// for tests. Nil uses the real fetch — see rssFetch.
 	FetchRSS RSSFetchFunc
@@ -285,6 +294,14 @@ func (fm *FeedMonitor) SetOnChannelUnhealthy(fn func(channelID string, consecuti
 // crossed the threshold answers a check again.
 func (fm *FeedMonitor) SetOnChannelHealthy(fn func(channelID string)) {
 	fm.health.onHealthy = fn
+}
+
+// RestoreUnhealthy names the channels whose "not responding" alert a previous
+// process sent and never closed. Each is treated as a channel already past the
+// threshold: its first successful check fires the OnChannelHealthy callback
+// (the close), and failures stay silent until then. Call before Start.
+func (fm *FeedMonitor) RestoreUnhealthy(channelIDs []string) {
+	fm.health.restoreUnhealthy(channelIDs)
 }
 
 // NewFeedMonitor creates a new RSS feed monitor. The Store carries the
@@ -594,7 +611,9 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 //  2. STORE   Upsert every item seen (db.UpsertFeedItem) with its
 //     listing-derived date/precision and collect the video IDs
 //     inserted (not merely re-sighted) THIS cycle into newIDs, for
-//     the ARCHIVE step to disposition as new-vs-backlog.
+//     the ARCHIVE step to disposition as new-vs-backlog — joined by
+//     the ones earlier cycles inserted and have not jobbed yet
+//     (carryNewIDs).
 //  3. WALK    the serial probe pass over the store's scope (walk.go, spec §8),
 //     returning the FRESH map of this cycle's successful probes.
 //  4. ARCHIVE re-read scope — the walk corrected dates and statuses, so rows
@@ -706,6 +725,8 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		}
 	}
 
+	fm.carryNewIDs(chID, newIDs, cycleNow)
+
 	// 3. WALK — the serial probe pass over the store's scope (spec §8).
 	scope, scopeErr := fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
 	if scopeErr != nil {
@@ -726,8 +747,73 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	archiveCtx, archiveCancel := context.WithTimeout(ctx, passBudget(len(scope)))
 	fm.archive(archiveCtx, ch, chID, cutoff, scope, newIDs, fresh)
 	archiveCancel()
+	fm.settleNewIDs(chID, newIDs)
 
 	return rssErr
+}
+
+// newVODCarry is how long a video keeps the "new" standing of the cycle that
+// first stored it while no job exists for it (carriedNew). Long enough to
+// outlast any run of transient probe failures; past it, content that waited
+// that long for its first job is paced like the backlog.
+const newVODCarry = 24 * time.Hour
+
+// carryNewIDs adds to this cycle's newIDs the videos earlier cycles stored
+// as new and have not jobbed yet, records this cycle's own, and drops entries
+// older than newVODCarry from every channel — so a removed channel's entries
+// age out too.
+func (fm *FeedMonitor) carryNewIDs(chID string, newIDs map[string]bool, now time.Time) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	for id, ids := range fm.carriedNew {
+		for vid, at := range ids {
+			if now.Sub(at) >= newVODCarry {
+				delete(ids, vid)
+			}
+		}
+		if len(ids) == 0 {
+			delete(fm.carriedNew, id)
+		}
+	}
+	carried := fm.carriedNew[chID]
+	for vid := range carried {
+		newIDs[vid] = true
+	}
+	for vid := range newIDs {
+		if _, ok := carried[vid]; ok {
+			continue
+		}
+		if carried == nil {
+			if fm.carriedNew == nil {
+				fm.carriedNew = map[string]map[string]time.Time{}
+			}
+			carried = map[string]time.Time{}
+			fm.carriedNew[chID] = carried
+		}
+		carried[vid] = now
+	}
+}
+
+// settleNewIDs drops the carried videos a job now exists for. A DB error
+// keeps the entry: newVODCarry bounds it either way.
+func (fm *FeedMonitor) settleNewIDs(chID string, newIDs map[string]bool) {
+	var jobbed []string
+	for vid := range newIDs {
+		if has, err := fm.db.HasAnyJob(vid); err == nil && has {
+			jobbed = append(jobbed, vid)
+		}
+	}
+	if len(jobbed) == 0 {
+		return
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	for _, vid := range jobbed {
+		delete(fm.carriedNew[chID], vid)
+	}
+	if len(fm.carriedNew[chID]) == 0 {
+		delete(fm.carriedNew, chID)
+	}
 }
 
 // rssFetch is the injectable RSS-fetch seam: FetchRSS when a test has wired
@@ -1043,20 +1129,9 @@ type atomFeed struct {
 }
 
 type atomEntry struct {
-	VideoID    string         `xml:"http://www.youtube.com/xml/schemas/2015 videoId"`
-	Title      string         `xml:"title"`
-	Published  string         `xml:"published"` // RFC3339, e.g. 2026-07-13T04:18:12+00:00
-	Links      []atomLink     `xml:"link"`
-	MediaGroup atomMediaGroup `xml:"http://search.yahoo.com/mrss/ group"`
-}
-
-type atomLink struct {
-	Rel  string `xml:"rel,attr"`
-	Href string `xml:"href,attr"`
-}
-
-type atomMediaGroup struct {
-	Description string `xml:"http://search.yahoo.com/mrss/ description"`
+	VideoID   string `xml:"http://www.youtube.com/xml/schemas/2015 videoId"`
+	Title     string `xml:"title"`
+	Published string `xml:"published"` // RFC3339, e.g. 2026-07-13T04:18:12+00:00
 }
 
 // resolveArchiveWindowDays is THE per-channel resolver for how many days back
@@ -1098,24 +1173,21 @@ func (fm *FeedMonitor) membershipDiscoveryEnabled() bool {
 }
 
 // discoveredVideo is one parsed RSS feed entry, as consumed by the STORE step
-// (spec §7): videoID/title/published feed the upsert. desc and url are parse
-// outputs the store does not persist — the store-driven passes term-match on
-// title only (§8) and synthesize canonical watch URLs (archive.go).
+// (spec §7): videoID/title/published feed the upsert. url is a parse output
+// the store does not persist — the store-driven passes synthesize canonical
+// watch URLs (archive.go). The description is not parsed at all: the passes
+// term-match on title only (§8), since a store row carries no description.
 type discoveredVideo struct {
 	videoID   string
 	title     string
-	desc      string    // RSS description (lookbehind-deduped); not stored
-	url       string    // RSS alternate link; not stored
 	published time.Time // RSS <published> — 'exact' in the store; zero ⇒ 'assumed'/cycle-now
-	source    string    // always "rss" (feed_items.source)
 }
 
 // parseFeedCandidates parses an Atom feed into discovery candidates. It returns
 // ALL entries; the STORE step upserts every one, carrying its <published> date
 // as the row's 'exact'-precision published (zero time ⇒ 'assumed'/cycle-now —
-// see the STORE step). Description dedup
-// (NumDescLookbehind) is applied here because it depends on feed entry order. A
-// parse failure is returned so the caller can record it as channel-health.
+// see the STORE step). A parse failure is returned so the caller can record it
+// as channel-health.
 func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte) ([]discoveredVideo, error) {
 	var feed atomFeed
 	if err := xml.Unmarshal(data, &feed); err != nil {
@@ -1126,38 +1198,10 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 		return nil, nil
 	}
 
-	lookbehind := 0
-	if ch.NumDescLookbehind != nil {
-		lookbehind = *ch.NumDescLookbehind
-	}
-	// Precompute per-entry line sets once (avoids O(N*M*K) re-trimming).
-	var entryLineSets []map[string]struct{}
-	if lookbehind > 0 {
-		entryLineSets = make([]map[string]struct{}, len(entries))
-		for i := range entries {
-			entryLineSets[i] = descriptionLineSet(entries[i].MediaGroup.Description)
-		}
-	}
-
 	out := make([]discoveredVideo, 0, len(entries))
-	for i, entry := range entries {
+	for _, entry := range entries {
 		if entry.VideoID == "" {
 			continue
-		}
-
-		// Description dedup: filter lines that appear in older entries.
-		description := entry.MediaGroup.Description
-		if lookbehind > 0 && i+1 < len(entries) {
-			end := min(i+1+lookbehind, len(entries))
-			description = filterUniqueDescriptionLinesPrecomputed(description, entryLineSets[i+1:end])
-		}
-
-		videoURL := ""
-		for _, link := range entry.Links {
-			if link.Rel == "alternate" {
-				videoURL = link.Href
-				break
-			}
 		}
 
 		// A missing/invalid <published> parses to the zero time. The zero
@@ -1171,44 +1215,10 @@ func (fm *FeedMonitor) parseFeedCandidates(ch *config.ChannelConfig, data []byte
 		out = append(out, discoveredVideo{
 			videoID:   entry.VideoID,
 			title:     entry.Title,
-			desc:      description,
-			url:       videoURL,
 			published: published,
-			source:    "rss",
 		})
 	}
 	return out, nil
-}
-
-// descriptionLineSet builds the trimmed-line lookup set for a description.
-// Sharing one set per entry across the outer loop keeps dedup work linear in
-// total lines rather than quadratic in entries.
-func descriptionLineSet(description string) map[string]struct{} {
-	set := make(map[string]struct{})
-	for line := range strings.SplitSeq(description, "\n") {
-		set[strings.TrimSpace(line)] = struct{}{}
-	}
-	return set
-}
-
-// filterUniqueDescriptionLinesPrecomputed removes lines that appear in any of
-// the precomputed older-entry line sets.
-func filterUniqueDescriptionLinesPrecomputed(description string, olderLineSets []map[string]struct{}) string {
-	var unique []string
-	for line := range strings.SplitSeq(description, "\n") {
-		trimmed := strings.TrimSpace(line)
-		found := false
-		for _, set := range olderLineSets {
-			if _, ok := set[trimmed]; ok {
-				found = true
-				break
-			}
-		}
-		if !found {
-			unique = append(unique, line)
-		}
-	}
-	return strings.Join(unique, "\n")
 }
 
 // getYouTubeChannels returns a copy of the YouTube channel list under

@@ -310,7 +310,7 @@ func TestUnscopedUpdateStaysInsideTheDeclaredOrigin(t *testing.T) {
 			updates := map[cookieUpdateKey]cookieUpdate{
 				{Name: "SAPISID"}: {Delete: true},
 			}
-			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+			if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 				t.Fatalf("updateCookieFile: %v", err)
 			}
 
@@ -402,7 +402,7 @@ func TestUnscopedRefreshCrossesDomainsOnlyInsideTheDeclaredPlatform(t *testing.T
 			updates := map[cookieUpdateKey]cookieUpdate{
 				{Name: "SID"}: {Value: "fresh-from-the-caller", Expiry: 2100000000},
 			}
-			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+			if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 				t.Fatalf("updateCookieFile: %v", err)
 			}
 
@@ -516,7 +516,7 @@ func TestInsertionStaysInsideTheDeclaredPlatform(t *testing.T) {
 			updates := map[cookieUpdateKey]cookieUpdate{
 				tc.key: {Value: "inserted-value", Expiry: 2100000000},
 			}
-			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+			if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 				t.Fatalf("updateCookieFile: %v", err)
 			}
 
@@ -636,7 +636,7 @@ func TestEssentialCookieLoggingIsDomainGuarded(t *testing.T) {
 				updates := map[cookieUpdateKey]cookieUpdate{
 					{Name: "SID", Domain: tc.domain}: {Delete: true},
 				}
-				if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+				if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 					t.Fatalf("updateCookieFile: %v", err)
 				}
 
@@ -674,7 +674,7 @@ func TestEssentialCookieLoggingIsDomainGuarded(t *testing.T) {
 				updates := map[cookieUpdateKey]cookieUpdate{
 					{Name: "SID", Domain: tc.domain}: {Value: "", Expiry: 2000000000},
 				}
-				if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+				if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 					t.Fatalf("updateCookieFile: %v", err)
 				}
 

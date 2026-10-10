@@ -2,50 +2,6 @@ package main
 
 import "github.com/vampiricwulf/Moombox/internal/database"
 
-// progressOnlyColumns are the schema columns a download's ~60 Hz progress tick
-// writes (internal/worker/progress.go ProgressTracker.maybeUpdate and the two
-// activity writers) and that nothing else writes alone. A JobChange whose every
-// column is in this set carries no state transition, so the dashboard can be
-// sent the slim job_progress frame instead of the whole row.
-//
-// total_video_seq / total_audio_seq are here although O-O's field list does not
-// name them: maybeUpdate writes them on every tick that the stream has
-// reported, so omitting them would classify every real tick as a transition and
-// leave the whole change inert.
-//
-// "status" is deliberately ABSENT: a status change re-sorts the list and can
-// cross the archive boundary, which is what job_update is for.
-var progressOnlyColumns = map[string]bool{
-	"progress":            true,
-	"percent":             true,
-	"eta":                 true,
-	"speed":               true,
-	"last_video_seq":      true,
-	"total_video_seq":     true,
-	"last_audio_seq":      true,
-	"total_audio_seq":     true,
-	"total_chat_messages": true,
-}
-
-// isProgressOnlyChange reports whether every column in changes is a progress
-// column.
-//
-// An empty (or nil) set is NOT progress-only. UpdateJobFields never produces
-// one for a real write — it refuses a call with no known field and strips only
-// updated_at from the list — so an empty set means "a change we cannot
-// classify", and the safe answer for that is the full row.
-func isProgressOnlyChange(changes []string) bool {
-	if len(changes) == 0 {
-		return false
-	}
-	for _, col := range changes {
-		if !progressOnlyColumns[col] {
-			return false
-		}
-	}
-	return true
-}
-
 // jobProgressFrame is the job_progress payload (O-O).
 //
 // Every JSON key is spelled exactly as the same field on database.Job, because
@@ -76,7 +32,14 @@ type jobProgressFrame struct {
 	TotalAudioSeq     *int               `json:"totalAudioSeq"`
 	TotalChatMessages *int               `json:"totalChatMessages"`
 	UpdatedAt         string             `json:"updatedAt"`
+
+	// version is the write that produced the row (database.Job.Version),
+	// for the hub's stale-frame check. Not part of the wire frame.
+	version uint64
 }
+
+// JobVersion lets the WebSocket hub drop a frame older than one it has sent.
+func (f jobProgressFrame) JobVersion() (string, uint64) { return f.ID, f.version }
 
 // newJobProgressFrame projects the mutable fields out of a job row.
 //
@@ -97,6 +60,7 @@ func newJobProgressFrame(job *database.Job) jobProgressFrame {
 		TotalVideoSeq:     job.TotalVideoSeq,
 		TotalAudioSeq:     job.TotalAudioSeq,
 		TotalChatMessages: job.TotalChatMessages,
+		version:           job.Version,
 		UpdatedAt:         job.UpdatedAt,
 	}
 }

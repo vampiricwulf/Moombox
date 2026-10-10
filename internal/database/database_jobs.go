@@ -1,15 +1,30 @@
 package database
 
 import (
+	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
 
 // AddJob inserts a new job into the database.
+//
+// The row, its gap rows and its segment rows go in one transaction: a gap
+// insert that failed used to leave the job row behind while AddJob reported
+// an error and fired no JobAdded — a job every list showed only after a
+// restart, that its creator believed was never made. Segments are the parts
+// of a recording that arrives already split (an archive import's): inserted
+// after AddJob, they were in no event — JobAdded is the only one a new row
+// gets — so the dashboard and the TUI held the job without its parts.
+//
+// JobAdded carries the row as STORED, read back inside the same lock with its
+// child rows, as GetJob reads it: the INSERT names a fixed column list, so a
+// field it does not cover (watched, incomplete_tail, park_reason,
+// auto_retry_count — written later through UpdateJobFields) takes the schema
+// default no matter what the caller's struct held, and subscribers must see
+// what a GetJob would return, not the struct. Each of job.Segments gets its
+// row's id and the job's id written back.
 func (db *Database) AddJob(job *Job) (bool, error) {
 	db.mu.Lock()
 
@@ -19,7 +34,15 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 	}
 	job.UpdatedAt = now
 
-	result, err := insertJobExec(db.getCtx(), db.db, job)
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		db.mu.Unlock()
+		return false, fmt.Errorf("failed to begin job insert: %w", err)
+	}
+	defer tx.Rollback() // a no-op once committed
+
+	result, err := insertJobExec(ctx, tx, job)
 	if err != nil {
 		db.mu.Unlock()
 		return false, fmt.Errorf("failed to insert job: %w", err)
@@ -34,22 +57,39 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 
 	// Insert gaps
 	for _, gap := range job.Gaps {
-		_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)`,
 			job.ID, gap.From, gap.To, gap.Stream)
 		if err != nil {
 			db.mu.Unlock()
 			return false, fmt.Errorf("failed to insert gap: %w", err)
 		}
 	}
+	for i := range job.Segments {
+		if err := insertSegmentExec(ctx, tx, job.ID, &job.Segments[i]); err != nil {
+			db.mu.Unlock()
+			return false, fmt.Errorf("failed to insert segment: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		db.mu.Unlock()
+		return false, fmt.Errorf("failed to commit job insert: %w", err)
+	}
+
+	added := job
+	if stored, err := scanJob(db.stmtGetJob.QueryRowContext(ctx, job.ID)); err == nil {
+		db.loadChildRows(stored)
+		db.jobWriteVersion++
+		stored.Version = db.jobWriteVersion
+		added = stored
+	}
 
 	db.mu.Unlock()
 	// AddJob fires ONLY OnJobAdded — the legacy OnJobsChange dispatch
 	// was dropped now that the WS broadcaster + TUI both consume the
-	// targeted lifecycle event (DECISIONS #21 consumer migration). The
-	// other OnJobsChange writers (DeleteJob, AddTrim, DeleteTrim,
-	// BatchSetWatched) still fire OnJobsChange for now; their consumer
-	// migrations will land separately.
-	db.notifyJobAdded(job)
+	// targeted lifecycle event (DECISIONS #21 consumer migration). Only
+	// the bulk writers (BatchSetWatched, DeleteJobsAndHistoryForChannel)
+	// still fire OnJobsChange.
+	db.notifyJobAdded(added)
 	return true, nil
 }
 
@@ -78,8 +118,17 @@ func (db *Database) GetJob(id string) (*Job, error) {
 		}
 		return nil, err
 	}
+	db.loadChildRows(job)
+	return job, nil
+}
 
-	// Load gaps (non-fatal — gaps may simply not exist)
+// loadChildRows fills job's gaps, trims and segments from their tables: the
+// whole row GetJob returns, which UpdateJobFields' read-back hands its
+// subscribers too. Each load is non-fatal — a job may simply have none — and
+// a failed one is logged and leaves that field empty. The caller must hold
+// db.mu (read or write).
+func (db *Database) loadChildRows(job *Job) {
+	id := job.ID
 	if gaps, err := db.getGaps(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load gaps for job", "jobID", id, "err", err)
@@ -87,7 +136,6 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Gaps = gaps
 	}
-	// Load trims (non-fatal — trims may simply not exist)
 	if trims, err := db.getTrimsUnlocked(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load trims for job", "jobID", id, "err", err)
@@ -95,7 +143,6 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Trims = trims
 	}
-	// Load segments (non-fatal — segments may simply not exist)
 	if segments, err := db.getSegments(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load segments for job", "jobID", id, "err", err)
@@ -103,8 +150,6 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Segments = segments
 	}
-
-	return job, nil
 }
 
 // GetAllJobs returns all jobs from the database. Age-based filtering of
@@ -154,7 +199,9 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		return nil, err
 	}
 
-	db.attachTrimsAndGaps(jobs)
+	if err := db.attachTrimsAndGaps(jobs); err != nil {
+		return nil, err
+	}
 	return jobs, nil
 }
 
@@ -165,8 +212,9 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 // jobIDs is chunked to stay under SQLITE_MAX_VARIABLE_NUMBER and all chunks
 // run inside a single outer transaction so the update is atomic.
 //
-// BatchSetWatched is the lone holdout still firing OnJobsChange (a full
-// jobs+trims+gaps re-scan) rather than per-event notifications. Migration
+// BatchSetWatched is one of the two bulk writers still firing OnJobsChange
+// (a full jobs+trims+gaps re-scan) rather than per-event notifications; the
+// other is DeleteJobsAndHistoryForChannel, for the same reason. Migration
 // rationale: a batch can flip 100+ jobs at once and per-event dispatch
 // would amplify into 100+ subscriber callbacks, each running their own
 // re-render. The single full re-scan is cheaper for the consumer side
@@ -273,6 +321,72 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	return true, nil
 }
 
+// ManualTwitchJobs returns the non-terminal manually added Twitch jobs for
+// login's channel — the `tw_manual_<login>_<ns>` rows the Web add creates when
+// the channel is offline — with ID, Status and StreamStartTime set. Such a row
+// carries no stream ID, so the Twitch monitor's HasActiveJob(streamID) dedupe
+// never matches it; the monitor decides from these whether one has claimed a
+// broadcast (manualJobClaims). The login is everything between the prefix and
+// the last underscore (the add's UnixNano suffix has none), matched in Go
+// because a login's own underscores are LIKE wildcards.
+func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, status, stream_start_time FROM jobs WHERE id LIKE 'tw\_manual\_%' ESCAPE '\' AND status NOT IN (?, ?, ?)`,
+		StatusFinished, StatusError, StatusCancelled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		var id, status string
+		var start sql.NullString
+		if err := rows.Scan(&id, &status, &start); err != nil {
+			return nil, err
+		}
+		rest := strings.TrimPrefix(id, "tw_manual_")
+		if i := strings.LastIndex(rest, "_"); i > 0 && strings.EqualFold(rest[:i], login) {
+			out = append(out, &Job{ID: id, VideoID: id, Status: JobStatus(status), StreamStartTime: start.String})
+		}
+	}
+	return out, rows.Err()
+}
+
+// TwitchEndUnconfirmedJobs returns the Twitch jobs sitting in Error with
+// ParkReasonTwitchEndUnconfirmed — a live capture that failed while its
+// broadcast's end was unconfirmed, staging kept — with the fields the Twitch
+// monitor needs to tell whether that broadcast is over: ID, VideoID, URL,
+// ChannelName, StreamStartTime and ManuallyAdded.
+func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, video_id, url, channel_name, stream_start_time, manually_added FROM jobs
+		 WHERE platform = 'twitch' AND status = ? AND park_reason = ?`,
+		StatusError, ParkReasonTwitchEndUnconfirmed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		var id string
+		var videoID, url, channelName, start sql.NullString
+		var manual sql.NullInt64
+		if err := rows.Scan(&id, &videoID, &url, &channelName, &start, &manual); err != nil {
+			return nil, err
+		}
+		out = append(out, &Job{ID: id, VideoID: videoID.String, URL: url.String, ChannelName: channelName.String,
+			StreamStartTime: start.String, ManuallyAdded: manual.Int64 != 0, Platform: "twitch",
+			Status: StatusError, ParkReason: ParkReasonTwitchEndUnconfirmed})
+	}
+	return out, rows.Err()
+}
+
 // QueuedChannels returns the distinct channel IDs that currently have Queued
 // (un-admitted backlog) jobs. NULL channel_id rows are excluded: Twitch and
 // manual adds have no channel affiliation and are never scheduler-paced, and
@@ -300,6 +414,70 @@ func (db *Database) QueuedChannels() ([]string, error) {
 	return channels, rows.Err()
 }
 
+// ChannelJob is one job of a channel as ListChannelJobs reads it: what a
+// channel removal's confirmation counts and names.
+type ChannelJob struct {
+	ID     string
+	Title  string
+	Status JobStatus
+}
+
+// ListChannelJobs returns every job carrying channelID — whatever its status
+// — oldest first. jobs.channel_id is nullable and `channel_id = ?` never
+// matches NULL, so Twitch and manually added jobs are never listed: a Twitch
+// channel's are ListTwitchJobs'.
+func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, title, status FROM jobs WHERE channel_id = ? ORDER BY created_at, id`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []ChannelJob
+	for rows.Next() {
+		var j ChannelJob
+		if err := rows.Scan(&j.ID, &j.Title, &j.Status); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
+// ListTwitchJobs returns every Twitch job — whatever its status — oldest
+// first, with the fields that tie one to a channel (ID, VideoID, URL and
+// ChannelName, which worker.TwitchJobLogin reads) and its Title and Status:
+// what a Twitch channel's removal confirmation counts. No Twitch row carries
+// a channel_id — neither the Twitch monitor's (newTwitchStreamJob) nor a
+// manual add sets one — so ListChannelJobs never finds one.
+func (db *Database) ListTwitchJobs() ([]*Job, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, video_id, url, channel_name, title, status FROM jobs WHERE platform = 'twitch' ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []*Job
+	for rows.Next() {
+		var id, status string
+		var videoID, url, channelName, title sql.NullString
+		if err := rows.Scan(&id, &videoID, &url, &channelName, &title, &status); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, &Job{ID: id, VideoID: videoID.String, URL: url.String, ChannelName: channelName.String,
+			Title: title.String, Status: JobStatus(status), Platform: "twitch"})
+	}
+	return jobs, rows.Err()
+}
+
 // CountBacklogInFlight returns the channel's admitted-backlog count — the M
 // count of spec §10.
 //
@@ -310,31 +488,38 @@ func (db *Database) CountBacklogInFlight(channelID string) (int, error) {
 	defer db.mu.RUnlock()
 
 	var n int
+	// Bound from the JobStatus constants, as HasActiveJob does, so a status
+	// rename cannot silently zero the scheduler's in-flight count.
 	err := db.db.QueryRowContext(db.getCtx(), `SELECT COUNT(*) FROM jobs
  WHERE channel_id = ? AND queue_priority = 1
-   AND status IN ('Upcoming','Live','Downloading','Muxing');`, channelID).Scan(&n)
+   AND status IN (?, ?, ?, ?);`, channelID,
+		StatusUpcoming, StatusLive, StatusDownloading, StatusMuxing).Scan(&n)
 	return n, err
 }
 
 // NextQueuedJobs returns up to limit Queued job IDs for the channel, in the
 // order the scheduler admits them.
 //
-// Admission order: published DESC — no priority term (only backlog is ever Queued).
-// INNER JOIN is guaranteed to hit: only the archival pass creates Queued rows.
-// A cookie repair also returns priority-1 rows to Queued, and those were created
-// by the archival pass too — the cookie sweep checks for the partner
-// (GetFeedItem) before choosing Queued, so no Queued row lacks one. It has to:
-// the prune deletes {Queued, Upcoming, COOKIES?} jobs before it deletes
-// feed_items (backfill.go) but leaves a RUNNING download alone, and that is the
-// row that parks in COOKIES? afterwards with no partner left.
+// Admission order: published DESC — no priority term (only backlog is ever
+// Queued) — then created_at DESC for the rows with no feed_items partner,
+// which a NULL published sorts after every dated one.
+//
+// LEFT JOIN, because a Queued row can outlive its partner: removing a channel
+// keeps its jobs unless the operator chose to delete the pending ones, while
+// the departure prune still deletes the channel's feed_items (backfill.go
+// CancelAndPrune). An INNER JOIN left those kept rows in Queued with no exit —
+// ShouldProcess(Queued) is false and /retry and /resume both refuse it — so
+// keeping them would have meant losing them. The scheduler admits them under
+// the archive_slots its resolver gives a channel no longer configured: the
+// global default.
 func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(), `SELECT j.id FROM jobs j
-  JOIN feed_items f ON f.channel_id = j.channel_id AND f.video_id = j.video_id
+  LEFT JOIN feed_items f ON f.channel_id = j.channel_id AND f.video_id = j.video_id
  WHERE j.channel_id = ? AND j.status = 'Queued'
- ORDER BY f.published DESC
+ ORDER BY f.published DESC, j.created_at DESC
  LIMIT ?;`, channelID, limit)
 	if err != nil {
 		return nil, err
@@ -353,13 +538,16 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 }
 
 // DeleteJobsAndHistoryForChannel deletes the channel's jobs in the given
-// statuses AND their processing-history rows, returning the number of jobs
-// deleted. Plan 5's backfill prune calls it with {Queued, Upcoming, COOKIES?}
-// (spec §11): pre-download states with nothing on disk. AddToHistory fires at
-// job CREATION, so deleting the job while its history row survives
-// manufactures an orphan — HasProcessed keeps answering true and the re-added
-// channel can never re-archive the video (the exact class that re-armed
-// gr-ZTohjwnQ).
+// statuses AND their processing-history rows, sparing the rows whose IDs are
+// in keep, and returns the number of jobs deleted. Its one caller is the
+// "delete its pending jobs" choice of a channel removal
+// (worker.DeletePendingChannelJobs), with {Queued, Upcoming, COOKIES?} and
+// keep naming the rows whose staging holds recorded footage: a COOKIES? row
+// can be a live capture parked mid-stream, and deleting it left its footage
+// with no job to resume or mux it from. AddToHistory fires at job CREATION,
+// so deleting the job while its history row survives manufactures an orphan
+// — HasProcessed keeps answering true and the re-added channel can never
+// re-archive the video (the exact class that re-armed gr-ZTohjwnQ).
 //
 // Statement order is load-bearing: the history delete's subquery reads the
 // jobs table, so it must run BEFORE the jobs delete. Both run in one
@@ -381,12 +569,19 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // full jobs fetches in the WS subscriber and can overflow the TUI's bounded
 // drop-on-full channel. A prune that deleted nothing dispatches nothing
 // (DeleteJob's rowsAffected guard).
-func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus) (int, error) {
+//
+// The deleted rows' per-job logs go with them here, under db.mu, rather than
+// in an OnJobsChange subscriber: that list was read at commit and reaches the
+// subscribers later, on a goroutine, so a job AddJob creates in between is
+// missing from it without having been deleted — a prune of "everything not in
+// the list" dropped the new job's routing that its own OnJobAdded had just
+// set up, and its lines reached no log until its next status write.
+func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus, keep []string) (int, error) {
 	if len(statuses) == 0 {
 		return 0, nil
 	}
 
-	deleted, jobs, err := db.deleteJobsAndHistoryForChannelTx(channelID, statuses)
+	deleted, jobs, err := db.deleteJobsAndHistoryForChannelTx(channelID, statuses, keep)
 	if err != nil {
 		return 0, err
 	}
@@ -395,25 +590,33 @@ func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []
 }
 
 // deleteJobsAndHistoryForChannelTx runs the two-statement prune transaction
-// under db.mu and, when rows were deleted, snapshots the post-delete jobs
-// list for the caller's OnJobsChange dispatch (the snapshot must be taken
-// while the lock is still held).
-func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus) (deleted int, snapshot []*Job, err error) {
+// under db.mu and, when rows were deleted, drops their per-job logs and
+// snapshots the post-delete jobs list for the caller's OnJobsChange dispatch
+// (both while the lock is still held: an AddJob re-creating one of the ids
+// waits for it, so the routing its OnJobAdded sets up is never the one
+// dropped).
+func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus, keep []string) (deleted int, snapshot jobsSnapshot, err error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
 	match := "channel_id = ? AND status IN (" + placeholders + ")"
-	args := make([]any, 0, len(statuses)+1)
+	args := make([]any, 0, len(statuses)+len(keep)+1)
 	args = append(args, channelID)
 	for _, s := range statuses {
 		args = append(args, string(s))
+	}
+	if len(keep) > 0 {
+		match += " AND id NOT IN (" + strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",") + ")"
+		for _, id := range keep {
+			args = append(args, id)
+		}
 	}
 
 	ctx := db.getCtx()
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
 	defer tx.Rollback()
 
@@ -421,22 +624,35 @@ func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses 
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM history WHERE video_id IN (SELECT id FROM jobs WHERE "+match+")",
 		args...); err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
 
-	res, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE "+match, args...)
+	rows, err := tx.QueryContext(ctx, "DELETE FROM jobs WHERE "+match+" RETURNING id", args...)
 	if err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
-	n, _ := res.RowsAffected()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, jobsSnapshot{}, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, jobsSnapshot{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, nil, err
+		return 0, jobsSnapshot{}, err
 	}
-	if n == 0 {
-		return 0, nil, nil
+	if len(ids) == 0 {
+		return 0, jobsSnapshot{}, nil
 	}
-	return int(n), db.snapshotJobsChange(), nil
+	db.clearJobLogsOf(ids)
+	return len(ids), db.snapshotJobsChange(), nil
 }
 
 // AddGap adds a gap record for a job.
@@ -489,9 +705,9 @@ func (db *Database) AddTrim(trim *TrimRecord) error {
 	db.mu.Unlock()
 	// Fires ONLY OnTrimsChanged — the legacy OnJobsChange dispatch was
 	// dropped now that the WS broadcaster + TUI consume the targeted
-	// lifecycle event (DECISIONS #21 consumer migration). DeleteJob and
-	// BatchSetWatched still fire OnJobsChange; their migrations land
-	// separately.
+	// lifecycle event (DECISIONS #21 consumer migration). Only the bulk
+	// writers (BatchSetWatched, DeleteJobsAndHistoryForChannel) still fire
+	// OnJobsChange.
 	db.notifyTrimsChanged(trim.JobID)
 	return nil
 }
@@ -548,17 +764,23 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 func (db *Database) AddSegment(seg *Segment) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return insertSegmentExec(db.getCtx(), db.db, seg.JobID, seg)
+}
 
-	result, err := db.db.ExecContext(db.getCtx(), `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
+// insertSegmentExec inserts seg as a part row of jobID — the one column list
+// AddSegment, AddJob and ReplaceJobSegments write — and writes the row's id
+// and jobID back onto seg.
+func insertSegmentExec(ctx context.Context, exec executor, jobID string, seg *Segment) error {
+	result, err := exec.ExecContext(ctx, `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		seg.JobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
+		jobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
 		seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
 		seg.ChatFile)
 	if err != nil {
 		return err
 	}
 	id, _ := result.LastInsertId()
-	seg.ID = int(id)
+	seg.ID, seg.JobID = int(id), jobID
 	return nil
 }
 
@@ -582,17 +804,26 @@ func (db *Database) UpdateSegmentFile(id int, filename, filePath, chatFile strin
 // re-download is then finalized as multi-part from the OLD part files while the
 // freshly-downloaded media is discarded. (The job-delete cascade is the only
 // other place these rows are removed.)
+//
+// One transaction, like ReplaceJobSegments: as two autocommit DELETEs a crash
+// between them left the previous attempt's gap rows on the fresh run.
 func (db *Database) ClearJobSegmentsAndGaps(jobID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM gaps WHERE job_id = ?", jobID); err != nil {
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
 		return err
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, "DELETE FROM gaps WHERE job_id = ?", jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReplaceJobSegments atomically replaces all segment rows for a job with segs:
@@ -627,18 +858,9 @@ func (db *Database) ReplaceJobSegments(jobID string, segs []Segment) error {
 	}
 
 	for i := range segs {
-		seg := &segs[i]
-		result, err := tx.ExecContext(ctx, `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			jobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
-			seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
-			seg.ChatFile)
-		if err != nil {
+		if err := insertSegmentExec(ctx, tx, jobID, &segs[i]); err != nil {
 			return err
 		}
-		id, _ := result.LastInsertId()
-		seg.ID = int(id)
-		seg.JobID = jobID
 	}
 
 	return tx.Commit()
@@ -689,9 +911,15 @@ const idChunkSize = 500
 // requested job IDs via WHERE job_id IN (...) and chunked to respect
 // SQLITE_MAX_VARIABLE_NUMBER.
 // Caller must already hold db.mu (read or write).
-func (db *Database) attachTrimsAndGaps(jobs []*Job) {
+//
+// A failed query or an iteration that ends in error fails the whole load
+// rather than returning the jobs without their child rows: the orphan scanner
+// reads segment chat files through GetAllJobs, so a job silently missing its
+// segments makes those files look like orphans. A single row that fails to
+// scan is logged and skipped, as getGaps/getSegments and the jobs loop do.
+func (db *Database) attachTrimsAndGaps(jobs []*Job) error {
 	if len(jobs) == 0 {
-		return
+		return nil
 	}
 
 	// Collect the job IDs we actually care about so each sub-query is
@@ -706,6 +934,26 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	gapMap := make(map[string][]Gap, len(jobs))
 	segMap := make(map[string][]Segment, len(jobs))
 
+	// each runs one child query and hands every row to scan, which reports
+	// whether the row scanned. It owns the Close and the rows.Err check, so
+	// the three loads below cannot drift apart on either.
+	each := func(table, query string, args []any, scan func(*sql.Rows) error) error {
+		rows, err := db.db.QueryContext(db.getCtx(), query, args...)
+		if err != nil {
+			return fmt.Errorf("attachTrimsAndGaps: query %s: %w", table, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			if err := scan(rows); err != nil && db.logger != nil {
+				db.logger.Warn("attachTrimsAndGaps: scan error", "table", table, "err", err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("attachTrimsAndGaps: read %s: %w", table, err)
+		}
+		return nil
+	}
+
 	for start := 0; start < len(ids); start += idChunkSize {
 		end := min(start+idChunkSize, len(ids))
 		chunk := ids[start:end]
@@ -717,63 +965,54 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 		}
 
 		// Trims
-		trimRows, err := db.db.QueryContext(db.getCtx(),
+		if err := each("trims",
 			`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size
-			FROM trims WHERE job_id IN (`+placeholders+`)`, args...)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("attachTrimsAndGaps: failed to query trims", "err", err)
-			}
-		} else {
-			for trimRows.Next() {
+			FROM trims WHERE job_id IN (`+placeholders+`)`, args,
+			func(rows *sql.Rows) error {
 				var tr TrimRecord
-				if err := trimRows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
-					&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err == nil {
-					trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
+				if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
+					&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
+					return err
 				}
-			}
-			trimRows.Close()
+				trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
+				return nil
+			}); err != nil {
+			return err
 		}
 
 		// Gaps
-		gapRows, err := db.db.QueryContext(db.getCtx(),
+		if err := each("gaps",
 			`SELECT id, job_id, gap_from, gap_to, stream
-			FROM gaps WHERE job_id IN (`+placeholders+`)`, args...)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("attachTrimsAndGaps: failed to query gaps", "err", err)
-			}
-		} else {
-			for gapRows.Next() {
+			FROM gaps WHERE job_id IN (`+placeholders+`)`, args,
+			func(rows *sql.Rows) error {
 				var g Gap
-				if err := gapRows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err == nil {
-					gapMap[g.JobID] = append(gapMap[g.JobID], g)
+				if err := rows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err != nil {
+					return err
 				}
-			}
-			gapRows.Close()
+				gapMap[g.JobID] = append(gapMap[g.JobID], g)
+				return nil
+			}); err != nil {
+			return err
 		}
 
 		// Segments — keep this column list in lockstep with getSegments:
 		// the orphan scanner protects part chat files through THIS loader
 		// (GetAllJobs), so a column missed here reads as "no chat file" and
 		// the file becomes deletable as an orphan.
-		segRows, err := db.db.QueryContext(db.getCtx(),
+		if err := each("segments",
 			`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file
-			FROM segments WHERE job_id IN (`+placeholders+`) ORDER BY segment_index`, args...)
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Warn("attachTrimsAndGaps: failed to query segments", "err", err)
-			}
-		} else {
-			for segRows.Next() {
+			FROM segments WHERE job_id IN (`+placeholders+`) ORDER BY segment_index`, args,
+			func(rows *sql.Rows) error {
 				var s Segment
-				if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
+				if err := rows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
 					&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
-					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds, &s.ChatFile); err == nil {
-					segMap[s.JobID] = append(segMap[s.JobID], s)
+					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds, &s.ChatFile); err != nil {
+					return err
 				}
-			}
-			segRows.Close()
+				segMap[s.JobID] = append(segMap[s.JobID], s)
+				return nil
+			}); err != nil {
+			return err
 		}
 	}
 
@@ -788,6 +1027,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 			job.Segments = segs
 		}
 	}
+	return nil
 }
 
 // GetJobStats returns aggregate statistics across all jobs. The result is a
@@ -811,6 +1051,7 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	// types.go so a status rename can't silently desync the stats query
 	// (audit reports/database.md Q6).
 	statsQuery := fmt.Sprintf(`SELECT
+		COUNT(*),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status IN ('%s', '%s') THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
@@ -822,18 +1063,26 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') AND status IN ('%s', '%s', '%s') THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform = 'twitch' AND status IN ('%s', '%s', '%s') THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN length_seconds ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN status = '%s' THEN total_chat_messages ELSE 0 END), 0)
 		FROM jobs`,
 		StatusFinished, StatusDownloading, StatusLive, StatusMuxing, StatusError, StatusCancelled, StatusQueued,
+		StatusFinished, StatusError, StatusCancelled,
+		// The per-platform sizes count the same three statuses the per-status
+		// ones do, so the two cards always add up to Total Recorded. They
+		// summed every row, and a Finished incomplete-tail job being Resumed
+		// keeps its file_size while Downloading — the platforms then
+		// outweighed the total for the length of the resume.
+		StatusFinished, StatusError, StatusCancelled,
 		StatusFinished, StatusError, StatusCancelled,
 		StatusFinished, StatusFinished,
 	)
 
 	var s JobStats
 	err := db.db.QueryRowContext(db.getCtx(), statsQuery).Scan(
+		&s.TotalCount,
 		&s.FinishedCount, &s.ActiveCount, &s.MuxingCount,
 		&s.ErrorCount, &s.CancelledCount, &s.QueuedCount,
 		&s.YouTubeCount, &s.TwitchCount,
@@ -854,73 +1103,6 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	return &s, nil
 }
 
-// ImportFromJSON imports data from a TypeScript-version moombox.json file.
-//
-// Deprecated: Migration helper from the abandoned Node.js codebase. New
-// installs do not need this; reachability is near-zero (see audit report
-// reports/database.md T3/DC2). Plan to delete after one more release.
-func (db *Database) ImportFromJSON(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read JSON: %w", err)
-	}
-
-	var jsonDB struct {
-		Jobs       []Job             `json:"jobs"`
-		History    []string          `json:"history"`
-		LastVideos map[string]string `json:"lastVideos"`
-	}
-
-	if err := json.Unmarshal(data, &jsonDB); err != nil {
-		return fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	tx, err := db.db.BeginTx(db.getCtx(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Import jobs
-	for i := range jsonDB.Jobs {
-		job := &jsonDB.Jobs[i]
-		if job.Platform == "" {
-			job.Platform = "youtube"
-		}
-		// Use the shared insert helper inside the transaction.
-		if _, err := insertJobExec(db.getCtx(), tx, job); err != nil {
-			if db.logger != nil {
-				db.logger.Warn("import: failed to insert job", "jobID", job.ID, "err", err)
-			}
-			continue
-		}
-
-		for _, gap := range job.Gaps {
-			if _, err := tx.ExecContext(db.getCtx(), "INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)",
-				job.ID, gap.From, gap.To, gap.Stream); err != nil && db.logger != nil {
-				db.logger.Warn("import: failed to insert gap", "jobID", job.ID, "err", err)
-			}
-		}
-	}
-
-	// Import history
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, videoID := range jsonDB.History {
-		if _, err := tx.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now); err != nil && db.logger != nil {
-			db.logger.Warn("import: failed to insert history", "videoID", videoID, "err", err)
-		}
-	}
-
-	// Import last videos (dropped in v16, kept for backward compat; silently ignored)
-	for range jsonDB.LastVideos {
-		if db.logger != nil {
-			db.logger.Debug("legacy lastVideos ignored (dropped in v16)")
-		}
-	}
-
-	return tx.Commit()
-}
-
 // --- Job logs ---
 
 // capLogLines enforces the 200-line cap on a per-job log buffer. When
@@ -931,13 +1113,6 @@ func capLogLines(logs []string) []string {
 		return logs[len(logs)-100:]
 	}
 	return logs
-}
-
-// AddJobLog adds a log line to the per-job in-memory buffer.
-func (db *Database) AddJobLog(jobID, line string) {
-	db.jobLogsMu.Lock()
-	defer db.jobLogsMu.Unlock()
-	db.jobLogs[jobID] = capLogLines(append(db.jobLogs[jobID], line))
 }
 
 // GetJobLogs returns a copy of the in-memory log lines for a job.
@@ -955,10 +1130,18 @@ func (db *Database) GetJobLogs(jobID string) []string {
 
 // ClearJobLogs removes the per-job log buffer and stops routing to it.
 func (db *Database) ClearJobLogs(jobID string) {
+	db.clearJobLogsOf([]string{jobID})
+}
+
+// clearJobLogsOf is ClearJobLogs for a list, under one lock acquisition: the
+// bulk channel prune drops its deleted rows' logs through it.
+func (db *Database) clearJobLogsOf(jobIDs []string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
-	delete(db.jobLogs, jobID)
-	delete(db.logRouted, jobID)
+	for _, id := range jobIDs {
+		delete(db.jobLogs, id)
+		delete(db.logRouted, id)
+	}
 }
 
 // RouteLogToJobs checks if a log line contains any TRACKED job ID and routes
@@ -1006,10 +1189,13 @@ func (db *Database) UntrackJobForLogs(jobID string) {
 
 // SyncJobLogTracking brings the routed set in line with a job list: every
 // non-terminal job is tracked, every terminal one untracked (buffer kept).
-// Both callers in cmd/moombox — the boot seed over GetAllJobs and the
-// OnJobsChange fan-out — used to track EVERY row, which is what made
-// RouteLogToJobs scan the whole history per log line (CORE-12). One lock
-// acquisition for the list, not one per job.
+// Its caller is cmd/moombox's boot seed over GetAllJobs, which — like the
+// OnJobsChange fan-out that also called it once — used to track EVERY row,
+// which is what made RouteLogToJobs scan the whole history per log line
+// (CORE-12). After boot, routing follows each job's own events; a sync over
+// the whole table would untrack a terminal job a worker bracket is routing
+// to (RecoverAsides, cleanupStagingAfterMux). One lock acquisition for the
+// list, not one per job.
 func (db *Database) SyncJobLogTracking(jobs []*Job) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
@@ -1030,23 +1216,5 @@ func (db *Database) trackForLogsLocked(jobID string) {
 	db.logRouted[jobID] = struct{}{}
 	if _, ok := db.jobLogs[jobID]; !ok {
 		db.jobLogs[jobID] = nil
-	}
-}
-
-// PruneJobLogs removes log entries — and routing — for job IDs not in the
-// provided set. Called on jobsChange to keep the log maps in sync with the
-// database.
-func (db *Database) PruneJobLogs(activeIDs map[string]struct{}) {
-	db.jobLogsMu.Lock()
-	defer db.jobLogsMu.Unlock()
-	for id := range db.jobLogs {
-		if _, ok := activeIDs[id]; !ok {
-			delete(db.jobLogs, id)
-		}
-	}
-	for id := range db.logRouted {
-		if _, ok := activeIDs[id]; !ok {
-			delete(db.logRouted, id)
-		}
 	}
 }

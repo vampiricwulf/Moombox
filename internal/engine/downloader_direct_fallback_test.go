@@ -38,7 +38,7 @@ func TestProbeFileSizeRetriesBeforeFallback(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
 	d.delays = fastDelays()
 
-	if got := d.probeFileSizeWithRetry(context.Background()); got != 4096 {
+	if got, _ := d.probeFileSizeWithRetry(context.Background()); got != 4096 {
 		t.Fatalf("probeFileSizeWithRetry = %d, want 4096 after one transient failure (calls=%d)", got, calls.Load())
 	}
 }
@@ -147,7 +147,8 @@ func TestStreamingFallbackDiscardsWhenRangeIgnored(t *testing.T) {
 // runs under. ENGINE-4 took the client-level five-minute Timeout away, and
 // that Timeout was the ONLY bound this GET ever had — a CDN that answers with
 // headers and then goes silent would otherwise hold a VOD download open
-// forever.
+// forever. A stall is a request with no complete answer, so the fallback asks
+// again, MaxChunkRetries times in all, before the stall's error stands.
 //
 // Mutant: dropping the withReadProgressDeadline/idleBody pair from
 // runDirectDownloadFallback — the call never returns and this test fails on
@@ -176,6 +177,7 @@ func TestStreamingFallbackFailsOnIdleStall(t *testing.T) {
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, OutputFile: path, IsDirectURL: true})
 	d.outputFile = f
+	d.delays = fastDelays()
 
 	done := make(chan error, 1)
 	go func() { done <- d.runDirectDownloadFallback(context.Background()) }()
@@ -250,7 +252,7 @@ func TestProbeFileSizeDrainIsBounded(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
-	if got := d.probeFileSize(context.Background()); got != 4096 {
+	if got, _ := d.probeFileSize(context.Background()); got != 4096 {
 		t.Fatalf("probeFileSize = %d, want 4096", got)
 	}
 	// Give the server goroutine a moment to notice the closed body.
@@ -360,6 +362,41 @@ func TestParseContentRangeStart(t *testing.T) {
 		if start != tc.wantStart || ok != tc.wantOK {
 			t.Errorf("parseContentRangeStart(%q) = (%d, %v), want (%d, %v)",
 				tc.header, start, ok, tc.wantStart, tc.wantOK)
+		}
+	}
+}
+
+// TestParseContentRangeTotal pins the total the streaming fallback holds a
+// resumed partial to: from a 206's range form and from the `bytes */<total>`
+// form a 416 may carry, and never from an unknown `*` length or a header that
+// is not a byte range.
+//
+// Mutant: dropping the `bytes` unit check — "items 1-2/3" reads as a total of
+// 3. Mutant: dropping `total < 0` — "bytes 8-15/-1" reads as a total.
+func TestParseContentRangeTotal(t *testing.T) {
+	for _, tc := range []struct {
+		header    string
+		wantTotal int64
+		wantOK    bool
+	}{
+		{"bytes 8-15/16", 16, true},
+		{"bytes */16", 16, true}, // the 416 shape states its total too
+		{"  bytes  8-15/16  ", 16, true},
+		{"bytes 8-15/*", 0, false}, // an unknown length
+		{"", 0, false},
+		{"items 1-2/3", 0, false},
+		{"bytes 8-15", 0, false},
+		{"bytes 8-15/abc", 0, false},
+		{"bytes 8-15/-1", 0, false},
+	} {
+		h := http.Header{}
+		if tc.header != "" {
+			h.Set("Content-Range", tc.header)
+		}
+		total, ok := parseContentRangeTotal(h)
+		if total != tc.wantTotal || ok != tc.wantOK {
+			t.Errorf("parseContentRangeTotal(%q) = (%d, %v), want (%d, %v)",
+				tc.header, total, ok, tc.wantTotal, tc.wantOK)
 		}
 	}
 }
@@ -529,9 +566,10 @@ func TestStreamingFallbackClearsResumeSidecarOnSuccess(t *testing.T) {
 
 // TestStreamingFallbackCompletesWhenOffsetIsAtEOF pins the review's ZZ4: a
 // staging file that already holds the whole VOD asks for bytes past the end
-// and gets a 416. The chunked loop reads 416 as "past end of file" and the
-// pre-arc fallback sent no Range at all, so this is a finished download, not
-// a failed job.
+// and gets a 416. This path knows no total size and the pre-arc fallback
+// sent no Range at all, so this is a finished download, not a failed job.
+// (The chunked loop, which knows the total, reads a 416 below it as an error
+// — TestDirectChunkedLoopShortOriginIsAnError.)
 //
 // Mutant: dropping the 416 special case — Start fails with
 // "HTTP 416 downloading direct URL" over a complete recording.
@@ -585,4 +623,46 @@ func seedDirectResume(t *testing.T, path, staged string) string {
 		t.Fatalf("seed resume sidecar: %v", err)
 	}
 	return resumeFile
+}
+
+// TestFetchChunkWithRetryReportsTheLastCause pins that exhausting the
+// per-chunk retries keeps the cause: the error names the last fetch's own
+// failure and the status comes back with it. The caller
+// (runDirectDownload) hands the error up unwrapped, so this text is what the
+// job row shows — it used to read "chunk download failed: chunk download
+// failed after 3 retries", with the 503 and its status gone.
+//
+// Mutant: returning a fresh fmt.Errorf with no %w — the message has no
+// "HTTP 503" and the status is 0. Mutant: the caller re-adding its prefix —
+// the text carries "chunk download failed" twice.
+func TestFetchChunkWithRetryReportsTheLastCause(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := NewSegmentDownloader(DownloaderOptions{BaseURL: srv.URL, IsDirectURL: true})
+	d.delays = fastDelays()
+	data, status, err := d.fetchChunkWithRetry(context.Background(), 0, 7)
+	if err == nil {
+		t.Fatalf("fetchChunkWithRetry = (%q, %d, nil), want an error after %d failed attempts", data, status, MaxChunkRetries)
+	}
+	if got := attempts.Load(); got != MaxChunkRetries {
+		t.Errorf("attempts = %d, want %d (MaxChunkRetries counts attempts)", got, MaxChunkRetries)
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 — the last attempt's status must survive the retry loop", status)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "HTTP 503") {
+		t.Errorf("error = %q, want it to carry the last cause (HTTP 503)", msg)
+	}
+	if want := fmt.Sprintf("after %d attempts", MaxChunkRetries); !strings.Contains(msg, want) {
+		t.Errorf("error = %q, want %q in it", msg, want)
+	}
+	if strings.Count(msg, "chunk download failed") != 1 {
+		t.Errorf("error = %q, want the prefix exactly once", msg)
+	}
 }

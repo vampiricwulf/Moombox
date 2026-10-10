@@ -109,6 +109,9 @@ type (
 	}
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
+		// Manifest: the running release's signed manifest was checked too.
+		// False on success means the release publishes none.
+		Manifest bool
 	}
 	// releaseNotesFetchedMsg is the async result of OnFetchReleaseNotes,
 	// dispatched by the R N chord when no update is pending. Err empty
@@ -120,17 +123,30 @@ type (
 	}
 
 	// Async results for AddVideo dialog
-	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
-	addVideoResultMsg          struct {
+	// Each carries the video ID it was issued for, so a result that lands
+	// after the operator moved on — a different ID, a closed or reopened
+	// dialog — is told apart from the one the dialog is waiting on.
+	fetchFormatsAutoAdvanceMsg struct { // timer msg to auto-skip format on error
+		VideoID string
+	}
+	addVideoResultMsg struct {
+		VideoID  string
 		Feedback string
 	}
 	fetchFormatsResultMsg struct {
+		VideoID string
 		Formats *FormatsData
 		Err     string
 	}
+	// importResultMsg is the A Z upload's answer. Note is the server's own
+	// line for a name it found taken in imports/ (re-adopted or renamed) or a
+	// chat it left out, and Warn says the line is a warning: the archive took
+	// a " (n)" name beside a different file, or a chat matched no video.
 	importResultMsg struct {
 		Title string
 		Err   string
+		Note  string
+		Warn  bool
 	}
 	// cookieImportResultMsg is the async result of OnImportCookieFile (E I).
 	// The whole cookies.ImportResult, not a bool: the overlay words each
@@ -147,6 +163,7 @@ type (
 		Err      string
 	}
 	deleteTrimResultMsg struct {
+		JobID    string // the job whose trim dialog asked
 		TrimID   string
 		Filename string
 		Err      string
@@ -284,8 +301,11 @@ type (
 		Err    error
 	}
 
-	// Async results for channel URL resolution
+	// Async results for a channel editor's ID (resolveChannelCmd). Input is
+	// the text that was resolved, so an editor whose ID box changed while
+	// the lookup ran drops the answer instead of saving it over the new text.
 	channelResolvedMsg struct {
+		Input    string
 		ID       string
 		Name     string
 		Platform string
@@ -329,6 +349,19 @@ type (
 	// the overlay is closed, OnGetStats is nil, or Epoch names an earlier
 	// open (see App.statsEpoch).
 	statsRefreshTickMsg struct{ Epoch int }
+
+	// jobLogLinesMsg is the async result of OnGetJobLogs — the O L overlay's
+	// open and every refresh tick go through it. Epoch is the App.jobLogEpoch
+	// the read started under, so a read that outlives its open is dropped
+	// rather than painted into another job's overlay.
+	jobLogLinesMsg struct {
+		Epoch int
+		Lines []string
+	}
+	// jobLogRefreshTickMsg fires every jobLogRefreshInterval while the O L
+	// overlay is open; ignored once the overlay is closed, OnGetJobLogs is
+	// nil, or Epoch names an earlier open (see App.jobLogEpoch).
+	jobLogRefreshTickMsg struct{ Epoch int }
 
 	// Async results for setup wizard cookie extraction.
 	//
@@ -387,6 +420,12 @@ type chordState struct {
 	prefixTime time.Time // when prefix was pressed
 	action     string    // second key (for confirm step), empty if waiting
 	actionTime time.Time // when confirm prompt shown
+	// jobID is the job the confirm prompt named, for a single-job confirm
+	// chord. The confirm step acts on THIS job, not on whatever the cursor
+	// is on at the third key: a mouse click or wheel tick, or a deletion
+	// from the dashboard handing the cursor to a neighbour, can move it
+	// inside the window, and the prompt named the original.
+	jobID string
 }
 
 // App is the root BubbleTea model.
@@ -405,6 +444,7 @@ type App struct {
 	clientTokensDlg *ClientTokensDialogModel
 	ytdlpDlg        *YtdlpDialogModel
 	statsDlg        *StatsDialogModel
+	jobLog          *JobLogModel
 	setupWiz        *SetupWizardModel
 	settings        *SettingsModel
 
@@ -414,6 +454,10 @@ type App struct {
 	// ticks and fetch results from an earlier open are dropped instead of
 	// re-arming a second chain (the Web's single setInterval).
 	statsEpoch int
+	// jobLogEpoch is statsEpoch's twin for the O L overlay: bumped on every
+	// open and close, so exactly one refresh chain follows exactly one job,
+	// and a read from an earlier open never lands in a later one.
+	jobLogEpoch int
 
 	// Trim progress (async encoding)
 	trimInProgress  bool
@@ -424,6 +468,12 @@ type App struct {
 	// Progress
 	progressStore *ProgressStore
 	statusMap     map[string]database.JobStatus // track last-known status per job
+	// jobVersions is, per job, the newest database.Job.Version applied to the
+	// held row and to the progress store. Writers notify after releasing the
+	// database lock, so two of a job's updates can arrive in the opposite
+	// order to their writes; the older is dropped (see staleJobUpdate) rather
+	// than put back over the newer.
+	jobVersions map[string]appliedJobVersions
 
 	// Layout
 	focusedPanel FocusPanel
@@ -538,6 +588,12 @@ type App struct {
 
 	// Internal token for CSRF bypass on local API calls
 	internalToken string
+	// webPort reports the port the web server bound (SetWebPort); nil in
+	// tests, which fall back to the configured port.
+	webPort func() int
+	// webHTTPS reports whether the bound web server serves HTTPS
+	// (SetWebHTTPS); nil in tests, where the setting is read instead.
+	webHTTPS func() bool
 
 	// Cached HTTP client for local API calls (avoids re-creating per request).
 	// cachedClientHTTPS records which HTTPSEnabled value the cache was built
@@ -561,14 +617,18 @@ type App struct {
 	// asidesJobID / asidesCache memoise ONE job's JobAsides answer — the
 	// selected one. updateSelectedJob runs on every cursor move and on every
 	// JobsUpdateMsg, so an unmemoised probe would read the disk once per
-	// database write. Invalidated by invalidateAsides when a recovery is
-	// dispatched for that job.
-	asidesJobID string
-	asidesCache AsideSummary
+	// database write. Keyed on the row's updated_at too (see asidesFor), and
+	// invalidated by invalidateAsides when a recovery is dispatched for that
+	// job or while it is active.
+	asidesJobID     string
+	asidesUpdatedAt string // the row version the memo was probed for
+	asidesCache     AsideSummary
 
 	// Callbacks for actions
-	OnAddVideo  func(url string)
-	OnCancelJob func(jobID string)
+	OnAddVideo func(url string)
+	// OnCancelJob cancels a job and reports whether it did: a job that
+	// ended since the list last showed it is left as it ended.
+	OnCancelJob func(jobID string) bool
 	OnDeleteJob func(jobID string)
 	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
 	// /watched routes are the twin.
@@ -583,6 +643,11 @@ type App struct {
 	OnRecoverAsides func(jobID string) error
 	HasStagingFiles func(jobID string) bool // checks if staging dir has files
 	HasSegmentFiles func(jobID string) bool // checks if staging dir has segment files
+	// HasUnmuxedParts reports whether a Finished job's staging still holds a
+	// split part its finalize could not mux (worker.HasUnmuxedParts) — what
+	// makes A M offer itself on a Finished row. A disk probe like the two
+	// above, run on selection only.
+	HasUnmuxedParts func(jobID string) bool
 	// JobAsides reports a job's set-aside recordings and whether its staging
 	// dir still holds a chat capture. A DISK probe like HasStagingFiles and
 	// HasSegmentFiles beside it, so the same rule applies: it runs on
@@ -595,6 +660,17 @@ type App struct {
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).
 	OnSaveConfig func(cfg *config.MoomboxConfig) error
+	// OnChannelRemovalSummary counts what removing a channel would do to its
+	// jobs, for the Settings → Channels removal prompt (W25-09);
+	// OnDeletePendingChannelJobs is that prompt's "delete its pending jobs",
+	// run once the save that removes the channel has succeeded, answering
+	// how many it deleted and how many parked recordings with footage it
+	// kept. worker.SummarizeChannelRemoval / DeletePendingChannelJobs,
+	// adapted in cmd/moombox. Without them the prompt offers keep and Esc.
+	// The summary takes the channel's platform: a Twitch channel's jobs
+	// carry no channel ID, and are told by the login their URL names.
+	OnChannelRemovalSummary    func(channelID, platform string) (ChannelRemovalInfo, error)
+	OnDeletePendingChannelJobs func(channelID string) (deleted, footageKept int, err error)
 	// OnFfmpegPathChange re-applies paths.ffmpeg_path to the services that
 	// captured it when their muxers were built. Separate from OnSaveConfig
 	// because the FFmpeg overlay deliberately keeps a validated path live
@@ -617,11 +693,11 @@ type App struct {
 	OnDeleteClientToken func(id string) error
 
 	// Update callbacks
-	OnCheckUpdate     func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
-	OnForceCheck      func()                           // force an immediate monitor poll of all sources
-	OnBackfillRescan  func()                           // force a feed-history backfill re-scan of all channels (R B)
-	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
-	OnVerifySignature func() error                     // verify current binary's signature
+	OnCheckUpdate     func() (*UpdateStatusMsg, error)  // manual check — returns nil if up to date
+	OnForceCheck      func()                            // force an immediate monitor poll of all sources
+	OnBackfillRescan  func()                            // force a feed-history backfill re-scan of all channels (R B)
+	OnApplyUpdate     func(version string) string       // returns error string (empty on success, process exits)
+	OnVerifySignature func() (manifest bool, err error) // verify current binary's signature, and its release's manifest when it has one
 	// OnDismissUpdate skips a pending version (the S key in the
 	// release-notes overlay); nil hides the key.
 	OnDismissUpdate func(tag string) error
@@ -688,6 +764,11 @@ type App struct {
 	// chord); nil deletes the chord.
 	OnGetStats func() (stats.Snapshot, error)
 
+	// OnGetJobLogs returns a copy of one job's own log buffer — db.GetJobLogs,
+	// the buffer the dashboard's job dialog reads through GET
+	// /api/jobs/{id}/logs — for the O L overlay; nil deletes the chord.
+	OnGetJobLogs func(jobID string) []string
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
@@ -713,6 +794,13 @@ type appFeedback struct {
 	// scanning the text. See feedbackSeverity for why the inference is not
 	// good enough on the one line that carries a stated fact.
 	sev feedbackSeverity
+	// wrap lets the line take more than one row: View word-wraps it onto the
+	// rows above the status bar (wrapFeedback) instead of cutting it to one.
+	// Set only by setWrappedFeedback, for the lines that carry a sentence
+	// written elsewhere whose tail is the part to act on — the held profile's
+	// lock path, an import's outcome note. False, the zero value, is the one
+	// ellipsized row every other line has always had.
+	wrap bool
 	// until is when the line stops being shown. The zero value means "nothing
 	// scheduled", which is what an empty struct reads as.
 	until time.Time
@@ -738,6 +826,7 @@ func NewApp() *App {
 		clientTokensDlg:   NewClientTokensDialogModel(),
 		ytdlpDlg:          NewYtdlpDialogModel(),
 		statsDlg:          NewStatsDialogModel(),
+		jobLog:            NewJobLogModel(),
 		setupWiz:          NewSetupWizardModel(),
 		settings:          NewSettingsModel(),
 		ffmpegCheck:       NewFFmpegCheckModel(),
@@ -745,6 +834,7 @@ func NewApp() *App {
 		releaseNotesPopup: newReleaseNotesOverlay(),
 		progressStore:     ps,
 		statusMap:         make(map[string]database.JobStatus),
+		jobVersions:       make(map[string]appliedJobVersions),
 		isDark:            true, // default to dark; updated by BackgroundColorMsg
 	}
 }
@@ -1134,6 +1224,7 @@ func (a *App) hasActiveOverlay() bool {
 		a.clientTokensDlg.IsVisible() ||
 		a.ytdlpDlg.IsVisible() ||
 		a.statsDlg.IsVisible() ||
+		a.jobLog.IsVisible() ||
 		a.setupWiz.IsVisible() ||
 		a.ffmpegCheck.IsVisible() ||
 		a.actionMenu.IsVisible()
@@ -1263,8 +1354,42 @@ func (a *App) updateTerminalTitle() {
 	}
 }
 
-// getPort returns the configured port or default 774.
+// SetWebHTTPS supplies whether the bound web server serves HTTPS. The scheme,
+// like the port, is fixed when the server starts: https_enabled saved without
+// the restart it asks for used to switch the TUI's own API client, O W and
+// the plugin status to https:// against a listener still serving http, so
+// every TUI action failed until the restart.
+func (a *App) SetWebHTTPS(fn func() bool) {
+	a.webHTTPS = fn
+}
+
+// httpsActive reports which scheme the TUI's local calls must use: the bound
+// server's when SetWebHTTPS supplied it, the saved setting otherwise.
+func (a *App) httpsActive() bool {
+	if a.webHTTPS != nil {
+		return a.webHTTPS()
+	}
+	on := false
+	if a.configStore != nil {
+		a.configStore.Read(func(c *config.MoomboxConfig) { on = c.Network.HTTPSEnabled })
+	}
+	return on
+}
+
+// SetWebPort supplies the port the web server actually bound, which can differ
+// from the configured one when that was in use at boot.
+func (a *App) SetWebPort(fn func() int) {
+	a.webPort = fn
+}
+
+// getPort returns the port the web server is serving on, else the configured
+// port, else the default 774.
 func (a *App) getPort() int {
+	if a.webPort != nil {
+		if port := a.webPort(); port > 0 {
+			return port
+		}
+	}
 	if a.configStore != nil {
 		var port int
 		a.configStore.Read(func(c *config.MoomboxConfig) {

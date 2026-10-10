@@ -77,20 +77,20 @@ func (s *AutoCookieService) RefreshCookiesDetailed(ctx context.Context) (Refresh
 }
 
 func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy browserGatePolicy) (out RefreshResult, retErr error) {
-	// ONE stamp for eighteen returns.
+	// ONE stamp for nineteen returns.
 	//
-	// Mechanism has to be true of every exit — eight aborts, seven declines
+	// Mechanism has to be true of every exit — eight aborts, eight declines
 	// and three verdicts — and threading it through each return literal is
-	// exactly how the nineteenth one gets added without it. The named result
+	// exactly how the twentieth one gets added without it. The named result
 	// plus this defer make the stamp structural instead: a return site added
 	// later carries it whether or not its author knew the field existed.
 	//
 	// It starts empty and is set only where the path is actually chosen, at the
 	// importedFromProfile decision below, so a pass that declined above that
 	// point reports "" — the honest answer, and the one both surfaces know how
-	// to fall back from. The one decline below that point — the browser
-	// branch's empty-jar gate — carries "browser", because the branch WAS
-	// chosen.
+	// to fall back from. The two declines below that point — the browser
+	// branch's empty-jar gate, and a profile another browser holds — carry
+	// "browser", because the branch WAS chosen.
 	//
 	// NO LOCK: the closure touches the named result and nothing else, and it is
 	// registered before the first s.mu.Lock() so it runs LAST, after every path
@@ -283,12 +283,30 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		}
 	}
 
+	// A profile another browser holds is a SKIP, not a failure: its
+	// SingletonLock names a browser that may still be running (on another
+	// machine, or under a pid that still answers), so nothing was launched
+	// and nothing was read. Declined, so Ran stays false — no auth re-check is
+	// owed for a file nobody wrote — but the reason is RECORDED, because a skip
+	// that recurs every 30 minutes behind a blank status line is the silent
+	// failure lastError exists to name; both UIs render this sentence, and it
+	// names the host to go and close the browser on, and the lock to delete if
+	// no browser there is using the profile.
+	//
+	// Ahead of the DPAPI fallback, which answers a launch that FAILED; this one
+	// was never attempted. Windows never produces it — its Chromium lock is a
+	// plain file — so the fallback's only platform loses nothing.
+	if errors.Is(err, ErrProfileInUse) {
+		s.setError(err.Error())
+		return refreshDeclined(), err
+	}
+
 	// DPAPI fallback: if the CDP path failed and the user has opted
 	// in, try reading cookies directly from their real Chromium-family
 	// profile via CryptUnprotectData. Skipped for Firefox-based
 	// browsers — Firefox uses cookies.sqlite (no DPAPI involved) and
 	// already has its own SQLite-direct path. DECISIONS #6.
-	if err != nil && browser != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
+	if err != nil && browser != nil && s.dpapiFallbackOn() && !isFirefoxBased(browser.Type) {
 		// Gated on isWindows(): off Windows the fallback below is a no-op —
 		// it says so once, at Debug, and always has since dpapiExtractAsNetscape
 		// short-circuits on it — so "attempting" is not true there and would be
@@ -503,7 +521,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 
 	if previousCookies != "" {
 		fetchedCookies := netscapeCookies
-		netscapeCookies = mergeCookieFiles(previousCookies, netscapeCookies)
+		netscapeCookies = mergeBrowserCookies(previousCookies, netscapeCookies)
 		// ONE line, for the one prune outcome that leaves a credential pair
 		// half alive with nothing else in the process able to see it. See
 		// twitchLoginPrunedFromMerge; it names no value and no account.

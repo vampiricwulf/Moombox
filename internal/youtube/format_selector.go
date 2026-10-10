@@ -29,14 +29,17 @@ var videoCodecPatterns = []struct {
 	{regexp.MustCompile(`^vp0?8`), 1},
 }
 
-// Audio codec priority patterns.
+// Audio codec priority patterns. The two AAC profiles YouTube serves share a
+// score, as they share yt-dlp's "mp4a" rank, so bitrate decides between them:
+// HE-AAC (mp4a.40.5, itag 139) scored above AAC-LC (mp4a.40.2, itag 140) and,
+// codec outranking bitrate, a pool with no Opus took the 48 kbps track over
+// the 128 kbps one.
 var audioCodecPatterns = []struct {
 	pattern *regexp.Regexp
 	score   int
 }{
 	{regexp.MustCompile(`^opus`), 4},
-	{regexp.MustCompile(`^mp4a\.40\.5`), 3},
-	{regexp.MustCompile(`^mp4a\.40\.2`), 2},
+	{regexp.MustCompile(`^mp4a\.40\.[25]`), 2},
 	{regexp.MustCompile(`^mp4a`), 1},
 }
 

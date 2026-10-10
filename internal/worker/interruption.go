@@ -323,15 +323,14 @@ func resumeEvidence(signalFresh bool, mayResume func() bool) bool {
 // waitDeadline bounds ONE stall episode's total wait-branch lifetime to
 // the job's InterruptionTimeout ceiling (I3 fix).
 //
-// Why this exists: maxConsecutiveLiveChecks bounds a DIFFERENT branch — the
-// still-live re-verification loop in runLiveStreamDownload's "normal
-// download stop" section — and never applies to this one. The wait branch
-// (shouldWaitForResume returning true) retries on its own five-minute
-// sleep for as long as resume evidence keeps holding, with no counter of
-// its own; a stuck-live abandoned broadcast whose evidence never lapses
-// (e.g. a chat continuation that never closes) can hold this branch
-// forever, livelocking the job in Downloading. This gives the branch its
-// own independent ceiling.
+// Why this exists: a wait (shouldWaitForResume returning true) retries on a
+// five-minute cadence for as long as resume evidence keeps holding — first in
+// runLiveStreamDownload's quality-loss branch, then in its "normal download
+// stop" still-live re-verification branch, which refunds the
+// maxConsecutiveLiveChecks check it spent while the wait goes on. With no
+// ceiling of its own, a stuck-live abandoned broadcast whose evidence never
+// lapses (e.g. a chat continuation that never closes) could hold the job in
+// Downloading forever. This is that ceiling.
 //
 // start is latched by exceeded() the first time it is called for an
 // episode (zero value) and is NOT touched by later calls — the episode's
@@ -357,6 +356,14 @@ func (d *waitDeadline) exceeded(now time.Time, interruptionTimeout time.Duration
 
 // reset clears the latched episode start.
 func (d *waitDeadline) reset() { d.start = time.Time{} }
+
+// active reports whether an episode has started and its budget has not run
+// out — the loop is inside a wait it is allowed to keep up. Unlike
+// resumeWaitLatch, which stays set past the deadline for the finalize, this
+// goes false the moment the wait is over.
+func (d *waitDeadline) active(now time.Time, interruptionTimeout time.Duration) bool {
+	return !d.start.IsZero() && now.Sub(d.start) < interruptionTimeout
+}
 
 // shouldWaitForResume decides whether a failed live-refresh (refreshErr)
 // should wait-and-retry instead of ending the recording immediately — the

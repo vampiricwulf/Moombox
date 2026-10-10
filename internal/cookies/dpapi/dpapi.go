@@ -27,6 +27,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/vampiricwulf/Moombox/internal/sqliteuri"
 	_ "modernc.org/sqlite"
 )
 
@@ -43,10 +44,10 @@ type ChromeCookie struct {
 	SameSite string // "None" | "Lax" | "Strict" | "Unspecified"
 }
 
-// ErrNotSupported is returned by ReadChromeCookies on non-Windows
-// platforms. Moombox is Windows-only at runtime, but the package
-// compiles cross-platform so unit tests for shared helpers stay
-// reachable on dev hosts.
+// ErrNotSupported is returned by ReadChromeCookiesStats on non-Windows
+// platforms. DPAPI is a Windows API, but the package compiles
+// cross-platform so the Linux builds link and unit tests for shared
+// helpers stay reachable on dev hosts.
 var ErrNotSupported = errors.New("DPAPI cookie extraction is Windows-only")
 
 // Why one cookie row failed to decrypt. The extraction is fail-soft per
@@ -78,7 +79,7 @@ var (
 	ErrUnusablePlaintext = errors.New("decrypted value is not a usable cookie value")
 )
 
-// ChromeReadStats accounts for what one ReadChromeCookies pass skipped.
+// ChromeReadStats accounts for what one ReadChromeCookiesStats pass skipped.
 //
 // The extraction is fail-soft per row by design, but before this existed the
 // reason was discarded entirely: an operator saw only a final "no relevant
@@ -166,19 +167,11 @@ func (s ChromeReadStats) hashPrefixHint() string {
 	return " (the Cookies meta.version could not be read, so the Chrome 130+ domain-hash prefix was left in place)"
 }
 
-// ReadChromeCookies returns the decrypted cookies for a profile, discarding
-// the per-row accounting. ReadChromeCookiesStats is the same call with the
-// accounting kept.
-func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error) {
-	cookies, _, err := ReadChromeCookiesStats(profilePath, originFilter)
-	return cookies, err
-}
-
 // chromeV10Prefix tags Chrome's modern AES-GCM-encrypted cookie values.
 // Pre-v10 cookies were raw DPAPI blobs; we don't support those — they
 // haven't shipped in any Chrome release since 2020 and the rare row
 // that still has the legacy form will fail the prefix check and get
-// skipped by ReadChromeCookies (the fail-soft "skip undecryptable
+// skipped by ReadChromeCookiesStats (the fail-soft "skip undecryptable
 // rows" path).
 const chromeV10Prefix = "v10"
 const chromeV11Prefix = "v11"
@@ -245,6 +238,17 @@ func chromeUsesHashPrefix(metaVersion int64) bool {
 	return metaVersion >= chromeHashPrefixMetaVersion
 }
 
+// openCookieDB opens a Chromium "Cookies" file read-only: mode=ro, so SQLite
+// never writes into the browser's live database, and a 2-second busy timeout
+// for a browser mid-flush. The path goes through sqliteuri.FileURI because
+// SQLite reads a "file:" DSN as a URI: a '#', '?' or %HH anywhere in the
+// profile path cut it short or decoded it, and the read failed against a file
+// that was not the profile's. It lives outside dpapi_windows.go so the open
+// is tested on every platform.
+func openCookieDB(cookiesPath string) (*sql.DB, error) {
+	return sql.Open("sqlite", sqliteuri.FileURI(cookiesPath)+"?mode=ro&_pragma=busy_timeout(2000)")
+}
+
 // readChromeMetaVersion reads `meta.version` from an open Chrome Cookies
 // database — the schema stamp that says whether decrypted cookie values
 // carry the 32-byte domain-hash prefix.
@@ -286,10 +290,12 @@ func readChromeMetaVersion(db *sql.DB) (int64, bool) {
 //
 //	"v10" || nonce(12) || ciphertext || tag(16)
 //
-// The version-prefix branch on v10 vs v11 is purely informational —
-// both use the same AES-GCM-with-12-byte-nonce-and-16-byte-tag layout.
-// Chrome on Windows produces v10; Chrome on Linux / desktop-keystore
-// configurations produces v11; Edge has been seen producing both.
+// On Windows — the only platform this reader runs on — v10 and v11 are the
+// same AES-GCM-with-12-byte-nonce-and-16-byte-tag layout under the
+// DPAPI-unwrapped master key, so the branch on them is informational; Edge
+// has been seen producing both. (Chrome on Linux uses the same prefixes for
+// a different scheme — AES-128-CBC under a PBKDF2-derived key — which this
+// code does not read.)
 //
 // hashPrefix must come from chromeUsesHashPrefix(readChromeMetaVersion(db))
 // for the profile the row was read from: at meta.version >= 24 the
@@ -397,7 +403,7 @@ func decryptV10CookieWith(gcm cipher.AEAD, encrypted []byte, hashPrefix bool) (s
 	if hashPrefix {
 		// A plaintext shorter than the digest cannot be carrying one. Slicing
 		// anyway would report an empty value as a successful decrypt; erroring
-		// makes ReadChromeCookies skip the row instead.
+		// makes ReadChromeCookiesStats skip the row instead.
 		if len(plaintext) < chromeDomainHashLen {
 			return "", fmt.Errorf("%w: decrypted cookie is %d bytes, shorter than the %d-byte domain hash prefix Chrome writes at meta.version >= %d",
 				ErrUnusablePlaintext, len(plaintext), chromeDomainHashLen, chromeHashPrefixMetaVersion)

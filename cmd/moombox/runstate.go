@@ -9,7 +9,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
-	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/connectivity"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -56,18 +55,21 @@ type runState struct {
 	connMon *connectivity.Monitor
 
 	// --- Platform services ---
-	jar          *cookies.CookieJar
-	ytService    *youtube.Service
-	twService    *twitch.Service
-	potProvider  *bgutils.PotProvider
-	bgSidecar    *sidecar.Sidecar
-	cipherSolver *cipher.GojaResolver
-	routedCipher cipher.Solver
+	jar         *cookies.CookieJar
+	ytService   *youtube.Service
+	twService   *twitch.Service
+	potProvider *bgutils.PotProvider
+	bgSidecar   *sidecar.Sidecar
 
 	// --- Worker + notifications ---
 	notifyMgr notifications.Notifier
 	dlWorker  *worker.DownloadWorker
 	trimSvc   *worker.TrimService
+
+	// openAlerts is the persisted set of alerts sent and not yet closed
+	// (open_alerts.go), loaded in run() before any alerter is wired so each
+	// is seeded with what a previous run left open.
+	openAlerts *openAlerts
 
 	// --- Monitors ---
 	feedMon   *monitor.FeedMonitor
@@ -102,6 +104,11 @@ type runState struct {
 	// of them updated would go stale the moment the other changed the
 	// threshold. nil until the first broadcast.
 	hideAgeBroadcast atomic.Pointer[float64]
+	// segWorkersSeen is the downloader.segment_workers warnSegmentWorkers was
+	// last called with, so a save that did not move it says nothing — the
+	// Web PUT's change gate, which the TUI save cannot apply (see
+	// hideAgeBroadcast). nil until boot's call.
+	segWorkersSeen atomic.Pointer[int]
 	// hideAgeBroadcastMu serialises broadcastHideFinishedAge end to end.
 	// Load-compare-broadcast-Store is four steps, and its two callers are
 	// independent (a Web PUT and a TUI save): racing them could leave the
@@ -147,7 +154,7 @@ type runState struct {
 
 	// --- Close-once wrappers ---
 	// sync.Once-guarded so both the orderly deferred shutdown and the
-	// 10-second force-exit timer can invoke them safely.
+	// force-exit timer can invoke them safely.
 	closeLog      func()
 	closeDB       func()
 	closeLimiters func()
@@ -157,6 +164,15 @@ type runState struct {
 	tuiUpdateStatusCh chan tui.UpdateStatusMsg
 	tuiDiskStatusCh   chan tui.DiskStatusMsg
 	tuiBackfillCh     chan tui.BackfillStatusMsg
+
+	// configuredLogLevel is the logs.log_level the running logger last had
+	// applied from config (see applyConfiguredLogLevel); guarded by its mutex.
+	configuredLogLevelMu sync.Mutex
+	configuredLogLevel   string
+
+	// diskRecheck asks the periodic loop for a disk reading now (see
+	// requestDiskRecheck). Buffered 1: requests coalesce.
+	diskRecheck chan struct{}
 
 	// --- Backfill progress snapshot ---
 	// backfillProgress holds the last backfill OnProgress emission per
@@ -174,7 +190,10 @@ type runState struct {
 
 	// --- Subscription handles (assigned by monitor_callbacks wiring; needed
 	// by shutdown to unsubscribe cleanly before the database closes) ---
-	logSub              chan string
+	logSub chan logger.Line
+	// logSubDone stops the log forwarder after shutdown unsubscribes logSub:
+	// Unsubscribe never closes the channel, so the forwarder needs its own signal.
+	logSubDone          chan struct{}
 	unsubWSJobUpdate    func()
 	unsubWSJobAdded     func()
 	unsubWSJobDeleted   func()

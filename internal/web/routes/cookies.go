@@ -214,6 +214,13 @@ const (
 	causeBrowserReadUnanswered = "browser-read-unanswered"
 )
 
+// causeProfileInUse is the `cause` a refresh that skipped a held profile
+// (cookies.ErrProfileInUse) reaches the frontend as. The same 409 also answers
+// a locked cookie DB and a blocked ladder, and only this one is a skip — the
+// pass declined and launched nothing — so the dashboard's toast needs the
+// machine half to draw it in the warning colour rather than as a failure.
+const causeProfileInUse = "profile-in-use"
+
 // jsonErrorCause is jsonError plus a machine-readable `cause`.
 //
 // Deliberately NOT a field on AutoCookieStatus, and not a widened jsonError.
@@ -372,7 +379,8 @@ func writeBrowserReadError(rw http.ResponseWriter, err error) bool {
 	return true
 }
 
-// maxCookieImportBytes caps POST /api/cookies/import.
+// MaxCookieImportBytes caps POST /api/cookies/import, and the TUI's E I import
+// of a file by path (cmd/moombox readCookieFileCapped).
 //
 // A Netscape export of a signed-in YouTube + Twitch profile is a few kilobytes;
 // 512 KiB is three orders of magnitude of headroom and still inside the
@@ -381,7 +389,7 @@ func writeBrowserReadError(rw http.ResponseWriter, err error) bool {
 // wrappers NEST rather than override — an inner SMALLER limit errors first,
 // which is the direction that makes this cap real; the import endpoint's 500 MB
 // reader is exempted from MaxBodySize for the opposite reason.
-const maxCookieImportBytes = 512 << 10
+const MaxCookieImportBytes = 512 << 10
 
 // readCookieImportBody pulls the Netscape text out of either accepted request
 // shape, answers the client itself on every refusal, and reports whether it
@@ -398,7 +406,7 @@ const maxCookieImportBytes = 512 << 10
 // empty request is a REQUEST-shape problem: "that cookie file has no cookie
 // rows" is a claim about a file, and the operator sent none.
 func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bool) {
-	req.Body = http.MaxBytesReader(rw, req.Body, maxCookieImportBytes)
+	req.Body = http.MaxBytesReader(rw, req.Body, MaxCookieImportBytes)
 
 	var raw []byte
 	var err error
@@ -408,7 +416,7 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 		// below rather than as "no cookies part" — FormFile would swallow the
 		// MaxBytesError into a generic parse failure and answer the wrong
 		// sentence.
-		if perr := req.ParseMultipartForm(maxCookieImportBytes); perr != nil {
+		if perr := req.ParseMultipartForm(MaxCookieImportBytes); perr != nil {
 			err = perr
 			break
 		}
@@ -432,7 +440,7 @@ func readCookieImportBody(rw http.ResponseWriter, req *http.Request) (string, bo
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			jsonError(rw, fmt.Sprintf("that cookie file is larger than the %d KiB this endpoint accepts",
-				maxCookieImportBytes/1024), http.StatusRequestEntityTooLarge)
+				MaxCookieImportBytes/1024), http.StatusRequestEntityTooLarge)
 			return "", false
 		}
 		jsonError(rw, "could not read the request body", http.StatusBadRequest)
@@ -647,6 +655,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			case errors.Is(err, cookies.ErrCookieDBLocked):
 				jsonError(rw, err.Error(), http.StatusConflict)
+			// The same shape one level up: not the cookie DB but the whole
+			// profile, held by a browser its SingletonLock names — on another
+			// machine, or under a pid that still answers. Verbatim, because the
+			// sentence names that machine, and "cookie refresh failed" would
+			// leave the operator nothing to close. With a cause, because it is
+			// a SKIP the toast draws as a warning, where the locked DB beside
+			// it is still a failure.
+			case errors.Is(err, cookies.ErrProfileInUse):
+				jsonErrorCause(rw, err.Error(), causeProfileInUse, http.StatusConflict)
 			case errors.Is(err, cookies.ErrCookieDBUnreadable):
 				jsonError(rw, err.Error(), http.StatusUnprocessableEntity)
 			// S9's abort: Moombox could not read the existing cookies.txt and
@@ -872,6 +889,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			// in-progress cases get, because this one never clears.
 			case errors.Is(err, cookies.ErrServiceStopped):
 				jsonErrorSized(rw, err.Error(), http.StatusServiceUnavailable)
+			// A browser already holds the profile the sign-in window would
+			// open, so none was launched. 409 and verbatim, as on the refresh
+			// route: a state to change, and the sentence names where.
+			case errors.Is(err, cookies.ErrProfileInUse):
+				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			default:
 				jsonErrorSized(rw, "failed to start setup", http.StatusInternalServerError)
 			}

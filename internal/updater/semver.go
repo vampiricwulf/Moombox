@@ -77,18 +77,6 @@ func ParseVersionFull(s string) (Version, error) {
 	}, nil
 }
 
-// ParseVersion parses a version string into major/minor/patch ints. Kept
-// for backwards compatibility; new callers should prefer ParseVersionFull
-// since pre-release suffixes are now common in Moombox tags
-// (`v2.6.0-test.N`). Audit reports/small-packages.md.
-func ParseVersion(s string) (major, minor, patch int, err error) {
-	v, err := ParseVersionFull(s)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	return v.Major, v.Minor, v.Patch, nil
-}
-
 // CompareVersions compares two version strings per SemVer 2.0.0 ordering
 // rules. Returns -1 if a < b, 0 if a == b, 1 if a > b.
 //

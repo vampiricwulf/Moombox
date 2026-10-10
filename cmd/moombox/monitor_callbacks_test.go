@@ -6,6 +6,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
+	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
 type fakeHealthReporter struct{ health []monitor.ChannelHealth }
@@ -95,6 +96,49 @@ func TestJobCreationForDisposition(t *testing.T) {
 	}
 }
 
+// A deep backfill on an include_non_live_content channel queues a backlog VOD
+// per catalog entry, and each sent "Stream Found" as it was queued — a burst
+// of notifications for content that announces itself again, paced, when the
+// scheduler admits it. Broadcasts and new VODs still announce on creation.
+//
+// Mutant: announcesJobFound returning true for every disposition.
+func TestAnnouncesJobFound(t *testing.T) {
+	for _, tc := range []struct {
+		d    monitor.JobDisposition
+		want bool
+	}{
+		{monitor.DispositionBroadcast, true},
+		{monitor.DispositionNewVOD, true},
+		{monitor.DispositionBacklogVOD, false},
+	} {
+		if got := announcesJobFound(tc.d); got != tc.want {
+			t.Errorf("announcesJobFound(%s) = %v, want %v", tc.d, got, tc.want)
+		}
+	}
+}
+
+// The gate is applied where createYouTubeJob announces the job it created,
+// not only defined: a backlog VOD's creation sends nothing, the others send
+// one "Stream Found".
+//
+// Mutant: drop announcesJobFound(d) from announceYouTubeJobFound.
+func TestAnnounceYouTubeJobFoundHoldsBackBacklogVODs(t *testing.T) {
+	for _, tc := range []struct {
+		d    monitor.JobDisposition
+		want int
+	}{
+		{monitor.DispositionBroadcast, 1},
+		{monitor.DispositionNewVOD, 1},
+		{monitor.DispositionBacklogVOD, 0},
+	} {
+		rec := notificationtest.New()
+		announceYouTubeJobFound(rec, &database.Job{ID: "vid1", VideoID: "vid1", Platform: "youtube", Title: "A"}, tc.d)
+		if got := len(rec.ByEvent("found")); got != tc.want {
+			t.Errorf("%s: %d Stream Found sends, want %d", tc.d, got, tc.want)
+		}
+	}
+}
+
 // TestOutageAlert pins the "Outage Alert" notification sent on connectivity
 // restore (the only connectivity webhook that can actually deliver — a
 // "lost" notification has, by definition, no connectivity to ride). Start
@@ -124,5 +168,28 @@ func TestOutageAlert(t *testing.T) {
 		if !fields[i].Inline {
 			t.Errorf("field[%d] %q must be inline — the three cells read as one row", i, w.name)
 		}
+	}
+}
+
+// The auto-resume cooldown map gains an entry per job ever auto-resumed and
+// was never pruned. An expired entry decides nothing a missing one would not,
+// so recording a resume drops them.
+//
+// Mutant: recordAutoResume without the sweep — the stale entry stays.
+func TestRecordAutoResumeDropsExpiredEntries(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	last := map[string]time.Time{
+		"stale": now.Add(-autoResumeCooldown),
+		"fresh": now.Add(-time.Minute),
+	}
+	recordAutoResume(last, "new", now)
+	if _, ok := last["stale"]; ok {
+		t.Error("an entry whose cooldown has run out was kept")
+	}
+	if _, ok := last["fresh"]; !ok {
+		t.Error("an entry still inside its cooldown was dropped")
+	}
+	if !last["new"].Equal(now) {
+		t.Errorf("new = %v, want %v", last["new"], now)
 	}
 }

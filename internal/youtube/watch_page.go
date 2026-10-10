@@ -73,22 +73,22 @@ var (
 	ytAtNOpenRe = regexp.MustCompile(`window\.ytAtN\(\s*\{`)
 )
 
-// allowedInterpreterDomains gates which hosts may serve a BotGuard interpreter
-// referenced by a page-sourced challenge. The sidecar EXECUTES the fetched
-// body, and watch-page HTML embeds attacker-authored video metadata, so a
-// challenge is only forwarded when its interpreter lives on a Google-owned
-// host. The sidecar re-checks this independently (bgutil-sidecar/src/server.js
-// assertGoogleHost) — this copy stops a hostile challenge from ever leaving
-// the Go process. Suffix matches are dot-anchored so "evilgoogle.com" and
-// "google.com.evil.tld" cannot pass.
+// staticScriptPathRe is the shape a genuine interpreter path takes: an
+// unreserved-character path ending in .js (observed
+// /js/th/qtyJVB4UpQW6ehm0Eb6anVy7Y_bU8GitWVbp9gjCikM.js). Percent-encoding is
+// excluded deliberately — see the call site — as are query and fragment
+// markers, which cannot appear in a path this alphabet allows.
+var staticScriptPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/-]+\.[Jj][Ss]$`)
+
+// allowedInterpreterHosts gates which hosts may serve a BotGuard interpreter
+// referenced by a page-sourced challenge. A challenge is executable code
+// once a sidecar fetches its interpreter, and watch-page HTML embeds
+// attacker-authored video metadata, so a challenge is only accepted when its
+// interpreter lives on a Google-owned host. (The challenge is not forwarded
+// anywhere today — owner ruling R1, see WatchPageResult.AttestationChallenge
+// — and the sidecar's assertGoogleHost would re-check it independently if
+// it were.)
 //
-// Regional Google properties (google.de, google.co.uk, …) are matched
-// separately by regionalGoogleRe rather than enumerated. A host that is
-// genuinely Google's but missing here does not break downloads — the
-// challenge is dropped and the sidecar's /att/get flow runs — but it does
-// silently disable session coherence, so rejections are logged with the host
-// (atnBadInterpHost) precisely so an unlisted host shows up as a name to add
-// instead of an unexplained regression.
 // EXACT hosts only — never suffix matches, never patterns. An adversarial
 // review (2026-08-15) defeated both weaker forms:
 //
@@ -102,19 +102,12 @@ var (
 //     SHAPE, not ownership: google.com.se is a live third-party site, as are
 //     google.co.nl and google.org.ru. Anyone can register one.
 //
-// So the rule is now membership in this list and nothing else. Regional
-// Google domains are unsupported: the interpreter is served from a global
-// host (observed: www.google.com), and a genuinely-Google host missing here
-// fails closed — the challenge is dropped, the sidecar's /att/get flow runs,
-// and the rejected host is named in the reason string so it can be added
-// deliberately rather than guessed at by a pattern.
-// staticScriptPathRe is the shape a genuine interpreter path takes: an
-// unreserved-character path ending in .js (observed
-// /js/th/qtyJVB4UpQW6ehm0Eb6anVy7Y_bU8GitWVbp9gjCikM.js). Percent-encoding is
-// excluded deliberately — see the call site — as are query and fragment
-// markers, which cannot appear in a path this alphabet allows.
-var staticScriptPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/-]+\.[Jj][Ss]$`)
-
+// So the rule is membership in this list and nothing else. Regional Google
+// domains are unsupported: the interpreter is served from a global host
+// (observed: www.google.com), and a genuinely-Google host missing here fails
+// closed — the challenge is dropped and the rejected host is named in the
+// reason string (atnBadInterpHost) so it can be added deliberately rather
+// than guessed at by a pattern.
 var allowedInterpreterHosts = []string{
 	"www.google.com",
 	"google.com",
@@ -868,7 +861,6 @@ func extractEncryptedHostFlags(html string) string {
 // EmbedPageResult contains data extracted from a YouTube embed page.
 type EmbedPageResult struct {
 	EncryptedHostFlags string
-	PlayerURL          string
 }
 
 // FetchEmbedPage fetches a YouTube embed page and extracts encryptedHostFlags.
@@ -887,23 +879,17 @@ func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, erro
 	}
 
 	html := string(body)
-	result := &EmbedPageResult{
+	return &EmbedPageResult{
 		EncryptedHostFlags: extractEncryptedHostFlags(html),
-	}
-
-	// Also extract player URL from embed page
-	if m := jsURLRegex.FindStringSubmatch(html); m != nil {
-		result.PlayerURL = normalizePlayerJSURL(m[1])
-	}
-
-	return result, nil
+	}, nil
 }
 
 // extractAttestationChallenge pulls the BotGuard bgChallenge out of a watch
 // page's window.ytAtN(...) blob. The blob is a JS object literal whose "R"
 // key holds a JSON string; inside that is bgChallenge. Returns compact JSON
 // of bgChallenge, or "" on any miss/parse failure — absence is a normal
-// result (the POT sidecar falls back to /att/get), never an error.
+// result, never an error (the challenge is diagnostic only today; see
+// WatchPageResult.AttestationChallenge).
 func extractAttestationChallenge(page []byte) (challenge, reason string) {
 	loc := ytAtNOpenRe.FindIndex(page)
 	if loc == nil {

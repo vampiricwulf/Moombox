@@ -12,8 +12,14 @@ import { LogPanelController } from "./modules/log-panel.js";
 import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { JobDetailsController } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, reloginPromptTarget, canResumeJob, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, streamUrl, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
+
+// TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
+const TASK_STATUS_PRIORITY = {
+  "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
+  "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
+};
 
 export class MoomboxApp {
   constructor() {
@@ -27,6 +33,12 @@ export class MoomboxApp {
     // "error") — "done"/"idle" delete the entry. Rendered as a badge on the
     // Settings channel cards.
     this.backfillStatus = {};
+    // Trims the server is running, keyed by trim id (worker.TrimTask:
+    // id, jobId, startTime, endTime, progress). Seeded from `initial_state`
+    // (payload.runningTrims) and kept by `trim_status` frames; a trim leaves
+    // it when its outcome arrives. Drawn as a progress bar in its job's Trims
+    // section.
+    this.runningTrims = {};
     this.selectedJobId = null;
     this._selectedTaskJobs = new Set();
     this._selectedArchivedJobs = new Set();
@@ -304,26 +316,19 @@ export class MoomboxApp {
       });
     }
 
-    // Intercept tab switches when settings has unsaved changes
+    // Intercept tab switches when settings has unsaved changes. The guard
+    // itself is _canLeaveSettings / _confirmLeaveSettings, so that the two
+    // programmatic switches — the 1–8 shortcuts (showTab) and Play from the
+    // details dialog (openInPlayer) — owe the same answer a click does; this
+    // listener is only the click's way in.
     document.querySelectorAll("sl-tab[slot='nav']").forEach(tab => {
       tab.addEventListener("click", (e) => {
-        if (tab.panel !== "settings" && this.settings?._dirty) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          this.showConfirm("You have unsaved settings changes. Discard and leave?", {
-            title: "Unsaved Changes",
-            okLabel: "Leave Without Saving",
-            okVariant: "warning"
-          }).then(confirmed => {
-            if (confirmed) {
-              this.settings._dirty = false;
-              this.settings._updateUnsavedIndicator();
-              document.getElementById("settings-unsaved-banner").style.display = "none";
-              this.settings.app.loadConfig();
-              tab.click();
-            }
-          });
-        }
+        if (this._canLeaveSettings(tab.panel)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        this._confirmLeaveSettings().then(confirmed => {
+          if (confirmed) tab.click();
+        });
       }, true); // capture phase — intercept before Shoelace switches the tab
     });
 
@@ -544,7 +549,7 @@ export class MoomboxApp {
     document.getElementById("batch-watched")?.addEventListener("click", () => this.batchAction("watched"));
     document.getElementById("batch-unwatched")?.addEventListener("click", () => this.batchAction("unwatched"));
     document.getElementById("batch-select-all")?.addEventListener("click", () => {
-      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      const panel = this._activePanel;
       const selectionSet = this._activeSelectionSet();
       let visibleJobs;
       if (panel === "archived") {
@@ -562,17 +567,7 @@ export class MoomboxApp {
       }
       this.updateBatchActionBar();
     });
-    document.getElementById("batch-clear")?.addEventListener("click", () => {
-      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
-      this._activeSelectionSet().clear();
-      const containerId = panel === "archived" ? "archived-container" : "jobs-container";
-      const container = document.getElementById(containerId);
-      if (container) {
-        container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
-        container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
-      }
-      this.updateBatchActionBar();
-    });
+    document.getElementById("batch-clear")?.addEventListener("click", () => this._clearSelectionUI());
   }
 
   async loadConfig() {
@@ -675,7 +670,7 @@ export class MoomboxApp {
         );
         this.showToast(recheck.message, recheck.variant);
       } else {
-        this.showToast("Failed to recheck cookies", "danger");
+        this.showToast("Failed to recheck cookies: " + await serverErrorMessage(response), "danger");
       }
     } catch (e) {
       this.showToast("Failed to recheck cookies: " + e.message, "danger");
@@ -792,6 +787,15 @@ export class MoomboxApp {
         if (btn) btn.classList.remove("checking");
         await this.recheckCookies();
         return;
+      } else if (data.cause === "profile-in-use") {
+        // A SKIP, not a failure: a browser the profile's SingletonLock names
+        // may still be running on it, so the pass declined and launched
+        // nothing. The sentence as it stands — it names the host to close the
+        // browser on and the lock to delete — in the colour the Last cookie
+        // error line draws it in, as the TUI's R F does. Keyed on the cause,
+        // not the 409: a locked cookie DB answers the same status and is
+        // still a failure.
+        this.showToast(data.error, "warning");
       } else {
         this.showToast(data.error || `${mechanismLabel} failed`, "danger");
       }
@@ -863,7 +867,7 @@ export class MoomboxApp {
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
     // The BotGuard sidecar is an ALERT, not a status: while it is down,
     // signature-ciphered formats cannot be resolved at all (sig has no
-    // fallback) and PO tokens fall to the goja path, which errors. It carries
+    // fallback) and a PO token mint fails at once (no goja fallback). It carries
     // no action — the supervisor is already retrying and there is nothing for
     // the operator to click.
     if (this.sidecarHealthy === false)
@@ -1008,6 +1012,7 @@ export class MoomboxApp {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}`;
 
+    this.logPanel.newConnection();
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
@@ -1102,13 +1107,33 @@ export class MoomboxApp {
     statusEl.appendChild(label);
   }
 
+  /**
+   * Rebuild the Player tab's video picker when that tab is open. It used to
+   * refresh only on tab activation, Open in Player and a ZIP import, so with
+   * the tab open a recording that finished was not offered and a deleted one
+   * stayed listed. A hidden Player tab rebuilds on activation as before.
+   */
+  _refreshPlayerPicker() {
+    if (this._activePanel === "player" && this.player?.playerInitialized) {
+      this.player.loadPlayerJobList();
+    }
+  }
+
   handleMessage(message) {
     const p = message.payload;
     switch (message.type) {
       case "initial_state": {
         if (!p) break;
+        // Carry the staging fields only GET /api/jobs/:id adds (hasStaging,
+        // hasSegments, asides, keptChatSidecar, unmuxedParts) across the replace, as
+        // jobs_update and job_update do: the snapshot rows are raw, and an
+        // open details dialog refreshed from one below lost its Resume and
+        // Mux buttons. Not only on reconnect — the hub sends this snapshot
+        // in place of a frame a lagging tab dropped. Archived rows too: a
+        // deep-linked dialog may hold the enriched copy there.
+        this.details._preserveStagingFields([...this.jobs, ...this.archivedJobs], p.jobs || []);
         this.jobs = p.jobs || [];
-        this.logPanel.logs = p.logs || [];
+        this.logPanel.setSnapshot(p.logs || [], p.logSeq);
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1126,12 +1151,32 @@ export class MoomboxApp {
           }
         }
         this.settings.refreshBackfillBadges();
+        // Running trims: a trim outlives the page that started it, so a
+        // reload mid-trim learns of it here. Rebuilt, not merged — one that
+        // ended while the socket was down is dropped — and before the open
+        // details are refreshed below, which redraws their Trims section.
+        this.runningTrims = {};
+        for (const t of p.runningTrims || []) {
+          if (t?.id && t.jobId) this.runningTrims[t.id] = t;
+        }
+        if (this.selectedJobId) {
+          // An archived row's open details are not refreshed below.
+          const shown = this.jobs.find((j) => j.id === this.selectedJobId)
+            || this.archivedJobs.find((j) => j.id === this.selectedJobId);
+          if (shown) this.details._syncTrims(shown);
+        }
         // On a reconnect the archived list may carry rows the fresh active
         // list now owns again — prune them so neither panel double-counts.
         const archivedPruned = this._pruneArchivedAgainstActive();
         const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
         if (archivedMoved || archivedPruned) this.renderArchivedJobs();
+        // The snapshot carries active rows only, so it cannot say which
+        // archived rows were deleted (or which jobs aged into the archive)
+        // while frames were missed. A hidden Archived panel refetches when
+        // shown; an open one refetches now, or its ghosts stay until the
+        // operator leaves the tab and comes back.
+        if (this._activePanel === "archived") this.fetchArchivedJobs();
         this._syncParkedBadge();
         this.logPanel.renderLogs();
         this.updateCheckCountdown();
@@ -1198,19 +1243,25 @@ export class MoomboxApp {
           // Status change affects sort order — do full re-render
           if (oldStatus !== updatedJob.status) {
             this.renderJobs();
+            // The picker lists Finished recordings: one that just finished
+            // muxing (or left Finished) changes what it should offer.
+            if (oldStatus === "Finished" || updatedJob.status === "Finished") this._refreshPlayerPicker();
             // A status change (esp. → Finished) can cross the archive
             // threshold immediately (hide_finished_age_days = 0). Progress
             // ticks can't — jobs age by TIME, which the 60s sweep interval
             // already covers — so archive evaluation stays off the per-tick
             // path instead of running an O(n) scan on every progress update.
             this._evaluateArchiveBoundary();
+          } else if (this._sortKey(oldJob) !== this._sortKey(updatedJob)) {
+            // Same status but a new place in it — a renamed title, or a
+            // completed row's newer updatedAt. Patched in place, the card
+            // kept its old position while Arrow navigation and Enter index
+            // the re-sorted list, so the highlight landed on the wrong row.
+            this.renderJobs();
+            this.stats.updateActiveIndicator(this.jobs);
           } else {
             this.updateJobCard(updatedJob);
             this.stats.updateActiveIndicator(this.jobs);
-          }
-          // Update details dialog if this job is selected
-          if (this.selectedJobId === updatedJob.id) {
-            this.details.updateJobDetails(updatedJob);
           }
         } else {
           // Job not in the active array — either brand new, or one that had
@@ -1219,6 +1270,12 @@ export class MoomboxApp {
           // updated_at on every change). Push it active, then drop any stale
           // archived copy so it isn't shown in both panels. If it's still aged,
           // the _evaluateArchiveBoundary() below re-archives it.
+          //
+          // The archived copy is the one that holds the enriched fields the
+          // details dialog fetched for it, and the dialog refresh below would
+          // otherwise rebuild on a row without them.
+          const archivedCopy = this.archivedJobs.find((j) => j.id === updatedJob.id);
+          if (archivedCopy) this.details._preserveStagingFields([archivedCopy], [updatedJob]);
           this.jobs.push(updatedJob);
           if (this._pruneArchivedAgainstActive()) this.renderArchivedJobs();
           // One discovered job costs one card, not a rebuild of every card in
@@ -1233,6 +1290,14 @@ export class MoomboxApp {
         // the badge owes the same answer to both. The change gate inside is
         // what keeps this off the DOM on a progress tick.
         this._syncParkedBadge();
+        // Likewise the open dialog: it can be showing a job this tab holds
+        // only in archivedJobs (a deep link, or an archived row the operator
+        // opened), and the update that reaches the upsert branch is exactly
+        // the one it is waiting on — a Mark Watched on an archived row lands
+        // here once its updated_at moves back inside the active window.
+        if (this.selectedJobId === updatedJob.id) {
+          this.details.updateJobDetails(updatedJob);
+        }
         break;
       }
 
@@ -1319,6 +1384,10 @@ export class MoomboxApp {
         // handler no longer leaves a stale "Cancelled" row visible after delete.
         const deletedId = p?.id;
         if (!deletedId) break;
+        // A deleted recording must leave the Player's picker (and stop
+        // playing from a source that now 404s); loadPlayerJobList clears a
+        // selection that vanished.
+        this._refreshPlayerPicker();
         const deletedIdx = this.jobs.findIndex(j => j.id === deletedId);
         if (deletedIdx !== -1) {
           this.jobs.splice(deletedIdx, 1);
@@ -1345,7 +1414,7 @@ export class MoomboxApp {
       }
 
       case "log":
-        if (p) this.logPanel.addLog(p);
+        if (p) this.logPanel.addLog(p, message.seq);
         break;
 
       case "check_timers":
@@ -1364,9 +1433,23 @@ export class MoomboxApp {
         this.handleBackfillStatus(p);
         break;
 
+      case "trim_status":
+        this.handleTrimStatus(p);
+        break;
+
       case "update_available":
         this.updates.available = p;
         this.updates.updateVersionIndicator();
+        break;
+
+      case "update_cleared":
+        // The pending release was skipped or pulled. Only the release this
+        // page is showing: a clear racing a newly-found one names the older
+        // tag.
+        if (this.updates.available?.tagName === p?.tagName) {
+          this.updates.available = null;
+          this.updates.updateVersionIndicator();
+        }
         break;
 
       case "connectivity":
@@ -1434,6 +1517,43 @@ export class MoomboxApp {
       delete this.backfillStatus[p.channel];
     }
     this.settings.updateChannelBackfillBadge(p.channel);
+  }
+
+  /**
+   * A trim_status frame: a trim the server runs (worker.TrimEvent). It is
+   * keyed to the job and trim it names, never to whatever dialog is open —
+   * a "running" frame moves that trim's bar in its job's Trims section; an
+   * outcome takes the trim out of runningTrims and —
+   * the dialog that asked may be long gone, or the trim may have been asked
+   * for by the other UI. "finished" carries the stored record: it is merged
+   * into the job this page holds (the OnTrimsChanged job_update normally
+   * lands first; this makes the order not matter) and the job's open Trims
+   * section is redrawn. Each outcome is toasted on every page, naming the
+   * job: after a reload no page can tell which trims it asked for.
+   */
+  handleTrimStatus(p) {
+    if (!p?.id || !p.jobId) return;
+    if (p.state === "running") {
+      // A trim starting, then its progress (at most four frames a second).
+      this.runningTrims[p.id] = p;
+      this.details.updateRunningTrim(p);
+      return;
+    }
+    if (p.state !== "finished" && p.state !== "failed") return;
+    delete this.runningTrims[p.id];
+    const job = this.jobs.find((j) => j.id === p.jobId) || this.archivedJobs.find((j) => j.id === p.jobId);
+    const range = `${formatTimestamp(p.startTime)} – ${formatTimestamp(p.endTime)}`;
+    const of = job?.title ? ` of "${job.title}"` : "";
+    if (p.state === "finished") {
+      if (job && p.trim?.id) {
+        const trims = Array.isArray(job.trims) ? job.trims : [];
+        if (!trims.some((t) => t.id === p.trim.id)) job.trims = [...trims, p.trim];
+      }
+      this.showToast(`Trim ${range}${of} created`, "success");
+    } else {
+      this.showToast(`Trim ${range}${of} failed: ${p.error || "Failed to create trim"}`, "danger");
+    }
+    if (job) this.details._syncTrims(job);
   }
 
   /**
@@ -1637,10 +1757,14 @@ export class MoomboxApp {
   async checkMonitorsNow() {
     try {
       const resp = await fetch("/api/monitors/check-now", { method: "POST" });
+      if (!resp.ok) {
+        this.showToast("Force check failed: " + await serverErrorMessage(resp), "danger");
+        return;
+      }
       const data = await resp.json().catch(() => ({}));
       if (data.debounced) {
         this.showToast(`Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`, "primary");
-      } else if (resp.ok && data.success) {
+      } else if (data.success) {
         this.showToast("Checking all monitors now…", "success");
       } else {
         this.showToast("Force check failed", "danger");
@@ -1727,8 +1851,22 @@ export class MoomboxApp {
       return;
     }
 
+    // Remove stale selected IDs (jobs that no longer exist) before any early
+    // return below, so a filter that hides every row still syncs the bar.
+    const taskJobIds = new Set(this.jobs.map(j => j.id));
+    this._selectedTaskJobs.forEach(id => {
+      if (!taskJobIds.has(id)) this._selectedTaskJobs.delete(id);
+    });
+
     const filtered = this.filterBar.getFilteredJobs();
     const isFiltered = this.filterBar.tokens("jobs").length > 0;
+    // And the ones the filter hides: a batch action acts on what is on
+    // screen. Kept, a job ticked before the filter changed stayed in the
+    // "N selected" count and in the Delete or Cancel it was never shown in.
+    const visibleIds = new Set(filtered.map(j => j.id));
+    this._selectedTaskJobs.forEach(id => {
+      if (!visibleIds.has(id)) this._selectedTaskJobs.delete(id);
+    });
 
     // Update filter count
     if (filterCount) {
@@ -1748,9 +1886,10 @@ export class MoomboxApp {
       const msg = emptyState.querySelector("p");
       if (msg) msg.textContent = "No matching jobs";
       const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Search matches titles and channel names";
+      if (subtext) subtext.textContent = "Search matches titles, channel names and video IDs";
       const cta = emptyState.querySelector(".empty-state-cta");
       if (cta) cta.style.display = "none";
+      this.updateBatchActionBar();
       return;
     }
 
@@ -1777,12 +1916,6 @@ export class MoomboxApp {
     } else {
       this.focusedJobIndex = -1;
     }
-
-    // Remove stale selected IDs (jobs that no longer exist)
-    const taskJobIds = new Set(this.jobs.map(j => j.id));
-    this._selectedTaskJobs.forEach(id => {
-      if (!taskJobIds.has(id)) this._selectedTaskJobs.delete(id);
-    });
 
     // Re-apply selection state and sync the batch bar
     this._selectedTaskJobs.forEach(id => {
@@ -1976,8 +2109,19 @@ export class MoomboxApp {
       return;
     }
 
+    // Remove stale archived selected IDs before any early return below.
+    const archivedJobIds = new Set(this.archivedJobs.map(j => j.id));
+    this._selectedArchivedJobs.forEach(id => {
+      if (!archivedJobIds.has(id)) this._selectedArchivedJobs.delete(id);
+    });
+
     const filtered = this.filterBar.getFilteredArchivedJobs();
     const isFiltered = this.filterBar.tokens("archived").length > 0;
+    // And the ones the filter hides — see renderJobs.
+    const visibleArchivedIds = new Set(filtered.map(j => j.id));
+    this._selectedArchivedJobs.forEach(id => {
+      if (!visibleArchivedIds.has(id)) this._selectedArchivedJobs.delete(id);
+    });
 
     // Update filter count
     if (filterCount) {
@@ -1998,8 +2142,9 @@ export class MoomboxApp {
       const msg = emptyState.querySelector("p");
       if (msg) msg.textContent = "No matching archived jobs";
       const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Search matches titles and channel names";
+      if (subtext) subtext.textContent = "Search matches titles, channel names and video IDs";
       if (filterCount) filterCount.style.display = "";
+      this.updateBatchActionBar();
       return;
     }
 
@@ -2014,12 +2159,6 @@ export class MoomboxApp {
     container.innerHTML = sorted
       .map((job) => this.renderJobItem(job))
       .join("");
-
-    // Remove stale archived selected IDs
-    const archivedJobIds = new Set(this.archivedJobs.map(j => j.id));
-    this._selectedArchivedJobs.forEach(id => {
-      if (!archivedJobIds.has(id)) this._selectedArchivedJobs.delete(id);
-    });
 
     // Re-apply archived selection state
     this._selectedArchivedJobs.forEach(id => {
@@ -2138,13 +2277,17 @@ export class MoomboxApp {
     // Compact-row overflow menu. Only the desktop inline icons render on
     // wide viewports; CSS swaps them for this single trigger on phones.
     const overflowHtml = overflowItems.length
-      ? `<sl-dropdown class="video-item-overflow"><sl-icon-button slot="trigger" name="three-dots-vertical" label="More actions"></sl-icon-button><sl-menu>${overflowItems.join("")}</sl-menu></sl-dropdown>`
+      ? `<sl-dropdown class="video-item-overflow" role="cell"><sl-icon-button slot="trigger" name="three-dots-vertical" label="More actions"></sl-icon-button><sl-menu>${overflowItems.join("")}</sl-menu></sl-dropdown>`
       : "";
 
     const isSelected = this._selectedTaskJobs.has(job.id) || this._selectedArchivedJobs.has(job.id);
+    // role="row"/"cell": the containers are role="table" with a
+    // columnheader row, and a table's rows must be rows — without them the
+    // checkbox, status and buttons sat directly inside the rowgroup, which
+    // assistive technology cannot read as a table.
     return `
-      <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
-        <div class="thumb">
+      <div class="video-item${isSelected ? " selected" : ""}" role="row" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
+        <div class="thumb" role="cell">
           <input type="checkbox" class="job-checkbox" data-job-id="${escId}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
@@ -2153,18 +2296,18 @@ export class MoomboxApp {
           ${this.watchIndicatorHtml(job)}
           ${this.incompleteIndicatorHtml(job)}
         </div>
-        <div class="stream-info">
+        <div class="stream-info" role="cell">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
           <div class="stream-author">${this.escapeHtml(job.channelName)}</div>
         </div>
-        <div class="job-status-cell">
+        <div class="job-status-cell" role="cell">
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
-        <div class="job-progress">
+        <div class="job-progress" role="cell">
           <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
-        <div class="job-quick-actions">${actionsHtml}</div>
+        <div class="job-quick-actions" role="cell">${actionsHtml}</div>
         ${overflowHtml}
       </div>
     `;
@@ -2526,12 +2669,14 @@ export class MoomboxApp {
 
     try {
       const response = await fetch(`/api/formats/${videoId}`);
-      if (!response.ok) {
-        throw new Error("Failed to fetch formats");
-      }
 
-      // Discard stale response if user changed the URL during fetch
+      // Discard a stale response, failed or not, if the user changed the URL
+      // during the fetch: the newer fetch owns the skeleton and the toast.
       if (this._lastFormatVideoId !== videoId) return;
+
+      if (!response.ok) {
+        throw new Error(await serverErrorMessage(response));
+      }
 
       const data = await response.json();
       await this.populateFormatSelects(data);
@@ -2647,14 +2792,12 @@ export class MoomboxApp {
     const job = this.jobs.find((j) => j.id === this.selectedJobId)
       || this.archivedJobs.find((j) => j.id === this.selectedJobId);
     if (!job) return;
-    let url = job.url;
-    if (!url) {
-      if (job.platform === "twitch") {
-        url = `https://www.twitch.tv/${job.channelName || job.videoId}`;
-      } else {
-        url = `https://www.youtube.com/watch?v=${job.videoId}`;
-      }
-    }
+    // streamUrl, the details' Stream URL row's and the TUI's rule: a Twitch
+    // live row with no url has no page, where this opened
+    // twitch.tv/<channelName> — for an imported capture "Import", someone
+    // else's channel.
+    const url = streamUrl(job);
+    if (!url) return;
     try {
       const parsed = new URL(url);
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
@@ -2693,6 +2836,15 @@ export class MoomboxApp {
    */
   openInPlayer() {
     if (!this.selectedJobId) return Promise.resolve();
+    // Play is a switch to the Player tab like any other, so it owes the
+    // unsaved-settings guard the answer a click on that tab would get — the
+    // details dialog can sit over a dirty Settings page through a #job= deep
+    // link. Asked BEFORE the dialog is closed, so "stay" leaves the operator
+    // exactly where they were; re-entered on "leave", by which point the
+    // guard has reset the dirty state and lets the switch below through.
+    if (!this._canLeaveSettings("player")) {
+      return this._confirmLeaveSettings().then(confirmed => (confirmed ? this.openInPlayer() : undefined));
+    }
     const jobId = this.selectedJobId;
 
     // Close the details dialog
@@ -2730,6 +2882,13 @@ export class MoomboxApp {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
     if (!await this.showConfirm("Are you sure you want to cancel this job?", { okLabel: "Cancel Job", okVariant: "danger" })) return;
+    // Re-read after the confirm (see batchAction): a row this tab holds that
+    // left the cancellable states meanwhile is not cancelled.
+    const nowCancel = this._currentJob(id);
+    if (nowCancel && !CANCEL_STATUSES.has(nowCancel.status)) {
+      this.showToast(`Not cancelled — the job is ${nowCancel.status} now`, "warning");
+      return;
+    }
 
     this._jobActionsInFlight.add(id);
     try {
@@ -2879,6 +3038,14 @@ export class MoomboxApp {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
     if (!await this.showConfirm("Are you sure you want to delete this job?", { okLabel: "Delete", okVariant: "danger" })) return;
+    // Re-read after the confirm (see batchAction): the DELETE route cancels a
+    // running download before removing it, and a job retried while the dialog
+    // was open must not be pulled out from under its worker.
+    const nowDelete = this._currentJob(id);
+    if (nowDelete && !DELETE_STATUSES.has(nowDelete.status)) {
+      this.showToast(`Not deleted — the job is ${nowDelete.status} now`, "warning");
+      return;
+    }
 
     this._jobActionsInFlight.add(id);
     try {
@@ -2931,9 +3098,11 @@ export class MoomboxApp {
         throw new Error(error.error || 'Failed to create trim');
       }
 
+      // 202: the trim runs on the server, detached from this request — a
+      // reload or a closed tab no longer stops it. Its result arrives as
+      // trim_status frames (handleTrimStatus).
       const { trim } = await response.json();
-      this.showToast('Trim created successfully', 'success');
-      await this.details._refreshJobDetails(jobId);
+      this.showToast('Trim started — it keeps running if you leave this page', 'primary');
       return trim;
     } catch (error) {
       this.showToast(error.message, 'danger');
@@ -2952,7 +3121,7 @@ export class MoomboxApp {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to delete trim');
+        throw new Error('Failed to delete trim: ' + await serverErrorMessage(response));
       }
 
       this.showToast('Trim deleted', 'success');
@@ -2982,12 +3151,68 @@ export class MoomboxApp {
     return this.logPanel.addLog(...args);
   }
 
+  // ===== Tab switching =====
+
+  /**
+   * The unsaved-settings guard behind every tab switch. True when a switch to
+   * `panel` may go ahead right now: Settings itself is always reachable, and
+   * every other panel is while nothing on the Settings page is dirty.
+   */
+  _canLeaveSettings(panel) {
+    return panel === "settings" || !this.settings?._dirty;
+  }
+
+  /**
+   * Ask whether to discard the unsaved settings. Resolves true when the
+   * operator chose to leave — the dirty state is reset and the saved config
+   * reloaded here, so whichever caller then switches starts clean — and false
+   * when they stayed. Never rejects (showConfirm does not).
+   * @returns {Promise<boolean>}
+   */
+  _confirmLeaveSettings() {
+    return this.showConfirm("You have unsaved settings changes. Discard and leave?", {
+      title: "Unsaved Changes",
+      okLabel: "Leave Without Saving",
+      okVariant: "warning"
+    }).then(confirmed => {
+      if (!confirmed) return false;
+      this.settings._dirty = false;
+      this.settings._updateUnsavedIndicator();
+      document.getElementById("settings-unsaved-banner").style.display = "none";
+      this.loadConfig();
+      return true;
+    });
+  }
+
+  /**
+   * Switch to a tab the way a click on its sl-tab does — through the
+   * unsaved-settings guard. Synchronous when the guard lets it through, so a
+   * caller's ordering around the switch is what it always was; otherwise the
+   * switch waits on the confirm, and is dropped when the operator stays.
+   */
+  showTab(panel) {
+    const tabGroup = document.querySelector("sl-tab-group");
+    if (!tabGroup) return;
+    if (this._canLeaveSettings(panel)) {
+      tabGroup.show(panel);
+      return;
+    }
+    this._confirmLeaveSettings().then(confirmed => {
+      if (confirmed) tabGroup.show(panel);
+    });
+  }
+
   // ===== Keyboard Shortcuts =====
 
   setupKeyboardShortcuts() {
     document.addEventListener("keydown", (e) => {
       // Skip when typing in input fields (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
+
+      // Ctrl/Cmd/Alt combinations are the browser's: Ctrl+1..8 switched the
+      // dashboard's tab (and not the browser's), Ctrl+F focused the filter
+      // instead of opening Find, Ctrl+A opened the Add dialog.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       // A control that already handled this key consumed it. The status bar's
       // role="button" elements (#check-countdown, the re-login warnings, the
@@ -3004,25 +3229,18 @@ export class MoomboxApp {
         return;
       }
 
-      const tabGroup = document.querySelector("sl-tab-group");
       const panels = ["tasks", "archived", "player", "imports", "files", "stats", "logs", "settings"];
-      const activePanel = document.querySelector("sl-tab-panel[active]");
-      const isPlayerActive = activePanel?.getAttribute("name") === "player";
+      // The tracked panel, not the DOM's [active] attribute, which lags
+      // Shoelace's tab switch (see _activePanel).
+      const activePanel = this._activePanel;
+      const isPlayerActive = activePanel === "player";
 
-      const isTasksActive = activePanel?.getAttribute("name") === "tasks";
+      const isTasksActive = activePanel === "tasks";
 
       switch (e.key) {
         case "Escape":
           if (this._activeSelectionSet().size > 0) {
-            const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
-            this._activeSelectionSet().clear();
-            const containerId = panel === "archived" ? "archived-container" : "jobs-container";
-            const container = document.getElementById(containerId);
-            if (container) {
-              container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
-              container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
-            }
-            this.updateBatchActionBar();
+            this._clearSelectionUI();
             return;
           }
           break;
@@ -3037,7 +3255,10 @@ export class MoomboxApp {
           e.preventDefault();
           break;
         case "1": case "2": case "3": case "4": case "5": case "6": case "7": case "8":
-          if (tabGroup) tabGroup.show(panels[parseInt(e.key) - 1]);
+          // Through showTab, never tabGroup.show() directly: a dirty
+          // Settings page is a question a click on the tab asks, and the
+          // shortcut used to skip it.
+          this.showTab(panels[parseInt(e.key) - 1]);
           e.preventDefault();
           break;
         case "ArrowUp":
@@ -3048,7 +3269,11 @@ export class MoomboxApp {
           }
           break;
         case "Enter":
-          if (isTasksActive && this.focusedJobIndex >= 0) {
+          // Enter on a focused control belongs to that control: a Shoelace
+          // button does not preventDefault it, so Enter on Add Video, a
+          // card's Delete icon or the theme toggle ALSO opened the
+          // keyboard-focused job's details (over the control's own dialog).
+          if (isTasksActive && this.focusedJobIndex >= 0 && !this._enterFromControl(e)) {
             const filtered = this.filterBar.getFilteredJobs();
             const sorted = this._sortJobs(filtered);
             const job = sorted[this.focusedJobIndex];
@@ -3061,7 +3286,7 @@ export class MoomboxApp {
           // in a hidden sl-tab-panel), but skip it explicitly like "a" above
           // so only one handler ever reacts to the keypress.
           if (!isPlayerActive) {
-            const panel = activePanel?.getAttribute("name");
+            const panel = activePanel;
             const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
             const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
             if (filterInput) { filterInput.focus(); e.preventDefault(); }
@@ -3096,11 +3321,14 @@ export class MoomboxApp {
 
   // ===== Search/Filter =====
 
+  // _sortKey is what _sortJobs orders a row by within its status: updatedAt
+  // for the completed statuses, the title for everything else.
+  _sortKey(job) {
+    return (TASK_STATUS_PRIORITY[job.status] ?? 99) >= 7 ? job.updatedAt : job.title;
+  }
+
   _sortJobs(jobs) {
-    const STATUS_PRIORITY = {
-      "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
-      "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
-    };
+    const STATUS_PRIORITY = TASK_STATUS_PRIORITY;
     return [...jobs].sort((a, b) => {
       const pa = STATUS_PRIORITY[a.status] ?? 99;
       const pb = STATUS_PRIORITY[b.status] ?? 99;
@@ -3179,27 +3407,28 @@ export class MoomboxApp {
     if (job.status === "COOKIES?" && job.error) return job.error;
 
     const p = job.progress || "";
+    const chatCount = (n) => { const c = parseInt(n); return `${c.toLocaleString()} message${c === 1 ? "" : "s"}`; };
     // DASH: (V: 789/1000 A: 123/456 C: 50) — video first since v2.7.8;
     // pre-flip "(A: ... V: ...)" strings on old rows fall through to the
     // lastVideoSeq fallback below, which renders the same information.
     const dashMatch = p.match(/\(V:\s*(\S+)\s+A:\s*(\S+)(?:\s+C:\s*(\d+))?\)/);
     if (dashMatch) {
       let tip = `Video: ${dashMatch[1]} segments, Audio: ${dashMatch[2]} segments`;
-      if (dashMatch[3]) tip += `, Chat: ${parseInt(dashMatch[3]).toLocaleString()} messages`;
+      if (dashMatch[3]) tip += `, Chat: ${chatCount(dashMatch[3])}`;
       return tip;
     }
     // VOD: V:95.3% C: 456
     const vodMatch = p.match(/^V:([\d.]+%)(?:\s+C:\s*(\d+))?$/);
     if (vodMatch) {
       let tip = `Video: ${vodMatch[1]} downloaded`;
-      if (vodMatch[2]) tip += `, Chat: ${parseInt(vodMatch[2]).toLocaleString()} messages`;
+      if (vodMatch[2]) tip += `, Chat: ${chatCount(vodMatch[2])}`;
       return tip;
     }
     // HLS: Seq: 123 C: 456
     const hlsMatch = p.match(/^Seq:\s*(\d+)(?:\s+C:\s*(\d+))?$/);
     if (hlsMatch) {
       let tip = `Segments: ${parseInt(hlsMatch[1]).toLocaleString()}`;
-      if (hlsMatch[2]) tip += `, Chat: ${parseInt(hlsMatch[2]).toLocaleString()} messages`;
+      if (hlsMatch[2]) tip += `, Chat: ${chatCount(hlsMatch[2])}`;
       return tip;
     }
     // Frontend fallback: V: 123 / A: 456
@@ -3509,8 +3738,25 @@ export class MoomboxApp {
   }
 
   /** Return selected jobs for the currently active panel. */
+  /**
+   * Empty the active panel's selection and undo its marks in the DOM — the
+   * ticked boxes and the .selected highlight — then refresh the batch bar.
+   * One home for what the Clear button, Escape and a finished batch action
+   * all do.
+   */
+  _clearSelectionUI() {
+    this._activeSelectionSet().clear();
+    const containerId = this._activePanel === "archived" ? "archived-container" : "jobs-container";
+    const container = document.getElementById(containerId);
+    if (container) {
+      container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+      container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+    }
+    this.updateBatchActionBar();
+  }
+
   _getSelectedJobs() {
-    const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+    const panel = this._activePanel;
     if (panel === "archived") {
       return this.archivedJobs.filter(j => this._selectedArchivedJobs.has(j.id));
     }
@@ -3541,7 +3787,7 @@ export class MoomboxApp {
     // Update Select All label with count when filters are active
     const selectAllBtn = document.getElementById("batch-select-all");
     if (selectAllBtn) {
-      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      const panel = this._activePanel;
       const isFiltered = panel === "archived"
         ? this.filterBar.tokens("archived").length > 0
         : this.filterBar.tokens("jobs").length > 0;
@@ -3579,6 +3825,21 @@ export class MoomboxApp {
     }
   }
 
+  // _enterFromControl reports whether a keydown came from a control that
+  // handles Enter itself — a button of any kind, a link, a form field.
+  _enterFromControl(e) {
+    const path = typeof e.composedPath === "function" ? e.composedPath() : [e.target];
+    return path.some((el) => el instanceof Element && el.matches(
+      "button, a[href], input, select, textarea, sl-button, sl-icon-button, sl-checkbox, sl-switch, sl-select, sl-input, sl-dropdown, sl-menu-item, [role=button], [role=menuitem]"));
+  }
+
+  // _currentJob is the row this tab holds for id now — the active list, then
+  // the archived one — for actions that must re-read a status after a confirm
+  // the operator may have left open.
+  _currentJob(id) {
+    return this.jobs.find(j => j.id === id) || this.archivedJobs.find(j => j.id === id);
+  }
+
   async batchAction(action) {
     const selectedJobs = this._getSelectedJobs();
     // Strip jobs already being acted on (single-click cancel/resume/etc.
@@ -3587,31 +3848,36 @@ export class MoomboxApp {
     const eligibleJobs = isPerJob
       ? selectedJobs.filter(j => !this._jobActionsInFlight.has(j.id))
       : selectedJobs;
-    let targets, confirmMsg, apiCall;
+    let targets, confirmMsg, apiCall, qualifies;
 
     switch (action) {
       case "cancel":
-        targets = eligibleJobs.filter(j => CANCEL_STATUSES.has(j.status));
+        qualifies = j => CANCEL_STATUSES.has(j.status);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Cancel ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
         break;
       case "resume":
-        targets = eligibleJobs.filter(j => canResumeJob(j));
+        qualifies = j => canResumeJob(j);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Resume ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/resume`, { method: "POST" });
         break;
       case "reinitialize":
-        targets = eligibleJobs.filter(j => REINIT_STATUSES.has(j.status));
+        qualifies = j => REINIT_STATUSES.has(j.status);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Reinitialize ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/reinitialize`, { method: "POST" });
         break;
       case "delete":
-        targets = eligibleJobs.filter(j => DELETE_STATUSES.has(j.status));
+        qualifies = j => DELETE_STATUSES.has(j.status);
+        targets = eligibleJobs.filter(qualifies);
         confirmMsg = `Delete ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
         break;
       case "watched":
-        targets = selectedJobs.filter(j => j.status === "Finished" && !j.watched);
+        qualifies = j => j.status === "Finished" && !j.watched;
+        targets = selectedJobs.filter(qualifies);
         confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as watched?`;
         apiCall = () => fetch("/api/jobs/batch/watched", {
           method: "POST",
@@ -3620,7 +3886,8 @@ export class MoomboxApp {
         });
         break;
       case "unwatched":
-        targets = selectedJobs.filter(j => j.status === "Finished" && (j.watched || j.resumePosition != null));
+        qualifies = j => j.status === "Finished" && (j.watched || j.resumePosition != null);
+        targets = selectedJobs.filter(qualifies);
         confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as unwatched?`;
         apiCall = () => fetch("/api/jobs/batch/watched", {
           method: "DELETE",
@@ -3639,6 +3906,18 @@ export class MoomboxApp {
     });
     if (!confirmed) return;
 
+    // The dialog waits on the operator, and rows move meanwhile — an Error
+    // job a monitor retried is Downloading by the time OK is clicked, and the
+    // DELETE route cancels a running download before removing it. Act only on
+    // what still qualifies now, as the TUI re-validates at its confirm.
+    const offered = targets.length;
+    targets = targets.map(j => this._currentJob(j.id)).filter(j => j && qualifies(j));
+    if (targets.length < offered) {
+      const moved = offered - targets.length;
+      this.showToast(`${moved} job${moved !== 1 ? "s" : ""} changed state while you confirmed and ${moved !== 1 ? "were" : "was"} skipped`, "warning");
+    }
+    if (targets.length === 0) return;
+
     let succeeded, failed;
     if (action === "watched" || action === "unwatched") {
       // Single batch API call
@@ -3646,6 +3925,18 @@ export class MoomboxApp {
         const res = await apiCall();
         succeeded = res.ok ? targets.length : 0;
         failed = res.ok ? 0 : targets.length;
+        // The route answers {success}, not rows, and the jobs_update that
+        // follows it (BatchSetWatched still fires OnJobsChange) restates the
+        // active list only — an archived row is never restated, so the
+        // Archived panel kept its eyes and its checked boxes until the next
+        // fetchArchivedJobs. Write what the server wrote (watched, and the
+        // resume position it clears either way); the redraw below shows it.
+        if (res.ok) {
+          for (const j of targets) {
+            j.watched = action === "watched";
+            j.resumePosition = null;
+          }
+        }
       } catch {
         succeeded = 0;
         failed = targets.length;
@@ -3663,8 +3954,19 @@ export class MoomboxApp {
       }
     }
 
-    this._activeSelectionSet().clear();
-    this.updateBatchActionBar();
+    // The checkboxes too, not just the set: a target the server refused (a
+    // 400 from /resume or /cancel) provokes no job_update, and a selected row
+    // that was not a target of this verb at all is redrawn only if another
+    // row's status change re-renders the list — so both kept a ticked box
+    // and the .selected highlight with nothing behind them.
+    this._clearSelectionUI();
+    // The per-job actions are redrawn by the job_update each one provokes;
+    // the watched pair is redrawn here, from the rows patched above, on the
+    // panel the selection was made on.
+    if (succeeded > 0 && (action === "watched" || action === "unwatched")) {
+      if (this._activePanel === "archived") this.renderArchivedJobs();
+      else this.renderJobs();
+    }
 
     if (failed === 0) {
       const verbs = { delete: "Deleted", cancel: "Cancelled", resume: "Resumed", reinitialize: "Reinitialized", watched: "Marked watched", unwatched: "Marked unwatched" };

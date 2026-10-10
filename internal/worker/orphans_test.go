@@ -337,6 +337,69 @@ func TestOrphanSweepShieldsAnAsideOnlyStagingDir(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepShieldsAnUnusedRootRecording: a Finished job whose staging
+// root holds a recording its finalize did not use — the whole-file download
+// beside a job that finalized as parts — keeps that staging through
+// cleanupStagingAfterMux (unusedRootRecording), and the sweep must not then
+// offer it as an orphan, at any age. The control is the same job whose root
+// holds only part 0's own capture, which is an ordinary orphan.
+//
+// Mutants: drop the unusedRootRecording term from jobNeedsStaging — the dir
+// is offered for deletion; put the term under the age rule — the month-old
+// dir is offered on the stock seven-day expiry.
+func TestOrphanSweepShieldsAnUnusedRootRecording(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		root       string
+		wantShield bool
+	}{
+		{"whole-file download beside the parts", "video.mp4", true},
+		{"part 0's own capture", "video_stream", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, db := testWorkerSetup(t)
+			stagingRoot := filepath.Join(t.TempDir(), "staging")
+			cfg := &config.MoomboxConfig{Downloader: config.DownloaderConfig{
+				IncompleteStagingExpiryDays: config.FlexDuration{Value: 7},
+			}}
+			cfg.Paths.StagingDirectory = stagingRoot
+			jobDir := filepath.Join(stagingRoot, "j-root")
+			if err := os.MkdirAll(jobDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(jobDir, tc.root), []byte("\x00\x00\x00\x18ftypdash"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.AddJob(&database.Job{ID: "j-root", VideoID: "j-root", Status: database.StatusFinished}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AddSegment(&database.Segment{JobID: "j-root", SegmentIndex: 0, Filename: "x - part1.mp4"}); err != nil {
+				t.Fatal(err)
+			}
+
+			entries, err := scanStagingOrphans(db, cfg)
+			if err != nil {
+				t.Fatalf("scanStagingOrphans: %v", err)
+			}
+			offered := false
+			for _, e := range entries {
+				if normalizePath(e.Path) == normalizePath(jobDir) {
+					offered = true
+				}
+			}
+			if offered == tc.wantShield {
+				t.Errorf("sweep offered the staging dir = %v, want %v", offered, !tc.wantShield)
+			}
+
+			aged := &database.Job{ID: "j-root", Status: database.StatusFinished,
+				UpdatedAt: time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)}
+			if got := jobNeedsStaging(db, cfg, aged, jobDir); got != tc.wantShield {
+				t.Errorf("jobNeedsStaging for a month-old row = %v, want %v — the unused-root shield has no age rule", got, tc.wantShield)
+			}
+		})
+	}
+}
+
 // TestOutputSweepOwnsARecoveredAsideSibling pins fix round 1's Important 1: a
 // recovered set-aside recording is written into the OUTPUT directory as
 // <stem>.restart-<ts>.mp4, and nothing references it (it is deliberately not a
@@ -422,7 +485,9 @@ func TestOutputSweepOwnsARecoveredAsideSibling(t *testing.T) {
 }
 
 // TestScanTrimOrphansIssuesOneQuery pins ENGINE-17 (report #52): the scan used
-// one GetTrimsForJob per job (N+1) on every orphan sweep.
+// one GetTrimsForJob per job (N+1) on every orphan sweep. The trim half of the
+// sweep now lives in scanOutputOrphans (one walk for archives and trims), so
+// that is the function whose shape is pinned.
 //
 // Mutant: restoring the per-job loop — queries counts once per job instead of
 // once per scan.
@@ -471,7 +536,7 @@ func TestScanTrimOrphansIssuesOneQuery(t *testing.T) {
 	// can see it — so read the shape from the syntax tree, the package's
 	// technique for exactly this (queue_lifecycle_test.go's take-site pin).
 	// The mutant the brief names (restoring the per-job loop) puts
-	// GetTrimsForJob back inside scanTrimOrphans and fires the first arm.
+	// GetTrimsForJob back inside scanOutputOrphans and fires the first arm.
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, "orphans.go", nil, parser.ParseComments)
 	if err != nil {
@@ -479,19 +544,19 @@ func TestScanTrimOrphansIssuesOneQuery(t *testing.T) {
 	}
 	var scan *ast.FuncDecl
 	for _, decl := range parsed.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "scanTrimOrphans" {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "scanOutputOrphans" {
 			scan = fn
 		}
 	}
 	if scan == nil {
-		t.Fatal("no scanTrimOrphans declaration in orphans.go")
+		t.Fatal("no scanOutputOrphans declaration in orphans.go")
 	}
 	if n := len(methodCallPositions(scan, "GetTrimsForJob")); n != 0 {
-		t.Errorf("scanTrimOrphans calls GetTrimsForJob %d time(s) — that call is per JOB, so the "+
+		t.Errorf("scanOutputOrphans calls GetTrimsForJob %d time(s) — that call is per JOB, so the "+
 			"sweep pays one query per job again (ENGINE-17)", n)
 	}
 	if n := len(methodCallPositions(scan, "GetAllTrims")); n != 1 {
-		t.Errorf("scanTrimOrphans calls GetAllTrims %d time(s), want exactly 1 — one query per sweep", n)
+		t.Errorf("scanOutputOrphans calls GetAllTrims %d time(s), want exactly 1 — one query per sweep", n)
 	}
 }
 
@@ -543,21 +608,194 @@ func TestScanTrimOrphansReportsOnlyUnreferencedClips(t *testing.T) {
 		t.Fatalf("AddTrim absolute: %v", err)
 	}
 
-	entries, err := scanTrimOrphans(db, cfg)
+	entries, err := scanOutputOrphans(db, cfg)
 	if err != nil {
-		t.Fatalf("scanTrimOrphans: %v", err)
+		t.Fatalf("scanOutputOrphans: %v", err)
 	}
-	got := map[string]bool{}
+	got := map[string]string{}
 	for _, e := range entries {
-		got[normalizePath(e.Path)] = true
+		got[normalizePath(e.Path)] = e.Type
 	}
-	if !got[normalizePath(orphan)] {
-		t.Errorf("scanTrimOrphans did not offer the unreferenced clip %s", orphan)
+	if typ, ok := got[normalizePath(orphan)]; !ok {
+		t.Errorf("the sweep did not offer the unreferenced clip %s", orphan)
+	} else if typ != "trim" {
+		t.Errorf("the unreferenced clip %s is offered as %q, want \"trim\" — its directory is one a trim row names", orphan, typ)
 	}
-	if got[normalizePath(kept)] {
-		t.Errorf("scanTrimOrphans offered %s, which a trim record references by relative path", kept)
+	if _, ok := got[normalizePath(kept)]; ok {
+		t.Errorf("the sweep offered %s, which a trim record references by relative path", kept)
 	}
-	if got[normalizePath(abs)] {
-		t.Errorf("scanTrimOrphans offered %s, which a trim record references by absolute path", abs)
+	if _, ok := got[normalizePath(abs)]; ok {
+		t.Errorf("the sweep offered %s, which a trim record references by absolute path", abs)
 	}
+}
+
+// A job's filename and chat_filename are relative to the JOB's output
+// directory — its output_directory when it has one, which is where the
+// player, the chat route and Open Folder join them — but the sweep joined
+// them to the global directory alone, the class of W23-07. A job under a
+// per-channel directory inside the global one, whose row names its archive
+// and chat only by those columns, had both listed as orphans, and Delete
+// removed the files the player still plays.
+//
+// The global directory stays a candidate as well (rowRelativeLocations, the
+// rule trimFileLocations already had): after the archive tree is moved and
+// paths.output_directory repointed at it, the job's pinned directory names
+// the old tree and only the global one finds the files.
+//
+// Mutants:
+//   - rowRelativeLocations without the job's own directory (the old rule):
+//     the per-channel archive and chat are offered.
+//   - rowRelativeLocations with the job's directory in place of the global
+//     one rather than as well: the moved archive is offered.
+//   - scanOutputOrphans resolving filename alone, not chat_filename: the
+//     per-channel chat is offered.
+func TestOutputSweepResolvesRelativeColumnsAgainstTheJobsDirectory(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "output")
+	write := func(p string) string {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// A per-channel directory inside the global one.
+	chanDir := filepath.Join(outputDir, "ChannelA")
+	chanRel := filepath.Join("2026", "Title [relvid00001]")
+	archive := write(filepath.Join(chanDir, chanRel+".mp4"))
+	chat := write(filepath.Join(chanDir, chanRel+".chat.json"))
+	stray := write(filepath.Join(chanDir, "2026", "stray.mp4"))
+	if _, err := db.AddJob(&database.Job{
+		ID: "relvid00001", VideoID: "relvid00001", URL: "u", Platform: "youtube", Title: "t",
+		Status: database.StatusFinished, OutputDirectory: chanDir,
+		Filename: chanRel + ".mp4", ChatFilename: chanRel + ".chat.json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A job pinned to a tree that has since moved to the global directory.
+	movedRel := filepath.Join("ChannelB", "Title [relvid00002]")
+	moved := write(filepath.Join(outputDir, movedRel+".mp4"))
+	if _, err := db.AddJob(&database.Job{
+		ID: "relvid00002", VideoID: "relvid00002", URL: "u", Platform: "youtube", Title: "t",
+		Status: database.StatusFinished, OutputDirectory: filepath.Join(root, "old-output"),
+		Filename: movedRel + ".mp4",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{
+		OutputDirectory:  outputDir,
+		StagingDirectory: filepath.Join(root, "staging"),
+	}}
+	for _, p := range []string{archive, chat, moved} {
+		if typ := orphanTypeOf(t, db, cfg, p); typ != "" {
+			t.Errorf("%s is offered as a %q orphan while its job's relative column names it", filepath.Base(p), typ)
+		}
+	}
+	if typ := orphanTypeOf(t, db, cfg, stray); typ != "output" {
+		t.Errorf("a stray MP4 beside the archive is offered as %q, want \"output\"", typ)
+	}
+}
+
+// After the archive tree is moved and paths.output_directory repointed at it,
+// a job's absolute columns still name the old tree. The relative filename
+// kept a single-file archive owned, but nothing else named a split job's parts
+// — its filename is the base the parts share, which names no file — nor any
+// job's thumbnail, description or absolute chat. The sweep listed them as
+// "output" orphans and Delete removed the recordings. An absolute column under
+// the job's output_directory now counts under the current global directory as
+// well (rowAbsoluteLocations), the rule rowRelativeLocations applies to the
+// relative columns; one outside it keeps its own spelling alone.
+//
+// Mutants:
+//   - jobFileLocations taking the job's absolute columns as stored (the old
+//     rule): the thumbnail, description and chat are listed, and the delete
+//     removes the thumbnail.
+//   - jobFileLocations taking the parts' columns as stored: the second part
+//     and its chat are listed (the first is the job's output_file).
+//   - rowAbsoluteLocations re-rooting a column that is not under the job's
+//     directory (the ".." guard off): the stray a "../" column lands on
+//     through the global directory is owned, not listed.
+//   - newOutputOwners taking the parts' stem as stored: the set-aside
+//     recording named after the parts' base is listed.
+//   - trimDirsOf taking the output column as stored: the leftover in the
+//     moved trims directory is typed "output", not "trim".
+//
+// Equivalent mutants: dropping rowAbsoluteLocations' early return for a job
+// whose directory is the global one, which re-roots each column onto itself;
+// and trimDirsOf taking the parts' columns as stored, since a split job's
+// output_file is its first part, in the directory the parts share.
+func TestOutputSweepFindsAMovedTreesAbsoluteColumns(t *testing.T) {
+	f := newOrphanFixture(t)
+	root := filepath.Dir(f.outputDir)
+	oldOut := filepath.Join(root, "old-output")
+	old := func(rel string) string { return filepath.Join(oldOut, rel) }
+
+	// A job that finalized as parts: filename is the parts' base. The dot in
+	// the title keeps that base from carrying the set-aside recording's stem
+	// (it reads ".5 [mvdprt00001]" as an extension), so only the parts do.
+	partsBase := filepath.Join("Chan", "Stream v1.5 [mvdprt00001]")
+	part1 := f.write(t, partsBase+" - part1.mp4")
+	part2 := f.write(t, partsBase+" - part2.mp4")
+	partChat := f.write(t, partsBase+" - part2.chat.json")
+	partsAside := f.write(t, partsBase+".restart-1700000000.mp4")
+	addJob(t, f, "mvdprt00001", database.StatusFinished, func(j *database.Job) {
+		j.OutputDirectory = oldOut
+		j.Filename = partsBase
+		j.OutputFile = old(partsBase + " - part1.mp4")
+	})
+	for i, p := range []string{part1, part2} {
+		seg := &database.Segment{JobID: "mvdprt00001", SegmentIndex: i, Quality: "1080p",
+			Filename: filepath.Base(p), FilePath: old(filepath.Join("Chan", filepath.Base(p)))}
+		if i == 1 {
+			seg.ChatFile = old(filepath.Join("Chan", filepath.Base(partChat)))
+		}
+		if err := f.db.AddSegment(seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A single-file job in another channel: its thumbnail, description and
+	// chat are named only by absolute columns.
+	single := filepath.Join("Other", "Stream [mvdvid00001]")
+	f.write(t, single+".mp4")
+	thumb := f.write(t, single+".jpg")
+	desc := f.write(t, single+".description")
+	chat := f.write(t, single+".chat.json")
+	trimLeftover := f.write(t, filepath.Join("Other", "trim", "mvdvid00001 [1s-3s].mp4"))
+	addJob(t, f, "mvdvid00001", database.StatusFinished, func(j *database.Job) {
+		j.OutputDirectory = oldOut
+		j.Filename = single + ".mp4"
+		j.OutputFile = old(single + ".mp4")
+		j.ThumbnailFile = old(single + ".jpg")
+		j.DescriptionFile = old(single + ".description")
+		j.ChatFile = old(single + ".chat.json")
+	})
+
+	// A column outside the job's directory names only itself: re-rooting its
+	// "../output/Chan/..." would land on a stray in the current tree.
+	stray := f.write(t, filepath.Join("Chan", "stray.jpg"))
+	addJob(t, f, "mvdout00001", database.StatusFinished, func(j *database.Job) {
+		j.OutputDirectory = filepath.Join(root, "a", "b")
+		j.ThumbnailFile = filepath.Join(root, "a", "output", "Chan", "stray.jpg")
+	})
+
+	for _, p := range []string{part1, part2, partChat, partsAside, thumb, desc, chat} {
+		if typ := orphanTypeOf(t, f.db, f.cfg, p); typ != "" {
+			t.Errorf("%s is listed as a %q orphan after the tree move", filepath.Base(p), typ)
+		}
+	}
+	if typ := orphanTypeOf(t, f.db, f.cfg, stray); typ != "output" {
+		t.Errorf("the stray a column outside its job's directory resolves to through the global one is listed as %q, want \"output\"", typ)
+	}
+	if typ := orphanTypeOf(t, f.db, f.cfg, trimLeftover); typ != "trim" {
+		t.Errorf("a leftover in the moved trims directory is listed as %q, want \"trim\"", typ)
+	}
+	refusedAsStale(t, f, part1, "job mvdprt00001")
+	refusedAsStale(t, f, thumb, "job mvdvid00001")
 }

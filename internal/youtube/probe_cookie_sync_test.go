@@ -33,6 +33,24 @@ import (
 // identical from here. The ordering is pinned by the source's own comment and
 // by review — the doc used to claim this mutant died, and it does not.
 func TestProbeVideoStatusAuthenticatedSyncsTheCookieJar(t *testing.T) {
+	assertProbeSyncsTheCookieJar(t, func(svc *Service, ctx context.Context) {
+		_, _ = svc.ProbeVideoStatusAuthenticated(ctx, "dQw4w9WgXcQ")
+	})
+}
+
+// TestProbeVideoDateSyncsTheCookieJar: the monitors' date probe carries the
+// jar's credentials too (PlayerAPI.ProbeVideoDate), so a cookies.txt replaced
+// by hand while only monitors run must reach it as well.
+//
+// Mutant this kills: the SyncCookies call removed from Service.ProbeVideoDate.
+func TestProbeVideoDateSyncsTheCookieJar(t *testing.T) {
+	assertProbeSyncsTheCookieJar(t, func(svc *Service, ctx context.Context) {
+		_, _, _ = svc.ProbeVideoDate(ctx, "dQw4w9WgXcQ")
+	})
+}
+
+func assertProbeSyncsTheCookieJar(t *testing.T, probe func(svc *Service, ctx context.Context)) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "cookies.txt")
 	const before = "# Netscape HTTP Cookie File\n" +
 		".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tstale-sapisid\n" +
@@ -63,7 +81,7 @@ func TestProbeVideoStatusAuthenticatedSyncsTheCookieJar(t *testing.T) {
 	cancel()
 	// The error is the cancelled request; only the sync that preceded it is
 	// under test.
-	_, _ = svc.ProbeVideoStatusAuthenticated(ctx, "dQw4w9WgXcQ")
+	probe(svc, ctx)
 
 	if got := svc.GetCookieHeader(); !strings.Contains(got, "rotated-sapisid-value") {
 		t.Errorf("cookie header after the probe = %q; want the rotated value — "+

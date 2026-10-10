@@ -111,7 +111,8 @@ func TestGQL429WithAShortRetryAfterStillRetries(t *testing.T) {
 	t.Cleanup(func() { gqlBaseRetryDelay = prevDelay })
 
 	calls := install429Stub(t, "1") // 1 s: inside gqlMaxRetryDelay
-	a := NewAPI(&testLogger{})
+	log := &renderingLogger{}
+	a := NewAPI(log)
 
 	if _, err := a.gqlRequest(context.Background(), "TestOp", map[string]any{"q": 1}, ""); err == nil {
 		t.Fatal("a 429 must not succeed")
@@ -119,5 +120,13 @@ func TestGQL429WithAShortRetryAfterStillRetries(t *testing.T) {
 	if n := calls.Load(); n != gqlMaxRetries+1 {
 		t.Errorf("the stub answered %d times, want %d — a Retry-After inside the cap is a "+
 			"retry hint, not a stop", n, gqlMaxRetries+1)
+	}
+	// One wait per retry, none after the final attempt: the window that
+	// attempt's 429 names has no request left to precede, and sleeping it out
+	// only delayed the exhausted-retries error. Mutant: the pre-fix `ra > 0`
+	// guard alone logs (and sleeps) gqlMaxRetries+1 times.
+	if n := log.countLinesContaining("twitch gql 429 honoring Retry-After"); n != gqlMaxRetries {
+		t.Errorf("%d Retry-After waits, want %d — the final attempt's 429 must return, not sleep first",
+			n, gqlMaxRetries)
 	}
 }

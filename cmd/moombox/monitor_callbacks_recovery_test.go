@@ -705,3 +705,77 @@ func TestRecoveryRechecksExactlyWhenThePassRan(t *testing.T) {
 		})
 	}
 }
+
+// TestRecoveryReportsAHeldProfileAsASkip: a recovery whose pass found the
+// profile held by another machine's browser (cookies.ErrProfileInUse) went
+// down the generic error arm — an Error line, "auto-cookie recovery failed",
+// and a "Cookie Auto-Refresh Failed" notification telling the operator the
+// cookies must be replaced. Nothing failed: the pass declined and launched
+// nothing, and the sentence names the host to close the browser on and the
+// lock to delete, after which the next pass runs. The skip now says so, with
+// the sentence, at Warn; the session is still conclusively dead, so the
+// notification keeps Error and the cookie-replacement guidance as the other
+// way out.
+//
+// Mutants (checked): the held-profile arm removed — the title is "Failed" and
+// the log line is the Error one; the arm sending err-less copy — the
+// description does not carry the lock.
+func TestRecoveryReportsAHeldProfileAsASkip(t *testing.T) {
+	held := fmt.Errorf("%w by desktop-pc — a browser on that machine (pid 4242 there) holds its lock; close it there, "+
+		"or delete %q if no browser on desktop-pc is using that profile, and the next pass will run",
+		cookies.ErrProfileInUse, "/profile/SingletonLock")
+
+	log, err := logger.New(filepath.Join(t.TempDir(), "recovery.log"), "info", 4096, 1)
+	if err != nil {
+		t.Fatalf("logger.New: %v", err)
+	}
+	log.SuppressStdout()
+	t.Cleanup(log.Close)
+	lines := log.Subscribe()
+	s := &runState{log: log, cookieRefresh: cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log)}
+	var sent []sentNotification
+
+	s.runCookieRecovery(context.Background(), "youtube", func(context.Context) (cookies.RefreshResult, error) {
+		return cookies.RefreshResult{Mechanism: cookies.RefreshMechanismBrowser}, held
+	}, recoveryNotifier(&sent))
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notifications, want 1: %+v", len(sent), sent)
+	}
+	got := sent[0]
+	if got.title != "Cookie Auto-Refresh Skipped" {
+		t.Errorf("title = %q, want %q — the pass declined, it did not fail", got.title, "Cookie Auto-Refresh Skipped")
+	}
+	if !strings.Contains(got.desc, held.Error()) {
+		t.Errorf("description does not carry the held profile's sentence (the host and the lock): %q", got.desc)
+	}
+	if strings.Contains(strings.ToLower(got.desc), "failed") {
+		t.Errorf("description calls the skip a failure: %q", got.desc)
+	}
+	if got.ntype != notifications.TypeError {
+		t.Errorf("type = %v, want TypeError — the session that fired this is conclusively dead", got.ntype)
+	}
+
+	// Every line up to a marker: the skip at WARN, nothing at ERROR.
+	log.Info("marker")
+	var saw []string
+	for done := false; !done; {
+		select {
+		case l := <-lines:
+			if strings.Contains(l, "marker") {
+				done = true
+				continue
+			}
+			saw = append(saw, l)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the marker never arrived")
+		}
+	}
+	all := strings.Join(saw, "\n")
+	if !strings.Contains(all, " WARN auto-cookie recovery skipped — a browser holds the profile") {
+		t.Errorf("no WARN skip line among:\n%s", all)
+	}
+	if strings.Contains(all, " ERROR ") {
+		t.Errorf("the skip logged at ERROR:\n%s", all)
+	}
+}

@@ -1,6 +1,8 @@
 // Package database provides SQLite-based persistence for Moombox.
 package database
 
+import "slices"
+
 // JobStatus represents the status of a download job.
 type JobStatus string
 
@@ -19,7 +21,9 @@ const (
 	StatusCookies     JobStatus = "COOKIES?"
 )
 
-// ParkReason records WHY a job was parked at StatusCookies. The status alone
+// ParkReason records WHY a job was parked at StatusCookies — and, for one
+// Twitch case, why it stopped in StatusError (ParkReasonTwitchEndUnconfirmed,
+// the only value an Error row carries). The status alone
 // says "credentials are the fix", which is true for every value here — but it
 // does not say WHICH credentials, and the automatic recovery sweeps need that
 // distinction to avoid retrying a job that cannot possibly succeed against the
@@ -52,10 +56,34 @@ const (
 	// session cannot help, so the auth-recovered sweep skips these; only a
 	// genuine change of account identity resumes them.
 	ParkReasonMembership ParkReason = "membership"
+
+	// ParkReasonTwitchEndUnconfirmed is the one reason an ERROR row carries
+	// (owner decision D-T4): a live Twitch download failed while nothing said
+	// its broadcast was over, so the job stopped in Error with its staging and
+	// resume sidecar kept (ExecuteTwitch's unconfirmed-end latch). It is what
+	// lets the Twitch monitor mux that staging automatically once it confirms
+	// the broadcast is over — offline, or live as a different broadcast —
+	// exactly as the Mux action would, and only for these rows: the marker is
+	// written by the latch, never inferred from the error text, and the
+	// automatic mux clears it before it starts, so it runs once per failure.
+	// No COOKIES? sweep reads an Error row, so the credential sweeps never see
+	// it.
+	ParkReasonTwitchEndUnconfirmed ParkReason = "twitch_end_unconfirmed"
 )
 
 // Job is the primary data model for a download job.
 type Job struct {
+	// Version is the write that produced this copy of the row: a number
+	// drawn under db.mu by UpdateJobFields and AddJob, so a larger one is a
+	// later state. Both notify AFTER releasing the lock, so two writers can
+	// reach subscribers in the opposite order to their writes — a progress
+	// tick read back before a Muxing write, delivered after it, put the row
+	// back to Downloading on every dashboard. Subscribers that keep a copy
+	// (the WebSocket hub, the TUI) drop a row older than one they hold.
+	// Zero on rows read any other way (GetJob, GetAllJobs): no claim either
+	// way. Not serialised.
+	Version uint64 `json:"-"`
+
 	ID          string    `json:"id"`
 	VideoID     string    `json:"videoId"`
 	URL         string    `json:"url"`
@@ -103,6 +131,14 @@ type Job struct {
 	// Gaps
 	Gaps []Gap `json:"gaps,omitempty"`
 	// Twitch
+	//
+	// TwitchQuality is the variant the capture is actually recording, by its
+	// playlist name ("chunked", "720p60"): written when the capture starts and
+	// again whenever a split moves it to another variant. Both UIs show it as
+	// "Quality". It is NOT the preference and nothing selects from it — it used
+	// to be both, set to the preference at creation and read back as one by
+	// the next selection after the stream start had overwritten it. The
+	// preference is QualityPreference, on Twitch rows as on YouTube ones.
 	TwitchQuality    string `json:"twitchQuality,omitempty"`
 	TwitchCategory   string `json:"twitchCategory,omitempty"`
 	ChannelAvatarURL string `json:"channelAvatarUrl,omitempty"`
@@ -113,7 +149,13 @@ type Job struct {
 	SelectedAudioItag *int     `json:"selectedAudioItag,omitempty"`
 	StartTime         *float64 `json:"startTime,omitempty"`
 	EndTime           *float64 `json:"endTime,omitempty"`
-	// Quality monitoring
+	// QualityPreference is the quality the job was created to record: the
+	// channel's quality_preference, or the manual add's. Written at creation
+	// and never overwritten. Every variant selection reads it — on Twitch the
+	// capture start's and every re-selection during the capture, never
+	// TwitchQuality. A Twitch row records "best" when nothing was named; an
+	// empty value, which rows from before that rule can hold, selects as
+	// "best" too.
 	QualityPreference string `json:"qualityPreference,omitempty"`
 	// Watch tracking / player state
 	Watched        bool     `json:"watched"`
@@ -165,8 +207,9 @@ type Job struct {
 	NotificationMsgs map[string]string `json:"-"`
 	// IncompleteTail marks a Finished job whose recording is known to be missing
 	// tail segments (finalized behind head after refresh attempts). Staging +
-	// resume sidecar are preserved; Retry/Resume are allowed and clear the flag
-	// on a complete re-run.
+	// resume sidecar are preserved; Resume is allowed and clears the flag on a
+	// complete re-run. Retry is refused for such a job (it would delete the
+	// staging Resume needs — see the retry route in routes/jobs.go).
 	IncompleteTail bool `json:"incompleteTail,omitempty"`
 	// Trims (loaded via join)
 	Trims []TrimRecord `json:"trims,omitempty"`
@@ -174,9 +217,18 @@ type Job struct {
 	Segments []Segment `json:"segments,omitempty"`
 }
 
+// JobVersion reports the job's ID and write Version — the pair a subscriber
+// that keeps a copy needs to drop a stale delivery (see Version).
+func (j *Job) JobVersion() (string, uint64) { return j.ID, j.Version }
+
+// terminalStatuses are the statuses a job's run ends in — its outcome.
+// IsTerminal reads them, and UpdateJobFieldsUnlessTerminal will not write
+// over them.
+var terminalStatuses = []JobStatus{StatusFinished, StatusError, StatusCancelled}
+
 // IsTerminal returns true if the job status is a terminal state.
 func (j *Job) IsTerminal() bool {
-	return j.Status == StatusFinished || j.Status == StatusError || j.Status == StatusCancelled
+	return slices.Contains(terminalStatuses, j.Status)
 }
 
 // Gap represents a missing segment range in a download.
@@ -190,6 +242,7 @@ type Gap struct {
 
 // JobStats holds aggregate statistics across all jobs.
 type JobStats struct {
+	TotalCount        int   `json:"totalCount"` // every job, whatever its status or platform
 	FinishedCount     int   `json:"finishedCount"`
 	ActiveCount       int   `json:"activeCount"`
 	MuxingCount       int   `json:"muxingCount"`

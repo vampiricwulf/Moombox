@@ -45,11 +45,11 @@ func TestNotifEditTogglesDeliveryMode(t *testing.T) {
 		notifEditDelivery: "separate",
 		notifEditFocus:    notifEditDeliveryRow,
 	}
-	m.handleNotifEditKey(" ")
+	m.handleNotifEditKey(keySpace)
 	if m.notifEditDelivery != "edit" {
 		t.Fatalf("after one toggle = %q, want edit", m.notifEditDelivery)
 	}
-	m.handleNotifEditKey(" ")
+	m.handleNotifEditKey(keySpace)
 	if m.notifEditDelivery != "separate" {
 		t.Fatalf("after two toggles = %q, want separate", m.notifEditDelivery)
 	}

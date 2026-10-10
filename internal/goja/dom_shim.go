@@ -13,8 +13,10 @@ import (
 // domRealJS is the Option-2 hand-rolled real-class DOM (EventTarget,
 // Event, CustomEvent, etc.). Loaded after the legacy hand-stub block so
 // the constructs declared inside override the flat-object stubs while
-// keeping the same global names. See docs/investigations/botguard-
-// option-2-plan.md for the multi-day build-out plan.
+// keeping the same global names. "Why a Sidecar" in
+// docs/spec/platform-services.md records what this build-out reached
+// (API parity) and why it stopped there (the timing gap sits below the
+// API surface).
 //
 //go:embed js/dom-real.js
 var domRealJS string
@@ -268,15 +270,18 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	};
 
 	// Storage stubs
+	// A prototype-less store: on a plain {} getItem("constructor") read
+	// Object's constructor and setItem("__proto__", v) stored nothing, where
+	// a browser's Storage answers null and stores the key.
 	function makeStorage() {
-		var data = {};
+		var data = Object.create(null);
 		return {
-			getItem: function(k) { return data[k] !== undefined ? data[k] : null; },
-			setItem: function(k, v) { data[k] = String(v); },
-			removeItem: function(k) { delete data[k]; },
-			clear: function() { data = {}; },
+			getItem: function(k) { k = String(k); return k in data ? data[k] : null; },
+			setItem: function(k, v) { data[String(k)] = String(v); },
+			removeItem: function(k) { delete data[String(k)]; },
+			clear: function() { data = Object.create(null); },
 			get length() { return Object.keys(data).length; },
-			key: function(i) { var keys = Object.keys(data); return keys[i] || null; }
+			key: function(i) { var keys = Object.keys(data); return i >= 0 && i < keys.length ? keys[i] : null; }
 		};
 	}
 	globalThis.localStorage = makeStorage();
@@ -478,15 +483,30 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	try { Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'Window', configurable: true }); }
 	catch (e) { /* goja may forbid touching globalThis's tag on some builds */ }
 
-	// Make stub functions return "[native code]" from .toString() so a
-	// fingerprinter that does Function.prototype.toString.call(setTimeout)
-	// or similar doesn't see our raw JS source / Go module path. Real
-	// browsers' built-ins always return "function NAME() { [native code] }".
+	// Make stub functions read "[native code]" so a fingerprinter that does
+	// Function.prototype.toString.call(setTimeout) or similar doesn't see our
+	// raw JS source / Go module path. Real browsers' built-ins always read
+	// "function NAME() { [native code] }".
+	//
+	// Done by wrapping Function.prototype.toString ONCE, not by giving each
+	// stub an own toString: .call() on the prototype method bypasses an own
+	// property entirely (it printed the Go module path for setTimeout), and
+	// an own toString on a function is itself a tell no real built-in has.
+	// The wrapper registers itself, so toString.toString() reads native too.
+	var _nativeNames = new WeakMap();
+	var _origFnToString = Function.prototype.toString;
+	var _fnToString = function toString() {
+		if (typeof this === 'function' && _nativeNames.has(this)) {
+			return 'function ' + _nativeNames.get(this) + '() { [native code] }';
+		}
+		return _origFnToString.call(this);
+	};
+	_nativeNames.set(_fnToString, 'toString');
+	try { Object.defineProperty(Function.prototype, 'toString', { value: _fnToString, configurable: true, writable: true }); }
+	catch (e) { /* skip */ }
 	function _nativify(fn, name) {
 		if (typeof fn !== 'function') return;
-		var s = 'function ' + (name || fn.name || '') + '() { [native code] }';
-		try { Object.defineProperty(fn, 'toString', { value: function() { return s; }, configurable: true, writable: true }); }
-		catch (e) { /* skip */ }
+		_nativeNames.set(fn, name || fn.name || '');
 	}
 	_nativify(crypto.getRandomValues, 'getRandomValues');
 	_nativify(crypto.randomUUID, 'randomUUID');
@@ -701,10 +721,11 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 
 	// Option-2 real-class DOM overlay. Loaded AFTER the legacy hand-stub
 	// block so the classes declared inside (EventTarget, Event,
-	// CustomEvent, MessageEvent, ErrorEvent so far; Node/Element/
-	// Document/Window incoming) replace the flat-object stubs that have
-	// the same global names. See docs/investigations/botguard-option-2-
-	// plan.md for the build plan.
+	// CustomEvent, MessageEvent, ErrorEvent, Node/Element/Document/Window,
+	// CSSStyleDeclaration, URL, AbortController, DOMTokenList) replace the
+	// flat-object stubs that have the same global names. See "Why a
+	// Sidecar" in docs/spec/platform-services.md for where this overlay
+	// fits.
 	if _, err := vm.RunString(domRealJS); err != nil {
 		return fmt.Errorf("DOM real-class overlay failed: %w", err)
 	}

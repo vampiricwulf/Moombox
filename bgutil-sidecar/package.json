@@ -1,7 +1,7 @@
 {
     "name": "moombox-bgutil-sidecar",
     "version": "0.1.0",
-    "description": "Stdin/stdout JSON-RPC server that runs BotGuard via bgutils-js + JSDOM. Bundled with esbuild and embedded into Moombox.exe so PO tokens generate without a user-installed Node.",
+    "description": "Stdin/stdout JSON-RPC server that runs BotGuard via bgutils-js + JSDOM. Tarred with its production node_modules by build.mjs and embedded into the Moombox binary so PO tokens generate without a user-installed Node.",
     "license": "MIT",
     "private": true,
     "type": "module",

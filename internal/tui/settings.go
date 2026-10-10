@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -119,14 +120,14 @@ var sections = []settingsSection{
 		name: "Network",
 		fields: []fieldDef{
 			{"port", "Port", fieldNumber, nil, "web dashboard port, 1-65535 (requires restart)", nil},
-			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, "who can reach the dashboard (requires restart)", nil},
+			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, "who can reach the dashboard; applies now, but leaving localhost needs a restart to listen on the network", nil},
 			{"https_enabled", "HTTPS enabled", fieldToggle, nil, "serve over HTTPS, needs TLS cert + key (requires restart)", nil},
 			{"tls_cert_path", "TLS cert path", fieldText, nil, "PEM format certificate file (requires restart)", nil},
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
 			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 			{"trusted_proxies", "Trusted proxies", fieldText, nil, "comma-separated reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored — leave empty unless behind a proxy you control", nil},
-			{"public_url", "Public dashboard URL", fieldText, nil, "external address of this dashboard, used only in webhook embeds (e.g. https://moombox.example.com); blank = link to YouTube/Twitch", nil},
-			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = defaults (requires restart)", nil},
+			{"public_url", "Public dashboard URL", fieldText, nil, "address you type to reach this dashboard (e.g. https://moombox.example.com); webhook embeds link here, blank = YouTube/Twitch. Also trusted as the dashboard's own address: on localhost/lan a page on its port, from any local or private address, may drive the dashboard; on external, local browsers may open it by this host", nil},
+			{"probe_targets", "Connectivity probe targets", fieldText, nil, "comma-separated host:port TCP targets raced to detect internet reachability; blank = keep the current targets (requires restart)", nil},
 		},
 	},
 	{
@@ -135,7 +136,7 @@ var sections = []settingsSection{
 			{"database_path", "Database path", fieldText, nil, "SQLite database file (requires restart)", nil},
 			{"log_file_path", "Log file path", fieldText, nil, "log output file (requires restart)", nil},
 			{"output_directory", "Output directory", fieldText, nil, "where finished files go", nil},
-			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download", nil},
+			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download; new jobs use a change at once, but staging under the old dir is no longer found — move it across", nil},
 			{"ffmpeg_path", "FFmpeg path", fieldText, nil, "empty = system PATH", nil},
 		},
 	},
@@ -152,10 +153,10 @@ var sections = []settingsSection{
 		fields: []fieldDef{
 			{"archive_window_days", "Archive window (days)", fieldNumber, nil, "how many days back to archive; upcoming/live always covered (default: 3)", nil},
 			{"archive_slots", "Archive slots", fieldNumber, nil, "backlog downloads per channel at once; new content never waits (default: 3)", nil},
-			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes; fractions allowed, e.g. 0.5 (default: 10)", nil},
+			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes, 1-1440; fractions allowed, e.g. 2.5 (default: 10)", nil},
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic", nil},
-			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds, 5-3600 or empty for dynamic (default: 15)", nil},
-			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)", nil},
+			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds, 5-3600; empty = default 15 (±10% jitter always applied)", nil},
+			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days, 0-365 (default: 30, 0 = archive immediately)", nil},
 			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle; fractions allowed (default: 0, no max)", nil},
 			{"membership_discovery", "Membership discovery", fieldToggle, nil, "scan each YouTube channel's members-only tab for members-only streams (+ their VODs for channels that archive uploads & premieres); needs YouTube cookies (default: on)", nil},
 		},
@@ -172,7 +173,7 @@ var sections = []settingsSection{
 				},
 			},
 			{"max_video_resolution", "Max resolution", fieldNumber, resolutionPresets, "shorter edge in pixels; 0 = unbounded (e.g. 1080, 2160); ←/→ step the presets", resolutionPreview},
-			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "2-4 recommended, higher uses more CPU/network", nil},
+			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "VOD downloads at once across all channels; live streams never wait on this (default: 10)", nil},
 			{"segment_workers", "Segment workers", fieldNumber, nil, "segments fetched at once within one download, not the number of concurrent downloads (default: 12, min 1, no max; above 16 raises bot-detection risk)", nil},
 			{"reorder_buffer_mb", "Reorder buffer per job", fieldNumber, nil, "MB of out-of-order segments one download may hold in RAM; 0 = unbounded (default: 1024; 256 on arm64)", nil},
 			{"reorder_budget_mb", "Reorder budget total", fieldNumber, nil, "MB every download's reorder buffer may hold between them; 0 = unbounded (default: 4096; 1024 on arm64)", nil},
@@ -189,7 +190,7 @@ var sections = []settingsSection{
 			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt (requires restart)", nil},
 			{"active_youtube", "YouTube cookies", fieldToggle, nil, "YouTube cookie indicator in status bar", nil},
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar", nil},
-			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer + one browser retry on auth failure; R F imports either way (requires restart)", nil},
+			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer (requires restart) + one browser retry on auth failure (applies now); R F imports either way", nil},
 			{"acquisition", "Cookie source", fieldCycle, []string{"auto", "profile"}, "how a refresh gets cookies: auto = launch a browser when one is available, else read the profile; profile = never launch, read browser_profile_dir read-only (also allows a real browser's profile dir, which auto refuses). Takes effect immediately.", nil},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data (requires restart)", nil},
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
@@ -202,19 +203,19 @@ var sections = []settingsSection{
 		name: "Disk",
 		fields: []fieldDef{
 			{"disk_warn_percent", "Warning threshold", fieldNumber, nil, "% disk usage (default: 90)", nil},
-			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage, pauses downloads (default: 95)", nil},
+			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage for a critical alert; from it until 2 points below it backlog VODs wait in Queued, live and running downloads are not paused (default: 95)", nil},
 		},
 	},
 	{
 		name: "Updates",
 		fields: []fieldDef{
-			{"auto_check_updates", "Auto-check updates", fieldToggle, nil, "check GitHub on startup + daily", nil},
+			{"auto_check_updates", "Auto-check updates", fieldToggle, nil, "check GitHub on startup + daily; turning it on checks within a minute", nil},
 		},
 	},
 	{
 		name: "BotGuard Sidecar",
 		fields: []fieldDef{
-			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off) (requires restart)", nil},
+			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens and signature solving (default: on; when off, no PO tokens are minted and signature-ciphered formats are unavailable) (requires restart)", nil},
 		},
 	},
 	{
@@ -327,7 +328,6 @@ var channelFields = []channelFieldDef{
 	{"terms", "Filter regex", fieldText, nil, "e.g. (?i)karaoke", ""},
 	{"include_non_live", "Archive uploads & premieres (YouTube only)", fieldToggle, []string{"No", "Yes"}, "also capture uploads and premieres, not just live streams", "youtube"},
 	{"quality_preference", "Quality preference", fieldCycle, []string{"best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p", "900p60", "900p", "720p60", "720p", "480p", "360p", "160p", "audio_only"}, "", ""},
-	{"num_desc_lookbehind", "Description lookbehind", fieldNumber, nil, "compare descriptions with N older feed items; blank = default", ""},
 	{"output_directory", "Output directory", fieldText, nil, "per-channel override; blank = the global output directory", ""},
 	{"archive_window_days", "Archive window (days)", fieldNumber, nil, "per-channel override, 1-3650; blank = global", ""},
 	{"archive_slots", "Archive slots", fieldNumber, nil, "per-channel override, 1-100; blank = global", ""},
@@ -354,6 +354,8 @@ type SettingsModel struct {
 
 	// Layout state (set during View, read by mouse handler)
 	lastButtonContentY int // contentY where buttons were rendered (-1 = not rendered)
+	headerTabStart     int // first section tab the header shows
+	headerTabEnd       int // one past the last; 0 = header not rendered yet
 
 	// Save status
 	status   saveStatus
@@ -402,6 +404,15 @@ type SettingsModel struct {
 	channelDeleteConf bool
 	channelResolving  bool // true while async URL resolution is in progress
 	channels          []config.ChannelConfig
+	// channelsAtOpen is the channel list as Open copied it. A save writes
+	// back only what the editor changed relative to it (mergeChannelEdits),
+	// so a channel the dashboard added, disabled or removed while the
+	// overlay was open is not reverted by a save of something else.
+	channelsAtOpen []config.ChannelConfig
+
+	// The channel-removal prompt and the choices it took
+	// (settings_channel_removal.go).
+	channelRemovalState
 
 	// Notification sub-editor state
 	notifIndex      int
@@ -459,6 +470,10 @@ type SettingsModel struct {
 
 	// Close confirmation
 	closeConfirm bool
+	// afterClose is the action a prompted close hands back in place of
+	// "close" once the prompt is answered with Save or Discard — today only
+	// Ctrl+O's "open_ffmpeg", whose installer replaces the panel.
+	afterClose string
 
 	// Action buttons (bottom of settings panel when dirty)
 	// -1 = fields focused, 0 = Save button, 1 = Return button
@@ -492,7 +507,9 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.errorMsg = ""
 	m.showRestartOverlay = false
 	m.closeConfirm = false
+	m.afterClose = ""
 	m.buttonFocus = -1
+	m.resetChannelRemoval()
 
 	// Snapshot config under read lock. Use the closure-scoped `c`
 	// (the locked snapshot) consistently — `cfg` is the outer store
@@ -506,6 +523,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 		m.channelDeleteConf = false
 		m.channels = make([]config.ChannelConfig, len(c.Channels))
 		copy(m.channels, c.Channels)
+		m.channelsAtOpen = slices.Clone(c.Channels)
 
 		// Notification editor
 		m.notifIndex = 0
@@ -531,6 +549,28 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	maps.Copy(m.originalValues, m.values)
 
 	m.updateTextInputForField()
+}
+
+// resyncChannels makes the channel list just saved — this editor's changes
+// merged into everyone else's — both the list the editor shows and the base
+// the next save diffs against, as a fresh Open would. Copies, under the
+// store's read lock: the live slice is shared with Snapshot readers.
+func (m *SettingsModel) resyncChannels() {
+	read := func(c *config.MoomboxConfig) {
+		m.channels = slices.Clone(c.Channels)
+		m.channelsAtOpen = slices.Clone(c.Channels)
+	}
+	switch {
+	case m.configStore != nil:
+		m.configStore.Read(read)
+	case m.cfg != nil:
+		read(m.cfg)
+	default:
+		return
+	}
+	if m.channelIndex >= len(m.channels) {
+		m.channelIndex = max(0, len(m.channels)-1)
+	}
 }
 
 // Close hides the settings panel.
@@ -758,6 +798,12 @@ func (m *SettingsModel) applyValues() {
 		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
 		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
 		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
+		// The memory limits: 0 means "no limit", so an emptied field (Atoi 0)
+		// switched the limit off and applied that at once. 65536 is the web
+		// route's cap.
+		{"go_soft_limit_mb", "Go soft memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
+		{"sidecar_soft_limit_mb", "Sidecar soft memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
+		{"sidecar_hard_limit_mb", "Sidecar hard memory limit must be 0-65536 MB (0 = no limit)", 0, 65536},
 	} {
 		n, err := strconv.Atoi(m.values[c.key])
 		if err != nil || n < c.min || n > c.max {
@@ -770,6 +816,15 @@ func (m *SettingsModel) applyValues() {
 	critPct, _ := strconv.Atoi(m.values["disk_critical_percent"])
 	if critPct <= warnPct {
 		m.errorMsg = "Disk critical threshold must exceed warning threshold"
+		m.status = saveError
+		return
+	}
+	// The same pair rule config.Validate applies (and Save refuses on), said
+	// as a field message instead of a raw "Save failed: invalid config".
+	sideSoft, _ := strconv.Atoi(m.values["sidecar_soft_limit_mb"])
+	sideHard, _ := strconv.Atoi(m.values["sidecar_hard_limit_mb"])
+	if sideSoft > 0 && sideHard > 0 && sideHard <= sideSoft {
+		m.errorMsg = "Sidecar hard memory limit must exceed the soft limit"
 		m.status = saveError
 		return
 	}
@@ -811,7 +866,7 @@ func (m *SettingsModel) applyValues() {
 		min, max int
 	}{
 		{"decapi_check_interval", "DECAPI check interval must be 15-3600 seconds (or empty for dynamic)", 15, 3600},
-		{"twitch_check_interval", "Twitch check interval must be 5-3600 seconds (or empty for dynamic)", 5, 3600},
+		{"twitch_check_interval", "Twitch check interval must be 5-3600 seconds (or empty for the default 15)", 5, 3600},
 	} {
 		v := strings.TrimSpace(m.values[c.key])
 		if v == "" {
@@ -838,6 +893,11 @@ func (m *SettingsModel) applyValues() {
 			m.status = saveError
 			return
 		}
+	}
+	if len(m.values["output_template"]) > config.OutputTemplateMaxLen {
+		m.errorMsg = fmt.Sprintf("Output template must be at most %d characters", config.OutputTemplateMaxLen)
+		m.status = saveError
+		return
 	}
 	// Path fields: reject ".." segments. Absolute paths are accepted here and
 	// in the Web UI alike — config.PathHasTraversal is the single rule both
@@ -886,10 +946,15 @@ func (m *SettingsModel) applyValues() {
 			targets = append(targets, p)
 		}
 	}
-	if len(targets) == 0 {
-		targets = append([]string(nil), config.DefaultProbeTargets...)
+	if len(targets) > 0 {
+		m.cfg.Connectivity.ProbeTargets = targets
+	} else {
+		// Blank keeps the stored targets, as the dashboard's field does (an
+		// empty list is refused there). The TUI used to write the defaults
+		// instead, so the same gesture gave two configs. The field shows
+		// what is kept, so the save is not seen as a restart-worthy change.
+		m.values["probe_targets"] = strings.Join(m.cfg.Connectivity.ProbeTargets, ", ")
 	}
-	m.cfg.Connectivity.ProbeTargets = targets
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]
@@ -939,18 +1004,27 @@ func (m *SettingsModel) applyValues() {
 
 	// Cookies
 	m.cfg.Cookies.CookieFile = m.values["cookie_file"]
-	var activePlats []string
-	if m.values["active_youtube"] == "Yes" {
-		activePlats = append(activePlats, "youtube")
+	// The toggles display GetActivePlatforms' answer, which may be inferred.
+	// Only an edited toggle records the explicit override: writing an
+	// unedited inferred answer back would freeze it, so a channel added
+	// later would never light its platform. Non-nil even when empty — []
+	// is the explicit "both off" override.
+	if m.values["active_youtube"] != m.originalValues["active_youtube"] ||
+		m.values["active_twitch"] != m.originalValues["active_twitch"] {
+		activePlats := []string{}
+		if m.values["active_youtube"] == "Yes" {
+			activePlats = append(activePlats, "youtube")
+		}
+		if m.values["active_twitch"] == "Yes" {
+			activePlats = append(activePlats, "twitch")
+		}
+		m.cfg.Cookies.ActivePlatforms = activePlats
 	}
-	if m.values["active_twitch"] == "Yes" {
-		activePlats = append(activePlats, "twitch")
-	}
-	m.cfg.Cookies.ActivePlatforms = activePlats
 	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
 	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
 	// TrimSpace matches what validateConfigUpdates does for the web path
-	// (config_routes.go:424,427). Without trimming here, a user pasting
+	// (and applyConfigUpdates, in config_routes.go). Without trimming here, a
+	// user pasting
 	// "  /usr/bin/firefox  " would pass the trimmed validation above but
 	// persist whitespace into config — exec.Command would then fail with
 	// "fork/exec  /usr/bin/firefox  : no such file or directory".
@@ -975,8 +1049,15 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Memory.SidecarSoftLimitMB, _ = strconv.Atoi(m.values["sidecar_soft_limit_mb"])
 	m.cfg.Memory.SidecarHardLimitMB, _ = strconv.Atoi(m.values["sidecar_hard_limit_mb"])
 
-	// Apply channels and notifications
-	m.cfg.Channels = m.channels
+	// Channels: only this editor's own changes, merged by ID into the list
+	// as it stands NOW, under the store lock. Writing m.channels back whole
+	// reverted every channel change the dashboard made while the overlay was
+	// open — a save of the log level dropped a channel added there, and the
+	// next sweep then pruned that channel's jobs and feed history as
+	// departed. Untouched, the live list is left exactly as it is.
+	if merged, changed := mergeChannelEdits(m.channelsAtOpen, m.channels, m.cfg.Channels); changed {
+		m.cfg.Channels = merged
+	}
 	m.cfg.Notifications = m.notifications
 
 	mu.Unlock()

@@ -50,17 +50,39 @@ const (
 	// fsync. The sidecar only ever carries the dedup window a reconnect replay
 	// can overlap, so a save that is at most five seconds behind the file
 	// costs a count that is short by the messages written in the unsaved
-	// window: restoreResumeState seeds fileCount/totalCount straight from
-	// that stale sidecar and sets flushedToDisk, which makes Start skip
-	// adoptExistingPartFile — the only path that re-counts the file — so the
-	// deficit persists in that part's header count until the next part roll,
-	// AND in the job's chat total for the life of the job: totalCount is
-	// cumulative, survives RollFile by design, is never re-derived, and is
-	// what MessageCount() reports as the job's total_chat_messages. No
-	// message is lost; the file itself is
-	// written every flush regardless. The DEFERRED final save on stop
-	// (Start's exit path) is deliberately NOT throttled.
+	// window. restoreResumeState makes that up from the part file's header
+	// count, which every flush refreshes — without it the deficit persisted
+	// in that part's header count until the next part roll, AND in the job's
+	// chat total for the life of the job (totalCount is cumulative, survives
+	// RollFile by design, and is what MessageCount() reports as the job's
+	// total_chat_messages). No message is lost; the file itself is written
+	// every flush regardless. The DEFERRED final save on stop (Start's exit
+	// path) is deliberately NOT throttled.
 	ircResumeSaveFloor = 5 * time.Second
+	// ircReconnectBase and ircReconnectCap shape Start's backoff between
+	// failed sessions: base × 2^attempts, capped (2 s, 4 s, … 30 s).
+	ircReconnectBase = time.Second
+	ircReconnectCap  = 30 * time.Second
+	// ircExhaustedRetry is the pause between attempts once the reconnect
+	// budget (maxReconnects in Start) is spent. Spending it used to end chat
+	// capture for the rest of the job — a four-minute Twitch IRC outage, the
+	// video unaffected, cost hours of chat on a marathon stream, and nothing
+	// relaunched it outside a connectivity outage. Past the budget the loop
+	// keeps trying at this slow cadence for as long as the job runs; Stop,
+	// MarkStreamEnded and RetryNow cut a wait short (see wake).
+	ircExhaustedRetry = 2 * time.Minute
+	// ircPartBaseWait bounds how long a part's chat holds its messages in
+	// memory while it waits for its video to report the first segment's
+	// #EXT-X-PROGRAM-DATE-TIME (AwaitPartBase, SettlePartBase). The report
+	// normally lands within a playlist round trip of the part's start; an ad
+	// break the engine skips at the start delays it by the break's length.
+	// Past the bound the held messages go to disk on the provisional
+	// local-clock base, so a crash during a long wait loses this one window
+	// at most — but the bound does not give up on the report. One that
+	// arrives later still rebases the part file, whole and atomically, onto
+	// the first segment's time (rebaseLatePartLocked): owner decision D-T8
+	// keeps the local clock only for a playlist with no program date-times.
+	ircPartBaseWait = 60 * time.Second
 	// ircKeepalivePing is the exact line the keepalive sends. IRC PING/PONG
 	// rather than a WebSocket ping frame: a WS pong proves the socket is open,
 	// while this proves the IRC layer behind it is still serving us.
@@ -292,6 +314,25 @@ type ChatDownloader struct {
 	// some LATER session, turning a genuine refusal into an unbounded retry
 	// loop on credentials Twitch will not take.
 	reauthPending atomic.Bool
+	// baseAwaitPath names the part whose recordingStartMs is still
+	// PROVISIONAL — the local clock at the part's start — because its video
+	// has yet to report the first segment's program date-time (AwaitPartBase,
+	// RollFileAwaitingBase, SettlePartBase). While it equals outputPath and
+	// the part has no file yet, the periodic flush holds the part's messages
+	// rather than write a header whose base is about to move. "" when no part
+	// is waiting. baseAwaitSince is when the wait began (ircPartBaseWait).
+	// Guarded by cd.mu.
+	baseAwaitPath  string
+	baseAwaitSince time.Time
+	// baseLatePath names the part whose wait ran past ircPartBaseWait, so
+	// its file went to disk on the provisional base. A report that arrives
+	// for it after all (SettlePartBase) is still the part's real base:
+	// lateBaseMs holds it until the next flush or roll rewrites the file onto
+	// it whole (rebaseLatePartLocked) — never in between, and never on the
+	// download goroutine that reports it. 0 when nothing is pending. Both
+	// guarded by cd.mu.
+	baseLatePath string
+	lateBaseMs   int64
 	// recordingStartMs is the OffsetMs base for the CURRENT part file.
 	// Atomic: the IRC session goroutine reads it per message while RollFile
 	// rebases it at part boundaries from the orchestrator goroutine.
@@ -305,8 +346,14 @@ type ChatDownloader struct {
 	streamEnded      bool  // set by MarkStreamEnded — distinguishes drain from interruption
 	totalCount       int   // cumulative across all part files (job-level metric)
 	fileCount        int   // messages belonging to the CURRENT part file (header count)
+	rollUnwritten    int   // messages in no part file: boundary batches RollFile could not write to the part it closed, and a batch an interrupted exit spilled (job-level; sidecar-carried like totalCount)
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
+	// partUnread records that the part file existed at Start but could not be
+	// read (an AV lock, a sharing violation), so it was neither adopted nor
+	// moved aside. Until it is adopted, flushLocked must not take the
+	// first-write path, which would replace its history. Guarded by cd.mu.
+	partUnread bool
 	// lastResumeSave is when saveResumeStateThrottled last WROTE. Guarded by
 	// cd.mu; the zero value means "never", which always writes. A time.Time
 	// in a struct field keeps its monotonic reading, so the comparison below
@@ -332,6 +379,16 @@ type ChatDownloader struct {
 	// Reauthenticate fire it so a session parked in a quiet-channel read (up to
 	// ircReadDeadline) reacts immediately instead of minutes later.
 	sessionCancel context.CancelFunc
+
+	// wake cuts short the reconnect backoff in Start — the one wait
+	// sessionCancel cannot reach, because no session exists during it. Stop
+	// and MarkStreamEnded send on it so a downloader idling on the slow
+	// post-budget cadence (ircExhaustedRetry) exits at once; RetryNow sends
+	// on it so the next attempt is made now. Buffered 1, sent without
+	// blocking: one pending wake covers any number of requests. nil in a
+	// struct built without NewChatDownloader, where every send is a no-op and
+	// the backoff simply runs its course.
+	wake chan struct{}
 
 	// delays is every keepalive wait runIRCSession sleeps on;
 	// defaultChatDelays() in production, a scaled copy in tests (see delays.go).
@@ -434,6 +491,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		streamStartMs:   streamStartMs,
 		dedup:           utils.NewOrderedDedup[string](),
 		delays:          defaultChatDelays(),
+		wake:            make(chan struct{}, 1),
 		keepaliveWrite:  writeIRCFrame,
 		emoteResolver:   opts.EmoteResolver,
 		logger:          logger,
@@ -441,7 +499,9 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 }
 
 // SetRecordingStartTime sets the recording start time for offset calculation.
-// Should be called before Start() when the actual recording begins.
+// Should be called before Start() when the actual recording begins. For a part
+// whose video starts fresh it is only the fallback: AwaitPartBase holds the
+// part until the video's first segment reports the real base (SettlePartBase).
 func (cd *ChatDownloader) SetRecordingStartTime(isoString string) {
 	if t, err := time.Parse(time.RFC3339, isoString); err == nil {
 		cd.recordingStartMs.Store(t.UnixMilli())
@@ -694,9 +754,19 @@ func (cd *ChatDownloader) saveResumeState() {
 	cd.mu.Lock()
 	// Newest-first window, not the whole set — see chatResumeIDCap.
 	recentIDs := cd.dedup.Snapshot(chatResumeIDCap)
+	// The counts are what the FILE holds. fileCount and totalCount already
+	// include the messages still pending — a batch the last flush could not
+	// write, or ones that arrived while it wrote — and Start's exit paths save
+	// right after a flush that may have failed. A sidecar counting them was
+	// restored by the next run as if the part held them, and the header read 6
+	// over an array of 4 for good: restoreResumeState lets the part's header
+	// raise a count, never lower one (a header refresh that failed leaves it
+	// behind the array).
+	pending := len(cd.messages)
 	state := ChatResumeState{
-		MessageCount:    cd.fileCount,
-		TotalCount:      cd.totalCount,
+		MessageCount:    max(cd.fileCount-pending, 0),
+		TotalCount:      max(cd.totalCount-pending, 0),
+		RollUnwritten:   cd.rollUnwritten,
 		LastTimestampMs: cd.lastTimestampMs,
 		Timestamp:       time.Now().UnixMilli(),
 		StreamID:        cd.streamID,
@@ -743,23 +813,39 @@ func (cd *ChatDownloader) saveResumeStateThrottled() bool {
 // the new, never-written part) — blindly marking it flushed would route the
 // first flush onto the append path against a missing file, which fails,
 // merge-fails, and retries forever: the part's chat would never reach disk.
+//
+// The part file's own header count corrects the sidecar's. The sidecar is
+// saved at most every ircResumeSaveFloor, the header on every flush, so after
+// a crash the sidecar can be short by the messages flushed in its unsaved
+// window — a deficit that used to persist in the part's header and in the
+// job's cumulative total for the life of the job. Only the header is read
+// (1 KB), never the file, so an ordinary resume stays as cheap as before.
 func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 	fileExists := false
+	unsaved := 0
 	if path := cd.currentOutputPath(); path != "" {
 		if _, err := os.Stat(path); err == nil {
 			fileExists = true
+			if n, ok := utils.ReadChatFileMessageCount(path); ok && n > state.MessageCount {
+				unsaved = n - state.MessageCount
+			}
 		}
 	}
 
 	cd.mu.Lock()
+	cd.totalCount = max(state.TotalCount, state.MessageCount) + unsaved
 	if fileExists {
-		cd.fileCount = state.MessageCount
+		cd.fileCount = state.MessageCount + unsaved
 		cd.flushedToDisk = true
 	} else {
 		cd.fileCount = 0
 		cd.flushedToDisk = false
+		// The job total counted this part's messages too, and they went with
+		// the file: kept, the total stayed above everything on disk for the
+		// rest of the job.
+		cd.totalCount = max(cd.totalCount-state.MessageCount, 0)
 	}
-	cd.totalCount = max(state.TotalCount, state.MessageCount)
+	cd.rollUnwritten = max(cd.rollUnwritten, state.RollUnwritten)
 	cd.lastTimestampMs = state.LastTimestampMs
 	cd.dedup.Restore(state.RecentIDs)
 	cd.mu.Unlock()
@@ -772,8 +858,11 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 //
 // The file, not the run. The orchestrator hands every session time.Now() as
 // the recording start — SetRecordingStartTime, and the RollFile that redirects
-// a resumed job into the part it left off in — which is right for a part that
-// begins now and wrong for one that began hours ago. The resumed part's VIDEO
+// a resumed job into the part it left off in — which is close for a part that
+// begins now (and only provisional there: such a part waits for its video's
+// first segment to report the real base, SettlePartBase) and wrong for one
+// that began hours ago. A resumed part's video reports no first segment, so
+// nothing but this function can correct its base. The resumed part's VIDEO
 // is appended to (the engine reopens video_stream O_APPEND at the resume
 // sidecar's byte position, and the part is muxed with a derived start rather
 // than the restart time), so the part's timeline still starts where it always
@@ -792,10 +881,11 @@ func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
 // residual is therefore at most a window's worth of drift, against hours of
 // misplacement for the alternative.
 //
-// Only on a fresh Start (the caller's !alreadyInitialized gate). A downloader
-// the orchestrator re-Starts after a connectivity outage already holds the
-// base its part file was written with, so there is nothing to adopt and no
-// reason to race a roll for it.
+// Only on a fresh Start (the caller's !alreadyInitialized gate), and again at
+// the first write to a part Start could not read (adoptUnreadPart). A
+// downloader the orchestrator re-Starts after a connectivity outage already
+// holds the base its part file was written with, so there is nothing to adopt
+// and no reason to race a roll for it.
 //
 // The store is conditional on outputPath still being the path that was read.
 // Start runs on its own goroutine while the video loop is already going, so a
@@ -970,23 +1060,36 @@ var chatFileRecordingBaseMs = func(path string) (int64, bool, error) {
 // call RollFile in between — and the new part's counters must not be seeded
 // from the closed part's file.
 func (cd *ChatDownloader) adoptExistingPartFile() int {
+	n, _ := cd.adoptPartFile(false)
+	return n
+}
+
+// adoptPartFile is adoptExistingPartFile's body. retry is set when flushLocked
+// tries again a part that could not be read at Start: by then the counters
+// hold the messages captured since, so the adopted ones are ADDED to them
+// rather than taking their place. unread reports that the file is still
+// there and still could not be read — the caller must not write over it.
+func (cd *ChatDownloader) adoptPartFile(retry bool) (adopted int, unread bool) {
 	path := cd.currentOutputPath()
 	if path == "" {
-		return 0
+		return 0, false
 	}
 	summary, err := readChatPartFileSummary(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0 // nothing on disk — a fresh part
+			cd.setPartUnread(false)
+			return 0, false // nothing on disk — a fresh part
 		}
 		if !errors.Is(err, errChatPartMalformed) {
 			// Read failure, not a content verdict. Leave the file where it is
-			// and leave flushedToDisk false: this part behaves exactly as it
-			// did before the adoption existed.
+			// and leave flushedToDisk false — and remember it, so the first
+			// flush adopts it then instead of writing over it (flushLocked).
 			cd.logger.Warn("twitch chat: cannot read the existing part file; leaving it in place",
 				"channel", cd.channelLogin, "path", path, "err", err)
-			return 0
+			cd.setPartUnread(true)
+			return 0, true
 		}
+		cd.setPartUnread(false)
 		corruptPath := path + chatCorruptSuffix
 		cd.logger.Error("twitch chat: existing part file unreadable; preserving it instead of overwriting",
 			"channel", cd.channelLogin, "path", path, "preservedAs", corruptPath, "err", err)
@@ -994,19 +1097,26 @@ func (cd *ChatDownloader) adoptExistingPartFile() int {
 			cd.logger.Error("twitch chat: could not preserve the unreadable part file; the next flush will overwrite it",
 				"channel", cd.channelLogin, "path", path, "err", renameErr)
 		}
-		return 0
+		return 0, false
 	}
+	cd.setPartUnread(false)
 	if summary.messages == 0 {
-		return 0
+		return 0, false
 	}
 
 	cd.mu.Lock()
 	adopt := cd.outputPath == path && !cd.flushedToDisk
 	if adopt {
-		cd.fileCount = summary.messages
-		// The job-level metric never drops: a sidecar that restored a larger
-		// cumulative total (parts closed earlier in this job) keeps it.
-		cd.totalCount = max(cd.totalCount, summary.messages)
+		if retry {
+			cd.fileCount += summary.messages
+			cd.totalCount += summary.messages
+		} else {
+			cd.fileCount = summary.messages
+			// The job-level metric never drops: a sidecar that restored a
+			// larger cumulative total (parts closed earlier in this job)
+			// keeps it.
+			cd.totalCount = max(cd.totalCount, summary.messages)
+		}
 		cd.flushedToDisk = true
 		// Add, not Restore: additive seeding cannot discard whatever a
 		// sidecar restore already put there.
@@ -1020,11 +1130,98 @@ func (cd *ChatDownloader) adoptExistingPartFile() int {
 	cd.mu.Unlock()
 
 	if !adopt {
-		return 0
+		return 0, false
 	}
 	cd.logger.Info("twitch chat: adopting the existing part file",
 		"channel", cd.channelLogin, "path", path, "messages", summary.messages)
-	return summary.messages
+	return summary.messages, false
+}
+
+// adoptUnreadPart retries, at a write, the adoption Start could not make of a
+// part file it could not read (partUnread). Caller holds flushMu, so the part
+// cannot roll underneath it.
+//
+// Base first, in Start's order. The base read failed at Start with the rest of
+// the file, so recordingStartMs still holds the run's start — the restart — and
+// every message buffered since was offset against it; adopting the file alone
+// appended those offsets to a file whose header and history count from its
+// own base, two clocks in one file. The pending messages are rebased onto the
+// adopted base under cd.mu, the lock addMessage computes offsets under, so the
+// ones already buffered and the ones still to come share the file's clock.
+func (cd *ChatDownloader) adoptUnreadPart() (adopted int, unread bool) {
+	runBase := cd.recordingStartMs.Load()
+	cd.adoptPartRecordingBase()
+	cd.mu.Lock()
+	if base := cd.recordingStartMs.Load(); base > 0 && base != runBase {
+		for i := range cd.messages {
+			cd.messages[i].OffsetMs = cd.messages[i].TimestampMs - base
+		}
+	}
+	cd.mu.Unlock()
+	return cd.adoptPartFile(true)
+}
+
+// setPartUnread records whether the current part file is one that exists and
+// could not be read; see partUnread.
+func (cd *ChatDownloader) setPartUnread(v bool) {
+	cd.mu.Lock()
+	cd.partUnread = v
+	cd.mu.Unlock()
+}
+
+// repairDamagedPart salvages a resumed part whose file no longer ends the way
+// an append needs (a crash-torn tail, a cut mid-record). The resume trusted
+// the file on a stat, so every flush failed against it: the batch stayed in
+// memory, was retried each second, and was thrown away at the stream's end
+// while the job read "finished". The intact messages are kept, the original
+// bytes are kept beside it as <path>.corrupt, and the counters follow the
+// rewritten file.
+//
+// Under flushMu, like every other write to a part (flushMu → mu, as RollFile
+// takes them). Start runs on its own goroutine while the video loop is going,
+// and a gap split's RollFile used to land between the read of the path and the
+// counter update: the closed part's salvage delta went to the NEW part — its
+// fileCount -2, its header -1 over an array of 1 — while the roll's drain and
+// the part's enrichment could reach the file the salvage was rewriting.
+func (cd *ChatDownloader) repairDamagedPart() {
+	cd.flushMu.Lock()
+	defer cd.flushMu.Unlock()
+	path := cd.currentOutputPath()
+	if path == "" {
+		return
+	}
+	cd.mu.Lock()
+	before := cd.fileCount
+	startMs := cd.recordingStartMs.Load()
+	cd.mu.Unlock()
+	kept, salvaged := cd.salvageDamagedPartLocked(path, startMs, "the resumed part file is damaged; salvaging it")
+	if !salvaged {
+		return
+	}
+	cd.mu.Lock()
+	cd.fileCount += kept - before
+	cd.totalCount = max(cd.totalCount+kept-before, 0)
+	cd.mu.Unlock()
+}
+
+// salvageDamagedPartLocked rewrites a part file whose end an append can no
+// longer reach (utils.ChatFileEndIntact) out of its intact messages, with the
+// original kept beside it as .corrupt, on the part's own base startMs. It
+// reports how many messages the file keeps, and false when the file was
+// intact, unreadable, or could not be salvaged. Caller holds flushMu.
+func (cd *ChatDownloader) salvageDamagedPartLocked(path string, startMs int64, why string) (kept int, salvaged bool) {
+	if intact, err := utils.ChatFileEndIntact(path); err != nil || intact {
+		return 0, false
+	}
+	cd.logger.Warn("twitch chat: "+why, "channel", cd.channelLogin, "path", path)
+	kept, err := rewriteChatFileWithHistory(path, nil, cd.logger, func(merged []TwitchChatMessage) error {
+		return cd.writeFullChatFileTo(path, merged, len(merged), startMs)
+	})
+	if err != nil {
+		cd.logger.Error("twitch chat: could not salvage the damaged part file", "path", path, "err", err)
+		return 0, false
+	}
+	return kept, true
 }
 
 // chatPartFileSummary is everything adoptExistingPartFile needs out of a part
@@ -1032,6 +1229,10 @@ func (cd *ChatDownloader) adoptExistingPartFile() int {
 type chatPartFileSummary struct {
 	messages  int
 	recentIDs []string
+	// maxOffsetMs / hasOffset: the furthest offsetMs in the file — for a VOD
+	// chat, how far into the VOD its committed messages reach.
+	maxOffsetMs int64
+	hasOffset   bool
 }
 
 // readChatPartFileSummary reads an existing part's chat file and reports its
@@ -1042,8 +1243,8 @@ type chatPartFileSummary struct {
 // the header's tokens to the "messages" key and then decodes one message at a
 // time into an id-only shape — peak memory is one message plus the decoder's
 // buffer, instead of the whole file twice (raw bytes plus the decoded slice),
-// which is what readChatFileMessages' os.ReadFile + json.Unmarshal costs the
-// append-failure fallback. Counting still means reading every byte of the
+// which is what the append-failure fallback's whole-file read
+// (utils.SalvageChatMessages) costs. Counting still means reading every byte of the
 // file; that is inherent to the format (the header's messageCount is exactly
 // the number this function refuses to trust) and it is one sequential pass at
 // startup, not per flush.
@@ -1186,12 +1387,16 @@ func decodeChatMessageIDs(dec *json.Decoder) (chatPartFileSummary, error) {
 		// id only: the decoder skips every other field without materialising
 		// it, so a 400-byte message costs nothing but the scan.
 		var msg struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			OffsetMs *int64 `json:"offsetMs"`
 		}
 		if err := dec.Decode(&msg); err != nil {
 			return chatPartFileSummary{}, fmt.Errorf("parse chat messages: %w", err)
 		}
 		summary.messages++
+		if msg.OffsetMs != nil && (!summary.hasOffset || *msg.OffsetMs > summary.maxOffsetMs) {
+			summary.maxOffsetMs, summary.hasOffset = *msg.OffsetMs, true
+		}
 		if msg.ID == "" {
 			continue
 		}
@@ -1223,10 +1428,10 @@ func (cd *ChatDownloader) clearResumeState() {
 //
 // Start is safe to call once per ChatDownloader instance. Calling Start
 // concurrently (or after a previous Start returns) returns an error rather
-// than racing on the dedup/resume state — the struct retains seenIDs and
-// seenOrder across calls, and re-initialising them while a previous session
-// is still draining would drop messages.
-func (cd *ChatDownloader) Start(ctx context.Context) error {
+// than racing on the dedup/resume state — the struct retains its dedup set
+// across calls, and re-initialising it while a previous session is still
+// draining would drop messages.
+func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	if cd.running {
 		cd.mu.Unlock()
@@ -1270,6 +1475,12 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.mu.Lock()
 		sidecarRestored := cd.flushedToDisk
 		cd.mu.Unlock()
+		if sidecarRestored {
+			// The sidecar says the part holds history; make sure an append can
+			// still reach its end before trusting it with one. After the base
+			// adoption above, so the rewrite keeps the part's own base.
+			cd.repairDamagedPart()
+		}
 		if !sidecarRestored {
 			// The adopted count is deliberately NOT pushed through
 			// callOnProgress here. MessageCount() is cd.totalCount, which this
@@ -1291,15 +1502,28 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		if r := recover(); r != nil {
 			cd.logger.Error("chat downloader panic", "panic", r)
 			panicked = true
+			// A panic is an outcome, not a clean exit: the worker records
+			// chat_status "incomplete" for it instead of "finished".
+			retErr = fmt.Errorf("twitch chat downloader panic: %v", r)
 		}
 
 		cd.mu.Lock()
 		cd.running = false
 		streamEnded := cd.streamEnded
 		cd.mu.Unlock()
-		cd.flush()
+		flushErr := cd.flushFinal()
 
 		if panicked {
+			// A final flush that could not write the pending batch is
+			// spilled first, as on every other exit (spillUnwrittenBatch):
+			// the batch lived in memory alone, and a restart lost it. Safe
+			// here for the reason the flush above is: both take flushMu and
+			// cd.mu, and a panic that left either held has hung this exit
+			// before now. The panic is the verdict; the spill's error adds
+			// nothing to it.
+			if flushErr != nil {
+				_ = cd.spillUnwrittenBatch(flushErr)
+			}
 			// Don't clear resume state on panic — allow resume on restart.
 			// Unthrottled, exactly like the interrupted-exit save just below:
 			// the flush above went through saveResumeStateThrottled, which can
@@ -1316,8 +1540,63 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			// to chat.json instead of rewriting it from scratch (clearing
 			// here used to destroy all previously archived chat), and skip
 			// emote enrichment: enriched files must not receive appends.
+			//
+			// A final flush that could not write the pending batch is
+			// spilled and reported first, so the sidecar saved next carries
+			// the count and leaves the batch out (spillUnwrittenBatch).
+			if flushErr != nil {
+				if err := cd.spillUnwrittenBatch(flushErr); err != nil && retErr == nil {
+					retErr = err
+				}
+			}
 			cd.saveResumeState()
+			// A boundary spill is reported here too, not only at the
+			// stream's end. ExecuteTwitch's outage finalize — the broadcast
+			// ended while connectivity was down — ends chat with Stop() and
+			// records THIS verdict, so a nil here read "finished" and the
+			// staging cleanup deleted the spill with the part's dir. A
+			// shutdown discards the verdict, and the sidecar just saved
+			// carries the count to the resumed run's end.
+			if err := cd.rollUnwrittenErr(); err != nil && retErr == nil {
+				retErr = err
+			}
 			return
+		}
+
+		if flushErr != nil {
+			// The stream is over and the file would not take the last
+			// messages. They used to be dropped here with the sidecar cleared
+			// and nil returned, so the job read "finished" over a capture
+			// that had lost them. Spill them beside the part, keep the
+			// sidecar, and report the capture incomplete.
+			//
+			// Spilled the way the interrupted exit spills them
+			// (spillUnwrittenBatch), ahead of the save. This arm dumped the
+			// batch and kept it — pending, and in the part's count and the
+			// job total — so the job's chat count took in messages no part
+			// holds, a relaunch wrote them to the part as well as the spill,
+			// and the sidecar carried no count: a run resumed from it ended
+			// clean, and the staging cleanup deleted the spill.
+			if err := cd.spillUnwrittenBatch(flushErr); err != nil && retErr == nil {
+				retErr = err
+			}
+			cd.saveResumeState()
+			// Nothing left to spill — a roll drained the batch after the
+			// final flush let go of flushMu — leaves the verdict to the
+			// boundary count, as on the interrupted exit.
+			if err := cd.rollUnwrittenErr(); err != nil && retErr == nil {
+				retErr = err
+			}
+			return
+		}
+
+		// A part roll that could not write its boundary batch spilled it
+		// beside the closed part. The capture is short by those messages, so
+		// it must not read "finished": that verdict let the staging cleanup
+		// delete the spill with the part's dir. Incomplete keeps it
+		// (keepOnlyChatCapture keeps every chat.json.* file at any depth).
+		if err := cd.rollUnwrittenErr(); err != nil && retErr == nil {
+			retErr = err
 		}
 
 		// Stream-over drain: clear resume state
@@ -1350,7 +1629,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// reconnectAttempts is reset after any session that stayed connected for
 	// longer than reconnectResetUptime. Long-running (8+ hour) streams
 	// previously exhausted the counter on sparse network hiccups and then
-	// gave up chat for the remainder of the stream.
+	// gave up chat for the remainder of the stream. The loop no longer gives
+	// up at all: past maxReconnects it retries every ircExhaustedRetry until
+	// Stop or ctx ends it, so "exhausting the budget" — which the comments
+	// on the uncharged reconnect kinds still guard against — now costs up to
+	// two minutes of chat per drop instead of the rest of the job.
 	const (
 		maxReconnects        = 10
 		reconnectResetUptime = 5 * time.Minute
@@ -1363,22 +1646,33 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// wire now, not after thirty seconds.
 	immediate := false
 
-	for reconnectAttempts <= maxReconnects {
+	for {
 		if ctx.Err() != nil || !cd.IsRunning() {
 			return nil
 		}
 
 		if reconnectAttempts > 0 && !immediate {
-			// Exponential backoff: 1000 * 2^attempts, capped at 30s (matches TypeScript)
+			// Exponential backoff: base × 2^attempts, capped (matches
+			// TypeScript) — then, once the budget is spent, the slow cadence
+			// for as long as the job runs (see ircExhaustedRetry).
 			shift := min(reconnectAttempts, 15) // cap shift to prevent overflow
-			delayMs := min(1000*(1<<shift), 30000)
-			delay := time.Duration(delayMs) * time.Millisecond
+			delay := min(cd.delays.reconnectBase*time.Duration(1<<shift), cd.delays.reconnectCap)
+			if reconnectAttempts > maxReconnects {
+				delay = cd.delays.exhaustedRetry
+				if reconnectAttempts == maxReconnects+1 {
+					cd.logger.Warn("twitch IRC keeps failing; retrying at a slow cadence for as long as the stream is captured",
+						"channel", cd.channelLogin, "failedReconnects", maxReconnects, "every", delay)
+				}
+			}
 			cd.logger.Info("reconnecting to twitch IRC",
 				"channel", cd.channelLogin, "attempt", reconnectAttempts, "max", maxReconnects, "delay", delay)
 			cd.flush() // Save state before reconnect
 			select {
 			case <-ctx.Done():
 				return nil
+			case <-cd.wake:
+				// Stop / MarkStreamEnded (the loop head returns) or RetryNow
+				// (it reconnects now).
 			case <-time.After(delay):
 			}
 		}
@@ -1510,8 +1804,6 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		reconnectAttempts++
 		cd.logger.Warn("IRC session error, will reconnect", "err", err, "channel", cd.channelLogin)
 	}
-
-	return fmt.Errorf("exceeded max IRC reconnects for %s", cd.channelLogin)
 }
 
 func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
@@ -1667,6 +1959,24 @@ func (cd *ChatDownloader) Stop() {
 	cd.running = false
 	cd.mu.Unlock()
 	cd.interruptSession()
+	cd.wakeBackoff()
+}
+
+// wakeBackoff cuts short a reconnect backoff Start is sleeping in (see wake).
+func (cd *ChatDownloader) wakeBackoff() {
+	select {
+	case cd.wake <- struct{}{}:
+	default:
+	}
+}
+
+// RetryNow makes a downloader waiting out a reconnect backoff try again at
+// once. The orchestrator calls it when connectivity returns: past the
+// reconnect budget the backoff is ircExhaustedRetry, and a downloader that
+// kept failing through an outage would otherwise sit out up to that long
+// after the network came back. A no-op when no backoff is running.
+func (cd *ChatDownloader) RetryNow() {
+	cd.wakeBackoff()
 }
 
 // MarkStreamEnded signals that the upstream live stream has ended and the
@@ -1681,4 +1991,5 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.running = false
 	cd.mu.Unlock()
 	cd.interruptSession()
+	cd.wakeBackoff()
 }

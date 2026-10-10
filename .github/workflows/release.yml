@@ -6,7 +6,8 @@ on:
       - 'v*'
   # Dry run. "Run workflow" on any ref runs every job below exactly as a
   # tag would — the test gate, the embed blobs, the three cross-builds, the
-  # signing with its self-check, the multi-arch image build — and publishes
+  # signing with its self-check, the signed release manifest, the
+  # multi-arch image build — and publishes
   # nothing: the image is not pushed, and the release upload goes to a
   # draft that the job deletes. This
   # workflow otherwise runs on tags alone, and a tag is never replaced, so
@@ -18,7 +19,7 @@ on:
   # github.event_name == 'push' (the only push this workflow listens for is
   # a v* tag). A manual run started ON a tag ref is therefore still a dry
   # run. Gating on ref_type alone would have let it rebuild and overwrite
-  # that release's six assets and move "Latest" back to it.
+  # that release's eight assets and move "Latest" back to it.
   workflow_dispatch:
 
 # Each job states what it needs; nothing is granted workflow-wide beyond read.
@@ -62,8 +63,10 @@ permissions:
 #      dep 3x). Per-step naming gives per-binary timing in the
 #      Actions UI and easier failure attribution.
 #   5. Sign all 3 binaries sequentially, each in its own named step.
-#   6. Single softprops/action-gh-release@v3 call publishes the
-#      release with body + all 6 assets in one shot. In a dry run the
+#   6. Write the release manifest (version, tag, each platform's asset
+#      name and SHA-256) and sign it with the same key.
+#   7. Single softprops/action-gh-release@v3 call publishes the
+#      release with body + all 8 assets in one shot. In a dry run the
 #      same call uploads to a draft release that is then deleted.
 #
 # Single-job structure means no artifact upload/download cycle, no
@@ -274,6 +277,21 @@ jobs:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: go run ./cmd/sign moombox-linux-arm64
 
+      - name: Write and sign the release manifest
+        # A binary's .sig says only that the key signed those bytes, so a
+        # validly signed OLDER binary, or another platform's, verifies as well
+        # as the right one. The manifest binds the bytes to this release: its
+        # version and tag, and for each platform the asset name and SHA-256
+        # (cmd/sign -manifest, internal/updater/manifest.go). Signed with the
+        # same key and self-checked the same way as the binaries; the updater
+        # refuses to auto-apply a release that has none. The per-binary .sig
+        # files above stay: installs that predate the manifest verify only
+        # them. A dry run writes and signs one too, for its -dryrun version
+        # and its draft's tag.
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: go run ./cmd/sign -manifest -version "$VERSION" -tag "$RELEASE_TAG"
+
       - name: Build release body
         shell: bash
         env:
@@ -308,11 +326,13 @@ jobs:
         if: github.event_name != 'push'
         run: |
           echo "Dry run of $VERSION ($COMMIT): built and signed; the upload below goes to a draft that is then deleted."
-          ls -l Moombox.exe Moombox.exe.sig moombox-linux-amd64 moombox-linux-amd64.sig moombox-linux-arm64 moombox-linux-arm64.sig
+          ls -l Moombox.exe Moombox.exe.sig moombox-linux-amd64 moombox-linux-amd64.sig moombox-linux-arm64 moombox-linux-arm64.sig moombox-manifest.json moombox-manifest.json.sig
+          echo "--- release manifest ---"
+          cat moombox-manifest.json
           echo "--- release body ---"
           cat release_body.md
 
-      - name: Create GitHub Release with all 6 assets
+      - name: Create GitHub Release with all 8 assets
         # ONE step for both modes, so a dry run executes the same action, the
         # same token and the same file list a tag does. What differs comes
         # from the version step: a tag push publishes under its own tag; a
@@ -341,6 +361,8 @@ jobs:
             moombox-linux-amd64.sig
             moombox-linux-arm64
             moombox-linux-arm64.sig
+            moombox-manifest.json
+            moombox-manifest.json.sig
 
       - name: Dry run — check the draft release, then delete it
         # always(): a draft the upload step created and then failed on must
@@ -361,7 +383,7 @@ jobs:
           found=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '"draft=\(.draft) assets=\(.assets | length)"')
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
           echo "draft release $RELEASE_TAG: $found — deleted"
-          if [ "$found" != "draft=true assets=6" ]; then
-            echo "expected draft=true assets=6"
+          if [ "$found" != "draft=true assets=8" ]; then
+            echo "expected draft=true assets=8"
             exit 1
           fi

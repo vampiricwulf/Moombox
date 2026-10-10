@@ -39,8 +39,14 @@ function matchTerm(term, job) {
       // group keys fall back to a direct status-name comparison so real
       // statuses (status:live, status:downloading) match instead of
       // silently emptying the list.
+      //
+      // Own properties only: the key is user text, and a plain `[key]`
+      // lookup would hand status:constructor / status:__proto__ an
+      // Object.prototype member, whose `.includes` is not a function — and
+      // the filter bar stores the token before it renders, so every later
+      // render would throw too and the list would freeze.
       const key = term.value.toLowerCase();
-      const allowed = STATUS_FILTER_MAP[key];
+      const allowed = Object.hasOwn(STATUS_FILTER_MAP, key) ? STATUS_FILTER_MAP[key] : undefined;
       if (allowed) {
         result = allowed.includes(job.status);
       } else {

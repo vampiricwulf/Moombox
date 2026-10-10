@@ -148,3 +148,28 @@ func TestRateLimiterManyIPs(t *testing.T) {
 		}
 	}
 }
+
+// TestRateLimiterBucketsAGlobalIPv6ByItsSlash64: keyed by the full address, a
+// client rotating through its own /64 got a fresh bucket per request. LAN
+// IPv6 (ULA, link-local) and IPv4 stay exact.
+//
+// Mutant: drop the bucketKey call from AllowWithRetry — the second address in
+// the /64 is allowed.
+func TestRateLimiterBucketsAGlobalIPv6ByItsSlash64(t *testing.T) {
+	rl := NewRateLimiterCtx(t.Context(), 1, time.Minute)
+	if !rl.Allow("2001:db8:1:2::1") {
+		t.Fatal("the first request was refused")
+	}
+	if rl.Allow("2001:db8:1:2:ffff::9") {
+		t.Error("a second address in the same /64 got a fresh bucket")
+	}
+	if !rl.Allow("2001:db8:1:3::1") {
+		t.Error("a different /64 was refused")
+	}
+	for _, pair := range [][2]string{{"fd00::1", "fd00::2"}, {"fe80::1", "fe80::2"}, {"192.168.1.2", "192.168.1.3"}} {
+		rl.Allow(pair[0])
+		if !rl.Allow(pair[1]) {
+			t.Errorf("LAN address %s shares a bucket with %s", pair[1], pair[0])
+		}
+	}
+}

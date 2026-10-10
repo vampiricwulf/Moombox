@@ -7,7 +7,9 @@ import (
 
 // The help overlay is the only discoverable path to batch mode, and it listed
 // neither Space nor the keys that leave it. Mutant: dropping any of the four
-// rows — the operator has no way to learn the key exists.
+// rows — the operator has no way to learn the key exists. The O L overlay
+// answers the log panel's keys, so the rows that name the log panel name it
+// too; mutant: dropping "Job Log" from the End, / or n / N row.
 func TestHelpDocumentsTheBatchAndScrollKeys(t *testing.T) {
 	app := NewApp()
 	h := NewHelpModel()
@@ -20,7 +22,9 @@ func TestHelpDocumentsTheBatchAndScrollKeys(t *testing.T) {
 		"Space", "Select task for batch actions (Tasks)",
 		"Esc", "Clear batch selection",
 		"Ctrl+U/Ctrl+D", "Half-page scroll",
-		"End", "Resume auto-scroll (Logs)",
+		"End", "Resume auto-scroll (Logs · Job Log)",
+		"/", "Find text (Logs · Job Log)",
+		"n / N", "Next / previous search match (Logs · Job Log)",
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("help view lacks %q:\n%s", want, view)
@@ -34,7 +38,8 @@ func TestHelpDocumentsTheBatchAndScrollKeys(t *testing.T) {
 // (CORE-16).
 //
 // Mutant: adding the four cases to handleTaskKey without widening the help
-// row — the PgUp line still reads "(Details · Logs)" and fails here.
+// row — the PgUp line still reads "(Details · Logs)" and fails here. The O L
+// overlay pages too (its viewer is the log panel's), so the claim names it.
 func TestHelpClaimsTaskPanelPaging(t *testing.T) {
 	app := NewApp()
 	h := NewHelpModel()
@@ -47,8 +52,8 @@ func TestHelpClaimsTaskPanelPaging(t *testing.T) {
 	for _, line := range strings.Split(view, "\n") {
 		if strings.Contains(line, "PgUp") {
 			sawPaging = true
-			if !strings.Contains(line, "(Tasks · Details · Logs)") {
-				t.Errorf("PgUp/PgDn pages all three panels now: %q", line)
+			if !strings.Contains(line, "(Tasks · Details · Logs · Job Log)") {
+				t.Errorf("PgUp/PgDn pages all three panels and the job log now: %q", line)
 			}
 		}
 		if strings.Contains(line, "Home/End") {

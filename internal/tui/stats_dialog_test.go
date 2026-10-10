@@ -7,6 +7,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -17,7 +18,7 @@ func sampleSnapshot() stats.Snapshot {
 		TotalSize:         512 << 30,
 		JobCount:          1234,
 		SizeByPlatform:    map[string]int64{"youtube": 400 << 30, "twitch": 112 << 30},
-		SizeByStatus:      map[string]int64{"finished": 500 << 30, "error": 12 << 30, "cancelled": 0},
+		SizeByStatus:      map[string]int64{"finished": 497 << 30, "error": 12 << 30, "cancelled": 3 << 30},
 		TotalFinished:     1200,
 		TotalDuration:     3*3600 + 25*60 + 7,
 		TotalChatMessages: 98765,
@@ -28,7 +29,7 @@ func sampleSnapshot() stats.Snapshot {
 	}
 }
 
-// TestStatsDialogRendersEveryWebCard: the overlay shows the same thirteen
+// TestStatsDialogRendersEveryWebCard: the overlay shows the same fourteen
 // figures the Web Stats tab shows, plus uptime, in the Web's own units —
 // utils.FormatFileSize is the Web's formatBytes ("512.0GB", no space) and
 // formatHMS is its formatDurationSeconds ("49h 30m 0s").
@@ -47,7 +48,7 @@ func TestStatsDialogRendersEveryWebCard(t *testing.T) {
 		"Total Recorded", "512.0GB",
 		"Total Jobs", "1,234",
 		"YouTube Storage", "400.0GB", "Twitch Storage", "112.0GB",
-		"Finished", "500.0GB", "Error", "12.0GB",
+		"Finished", "497.0GB", "Error", "12.0GB", "Cancelled", "3.0GB",
 		"Streams Archived", "1,200",
 		"Total Recording Time", "3h 25m 7s",
 		"Chat Messages", "98,765",
@@ -64,6 +65,44 @@ func TestStatsDialogRendersEveryWebCard(t *testing.T) {
 		if w := runewidth.StringWidth(line); w > 100 {
 			t.Errorf("line wider than the dialog (%d): %q", w, line)
 		}
+	}
+}
+
+// With no disk reading — stats.Build's zero Disk, before the first successful
+// disk check or while the output directory's disk cannot be read — the
+// overlay drew an empty bar over "0B used of 0B   0B free (0.0% used)", a
+// real-looking 0-byte disk, where the Web Stats tab says "No disk reading
+// available" (web/tests/dashboard-text.test.mjs pins the Web side). The
+// storage figures under it still show, as the Web's Storage cards do.
+//
+// Mutant: writeStorage without its d.Total == 0 arm — the fabricated disk
+// line is back and the notice is missing.
+func TestStatsDialogSaysWhenThereIsNoDiskReading(t *testing.T) {
+	for _, size := range [][2]int{{60, 20}, {80, 24}, {100, 40}} {
+		m := NewStatsDialogModel()
+		m.SetSize(size[0], size[1])
+		m.Open()
+		snap := stats.Build(&database.JobStats{FinishedSize: 512 << 30}, nil)
+		m.SetSnapshot(snap)
+		v := stripANSI(m.View())
+		if !strings.Contains(v, "No disk reading available") {
+			t.Errorf("%dx%d: the Web's no-reading notice is missing:\n%s", size[0], size[1], v)
+		}
+		if strings.Contains(v, "used of") || strings.Contains(v, "░") {
+			t.Errorf("%dx%d: a disk bar and labels were drawn with no reading:\n%s", size[0], size[1], v)
+		}
+		if !strings.Contains(v, "512.0GB") {
+			t.Errorf("%dx%d: the storage figures must still show:\n%s", size[0], size[1], v)
+		}
+	}
+
+	// A reading brings the bar and its labels back.
+	m := NewStatsDialogModel()
+	m.SetSize(100, 40)
+	m.Open()
+	m.SetSnapshot(sampleSnapshot())
+	if v := stripANSI(m.View()); strings.Contains(v, "No disk reading") || !strings.Contains(v, "used of") {
+		t.Errorf("with a reading the bar and its labels show, not the notice:\n%s", v)
 	}
 }
 
@@ -148,7 +187,7 @@ func TestStatsDialogFitsAShortTerminal(t *testing.T) {
 	if rowOf(sl, "Statistics")+1 != rowOf(sl, "Storage") {
 		t.Errorf("at 24 rows the blank line under the title must go:\n%s", stripANSI(sv))
 	}
-	if rowOf(sl, "Error")+1 != rowOf(sl, "Activity") {
+	if rowOf(sl, "Cancelled")+1 != rowOf(sl, "Activity") {
 		t.Errorf("at 24 rows the blank line between the sections must go:\n%s", stripANSI(sv))
 	}
 
@@ -160,7 +199,64 @@ func TestStatsDialogFitsAShortTerminal(t *testing.T) {
 	if rowOf(tl, "Statistics")+2 != rowOf(tl, "Storage") {
 		t.Error("at 40 rows the title keeps its blank line")
 	}
-	if rowOf(tl, "Error")+2 != rowOf(tl, "Activity") {
+	if rowOf(tl, "Cancelled")+2 != rowOf(tl, "Activity") {
 		t.Error("at 40 rows the sections keep their blank line")
+	}
+}
+
+// TestStatsDialogFitsTheFloorTerminal: below the compact box's 23 rows — down
+// to the TUI's 60x20 floor — the box drew 23 lines anyway, and the renderer
+// dropped its top border, title and "Storage" header. There the hint joins the
+// title line and the blank above it and Uptime go, so every figure the Web
+// Stats tab shows still fits.
+//
+// Mutant: keeping the footer on its own line when tight — 20 rows overflow.
+func TestStatsDialogFitsTheFloorTerminal(t *testing.T) {
+	for _, size := range [][2]int{{60, 20}, {80, 21}, {80, 22}, {80, 23}} {
+		m := NewStatsDialogModel()
+		m.SetSize(size[0], size[1])
+		m.Open()
+		m.SetSnapshot(sampleSnapshot())
+		v := stripANSI(m.View())
+		if n := strings.Count(v, "\n") + 1; n > size[1] {
+			t.Errorf("%dx%d: rendered %d lines:\n%s", size[0], size[1], n, v)
+		}
+		for _, want := range []string{"Statistics", "Storage", "Activity", "Twitch Jobs", "R: Refresh", "Cancelled 3.0GB"} {
+			if !strings.Contains(v, want) {
+				t.Errorf("%dx%d: %q is not on screen:\n%s", size[0], size[1], want, v)
+			}
+		}
+	}
+}
+
+// Total Recorded counts cancelled jobs' files, and the by-status breakdown
+// used to show only Finished and Error, so the two did not add up whenever a
+// cancelled job kept its file. Cancelled is shown in every layout — on its own
+// row where there is room, sharing one line with the other two in the tight
+// one — and that shared line fits the 60-column floor at its widest.
+//
+// Mutant: dropping Cancelled from either layout, or the tight layout keeping
+// three rows (the floor then overflows).
+func TestStatsDialogShowsCancelledStorage(t *testing.T) {
+	snap := sampleSnapshot()
+	big := int64(9999) << 30 / 10 // 999.9GB
+	snap.SizeByStatus = map[string]int64{"finished": big, "error": big, "cancelled": big}
+	for _, size := range [][2]int{{60, 20}, {80, 24}, {100, 40}} {
+		m := NewStatsDialogModel()
+		m.SetSize(size[0], size[1])
+		m.Open()
+		m.SetSnapshot(snap)
+		v := stripANSI(m.View())
+		if !strings.Contains(v, "Cancelled") || strings.Count(v, "999.9GB") != 3 {
+			t.Errorf("%dx%d: the three by-status sizes are not all shown:\n%s", size[0], size[1], v)
+		}
+		if n := strings.Count(v, "\n") + 1; n > size[1] {
+			t.Errorf("%dx%d: rendered %d lines", size[0], size[1], n)
+		}
+		for line := range strings.SplitSeq(v, "\n") {
+			if w := runewidth.StringWidth(line); w > size[0] {
+				t.Errorf("%dx%d: line wider than the terminal (%d): %q", size[0], size[1], w, line)
+			}
+		}
 	}
 }

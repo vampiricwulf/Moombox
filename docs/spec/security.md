@@ -8,11 +8,11 @@ This document defines the security architecture of Moombox's HTTP server, authen
 
 These are hard rules. They are not guidelines, suggestions, or aspirations. An AI assisting with Moombox development must follow these without exception:
 
-- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: RequestID, Drain, Recovery, CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, Compression, Auth. (`chimiddleware.RequestID` runs first so recovery/log lines can be correlated to a request; `DrainMiddleware` sits ahead of `RecoveryMiddleware` so its shutdown 503 cannot be disturbed by a panic in a later middleware. The eight security-relevant middlewares from Recovery onward are documented individually below.) Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
+- **Middleware order is critical and MUST be maintained.** The middleware chain is applied in this exact order: RequestID, Drain, Recovery, IPGate, HostGate, CORS, SecurityHeaders, CSRF, MaxBodySize, Compression, Auth. (`chimiddleware.RequestID` runs first so recovery/log lines can be correlated to a request; `DrainMiddleware` sits ahead of `RecoveryMiddleware` so its shutdown 503 cannot be disturbed by a panic in a later middleware. The nine security-relevant middlewares from Recovery onward are documented individually below. IPGate and HostGate run ahead of CSRF because CSRF logs every refused origin: a peer the IP gate refuses must not be able to fill the log, and every dashboard it is broadcast to, with lines it chose.) Reordering can create security vulnerabilities (e.g., moving Auth before IPGate would break local-network trust; moving CSRF after Auth would leave authenticated routes unprotected against cross-site request forgery).
 - **CSRF uses Origin/Referer validation, NOT CSRF tokens.** Moombox does not generate or validate CSRF tokens. It validates the Origin or Referer header on mutating requests (POST, PUT, DELETE) against the configured network_access level. This is sufficient because the server controls CORS preflight responses and does not grant cross-origin access to untrusted origins.
 - **TUI bypasses CSRF via the X-Internal-Token header.** The TUI is a same-process client that cannot send Origin/Referer headers. It sends a 16-byte random hex token (generated at server startup) in the `X-Internal-Token` header. The comparison uses `crypto/subtle.ConstantTimeCompare` to prevent timing side-channels.
-- **Loopback and private IPs skip authentication.** Requests from 127.0.0.1, ::1, and private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local addresses) bypass the AuthMiddleware entirely. Authentication is only enforced for external (non-local, non-LAN) clients when a password is configured.
-- **Ed25519 signature verification before binary swap.** Self-updates download a new binary and a `.sig` file. The binary is verified against the embedded Ed25519 public key before any file rename operations occur. An invalid signature aborts the update.
+- **Loopback and private IPs skip authentication.** Requests from 127.0.0.1, ::1, and private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local addresses — plus 100.64.0.0/10 under `lan` only, see [Private IP Detection](#private-ip-detection)) bypass the AuthMiddleware entirely. Authentication is only enforced for external (non-local, non-LAN) clients when a password is configured.
+- **Ed25519 signature verification before binary swap.** Self-updates download the release's signed manifest, a new binary and its `.sig` file. The manifest's signature, the binary's signature and the binary's SHA-256 against the manifest are all verified against the embedded Ed25519 public key before any file rename operations occur. Any failure aborts the update, and a release with no manifest is refused for auto-update (see [Release Manifest](#release-manifest)).
 - **X-Forwarded-For is ignored unless the direct peer is a declared trusted proxy.** `ExtractIP` never reads proxy headers — it is `net.SplitHostPort(r.RemoteAddr)` and nothing else. Every trust decision instead calls `EffectiveClientIP(store, r)`, which returns `ExtractIP(r)` unless the *direct peer* matches an entry in `network.trusted_proxies`; only then does it walk `X-Forwarded-For` right-to-left past trusted hops (rightmost-untrusted). `trusted_proxies` is empty by default, so the default posture is identical to never trusting the header. A client-forged `X-Forwarded-For` never matters: either the peer is untrusted and the header is ignored, or a trusted proxy appended the real address to the right of the forgery. See "Client IP Resolution and Trusted Proxies" below.
 - **Loopback-gated endpoints always use the direct peer address.** `LoopbackOnly`, `IsLoopbackRequest`, first-time password setup, the setup wizard, and the four cookie auto-setup endpoints call `ExtractIP` directly and MUST continue to. "Arrived over this machine's loopback interface" is a physical-access signal, and no forwarded header may ever confer it.
 - **All goroutines must have panic recovery.** Every goroutine in the application — HTTP handlers, background workers, database callbacks, monitor callbacks — must include a `defer func() { if r := recover(); r != nil { ... } }()` block. A panic in one subsystem must never crash the application. This is enforced at multiple layers: RecoveryMiddleware for HTTP, `safeCallJobUpdate`/`safeCallJobsChange` for database subscribers, and inline defers for all other goroutines.
@@ -34,13 +34,40 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - Wraps the `http.ResponseWriter` in a `recoveryWriter` that tracks whether headers have already been sent to the client.
 - If a panic occurs and headers have not been sent, it writes a `500 Internal Server Error` JSON response: `{"error":"Internal server error"}`.
 - If headers have already been sent (partial response written), it cannot write a new status code — the connection is effectively broken, but the server survives.
-- Logs the panic value and the request path at Error level.
+- Logs the panic value, the method, the request path (never the query string), the peer, the request ID and the stack that panicked at Error level. The stack is one line of `function (file:line)` frames, innermost first and at most 32 of them, built from program counters rather than `debug.Stack`, which prints each frame's raw argument words — the one part of a trace that comes from the request rather than the code.
 
-**Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler. Placed later, a panic in a middleware it had skipped past would escape it: `net/http` recovers such a panic per-connection, so the process survives either way, but the client sees an aborted connection instead of the 500 JSON response and the stack is logged by the standard library rather than by Moombox. `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above).
+**Why it is first of these:** it catches panics raised anywhere downstream — every numbered middleware below it, plus the handler — with the request ID on its line. `RequestID` and `Drain` run ahead of it and sit outside that cover by design (see the note above), as does the WebSocket upgrade, which `interceptUpgrades` takes ahead of the router: `HandleUpgrade`'s own recover stands in there (see [Recovery Layers](#recovery-layers)). A panic in any of those, or in `interceptUpgrades`' own gates, reaches `outermostRecovery`, the server's outermost handler (`serverHandler`): it logs the panic as this middleware does, without a request ID (`RequestID`, inside it, need not have run), and answers the same 500 when nothing has reached the client, or hands the panic back to `net/http` as `http.ErrAbortHandler`, which drops the connection without a report of its own, when something has. Before it such a panic was logged nowhere: `net/http` recovers it per-connection and writes its report to the server's `ErrorLog`, which Moombox discards (see [HTTP Server Hardening](#http-server-hardening)), and the client saw an aborted connection.
 
 **Source:** `RecoveryMiddleware` in `internal/web/server.go`.
 
-### 2. CORSMiddleware
+### 2. IPGateMiddleware
+
+**Purpose:** Restricts HTTP access based on the `network_access` configuration level and the client's IP address.
+
+**Behavior by network_access level:**
+- `external` / `public`: All IPs allowed.
+- `lan`: Only loopback (127.0.0.1, ::1) and private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local unicast, and — on this mode only — the 100.64.0.0/10 shared address space Tailscale uses). External IPs receive `403 Forbidden`.
+- `localhost` (or unset default): Only loopback IPs. Everything else receives `403 Forbidden`.
+
+**IP extraction:** Uses `EffectiveClientIP(store, r)` — the direct peer address unless that peer is listed in `network.trusted_proxies`, in which case the rightmost-untrusted `X-Forwarded-For` hop. With the default empty `trusted_proxies` this is exactly `ExtractIP(r)`. The shared helper `ipAllowedByNetworkAccess` applies the policy for every branch, so the routed chain and the WebSocket upgrade path (which bypasses the router entirely — see `Server.Start` in `internal/web/server.go`) cannot drift apart.
+
+**Private IP detection:** The `isPrivateIP` function checks against pre-parsed CIDR blocks (parsed once at package init to avoid per-request overhead) and also treats `IsLinkLocalUnicast()` addresses (fe80::/10 IPv6, 169.254.0.0/16 IPv4) as private, since phones on LAN often connect via IPv6 link-local. The gate reads it through `isLocalIPFor`/`isPrivateIPFor`, which add 100.64.0.0/10 on `lan` — see [Private IP Detection](#private-ip-detection).
+
+**Additional route-level gating:** The `LoopbackOnly` middleware is applied to specific routes (`/get_pot`, `/invalidate_caches`, `/invalidate_it`) that must only be accessible from the local machine regardless of `network_access` config. Four more routes are gated INLINE in their handlers, in the first-run wizard's shape rather than through the middleware: `POST /api/cookies/auto-setup/start`, `/finish`, `/cancel` and `/abandon` (`requireLoopbackForBrowserSetup`, `internal/web/routes/cookies.go`). The first three open, finish and close a headed browser window on the host's screen, and under `network_access = "lan"` nothing else would stop a LAN device from putting one on a screen it cannot see. They answer **403** rather than the wizard's 401 because `app.js` reloads the page on any 401 outside `/api/auth/`, and the refusal names `POST /api/cookies/import` — which stays open to any authenticated client by owner ruling — as the remedy that works from anywhere. `/abandon` opens nothing and is gated for the opposite reason: it RELEASES. Where `setupBrowserGone` cannot answer (a failed job creation or assign, an unadopted Linux process group, an unreadable `/proc`, darwin, the fallback build) it clears the setup slot, so one unauthenticated LAN POST destroyed a sign-in the host operator was in the middle of. It is free to gate because the beacon only ever fires from a tab that completed a `/start`, which is itself loopback-only.
+
+**Source:** `IPGateMiddleware`, `ipAllowedByNetworkAccess`, `LoopbackOnly`, `ExtractIP`, `EffectiveClientIP`, `isPrivateIP`, `isLoopback` in `internal/web/middleware.go`.
+
+### 3. HostGateMiddleware
+
+**Purpose:** On `localhost` and `lan` (and the unset default), refuses a request whose `Host` names something the origin policy would not admit — the DNS-rebinding read path.
+
+**Why it exists:** CSRF and the WebSocket upgrade refuse a mutating request or an upgrade whose `Origin` is a DNS name on these modes, but a GET carries no Origin check. A page on `attacker.example` whose name was rebound to `127.0.0.1` (or a LAN address) could `fetch("/api/config")` same-origin, and the server — seeing a loopback or private peer, which skips authentication — answered it: notification webhook URLs, channels, job lists, logs and recordings. The browser cannot hide the `Host` it was told to use, so the `Host` (the effective one: `X-Forwarded-Host` from a trusted proxy, else `r.Host`) is held to the same rule `isAllowedOrigin` applies to an `Origin`: a loopback literal or `localhost` (plus, on `lan`, a private literal), or a LITERAL certificate SAN. That is exactly the set these modes already require for the dashboard's own POSTs and socket (see CORSMiddleware above), so no working access path is lost; an install reached by a DNS name needs a certificate naming it, or access by IP / `localhost`. A refusal is `403 {"error":"Forbidden: unrecognized host — …"}`.
+
+**On `external` / `public`:** those modes are meant to be reached by DNS names, so only the peers that skip authentication — loopback and private, by `EffectiveClientIP` — are held to a host rule (`externalHostRefused`): a DNS-name `Host` must be a certificate SAN — a wildcard SAN covering it counts, as it does for these modes' `Origin` check (`hostInSANs` with wildcards allowed), so a page loaded by a name the certificate covers can also read what it may already drive — `localhost`, or the host of `network.public_url`; an IP literal always passes, since a rebinding attack arrives under a DNS name. The certificate attestation on `Origin` never engages for a GET, so without this a page rebound to the server's LAN address read `/api/config` — notification webhook tokens included — from a LAN browser, the peer skipping the password. A public peer is not the rebinding victim and is not checked. The WebSocket upgrade, which bypasses the router's chain, applies the same rule (`interceptUpgrades`, `internal/web/server.go`). A request with no `Host` at all (HTTP/1.0) passes; a browser always sends one.
+
+**Source:** `HostGateMiddleware` in `internal/web/middleware.go`; `TestHostGateRefusesARebindingHost` and the chain-level `TestChainGatesRunBeforeCSRF`.
+
+### 4. CORSMiddleware
 
 **Purpose:** Validates `Origin` headers on cross-origin requests and sets appropriate CORS response headers based on the `network_access` configuration.
 
@@ -55,8 +82,8 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 - Origin validation uses `url.Parse` for proper URL parsing — no substring matching.
 
 **Origin allowance rules by network_access level:**
-- `localhost`: Only loopback IPs and `localhost`.
-- `lan`: Loopback + `localhost` + private IPs.
+- `localhost`: Only loopback IPs and `localhost` — on the port the dashboard is served on (the port rule below).
+- `lan`: Loopback + `localhost` + private IPs — on the port the dashboard is served on (the port rule below).
 - `external` / `public`: **Only an origin that names the request's own host.** The Origin (or Referer)
   authority is compared against `r.Host` — or against `X-Forwarded-Host` when the direct peer is listed
   in `network.trusted_proxies`, the same trust rule `EffectiveClientIP` applies. Hosts must match; ports
@@ -92,7 +119,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   name to the certificate's SANs; a certless or placeholder-only install is unaffected, because the
   self-signed placeholder never narrows this check. On `localhost`/`lan`, an install reached by a DNS
   name needs an operator certificate whose SANs name it, or access by IP / `localhost`; since the
-  upgrade shares the decision, that applies to the WebSocket as well as to POSTs.
+  upgrade shares the decision, that applies to the WebSocket as well as to POSTs — and, through HostGateMiddleware, to every request.
   **Not covered:** a rebinding attacker who also controls DNS for a name the certificate attests.
   **Residual:** a proxy listed in `network.trusted_proxies` that does not itself set or overwrite
   `X-Forwarded-Host` lets its peer choose the host the Origin is compared against. A browser cannot
@@ -102,9 +129,47 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   Configure the proxy to set the header; do not rely on its absence.
 - Default (unset): Same as `localhost`.
 
-**Source:** `CORSMiddleware` and `isAllowedOrigin` in `internal/web/middleware.go`.
+**The port rule on `localhost` / `lan` (and the unset default).** The IP class names a machine, not
+a program: until 2026-10 a loopback or private origin was trusted on ANY port, so a page any other
+service on a trusted address served — a dev server on `127.0.0.1:3000`, a router or NAS admin page
+on the LAN — passed CSRF, was echoed by CORS with credentials, and opened the WebSocket. The origin
+(or Referer) must now ALSO name a port this deployment answers on (`originPortServed`): the port the
+request was addressed to — the effective host's, so `X-Forwarded-Host` from a proxy listed in
+`network.trusted_proxies` still decides, exactly as on `external`/`public` — or the port of
+`network.public_url`. Both sides of the request-port comparison are defaulted from their own scheme
+and compared exactly, so a portless authority names its scheme's default port and no other: a router
+admin page at `http://192.168.1.1` (80) is not a dashboard Moombox serves over TLS on 443, and a page at
+`https://127.0.0.1` (443) is not one addressed on plain 80. `sameSiteOrigin`'s two-portless leniency
+(`samePort`) applies only when Moombox cannot know the browser's scheme (`browserSchemeUnknown`): the
+direct peer is listed in `network.trusted_proxies`, the hop to Moombox is plain HTTP, and
+`trust_forwarded_proto` is off. That is a listed TLS-terminating proxy on 443 forwarding the browser's
+portless `Host`, which keeps working. An unlisted proxy doing the same looks exactly like a browser
+that connected on plain 80 and is refused: list it, turn `trust_forwarded_proto` on (its
+`X-Forwarded-Proto: https` then names 443), or set `network.public_url`. Until the 2026-10 review the
+leniency applied to every request, so with the dashboard on 443 a page at `http://192.168.1.1` passed
+— the other-service case this rule exists to close. `public_url` is the operator's statement of scheme
+and port and is compared defaulted, with no leniency — `https://192.168.1.5` admits 443 and nothing
+else. Only the port is added: the origin's host is still judged by IP class, so `http://localhost:774` and
+`http://127.0.0.1:774` are interchangeable against a dashboard on `:774`. The certificate-SAN
+widening is held to the same port. The dashboard's own fetches and socket, the TUI (internal token,
+no Origin), the yt-dlp plugin (no Origin) and a reverse proxy that passes on the port the browser used
+— in the `Host` it forwards, or in `X-Forwarded-Host` when it is listed in `network.trusted_proxies`
+— are unaffected. Caddy and Traefik forward the browser's own `Host` by default. Refused since this
+rule, each until `network.public_url` names the address the browser types or the proxy is fixed: a
+proxy on a non-default port that does not pass that port on — one that rewrites `Host` to the
+upstream's and sets no `X-Forwarded-Host` or is not listed, and a listed one whose `X-Forwarded-Host`
+is portless, which is nginx's `$host` (`$http_host` or `$host:$server_port` carries the port) — and
+an unlisted TLS-terminating proxy on 443 forwarding a portless `Host` with `trust_forwarded_proto`
+off (above). A listed proxy's forwarded host is the authority the browser addressed; Moombox cannot
+recover a port the proxy dropped, and accepting any port there would reopen the rule for every other
+service on a trusted address. `HostGateMiddleware` compares the `Host` with itself, so the
+rule is a no-op there. Pinned by the D-S7 rows of `TestIsAllowedOrigin`,
+`TestCSRFHoldsALocalOriginToTheServedPort` (`internal/web/middleware_test.go`) and
+`TestWebSocketUpgradeHoldsALoopbackOriginToItsPort` (`internal/web/websocket_origin_test.go`).
 
-### 3. SecurityHeaders
+**Source:** `CORSMiddleware`, `isAllowedOrigin`, `originPortServed` and `browserSchemeUnknown` in `internal/web/middleware.go`.
+
+### 5. SecurityHeaders
 
 **Purpose:** Sets hardened HTTP response headers on every response to mitigate common web attacks.
 
@@ -117,37 +182,20 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `SecurityHeaders` in `internal/web/middleware.go`.
 
-### 4. CSRFMiddleware
+### 6. CSRFMiddleware
 
 **Purpose:** Prevents cross-site request forgery on mutating requests (POST, PUT, DELETE).
 
 **Behavior — step by step:**
-1. **Safe methods pass through.** GET, HEAD, and OPTIONS requests are never subject to CSRF validation.
-2. **Loopback-only routes are exempt.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that do not send Origin/Referer headers. These routes are already protected by `LoopbackOnly` middleware at the route level, so CSRF protection is redundant.
+1. **Safe methods pass through.** GET, HEAD, and OPTIONS requests are never subject to CSRF validation. The four GET routes whose handler acts rather than reads — `GET /api/formats/{videoId}` (a YouTube extraction with the operator's cookies), `GET /api/ffmpeg/check` and `GET /api/setup/status` (each spawns the configured ffmpeg through the same 10-second `CheckFFmpegCached`; the setup wizard and the dashboard's boot fetch the latter same-origin) and `GET /api/update/release-notes` (fetches from GitHub) — are wrapped in `RefuseCrossSite` instead, which answers `403 Forbidden: cross-site request` when the browser marks the request `Sec-Fetch-Site: cross-site`: an `<img>` on any page open in the operator's browser could otherwise fire them at a loopback dashboard and spend the format picker's shared limiter budget (the refusal runs ahead of that limiter). Only browsers set the header, and only on a request another site's page started, so the dashboard's own fetches (`same-origin`), a second local dashboard (`same-site` — ports do not split a site), a typed URL (`none`) and every non-browser client pass. Reads are deliberately left unwrapped: no CORS is granted, so another site cannot see the answer, and an embedded thumbnail or a linked recording stays usable.
+2. **Loopback-only routes are exempt — for a caller that names no origin.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that send neither Origin nor Referer, and are protected by `LoopbackOnly` at the route level. A request to them that DOES carry an Origin or Referer takes the normal check: a browser always sends Origin on a POST, no-cors included, and `LoopbackOnly` does not stop a page open in the operator's own browser from POSTing to `127.0.0.1` cross-site. Exempt by path alone, such a page could drop the PO-token caches at will (both invalidate routes are unthrottled) or spend the 10/min `/get_pot` budget the yt-dlp plugin shares.
 3. **Internal token bypass.** If the request includes an `X-Internal-Token` header whose value matches the server's startup-generated token (compared with `crypto/subtle.ConstantTimeCompare`), the request passes through. This is safe because browsers cannot set custom headers on cross-origin requests without a CORS preflight, which the server does not grant to untrusted origins.
-4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test, either spelling passes.
+4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should supply the internal token, or set `Origin` to the **same authority the request's own `Host` carries**. Under `external` / `public` the origin must name the request's own host and the same-host arm does not fold `localhost` to loopback, so a client dialling `127.0.0.1:774` sends `Host: 127.0.0.1:774` and must send `Origin: http://127.0.0.1:774` — `http://localhost:774` is refused there. On `localhost` / `lan`, where the check is an IP-class test plus the port rule, either spelling passes — on the port the request reached.
 5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`. A refusal logs exactly one `CSRF: origin refused` line naming the origin and the authority it was compared against, both clipped by `clipForLog` (`internal/web/middleware.go`) before they reach the dashboard's log panel.
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
 
-### 5. IPGateMiddleware
-
-**Purpose:** Restricts HTTP access based on the `network_access` configuration level and the client's IP address.
-
-**Behavior by network_access level:**
-- `external` / `public`: All IPs allowed.
-- `lan`: Only loopback (127.0.0.1, ::1) and private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local unicast). External IPs receive `403 Forbidden`.
-- `localhost` (or unset default): Only loopback IPs. Everything else receives `403 Forbidden`.
-
-**IP extraction:** Uses `EffectiveClientIP(store, r)` — the direct peer address unless that peer is listed in `network.trusted_proxies`, in which case the rightmost-untrusted `X-Forwarded-For` hop. With the default empty `trusted_proxies` this is exactly `ExtractIP(r)`. The shared helper `ipAllowedByNetworkAccess` applies the policy for every branch, so the routed chain and the WebSocket upgrade path (which bypasses the router entirely — see `Server.Start` in `internal/web/server.go`) cannot drift apart.
-
-**Private IP detection:** The `isPrivateIP` function checks against pre-parsed CIDR blocks (parsed once at package init to avoid per-request overhead) and also treats `IsLinkLocalUnicast()` addresses (fe80::/10 IPv6, 169.254.0.0/16 IPv4) as private, since phones on LAN often connect via IPv6 link-local.
-
-**Additional route-level gating:** The `LoopbackOnly` middleware is applied to specific routes (`/get_pot`, `/invalidate_caches`, `/invalidate_it`) that must only be accessible from the local machine regardless of `network_access` config. Four more routes are gated INLINE in their handlers, in the first-run wizard's shape rather than through the middleware: `POST /api/cookies/auto-setup/start`, `/finish`, `/cancel` and `/abandon` (`requireLoopbackForBrowserSetup`, `internal/web/routes/cookies.go`). The first three open, finish and close a headed browser window on the host's screen, and under `network_access = "lan"` nothing else would stop a LAN device from putting one on a screen it cannot see. They answer **403** rather than the wizard's 401 because `app.js` reloads the page on any 401 outside `/api/auth/`, and the refusal names `POST /api/cookies/import` — which stays open to any authenticated client by owner ruling — as the remedy that works from anywhere. `/abandon` opens nothing and is gated for the opposite reason: it RELEASES. Where `setupBrowserGone` cannot answer (a failed job creation or assign, an unadopted Linux process group, an unreadable `/proc`, darwin, the fallback build) it clears the setup slot, so one unauthenticated LAN POST destroyed a sign-in the host operator was in the middle of. It is free to gate because the beacon only ever fires from a tab that completed a `/start`, which is itself loopback-only.
-
-**Source:** `IPGateMiddleware`, `ipAllowedByNetworkAccess`, `LoopbackOnly`, `ExtractIP`, `EffectiveClientIP`, `isPrivateIP`, `isLoopback` in `internal/web/middleware.go`.
-
-### 6. MaxBodySize
+### 7. MaxBodySize
 
 **Purpose:** Limits the request body size on mutating requests (POST, PUT, DELETE) to prevent abuse and resource exhaustion.
 
@@ -159,7 +207,7 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
 
 **Source:** `MaxBodySize` in `internal/web/middleware.go`.
 
-### 7. CompressionMiddleware
+### 8. CompressionMiddleware
 
 **Purpose:** Applies gzip compression to responses larger than 1 KB to reduce bandwidth usage.
 
@@ -174,21 +222,22 @@ Two non-security middlewares run ahead of everything numbered below: `chimiddlew
   undecodable). Checked at the 1 KB threshold rather than up front, because a handler sets its
   `Content-Type` while it writes. See `skipCompression` in `internal/web/server.go`.
 - Reuses `*gzip.Writer` instances from a `sync.Pool` rather than allocating one per response.
+- Leaves the response uncommitted when the handler panics before anything reached the wire. Committing it on the way out — the default 200 plus whatever the handler had buffered — made RecoveryMiddleware, which sits outside it, find headers sent and skip its 500, so every browser (all of them offer gzip) got an empty or half-written success instead of the error.
 
 **Source:** `CompressionMiddleware` and `gzipResponseWriter` in `internal/web/server.go`.
 
-### 8. AuthMiddleware
+### 9. AuthMiddleware
 
 **Purpose:** Enforces authentication for external (non-local, non-LAN) clients when a password is configured. Applied last in the chain so that route-level middleware can execute first.
 
-**Note on registration:** AuthMiddleware is registered separately from the other middleware — it is added via `r.Use(webServer.AuthMiddleware)` in `main.go` after the server is constructed, because it requires the AuthService to be wired up first. Despite this, it is the last middleware in the chain.
+**Note on registration:** AuthMiddleware is registered separately from the other middleware — it is added via `s.r.Use(webServer.AuthMiddleware)` in `initServices` (`cmd/moombox/services.go`) after the server is constructed, because it requires the AuthService to be wired up first. Despite this, it is the last middleware in the chain.
 
 **Behavior — step by step:**
 1. Resolve the client IP via `EffectiveClientIP(s.configStore, r)`.
 2. If the IP is loopback or private: skip auth, serve the request.
 3. If `IsAuthRequired` returns false (network_access is neither `external` nor `public`, or no password hash is configured): skip auth.
-4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/minter_cache`, `/favicon.svg`, `/login.html`): skip auth.
-5. Check the `moombox_session` cookie. If valid (exists in the in-memory session map and not expired): serve the request.
+4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/minter_cache`, `/favicon.svg`, `/login.html`, and the two credential-free scripts the login page loads, `/boot-theme.js` and `/login.js`): skip auth.
+5. Check the `moombox_session` cookie. If valid (exists in the in-memory session map and not expired): serve the request — and when `ValidateSessionAndSlide` just renewed the session (see Session Management), re-issue the cookie with a fresh `Max-Age`.
 6. Fallback: check the `moombox_client` cookie. If the `ClientTokenCheck` callback validates the persistent client token: issue a fresh session cookie and serve the request.
 7. If unauthenticated:
    - API requests (`/api/*`): return `401 {"error":"Authentication required"}`.
@@ -207,7 +256,8 @@ Moombox uses Origin/Referer header validation rather than CSRF tokens. This deci
 3. The only clients that legitimately omit `Origin` are same-process clients (TUI), which authenticate via the internal token.
 
 That equivalence now holds on every policy. On `localhost` and `lan`, `isAllowedOrigin`
-(`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins.
+(`internal/web/middleware.go`) admits only loopback, `localhost` and — for `lan` — private-IP origins,
+and only on the port the request was addressed to or `network.public_url`'s (the port rule, § 4. CORSMiddleware).
 On `external` / `public` there is no IP class left to test (every address is admissible), so the check
 becomes `sameSiteOrigin`: the origin must name the host the request was addressed to. Before the
 2026-09-15 sweep that arm returned true for **every** parseable origin and `CSRFMiddleware` enforced
@@ -241,7 +291,7 @@ Three categories of requests are exempt from CSRF validation:
 
 **Safe HTTP methods:** GET, HEAD, and OPTIONS never modify state and are always exempt.
 
-**Loopback-only routes:** `/get_pot`, `/invalidate_caches`, `/invalidate_it` are exempt because they are called by yt-dlp Python scripts that cannot send browser headers. These routes enforce `LoopbackOnly` at the route level, making CSRF protection redundant — an attacker cannot reach them from outside the local machine.
+**Loopback-only routes:** `/get_pot`, `/invalidate_caches`, `/invalidate_it` are exempt when the request carries no Origin and no Referer, because they are called by yt-dlp Python scripts that send no browser headers. These routes enforce `LoopbackOnly` at the route level, so nothing outside the local machine reaches them; a request that names an origin — a browser page, which can reach loopback — is checked like any other (rule 2 above).
 
 **Internal token bypass:** The TUI sends `X-Internal-Token` on every request via a custom `net/http.RoundTripper`. The CSRF middleware allows the request if the token matches (constant-time comparison). This is safe because browsers cannot set custom headers on cross-origin requests without a successful CORS preflight, and the server never grants preflight to untrusted origins.
 
@@ -251,7 +301,7 @@ A mutating request that reaches the Origin check with neither an `Origin` nor a 
 
 There is no localhost/LAN exemption. An earlier version allowed missing-Origin requests from local and LAN clients, which let any local process or same-origin browser tab call `/api/restart`, `/api/auth/set-password`, or `/api/jobs/{id}/open-folder` with no proof of browser context. That bypass was removed (audit `reports/web.md` C-1/C-5/C-8) and **must not be reintroduced.**
 
-The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three path-exempt POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level). Non-browser local CLIs must therefore send the internal token, or set `Origin` to the **same authority the request's own `Host` carries** — the rule step 4 above states in full (under `localhost` / `lan` the check is an IP-class test, so either spelling of loopback passes; under `external` / `public` the origin must name the request's own host exactly).
+The only ways a mutating request reaches a handler without an Origin/Referer header are the two exemptions listed above, both of which short-circuit before the check: a matching `X-Internal-Token` (same-process TUI), or one of the three POT endpoints (`/get_pot`, `/invalidate_caches`, `/invalidate_it`, each `LoopbackOnly` at the route level) called with no Origin and no Referer. Non-browser local CLIs must therefore send the internal token, or set `Origin` to the **same authority the request's own `Host` carries** — the rule step 4 above states in full (under `localhost` / `lan` the check is an IP-class test plus the port rule, so either spelling of loopback passes on the port the request reached; under `external` / `public` the origin must name the request's own host exactly).
 
 ---
 
@@ -275,7 +325,7 @@ The only ways a mutating request reaches a handler without an Origin/Referer hea
 
 **Storage:** In-memory `map[string]sessionEntry` protected by `sync.RWMutex`. Sessions are NOT persisted to the database — they are lost on restart, requiring re-authentication. This is intentional: session persistence would add complexity without meaningful benefit, since persistent client tokens (below) handle the "remember me" use case.
 
-**TTL:** 24 hours from creation. There is no sliding window — the session expires exactly 24 hours after it was created regardless of activity.
+**TTL:** 24 hours (`sessionTTL`), sliding. `ValidateSessionAndSlide` — the check the middleware runs on every request — resets the session's `createdAt` once it is more than half elapsed (`sessionSlideThreshold`, 12 hours), and the middleware then re-issues the cookie with a fresh `Max-Age` so the browser does not drop it before the server would. An active session therefore never expires; an idle one expires 24 hours after its last renewal. The plain `ValidateSession` (no renewal) remains for the `/api/auth/*` routes, which only need the answer.
 
 **Cleanup:** A background goroutine runs every hour (`sessionCleanup = 1 * time.Hour`) and evicts all sessions whose creation time is older than 24 hours.
 
@@ -284,10 +334,10 @@ The only ways a mutating request reaches a handler without an Origin/Referer hea
 - Path: `/`
 - MaxAge: 86400 (24 hours)
 - HttpOnly: true (inaccessible to JavaScript)
-- Secure: true only if TLS is active (`r.TLS != nil`)
+- Secure: true when the request is secure (`IsRequestSecure`): TLS is active, or `trust_forwarded_proto` is on and the request carries `X-Forwarded-Proto: https`
 - SameSite: Lax
 
-**Source:** `CreateSession`, `ValidateSession`, `SetSessionCookie`, `evictExpired` in `internal/web/auth.go`.
+**Source:** `CreateSession`, `ValidateSession`, `ValidateSessionAndSlide`, `SetSessionCookie`, `evictExpired` in `internal/web/auth.go`; the slide-and-reissue call site is `AuthMiddleware` in `internal/web/server.go`.
 
 ### Client Token Persistence
 
@@ -309,6 +359,8 @@ Client tokens provide a "remember this browser" mechanism for remote clients, su
 
 **Auth flow integration:** When the `moombox_session` cookie is missing or invalid, the AuthMiddleware falls back to checking the `moombox_client` cookie. If the client token is valid, a fresh session is issued (new `moombox_session` cookie set on the response) and the request proceeds.
 
+**Expiry is enforced on the server.** `network.client_token_ttl_days` sets the cookie's `Max-Age`, but that is the client's to ignore, so the same TTL is checked against the row's `created_at` in `clientTokenFor` (`cmd/moombox/ws_wiring.go`), the one check the HTTP fallback and the WebSocket upgrade share. An expired token is refused and its row deleted; an unreadable `created_at` counts as expired.
+
 **Source:** `GenerateToken`, `TokenPrefix`, `HashToken`, `VerifyToken` in `internal/web/auth.go`. Client token database storage in `internal/database/`.
 
 ### Auth Flow Summary
@@ -318,7 +370,7 @@ For every incoming request:
 1. Resolve the client IP with `EffectiveClientIP` — `RemoteAddr` unless the peer is a declared trusted proxy.
 2. If IP is loopback (127.0.0.1, ::1) or private (LAN ranges): **skip auth entirely**.
 3. If `network_access` is neither `external` nor `public`, or no password hash is configured: **skip auth**.
-4. If the path is a public endpoint (login, status, ping, favicon): **skip auth**.
+4. If the path is a public endpoint (login, status, ping, minter cache, favicon, the login page and its two scripts): **skip auth**.
 5. Check `moombox_session` cookie → validate against in-memory session map → if valid: **authenticated**.
 6. Check `moombox_client` cookie → validate via `ClientTokenCheck` callback → if valid: issue fresh session, **authenticated**.
 7. Otherwise: **unauthenticated**. API paths get `401 JSON`. Browser paths get `login.html` served inline.
@@ -334,12 +386,12 @@ Moombox does not have role-based access control or user accounts. Authorization 
 | Level | Who can connect | Auth required? | Settable from a UI? |
 |-------|----------------|----------------|---------------------|
 | `localhost` (default) | Loopback only (127.0.0.1, ::1) | Never | Yes |
-| `lan` | Loopback + private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local) | Never | Yes |
+| `lan` | Loopback + private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, link-local, and 100.64.0.0/10 on this mode only) | Never | Yes |
 | `external` | Any IP | Yes, if password configured | Yes (password required first) |
 | `public` | Any IP — identical to `external` | Yes, if password configured | **No — config file only** |
 
 **Key behaviors:**
-- Loopback and private IPs are always trusted regardless of the `network_access` setting. Even at `external` level, a request from 192.168.1.100 skips authentication.
+- Loopback and private IPs are always trusted regardless of the `network_access` setting. Even at `external` level, a request from 192.168.1.100 skips authentication. The one mode-dependent range is 100.64.0.0/10: private on `lan`, public — so asked for the password — on `external`/`public`.
 - Authentication is enforced when `network_access` is `external` **or** `public` AND a `password_hash` is configured — `IsAuthRequired` in `internal/web/auth.go` treats the two identically, as does every other runtime consumer (the IP gate, the bind-address switch, the plain-HTTP warning). `public` is a label for "this deployment sits behind an authenticating reverse proxy", not a distinct policy.
 - The IP gate (middleware layer 5) rejects connections from disallowed IP ranges before they reach the auth layer. This means that at `localhost` level, a request from an external IP never reaches the auth check — it is rejected at the network level.
 
@@ -364,6 +416,8 @@ The `isPrivateIP` function uses pre-parsed CIDR blocks (allocated once at packag
 - `192.168.0.0/16` — Class C private
 - `fc00::/7` — IPv6 unique local addresses
 - `IsLinkLocalUnicast()` — fe80::/10 (IPv6) and 169.254.0.0/16 (IPv4) link-local addresses, included because mobile devices on LAN frequently connect via IPv6 link-local
+
+**100.64.0.0/10 on `lan`.** The RFC 6598 shared address space — the carrier-grade-NAT range Tailscale numbers its nodes from — is private under `lan` and under no other mode. Every decision that classes a peer or an origin reads the mode-aware form, `isPrivateIPFor(ip, networkAccess)` (and `isLocalIPFor`, loopback or that): the IP gate (`ipAllowedByNetworkAccess`), the `lan` arm of `isAllowedOrigin` (so the Origin check and `HostGateMiddleware`), and the auth waivers — `AuthMiddleware`, `IsLocalOrPrivateRequest` (the set-password / remove-password gates) and the WebSocket upgrade (`WebSocketHub.LocalPeer`, wired by `NewServer`). A tailnet client therefore reaches a `lan` dashboard exactly as a LAN client does, and the dashboard can be opened at its `100.x.y.z` address. Only `lan`, because the same range is what some ISPs hand their customers: on a host behind such an ISP's NAT, its other customers can arrive from it. Under `lan` that is the boundary the operator chose — the mode trusts whatever network the host sits on — but under `external`/`public` it would waive the password for strangers, so there a 100.64.0.0/10 peer is a public one: it is asked for the password, and `externalHostRefused` does not engage for it. Tailscale's IPv6 addresses (`fd7a:115c:a1e0::/48`) are inside `fc00::/7` and were private on every mode already. Pinned by `internal/web/shared_address_space_test.go`.
 
 Loopback detection uses Go's `net.IP.IsLoopback()`, which covers both 127.0.0.0/8 (IPv4) and ::1 (IPv6), plus the string `"localhost"` as a fallback.
 
@@ -409,19 +463,20 @@ One string breaks that guarantee on its own: `isLoopback` deliberately resolves 
 
 ### Where it is used
 
-Every trust decision that is a function of the CLIENT IP routes through `EffectiveClientIP`. One decision is not: the same-host Origin comparison needs the DIRECT peer, not the resolved client, so `effectiveRequestHost` applies the `trusted_proxies` test itself and reads `X-Forwarded-Host` rather than going through `EffectiveClientIP`. It is the setting's second consumer.
+Every trust decision that is a function of the CLIENT IP routes through `EffectiveClientIP`. One decision is not: the Origin comparison needs the DIRECT peer, not the resolved client, so `effectiveRequestHost` applies the `trusted_proxies` test itself and reads `X-Forwarded-Host` rather than going through `EffectiveClientIP`, and `browserSchemeUnknown` applies the same direct-peer test to decide whether a portless `Host` may stand for either default port (the port rule, § 4. CORSMiddleware). They are the setting's second consumer.
 
 | Decision point | Source |
 |----------------|--------|
 | `network_access` IP gate (all branches) | `ipAllowedByNetworkAccess`, `internal/web/middleware.go` |
-| WebSocket upgrade gate (bypasses the router chain) | `Server.Start`, `internal/web/server.go` |
+| WebSocket upgrade gate (bypasses the router chain) | `interceptUpgrades` (installed by `Server.Start`), `internal/web/server.go` |
 | WebSocket auth-skip check | `WebSocketHub.HandleUpgrade` via `hub.ClientIP`, `internal/web/websocket.go` |
 | Auth skip for loopback/private clients | `Server.AuthMiddleware`, `internal/web/server.go` |
 | Auth-endpoint local check | `IsLocalOrPrivateRequest`, `internal/web/middleware.go` |
 | Rate limiters — API, POT, login, password | `RateLimiter.ClientIP` wired in `initServices`, `cmd/moombox/services.go` |
 | Rate limiter — import | `ImportRoutes`, `internal/web/routes/import_routes.go` |
 | Login/password audit log lines, client-token labels and `LastIP` | `internal/web/routes/auth.go`, `cmd/moombox/ws_wiring.go` |
-| Same-host Origin comparison on `external` / `public` — reads `X-Forwarded-Host`, deliberately NOT via `EffectiveClientIP` | `effectiveRequestHost`, `internal/web/middleware.go` |
+| Origin comparison — the host on `external` / `public`, the port on `localhost` / `lan` — reads `X-Forwarded-Host`, deliberately NOT via `EffectiveClientIP` | `effectiveRequestHost`, `internal/web/middleware.go` |
+| Port rule's two-portless leniency on `localhost` / `lan` — direct peer only | `browserSchemeUnknown`, `internal/web/middleware.go` |
 
 Keying rate limiters by the effective IP matters as much as the gate: without it, a reverse proxy collapses every remote client into one bucket, and a single attacker could exhaust the 5/min login budget for everyone behind the proxy.
 
@@ -503,7 +558,7 @@ For completeness: `internal/web/middleware.go`'s private-range list covers only 
 
 Sliding window per-IP rate limiting, implemented entirely in-memory. Each IP address has an array of request timestamps. When a new request arrives, expired timestamps (outside the window) are filtered out. If the remaining count meets or exceeds the limit, the request is rejected.
 
-The bucket key is the **effective** client IP. Each limiter carries a `ClientIP func(*http.Request) string` hook wired to `EffectiveClientIP`; when it is nil the limiter falls back to the raw peer address. Without the hook, a reverse proxy would collapse every remote client into a single bucket and one attacker could exhaust the login budget for everyone behind it.
+The bucket key is the **effective** client IP. Each limiter carries a `ClientIP func(*http.Request) string` hook wired to `EffectiveClientIP`; when it is nil the limiter falls back to the raw peer address. Without the hook, a reverse proxy would collapse every remote client into a single bucket and one attacker could exhaust the login budget for everyone behind it. A **global IPv6** address is then masked to its `/64` (`bucketKey`, `internal/web/rate_limiter.go`): a subscriber is handed a whole `/64`, so keyed by the full address an attacker could rotate through it for a fresh bucket per request (five scrypt-verified login guesses per address) and churn past the entry cap. LAN IPv6 (ULA, link-local, loopback) and IPv4 stay exact, so devices on one home subnet never share a bucket.
 
 ### Memory Bounds
 
@@ -528,11 +583,18 @@ All rate limiters use a 60-second sliding window. The limit constants live in `c
 | Password set/remove | 3 | 60s | Prevents rapid password changes |
 | POT generation (`/get_pot`) | 10 | 60s | Limits BotGuard work (sidecar IPC + Google WAA round-trip on cache miss) |
 | Import (`/api/import`) | 5 | 60s | Limits resource-intensive archive imports |
-| API general | 20 | 60s | Broad rate limit on API endpoints |
+| API general | 20 | 60s | One shared limiter on the routes that cost something per call: `POST /api/jobs`, the FFmpeg check/install POSTs, the cookie "heavy" group, `GET /api/formats/{id}` (a YouTube extraction), `POST /api/resolve-channel` (a youtube.com fetch with retries), the same fetch when `POST /api/config/channels` or `PUT /api/config` carries a channel URL or `@handle` to resolve, and `POST /api/jobs/{id}/trims` (an FFmpeg process). Not every API route — cheap reads stay unlimited |
 
 **Source:** `internal/web/rate_limiter.go`, limit constants in `cmd/moombox/main.go`, instantiation and `ClientIP` wiring in `cmd/moombox/services.go` and `internal/web/routes/import_routes.go`.
 
 ---
+
+## Paths Moombox Executes
+
+Two configurable paths name a program Moombox runs: `paths.ffmpeg_path` (`-version` on `POST /api/ffmpeg/check`, then every mux) and `cookies.browser_path` (`--version` on `POST /api/auto-cookies/validate-browser-path`, then every browser refresh). Any client the IP gate admits can set them, and one of those clients can also PLANT bytes on the host: `POST /api/import` writes an upload under the output directory as `<title> [<id>].<ext>`, and Windows' `CreateProcess` runs a PE whatever its extension. So:
+
+- **FFmpeg:** the executable must be named `ffmpeg` or `ffmpeg.exe` (case-insensitive; `ffmpegPathError`, `internal/web/routes/config_routes.go`). Checked before the check route spawns anything, and on `PUT /api/config` / the setup wizard whenever the value CHANGES — the full-form save sends the stored path back every time, and a path stored before the rule must not make unrelated saves fail. An import can never carry that name.
+- **Browser:** on Windows the path must end in `.exe` (`ValidateBrowserPathQuick`, `internal/cookies/browser_validate.go`); on Unix it must have an executable bit, which an imported file never gets. A basename allowlist was rejected: browser executable names vary too much across distributions and packagings.
 
 ## Browser Profile Directory Guard
 
@@ -553,7 +615,7 @@ default-src 'self'
 script-src 'self' https://cdn.jsdelivr.net
 style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net
 font-src 'self' https://cdn.jsdelivr.net
-img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com
+img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net
 connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:
 frame-src https://www.youtube-nocookie.com https://player.twitch.tv
 object-src 'none'
@@ -566,7 +628,7 @@ form-action 'self'
 - **`script-src` has no `'unsafe-inline'`** — the dashboard and the login page load every script from a file (`/app.js`, `/boot-theme.js`, `/login.js`, and Shoelace's autoloader from the CDN), so the policy needs neither a nonce nor a hash. It was carried for five inline blocks that have since moved to files; every `innerHTML` sink is escaped, and this is the second line of defence if one ever is not. `/boot-theme.js` and `/login.js` are on `AuthMiddleware`'s unauthenticated allow-list (`internal/web/server.go`) because the login page has to be able to load them.
 - **`style-src 'unsafe-inline'`** — Required for Shoelace's shadow DOM styling and dynamically generated styles.
 - **`https://cdn.jsdelivr.net`** — Shoelace v2.16 is loaded from jsDelivr CDN (scripts, styles, fonts, icons).
-- **`img-src` domains** — YouTube thumbnails (`i.ytimg.com`, `yt3.ggpht.com`), Twitch images (`*.jtvnw.net`, `*.ttvnw.net`), Shoelace icons (`cdn.jsdelivr.net`), and Google fonts icon assets (`fonts.gstatic.com`). `cdn.betterttv.net`, `cdn.7tv.app`, and `cdn.frankerfacez.com` are admitted because the chat replay renders BTTV/7TV/FFZ emotes as `<img>` tags sourced from those CDNs. The `data:` scheme is needed for inline SVG and base64-encoded images.
+- **`img-src` domains** — YouTube thumbnails (`i.ytimg.com`, `yt3.ggpht.com`), Twitch images (`*.jtvnw.net`, `*.ttvnw.net`), and Shoelace icons (`cdn.jsdelivr.net`). `cdn.betterttv.net`, `cdn.7tv.app`, and `cdn.frankerfacez.com` are admitted because the chat replay renders BTTV/7TV/FFZ emotes as `<img>` tags sourced from those CDNs. The `data:` scheme is needed for inline SVG and base64-encoded images.
 - **`connect-src ws: wss:`** — WebSocket connections for real-time job updates. The schemes are unrestricted because the server may be accessed on any host/port combination.
 - **`frame-src`** — Allows embedding YouTube (privacy-enhanced mode) and Twitch player iframes for stream preview.
 - **`object-src 'none'`** — Blocks all plugin content (Flash, Java, etc.).
@@ -601,7 +663,7 @@ Both protocols share the single configured port. A protocol splitter (`internal/
 - `https_enabled = true`: plain `http://` requests redirect to `https://`.
 - `https_enabled = false`: `https://` requests redirect to `http://` — only when a certificate pair exists on disk (typically left from an earlier HTTPS run) so the TLS handshake can be terminated; the cert is load-only here, never generated. Without one, TLS connections close as before.
 
-`307` (temporary, method-preserving) is deliberate: browsers cache permanent redirects, and toggling `https_enabled` later would otherwise trap clients in a cached cross-scheme loop.
+`307` (temporary, method-preserving) is deliberate: browsers cache permanent redirects, and toggling `https_enabled` later would otherwise trap clients in a cached cross-scheme loop. The https→http redirect also carries `Strict-Transport-Security: max-age=0`: with HTTPS on, every response pins the host for a year, and a browser that trusted the certificate would otherwise keep upgrading `http://` to `https://` after HTTPS is turned off, looping against this very redirect. Served over TLS, the header clears the pin before the browser follows.
 
 ### Binding
 
@@ -613,7 +675,7 @@ Both are IPv4 literals, and in Go `net.Listen("tcp", "0.0.0.0:774")` creates an 
 
 ### Port
 
-Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially, reusing the same host, so the fallback is IPv4-only too. The first available port is used, and the actual port is logged.
+Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially, reusing the same host, so the fallback is IPv4-only too. The first available port is used, and the actual port is logged. It is this run's port only: the config keeps the configured one, and the TUI and the yt-dlp plugin writer read the bound port from the server (`currentWebPort` in `cmd/moombox/routes_wiring.go`).
 
 ### Security Warning
 
@@ -637,34 +699,72 @@ Moombox self-updates are cryptographically signed to prevent binary tampering. T
 
 - **Public key** (embedded in binary): `71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb` (32 bytes, hex-encoded).
 - **Private key**: Stored as a GitHub Actions secret (`SIGNING_KEY`). Never embedded in the binary or committed to the repository.
-- **Signing tool**: `cmd/sign/main.go` — a standalone CLI tool used only in CI to sign the release binary.
+- **Signing tool**: `cmd/sign/main.go` — a standalone CLI tool used only in CI to sign the release binaries and to write and sign the release manifest (`-manifest`).
 
 ### Signature Format
 
 - Signature file extension: `.sig`
 - Contents: Raw 64-byte Ed25519 signature (not PEM, not base64 — raw bytes).
-- Signed data: The entire binary file contents.
+- Signed data: The entire file contents — each binary, and the release manifest (`moombox-manifest.json` → `moombox-manifest.json.sig`).
+
+### Release Manifest
+
+A binary's signature says only that the key signed those bytes. A validly signed OLDER binary, or another platform's, therefore verified against its own `.sig` as well as the right one did, and anyone able to answer the update check short of holding the key — a compromised GitHub account, a tampered response — could serve either under a newer tag. The manifest binds bytes to a release.
+
+`release.yml` writes one per release (`go run ./cmd/sign -manifest -version "$VERSION" -tag "$RELEASE_TAG"`, after the three binaries are signed) and signs it with the same key, with the same self-check against the embedded public key; a dry run writes and signs one too, for its `-dryrun` version and draft tag. It is JSON (`Manifest`, `internal/updater/manifest.go`):
+
+```json
+{
+  "version": "2.9.0",
+  "tag": "v2.9.0",
+  "platforms": {
+    "linux/amd64":   { "asset": "moombox-linux-amd64", "sha256": "<64 hex>" },
+    "linux/arm64":   { "asset": "moombox-linux-arm64", "sha256": "<64 hex>" },
+    "windows/amd64": { "asset": "Moombox.exe",         "sha256": "<64 hex>" }
+  }
+}
+```
+
+`BuildManifest` hashes every platform `releaseAssetMap` lists and fails when one is missing; `cmd/sign` reads what it wrote back through `ParseManifest` — the parser installs run — before signing. The per-binary `.sig` assets are still published: installs that predate the manifest verify only them.
+
+`ApplyUpdate` (`verifiedManifestEntry`, then the hash check after the binary's signature) refuses unless:
+
+1. the release publishes `moombox-manifest.json` and its `.sig` — a release without them is still OFFERED (the check reports it and its notes) but its apply is refused. A release at or past `FirstManifestVersion` (below) — every release a binary carrying this check is offered — is published with the signed manifest, so the refusal is a failure naming the missing asset and advises no manual install: installed by hand, that binary would fail the running-binary verify below for the same missing assets, and the advice would send the operator round the binding check. Only a release before it, which never had a manifest, is refused with an error telling the operator to update manually from the release page;
+2. the manifest (at most 64 KiB, checked before it is read) carries a valid signature by the embedded key;
+3. its `version` and `tag` are exactly the release being applied;
+4. that version is newer than the running one (`CompareVersions`, the ordering the check uses);
+5. it has an entry for the running `GOOS/GOARCH`, naming the asset the updater downloads there;
+6. the downloaded binary's own signature verifies, AND its SHA-256 equals that entry's.
+
+The manifest is fetched first, so a release it refuses costs no binary download. Pinned by `TestApplyUpdateBindsTheBinaryToTheSignedManifest` (`internal/updater/manifest_test.go`), which serves real signatures for each refusal: no manifest, a stranger's key, an older release's manifest and binary replayed, this tag under another version, another tag, not newer, no entry, another platform's asset name, another platform's validly signed binary, an oversized manifest. `TestApplyUpdateRefusesAManifestReleaseWithoutItsManifest` pins item 1's two refusals, and `TestCheckForUpdateWarnsByTheReleaseItOffers` the check's matching Warn lines. `TestReleaseWorkflowPublishesTheSignedManifest` (`cmd/sign/main_test.go`) ties `release.yml`'s upload list and dry-run draft check to the asset names.
+
+**The running binary.** `VerifyCurrentSignature` (`POST /api/update/verify`, `R S`) holds the running binary to the release tagged with the running version the same way: its own `.sig`, then the manifest's signature, its `version`/`tag` naming exactly the running release, the running platform's entry naming the asset the updater downloads there, and that entry's SHA-256 equalling the running binary's (`verifyRunningAgainstManifest`, `internal/updater/manifest.go`; there is no newer-than check, since the release checked is the running one).
+
+The manifest is the binding check from `FirstManifestVersion` on (`internal/updater/manifest.go`): the first release cut by the manifest pipeline. v2.8.10 was the last release cut before it, so the constant names the next release, 2.8.11, and is kept in step with the release process — set to the release's number in its bump commit if it is cut under another. `TestFirstManifestVersionKeepsStepWithTheReleases` checks it against the version `cmd/moombox/main.go` declares: the next patch while that is still 2.8.10, never past it afterwards. Every release at or past it is published with the manifest, so for a running version at or past it a release that publishes no `moombox-manifest.json`, or publishes it without its `.sig`, **fails** the verify — `422` from the route, red in both UIs, the reason naming the missing asset — since deleting those assets would otherwise be all it took to pass another release's validly signed binary. The comparison is on MAJOR.MINOR.PATCH, so a pre-release of it (`2.8.11-rc.1`, cut by the same pipeline) is held to the manifest too, and a version that does not parse is held to it. A release before it never had a manifest and is verified by its `.sig` alone, and the answer says so: the route returns `manifest: false` beside `verified: true`, and both UIs report a signature-only check in the warning colour rather than the full check's green. Pinned by `TestVerifyCurrentSignatureChecksTheReleaseManifest`, `TestVerifyCurrentSignatureHoldsAManifestReleaseToItsManifest` and `TestReleaseCarriesManifest` (`internal/updater/manifest_test.go`).
+
+**Not covered:** whoever holds the signing key can sign any manifest. A release before `FirstManifestVersion` has no manifest to hold its binary to, so the verify action can only report a signature-only check there, and a binary of another release that the key signed still passes it (an apply of a release without a manifest is refused outright). From `FirstManifestVersion` on, a release whose manifest assets were removed fails the verify rather than reading as one that never had them. A `FirstManifestVersion` left above the release that first ships the manifest would reopen that gap for the releases between; the step test above is what stops it.
 
 ### Verification Flow
 
-1. Read the binary file into memory.
-2. Read the `.sig` file (must be exactly 64 bytes).
-3. Decode the embedded public key from hex.
+1. Download the manifest and its `.sig`; verify the signature (below) and the manifest's claims (above).
+2. Download the binary and its `.sig`.
+3. Read the binary file into memory and the `.sig` file (must be exactly 64 bytes); decode the embedded public key from hex.
 4. Call `ed25519.Verify(publicKey, binaryContents, signature)`.
-5. If verification fails: abort the update, log the error, do not modify any files.
-6. If verification succeeds: proceed with the binary swap.
+5. Hash the binary with SHA-256 and compare with the manifest's entry for this platform.
+6. If any step fails: abort the update, delete the downloads, do not modify the running binary.
+7. If all succeed: proceed with the binary swap.
 
 ### Binary Swap
 
-The update process uses a three-step rename to handle Windows's restriction on overwriting a running executable:
+The update process keeps the running binary at `<path>.old` and places the new one at `<path>`:
 
 1. Write the new binary to `<path>.new`.
-2. Rename the current binary from `<path>` to `<path>.old`.
-3. Rename `<path>.new` to `<path>`.
+2. Keep the current binary at `<path>.old` — a hard link on Linux; on Windows, which cannot overwrite a running executable, a rename of `<path>` itself.
+3. Rename `<path>.new` to `<path>`. On Linux this replaces `<path>` in one step, so the path is never empty; on Windows it fills the name step 2 freed.
 
-If the rename fails at step 3, the `.old` file can be renamed back to restore the original binary. After a successful swap, the application exits with code 42, and the launcher/supervisor respawns using the new binary.
+If the rename fails at step 3, the running binary is still at `<path>` on Linux (the link is removed); on Windows the `.old` file is renamed back to restore the original binary. After a successful swap, the application exits with code 42, and the launcher/supervisor respawns using the new binary.
 
-**Source:** `VerifySignature`, `SignBinary` in `internal/updater/signing.go`. Binary swap logic in `internal/updater/`.
+**Source:** `VerifySignature`, `SignBinary` in `internal/updater/signing.go`; `Manifest`, `BuildManifest`, `ParseManifest` and `verifiedManifestEntry` in `internal/updater/manifest.go`. Binary swap logic in `internal/updater/`.
 
 ---
 
@@ -684,7 +784,7 @@ At server startup, 16 random bytes are generated from `crypto/rand` and hex-enco
 
 **Validation:** The CSRF middleware checks for this header on every mutating request. If present, it compares the value against the stored token using `crypto/subtle.ConstantTimeCompare`. A match bypasses all other CSRF checks.
 
-**WebSocket:** The same `X-Internal-Token` header is sent during WebSocket upgrade requests, allowing the TUI to establish WebSocket connections without browser-style Origin headers.
+**WebSocket:** Not involved. The TUI never opens a WebSocket — it receives its live updates over in-process Go channels fed by the database subscriptions (see user-interfaces.md) — and the upgrade path in `internal/web/websocket.go` does not consult the internal token; an upgrade with no `Origin` header is simply accepted by the origin check.
 
 **Auth bypass:** Because the TUI connects from loopback (127.0.0.1), it also skips the AuthMiddleware. The internal token is specifically for CSRF bypass, not authentication.
 
@@ -704,7 +804,7 @@ Panic recovery is a hard requirement across the entire application. A panic in o
 
 ### Recovery Layers
 
-**HTTP handlers:** `RecoveryMiddleware` (middleware layer 1) catches panics in any HTTP handler or downstream middleware. Returns 500 JSON if headers have not been sent.
+**HTTP handlers:** `RecoveryMiddleware` (middleware layer 1) catches panics in any HTTP handler or downstream middleware. Returns 500 JSON if headers have not been sent. The WebSocket upgrade is the exception: `interceptUpgrades` (`Server.Start`'s handler) takes it ahead of the router, so `HandleUpgrade` carries its own recover, which logs the panic with the stack that raised it — the same one-line `panicStack` RecoveryMiddleware logs — removes a client it had already registered, and answers 500 when the upgrade had not yet been accepted. A panic in `interceptUpgrades`' own gates, or in `RequestID` or `Drain`, is caught by `outermostRecovery` (`internal/web/server.go`), the handler `Server.Start` hands `http.Server` (`serverHandler`): it logs the panic with the same one-line `panicStack` (no request ID — `RequestID` is inside it) and answers 500 when nothing was written, or re-panics `http.ErrAbortHandler` when something was, so `net/http` drops the connection without a report of its own. A handler's own deliberate `http.ErrAbortHandler` passes through it unlogged.
 
 **Database subscriber callbacks:** The database package wraps all subscriber notifications in `safeCallJobUpdate` and `safeCallJobsChange`. If a subscriber callback panics, the panic is logged and the remaining subscribers still receive their notifications. The database update pipeline continues uninterrupted.
 
@@ -740,7 +840,7 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **ReadHeaderTimeout:** 30 seconds. Protects against slowloris attacks (where an attacker sends headers very slowly to tie up connections). The deadline is cleared after headers are read so that long-running requests (WebSocket, video streaming) are not affected.
 - **WriteTimeout:** 0 (disabled). Required for WebSocket connections and video streaming endpoints, which can run indefinitely.
 - **IdleTimeout:** 120 seconds. Closes idle keep-alive connections after 2 minutes.
-- **ErrorLog:** Redirected to `io.Discard`. HTTP server internal errors (broken pipe, connection reset) are suppressed from stdout/stderr. Meaningful errors are routed through the application's structured logger via middleware.
+- **ErrorLog:** Redirected to `io.Discard`. HTTP server internal errors (broken pipe, connection reset) are suppressed from stdout/stderr. Meaningful errors are routed through the application's structured logger via middleware. That includes `net/http`'s report of a panic that escaped every recover, which is why the server's handler is wrapped in `outermostRecovery`: no panic reaches `net/http`'s recover except the `http.ErrAbortHandler` it hands back, which `net/http` does not report (see [RecoveryMiddleware](#1-recoverymiddleware)).
 
 **Source:** `http.Server` configuration in `Start()` in `internal/web/server.go`.
 
@@ -753,7 +853,7 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **[operations.md](operations.md)** — Ed25519 signing in the release process, binary swap mechanism during updates, CI signing workflow.
 - **[data-and-storage.md](data-and-storage.md)** — Client token storage in the database (`client_tokens` table, schema v6), password hash storage in the TOML config file.
 - **[operations.md](operations.md#docker-image)** — Docker image build, entrypoint config seeding, and the compose network.
-- **[`README.md`](../../README.md#remote-access)** — Operator-facing "Remote Access" guide: VPN/Tailscale, reverse proxy, direct exposure, and the Docker caveats in practical form.
+- **[`README.md`](../../README.md#remote-access)** — Operator-facing "Remote Access" guide: VPN (and why a Tailscale `100.64.0.0/10` address is private on `lan` only), reverse proxy, direct exposure, and the Docker caveats in practical form.
 - **Source: [`internal/web/middleware.go`](../../internal/web/middleware.go)** — CORS, SecurityHeaders, CSRF, IPGate, MaxBodySize, LoopbackOnly, ExtractIP, EffectiveClientIP, canonicalizeForwardedIP, loadTrustedProxies, isPrivateIP, isLoopback.
 - **Source: [`internal/config/types.go`](../../internal/config/types.go)** — `NetworkConfig`, including `TrustedProxies` and `TrustForwardedProto`.
 - **Source: [`docker-compose.yml`](../../docker-compose.yml)** — IPv6-enabled network, port-publish guidance, Docker Desktop caveat. Its comments are the reference wording for the IPv6 behavior.
@@ -762,4 +862,6 @@ Beyond the middleware stack, the HTTP server itself is configured with security-
 - **Source: [`internal/web/rate_limiter.go`](../../internal/web/rate_limiter.go)** — RateLimiter struct, sliding window algorithm, cleanup goroutine.
 - **Source: [`internal/web/tls.go`](../../internal/web/tls.go)** — LoadOrGenerateTLSConfig, self-signed certificate generation.
 - **Source: [`internal/updater/signing.go`](../../internal/updater/signing.go)** — Ed25519 verification and signing functions, embedded public key.
-- **Source: [`cmd/moombox/main.go`](../../cmd/moombox/main.go)** — Rate limiter instantiation with per-route limits, auth service wiring, middleware registration order.
+- **Source: [`internal/updater/manifest.go`](../../internal/updater/manifest.go)** — the signed release manifest: format, builder, parser, and the checks `ApplyUpdate` makes against it.
+- **Source: [`cmd/moombox/main.go`](../../cmd/moombox/main.go)** — The rate-limit constants only.
+- **Source: [`cmd/moombox/services.go`](../../cmd/moombox/services.go)** — `initServices`: rate limiter instantiation with per-route limits, auth service wiring, and the `AuthMiddleware` registration that closes the chain.

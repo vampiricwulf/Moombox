@@ -75,7 +75,7 @@ func TestSelectHlsVariantCap(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := selectHlsVariant(tc.variants, tc.pref, tc.maxRes)
+			got := selectHlsVariant(tc.variants, tc.pref, tc.maxRes, true)
 			if got == nil {
 				t.Fatalf("selectHlsVariant returned nil for %q at cap %d — the cap is a preference, never a failure", tc.pref, tc.maxRes)
 			}
@@ -90,7 +90,7 @@ func TestSelectHlsVariantCap(t *testing.T) {
 // no answer. DownloadHls rejects an empty master playlist before this point;
 // the nil is the contract, not a resolution decision.
 func TestSelectHlsVariantEmpty(t *testing.T) {
-	if got := selectHlsVariant(nil, "best", 2160); got != nil {
+	if got := selectHlsVariant(nil, "best", 2160, true); got != nil {
 		t.Errorf("selectHlsVariant(nil, …) = %+v, want nil", got)
 	}
 }

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -14,12 +17,29 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/stats"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
+
+// trimFailureText is what the TUI shows for a Trim Video that failed — on the
+// trim dialog's error line, or on the feedback row when the dialog was
+// dismissed — split the way the Web trim route splits it: a refusal the
+// operator can act on (the job's state, the range, a trim already running)
+// as written, and anything else as one fixed line, its detail left to the
+// log line OnCreateTrim writes beside it. Written whole, an FFmpeg failure
+// carried the stderr tail its error keeps — up to 500 bytes over several
+// lines — and the dialog grew past a 24-row terminal, pushing the frame's top
+// rows off the screen.
+func trimFailureText(err error) string {
+	if refused, ok := errors.AsType[*worker.TrimRefusedError](err); ok {
+		return refused.Reason
+	}
+	return "Could not create the trim; the log has the reason"
+}
 
 // cookieBadgeFor projects one platform's AuthStatus triple onto the status-bar
 // tier. Shared by both platforms rather than written twice: the two arms had
@@ -157,6 +177,8 @@ func (s *runState) runTUI() {
 	app.SetConfigStore(s.configStore)
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())
+	app.SetWebPort(s.currentWebPort)
+	app.SetWebHTTPS(s.httpsEnabled)
 	app.IsFirstRun = !s.configLoaded()
 
 	// Wire TUI callbacks
@@ -164,9 +186,7 @@ func (s *runState) runTUI() {
 		// Job creation is handled via HTTP POST in addVideoCmd; this is just for logging
 		s.log.Info("Add video from TUI", slog.String("url", url))
 	}
-	app.OnCancelJob = func(jobID string) {
-		s.dlWorker.CancelJob(jobID)
-	}
+	app.OnCancelJob = s.cancelJobFromTUI
 	app.OnDeleteJob = func(jobID string) {
 		job, err := s.db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -225,6 +245,13 @@ func (s *runState) runTUI() {
 			base = c.Paths.EffectiveStagingDir()
 		})
 		return worker.HasSegmentFiles(base, jobID)
+	}
+	app.HasUnmuxedParts = func(jobID string) bool {
+		var base string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			base = c.Paths.EffectiveStagingDir()
+		})
+		return worker.HasUnmuxedParts(s.db, base, jobID)
 	}
 	app.JobAsides = func(jobID string) tui.AsideSummary {
 		report, err := s.dlWorker.Asides(jobID)
@@ -286,10 +313,15 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to get job for trim", slog.String("jobID", jobID))
 			return "", "Failed to get job"
 		}
+		// context.Background(): the dialog's "Continue in background" must
+		// not stop the trim, and the trim service bounds every trim by its
+		// own lifetime anyway (TrimService.Stop, at shutdown). A trim that
+		// broke has already sent trim_error from the service; the dialog's own
+		// line below is the TUI's feedback beside it.
 		record, err := s.trimSvc.CreateTrim(context.Background(), job, startSec, endSec, onProgress)
 		if err != nil {
-			s.log.Error("Failed to create trim", slog.String("error", err.Error()))
-			return "", err.Error()
+			s.log.Error("Failed to create trim", slog.String("jobID", jobID), slog.String("error", err.Error()))
+			return "", trimFailureText(err)
 		}
 		return record.Filename, ""
 	}
@@ -357,6 +389,10 @@ func (s *runState) runTUI() {
 		snap.Uptime = time.Since(s.startTime)
 		return snap, nil
 	}
+	// O L: the per-job log buffer the dashboard's job dialog reads through
+	// GET /api/jobs/{id}/logs — the database's, never a second copy.
+	app.OnGetJobLogs = s.db.GetJobLogs
+	s.wireTUIChannelRemoval(app)
 	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) error {
 		// Serialize on the store lock like every other saver (web routes,
 		// Store.Update-driven background saves, and the setup-wizard callback
@@ -401,20 +437,18 @@ func (s *runState) runTUI() {
 		// the change gate the Web route applies before calling, so a save
 		// that did not move the threshold still costs nothing.
 		s.broadcastHideFinishedAge()
+		// Everything below reads a Snapshot, NOT updatedCfg: that's the live
+		// *MoomboxConfig pointer, and reading it unlocked would race a
+		// concurrent web PUT /api/config whole-struct store.
+		snap := s.configStore.Snapshot()
 		// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
-		if updatedCfg.Logs.LogLevel != "" {
-			s.log.SetLevel(updatedCfg.Logs.LogLevel)
-		}
-		if updatedCfg.Downloader.NumParallelDownloads > 0 {
-			s.dlWorker.SetParallelDownloads(updatedCfg.Downloader.NumParallelDownloads)
+		s.applyConfiguredLogLevel(snap.Logs.LogLevel)
+		if snap.Downloader.NumParallelDownloads > 0 {
+			s.dlWorker.SetParallelDownloads(snap.Downloader.NumParallelDownloads)
 		}
 		// Notification targets hot-reload (mirrors the web route's
 		// OnNotificationsChange). Unconditional — the rebuild is a few URL
-		// parses, cheaper than diffing the section. Snapshot, NOT
-		// updatedCfg: that's the live *MoomboxConfig pointer, and reading
-		// its Notifications slice unlocked would race a concurrent web
-		// PUT /api/config whole-struct store.
-		snap := s.configStore.Snapshot()
+		// parses, cheaper than diffing the section.
 		s.notifyMgr.Reload(snap)
 		// The four read-once settings the web PUT re-applies via
 		// ConfigRoutesCallbacks; applied unconditionally here for the same
@@ -423,8 +457,12 @@ func (s *runState) runTUI() {
 		s.applyTrustForwardedProto(snap.Network.TrustForwardedProto)
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		s.applyReorderBudget(snap.Downloader)
+		s.warnSegmentWorkers(snap.Downloader.SegmentWorkers)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
+		// The disk thresholds and the output directory, read by the disk
+		// loop only every third tick otherwise.
+		s.requestDiskRecheck()
 		return nil
 	}
 	// The FFmpeg overlay's own path applier. OnSaveConfig returns above
@@ -446,23 +484,7 @@ func (s *runState) runTUI() {
 		}
 	}
 	if s.upd != nil {
-		app.OnCheckUpdate = func() (*tui.UpdateStatusMsg, error) {
-			s.log.Info("Update check requested from TUI")
-			release, err := s.upd.CheckForUpdate(context.Background())
-			if err != nil {
-				return nil, err
-			}
-			if release == nil {
-				return nil, nil
-			}
-			routes.SharedUpdateInfo.Store(release)
-			s.wsHub.Broadcast("update_available", release)
-			return &tui.UpdateStatusMsg{
-				Version:      release.Version,
-				TagName:      release.TagName,
-				ReleaseNotes: release.ReleaseNotes,
-			}, nil
-		}
+		app.OnCheckUpdate = s.checkUpdateFromTUI
 		app.OnApplyUpdate = func(ver string) string {
 			release := routes.SharedUpdateInfo.Load()
 			if release == nil {
@@ -476,7 +498,7 @@ func (s *runState) runTUI() {
 			s.triggerRestart("TUI update")
 			return ""
 		}
-		app.OnVerifySignature = func() error {
+		app.OnVerifySignature = func() (bool, error) {
 			return s.upd.VerifyCurrentSignature(context.Background())
 		}
 		app.OnFetchReleaseNotes = func(version string) (string, string, error) {
@@ -638,7 +660,7 @@ func (s *runState) runTUI() {
 	if s.autoCookieSvc != nil {
 		app.OnImportCookieFile = func(path string) (cookies.ImportResult, error) {
 			s.log.Info("Cookie file import requested from TUI", slog.String("path", path))
-			data, err := os.ReadFile(path)
+			data, err := readCookieFileCapped(path)
 			if err != nil {
 				return cookies.ImportResult{}, err
 			}
@@ -954,25 +976,22 @@ func (s *runState) runTUI() {
 		}
 	}()
 
-	// Forward log lines to TUI
-	tuiLogSub := s.log.Subscribe()
+	// Forward log lines to TUI. Subscribed BEFORE the backfill is read, so no
+	// line falls between the two — and a line logged in between is in both,
+	// which forwardTUILogs skips by its number.
+	tuiLogSub := s.log.SubscribeLines()
+	backfill, backfillSeq := s.log.RecentLines()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("[Main] Panic in TUI log forwarder", "panic", fmt.Sprint(r))
 			}
 		}()
-		for line := range tuiLogSub {
-			select {
-			case logCh <- line:
-			default:
-				tuiDroppedLogs.Add(1)
-			}
-		}
+		forwardTUILogs(s.ctx, tuiLogSub, backfillSeq, logCh, &tuiDroppedLogs)
 	}()
 
 	// Backfill TUI with logs emitted before subscription
-	app.BackfillLogs(s.log.GetRecentLines())
+	app.BackfillLogs(backfill)
 
 	// Forward monitor schedule events to TUI via the atomic pointers installed
 	// by monitor_callbacks.wireMonitorCallbacks. Store() is race-free against
@@ -1122,7 +1141,7 @@ func (s *runState) runTUI() {
 	// unsubscribe. Don't close channels: non-blocking sends mean no
 	// goroutine will block, and GC handles cleanup.
 	s.cancel() // TUI quit triggers shutdown
-	s.log.Unsubscribe(tuiLogSub)
+	s.log.UnsubscribeLines(tuiLogSub)
 	unsubTUIJobUpdate()
 	unsubTUIJobAdded()
 	unsubTUIJobDeleted()
@@ -1144,11 +1163,60 @@ func (s *runState) runTUI() {
 	}
 }
 
+// applyConfiguredLogLevel puts the running logger on a saved logs.log_level —
+// but only when that CONFIGURED level changed since it was last applied. A
+// -log-level override is a one-off diagnostic the logger alone carries; an
+// explicit level choice ends it, a save of some other setting must not. Both
+// save paths call this: the web PUT on its own change gate, the TUI save on
+// every save (it has no pre-mutation snapshot to diff against).
+func (s *runState) applyConfiguredLogLevel(level string) {
+	if level == "" {
+		return
+	}
+	s.configuredLogLevelMu.Lock()
+	changed := !strings.EqualFold(level, s.configuredLogLevel)
+	s.configuredLogLevel = level
+	s.configuredLogLevelMu.Unlock()
+	if changed {
+		s.log.SetLevel(level)
+	}
+}
+
+// requestDiskRecheck asks the periodic loop in run() for a disk reading now,
+// for a save that changed the disk thresholds or the output directory.
+// Coalescing and non-blocking: a request already pending covers this one,
+// and a nil channel (a runState built by a test) makes it a no-op.
+func (s *runState) requestDiskRecheck() {
+	select {
+	case s.diskRecheck <- struct{}{}:
+	default:
+	}
+}
+
+// resendTUICookieStatus re-sends the TUI's cookie status line, whose
+// platform indicators come from config.GetActivePlatforms — wired to
+// OnActivePlatformsChange so a dashboard save reaches the status bar instead
+// of waiting for the next auth transition. A no-op without a TUI (the slot
+// is stored only by runTUI).
+func (s *runState) resendTUICookieStatus() {
+	if fn := s.authChangeTUI.Load(); fn != nil && s.cookieRefresh != nil {
+		(*fn)(s.cookieRefresh.GetStatus())
+	}
+}
+
 // httpsEnabled and ffmpegPathOrDefault read through the config store.
 // Closures that outlive wiring must never touch s.cfg's fields directly:
 // PUT /api/config assigns *cfg = cfgCopy under the store's lock, so an
 // unlocked field read races a whole-struct replacement (CORE-24).
+//
+// httpsEnabled answers for the LISTENER once it is bound — its scheme is fixed
+// at boot, like currentWebPort's port — and falls back to the setting before
+// that. Everything local that must reach this server (the TUI's API client,
+// O W, the yt-dlp plugin status and install) asks here.
 func (s *runState) httpsEnabled() bool {
+	if s.webServer != nil && s.webServer.ActualPort() > 0 {
+		return s.webServer.TLSActive()
+	}
 	enabled := false
 	s.configStore.Read(func(c *config.MoomboxConfig) { enabled = c.Network.HTTPSEnabled })
 	return enabled
@@ -1179,4 +1247,82 @@ func (s *runState) configLoaded() bool {
 	loaded := false
 	s.configStore.Read(func(c *config.MoomboxConfig) { loaded = c.ConfigLoaded })
 	return loaded
+}
+
+// readCookieFileCapped reads the cookie file an operator named for E I,
+// refusing one larger than the Web import accepts (routes.MaxCookieImportBytes).
+// A mistyped path to a recording used to be read whole into memory before
+// the import could reject it. Only the size is reported, never the bytes.
+func readCookieFileCapped(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, routes.MaxCookieImportBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > routes.MaxCookieImportBytes {
+		return nil, fmt.Errorf("that file is larger than the %d KiB a cookie file can be — check the path",
+			routes.MaxCookieImportBytes/1024)
+	}
+	return data, nil
+}
+
+// checkUpdateFromTUI is the TUI's R V: a manual check. An up-to-date answer
+// withdraws the release that was pending before the check (seen) — and only
+// that one, so a release another check found during this one's round trip
+// survives it.
+func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
+	s.log.Info("Update check requested from TUI")
+	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
+	release, err := checkForUpdate(s.upd, context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		if tag := routes.ClearPendingUpdate(seen); tag != "" {
+			announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
+		}
+		return nil, nil
+	}
+	routes.SharedUpdateInfo.Store(release)
+	s.wsHub.Broadcast("update_available", release)
+	return &tui.UpdateStatusMsg{
+		Version:      release.Version,
+		TagName:      release.TagName,
+		ReleaseNotes: release.ReleaseNotes,
+	}, nil
+}
+
+// forwardTUILogs copies the logger's lines into the TUI's log channel until
+// ctx ends, skipping every line numbered at or below backfillSeq: the backfill
+// the log panel was seeded with already holds those. The subscription is
+// taken before the backfill is read so that no line falls between the two,
+// which means a line logged in between is in both — and the panel showed it
+// twice (the dashboard's W24-14, at the TUI's start). A full channel drops the
+// line and counts it.
+//
+// Not a `range` over sub: UnsubscribeLines never closes the channel (see
+// Logger.Subscribe), and the TUI's exit cancels ctx before it unsubscribes.
+func forwardTUILogs(ctx context.Context, sub <-chan logger.Line, backfillSeq uint64, logCh chan<- string, dropped *atomic.Int64) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case line, ok := <-sub:
+			if !ok {
+				return
+			}
+			if line.Seq <= backfillSeq {
+				continue
+			}
+			select {
+			case logCh <- line.Text:
+			default:
+				dropped.Add(1)
+			}
+		}
+	}
 }

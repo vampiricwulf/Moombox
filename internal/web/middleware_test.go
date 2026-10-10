@@ -2,6 +2,7 @@ package web
 
 import (
 	"compress/gzip"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,10 +75,16 @@ func TestIsAllowedOrigin(t *testing.T) {
 		origin        string
 		networkAccess string
 		// host/scheme describe the request the Origin arrived on. Empty means
-		// the default fixture in the runner — every localhost/lan row predates
-		// the same-host rule and must keep passing without naming a host.
+		// the default fixture in the runner, 127.0.0.1:774 over http — the
+		// port every localhost/lan row's origin names, since those arms hold
+		// the origin to the port the request was addressed to.
 		host   string
 		scheme string
+		// publicURL is network.public_url; empty is unset.
+		publicURL string
+		// schemeUnknown is browserSchemeUnknown: the request came from a
+		// listed trusted proxy over plain HTTP with trust_forwarded_proto off.
+		schemeUnknown bool
 		// identity is the certificate-attested host list. nil means "no
 		// certificate", which is what every pre-existing row wants.
 		identity []string
@@ -85,73 +92,73 @@ func TestIsAllowedOrigin(t *testing.T) {
 	}{
 		{
 			name:          "local mode allows localhost",
-			origin:        "http://localhost:3000",
+			origin:        "http://localhost:774",
 			networkAccess: "localhost",
 			expected:      true,
 		},
 		{
 			name:          "local mode allows 127.0.0.1",
-			origin:        "http://127.0.0.1:8080",
+			origin:        "http://127.0.0.1:774",
 			networkAccess: "localhost",
 			expected:      true,
 		},
 		{
 			name:          "local mode rejects LAN IP",
-			origin:        "http://192.168.1.100:3000",
+			origin:        "http://192.168.1.100:774",
 			networkAccess: "localhost",
 			expected:      false,
 		},
 		{
 			name:          "local mode rejects external",
-			origin:        "http://example.com",
+			origin:        "http://example.com:774",
 			networkAccess: "localhost",
 			expected:      false,
 		},
 		{
 			name:          "lan mode allows localhost",
-			origin:        "http://localhost:3000",
+			origin:        "http://localhost:774",
 			networkAccess: "lan",
 			expected:      true,
 		},
 		{
 			name:          "lan mode allows 127.0.0.1",
-			origin:        "http://127.0.0.1:3000",
+			origin:        "http://127.0.0.1:774",
 			networkAccess: "lan",
 			expected:      true,
 		},
 		{
 			name:          "lan mode allows private IP 192.168",
-			origin:        "http://192.168.1.50:8080",
+			origin:        "http://192.168.1.50:774",
 			networkAccess: "lan",
 			expected:      true,
 		},
 		{
 			name:          "lan mode allows private IP 10.x",
-			origin:        "http://10.0.0.5:8080",
+			origin:        "http://10.0.0.5:774",
 			networkAccess: "lan",
 			expected:      true,
 		},
 		{
 			name:          "lan mode allows private IP 172.16",
-			origin:        "http://172.16.0.1:8080",
+			origin:        "http://172.16.0.1:774",
 			networkAccess: "lan",
 			expected:      true,
 		},
 		{
 			name:          "lan mode rejects external",
-			origin:        "http://example.com",
+			origin:        "http://example.com:774",
 			networkAccess: "lan",
 			expected:      false,
 		},
 		{
 			name:          "default (empty) mode allows localhost",
-			origin:        "http://localhost:3000",
+			origin:        "http://localhost:774",
 			networkAccess: "",
 			expected:      true,
 		},
 		{
 			name:          "default (empty) mode rejects external",
-			origin:        "http://example.com",
+			origin:        "http://example.com:774",
 			networkAccess: "",
 			expected:      false,
 		},
@@ -289,6 +296,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "lan mode allows a certificate-attested name",
 			origin:        "https://dash.lan",
 			networkAccess: "lan",
+			host:          "dash.lan",
+			scheme:        "https",
 			identity:      []string{"dash.lan"},
 			expected:      true,
 		},
@@ -296,6 +305,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "lan mode still refuses a bare name with no certificate",
 			origin:        "https://dash.lan",
 			networkAccess: "lan",
+			host:          "dash.lan",
+			scheme:        "https",
 			identity:      nil,
 			expected:      false,
 		},
@@ -303,6 +314,7 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "localhost mode is unchanged when no certificate is loaded",
 			origin:        "http://localhost",
 			networkAccess: "localhost",
+			host:          "localhost",
 			identity:      nil,
 			expected:      true,
 		},
@@ -316,6 +328,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "localhost mode does not expand a wildcard SAN (review P7)",
 			origin:        "https://evil.example.com",
 			networkAccess: "localhost",
+			host:          "evil.example.com",
+			scheme:        "https",
 			identity:      []string{"*.example.com"},
 			expected:      false,
 		},
@@ -323,6 +337,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "lan mode still allows a literal certificate-attested name (review P7)",
 			origin:        "https://dash.lan",
 			networkAccess: "lan",
+			host:          "dash.lan",
+			scheme:        "https",
 			identity:      []string{"dash.lan"},
 			expected:      true,
 		},
@@ -337,6 +353,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "lan mode does not expand a wildcard SAN (review P7)",
 			origin:        "https://evil.example.com",
 			networkAccess: "lan",
+			host:          "evil.example.com",
+			scheme:        "https",
 			identity:      []string{"*.example.com"},
 			expected:      false,
 		},
@@ -346,7 +364,182 @@ func TestIsAllowedOrigin(t *testing.T) {
 			name:          "unset default mode does not expand a wildcard SAN (review P7)",
 			origin:        "https://evil.example.com",
 			networkAccess: "",
+			host:          "evil.example.com",
+			scheme:        "https",
 			identity:      []string{"*.example.com"},
+			expected:      false,
+		},
+		// D-S7: on localhost/lan (and the unset default) an origin of a trusted
+		// IP class is held to the port this request was addressed to, or to
+		// network.public_url's — the class names a machine, not Moombox, and
+		// any other service on it could otherwise drive the dashboard. The
+		// mutants each row kills, against originPortServed and the arms that
+		// call it:
+		//   - drop `&& originPortServed(...)` from the localhost arm: the two
+		//     "localhost mode refuses" rows;
+		//   - drop it from the lan arm: the lan "on another port" rows;
+		//   - drop it from the default arm: the "unset default" row;
+		//   - move it inside the class disjunction, binding to hostInSANs alone
+		//     (`|| hostInSANs(...) && originPortServed(...)`): every
+		//     loopback/private "on another port" row;
+		//   - hold the host as well (sameSiteOrigin in place of
+		//     originPortServed): the other-spelling-of-loopback row;
+		//   - drop the defaultedPort calls in originPortServed's request-port
+		//     comparison (compare the raw ports): the two "defaults a
+		//     portless" rows;
+		//   - drop the schemeUnknown arm (samePort's two-portless leniency):
+		//     the listed TLS-terminating proxy row;
+		//   - apply that leniency whatever schemeUnknown says (`samePort(...)`
+		//     in place of `schemeUnknown && samePort(...)`, the rule before
+		//     the 2026-10 review): the three "other scheme's default port"
+		//     rows;
+		//   - let the leniency ignore an explicit port (`schemeUnknown` alone):
+		//     the "still compares a port the origin writes" row;
+		//   - drop the public_url alternative (return false after samePort):
+		//     the three public_url `true` rows;
+		//   - compare public_url's port raw (pPort in place of
+		//     defaultedPort(pPort, p.Scheme)): the "names none" row;
+		//   - compare the origin's port raw against it (oPort in place of
+		//     defaultedPort(oPort, u.Scheme)): the explicit-:443 row;
+		//   - default public_url's port from the ORIGIN's scheme: the
+		//     "own scheme" row;
+		//   - accept any origin port once public_url is set: the "neither
+		//     the request's nor public_url's" row.
+		{
+			name:          "localhost mode refuses a loopback origin on another port",
+			origin:        "http://127.0.0.1:3000",
+			networkAccess: "localhost",
+			expected:      false,
+		},
+		{
+			name:          "localhost mode refuses a localhost origin on another port",
+			origin:        "http://localhost:8080",
+			networkAccess: "localhost",
+			expected:      false,
+		},
+		{
+			name:          "lan mode refuses a private-IP origin on another port",
+			origin:        "http://192.168.1.50:8080",
+			networkAccess: "lan",
+			host:          "192.168.1.50:774",
+			expected:      false,
+		},
+		{
+			name:          "lan mode refuses a loopback origin on another port",
+			origin:        "http://localhost:3000",
+			networkAccess: "lan",
+			expected:      false,
+		},
+		{
+			name:          "lan mode refuses a certificate-attested name on another port",
+			origin:        "https://dash.lan:8443",
+			networkAccess: "lan",
+			host:          "dash.lan",
+			scheme:        "https",
+			identity:      []string{"dash.lan"},
+			expected:      false,
+		},
+		{
+			name:          "unset default mode refuses a loopback origin on another port",
+			origin:        "http://localhost:3000",
+			networkAccess: "",
+			expected:      false,
+		},
+		{
+			name:          "lan mode accepts the other spelling of loopback on the same port",
+			origin:        "http://[::1]:774",
+			networkAccess: "lan",
+			host:          "127.0.0.1:774",
+			expected:      true,
+		},
+		{
+			name:          "localhost mode defaults a portless origin's port from its scheme",
+			origin:        "http://127.0.0.1",
+			networkAccess: "localhost",
+			host:          "127.0.0.1:80",
+			expected:      true,
+		},
+		{
+			name:          "lan mode defaults a portless Host's port from the request's scheme",
+			origin:        "https://192.168.1.5:443",
+			networkAccess: "lan",
+			host:          "192.168.1.5",
+			scheme:        "https",
+			expected:      true,
+		},
+		{
+			name:          "lan mode keeps the portless pair a listed TLS-terminating proxy forwards",
+			origin:        "https://192.168.1.5",
+			networkAccess: "lan",
+			host:          "192.168.1.5", // Moombox sees plain HTTP behind the proxy
+			schemeUnknown: true,
+			expected:      true,
+		},
+		{
+			name:          "lan mode with an unknown scheme still compares a port the origin writes",
+			origin:        "https://192.168.1.5:8443",
+			networkAccess: "lan",
+			host:          "192.168.1.5", // nginx's portless $host in X-Forwarded-Host
+			schemeUnknown: true,
+			expected:      false,
+		},
+		{
+			name:          "lan mode refuses a page on the other scheme's default port: http:80 against TLS on 443",
+			origin:        "http://192.168.1.1",
+			networkAccess: "lan",
+			host:          "192.168.1.5",
+			scheme:        "https",
+			expected:      false,
+		},
+		{
+			name:          "lan mode refuses a page on the other scheme's default port: https:443 against plain HTTP on 80",
+			origin:        "https://192.168.1.1",
+			networkAccess: "lan",
+			host:          "192.168.1.5", // a direct peer: the request reached port 80
+			expected:      false,
+		},
+		{
+			name:          "localhost mode refuses a page on the other scheme's default port: http:80 against TLS on 443",
+			origin:        "http://127.0.0.1",
+			networkAccess: "localhost",
+			host:          "127.0.0.1",
+			scheme:        "https",
+			expected:      false,
+		},
+		{
+			name:          "lan mode admits the port of network.public_url",
+			origin:        "https://192.168.1.5:8443",
+			networkAccess: "lan",
+			host:          "127.0.0.1:774",
+			publicURL:     "https://moombox.lan:8443",
+			expected:      true,
+		},
+		{
+			name:          "localhost mode admits public_url's default port when it names none",
+			origin:        "https://localhost",
+			networkAccess: "localhost",
+			publicURL:     "https://localhost",
+			expected:      true,
+		},
+		{
+			name:          "lan mode defaults an explicit :443 in public_url like any other",
+			origin:        "https://192.168.1.5",
+			networkAccess: "lan",
+			publicURL:     "https://dash.lan:443",
+			expected:      true,
+		},
+		{
+			name:          "lan mode defaults public_url's port from public_url's own scheme",
+			origin:        "http://192.168.1.5",
+			networkAccess: "lan",
+			publicURL:     "https://192.168.1.5",
+			expected:      false,
+		},
+		{
+			name:          "lan mode refuses a port that is neither the request's nor public_url's",
+			origin:        "http://192.168.1.5:8080",
+			networkAccess: "lan",
+			publicURL:     "https://moombox.lan",
 			expected:      false,
 		},
 	}
@@ -361,10 +554,10 @@ func TestIsAllowedOrigin(t *testing.T) {
 			if scheme == "" {
 				scheme = "http"
 			}
-			result := isAllowedOrigin(tt.origin, tt.networkAccess, host, scheme, tt.identity)
+			result := isAllowedOrigin(tt.origin, tt.networkAccess, host, scheme, tt.publicURL, tt.schemeUnknown, tt.identity)
 			if result != tt.expected {
-				t.Errorf("isAllowedOrigin(%q, %q, host=%q, scheme=%q, identity=%v) = %v, expected %v",
-					tt.origin, tt.networkAccess, host, scheme, tt.identity, result, tt.expected)
+				t.Errorf("isAllowedOrigin(%q, %q, host=%q, scheme=%q, public_url=%q, schemeUnknown=%v, identity=%v) = %v, expected %v",
+					tt.origin, tt.networkAccess, host, scheme, tt.publicURL, tt.schemeUnknown, tt.identity, result, tt.expected)
 			}
 		})
 	}
@@ -633,6 +826,9 @@ func TestCSRFMiddleware(t *testing.T) {
 
 	makeRequest := func(method, path string, headers map[string]string) *http.Request {
 		r := httptest.NewRequest(method, path, strings.NewReader(""))
+		// Addressed the way a browser on this machine addresses the
+		// dashboard: the origins below name the port they reached.
+		r.Host = "127.0.0.1:774"
 		for k, v := range headers {
 			r.Header.Set(k, v)
 		}
@@ -679,6 +875,35 @@ func TestCSRFMiddleware(t *testing.T) {
 			method:        http.MethodPost,
 			path:          "/invalidate_caches",
 			wantStatus:    http.StatusNoContent,
+		},
+		// A browser always sends Origin on a POST, so the POT exemption holds
+		// only for a caller that names no origin (yt-dlp, curl). Exempt by
+		// path alone, a page in the operator's browser could POST to
+		// 127.0.0.1 cross-site and drop the PO-token caches at will.
+		// Mutant: the exemption without the Origin/Referer test — 204.
+		{
+			name:          "POT /invalidate_caches from a cross-site page rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/invalidate_caches",
+			headers:       map[string]string{"Origin": "https://evil.example"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "POT /get_pot from a cross-site page rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/get_pot",
+			headers:       map[string]string{"Origin": "https://evil.example"},
+			wantStatus:    http.StatusForbidden,
+		},
+		{
+			name:          "POT /invalidate_it with a cross-site Referer rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/invalidate_it",
+			headers:       map[string]string{"Referer": "https://evil.example/page"},
+			wantStatus:    http.StatusForbidden,
 		},
 		{
 			name:          "InternalToken header bypasses CSRF on mutating request",
@@ -894,6 +1119,202 @@ func TestCSRFOriginPolicyInExternalMode(t *testing.T) {
 			t.Fatalf("status = %d, want 403 — reading X-Forwarded-Host without the trusted-proxy "+
 				"check lets the attacker choose the host the origin is compared against, which is "+
 				"no check at all", rr.Code)
+		}
+	})
+}
+
+// TestCSRFHoldsALocalOriginToTheServedPort drives D-S7 through the whole
+// CSRFMiddleware and CORSMiddleware on lan: an origin of a trusted IP class is
+// accepted only on the port this request was addressed to — the effective
+// host's, so a listed proxy's X-Forwarded-Host still decides — or on
+// network.public_url's.
+//
+// THE MUTANTS: drop `&& originPortServed(...)` from isAllowedOrigin's lan arm
+// — the first subtest goes 403 → 204 and CORS echoes the foreign port;
+// pass r.Host where originAllowed passes effectiveRequestHost — the proxy
+// subtest goes 204 → 403; pass "" where originAllowed passes the stored
+// public_url — the public_url subtest goes 204 → 403.
+//
+// The default-port subtests (2026-10 review of D-S7): apply samePort's
+// two-portless leniency whatever browserSchemeUnknown says — the "other
+// scheme's default port" subtest goes 403 → 204 on all three requests and
+// CORS echoes the router's origin; pass false where originAllowed passes
+// browserSchemeUnknown — the listed TLS-terminating proxy subtest goes
+// 204 → 403; drop the trusted_proxies test from browserSchemeUnknown — the
+// unlisted-peer request goes 403 → 204; drop its r.TLS test — the
+// TLS-to-Moombox request goes 403 → 204; drop its trust_forwarded_proto
+// test — the request with no X-Forwarded-Proto goes 403 → 204; let the
+// unknown scheme admit any port (`if schemeUnknown { return true }`) — the
+// portless X-Forwarded-Host subtest goes 403 → 204.
+func TestCSRFHoldsALocalOriginToTheServedPort(t *testing.T) {
+	newStore := func(publicURL string, proxies ...string) *config.Store {
+		return config.NewStore(&config.MoomboxConfig{
+			Network: config.NetworkConfig{
+				NetworkAccess:  "lan",
+				TrustedProxies: proxies,
+				PublicURL:      publicURL,
+			},
+		}, "")
+	}
+	pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// overTLS marks a request as having reached Moombox over TLS (r.TLS).
+	newReq := func(method, target, remoteAddr, host, origin string, overTLS bool, hdr map[string]string) *http.Request {
+		req := httptest.NewRequest(method, target, strings.NewReader(""))
+		req.RemoteAddr = remoteAddr
+		req.Host = host
+		req.Header.Set("Origin", origin)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		if overTLS {
+			req.TLS = &tls.ConnectionState{}
+		}
+		return req
+	}
+	postOver := func(store *config.Store, overTLS bool, remoteAddr, host, origin string, hdr map[string]string) (*httptest.ResponseRecorder, *recordingLogger) {
+		log := &recordingLogger{}
+		rr := httptest.NewRecorder()
+		CSRFMiddleware(store, "tok", log)(pass).ServeHTTP(rr,
+			newReq(http.MethodPost, "/api/restart", remoteAddr, host, origin, overTLS, hdr))
+		return rr, log
+	}
+	post := func(store *config.Store, remoteAddr, host, origin string, hdr map[string]string) (*httptest.ResponseRecorder, *recordingLogger) {
+		return postOver(store, false, remoteAddr, host, origin, hdr)
+	}
+
+	t.Run("another service's port on the same address is refused", func(t *testing.T) {
+		rr, log := post(newStore(""), "192.168.1.20:50000", "192.168.1.5:774", "http://192.168.1.5:8080", nil)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 — a page served on :8080 of a LAN address drove the "+
+				"dashboard on :774: %s", rr.Code, rr.Body.String())
+		}
+		if len(log.warns) != 1 || !strings.Contains(log.warns[0], "192.168.1.5:774") {
+			t.Fatalf("logged %v, want one refusal naming the host compared", log.warns)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+		req.Host = "192.168.1.5:774"
+		req.Header.Set("Origin", "http://192.168.1.5:8080")
+		cors := httptest.NewRecorder()
+		CORSMiddleware(newStore(""))(pass).ServeHTTP(cors, req)
+		if got := cors.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Fatalf("Access-Control-Allow-Origin = %q for another port, want none", got)
+		}
+	})
+
+	t.Run("the dashboard's own port is accepted", func(t *testing.T) {
+		rr, _ := post(newStore(""), "192.168.1.20:50000", "192.168.1.5:774", "http://192.168.1.5:774", nil)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — the dashboard must still post to itself: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("a trusted proxy's X-Forwarded-Host supplies the port", func(t *testing.T) {
+		rr, _ := post(newStore("", "10.4.0.9"), "10.4.0.9:5555", "10.4.0.9:774", "https://192.168.1.5:8443",
+			map[string]string{"X-Forwarded-Host": "192.168.1.5:8443"})
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — the proxy says the browser addressed :8443: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("a listed proxy's portless X-Forwarded-Host does not carry another port", func(t *testing.T) {
+		// nginx on :8443 with `proxy_set_header X-Forwarded-Host $host;`:
+		// $host drops the port, so the authority compared is the portless
+		// 192.168.1.5 and the browser's :8443 is not it. README and
+		// security.md tell the operator to forward $http_host instead.
+		proxied := newStore("", "10.4.0.9")
+		rr, _ := post(proxied, "10.4.0.9:5555", "10.4.0.9:774", "https://192.168.1.5:8443",
+			map[string]string{"X-Forwarded-Host": "192.168.1.5"})
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 — a portless forwarded host names a default port, not :8443", rr.Code)
+		}
+		rr, _ = post(proxied, "10.4.0.9:5555", "10.4.0.9:774", "https://192.168.1.5:8443",
+			map[string]string{"X-Forwarded-Host": "192.168.1.5:8443"})
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — $http_host carries the browser's port: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("X-Forwarded-Host from an UNTRUSTED peer does not", func(t *testing.T) {
+		rr, _ := post(newStore(""), "192.168.1.20:50000", "192.168.1.5:774", "http://192.168.1.5:8080",
+			map[string]string{"X-Forwarded-Host": "192.168.1.5:8080"})
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 — a client-chosen X-Forwarded-Host chose the port", rr.Code)
+		}
+	})
+
+	t.Run("network.public_url's port is accepted", func(t *testing.T) {
+		rr, _ := post(newStore("https://192.168.1.5"), "192.168.1.20:50000", "192.168.1.5:774", "https://192.168.1.5", nil)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — public_url names :443 as this dashboard's: %s", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("a page on the other scheme's default port is refused", func(t *testing.T) {
+		localhost := config.NewStore(&config.MoomboxConfig{
+			Network: config.NetworkConfig{NetworkAccess: "localhost"},
+		}, "")
+		for _, tc := range []struct {
+			what                 string
+			store                *config.Store
+			overTLS              bool
+			remote, host, origin string
+		}{
+			{"lan, dashboard on TLS 443, router page on http:80", newStore(""), true,
+				"192.168.1.20:50000", "192.168.1.5", "http://192.168.1.1"},
+			{"lan, dashboard on plain 80, NAS page on https:443", newStore(""), false,
+				"192.168.1.20:50000", "192.168.1.5", "https://192.168.1.1"},
+			{"localhost, dashboard on TLS 443, local page on http:80", localhost, true,
+				"127.0.0.1:50000", "127.0.0.1", "http://127.0.0.1"},
+		} {
+			rr, _ := postOver(tc.store, tc.overTLS, tc.remote, tc.host, tc.origin, nil)
+			if rr.Code != http.StatusForbidden {
+				t.Errorf("%s: status = %d, want 403 — a portless authority names its scheme's default "+
+					"port, and 80 is not 443: %s", tc.what, rr.Code, rr.Body.String())
+			}
+		}
+
+		cors := httptest.NewRecorder()
+		CORSMiddleware(newStore(""))(pass).ServeHTTP(cors,
+			newReq(http.MethodGet, "/api/config", "192.168.1.20:50000", "192.168.1.5", "http://192.168.1.1", true, nil))
+		if got := cors.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q for a port-80 page against the dashboard on 443, want none", got)
+		}
+	})
+
+	t.Run("a listed TLS-terminating proxy's portless pair is accepted, and only there", func(t *testing.T) {
+		t.Cleanup(func() { SetTrustForwardedProto(false) })
+		proxied := newStore("", "10.4.0.9")
+		// nginx terminating TLS on 443 with `proxy_set_header Host $host;`:
+		// the browser typed https://192.168.1.5, Moombox sees plain HTTP and
+		// a portless Host, and nothing says which default port it meant.
+		rr, _ := post(proxied, "10.4.0.9:5555", "192.168.1.5", "https://192.168.1.5", nil)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204 — a listed TLS-terminating proxy on 443 must keep working: %s",
+				rr.Code, rr.Body.String())
+		}
+
+		// A direct peer that connected over plain HTTP: the request reached 80.
+		if rr, _ := post(proxied, "192.168.1.20:50000", "192.168.1.5", "https://192.168.1.5", nil); rr.Code != http.StatusForbidden {
+			t.Errorf("the same pair from an unlisted peer: status = %d, want 403 — the request reached port 80", rr.Code)
+		}
+		// The listed proxy's hop to Moombox is TLS, so the request reached
+		// 443, and a page on http:80 is not the dashboard.
+		if rr, _ := postOver(proxied, true, "10.4.0.9:5555", "192.168.1.5", "http://192.168.1.5", nil); rr.Code != http.StatusForbidden {
+			t.Errorf("a listed proxy whose hop to Moombox is TLS: status = %d, want 403 for an http:80 origin", rr.Code)
+		}
+
+		// trust_forwarded_proto on: the proxy states the scheme, so its
+		// silence means plain HTTP and its "https" means 443.
+		SetTrustForwardedProto(true)
+		if rr, _ := post(proxied, "10.4.0.9:5555", "192.168.1.5", "https://192.168.1.5", nil); rr.Code != http.StatusForbidden {
+			t.Errorf("trust_forwarded_proto on, no X-Forwarded-Proto: status = %d, want 403 — the proxy said plain HTTP", rr.Code)
+		}
+		if rr, _ := post(proxied, "10.4.0.9:5555", "192.168.1.5", "https://192.168.1.5",
+			map[string]string{"X-Forwarded-Proto": "https"}); rr.Code != http.StatusNoContent {
+			t.Errorf("trust_forwarded_proto on, X-Forwarded-Proto https: status = %d, want 204 — 443 against 443", rr.Code)
 		}
 	})
 }
@@ -1230,4 +1651,142 @@ func TestCSRFOriginComparison(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestHostGateRefusesARebindingHost: on localhost/lan a GET carries no Origin
+// check, so a page on attacker.example rebound to 127.0.0.1 read the whole
+// API same-origin — the peer is loopback, so no auth applied. The Host it was
+// addressed by is held to the Origin rule instead. external/public are meant
+// to be reached by DNS names and stay open here.
+//
+// Mutant: drop HostGateMiddleware from the chain (or let a DNS name through on
+// lan) — the attacker.example rows pass.
+func TestHostGateRefusesARebindingHost(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	for _, tc := range []struct {
+		access, host string
+		want         int
+	}{
+		{"localhost", "localhost:774", http.StatusOK},
+		{"localhost", "127.0.0.1:774", http.StatusOK},
+		{"localhost", "[::1]:774", http.StatusOK},
+		{"localhost", "attacker.example:774", http.StatusForbidden},
+		{"localhost", "192.168.1.10:774", http.StatusForbidden},
+		{"", "attacker.example", http.StatusForbidden},
+		{"lan", "192.168.1.10:774", http.StatusOK},
+		{"lan", "localhost:774", http.StatusOK},
+		{"lan", "attacker.example:774", http.StatusForbidden},
+		// external/public: the peers that skip auth (loopback, private) are
+		// held to a host rule — a DNS name needs a SAN, localhost or the
+		// public_url host. A public peer is not the rebinding victim.
+		// Mutant: externalHostRefused always false — the rebinding rows pass.
+		{"external", "attacker.example:774", http.StatusForbidden},
+		{"external", "192.168.1.10:774", http.StatusOK},
+		{"external", "moombox.example.com", http.StatusOK},
+		{"public", "attacker.example", http.StatusForbidden},
+		{"public", "localhost:774", http.StatusOK},
+		{"public", "moombox.example.com:443", http.StatusOK},
+	} {
+		cfg := config.Defaults()
+		cfg.Network.NetworkAccess = tc.access
+		cfg.Network.PublicURL = "https://moombox.example.com"
+		h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
+		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+		req.RemoteAddr = "127.0.0.1:50000"
+		req.Host = tc.host
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != tc.want {
+			t.Errorf("access=%q Host=%q: status %d, want %d", tc.access, tc.host, rr.Code, tc.want)
+		}
+	}
+
+	// With an operator certificate, the names it attests. On external/public
+	// a wildcard SAN covers one label, as it does for the same modes' Origin
+	// check: a LAN browser that loaded the dashboard by such a name (split
+	// DNS) passes CSRF there, and its GETs — the dashboard shell first — were
+	// refused as an unrecognized host. lan stays held to a literal SAN.
+	//
+	// Mutants: delete the SAN admission from externalHostRefused — the literal
+	// rows are 403; compare SANs literally (the strings.EqualFold loop it
+	// replaced) — the wildcard rows are 403; hostInSANs with wildcards off
+	// there — the same; HostGateMiddleware's lan arm allowing wildcards — the
+	// lan wildcard row passes.
+	useIdentityCert(t, certWatcherFor(t, "dash.example.net", []string{"dash.example.net", "*.example.org"}, nil))
+	for _, tc := range []struct {
+		access, host string
+		want         int
+	}{
+		{"external", "dash.example.net:774", http.StatusOK},
+		{"public", "DASH.example.net", http.StatusOK},
+		{"external", "box.example.org:774", http.StatusOK},
+		{"public", "box.example.org", http.StatusOK},
+		{"external", "a.box.example.org:774", http.StatusForbidden},
+		{"external", "example.org:774", http.StatusForbidden},
+		{"external", "attacker.example:774", http.StatusForbidden},
+		{"lan", "dash.example.net:774", http.StatusOK},
+		{"lan", "box.example.org:774", http.StatusForbidden},
+	} {
+		cfg := config.Defaults()
+		cfg.Network.NetworkAccess = tc.access
+		h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "192.168.1.20:50000"
+		req.Host = tc.host
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != tc.want {
+			t.Errorf("with a certificate, access=%q Host=%q: status %d, want %d", tc.access, tc.host, rr.Code, tc.want)
+		}
+	}
+}
+
+// The external/public host rule is for the peers that skip auth: a rebinding
+// page's request comes from the browser it runs in, on the LAN or the machine
+// itself. A public peer reaching an external install by its DNS name is the
+// normal case and passes.
+//
+// Mutant: externalHostRefused without the peer test — the public peer is 403.
+func TestHostGateLetsAPublicPeerUseADNSName(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	cfg := config.Defaults()
+	cfg.Network.NetworkAccess = "external"
+	h := HostGateMiddleware(config.NewStore(cfg, ""))(ok)
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req.RemoteAddr = "203.0.113.5:50000"
+	req.Host = "moombox.example.net"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("public peer by DNS name: status %d, want 200", rr.Code)
+	}
+}
+
+// TestRefuseCrossSite: only a request the browser marks as started by another
+// site's page is refused. The dashboard's own fetch (same-origin), another
+// local dashboard (same-site), a typed URL (none) and a non-browser client (no
+// header) all pass.
+//
+// Mutant: compare against "same-site" too, or not at all.
+func TestRefuseCrossSite(t *testing.T) {
+	h := RefuseCrossSite(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for site, want := range map[string]int{
+		"":            http.StatusNoContent,
+		"same-origin": http.StatusNoContent,
+		"same-site":   http.StatusNoContent,
+		"none":        http.StatusNoContent,
+		"cross-site":  http.StatusForbidden,
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/formats/x", nil)
+		if site != "" {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Errorf("Sec-Fetch-Site %q: status %d, want %d", site, rec.Code, want)
+		}
+	}
 }

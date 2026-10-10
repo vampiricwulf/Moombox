@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 
@@ -78,6 +79,15 @@ type AddVideoModel struct {
 	selectedVideoItag *int // nil=auto, -1=none, else specific itag
 	selectedAudioItag *int
 	loading           bool
+	// fetchFailed marks a format fetch that came back with an error, so the
+	// 2 s auto-advance to Confirm applies to that failure and nothing else
+	// (an Esc back to the URL step clears it).
+	fetchFailed bool
+
+	// submitting is set while POST /api/jobs is in flight: Enter does not
+	// post again (the second answer, a 409, used to overwrite "Added to
+	// queue"), and only the dialog this flag is on is closed by the result.
+	submitting bool
 
 	// Format tables (built when formats arrive)
 	videoTable table.Model
@@ -137,6 +147,8 @@ func (m *AddVideoModel) reset() {
 	m.selectedVideoItag = nil
 	m.selectedAudioItag = nil
 	m.loading = false
+	m.fetchFailed = false
+	m.submitting = false
 	m.startTimeInput = ""
 	m.endTimeInput = ""
 	m.timeInputFocus = 0
@@ -257,6 +269,32 @@ func (m *AddVideoModel) SetError(err string) {
 	m.loading = false
 }
 
+// SetFetchError applies a failed format fetch: the error, and the mark the
+// auto-advance to Confirm checks for.
+func (m *AddVideoModel) SetFetchError(err string) {
+	m.SetError(err)
+	m.fetchFailed = true
+}
+
+// AwaitingFormats reports whether a format fetch for videoID is the one this
+// dialog is waiting on. A result for anything else — an earlier ID the
+// operator Esc'd away from, or a dialog since closed — is stale.
+func (m *AddVideoModel) AwaitingFormats(videoID string) bool {
+	return m.visible && m.loading && m.step == AddStepVideoFormat && m.videoID == videoID
+}
+
+// AutoAdvanceApplies reports whether the 2 s auto-advance armed by a failed
+// fetch for videoID still applies: the dialog is still on the format step of
+// that video, showing that failure.
+func (m *AddVideoModel) AutoAdvanceApplies(videoID string) bool {
+	return m.visible && m.fetchFailed && m.step == AddStepVideoFormat && m.videoID == videoID
+}
+
+// Submitting reports whether this dialog has a POST in flight for videoID.
+func (m *AddVideoModel) Submitting(videoID string) bool {
+	return m.visible && m.submitting && m.videoID == videoID
+}
+
 // UpdateComponents routes tea.Msg to embedded textinput/spinner/table and syncs.
 func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible {
@@ -264,7 +302,7 @@ func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	}
 	var cmds []tea.Cmd
 	// Route spinner tick when loading
-	if m.loading {
+	if m.loading || m.submitting {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		if cmd != nil {
@@ -328,7 +366,7 @@ func (m *AddVideoModel) syncFromTextInput() {
 func (m *AddVideoModel) syncToTextInput() {
 	target := m.activeTextTarget()
 	if target != nil {
-		m.textInput.SetValue(*target)
+		loadTextInput(&m.textInput, *target)
 		if m.step == AddStepTimestamps {
 			m.textInput.Validate = validateTimeChars
 		} else {
@@ -343,6 +381,14 @@ func (m *AddVideoModel) syncToTextInput() {
 // HandleKey processes key input. Returns (action, data) where action can be:
 // "submit" with URL, "fetch_formats" with video ID, or "" for no action.
 func (m *AddVideoModel) HandleKey(key string) (string, string) {
+	if m.submitting {
+		// The POST is in flight: nothing but Esc, which closes the dialog
+		// and leaves the answer to the feedback line.
+		if key == keyEsc {
+			m.Close()
+		}
+		return "", ""
+	}
 	// Clear error on input
 	if key != keyEnter && key != keyEsc && key != keyTab {
 		m.errorMsg = ""
@@ -375,6 +421,10 @@ func (m *AddVideoModel) handleEscape() (string, string) {
 	case AddStepVideoFormat:
 		m.step = AddStepURL
 		m.advancedMode = false
+		// A fetch still in flight is abandoned: its result is dropped
+		// (AwaitingFormats) and a failure's auto-advance disarmed.
+		m.loading = false
+		m.fetchFailed = false
 		m.syncToTextInput()
 	case AddStepAudioFormat:
 		m.step = AddStepVideoFormat
@@ -414,13 +464,10 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 		m.videoID = vid
 		m.platform = plat
 
-		// Twitch: no advanced options, submit directly with parsed ID
-		if plat == "twitch" {
-			return "submit", vid
-		}
-
-		// YouTube: check advanced mode
-		if !m.advancedEnabled {
+		// Twitch: no advanced options, submit directly with parsed ID.
+		// YouTube without advanced mode likewise.
+		if plat == "twitch" || !m.advancedEnabled {
+			m.startSubmit()
 			return "submit", vid
 		}
 
@@ -514,21 +561,26 @@ func (m *AddVideoModel) handleTimestampsStep(key string) (string, string) {
 		m.syncToTextInput()
 		return "", ""
 	case keyEnter:
+		var s, e float64
 		if m.startTimeInput != "" {
-			if _, err := parseTimeToSeconds(m.startTimeInput); err != nil {
+			var err error
+			if s, err = parseTimeToSeconds(m.startTimeInput); err != nil {
 				m.errorMsg = "Invalid start time format"
+				return "", ""
+			}
+			if s < 0 {
+				m.errorMsg = "Start time cannot be negative"
 				return "", ""
 			}
 		}
 		if m.endTimeInput != "" {
-			if _, err := parseTimeToSeconds(m.endTimeInput); err != nil {
+			var err error
+			if e, err = parseTimeToSeconds(m.endTimeInput); err != nil {
 				m.errorMsg = "Invalid end time format"
 				return "", ""
 			}
-		}
-		if m.startTimeInput != "" && m.endTimeInput != "" {
-			s, _ := parseTimeToSeconds(m.startTimeInput)
-			e, _ := parseTimeToSeconds(m.endTimeInput)
+			// A blank start is the beginning of the video, so an end at or
+			// before 0 is as empty a range as one before a typed start.
 			if e <= s {
 				m.errorMsg = "End time must be after start time"
 				return "", ""
@@ -548,9 +600,22 @@ func (m *AddVideoModel) handleConfirmStep(key string) (string, string) {
 			m.errorMsg = "Cannot select None for both video and audio"
 			return "", ""
 		}
+		m.startSubmit()
 		return "submit", m.videoID
 	}
 	return "", ""
+}
+
+// startSubmit enters the in-flight state a submit holds until its result.
+func (m *AddVideoModel) startSubmit() {
+	m.submitting = true
+	m.spinner = newSpinner()
+	m.textInput.Blur()
+}
+
+// submittingLine is the hint row while a submit is in flight.
+func (m *AddVideoModel) submittingLine() string {
+	return m.spinner.View() + " Adding… " + DimStyle.Render("Esc: Close")
 }
 
 // GetSelectedVideoItag returns the selected video itag (nil=auto, -1=none).
@@ -559,11 +624,20 @@ func (m *AddVideoModel) GetSelectedVideoItag() *int { return m.selectedVideoItag
 // GetSelectedAudioItag returns the selected audio itag (nil=auto, -1=none).
 func (m *AddVideoModel) GetSelectedAudioItag() *int { return m.selectedAudioItag }
 
-// GetStartTime returns the start time input.
-func (m *AddVideoModel) GetStartTime() string { return m.startTimeInput }
-
-// GetEndTime returns the end time input.
-func (m *AddVideoModel) GetEndTime() string { return m.endTimeInput }
+// TimeRange returns the validated start and end, in seconds, for the POST
+// body — nil for a blank field. POST /api/jobs decodes both as numbers, so
+// the raw "1:30" the inputs hold was a 400 "invalid request body" for every
+// add with a range. A zero start is no start at all and is left off, as the
+// dashboard leaves it off.
+func (m *AddVideoModel) TimeRange() (start, end *float64) {
+	if s, err := parseTimeToSeconds(m.startTimeInput); err == nil && s > 0 {
+		start = &s
+	}
+	if e, err := parseTimeToSeconds(m.endTimeInput); err == nil && e > 0 {
+		end = &e
+	}
+	return start, end
+}
 
 // SpinnerInit returns the spinner's initial tick command when loading.
 func (m *AddVideoModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
@@ -658,7 +732,11 @@ func (m *AddVideoModel) renderURLStep(w, _ int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("Tab: Advanced | Enter: Continue | Esc: Cancel"))
+	if m.submitting {
+		lines = append(lines, m.submittingLine())
+	} else {
+		lines = append(lines, DimStyle.Render("Tab: Advanced | Enter: Continue | Esc: Cancel"))
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -810,7 +888,11 @@ func (m *AddVideoModel) renderConfirm(w, _ int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("Enter: Submit | Esc: Back"))
+	if m.submitting {
+		lines = append(lines, m.submittingLine())
+	} else {
+		lines = append(lines, DimStyle.Render("Enter: Submit | Esc: Back"))
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -1056,7 +1138,18 @@ func splitPathSegments(path string) []string {
 	return strings.Split(path, "/")
 }
 
-// parseTimeToSeconds parses HH:MM:SS, MM:SS, or raw seconds to float64.
+// validClockFields reports whether the minutes and seconds of an MM:SS or
+// HH:MM:SS time are on the clock face: whole minutes 0-59 and seconds in
+// [0, 60) — "1:59.5" is a time, and the old `secs > 59` turned it away. Written
+// as a range the value must fall INSIDE so a NaN or ±Inf ("1:NaN") is refused
+// rather than slipping past two comparisons that are both false for it.
+func validClockFields(mins int, secs float64) bool {
+	return mins >= 0 && mins <= 59 && secs >= 0 && secs < 60
+}
+
+// parseTimeToSeconds parses HH:MM:SS, MM:SS, or raw seconds to float64. The
+// result is always finite; a negative one (a raw "-5", or "-1:00:00") is
+// returned as such for the caller to refuse with its own message.
 func parseTimeToSeconds(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1066,7 +1159,16 @@ func parseTimeToSeconds(s string) (float64, error) {
 	parts := strings.Split(s, ":")
 	switch len(parts) {
 	case 1:
-		return strconv.ParseFloat(parts[0], 64)
+		secs, err := strconv.ParseFloat(parts[0], 64)
+		if err != nil {
+			return 0, err
+		}
+		// ParseFloat takes "NaN" and "Inf" — neither is a time, and NaN
+		// slips through every range comparison a caller makes after this.
+		if math.IsNaN(secs) || math.IsInf(secs, 0) {
+			return 0, fmt.Errorf("not a finite number of seconds")
+		}
+		return secs, nil
 	case 2:
 		mins, err := strconv.Atoi(parts[0])
 		if err != nil {
@@ -1076,7 +1178,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
+		if !validClockFields(mins, secs) {
 			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
 		return float64(mins)*60 + secs, nil
@@ -1093,7 +1195,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
+		if !validClockFields(mins, secs) {
 			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
 		return float64(hours)*3600 + float64(mins)*60 + secs, nil

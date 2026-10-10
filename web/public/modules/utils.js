@@ -830,9 +830,10 @@ export function reloginPromptTarget(status, hostname) {
  * Apply the per-channel override inputs to a channel payload. A blank input
  * (undefined number / empty string) clears the key so the server falls back
  * to the global value; a present value is validated against the same bounds
- * config.Validate uses for the globals. Returns { channel, error }.
+ * config.Validate uses for the globals. Returns { channel, error }. Keys the
+ * dialog does not show (the retired num_desc_lookbehind) ride through as given.
  */
-export function applyChannelOverrides(channel, { numDescLookbehind, outputDirectory, archiveWindowDays, archiveSlots }) {
+export function applyChannelOverrides(channel, { outputDirectory, archiveWindowDays, archiveSlots }) {
   const out = { ...channel };
   const setInt = (key, value, label, min, max) => {
     if (value === undefined || value === null || value === "") {
@@ -846,7 +847,6 @@ export function applyChannelOverrides(channel, { numDescLookbehind, outputDirect
     return null;
   };
   const err =
-    setInt("num_desc_lookbehind", numDescLookbehind, "Description lookbehind", 0, 1000) ||
     setInt("archive_window_days", archiveWindowDays, "Archive window", 1, 3650) ||
     setInt("archive_slots", archiveSlots, "Archive slots", 1, 100);
   if (err) return { channel, error: err };
@@ -868,6 +868,74 @@ export const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKI
 // Equal to REINIT_STATUSES today by coincidence, not by contract — resume
 // preserves staging, reinitialize deletes it; keep them separately gated.
 export const RESUMABLE_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+
+// ── Channel removal ──────────────────────────────────────────────────────────
+// Removing a channel asks what to do with its jobs (W25-09, owner decision).
+// The confirmation counts them — GET /api/config/channels/{id}/removal — and
+// offers "Remove channel, keep its N jobs" (the default), "Remove channel and
+// delete its N pending jobs" (only when there are any) and Cancel; the choice
+// rides the DELETE as ?jobs=keep or ?jobs=delete. "Pending" is the Queued,
+// Upcoming and COOKIES? rows, less any whose staging holds footage, which
+// neither choice deletes and the prompt names; active downloads are never
+// touched. A Twitch channel's jobs are counted by the login their URL names,
+// and none of them is pending (worker.SummarizeChannelRemoval). The dialog itself is SettingsController.chooseChannelRemoval; the
+// TUI's Settings → Channels delete asks the same question
+// (internal/tui/settings_channels.go).
+
+const countOf = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The confirmation's text for removing `name`, from the removal summary the
+ * server answered — `{total, pending, footage: [{id, title, status}], active}`
+ * — or null when it could not be read: the prompt then offers keep and
+ * Cancel only, since a delete it cannot count is not one to offer.
+ * @returns {{message: string, keepLabel: string, deleteLabel: string|null}}
+ */
+export function channelRemovalPrompt(name, summary) {
+  const lines = [`Remove "${name}" from the monitored channels?`];
+  if (!summary) {
+    lines.push("Its jobs could not be counted, so all of them will be kept.");
+    return { message: lines.join("\n\n"), keepLabel: "Remove channel, keep its jobs", deleteLabel: null };
+  }
+  const total = summary.total ?? 0;
+  const pending = summary.pending ?? 0;
+  const footage = summary.footage ?? [];
+  const active = summary.active ?? 0;
+  // A zero is no proof the channel has none: a YouTube row from before jobs
+  // carried their channel's ID, or one added by hand, is never counted — and
+  // never deleted either, which is the one thing the zero can promise.
+  lines.push(total ? `It has ${countOf(total, "job", "jobs")}.` : "No job will be deleted.");
+  if (footage.length) {
+    // The first three titles and a count of the rest.
+    const names = footage.slice(0, 3).map((f) => `"${f.title || f.id}"`);
+    if (footage.length > 3) names.push(`and ${footage.length - 3} more`);
+    lines.push(`${countOf(footage.length, "parked recording", "parked recordings")} with footage will be kept either way: ${names.join(", ")}.`);
+  }
+  if (active) {
+    lines.push(`${countOf(active, "download", "downloads")} in progress ${active === 1 ? "is" : "are"} not affected.`);
+  }
+  return {
+    message: lines.join("\n\n"),
+    keepLabel: total ? `Remove channel, keep its ${countOf(total, "job", "jobs")}` : "Remove channel",
+    deleteLabel: pending ? `Remove channel and delete its ${countOf(pending, "pending job", "pending jobs")}` : null,
+  };
+}
+
+/**
+ * The toast once the DELETE succeeded: `choice` is what was asked, `data`
+ * the response body — `{jobsDeleted, footageKept}` for a delete.
+ */
+export function channelRemovedToast(choice, summary, data) {
+  if (choice === "delete") {
+    const kept = data?.footageKept?.length ?? 0;
+    let msg = `Channel removed; ${countOf(data?.jobsDeleted ?? 0, "pending job", "pending jobs")} deleted`;
+    if (kept) msg += `, ${countOf(kept, "parked recording", "parked recordings")} with footage kept`;
+    return msg;
+  }
+  if (!summary) return "Channel removed; its jobs were kept";
+  const total = summary.total ?? 0;
+  return total ? `Channel removed; its ${countOf(total, "job", "jobs")} ${total === 1 ? "was" : "were"} kept` : "Channel removed";
+}
 
 /**
  * Whether a job can be resumed (staging preserved, continue where it stopped).
@@ -895,9 +963,13 @@ export function canResumeJob(job, { requireKnownStaging = false } = {}) {
 /**
  * streamUrl is the JS twin of the TUI's streamURL (internal/tui/app_actions.go,
  * the O C chord): the job's own url when it has one, else derived from the
- * platform. Twitch VOD ids carry a "tw_v" prefix on the wire; Twitch live has
- * no id-addressable page, only the channel's. Empty string = nothing to copy.
- * @param {{url?: string, videoId?: string, platform?: string, isVod?: boolean, channelName?: string}|null} job
+ * platform. Twitch VOD ids carry a "tw_v" prefix on the wire. A Twitch live
+ * row with no url has no page: every Twitch row Moombox creates carries its
+ * url, and the one that does not is an imported live capture, whose stream id
+ * names no page and whose channelName is no login — the import's "Import"
+ * placeholder or the chat's display name — so twitch.tv/<channelName> was
+ * somebody else's channel, or none. Empty string = nothing to copy or open.
+ * @param {{url?: string, videoId?: string, platform?: string, isVod?: boolean}|null} job
  * @returns {string}
  */
 export function streamUrl(job) {
@@ -905,10 +977,24 @@ export function streamUrl(job) {
   if (job.url) return job.url;
   if (!job.videoId) return "";
   if (job.platform === "twitch") {
-    if (job.isVod) return "https://www.twitch.tv/videos/" + job.videoId.replace(/^tw_v/, "");
-    return job.channelName ? "https://www.twitch.tv/" + job.channelName : "";
+    return job.isVod ? "https://www.twitch.tv/videos/" + job.videoId.replace(/^tw_v/, "") : "";
   }
   return "https://www.youtube.com/watch?v=" + job.videoId;
+}
+
+/**
+ * isImportPlaceholderId reports whether a videoId is the stand-in the ZIP
+ * import mints when the archive carries no YouTube id: "imp_" and the eight
+ * lowercase hex digits of randomHex(4) (internal/web/routes/import_routes.go).
+ * Such a job's url, thumbnail and embed all point at a video that does not
+ * exist, so the details dialog shows neither the embed nor the URL. Exactly
+ * eight digits on purpose: a real YouTube id is eleven characters, so
+ * "imp_" + 7 could be one and "imp_" + 8 never is.
+ * @param {string|undefined} videoId
+ * @returns {boolean}
+ */
+export function isImportPlaceholderId(videoId) {
+  return /^imp_[0-9a-f]{8}$/.test(videoId || "");
 }
 
 /** Read a dotted path ("network.port") from a config object; undefined when absent. */
@@ -963,3 +1049,27 @@ export function channelTermsForSave(existingTerms, seedShown, typed) {
   }
   return typed;
 }
+
+/**
+ * What looks like a URL rather than a channel ID, matched against the
+ * lower-cased input: a scheme, a host name leading the input, or youtube.com,
+ * youtu.be or twitch.tv anywhere. The Go side's urlShapedRe
+ * (internal/utils/channel.go) is the same pattern.
+ */
+const URL_SHAPED = /^[a-z][a-z0-9+.-]*:\/\/|^[a-z0-9-]+(\.[a-z0-9-]+)+(\/|$)|youtube\.com|youtu\.be|twitch\.tv/;
+
+/**
+ * Whether a typed channel ID has to go through /api/resolve-channel before it
+ * is a channel ID: anything URL-shaped, the host compared case-insensitively
+ * ("Twitch.tv/shroud" as bios write it used to be posted as the ID), or a
+ * bare @handle (a YouTube handle — both channel dialogs advertise the form,
+ * and posted verbatim it named no channel the monitors could poll). The Go
+ * side's utils.NeedsChannelResolve is the same rule.
+ */
+export function needsChannelResolve(id) {
+  const v = String(id ?? "").trim();
+  return v.startsWith("@") || URL_SHAPED.test(v.toLowerCase());
+}
+
+/** The resolve step's refusal, worded as the server words it. */
+export const NOT_A_CHANNEL_URL = "Not a YouTube or Twitch channel URL";

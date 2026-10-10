@@ -45,7 +45,9 @@ func TestRemoveStaleLockRemovesAGenuinelyStaleFile(t *testing.T) {
 	}
 	ageFile(t, path, 10*time.Second)
 
-	removeStaleLock(path)
+	if err := removeStaleLock(path); err != nil {
+		t.Fatalf("removeStaleLock on a plain stale file = %v, want nil — only a symlink lock can be held", err)
+	}
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("stale lock survived removeStaleLock: stat err = %v, want IsNotExist", err)
@@ -69,7 +71,9 @@ func TestRemoveStaleLockKeepsAFreshFile(t *testing.T) {
 	}
 	ageFile(t, path, 1*time.Second) // well under the 5s threshold
 
-	removeStaleLock(path)
+	if err := removeStaleLock(path); err != nil {
+		t.Fatalf("removeStaleLock on a fresh plain file = %v, want nil — the age rule keeps it silently", err)
+	}
 
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("a lock file touched 1s ago was removed — this is the live-browser guard "+
@@ -84,7 +88,9 @@ func TestRemoveStaleLockToleratesAMissingPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist")
 
-	removeStaleLock(path) // must not panic
+	if err := removeStaleLock(path); err != nil { // must not panic
+		t.Fatalf("removeStaleLock on a missing path = %v, want nil", err)
+	}
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("removeStaleLock on a missing path left something behind: stat err = %v", err)
@@ -93,8 +99,9 @@ func TestRemoveStaleLockToleratesAMissingPath(t *testing.T) {
 
 // TestRemoveStaleLockToleratesADirectoryItCannotRemove is the (d) case:
 // os.Remove on a non-empty directory fails. removeStaleLock discards that
-// error (it has no error return at all), so it must tolerate the failure
-// silently — the directory, and what is inside it, must survive.
+// error (its own error return means one thing only — a lock a live browser
+// may hold), so it must tolerate the failure silently — the directory, and
+// what is inside it, must survive.
 func TestRemoveStaleLockToleratesADirectoryItCannotRemove(t *testing.T) {
 	dir := t.TempDir()
 	lockDir := filepath.Join(dir, "SingletonLock")
@@ -109,7 +116,9 @@ func TestRemoveStaleLockToleratesADirectoryItCannotRemove(t *testing.T) {
 	}
 	ageFile(t, lockDir, 10*time.Second) // stale by mtime, so the unlink is attempted
 
-	removeStaleLock(lockDir) // must not panic despite os.Remove failing
+	if err := removeStaleLock(lockDir); err != nil { // must not panic despite os.Remove failing
+		t.Fatalf("removeStaleLock on a directory it cannot remove = %v, want nil", err)
+	}
 
 	if info, err := os.Stat(lockDir); err != nil || !info.IsDir() {
 		t.Fatalf("directory did not survive a failed os.Remove: stat = (%v, %v)", info, err)
@@ -179,7 +188,9 @@ func TestCleanChromiumLockFiles(t *testing.T) {
 	}
 	ageFile(t, localState, 10*time.Second)
 
-	cleanChromiumLockFiles(dir)
+	if err := cleanChromiumLockFiles(dir); err != nil {
+		t.Fatalf("cleanChromiumLockFiles over plain files = %v, want nil — none of them names a holder", err)
+	}
 
 	// Removed: every canonical name except freshName, plus the glob-only match.
 	for _, name := range chromiumLockFiles {

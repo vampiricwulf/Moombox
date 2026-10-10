@@ -50,10 +50,37 @@ type healthTracker struct {
 	// contradicts — so the wiring, not this tracker, decides whether the close
 	// is worth sending.
 	onHealthy func(channelID string)
+
+	// restored holds the channels whose unhealthy alert a PREVIOUS process
+	// raised and never closed (restoreUnhealthy). Each counts as a streak
+	// that already crossed the threshold: its next success fires onHealthy,
+	// and its next failure joins the streak silently, exactly as the same
+	// channel would have behaved had the process not restarted. Kept apart
+	// from byID so a channel this process has not checked yet stays out of
+	// the /api/status snapshot.
+	restored map[string]bool
 }
 
 func newHealthTracker() *healthTracker {
-	return &healthTracker{byID: make(map[string]*channelState)}
+	return &healthTracker{byID: make(map[string]*channelState), restored: make(map[string]bool)}
+}
+
+// restoreUnhealthy marks channels as already alerted (see restored).
+func (h *healthTracker) restoreUnhealthy(ids []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range ids {
+		h.restored[id] = true
+	}
+}
+
+// takeRestored folds a restored alert into the channel's live state the first
+// time the channel is checked. Caller holds h.mu.
+func (h *healthTracker) takeRestored(id string, s *channelState) {
+	if h.restored[id] {
+		s.notified = true
+		delete(h.restored, id)
+	}
 }
 
 func (h *healthTracker) state(id string) *channelState {
@@ -70,6 +97,7 @@ func (h *healthTracker) state(id string) *channelState {
 func (h *healthTracker) recordSuccess(id string) {
 	h.mu.Lock()
 	s := h.state(id)
+	h.takeRestored(id, s)
 	s.lastCheckedAt = time.Now()
 	s.lastError = ""
 	s.consecutiveErrors = 0
@@ -84,11 +112,12 @@ func (h *healthTracker) recordSuccess(id string) {
 }
 
 // recordError bumps a channel's failure streak and fires onUnhealthy once
-// when it crosses the threshold. Returns whether the callback fired so the
-// caller can log it.
+// when it crosses the threshold; the streak then stays silent until
+// recordSuccess resets it.
 func (h *healthTracker) recordError(id string, err error) {
 	h.mu.Lock()
 	s := h.state(id)
+	h.takeRestored(id, s)
 	s.lastCheckedAt = time.Now()
 	s.lastError = err.Error()
 	s.consecutiveErrors++
@@ -134,6 +163,11 @@ func (h *healthTracker) prune(activeIDs map[string]struct{}) {
 	for id := range h.byID {
 		if _, ok := activeIDs[id]; !ok {
 			delete(h.byID, id)
+		}
+	}
+	for id := range h.restored {
+		if _, ok := activeIDs[id]; !ok {
+			delete(h.restored, id)
 		}
 	}
 }

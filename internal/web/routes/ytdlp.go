@@ -3,8 +3,6 @@ package routes
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 
@@ -26,8 +24,8 @@ func YtdlpPluginStatus(port int, httpsEnabled bool) (YtdlpPluginInfo, error) {
 }
 
 // InstallYtdlpPlugin writes the yt-dlp PO token provider plugin to the
-// standard yt-dlp plugin directory. Called from the TUI setup wizard and the
-// web install route. See ytdlpplugin.Install.
+// standard yt-dlp plugin directory. Called from the TUI's setup wizard and
+// E Y overlay and from the web setup route. See ytdlpplugin.Install.
 func InstallYtdlpPlugin(port int, httpsEnabled bool) error {
 	return ytdlpplugin.Install(port, httpsEnabled)
 }
@@ -58,46 +56,27 @@ func YtdlpRoutes(r chi.Router, currentPort func() int, httpsEnabled bool) {
 			return
 		}
 
-		pluginDir := ytdlpplugin.Dir()
-		if pluginDir == "" {
-			jsonError(rw, "cannot determine yt-dlp plugin directory", http.StatusInternalServerError)
-			return
-		}
-
-		// Create plugin directory structure (matches TypeScript layout)
-		targetDir := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor")
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			jsonError(rw, "failed to create plugin directory", http.StatusInternalServerError)
-			return
-		}
-
-		pluginPath := filepath.Join(targetDir, "getpot_moombox.py")
-
-		// Check if already installed with correct port and scheme
-		expectedScheme := "http"
-		if httpsEnabled {
-			expectedScheme = "https"
-		}
+		// The same Status and Install the TUI uses. This route used to
+		// write the file itself, with its own copy of the already-installed
+		// check, and answered a failure with a bare "failed to write
+		// plugin" — dropping the cause (permission denied, a read-only
+		// file system) that the TUI's I key shows.
 		if !body.Force {
-			if data, err := os.ReadFile(pluginPath); err == nil {
-				existingScheme, existingPort := ytdlpplugin.ParseInstalled(string(data))
-				if existingPort == port && existingScheme == expectedScheme {
-					jsonResponse(rw, map[string]any{
-						"success":          true,
-						"alreadyInstalled": true,
-						"path":             pluginPath,
-					})
-					return
-				}
+			if info, err := ytdlpplugin.Status(port, httpsEnabled); err == nil &&
+				info.Installed && !info.Unparseable && !info.PortMismatch {
+				jsonResponse(rw, map[string]any{
+					"success":          true,
+					"alreadyInstalled": true,
+					"path":             ytdlpplugin.File(),
+				})
+				return
 			}
 		}
-
-		// Write the plugin file with the current port
-		pluginContent := ytdlpplugin.Generate(port, httpsEnabled)
-		if err := os.WriteFile(pluginPath, []byte(pluginContent), 0o644); err != nil {
-			jsonError(rw, "failed to write plugin", http.StatusInternalServerError)
+		if err := ytdlpplugin.Install(port, httpsEnabled); err != nil {
+			jsonError(rw, "Failed to install plugin: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		pluginPath := ytdlpplugin.File()
 
 		jsonResponse(rw, map[string]any{
 			"success":          true,

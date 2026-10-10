@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -171,7 +173,7 @@ https://example.com/chunked.m3u8`
 }
 
 func TestSelectBestVariantEmpty(t *testing.T) {
-	result := SelectBestVariant(nil, "best", 0)
+	result := SelectBestVariant(nil, "best", 0, true)
 	if result != nil {
 		t.Error("expected nil for empty variants")
 	}
@@ -184,7 +186,7 @@ func TestSelectBestVariantSource(t *testing.T) {
 		{Name: "audio_only", Bandwidth: 160000},
 	}
 
-	result := SelectBestVariant(variants, "best", 0)
+	result := SelectBestVariant(variants, "best", 0, true)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -199,7 +201,7 @@ func TestSelectBestVariantAudioOnly(t *testing.T) {
 		{Name: "audio_only", Bandwidth: 160000},
 	}
 
-	result := SelectBestVariant(variants, "audio_only", 0)
+	result := SelectBestVariant(variants, "audio_only", 0, true)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -216,7 +218,7 @@ func TestSelectBestVariantHeightPref(t *testing.T) {
 		{Name: "480p30", Bandwidth: 1500000, Width: 854, Height: 480, FPS: 30},
 	}
 
-	result := SelectBestVariant(variants, "720p60", 0)
+	result := SelectBestVariant(variants, "720p60", 0, true)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -237,7 +239,7 @@ func TestSelectBestVariantMaxResolution(t *testing.T) {
 		{Name: "480p30", Bandwidth: 1500000, Width: 854, Height: 480},
 	}
 
-	result := SelectBestVariant(variants, "best", 1280)
+	result := SelectBestVariant(variants, "best", 1280, true)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -247,7 +249,7 @@ func TestSelectBestVariantMaxResolution(t *testing.T) {
 
 	// And a cap the source really is over: 720 admits only the 720p and 480p
 	// transcodes, and the largest at or below wins.
-	result = SelectBestVariant(variants, "best", 720)
+	result = SelectBestVariant(variants, "best", 720, true)
 	if result == nil {
 		t.Fatal("expected non-nil result at a 720 cap")
 	}
@@ -268,7 +270,7 @@ func TestSelectBestVariantBelowEveryRendition(t *testing.T) {
 		{Name: "chunked", Bandwidth: 6000000, Width: 1920, Height: 1080, IsSource: true},
 		{Name: "720p30", Bandwidth: 3000000, Width: 1280, Height: 720},
 	}
-	got := SelectBestVariant(variants, "best", 360)
+	got := SelectBestVariant(variants, "best", 360, true)
 	if got == nil {
 		t.Fatal("expected non-nil result below every rendition")
 	}
@@ -291,7 +293,7 @@ func TestSelectBestVariantFourKUnderTheDefaultCap(t *testing.T) {
 		{Name: "chunked", Bandwidth: 25000000, Width: 3840, Height: 2160, VideoCodec: "av01", IsSource: true},
 		{Name: "720p60", Bandwidth: 3000000, Width: 1280, Height: 720, VideoCodec: "avc1"},
 	}
-	got := SelectBestVariant(variants, "best", 2160)
+	got := SelectBestVariant(variants, "best", 2160, true)
 	if got == nil {
 		t.Fatal("expected non-nil result for a 3840x2160 source at cap 2160")
 	}
@@ -313,7 +315,7 @@ func TestSelectBestVariantPortraitUnderTheDefaultCap(t *testing.T) {
 	got := SelectBestVariant([]TwitchHLSVariant{
 		{Name: "chunked", Bandwidth: 18000000, Width: 2160, Height: 3840, VideoCodec: "avc1", IsSource: true},
 		{Name: "720p60", Bandwidth: 3000000, Width: 720, Height: 1280, VideoCodec: "avc1"},
-	}, "best", 2160)
+	}, "best", 2160, true)
 	if got == nil {
 		t.Fatal("expected non-nil result for a 2160x3840 portrait source at cap 2160")
 	}
@@ -329,7 +331,7 @@ func TestSelectBestVariantFallbackToLower(t *testing.T) {
 	}
 
 	// Request 720p but only 1080 and 480 available — should fall back to 480
-	result := SelectBestVariant(variants, "720p", 0)
+	result := SelectBestVariant(variants, "720p", 0, true)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -436,7 +438,7 @@ func TestVideoCodecFamily(t *testing.T) {
 // Mutant: the codec order reversed in rankAtChosenSize — the H.264 source wins.
 func TestSelectBestVariantPrefersTheEnhancedSource(t *testing.T) {
 	variants := ParseHLSMasterPlaylist(enhancedMasterPlaylist)
-	got := SelectBestVariant(variants, "best", 0)
+	got := SelectBestVariant(variants, "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil")
 	}
@@ -457,7 +459,7 @@ https://example.com/chunked-h264.m3u8
 https://example.com/chunked-hevc.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,CODECS="avc1.4D401F,mp4a.40.2",FRAME-RATE=30.000,VIDEO="720p30"
 https://example.com/720p30.m3u8`
-	got = SelectBestVariant(ParseHLSMasterPlaylist(enhancedSourceListedLast), "best", 0)
+	got = SelectBestVariant(ParseHLSMasterPlaylist(enhancedSourceListedLast), "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil for the source-listed-last playlist")
 	}
@@ -483,7 +485,7 @@ https://example.com/720p30.m3u8`
 func TestSelectBestVariantEnhancedSourceUnderTheDefaultCap(t *testing.T) {
 	variants := ParseHLSMasterPlaylist(enhancedMasterPlaylist)
 
-	got := SelectBestVariant(variants, "best", 2160)
+	got := SelectBestVariant(variants, "best", 2160, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil at the default cap")
 	}
@@ -495,7 +497,7 @@ func TestSelectBestVariantEnhancedSourceUnderTheDefaultCap(t *testing.T) {
 
 	// A cap that really is below the enhanced source: 1080 admits the H.264
 	// source and the 720p transcode, and the largest at or below wins.
-	got = SelectBestVariant(variants, "best", 1080)
+	got = SelectBestVariant(variants, "best", 1080, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil at a 1080 cap")
 	}
@@ -523,7 +525,7 @@ https://example.com/chunked.m3u8
 https://example.com/chunked-second.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,FRAME-RATE=30.000,VIDEO="720p30"
 https://example.com/720p30.m3u8`
-	got := SelectBestVariant(ParseHLSMasterPlaylist(legacy), "best", 0)
+	got := SelectBestVariant(ParseHLSMasterPlaylist(legacy), "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil")
 	}
@@ -538,7 +540,7 @@ https://example.com/720p30.m3u8`
 https://example.com/chunked-first.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1920x1080,FRAME-RATE=60.000,VIDEO="chunked"
 https://example.com/chunked-larger.m3u8`
-	got = SelectBestVariant(ParseHLSMasterPlaylist(legacyLargerLater), "best", 0)
+	got = SelectBestVariant(ParseHLSMasterPlaylist(legacyLargerLater), "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil for the larger-later playlist")
 	}
@@ -554,7 +556,7 @@ https://example.com/chunked-larger.m3u8`
 https://example.com/avc1-first.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",FRAME-RATE=60.000,VIDEO="chunked"
 https://example.com/avc1-larger.m3u8`
-	got = SelectBestVariant(ParseHLSMasterPlaylist(legacyWithCodecs), "best", 0)
+	got = SelectBestVariant(ParseHLSMasterPlaylist(legacyWithCodecs), "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil for the two-avc1 playlist")
 	}
@@ -570,7 +572,7 @@ https://example.com/avc1-larger.m3u8`
 https://example.com/first.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,FRAME-RATE=60.000,VIDEO="chunked"
 https://example.com/second.m3u8`
-	got = SelectBestVariant(ParseHLSMasterPlaylist(identical), "best", 0)
+	got = SelectBestVariant(ParseHLSMasterPlaylist(identical), "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil for the identical-renditions playlist")
 	}
@@ -594,7 +596,7 @@ func TestSelectBestVariantCodecRankAtTheChosenSize(t *testing.T) {
 		{Name: "1080p60-av1", Bandwidth: 6000000, Width: 1920, Height: 1080, VideoCodec: "av01"},
 		{Name: "720p60", Bandwidth: 3000000, Width: 1280, Height: 720, VideoCodec: "av01"},
 	}
-	got := SelectBestVariant(variants, "best", 0)
+	got := SelectBestVariant(variants, "best", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil")
 	}
@@ -605,14 +607,14 @@ func TestSelectBestVariantCodecRankAtTheChosenSize(t *testing.T) {
 
 	// Drop AV1 and HEVC wins; drop HEVC too and the H.264 SOURCE wins over the
 	// H.264 transcode at the same size.
-	got = SelectBestVariant(variants[:2], "best", 0)
+	got = SelectBestVariant(variants[:2], "best", 0, true)
 	if got == nil || got.Name != "1080p60-hevc" {
 		t.Errorf("selected %v, want 1080p60-hevc once AV1 is gone", got)
 	}
 	got = SelectBestVariant([]TwitchHLSVariant{
 		{Name: "1080p60", Bandwidth: 9000000, Width: 1920, Height: 1080, VideoCodec: "avc1"},
 		{Name: "chunked", Bandwidth: 6000000, Width: 1920, Height: 1080, VideoCodec: "avc1", IsSource: true},
-	}, "best", 0)
+	}, "best", 0, true)
 	if got == nil || got.Name != "chunked" {
 		t.Errorf("selected %v, want chunked — at equal codec the SOURCE outranks the transcode "+
 			"and outranks bandwidth", got)
@@ -621,18 +623,48 @@ func TestSelectBestVariantCodecRankAtTheChosenSize(t *testing.T) {
 
 // TestSelectBestVariantHonoursAnExplicitHeightOverTheEnhancedSource: an
 // operator who asked for 1080p60 gets 1080p60, enhanced source or not. The
-// codec rung ranks only the chosen size (R2 put it ahead of the source flag)
-// and never overrides the quality preference.
+// codec rung ranks the renditions of one size — the size the preference
+// names, as the size the cap chose (R2 put it ahead of the source flag) — and
+// never overrides the size the preference names.
 //
-// Mutant: applying the codec rank inside selectVariantByHeight — the 1440p
-// HEVC source is returned for a 1080p60 request.
+// Mutant: the size test dropped from selectVariantByHeight's fps filter — the
+// 1440p HEVC source, 60 fps too, wins on its codec.
 func TestSelectBestVariantHonoursAnExplicitHeightOverTheEnhancedSource(t *testing.T) {
-	got := SelectBestVariant(ParseHLSMasterPlaylist(enhancedMasterPlaylist), "1080p60", 0)
+	got := SelectBestVariant(ParseHLSMasterPlaylist(enhancedMasterPlaylist), "1080p60", 0, true)
 	if got == nil {
 		t.Fatal("SelectBestVariant returned nil")
 	}
 	if got.Height != 1080 {
 		t.Errorf("selected %dx%d for quality pref 1080p60, want a 1080-high variant",
 			got.Width, got.Height)
+	}
+}
+
+// TestFetchHLSMasterPlaylistTransportErrorCarriesNoToken: http.Client.Do's
+// *url.Error quotes the whole request URL, and an usher URL's query is the
+// playback token and its signature, so a connection failure put both (and
+// the operator's IP, inside the token) into the job's error column.
+//
+// Mutant: return Do's error unredacted — the signature is in the message.
+func TestFetchHLSMasterPlaylistTransportErrorCarriesNoToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := srv.URL
+	srv.Close() // nothing listens: Do fails in the transport
+
+	_, err := FetchHLSMasterPlaylist(context.Background(),
+		base+"/api/channel/hls/somechannel.m3u8?sig=SIGSECRET&token=%7B%22user_ip%22%3A%22203.0.113.9%22%7D")
+	if err == nil {
+		t.Fatal("a fetch from a closed server succeeded")
+	}
+	for _, secret := range []string{"SIGSECRET", "user_ip", "203.0.113.9", "token="} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("the error carries %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "/api/channel/hls/somechannel.m3u8") {
+		t.Errorf("the error lost the playlist path: %v", err)
+	}
+	if _, ok := errors.AsType[*url.Error](err); !ok {
+		t.Errorf("the error is no longer a *url.Error, so transport classification breaks: %T", err)
 	}
 }

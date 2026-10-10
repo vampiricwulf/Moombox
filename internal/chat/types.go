@@ -127,6 +127,14 @@ type ChatResumeState struct {
 	// pre-existing behaviour so an upgrade never strands a mid-resume job.
 	// Start's mode rule is the only reader.
 	Mode string `json:"mode,omitempty"`
+	// ReplayHighWaterUsec carries the run's replay high-water mark (the
+	// highest absolute timestampUsec committed; see
+	// ChatDownloader.replayHighWaterUsec) to the next run. Without it a run
+	// that resumed a live capture on a REPLAY token paged the archive from the
+	// top with no mark, and everything older than the 5000-ID dedup window
+	// was appended again. nil means no mark (or a sidecar written before the
+	// field existed).
+	ReplayHighWaterUsec *int64 `json:"replayHighWaterUsec,omitempty"`
 }
 
 // ChatResumeState.Mode's values — the kind of run that wrote a sidecar.

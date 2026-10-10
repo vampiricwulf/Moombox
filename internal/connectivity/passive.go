@@ -58,7 +58,7 @@ func (pt *PassiveTracker) ReportFailure(tag string) {
 // transition. Folding the was-triggered read, the per-tag drain, the latch
 // clear, and the did-it-clear check into a SINGLE lock acquisition makes the
 // result atomic with respect to a concurrent ReportFailure — closing the window
-// the prior IsTriggered()/ReportSuccess()/IsTriggered() call sequence left open.
+// the prior read/ReportSuccess()/read call sequence left open.
 //
 // The tracker triggers when multiple distinct tags have piled up failures within
 // the window, so clearing per-tag gives the threshold logic a truthful picture
@@ -67,8 +67,7 @@ func (pt *PassiveTracker) ReportFailure(tag string) {
 // outage.
 //
 // The triggered flag is cleared only when the pruned failure set can no longer
-// meet the trigger threshold, so callers that rely on IsTriggered() state see a
-// stable signal.
+// meet the trigger threshold, so the latch is a stable signal.
 func (pt *PassiveTracker) ReportSuccessAndCleared(tag string) bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
@@ -115,15 +114,12 @@ func (pt *PassiveTracker) ShouldTriggerOffline() bool {
 	return true
 }
 
-// IsTriggered reads the cached latch state without pruning. Callers
-// that have NOT recently invoked ShouldTriggerOffline() / ReportFailure()
-// / ReportSuccess() may see a stale `true` for some time after the
-// failure window has aged out — pruneOld is the only path that clears
-// the latch on idle, and it runs only from those three methods. For
-// fresh state without the trigger side-effect, use IsTriggeredPruned()
-// (ShouldTriggerOffline() also prunes but latches `triggered` true when
-// the threshold is met, which a read-only caller does not want).
-func (pt *PassiveTracker) IsTriggered() bool {
+// isTriggered reads the cached latch state without pruning — the raw latch
+// the tests pin. Production reads IsTriggeredPruned(): this may see a stale
+// `true` for some time after the failure window has aged out, since pruneOld
+// is the only path that clears the latch on idle and it runs only from
+// ShouldTriggerOffline(), ReportFailure() and ReportSuccess().
+func (pt *PassiveTracker) isTriggered() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 	return pt.triggered

@@ -13,16 +13,37 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+// afterSettingsClose re-applies what a save may have changed and nothing
+// else re-reads: hide_finished_age_days, and the status bar's platform
+// indicators (cookies.active_platforms), which otherwise followed only an
+// auth transition — a platform switched off kept its indicator indefinitely.
+// Read under the store lock — HTTP handlers mutate config via
+// configStore.Update concurrently (matches getPort/apiBaseURL).
+func (a *App) afterSettingsClose() {
+	if a.configStore == nil {
+		return
+	}
+	var days float64
+	var ytActive, twActive bool
+	a.configStore.Read(func(c *config.MoomboxConfig) {
+		days = c.Monitors.HideFinishedAgeDays.Days()
+		ytActive, twActive = config.GetActivePlatforms(c)
+	})
+	a.taskList.SetHideFinishedAgeDays(days)
+	a.statusBar.SetActivePlatforms(ytActive, twActive)
+	a.updateSelectedJob() // the rebuild can move the cursor
+}
+
 func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Ctrl+C ALWAYS quits — checked before ANY overlay intercept (O-M).
 	// bubbletea v2 delivers Ctrl+C as a plain key (tea.InterruptMsg comes
-	// only from a real SIGINT), and fourteen overlays consume every key
-	// before it reaches the rest of this function, so twelve of them
-	// swallowed the "Ctrl+C  Quit immediately" help.go promises. No text
-	// input in the TUI binds Ctrl+C — both search boxes already hand it
-	// back — so hoisting it costs nothing (CORE-5).
+	// only from a real SIGINT), and fifteen overlays consume every key
+	// before it reaches the rest of this function; twelve of the fourteen
+	// there were then swallowed the "Ctrl+C  Quit immediately" help.go
+	// promises. No text input in the TUI binds Ctrl+C — both search boxes
+	// already hand it back — so hoisting it costs nothing (CORE-5).
 	//
 	// The wizard's cookie step is the one thing that needs doing on the way
 	// out: AutoCookieService holds the acquisition slot until someone
@@ -41,37 +62,34 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Settings panel intercepts all keys (before normalization to preserve case for text input)
 	if a.settings.IsVisible() {
 		action := a.settings.HandleKey(key)
+		// A save that just removed channels with "delete its pending jobs"
+		// hands their IDs over here (settings_channel_removal.go).
+		prune := a.channelPruneCmd()
 		switch action {
 		case "close":
-			// Re-apply hide_finished_age_days in case it changed. Read
-			// under the store lock — HTTP handlers mutate config via
-			// configStore.Update concurrently (matches getPort/apiBaseURL).
-			if a.configStore != nil {
-				var days float64
-				a.configStore.Read(func(c *config.MoomboxConfig) {
-					days = c.Monitors.HideFinishedAgeDays.Days()
-				})
-				a.taskList.SetHideFinishedAgeDays(days)
-			}
+			a.afterSettingsClose()
 		case "restart":
 			if a.OnRestart != nil {
 				onRestart := a.OnRestart
-				return a, safeCmd(func() tea.Msg {
+				return a, tea.Batch(prune, safeCmd(func() tea.Msg {
 					onRestart()
 					return tea.QuitMsg{}
-				})
+				}))
 			}
+		case "channel_removal_summary":
+			return a, a.channelRemovalSummaryCmd(a.settings.ChannelRemovalID())
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
 		case "test_notification":
 			return a, a.testNotificationCmd(a.settings.SelectedNotificationURL())
 		case "open_ffmpeg":
 			a.settings.Close()
+			a.afterSettingsClose() // a prompted close may have just saved
 			a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs
 			a.ffmpegCheck.Open()
 			a.ffmpegCheck.SetSize(a.width, a.height)
 		}
-		return a, nil
+		return a, prune
 	}
 
 	// Help overlay intercepts all keys (scroll handled by viewport in routeComponentMsg)
@@ -92,6 +110,15 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.releaseNotesPopup.close()
 			return a, nil
 		case "u", "U":
+			// Offered, and handled, only beside a pending update's own notes
+			// — the same gate as S below. In viewer mode U used to close the
+			// notes being read to print "No update available"; and an
+			// UpdateStatusMsg landing while some other version's notes were
+			// open let U apply a release whose notes were not on screen.
+			if !a.releaseNotesPopup.pending || a.updateAvailable == nil ||
+				a.updateAvailable.TagName != a.releaseNotesPopup.tag {
+				return a, nil
+			}
 			// Shared apply flow (active-downloads confirm included). Close
 			// the overlay first so the confirmation/`Updating...` feedback is
 			// visible on the main screen; a pending confirm re-arms via the
@@ -190,6 +217,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		var cmds []tea.Cmd
+		if action == "resolve_channel" {
+			cmds = append(cmds, a.resolveChannelCmd(a.setupWiz.GetChannelResolveInput()))
+		}
 		if action == "finish_cookie" {
 			// Run cookie extraction async so TUI doesn't freeze
 			platform := a.setupWiz.cookiePlatform
@@ -268,7 +298,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		action, data := a.addVideo.HandleKey(key)
 		switch action {
 		case "submit":
-			return a, a.addVideoCmd(data)
+			return a, tea.Batch(a.addVideoCmd(data), a.addVideo.SpinnerInit())
 		case "fetch_formats":
 			return a, tea.Batch(a.fetchFormatsCmd(data), a.addVideo.SpinnerInit())
 		}
@@ -378,6 +408,19 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// The O L overlay owns every key while open: its search box, n/N, End
+	// and the close keys here, the scroll keys already fed to its viewport
+	// by routeComponentMsg. Nothing reaches the chord system underneath.
+	if a.jobLog.IsVisible() {
+		cmd, action := a.jobLog.HandleKey(msg)
+		if action == "close" {
+			// HandleKey already hid the overlay. Retiring the epoch orphans
+			// the session's pending tick and any read in flight.
+			a.jobLogEpoch++
+		}
+		return a, cmd
+	}
+
 	// Log search intercept — must be before key normalization to preserve
 	// case for N (shift+n) and before chord system to capture / and n/N.
 	if a.focusedPanel == PanelLogs {
@@ -396,6 +439,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// with the Tasks panel focused means the main view owns the keyboard.
 	if a.focusedPanel == PanelTasks {
 		if cmd, consumed := a.taskList.HandleSearchKey(msg); consumed {
+			// Enter/Esc re-filter and put the cursor on the first match; the
+			// details panel follows it, as it does for every other move.
+			a.updateSelectedJob()
 			return a, cmd
 		}
 		if key == "/" && !a.taskList.IsSearching() {
@@ -423,6 +469,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Clear an active task-list search (box closed, query applied). The
 		// box-open case is already consumed by HandleSearchKey above.
 		if a.focusedPanel == PanelTasks && a.taskList.ClearSearch() {
+			a.updateSelectedJob()
 			return a, nil
 		}
 		// Also clear any active chord prefix on Esc
@@ -456,9 +503,12 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.seenChordHint = true
 		return a.dispatchAction("`", nil)
 	case keyTab:
-		a.cycleFocus()
+		a.cycleFocus(1)
 		return a, nil
-	case " ":
+	case keyShiftTab:
+		a.cycleFocus(-1)
+		return a, nil
+	case keySpace:
 		// Space: toggle batch selection on focused task (only when task panel focused)
 		if a.focusedPanel == PanelTasks {
 			if job := a.taskList.SelectedJob(); job != nil {
@@ -581,7 +631,8 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 					if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
 						break // batch mode — pass nil job so dispatchAction takes batch path
 					}
-					job = a.taskList.SelectedJob()
+					// The job the prompt named, not the cursor's (chordState.jobID).
+					job = a.taskList.GetJobByID(a.chord.jobID)
 					if job != nil && item.JobFilter != nil && !item.JobFilter(job) {
 						job = nil // job status changed during confirm window
 					}
@@ -649,18 +700,34 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		// single job — only for chords dispatchAction implements batch for;
 		// the rest fall through to the single-selected-job path.
 		if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
+			// Count what the batch will act on, as the Web's batch bar
+			// does, not the whole selection: the prompt used to offer
+			// "delete 1 jobs" for a selection of one Downloading job, whose
+			// confirm then found nothing deletable.
+			eligible := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				if j := a.taskList.GetJobByID(id); j != nil && (item.JobFilter == nil || item.JobFilter(j)) {
+					eligible++
+				}
+			}
+			if eligible == 0 {
+				a.rejectChordForJob(item)
+				return a, nil, true
+			}
 			a.chord.action = key
 			a.chord.actionTime = time.Now()
-			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %d jobs (3s)",
-				strings.ToUpper(key), strings.ToLower(item.HintLabel), a.taskList.SelectedCount()))
+			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %s (3s)",
+				strings.ToUpper(key), strings.ToLower(item.HintLabel), jobCount(eligible)))
 			return a, nil, true
 		}
 		job := a.taskList.SelectedJob()
 		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
-			return a, nil, true // no valid job — consume key but do nothing
+			a.rejectChordForJob(item)
+			return a, nil, true
 		}
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
+		a.chord.jobID = job.ID
 		a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\" (3s)",
 			strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title))
 		return a, nil, true
@@ -686,7 +753,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		}
 		job := a.taskList.SelectedJob()
 		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
-			return a, nil, true // no valid job — consume key but do nothing
+			a.rejectChordForJob(item)
+			return a, nil, true
 		}
 		a.chord = chordState{}
 		m, cmd := a.dispatchAction(chord, job)
@@ -697,4 +765,24 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	a.chord = chordState{}
 	m, cmd := a.dispatchAction(chord, nil)
 	return m, cmd, true
+}
+
+// rejectChordForJob answers a registered NeedsJob chord whose selected job
+// fails the item's JobFilter, or that was pressed with no job selected. The
+// key is consumed, the chord resets to idle exactly as the invalid-chord path
+// does, and the line says why — with the item's DisabledReason, the same
+// words the action menu shows beside a greyed entry. Before this the key was
+// swallowed in silence and the prefix stayed armed, so the operator's next
+// press was read as a second key of a chord they thought had ended.
+//
+// The severity is stated: "no finished jobs in selection" has no word the
+// fallback scan reads as a warning, and it would otherwise render in the
+// success green.
+func (a *App) rejectChordForJob(item *ActionMenuItem) {
+	a.chord = chordState{}
+	reason := item.DisabledReason
+	if reason == "" {
+		reason = "no eligible jobs"
+	}
+	a.setFeedbackWithSeverity(item.Label+": "+reason+" in selection", severityWarning)
 }

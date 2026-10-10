@@ -1,7 +1,7 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay } from "./utils.js";
+import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay, serverErrorMessage } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 import {
   normalizeOffsetMs,
@@ -221,6 +221,14 @@ function resolvedColor(archived, fallback) {
  * focus.
  */
 export function focusPlayerSurface() {
+  // An open resume dialog owns the keyboard. The picker's sl-change handler
+  // calls this after onPlayerJobSelect resolves, which with a slow chat fetch
+  // is after the dialog focused its primary action, and took that away.
+  const resume = document.querySelector("#player-video-wrapper .resume-overlay #resume-continue");
+  if (resume) {
+    resume.focus();
+    return;
+  }
   document.getElementById("player-job-select")?.blur();
   document.getElementById("player-video-wrapper")?.focus({ preventScroll: true });
 }
@@ -262,7 +270,6 @@ export class PlayerController {
   constructor(app) {
     this.app = app;
     this.playerJob = null;
-    this.playerChatData = null;
     this.playerChatMessages = [];
     this.playerAutoScroll = true;
     this.playerScrollLock = false;
@@ -446,6 +453,10 @@ export class PlayerController {
     video.addEventListener("seeked", () => {
       const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
+      // Scroll too. The seek's own timeupdate ran BEFORE this (see
+      // "seeking" above), against the pre-seek index, so it scrolled to the
+      // old position; while paused no further tick comes to correct it.
+      if (this.playerAutoScroll && !this.playerScrollLock) this.syncSidebarToTime();
       this._reanchorNicoAt(currentMs + this.playerCustomOffsetMs);
     });
 
@@ -524,7 +535,8 @@ export class PlayerController {
     video.addEventListener("error", () => {
       if (video.error && video.src) {
         console.error("Video load error:", video.error.message);
-        this.app.showToast("Video failed to load — segment may be missing", "danger");
+        // The segment hint only means something for a multi-segment job.
+        this.app.showToast(this._seg.active ? "Video failed to load — segment may be missing" : "Video failed to load", "danger");
       }
     });
 
@@ -688,6 +700,11 @@ export class PlayerController {
       // Skip when typing in inputs (composedPath handles Shoelace shadow DOM)
       if (isTypingInInput(e)) return;
 
+      // Ctrl/Cmd/Alt combinations are the browser's: Ctrl+C copying selected
+      // chat used to toggle the overlay instead, and Ctrl+F to go fullscreen.
+      // Shift stays ours (Shift+Arrow is the 30 s seek).
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
       // Let a focused control handle its own Space (activate/toggle) instead
       // of the player also toggling playback on the same keypress.
       const target = e.composedPath()[0];
@@ -849,7 +866,6 @@ export class PlayerController {
     this._dismissResumeDialog();
 
     this.playerJob = null;
-    this.playerChatData = null;
     this.playerChatMessages = [];
     this.twitchEmoteMap = new Map();
     this.playerAutoScroll = true;
@@ -985,8 +1001,10 @@ export class PlayerController {
   /**
    * Rebuild the video picker from the live and archived job lists.
    *
-   * Two calls overlapping is normal — a WebSocket job update lands while a
-   * manual refresh is still in flight — and each one awaits three times. A
+   * Two calls overlapping is normal — a WebSocket job update (a recording
+   * finishing, or a job deleted, while the Player tab is open:
+   * MoomboxApp._refreshPlayerPicker) lands while a manual refresh is still in
+   * flight — and each one awaits three times. A
    * generation token makes the NEWEST call the only one that writes: every
    * await is followed by a bail, so a superseded rebuild leaves the option list
    * and the selection alone instead of restoring a value its own stale list
@@ -1010,19 +1028,28 @@ export class PlayerController {
       const jobs = jobsRes.ok ? await jobsRes.json() : [];
       const archived = archivedRes.ok ? await archivedRes.json() : [];
       if (token !== this._rebuildToken) return;
-      if (!jobsRes.ok && !archivedRes.ok) {
-        this.app.showToast("Failed to load video list", "warning");
+      // Only a list built from BOTH answers can say a recording is gone.
+      const complete = jobsRes.ok && archivedRes.ok;
+      if (!complete) {
+        const failed = jobsRes.ok ? archivedRes : jobsRes;
+        this.app.showToast(`Failed to load the video list: ${await serverErrorMessage(failed)}`, "warning");
+        if (token !== this._rebuildToken) return;
       }
 
-      const all = [...jobs, ...archived]
-        .filter((j) => j.status === "Finished" && j.filename)
-        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-
-      // The currently loaded job disappeared (deleted, or its id changed via
-      // re-import) — clear the player instead of leaving a dangling selection.
+      const all = [...jobs, ...archived].filter((j) => j.status === "Finished" && j.filename);
       if (currentValue && !all.some((j) => j.id === currentValue)) {
-        this.clearPlayer();
+        if (complete) {
+          // The currently loaded job disappeared (deleted, or its id changed
+          // via re-import) — clear the player instead of leaving a dangling
+          // selection.
+          this.clearPlayer();
+        } else if (this.playerJob?.id === currentValue) {
+          // Missing from a list that half failed proves nothing: keep the
+          // playing recording, and keep it in the picker.
+          all.push(this.playerJob);
+        }
       }
+      all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
       // Rebuild the option list even while a video is playing: removing/adding
       // sl-options does not itself emit sl-change in Shoelace 2.16 (verified —
@@ -1051,17 +1078,26 @@ export class PlayerController {
         this._rebuildsActive--;
       }
 
-      // Show/hide empty state
+      // Show/hide empty state. Both lines are set in both arms: the subtext
+      // ("Choose from the dropdown above…") used to stay put when the list
+      // was empty, pointing at a dropdown with nothing in it.
       const emptyState = document.getElementById("player-empty-state");
+      const msg = emptyState.querySelector("p");
+      const subtext = emptyState.querySelector(".empty-state-subtext");
       if (all.length === 0) {
         emptyState.style.display = "";
-        emptyState.querySelector("p").textContent = "No finished videos available.";
+        msg.textContent = "No finished videos available.";
+        if (subtext) subtext.textContent = "Finished recordings appear here to watch with synced chat";
       } else if (!select.value) {
         emptyState.style.display = "";
-        emptyState.querySelector("p").textContent = "Select a finished video to play.";
+        msg.textContent = "Select a finished video to play.";
+        if (subtext) subtext.textContent = "Choose from the dropdown above to watch with synced chat overlay";
       }
     } catch (e) {
       console.error("Failed to load player job list:", e);
+      // The half-failed list toasts above; a total failure (server
+      // unreachable) must too, or the picker just sits stale.
+      this.app.showToast(`Failed to load the video list: ${e.message}`, "warning");
     }
   }
 
@@ -1074,9 +1110,21 @@ export class PlayerController {
     const selectionId = ++this._selectionSeq;
 
     // Fetch job details
+    // A pick that cannot be opened says why and puts the picker back on what
+    // is still playing, rather than showing one recording while another plays.
+    const refuse = (reason) => {
+      if (this._selectionSeq !== selectionId) return;
+      this.app.showToast(`Could not open the recording: ${reason}`, "danger");
+      const select = document.getElementById("player-job-select");
+      if (select) select.value = this.playerJob?.id ?? "";
+    };
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok || this._selectionSeq !== selectionId) return;
+      if (this._selectionSeq !== selectionId) return;
+      if (!res.ok) {
+        refuse(await serverErrorMessage(res));
+        return;
+      }
       const job = await res.json();
       // The body of an OLDER selection can resolve after a newer one completed —
       // re-check before anything observable (playerJob, video.src) is touched.
@@ -1084,6 +1132,7 @@ export class PlayerController {
       this.playerJob = job;
     } catch (e) {
       console.error("Failed to fetch job:", e);
+      refuse(e.message);
       return;
     }
 
@@ -1112,7 +1161,6 @@ export class PlayerController {
     // - a `seeked` inside the fetch window (a restored resume position) would
     //   re-anchor over the old job's flying text on top of the new picture.
     this.playerChatMessages = [];
-    this.playerChatData = null;
     this._chatParts = null;
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
@@ -1159,35 +1207,33 @@ export class PlayerController {
     // the source swap).
     if (this.playerJob.chatFilename || (this.playerJob.segments || []).some((s) => s.chatFile)) {
       try {
-        this.playerChatData = await this._fetchChatData(jobId, selectionId);
+        // A block-scoped local, not a field: nothing reads the raw file
+        // after this block, and going out of scope here releases it (the
+        // normalized copy in playerChatMessages is what everything reads).
+        const chatData = await this._fetchChatData(jobId, selectionId);
         if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
-        if (this.playerChatData) {
+        if (chatData) {
           // Chat-to-video timing correction (see chat-timeline.js for the
           // semantics per platform). Multi-part YouTube jobs use the same
           // rule: the video begins at the actual stream start regardless of
           // when Moombox started downloading.
           const chatBiasMs = computeChatBiasMs({
-            platform: this.playerChatData.platform,
-            chatStreamStartTime: this.playerChatData.streamStartTime,
+            platform: chatData.platform,
+            chatStreamStartTime: chatData.streamStartTime,
             jobStreamStartTime: this.playerJob.streamStartTime,
           });
-          this.playerChatMessages = (this.playerChatData.messages || [])
+          this.playerChatMessages = (chatData.messages || [])
             .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
           // Build 3rd-party emote lookup map for Twitch chat
           // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
-          if (this.playerChatData.emotes) {
-            const { bttv, ffz, seventv } = this.playerChatData.emotes;
+          if (chatData.emotes) {
+            const { bttv, ffz, seventv } = chatData.emotes;
             for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
             for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
             for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
           }
-
-          // Release the raw array now that playerChatMessages holds the
-          // normalized/biased copy — halves peak memory for large chat
-          // files. filterChat and everything else read playerChatMessages.
-          this.playerChatData.messages = null;
         }
       } catch (e) {
         console.error("Failed to load chat:", e);
@@ -1258,10 +1304,17 @@ export class PlayerController {
       // await inside the closure would throw on the stale `.find()` call
       // instead of falling through to the seq check below.
       const segOffsets = this._seg.segOffsets;
+      // A part whose chat fails to load is dropped from the merge, but not
+      // silently: "no chat for this part" (404) is ordinary, anything else
+      // is named, or the sidebar just reads short with no explanation.
+      const failedParts = [];
       const parts = await Promise.all(withChat.map(async (s) => {
         try {
           const r = await fetch(`/api/jobs/${jobId}/segments/${s.segmentIndex}/chat`);
-          if (!r.ok) return null;
+          if (!r.ok) {
+            if (r.status !== 404) failedParts.push(`part ${s.segmentIndex + 1}: ${await serverErrorMessage(r)}`);
+            return null;
+          }
           const data = await r.json();
           // Per part, against the PART's own header — before mergePartChats
           // shifts it onto the global timeline (one file, one epoch, and the
@@ -1278,17 +1331,28 @@ export class PlayerController {
           else if (data) deriveMissingOffsets(data.messages, data.streamStartTime);
           const off = segOffsets.find((o) => o.segmentIndex === s.segmentIndex);
           return { startOffsetSec: off ? off.startOffset : 0, data };
-        } catch {
+        } catch (e) {
+          failedParts.push(`part ${s.segmentIndex + 1}: ${e.message}`);
           return null;
         }
       }));
       if (this._selectionSeq !== selectionId) return null;
+      if (failedParts.length > 0) {
+        this.app.showToast(`Some chat replay failed to load (${failedParts.join("; ")})`, "warning");
+      }
       const merged = mergePartChats(parts.filter(Boolean));
       if (merged.messages.length > 0) return merged;
     }
     const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
     if (this._selectionSeq !== selectionId) return null;
-    if (!chatRes.ok) return null;
+    if (!chatRes.ok) {
+      // 404 is "this job has no chat"; anything else (a corrupt file's 422,
+      // a 403) is a chat that exists and failed, and says why.
+      if (chatRes.status !== 404) {
+        this.app.showToast(`Failed to load chat replay: ${await serverErrorMessage(chatRes)}`, "warning");
+      }
+      return null;
+    }
     const data = await chatRes.json();
     if (this._selectionSeq !== selectionId) return null;
     // A message the producer left without an offset of its own (offsetMs 0
@@ -1776,9 +1840,14 @@ export class PlayerController {
     // "Recording ended" divider so the tail — the part that has no playback
     // position of its own — is what the sync button hands you. Checked before
     // the active-index guard so a chat that is entirely post-end still syncs.
+    // On a multi-part job `ended` is the PART's: it already reads true on the
+    // last tick of every part but the final one, which jumped the sidebar to
+    // the divider at each boundary and back when the next part loaded.
     const video = document.getElementById("player-video");
     const p = this._chatParts;
-    if (video?.ended && p && p.firstPostIndex >= 0 && container.children[p.firstPostIndex]) {
+    const recordingEnded = video?.ended &&
+      (!this._seg.active || this._seg.segIdx === this._seg.segments.length - 1);
+    if (recordingEnded && p && p.firstPostIndex >= 0 && container.children[p.firstPostIndex]) {
       this._programmaticScroll = true;
       container.scrollTop = Math.max(0, container.children[p.firstPostIndex].offsetTop - 8);
       requestAnimationFrame(() => {
@@ -2327,10 +2396,25 @@ export class PlayerController {
     this._resumeDialogAbort = new AbortController();
     const sig = this._resumeDialogAbort.signal;
 
-    const dismiss = () => this._dismissResumeDialog();
+    // An ANSWER hands the keyboard to the player, not back to where focus was
+    // when the dialog opened: that is the picker, where Space opens the list
+    // instead of pausing (see focusPlayerSurface), or a details-dialog button
+    // that is gone. Teardown (job switch, clearPlayer) still restores.
+    const dismiss = () => {
+      this._resumeReturnFocus = null;
+      this._dismissResumeDialog();
+      focusPlayerSurface();
+    };
+
+    // Both document handlers below answer only while the Player tab is
+    // showing. Leaving the tab does not dismiss the dialog (it is still
+    // waiting when the user comes back), and without this guard its Tab trap
+    // swallowed every Tab app-wide and its Escape started the hidden video.
+    const playerShowing = () =>
+      document.querySelector('sl-tab-panel[name="player"]')?.hasAttribute("active") === true;
 
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || !playerShowing()) return;
       if (document.querySelector("sl-dialog[open]") || isTypingInInput(e)) return;
       e.preventDefault();
       // Start from beginning on Escape (same as clicking "Start from beginning")
@@ -2352,7 +2436,7 @@ export class PlayerController {
     const focusables = () => [...overlay.querySelectorAll("sl-button, button, [tabindex]:not([tabindex='-1'])")]
       .filter((el) => !el.disabled);
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Tab") return;
+      if (e.key !== "Tab" || !playerShowing()) return;
       const items = focusables();
       if (!items.length) return;
       const first = items[0], last = items[items.length - 1];
@@ -2407,15 +2491,25 @@ export class PlayerController {
     const video = document.getElementById("player-video");
 
     // Periodic save every 10 seconds
+    //
+    // Watched is checked FIRST, and a tick that marks the job watched saves
+    // no position: marking watched clears resume_position on the server, but
+    // the PUT and the POST ride separate connections, so a PUT dispatched in
+    // the same tick could land second and leave a watched job offering
+    // "Resume from" its end.
     this._watchSaveInterval = setInterval(() => {
       if (!video || video.paused || document.hidden) return;
+      if (this._checkWatched(jobId, video)) return;
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
       this._saveResumePosition(jobId, pos);
-      this._checkWatched(jobId, video);
     }, 10000);
 
-    // Save on pause
+    // Save on pause — except the pause the media fires as the recording
+    // ends, for the same reason: `ended` follows it and marks the job
+    // watched (onSegmentEnded), and this PUT could land after that POST.
     this._onPauseSave = () => {
+      const lastPart = !this._seg.active || this._seg.segIdx === this._seg.segments.length - 1;
+      if (video.ended && lastPart) return;
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
       this._saveResumePosition(jobId, pos);
     };
@@ -2469,8 +2563,9 @@ export class PlayerController {
     this.app._updateJobResumePosition(jobId, position);
   }
 
+  /** Mark the job watched once playback is near the end; true when it did. */
   _checkWatched(jobId, video) {
-    if (this._watchedTriggered) return;
+    if (this._watchedTriggered) return false;
 
     let currentPos, totalDuration;
     if (this._seg.active) {
@@ -2483,7 +2578,7 @@ export class PlayerController {
       totalDuration = (jobLen && jobLen > 0) ? jobLen : video.duration;
     }
 
-    if (!totalDuration || !isFinite(totalDuration)) return;
+    if (!totalDuration || !isFinite(totalDuration)) return false;
 
     const withinThreshold =
       (totalDuration > 60 && totalDuration - currentPos <= 30) ||
@@ -2493,7 +2588,9 @@ export class PlayerController {
       this._watchedTriggered = true;
       this._clearWatchTracking();
       fetch(`/api/jobs/${jobId}/watched`, { method: "POST" }).catch(() => {});
+      return true;
     }
+    return false;
   }
 
   /**

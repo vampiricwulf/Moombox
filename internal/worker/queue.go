@@ -14,20 +14,16 @@ type pendingJob struct {
 	Priority int
 }
 
-// calculatePriority returns the queue priority for a job status.
-// Live=1 (highest), Upcoming/Downloading=0, Error=-1 (lowest).
-// Matches TS: Live streams are processed before upcoming/retried jobs.
+// calculatePriority returns the queue priority for a job status: Live=1
+// (highest), everything else 0. Matches TS: Live streams are processed before
+// upcoming and resumed jobs. (There was an Error=-1 tier "for retries", but
+// every retry path writes Upcoming or Downloading before it enqueues, and
+// processJob skips a row the queue does not process, so nothing reached it.)
 func calculatePriority(status database.JobStatus) int {
-	switch status {
-	case database.StatusLive:
+	if status == database.StatusLive {
 		return 1
-	case database.StatusUpcoming, database.StatusDownloading:
-		return 0
-	case database.StatusError:
-		return -1
-	default:
-		return 0
 	}
+	return 0
 }
 
 // JobQueue manages the download job queue with separate lifecycle and download concurrency.
@@ -52,6 +48,7 @@ type JobQueue struct {
 	holdingLifecycle map[string]bool          // tracks which jobs hold lifecycle slots
 	droppedLogged    map[string]struct{}      // jobs whose backlog drop has been logged
 	cancelled        map[string]bool          // tracks user-initiated cancellations (vs shutdown)
+	settled          map[string]bool          // runs past reporting a Cancel (settle)
 	notify           chan struct{}
 	dlNotify         chan struct{} // signaling for download slot availability
 	lifeNotify       chan struct{} // signaling for lifecycle slot availability
@@ -86,6 +83,7 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 		holdingLifecycle:   make(map[string]bool),
 		droppedLogged:      make(map[string]struct{}),
 		cancelled:          make(map[string]bool),
+		settled:            make(map[string]bool),
 		notify:             make(chan struct{}, 1),
 		dlNotify:           make(chan struct{}, 1),
 		lifeNotify:         make(chan struct{}, 1),
@@ -192,11 +190,11 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 
 // AcquireLifecycleSlot blocks until one of the maxLifecycle slots is free,
 // then claims it for jobID. Called once stream processing has decided the job
-// will actually download (owner decision O-F), so the cap now bounds
-// CONCURRENT DOWNLOADS rather than concurrent waits — a limit no realistic
-// install approaches, which is the point: the wait phase is unbounded except
-// by per-job goroutine cost. Returns false if ctx is cancelled first — which
-// is what makes Stop prompt: a parked job must not hold shutdown open.
+// will actually download (owner decision O-F), and for a VOD only once it
+// holds its download slot, so the cap bounds the jobs actually downloading or
+// muxing rather than the ones waiting — the wait phase is unbounded except by
+// per-job goroutine cost. Returns false if ctx is cancelled first — which is
+// what makes Stop prompt: a parked job must not hold shutdown open.
 //
 // A wait that outlasts lifecycleWarnAfter logs ONE line naming the job and how
 // many slots are held. Once per wait, not once per wakeup: at the cap every
@@ -275,28 +273,9 @@ func (q *JobQueue) releaseLifecycleSlotLocked(jobID string) {
 // Returns true if the slot was acquired, false if the context was cancelled.
 func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 	for {
-		q.mu.Lock()
-		if q.activeDownloads < q.maxDownloads {
-			q.activeDownloads++
-			q.holdingDlSlot[jobID] = true
-			stillFree := q.activeDownloads < q.maxDownloads
-			q.mu.Unlock()
-			// Cascade the wakeup: dlNotify has capacity 1, so two releases in
-			// quick succession collapse into one signal — without this forward,
-			// one waiter would take one slot while a second waiter slept next
-			// to a free slot until the NEXT release (potentially hours on live
-			// streams). Each successful acquirer re-signals while capacity
-			// remains so every free slot finds its waiter.
-			if stillFree {
-				select {
-				case q.dlNotify <- struct{}{}:
-				default:
-				}
-			}
+		if q.TryAcquireDownloadSlot(jobID) {
 			return true
 		}
-		q.mu.Unlock()
-
 		select {
 		case <-ctx.Done():
 			return false
@@ -306,35 +285,91 @@ func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 	}
 }
 
+// TryAcquireDownloadSlot takes a download slot for the job when one is free
+// and reports whether it did, without waiting. AcquireDownloadSlot is this in
+// a loop; the worker calls it first so it can tell the operator a VOD is
+// queueing for a slot only when it actually is.
+func (q *JobQueue) TryAcquireDownloadSlot(jobID string) bool {
+	q.mu.Lock()
+	if q.activeDownloads >= q.maxDownloads {
+		q.mu.Unlock()
+		return false
+	}
+	q.activeDownloads++
+	q.holdingDlSlot[jobID] = true
+	stillFree := q.activeDownloads < q.maxDownloads
+	q.mu.Unlock()
+	// Cascade the wakeup: dlNotify has capacity 1, so two releases in
+	// quick succession collapse into one signal — without this forward,
+	// one waiter would take one slot while a second waiter slept next
+	// to a free slot until the NEXT release (potentially hours on live
+	// streams). Each successful acquirer re-signals while capacity
+	// remains so every free slot finds its waiter.
+	if stillFree {
+		select {
+		case q.dlNotify <- struct{}{}:
+		default:
+		}
+	}
+	return true
+}
+
 // ReleaseDownloadSlot frees the download slot for a job without cancelling its context.
 // Called after download completes but before muxing, so the next download can start
 // while muxing runs (mux is CPU-bound, not a download slot).
 func (q *JobQueue) ReleaseDownloadSlot(jobID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.releaseDownloadSlotLocked(jobID)
+}
 
-	if q.holdingDlSlot[jobID] {
-		delete(q.holdingDlSlot, jobID)
-		q.activeDownloads--
-		// Signal that a download slot is free
-		select {
-		case q.dlNotify <- struct{}{}:
-		default:
-		}
+// releaseDownloadSlotLocked frees jobID's download slot if it holds one.
+// Caller holds q.mu.
+func (q *JobQueue) releaseDownloadSlotLocked(jobID string) {
+	if !q.holdingDlSlot[jobID] {
+		return
+	}
+	delete(q.holdingDlSlot, jobID)
+	q.activeDownloads--
+	// Signal that a download slot is free
+	select {
+	case q.dlNotify <- struct{}{}:
+	default:
 	}
 }
 
-// Complete marks a job as finished, freeing its lifecycle slot and cleaning up.
-// Also releases the download slot if still held.
+// ReleaseSlots gives back jobID's lifecycle and download slots WITHOUT ending
+// its run. setJobError and handleCancellation call it first thing, so the next
+// download does not wait out a failing run's tail — notifications, and an
+// automatic cookie refresh that can take minutes.
+//
+// They used to call Complete for this, and Complete also unregisters the run:
+// with the run gone from processing, anything that re-enqueued the job during
+// that tail (a Retry, the heartbeat, the cookie sweep) started a SECOND run,
+// and the first run's deferred Complete then cancelled the second's context,
+// closed its Done and released its slots — a live capture stalled until the
+// heartbeat restarted it. Done also closed before the goroutine returned,
+// which is what afterJobExit and WaitForJobExit rely on it not doing. The run
+// now stays registered until processJob's deferred Complete, its only one.
+// Idempotent, like the release helpers it calls.
+func (q *JobQueue) ReleaseSlots(jobID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.releaseLifecycleSlotLocked(jobID)
+	q.releaseDownloadSlotLocked(jobID)
+}
+
+// Complete ends a job's run: it frees any slot still held, cancels the run's
+// context, unregisters it and closes its Done channel. processJob's deferred
+// call is the only caller — once per run, when the goroutine returns (see
+// ReleaseSlots for why nothing calls it earlier).
 func (q *JobQueue) Complete(jobID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	// Outside the processing branch on purpose: a job that claimed a slot and
-	// then had its row deleted (or whose setJobError/handleCancellation
-	// Complete already removed the processing entry) must still give the slot
-	// back. The holdingLifecycle guard makes the repeat call a no-op, so the
-	// two Completes every error path fires cannot over-release.
+	// then had its row deleted must still give the slot back. The
+	// holdingLifecycle guard makes a call after ReleaseSlots a no-op.
 	q.releaseLifecycleSlotLocked(jobID)
 
 	// Outside the processing branch for the same reason: a job with a
@@ -350,8 +385,10 @@ func (q *JobQueue) Complete(jobID string) {
 
 		// Drop any unconsumed user-cancel flag so it can't leak or
 		// misclassify the job's next run (WasCancelled normally consumes it,
-		// but error paths can finish a run without ever reading it).
+		// but a run that finishes its download ends without reading it), and
+		// the settled mark with it: the job's next run reports its own.
 		delete(q.cancelled, jobID)
+		delete(q.settled, jobID)
 
 		// Signal that the processing goroutine has returned.
 		ch := q.done[jobID]
@@ -361,29 +398,17 @@ func (q *JobQueue) Complete(jobID string) {
 		}
 
 		// Also release download slot if still held
-		if q.holdingDlSlot[jobID] {
-			delete(q.holdingDlSlot, jobID)
-			q.activeDownloads--
-			select {
-			case q.dlNotify <- struct{}{}:
-			default:
-			}
-		}
+		q.releaseDownloadSlotLocked(jobID)
 	}
 
-	// Wake a parked Dequeue so it re-checks the backlog (the lifecycle slot is
-	// released above, and Dequeue no longer waits on it).
-	select {
-	case q.notify <- struct{}{}:
-	default:
-	}
 }
 
 // Cancel cancels a specific job (user-initiated). Returns true when it
-// flagged an actively-processing run — that run's handleCancellation will
-// emit the "cancelled" notification, so notifying callers (the cancel
-// route) skip their own emission; previously one user cancel produced two
-// embeds for an in-flight job.
+// flagged an actively-processing run that had not yet settled its outcome
+// (settle) — that run's handleCancellation will emit the "cancelled"
+// notification, so notifying callers (the cancel route) skip their own
+// emission; previously one user cancel produced two embeds for an in-flight
+// job.
 func (q *JobQueue) Cancel(jobID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -394,11 +419,17 @@ func (q *JobQueue) Cancel(jobID string) bool {
 	// classify — the entry would leak forever and, worse, misclassify a
 	// future run of the same job (a later shutdown interruption would read
 	// the stale flag and flip a resumable job to Cancelled).
+	//
+	// Nor a run that has settled its outcome (settle): it is past the point
+	// of reporting a cancel, so this one is its caller's to report. Its
+	// context is cancelled all the same.
 	flagged := false
 	if cancel, ok := q.processing[jobID]; ok {
-		q.cancelled[jobID] = true
+		if !q.settled[jobID] {
+			q.cancelled[jobID] = true
+			flagged = true
+		}
 		cancel()
-		flagged = true
 	}
 	// Also remove from pending
 	for i, pj := range q.pending {
@@ -412,15 +443,63 @@ func (q *JobQueue) Cancel(jobID string) bool {
 }
 
 // WasCancelled returns true if the job was explicitly cancelled by the user
-// (as opposed to being stopped by shutdown). Clears the flag after reading.
+// (as opposed to being stopped by shutdown). Clears the flag after reading,
+// and settles the run (settle): it is ending either way, so a Cancel that
+// arrives after this is its caller's to report — CancelJob writes
+// Cancelled before it flags, and that write alone can end a run here.
 func (q *JobQueue) WasCancelled(jobID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if _, ok := q.processing[jobID]; ok {
+		q.settled[jobID] = true
+	}
 	if q.cancelled[jobID] {
 		delete(q.cancelled, jobID)
 		return true
 	}
 	return false
+}
+
+// settle marks the point past which jobID's run no longer reports a Cancel,
+// and reports whether one flagged it first. A run calls it as it records its
+// outcome — setJobError's failure, a backlog requeue — and WasCancelled does
+// it for a run ending as cancelled or interrupted.
+//
+// Flagged first (true), the run must end as a cancelled one
+// (handleCancellation, which consumes the flag) and send the Job Cancelled
+// that Cancel's caller left to it. Otherwise the run is settled: Cancel no
+// longer flags it and answers false, so its caller — the cancel route, the
+// TUI — sends that notification itself.
+//
+// The queue's lock decides which came first. Read and written apart, the
+// flag and the outcome left a window either way: a run that recorded its
+// failure after CancelJob's flag and before its Cancelled write sent Job
+// Failed for the operator's Cancel, and the Job Cancelled never went; a
+// Cancel that flagged a run already past reading the flag — a failure's
+// tail, which an automatic cookie refresh can hold for minutes, or a
+// requeue — was reported by nobody, since its caller had left it to the run.
+func (q *JobQueue) settle(jobID string) bool {
+	flagged, _ := q.settleRun(jobID)
+	return flagged
+}
+
+// settleRun is settle, also reporting whether the run had settled before this
+// call (already): it recorded its outcome — a failure, a requeue, the end of
+// a cancelled or interrupted run — and is in what is left of it. A run that
+// panics asks (recordRunPanic), since the outcome it recorded before the
+// panic stands. The two never both hold: Cancel does not flag a settled run,
+// and a flagged run settles only as its flag is consumed (WasCancelled).
+func (q *JobQueue) settleRun(jobID string) (flagged, already bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.cancelled[jobID] {
+		return true, false
+	}
+	if _, ok := q.processing[jobID]; ok {
+		already = q.settled[jobID]
+		q.settled[jobID] = true
+	}
+	return false, already
 }
 
 // SetMaxDownloads updates the max parallel downloads.

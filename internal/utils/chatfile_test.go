@@ -316,6 +316,59 @@ func TestAppendChatMessagesMarshalFailureLogs(t *testing.T) {
 	}
 }
 
+// TestAppendChatMessagesSkippedLastMessageKeepsValidJSON: the separator was
+// written after every message but the batch's last by index, so a batch whose
+// LAST message failed to marshal left a trailing comma before "]" — and the
+// file, already holding messages, was no longer valid JSON. A batch where
+// nothing marshals leaves the file as it was.
+//
+// Mutant: restore the index-driven separator — the first case's file fails
+// to parse.
+func TestAppendChatMessagesSkippedLastMessageKeepsValidJSON(t *testing.T) {
+	type chatDoc struct {
+		MessageCount int              `json:"messageCount"`
+		Messages     []map[string]any `json:"messages"`
+	}
+	seed := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "chat.json")
+		if err := WriteChatFileAtomic(path, &chatDoc{MessageCount: 1, Messages: []map[string]any{{"id": "a"}}}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		return path
+	}
+	read := func(t *testing.T, path string) chatDoc {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc chatDoc
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("file is no longer valid JSON: %v\n%s", err, raw)
+		}
+		return doc
+	}
+
+	path := seed(t)
+	batch := []any{map[string]any{"id": "b"}, make(chan int)}
+	if err := AppendChatMessages(path, batch, 2, &captureLogger{}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if doc := read(t, path); len(doc.Messages) != 2 || doc.Messages[1]["id"] != "b" {
+		t.Errorf("messages = %v, want a then b", doc.Messages)
+	}
+
+	path = seed(t)
+	before, _ := os.ReadFile(path)
+	if err := AppendChatMessages(path, []any{make(chan int)}, 2, &captureLogger{}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Errorf("a batch with nothing to add rewrote the file:\n%s", after)
+	}
+}
+
 func TestUpdateChatFileHeaderFieldsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chat.json")
@@ -573,5 +626,41 @@ func TestWriteChatFileAtomicEncodingIsUnchanged(t *testing.T) {
 	}
 	if string(raw) != chatGoldenPreAdopt {
 		t.Errorf("encoding drifted.\n got: %q\nwant: %q", string(raw), chatGoldenPreAdopt)
+	}
+}
+
+// TestAppendChatMessagesAfterExtraWhitespaceBeforeTheBracket: a failed append
+// used to restore "\n  ]\n}" after the "\n  " already before the bracket,
+// leaving "}\n  \n  ]". The next append looked back only 5 bytes for a '}',
+// saw whitespace, and wrote its first message without a comma — invalid JSON
+// that every later append kept "succeeding" on.
+//
+// Mutant: shrink the look-back to 5 bytes again.
+func TestAppendChatMessagesAfterExtraWhitespaceBeforeTheBracket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chat.json")
+	initial := chatfileTestDoc{MessageCount: 1, Messages: []chatfileTestMessage{{ID: "a", Text: "first"}}}
+	if err := WriteChatFileAtomic(path, &initial); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old restore's layout: an extra "\n  " in front of the closing bracket.
+	i := strings.LastIndex(string(raw), "]")
+	if err := os.WriteFile(path, []byte(string(raw[:i])+"\n  "+string(raw[i:])), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b", Text: "second"}}, 2, nil); err != nil {
+		t.Fatalf("AppendChatMessages: %v", err)
+	}
+	raw, _ = os.ReadFile(path)
+	var doc chatfileTestDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the file is no longer JSON: %v\n%s", err, raw)
+	}
+	if len(doc.Messages) != 2 {
+		t.Errorf("got %d messages, want 2", len(doc.Messages))
 	}
 }

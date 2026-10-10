@@ -92,8 +92,8 @@ func youtubeGuideRequestBody() string {
 //     the in-memory ring buffer, which GET /api/logs serves to any authenticated
 //     client; the Web UI's live log stream (cmd/moombox's log-forwarder
 //     subscriber → wsHub.BroadcastLog → the frontend's "log" case); the per-job
-//     log buffers that same forwarder writes to the DATABASE; and the TUI log
-//     panel via its own subscriber.
+//     log buffers the logger's line router writes to the DATABASE; and the TUI
+//     log panel via its own subscriber.
 //
 // So that sink is conditional, persistent (file + DB), and remotely readable
 // — and DEBUG is exactly the level an operator raises to when their cookies
@@ -571,6 +571,9 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 //
 // It is the only caller in this file that writes the jar from a guide reply.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
+	// Whose session the request is about to carry. The reply's Set-Cookie
+	// rotations belong to it and to nothing else; see updateCookieFile.
+	sentAs := rs.jar.youTubeSessionKey()
 	authenticated, resp, err := rs.youtubeGuideExchange(ctx)
 	if err != nil || !authenticated {
 		// Anything short of an authenticated, readable reply stops here without
@@ -589,13 +592,16 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 		//     this branch were deleted.
 		return authenticated, err
 	}
-	rs.processYouTubeSetCookies(resp)
+	rs.processYouTubeSetCookies(resp, sentAs)
 	return true, nil
 }
 
 // processYouTubeSetCookies parses Set-Cookie headers from a YouTube API response
 // and merges updated cookies into the cookie file.
-func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
+//
+// sentAs is the jar's youTubeSessionKey when the request was built: the
+// rotations are written only into a file that still holds that session.
+func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response, sentAs string) {
 	setCookies := resp.Header.Values("Set-Cookie")
 	if len(setCookies) == 0 {
 		rs.logger.Debug("youtube session refresh: no Set-Cookie headers")
@@ -639,7 +645,11 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	//
 	// The same originYouTube is declared a second time here, to the write path,
 	// which needs it for its own three decisions — see updateCookieFile.
-	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
+	if err := rs.updateCookieFile(updates, originYouTube, sentAs); err != nil {
+		if errors.Is(err, errCookieSessionReplaced) {
+			rs.logger.Debug("youtube session refresh: cookies.txt now holds another session; its rotations were not applied")
+			return
+		}
 		rs.logger.Warn("youtube session refresh: failed to update cookie file — rotated session cookies were discarded and the file will go stale",
 			"err", err,
 			"hint", "if this is Docker, do not bind-mount cookies.txt as an individual file; put it inside the mounted /data directory so the atomic rename can replace it")

@@ -12,6 +12,25 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Route mouse to settings when visible
 	if a.settings.IsVisible() {
 		a.settings.HandleMouse(msg)
+		// A click on [ Save & Return ] or [ Return ] closes the overlay
+		// without passing through handleKey's "close" action, and a save
+		// may have changed the archive threshold the task list applies.
+		if !a.settings.IsVisible() {
+			a.afterSettingsClose()
+		}
+		// [ Save & Return ] can be the save that removes a channel with "delete
+		// its pending jobs".
+		return a, a.channelPruneCmd()
+	}
+
+	// The O L overlay scrolls under the wheel as the log panel does, three
+	// rows a notch; a click does nothing there.
+	if a.jobLog.IsVisible() {
+		if isScrollUp(msg) {
+			a.jobLog.Scroll(-3)
+		} else if isScrollDown(msg) {
+			a.jobLog.Scroll(3)
+		}
 		return a, nil
 	}
 
@@ -103,23 +122,22 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-func (a *App) cycleFocus() {
-	prevPanel := a.focusedPanel
-	a.focusedPanel = (a.focusedPanel + 1) % 3
-	a.taskList.SetFocused(a.focusedPanel == PanelTasks)
-	a.details.SetFocused(a.focusedPanel == PanelDetails)
-	a.logs.SetFocused(a.focusedPanel == PanelLogs)
-	// Re-enable log auto-scroll when tabbing away from logs (match TS)
-	if prevPanel == PanelLogs && a.focusedPanel != PanelLogs {
-		a.logs.ReEnableAutoScroll()
-	}
-	a.recalcLayout()
+// cycleFocus moves focus to the next panel (Tab) or, with delta -1, the
+// previous one (Shift-Tab).
+func (a *App) cycleFocus(delta int) {
+	a.setFocus(FocusPanel((int(a.focusedPanel) + delta + 3) % 3))
 }
 
 func (a *App) setFocus(panel FocusPanel) {
+	prevPanel := a.focusedPanel
 	a.focusedPanel = panel
 	a.taskList.SetFocused(panel == PanelTasks)
 	a.details.SetFocused(panel == PanelDetails)
 	a.logs.SetFocused(panel == PanelLogs)
+	// Re-enable log auto-scroll when focus leaves the logs (match TS) — by
+	// Tab, Shift-Tab or a click alike.
+	if prevPanel == PanelLogs && panel != PanelLogs {
+		a.logs.ReEnableAutoScroll()
+	}
 	a.recalcLayout()
 }

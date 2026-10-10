@@ -16,6 +16,11 @@ import (
 // PoT → setup → ffmpeg → log → import → cookies → yt-dlp → restart →
 // update → auth → client-token → watch.
 func (s *runState) wireRoutes() func() {
+	// Before any handler exists: the restart, update-apply and setup
+	// post-save goroutines report a recovered panic through this. It was
+	// never installed, so those panics went to raw stderr — not the log
+	// file, and over the TUI's screen when it runs.
+	routes.SetPanicLogger(s.log)
 	routes.JobRoutes(
 		s.r,
 		s.db,
@@ -27,8 +32,10 @@ func (s *runState) wireRoutes() func() {
 		s.notifyMgr,
 	)
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
-		DB: s.db,
-		YT: &ytFormatAdapter{svc: s.ytService, store: s.configStore},
+		DB:        s.db,
+		YT:        &ytFormatAdapter{svc: s.ytService, store: s.configStore},
+		Logger:    s.log,
+		RateLimit: s.apiRL,
 	})
 	routes.StatusRoute(s.r, &routes.StatusRouteDeps{
 		Version:            version,
@@ -70,14 +77,16 @@ func (s *runState) wireRoutes() func() {
 		},
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
-		OnLogLevelChange: func(level string) {
-			s.log.SetLevel(level)
-		},
+		OnLogLevelChange: s.applyConfiguredLogLevel,
 		OnMaxParallelChange: func(n int) {
 			s.dlWorker.SetParallelDownloads(n)
 		},
 		OnHideFinishedAgeChanged: s.broadcastHideFinishedAge,
 		OnChannelChange:          s.kickMonitors,
+		OnMonitorIntervalChange:  s.kickMonitors,
+		OnActivePlatformsChange:  s.resendTUICookieStatus,
+		OnDiskSettingsChange:     s.requestDiskRecheck,
+		OnSegmentWorkersChange:   s.warnSegmentWorkers,
 		OnNotificationsChange: func() {
 			// Hot-reload notification targets so edits apply immediately —
 			// previously they silently required a restart nothing asked for.
@@ -87,6 +96,7 @@ func (s *runState) wireRoutes() func() {
 		OnTrustForwardedProtoChange: s.applyTrustForwardedProto,
 		OnFfmpegPathChange:          s.applyFfmpegPath,
 		OnReorderBudgetChange:       s.applyReorderBudget,
+		ResolveRateLimit:            s.apiRL,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
 	routes.MonitorRoutes(s.r, &routes.MonitorRouteDeps{CheckNow: func() {
@@ -103,7 +113,13 @@ func (s *runState) wireRoutes() func() {
 			s.backfillRescan()
 		}
 	}})
-	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
+	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors, s.apiRL)
+	routes.ChannelRemovalRoutes(s.r, &routes.ChannelRemovalRoutesDeps{
+		DB:              s.db,
+		Store:           s.configStore,
+		OnChannelChange: s.kickMonitors,
+		Logger:          s.log,
+	})
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,
 		Store:  s.configStore,
@@ -113,7 +129,7 @@ func (s *runState) wireRoutes() func() {
 		DB:     s.db,
 		Logger: s.log,
 	})
-	routes.TrimRoutes(s.r, s.db, s.trimSvc)
+	routes.TrimRoutes(s.r, s.db, s.trimSvc, s.apiRL)
 	routes.StatsRoutes(s.r, &routes.StatsRouteDeps{
 		DB:     s.db,
 		Worker: s.dlWorker,
@@ -146,13 +162,14 @@ func (s *runState) wireRoutes() func() {
 		OnFfmpegPathChange: s.applyFfmpegPath,
 	})
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
-	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore)
+	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore, s.log)
 	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms, s.apiRL)
 	routes.YtdlpRoutes(s.r, s.currentWebPort, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
 		Updater:   s.upd,
 		Version:   version,
+		Logger:    s.log,
 		OnRestart: func() { s.triggerRestart("update") },
 		OnFound: func(release *updater.ReleaseInfo) {
 			s.wsHub.Broadcast("update_available", release)
@@ -165,20 +182,11 @@ func (s *runState) wireRoutes() func() {
 			default:
 			}
 		},
-		// An empty Version means "cleared": the dashboard skipped this
-		// release, so the TUI's badge must go out too instead of advertising a
-		// version the operator already dismissed.
-		//
-		// The TAG travels with the clear. The TUI holds its own copy of the
-		// pending release and drops it only when the dismiss names the release
-		// it is showing — otherwise a dismiss racing a newly-found release
-		// would blank the badge for an update nobody skipped. This is the ONLY
-		// producer of a cleared UpdateStatusMsg, so the tag is always set.
-		OnDismissed: func(tag string) {
-			select {
-			case s.tuiUpdateStatusCh <- tui.UpdateStatusMsg{TagName: tag}:
-			default:
-			}
+		// The dashboard skipped this release, or its check found nothing
+		// newer: the TUI's badge and every other open dashboard's must go out
+		// too (announceUpdateCleared).
+		OnCleared: func(tag string) {
+			announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
 		},
 	}, s.configStore)
 	authDeps := &routes.AuthRoutesDeps{

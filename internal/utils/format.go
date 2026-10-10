@@ -2,13 +2,20 @@ package utils
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 )
 
 // FormatFileSize formats bytes into a human-readable string (e.g. "1.5GB", "250.0MB").
-// The tiers and the unit-without-a-space form are the Web's formatBytes
-// (web/public/modules/utils.js), so a figure reads the same in the dashboard,
-// the TUI job details and the TUI statistics overlay.
+// The tiers, the rounding and the unit-without-a-space form are the Web's
+// formatBytes (web/public/modules/utils.js), so a figure reads the same in the
+// dashboard, the TUI job details and the TUI statistics overlay.
+//
+// So is the floor: a size below zero — a disk's used figure worked out as
+// total minus free from a reading that does not add up — prints "0B", as
+// formatBytes prints it. It printed "-2048B", a negative in bytes with no
+// tier, where the dashboard read "0B" for the same value.
 func FormatFileSize(bytes int64) string {
 	const (
 		kb = 1024
@@ -16,18 +23,28 @@ func FormatFileSize(bytes int64) string {
 		gb = 1024 * mb
 		tb = 1024 * gb
 	)
+	bytes = max(bytes, 0)
 	switch {
 	case bytes >= tb:
-		return fmt.Sprintf("%.1fTB", float64(bytes)/float64(tb))
+		return toFixed1(float64(bytes)/float64(tb)) + "TB"
 	case bytes >= gb:
-		return fmt.Sprintf("%.1fGB", float64(bytes)/float64(gb))
+		return toFixed1(float64(bytes)/float64(gb)) + "GB"
 	case bytes >= mb:
-		return fmt.Sprintf("%.1fMB", float64(bytes)/float64(mb))
+		return toFixed1(float64(bytes)/float64(mb)) + "MB"
 	case bytes >= kb:
-		return fmt.Sprintf("%.1fKB", float64(bytes)/float64(kb))
+		return toFixed1(float64(bytes)/float64(kb)) + "KB"
 	default:
 		return fmt.Sprintf("%dB", bytes)
 	}
+}
+
+// toFixed1 is JavaScript's Number.prototype.toFixed(1) for a non-negative v:
+// an exact tie rounds up. %.1f rounds it to even instead, and a size in a
+// binary unit lands on exact ties — any N.25 of a unit, 1280 bytes or
+// 1.25 GiB — so the TUI showed "1.2GB" where the dashboard showed "1.3GB" for
+// the same file.
+func toFixed1(v float64) string {
+	return strconv.FormatFloat(math.Floor(v*10+0.5)/10, 'f', 1, 64)
 }
 
 // FormatSpeed formats a speed in bytes/sec to a human-readable string.

@@ -12,10 +12,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // cookieSetupCountdownSeconds is how long the wizard waits for the user to
@@ -108,7 +109,7 @@ type setupStepDef struct {
 	fields   []setupFieldDef
 }
 
-// Advanced setup steps — 8 sections matching settings.go
+// Advanced setup steps — nine, drawn from settings.go's sections
 var advancedSetupSteps = []setupStepDef{
 	{
 		title:    "Network",
@@ -147,7 +148,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"archiveWindowDays", "Archive window (days)", "3", "How many days back to archive; upcoming/live always covered", setupFieldNumber, nil},
 			{"archiveSlots", "Archive slots", "3", "Backlog downloads per channel at once; new content never waits", setupFieldNumber, nil},
-			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks; fractions allowed, e.g. 0.5", setupFieldDecimal, nil},
+			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks, 1-1440; fractions allowed, e.g. 2.5", setupFieldDecimal, nil},
 			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived; fractions allowed, e.g. 0.5", setupFieldDecimal, nil},
 		},
 	},
@@ -157,7 +158,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"maxRes", "Max resolution", "2160", "Shorter edge in pixels; 0 = unbounded (always the largest)", setupFieldNumber, nil},
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
-			{"numParallel", "Parallel downloads", "2", "2-4 recommended, higher uses more CPU/network", setupFieldNumber, nil},
+			{"numParallel", "Parallel downloads", "10", "VOD downloads at once across all channels; live streams never wait on this (default: 10)", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
 			{"maximumTimeout", "YouTube max timeout (sec)", "600", "Seconds to keep retrying a stalled YouTube livestream before finalizing even if YouTube still says live", setupFieldNumber, nil},
 		},
@@ -247,6 +248,10 @@ type SetupWizardModel struct {
 	channelEditValues map[string]string
 	channelEditField  int
 	channelDeleteConf bool
+	// channelResolving is set while the edited ID — a URL or a bare @handle —
+	// is resolved off the update loop (resolveChannelCmd →
+	// HandleChannelResolved), the step the Settings editor has always had.
+	channelResolving bool
 
 	// Esc confirmation state for advanced mode (prevents accidental data loss)
 	escConfirm bool
@@ -321,6 +326,7 @@ func (m *SetupWizardModel) Open() {
 	m.channelEditValues = nil
 	m.channelEditField = 0
 	m.channelDeleteConf = false
+	m.channelResolving = false
 	m.escConfirm = false
 	m.advancedCookieDone = false
 	m.saving = false
@@ -389,8 +395,9 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 						Accessor(&MapAccessor{M: m.values, Key: f.key}),
 				)
 			case setupFieldNumber, setupFieldDecimal:
-				// The keystroke filter is per field type: a FlexDuration-backed
-				// field takes one decimal point, an int field does not.
+				// The validator is per field type: a FlexDuration-backed field
+				// takes one decimal point, an int field does not. huh runs it
+				// on Next/Submit/blur, not per keystroke.
 				validate := validateDigitsOnly
 				if f.ftype == setupFieldDecimal {
 					validate = validateDecimal
@@ -438,6 +445,31 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 		WithShowHelp(false)
 	m.advancedForm.SubmitCmd = nil // Don't quit on submit
 	m.advancedInitCmd = m.advancedForm.Init()
+}
+
+// advancedFormToLastGroup moves a freshly built advanced form onto its last
+// group, folding each move's Init into advancedInitCmd. The values it walks
+// past were already accepted when the form was completed, so no group's
+// validation stops the walk.
+func (m *SetupWizardModel) advancedFormToLastGroup() {
+	cmds := []tea.Cmd{m.advancedInitCmd}
+	for range len(advancedFormGroupTitles()) - 1 {
+		cmds = append(cmds, m.advancedForm.NextGroup())
+	}
+	m.advancedInitCmd = tea.Batch(cmds...)
+}
+
+// advancedFormGroupTitles lists the advanced form's groups in order — the
+// steps buildAdvancedForm turns into huh groups (the Cookie Login and
+// Channels steps are sub-editors, not groups).
+func advancedFormGroupTitles() []string {
+	var titles []string
+	for _, step := range advancedSetupSteps {
+		if step.fields != nil {
+			titles = append(titles, step.title)
+		}
+	}
+	return titles
 }
 
 // armCookieTick starts a countdown tick chain for the active cookie flow.
@@ -623,7 +655,7 @@ func (m *SetupWizardModel) updateTextInputForField() {
 				} else {
 					m.textInput.Validate = nil
 				}
-				m.textInput.SetValue(m.channelEditValues[field.key])
+				loadTextInput(&m.textInput, m.channelEditValues[field.key])
 				m.textInput.Focus()
 				m.updateTextInputWidth()
 				return
@@ -654,7 +686,7 @@ func (m *SetupWizardModel) updateTextInputWidth() {
 	if m.channelEditField < len(fields) {
 		f := fields[m.channelEditField]
 		prefix := "> " // focused field always has "> " prefix
-		m.textInput.SetWidth(contentW - runewidth.StringWidth(prefix+f.label+": "))
+		m.textInput.SetWidth(contentW - ansi.StringWidth(prefix+f.label+": "))
 	}
 }
 
@@ -878,7 +910,7 @@ func (m *SetupWizardModel) handleChannelListKey(key string, onEsc func() string,
 			"id": "", "name": "", "platform": "youtube",
 			"enabled": "Yes", "terms": "",
 			"include_non_live": "No", "quality_preference": "best",
-			"num_desc_lookbehind": "", "output_directory": "",
+			"output_directory":    "",
 			"archive_window_days": "", "archive_slots": "",
 		}
 		m.channelEditField = 0
@@ -925,37 +957,34 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 		} else if len(m.channels) == 0 {
 			m.channelIndex = 0
 		}
+		m.channelResolving = false
 		m.textInput.Blur()
 		return ""
 	case keyEnter:
+		if m.channelResolving {
+			return ""
+		}
 		id := strings.TrimSpace(m.channelEditValues["id"])
 		if id == "" {
 			m.errorMsg = "Channel ID is required"
 			return ""
 		}
-		// Check for duplicate channel ID
-		for i, existing := range m.channels {
-			if strings.EqualFold(existing.ID, id) && i != m.channelIndex {
-				m.errorMsg = fmt.Sprintf("Channel %q already added", id)
-				return ""
-			}
+		if channelIDTaken(m.channels, m.channelIndex, id) {
+			m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+			return ""
 		}
 		if msg := validateChannelValues(m.channelEditValues); msg != "" {
 			m.errorMsg = msg
 			return ""
 		}
-		var existing *config.ChannelConfig
-		if m.channelIndex < len(m.channels) {
-			existing = &m.channels[m.channelIndex]
+		// A URL or a bare @handle — what the field's help offers — is
+		// resolved first, as the Settings editor does. The wizard had no
+		// resolve step at all, and stored a pasted channel URL as the ID.
+		if utils.NeedsChannelResolve(id) {
+			m.channelResolving = true
+			return "resolve_channel"
 		}
-		ch := valuesToChannel(m.channelEditValues, existing)
-		if m.channelIndex < len(m.channels) {
-			m.channels[m.channelIndex] = ch
-		} else {
-			m.channels = append(m.channels, ch)
-		}
-		m.channelMode = "list"
-		m.textInput.Blur()
+		m.commitChannelEdit()
 		return ""
 	case keyUp:
 		if m.channelEditField > 0 {
@@ -983,6 +1012,73 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 		return ""
 	}
 	return ""
+}
+
+// commitChannelEdit writes the editor's values into the channel list — over
+// the entry being edited, or as a new one — and returns to the list.
+func (m *SetupWizardModel) commitChannelEdit() {
+	var existing *config.ChannelConfig
+	if m.channelIndex < len(m.channels) {
+		existing = &m.channels[m.channelIndex]
+	}
+	ch := valuesToChannel(m.channelEditValues, existing)
+	if m.channelIndex < len(m.channels) {
+		m.channels[m.channelIndex] = ch
+	} else {
+		m.channels = append(m.channels, ch)
+	}
+	m.channelMode = "list"
+	m.textInput.Blur()
+}
+
+// GetChannelResolveInput returns the channel ID being resolved.
+func (m *SetupWizardModel) GetChannelResolveInput() string {
+	if m.channelEditValues == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.channelEditValues["id"])
+}
+
+// HandleChannelResolved takes resolveChannelCmd's answer for the editor's ID
+// — the Settings editor's rules: an answer nothing is waiting for, or one
+// for text the ID box no longer holds, is dropped; an input that names no
+// channel is refused, never stored as typed; and a resolved ID the list
+// already has is refused as a typed one is.
+func (m *SetupWizardModel) HandleChannelResolved(input, id, name, platform string, err error) {
+	if !m.channelResolving {
+		return
+	}
+	m.channelResolving = false
+	if m.channelMode != "edit" || input != m.GetChannelResolveInput() {
+		return
+	}
+	if err != nil {
+		m.errorMsg = channelResolveError(err)
+		return
+	}
+	m.channelEditValues["id"] = id
+	if name != "" && m.channelEditValues["name"] == "" {
+		m.channelEditValues["name"] = name
+	}
+	if platform != "" {
+		m.channelEditValues["platform"] = platform
+	}
+	if channelIDTaken(m.channels, m.channelIndex, id) {
+		m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+		m.clampChannelEditField()
+		m.updateTextInputForField()
+		return
+	}
+	m.commitChannelEdit()
+}
+
+// channelEditHint is the channel editor's key line: what Enter and Esc do,
+// or that the ID is being resolved.
+func (m *SetupWizardModel) channelEditHint() string {
+	if m.channelResolving {
+		return "Resolving channel...  Esc: Cancel"
+	}
+	return "Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"
 }
 
 // clampChannelEditField adjusts channelEditField when cycling platform may
@@ -1112,9 +1208,12 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 
 	switch key {
 	case keyEsc:
-		// Go back to the form (rebuild with current values preserved)
+		// Go back to the form (rebuild with current values preserved) — on
+		// its LAST group, the one the form was completed from. A fresh form
+		// starts on its first, so "Esc: Back" used to land on Network.
 		m.advancedFormDone = false
 		m.buildAdvancedForm()
+		m.advancedFormToLastGroup()
 		return ""
 	case keyUp:
 		if m.cookieFocus > 0 {
@@ -1186,7 +1285,8 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		return n
 	}
 	// vFloat is vNum for the two FlexDuration-backed fields. Empty (and
-	// unparseable, which validateDecimal already refuses at the keystroke)
+	// unparseable, which validateDecimal already refuses before the step
+	// can advance)
 	// means "leave the default alone", the same contract vNum has.
 	vFloat := func(key string) float64 {
 		s := v(key)
@@ -1434,6 +1534,12 @@ func (m *SetupWizardModel) viewModeSelect() string {
 	boxW, contentW := dialogBox(60, m.width)
 
 	var lines []string
+	// desc renders a card's description indented under its title, the
+	// indent kept on every wrapped line: a description longer than the box
+	// used to wrap back to column 0.
+	desc := func(text string) string {
+		return DimStyle.PaddingLeft(3).Width(contentW).Render(text)
+	}
 
 	// Header
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Welcome to Moombox"))
@@ -1452,7 +1558,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		quickStyle = quickStyle.Bold(true)
 	}
 	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup (recommended)"))
-	lines = append(lines, DimStyle.Render("   Best for most users — takes ~2 minutes"))
+	lines = append(lines, desc("Best for most users — takes ~2 minutes"))
 	lines = append(lines, "")
 
 	// Advanced Setup card
@@ -1467,7 +1573,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		advStyle = advStyle.Bold(true)
 	}
 	lines = append(lines, advStyle.Render(advPrefix+"Advanced Setup"))
-	lines = append(lines, DimStyle.Render("   Full control over every setting"))
+	lines = append(lines, desc("Full control over every setting"))
 	lines = append(lines, "")
 
 	// Use Defaults card
@@ -1482,7 +1588,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		defStyle = defStyle.Bold(true)
 	}
 	lines = append(lines, defStyle.Render(defPrefix+"Use Defaults"))
-	lines = append(lines, DimStyle.Render("   Save default config and start. Configure later in settings."))
+	lines = append(lines, desc("Save default config and start. Configure later in settings."))
 	lines = append(lines, "")
 
 	// FFmpeg status
@@ -1533,7 +1639,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	} else {
 		titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
 		stepRendered := DimStyle.Render("Step 1/2")
-		titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 1/2"), 1)
+		titlePad := max(contentW-ansi.StringWidth("Quick Setup")-ansi.StringWidth("Step 1/2"), 1)
 		lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
 		step1 := lipgloss.NewStyle().Foreground(ColorCyan).Render("[>] 1")
@@ -1548,7 +1654,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	if m.cookieTimedOut {
 		lines = append(lines, "")
 		lines = append(lines, YellowStyle.Render(
-			"Cookie extraction timed out."))
+			"Timed out waiting for the browser sign-in."))
 		lines = append(lines, "")
 		lines = append(lines, "  R  Try Again")
 		lines = append(lines, "  S  Skip")
@@ -1628,10 +1734,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	if m.cookieOnly {
 		escLabel = "Esc: Close"
 	}
-	hintLeft := DimStyle.Render(escLabel)
-	hintRight := DimStyle.Render("Enter: Select")
-	gap := max(1, contentW-runewidth.StringWidth(escLabel)-runewidth.StringWidth("Enter: Select"))
-	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+	lines = append(lines, m.cookieStepFooter(escLabel, contentW))
 
 	content := strings.Join(lines, "\n")
 
@@ -1655,7 +1758,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	// Header
 	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
 	stepRendered := DimStyle.Render("Step 2/2")
-	titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 2/2"), 1)
+	titlePad := max(contentW-ansi.StringWidth("Quick Setup")-ansi.StringWidth("Step 2/2"), 1)
 	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
 	// Step indicator
@@ -1682,13 +1785,13 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 	if m.channelMode == "edit" {
-		lines = append(lines, DimStyle.Render("Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"))
+		lines = append(lines, DimStyle.Render(m.channelEditHint()))
 	} else {
 		hintLeft := DimStyle.Render("Esc: Back")
 		navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
 		finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
 		rightSide := navHint + finishHint
-		gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
+		gap := max(1, contentW-ansi.StringWidth("Esc: Back")-ansi.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
 		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
 	}
 
@@ -1706,20 +1809,22 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	return centerBox(box, m.width, m.height)
 }
 
-// templatePreview renders a sample output path from a template string.
+// templatePreview renders a sample output path from a template string,
+// through config.ResolveTemplate itself and with the muxer's .mp4, so the
+// example is a name a recording could actually get. (It used to format the
+// date and time its own way and append .mkv.)
 func templatePreview(value string) string {
 	if value == "" {
 		return ""
 	}
-	now := time.Now().Format("2006-01-02")
-	r := strings.NewReplacer(
-		"${channel}", "Miko Ch",
-		"${title}", "Singing Stream",
-		"${id}", "dQw4w9WgXcQ",
-		"${start_date}", now,
-		"${start_time}", "20-00-00",
-	)
-	return "Example: " + r.Replace(value) + ".mkv"
+	y, mo, d := time.Now().Date()
+	sample := time.Date(y, mo, d, 20, 0, 0, 0, time.Local).Format(time.RFC3339)
+	return "Example: " + config.ResolveTemplate(value, config.TemplateVariables{
+		Title:   "Singing Stream",
+		ID:      "dQw4w9WgXcQ",
+		Channel: "Miko Ch",
+		Date:    &sample,
+	}) + ".mp4"
 }
 
 // --- Advanced Setup View ---
@@ -1800,13 +1905,13 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		lines = append(lines, "")
 		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 		if m.channelMode == "edit" {
-			lines = append(lines, DimStyle.Render("Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"))
+			lines = append(lines, DimStyle.Render(m.channelEditHint()))
 		} else {
 			hintLeft := DimStyle.Render("Esc: Back")
 			navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
 			finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
 			rightSide := navHint + finishHint
-			gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
+			gap := max(1, contentW-ansi.StringWidth("Esc: Back")-ansi.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
 			lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
 		}
 
@@ -1835,7 +1940,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 	if m.cookieTimedOut {
 		lines = append(lines, "")
 		lines = append(lines, YellowStyle.Render(
-			"Cookie extraction timed out."))
+			"Timed out waiting for the browser sign-in."))
 		lines = append(lines, "")
 		lines = append(lines, "  R  Try Again")
 		lines = append(lines, "  S  Skip")
@@ -1903,10 +2008,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
-	hintLeft := DimStyle.Render("Esc: Back")
-	hintRight := DimStyle.Render("Enter: Select")
-	gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("Enter: Select"))
-	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+	lines = append(lines, m.cookieStepFooter("Esc: Back", contentW))
 
 	content := strings.Join(lines, "\n")
 
@@ -1989,7 +2091,7 @@ func (m *SetupWizardModel) renderChannelEditor(contentW int) []string {
 		} else if isFocused {
 			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+m.textInput.View())
 		} else {
-			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+renderInactiveInput(val, contentW-runewidth.StringWidth(prefix+f.label+": "), ColorWhite))
+			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+renderInactiveInput(val, contentW-ansi.StringWidth(prefix+f.label+": "), ColorWhite))
 		}
 
 		if f.help != "" && isFocused {
@@ -2015,4 +2117,24 @@ func renderSetupOptionSelector(options []string, selected string, focused bool) 
 		}
 	}
 	return strings.Join(parts, DimStyle.Render(" / "))
+}
+
+// cookieStepFooter renders the cookie step's key-hint line for whichever
+// state the step is in, so the footer names the keys the handlers actually
+// take (handleSimpleCookieKey / handleAdvancedCookieKey). It used to show the
+// selection hints in every state: "Enter: Select" and the Back/Close Esc
+// while the timed-out prompt answered only R and S, and "Esc: Back" while the
+// body said Esc cancels the sign-in. escLabel is the selection state's Esc.
+func (m *SetupWizardModel) cookieStepFooter(escLabel string, contentW int) string {
+	left, right := escLabel, "Enter: Select"
+	switch {
+	case m.cookieTimedOut:
+		left, right = "R: Try again", "S: Skip"
+	case m.cookieActive && m.cookieFinishing:
+		return "" // extraction in progress: every key is ignored
+	case m.cookieActive:
+		left, right = "Esc: Cancel", "Enter: Extract cookies"
+	}
+	gap := max(1, contentW-ansi.StringWidth(left)-ansi.StringWidth(right))
+	return DimStyle.Render(left) + strings.Repeat(" ", gap) + DimStyle.Render(right)
 }

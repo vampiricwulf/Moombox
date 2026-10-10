@@ -84,7 +84,7 @@ Beyond the core download workflow:
 - **Terminal UI** — A bubbletea-based TUI provides the same capabilities as the web dashboard: job monitoring, log viewing, channel management, settings, and all operational controls. The TUI uses a chord-based keyboard system for efficient navigation.
 - **Self-Updating** — Moombox checks GitHub releases for new versions, downloads updates, verifies Ed25519 signatures, and performs a three-step binary swap (`.new` -> current -> `.old`). The launcher/supervisor pattern allows graceful restarts after updates.
 - **Cookie Management** — Moombox manages browser cookies for YouTube authentication, supporting automatic extraction from Firefox and Chromium browsers, periodic refresh, and manual import.
-- **BotGuard/PO Token** — Moombox runs YouTube's BotGuard challenge under an embedded Node.js + JSDOM + bgutils-js sidecar (real V8, real DOM) to generate Proof of Origin tokens. The Node binary and JS payload are embedded into the Moombox.exe via `go:embed` and extracted on first launch — users do not need a Node install. A goja-VM fallback path is retained for environments where the sidecar fails to start; it produces websafe-fallback tokens which work for most YouTube content but not for PO-token-gated formats.
+- **BotGuard/PO Token** — Moombox runs YouTube's BotGuard challenge under an embedded Node.js + JSDOM + bgutils-js sidecar (real V8, real DOM) to generate Proof of Origin tokens. The Node binary and JS payload are embedded into the Moombox.exe via `go:embed` and extracted on first launch — users do not need a Node install. A goja-VM path runs when the sidecar is turned off, but BotGuard's timing check rejects it, so it mints no PO tokens; while a configured sidecar is down a mint fails at once. Either way PO-token-gated formats are unavailable until the sidecar is back.
 - **Signature Cipher** — Moombox solves YouTube's signature cipher for format URL decryption using AST analysis with regex fallback, maintaining a 10-VM LRU cache keyed by player.js URL.
 
 ## What Moombox Is NOT
@@ -93,8 +93,8 @@ These boundaries are important for understanding what is in scope and what is no
 
 - **Not a general-purpose video downloader.** Moombox supports YouTube and Twitch only. It does not download from Niconico, Bilibili, Crunchyroll, or any other platform. Adding new platforms is not a goal.
 - **Not a yt-dlp wrapper or binding.** Moombox reimplements extraction and download logic in Go. It does not shell out to yt-dlp, import yt-dlp's Python code, or depend on yt-dlp being installed. It tracks yt-dlp upstream for awareness of protocol changes only.
-- **Not cross-platform by default.** Moombox targets Windows. It may work on Linux or macOS incidentally, but platform-specific code (disk space queries, process management, etc.) assumes Windows. Cross-platform support is added only when explicitly requested.
-- **Not a hosted or cloud service.** Moombox runs locally on the user's machine. There is no multi-user support, no cloud deployment model, no container image, no Kubernetes manifold. It is a desktop appliance.
+- **Not macOS software.** Moombox ships for Windows x64, Linux x64 and Linux arm64 (see Rules and Constraints above); macOS is deferred. Platform-specific code (disk space queries, process management, cookie decryption) has a Windows and a Linux implementation, not a macOS one.
+- **Not a hosted or cloud service.** Moombox runs on the user's own machine — a desktop, or a home server through the published Docker image. There is no multi-user support, no cloud deployment model, no Kubernetes manifest. It is a self-hosted appliance.
 - **Not a media server.** Moombox archives files to disk. The web UI includes basic video playback with chat overlay, but Moombox does not transcode, stream to external clients, integrate with Plex/Jellyfin, or serve as a media library. It is an archiver, not a server.
 - **Not a chat bot or stream interaction tool.** Moombox reads chat passively for archival. It does not post messages, moderate chat, or interact with streams in any way.
 
@@ -133,7 +133,7 @@ There is no ongoing relationship between the TypeScript codebase and the current
 
 ### Binary Distribution
 
-Moombox is distributed as a single Windows executable. There is no installer, no MSI, no setup wizard beyond what the application itself provides on first run. The user downloads the `.exe` and runs it.
+Moombox is distributed as a single executable per platform — Windows x64, Linux x64 and Linux arm64 — attached to each GitHub release, plus a Docker image (x64 and arm64) for headless hosts. There is no installer, no MSI, no setup wizard beyond what the application itself provides on first run. The user downloads the binary for their platform and runs it.
 
 ### Runtime Dependencies
 
@@ -154,7 +154,7 @@ Moombox uses an environment variable (`_MOOMBOX_CHILD`) to implement a launcher/
 - **Without the variable** — the process acts as a launcher: it spawns itself as a child process and monitors it. If the child exits with code 42, the launcher respawns it (picking up any new binary from self-updates).
 - **With the variable** — the process runs the full application stack.
 
-This pattern enables graceful restarts for configuration changes, self-updates, and recovery. All restart triggers (config change, update, setup wizard, API request) exit with code 42 via `triggerRestart()`. A 10-second force-exit timer ensures the process never hangs during shutdown.
+This pattern enables graceful restarts for configuration changes, self-updates, and recovery. All restart triggers (config change, update, setup wizard, API request) exit with code 42 via `triggerRestart()`. A 15-second force-exit timer ensures the process never hangs during shutdown.
 
 ### Self-Update Flow
 
@@ -162,7 +162,7 @@ Moombox checks GitHub releases for new versions. When an update is available:
 
 1. Downloads the new binary.
 2. Verifies its Ed25519 signature against a known public key.
-3. Performs a three-step rename: new binary -> `.new`, current binary -> `.old`, `.new` -> current path.
+3. Swaps it in: new binary -> `.new`, current binary kept at `.old` (a hard link on Linux, a rename on Windows), `.new` -> current path.
 4. Triggers a restart (exit code 42), and the launcher respawns with the new binary.
 
 ### Network and Storage

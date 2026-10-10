@@ -767,3 +767,44 @@ func TestReplayTieAtTheMarkKeepsRealMessages(t *testing.T) {
 		t.Errorf("chat.json holds %d duplicate records", duplicates)
 	}
 }
+
+// TestAuthRefusalIsAGiveUp: ErrAuthRequired is a permanent loop exit, but it
+// set no verdict, so Start returned nil and the worker wrote chat_status
+// "finished" for a capture that stopped when the chat API refused the
+// credentials — members-only cookies expiring mid-stream is the realistic
+// trigger. (A replay run still clears its sidecar on this exit, by the
+// documented completion rule; the next run adopts chat.json as history.)
+//
+// Mutant: no setTerminalErr in the ErrAuthRequired branch → Start returns nil.
+func TestAuthRefusalIsAGiveUp(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("live=%v", live), func(t *testing.T) {
+			cd := NewChatDownloader(ChatDownloaderOptions{
+				VideoID:             "vidAuth",
+				OutputFile:          filepath.Join(t.TempDir(), "chat.json"),
+				IsLiveOrUpcoming:    live,
+				IsReplay:            !live,
+				InitialContinuation: "tok",
+			})
+			cd.testBackoffOverride = time.Millisecond
+			calls := 0
+			cd.testFetchOverride = func(context.Context) (*ChatApiResponse, error) {
+				calls++
+				if calls == 1 {
+					return &ChatApiResponse{
+						Messages:         []ChatMessage{{ID: "m1", TimestampUsec: "1700000000000000", AuthorName: "a", Message: []MessagePart{{Type: "text", Text: "hi"}}, OffsetMs: 1000, HasOffset: true}},
+						NextContinuation: "tok2",
+						TimeoutMs:        1,
+					}, nil
+				}
+				return nil, fmt.Errorf("%w: status 401", ErrAuthRequired)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := cd.Start(ctx); !errors.Is(err, ErrAuthRequired) {
+				t.Fatalf("Start = %v, want a give-up wrapping ErrAuthRequired", err)
+			}
+		})
+	}
+}

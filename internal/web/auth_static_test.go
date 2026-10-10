@@ -254,3 +254,41 @@ func TestCDNSubresourcesCarryIntegrity(t *testing.T) {
 		}
 	}
 }
+
+// TestClientTokenSessionReachesTheHandler: the client-token fallback minted a
+// session and set it on the RESPONSE only, while handlers read the REQUEST's
+// moombox_session — still the expired one. Logout then invalidated the stale
+// token and left the fresh one alive for its TTL; set-password answered 401
+// to a remote client the middleware had just authenticated. The handler now
+// sees the minted session, and the request's other cookies are kept.
+//
+// Mutant: pass r instead of withSessionCookie(r, …) — the handler reads
+// "stale".
+func TestClientTokenSessionReachesTheHandler(t *testing.T) {
+	s := authStaticFixture(t)
+	s.ClientTokenCheck = func(raw, ip string) (bool, string) { return raw == "client-ok", "fresh-session" }
+	s.Router().Get("/api/whoami", func(w http.ResponseWriter, r *http.Request) {
+		sess, _ := r.Cookie("moombox_session")
+		other, _ := r.Cookie("unrelated")
+		if sess == nil || other == nil {
+			w.Write([]byte("missing"))
+			return
+		}
+		w.Write([]byte(sess.Value + "|" + other.Value))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	req.Header.Set("Cookie", "moombox_session=stale; moombox_client=client-ok; unrelated=kept")
+	rr := httptest.NewRecorder()
+	s.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d (%s), want 200", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); got != "fresh-session|kept" {
+		t.Errorf("the handler saw %q, want the minted session and the other cookie (fresh-session|kept)", got)
+	}
+	if req.Header.Get("Cookie") != "moombox_session=stale; moombox_client=client-ok; unrelated=kept" {
+		t.Error("the middleware edited the caller's request headers instead of a copy")
+	}
+}

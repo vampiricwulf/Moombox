@@ -3,11 +3,13 @@ package routes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -113,6 +115,7 @@ func TestUpdateApplyNoUpdater(t *testing.T) {
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
 
 	req := httptest.NewRequest("POST", "/api/update/apply", nil)
+	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -148,6 +151,7 @@ func TestUpdateApplyAlreadyInProgress(t *testing.T) {
 	updateInProgress.Store(true)
 
 	req := httptest.NewRequest("POST", "/api/update/apply", nil)
+	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -170,6 +174,7 @@ func TestUpdateApplyNoReleaseAvailable(t *testing.T) {
 
 	// Pre-condition: SharedUpdateInfo is nil (resetUpdateGlobals).
 	req := httptest.NewRequest("POST", "/api/update/apply", nil)
+	req.RemoteAddr = "127.0.0.1:50000" // a local caller: the route is loopback-only
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -227,16 +232,16 @@ func TestUpdateDismissSkipsVersionAndClearsSharedInfo(t *testing.T) {
 	}
 }
 
-// TestUpdateDismissNotifiesOnDismissed: the dismiss route reports the tag it
-// skipped through OnDismissed so the other UI (the TUI's badge) can drop the
+// TestUpdateDismissNotifiesOnCleared: the dismiss route reports the tag it
+// skipped through OnCleared so the other UI (the TUI's badge) can drop the
 // release too — the Web hides its own indicator from SharedUpdateInfo, but the
 // TUI holds its own copy and would otherwise keep advertising a version the
 // operator already dismissed.
-func TestUpdateDismissNotifiesOnDismissed(t *testing.T) {
+func TestUpdateDismissNotifiesOnCleared(t *testing.T) {
 	var got []string
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
-		Version:     "2.6.0-test",
-		OnDismissed: func(tag string) { got = append(got, tag) },
+		Version:   "2.6.0-test",
+		OnCleared: func(tag string) { got = append(got, tag) },
 	})
 	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
 
@@ -248,17 +253,17 @@ func TestUpdateDismissNotifiesOnDismissed(t *testing.T) {
 		t.Fatalf("dismiss: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	if len(got) != 1 || got[0] != "v9.9.9" {
-		t.Fatalf(`OnDismissed calls: want ["v9.9.9"], got %q`, got)
+		t.Fatalf(`OnCleared calls: want ["v9.9.9"], got %q`, got)
 	}
 }
 
-// TestUpdateDismissWithoutPendingSkipsOnDismissed: nothing was skipped, so
+// TestUpdateDismissWithoutPendingSkipsOnCleared: nothing was skipped, so
 // nothing is announced — a 400 must not clear a badge that is still valid.
-func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
+func TestUpdateDismissWithoutPendingSkipsOnCleared(t *testing.T) {
 	called := false
 	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
-		Version:     "2.6.0-test",
-		OnDismissed: func(string) { called = true },
+		Version:   "2.6.0-test",
+		OnCleared: func(string) { called = true },
 	})
 
 	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
@@ -269,13 +274,13 @@ func TestUpdateDismissWithoutPendingSkipsOnDismissed(t *testing.T) {
 		t.Fatalf("dismiss with no pending update: want 400, got %d", rec.Code)
 	}
 	if called {
-		t.Error("OnDismissed must not fire when there was nothing to dismiss")
+		t.Error("OnCleared must not fire when there was nothing to dismiss")
 	}
 }
 
 // TestUpdateDismissConfigSaveFailureDoesNotNotify: the skip is not persisted,
 // so nothing may act as if it were. The 500 tells the dashboard the release is
-// still pending, and OnDismissed must stay silent — firing it would put out the
+// still pending, and OnCleared must stay silent — firing it would put out the
 // TUI's badge for a version that will be offered again on the next launch,
 // which is worse than the failure it is reporting.
 func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
@@ -293,8 +298,8 @@ func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
 	called := false
 	r := chi.NewRouter()
 	UpdateRoutes(r, &UpdateRouteDeps{
-		Version:     "2.6.0-test",
-		OnDismissed: func(string) { called = true },
+		Version:   "2.6.0-test",
+		OnCleared: func(string) { called = true },
 	}, store)
 	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
 
@@ -306,7 +311,7 @@ func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
 		t.Fatalf("dismiss with an unwritable config: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 	if called {
-		t.Error("OnDismissed fired although the skip was never persisted")
+		t.Error("OnCleared fired although the skip was never persisted")
 	}
 	// And the release is still pending, so the dashboard keeps showing it.
 	if SharedUpdateInfo.Load() == nil {
@@ -415,8 +420,12 @@ func TestUpdateDismissPersistsToDisk(t *testing.T) {
 // stamped on the ATTEMPT — the request that spent the quota — and refused the
 // second call.
 //
-// THE MUTANT: no debounce — the second call returns 500 (another attempted
+// THE MUTANT: no debounce — the second call returns 502 (another attempted
 // GitHub request) instead of a 200 debounced answer.
+//
+// The first call's body also carries the check's cause. It used to say only
+// "check failed", so the dashboard could not show why (rate limit, no
+// release, ...). Mutant: answer the fixed string again — the body test fails.
 func TestUpdateCheckIsDebounced(t *testing.T) {
 	upd, err := updater.New("2.6.0-test", silentLogger{})
 	if err != nil {
@@ -433,8 +442,14 @@ func TestUpdateCheckIsDebounced(t *testing.T) {
 		return rec
 	}
 
-	if got := call().Code; got != http.StatusInternalServerError {
-		t.Fatalf("first call: want 500 from the cancelled check, got %d", got)
+	first := call()
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first call: want 502 from the cancelled check, got %d", first.Code)
+	}
+	var firstBody map[string]any
+	json.NewDecoder(first.Body).Decode(&firstBody)
+	if msg, _ := firstBody["error"].(string); !strings.Contains(msg, "canceled") {
+		t.Errorf("first call's error = %q, want the check's cause (context canceled)", msg)
 	}
 
 	rec := call()
@@ -538,5 +553,201 @@ func TestReleaseNotesAcceptsEveryPublishedTagShape(t *testing.T) {
 		if rec.Code == http.StatusBadRequest {
 			t.Errorf("version=%q: rejected as malformed, but Moombox has published that shape", good)
 		}
+	}
+}
+
+// TestUpdateApplyRefusesALANPeerWithALoopbackOrigin: the gate used to read
+// only the Origin, which the client chooses — a LAN peer sending
+// `Origin: http://localhost:774` passed it. The direct peer must be loopback.
+//
+// Mutant: drop the IsLoopbackRequest check from updateApplyOriginAllowed.
+func TestUpdateApplyRefusesALANPeerWithALoopbackOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		peer, origin string
+		want         bool
+	}{
+		{"192.168.1.20:50000", "http://localhost:774", false},
+		{"192.168.1.20:50000", "", false},
+		{"127.0.0.1:50000", "http://localhost:774", true},
+		{"127.0.0.1:50000", "", true},
+		{"127.0.0.1:50000", "http://192.168.1.10:774", false},
+	} {
+		req := httptest.NewRequest("POST", "/api/update/apply", nil)
+		req.RemoteAddr = tc.peer
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		if got := updateApplyOriginAllowed(req); got != tc.want {
+			t.Errorf("peer %s origin %q: allowed = %v, want %v", tc.peer, tc.origin, got, tc.want)
+		}
+	}
+}
+
+// A check that finds nothing newer than the running version means the pending
+// release was pulled from GitHub: the badge offered an update whose download
+// no longer exists, and apply would fetch a dead asset. The check withdraws
+// it and announces the tag through OnCleared, so the TUI and every open
+// dashboard drop their own copies. With nothing pending, nothing is
+// announced.
+//
+// Mutants: the check route leaving SharedUpdateInfo alone on an up-to-date
+// answer, and announcing a clear when nothing was pending.
+func TestUpdateCheckUpToDateWithdrawsThePendingRelease(t *testing.T) {
+	orig := checkForUpdate
+	t.Cleanup(func() { checkForUpdate = orig })
+	checkForUpdate = func(*updater.Updater, context.Context) (*updater.ReleaseInfo, error) { return nil, nil }
+
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	for _, pending := range []bool{true, false} {
+		var cleared []string
+		r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+			Updater:   upd,
+			Version:   "2.6.0-test",
+			OnCleared: func(tag string) { cleared = append(cleared, tag) },
+		})
+		if pending {
+			SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+		}
+
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/update/check", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("check: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+		}
+		if SharedUpdateInfo.Load() != nil {
+			t.Errorf("pending=%v: SharedUpdateInfo still set after an up-to-date check", pending)
+		}
+		want := []string(nil)
+		if pending {
+			want = []string{"v9.9.9"}
+		}
+		if strings.Join(cleared, ",") != strings.Join(want, ",") {
+			t.Errorf("pending=%v: OnCleared calls = %q, want %q", pending, cleared, want)
+		}
+	}
+}
+
+// An up-to-date answer withdraws only the release pending when the check
+// started. Another check can find a release during this one's GitHub round
+// trip; withdrawing whatever was pending at the end withdrew that, and every
+// UI's badge with it until the next daily check.
+//
+// Mutant: the route loading SharedUpdateInfo after the check — v9.9.10 is
+// withdrawn.
+func TestUpdateCheckUpToDateKeepsAReleaseFoundDuringIt(t *testing.T) {
+	newer := &updater.ReleaseInfo{Version: "9.9.10", TagName: "v9.9.10"}
+	orig := checkForUpdate
+	t.Cleanup(func() { checkForUpdate = orig })
+	checkForUpdate = func(*updater.Updater, context.Context) (*updater.ReleaseInfo, error) {
+		SharedUpdateInfo.Store(newer) // another check found it meanwhile
+		return nil, nil
+	}
+
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	var cleared []string
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{
+		Updater:   upd,
+		Version:   "2.6.0-test",
+		OnCleared: func(tag string) { cleared = append(cleared, tag) },
+	})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/update/check", nil))
+	if got := SharedUpdateInfo.Load(); got != newer {
+		t.Errorf("SharedUpdateInfo = %+v, want the release found during the check", got)
+	}
+	if len(cleared) != 0 {
+		t.Errorf("OnCleared = %q, want nothing withdrawn", cleared)
+	}
+}
+
+// A slow link's download outlives what a browser waits for a response —
+// Firefox gives up after 300 s — and the abort cancelled the request context
+// the apply ran under: the very download the updater's stall timer exists to
+// let finish. The apply now runs detached from the request.
+//
+// Mutant: the route passing r.Context() — the apply sees it cancelled.
+func TestUpdateApplyOutlivesTheRequest(t *testing.T) {
+	orig := applyUpdate
+	t.Cleanup(func() { applyUpdate = orig })
+	var sawCancelled bool
+	applyUpdate = func(_ *updater.Updater, ctx context.Context, _ *updater.ReleaseInfo) error {
+		sawCancelled = ctx.Err() != nil
+		return errors.New("stop here")
+	}
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "9.9.9", TagName: "v9.9.9"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the browser has already stopped waiting
+	req := httptest.NewRequest("POST", "/api/update/apply", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:50000"
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	if sawCancelled {
+		t.Error("the apply ran under the request's cancelled context")
+	}
+}
+
+// TestUpdateVerifySaysWhetherTheManifestWasChecked: POST /api/update/verify
+// reports, beside verified, whether the running release's signed manifest was
+// checked too — false for a release that publishes none, which the dashboard
+// shows as a signature-only check rather than a full one. A failure is still
+// a 422 carrying the reason.
+//
+// Mutants: answer {"verified": true} alone — the manifest field is missing;
+// hard-code manifest true — the no-manifest row reads true.
+func TestUpdateVerifySaysWhetherTheManifestWasChecked(t *testing.T) {
+	orig := verifyCurrentSignature
+	t.Cleanup(func() { verifyCurrentSignature = orig })
+	upd, err := updater.New("2.6.0-test", silentLogger{})
+	if err != nil {
+		t.Fatalf("updater.New: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		manifest bool
+		err      error
+		status   int
+	}{
+		{"signature and manifest", true, nil, http.StatusOK},
+		{"signature alone", false, nil, http.StatusOK},
+		{"a failed check", false, errors.New("running binary: SHA-256 does not match"), http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifyCurrentSignature = func(*updater.Updater, context.Context) (bool, error) { return tc.manifest, tc.err }
+			r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test", Updater: upd})
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/update/verify", nil))
+			if rec.Code != tc.status {
+				t.Fatalf("status %d, want %d (%s)", rec.Code, tc.status, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %q: %v", rec.Body.String(), err)
+			}
+			if tc.err != nil {
+				if msg, _ := body["error"].(string); !strings.Contains(msg, "SHA-256 does not match") {
+					t.Errorf("error %q does not carry the reason", msg)
+				}
+				return
+			}
+			if body["verified"] != true {
+				t.Errorf("verified = %v, want true", body["verified"])
+			}
+			if got, ok := body["manifest"].(bool); !ok || got != tc.manifest {
+				t.Errorf("manifest = %v (present %v), want %v", body["manifest"], ok, tc.manifest)
+			}
+		})
 	}
 }

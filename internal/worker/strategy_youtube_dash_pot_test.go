@@ -48,7 +48,7 @@ func (ms *manifestServer) onlyPath(t *testing.T) string {
 // potLines returns the args of every line logged with msg, as key → value.
 func potLines(logs *captureLogger, msg string) []map[string]any {
 	var out []map[string]any
-	for _, m := range logs.msgs {
+	for _, m := range logs.lines() {
 		if m[0] != msg {
 			continue
 		}

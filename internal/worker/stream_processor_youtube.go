@@ -179,15 +179,17 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		select {
 		case <-ctx.Done():
 			sp.stopEarlyChat(chatDl)
-			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			return cancelledResult(), nil
 		default:
 		}
 
-		// Check if job was cancelled
+		// Check if job was cancelled — or deleted: a channel prune removes
+		// Upcoming rows in bulk without OnJobDeleted, and GetJob returns
+		// (nil, nil) for a missing row, which this used to dereference.
 		currentJob, err := sp.db.GetJob(job.ID)
-		if err == nil && currentJob.Status == database.StatusCancelled {
+		if err == nil && (currentJob == nil || currentJob.Status == database.StatusCancelled) {
 			sp.stopEarlyChat(chatDl)
-			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			return cancelledResult(), nil
 		}
 
 		// A5: probe interval with PROPORTIONAL jitter (~10% of the interval)
@@ -205,7 +207,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		case <-ctx.Done():
 			probeTimer.Stop()
 			sp.stopEarlyChat(chatDl)
-			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			return cancelledResult(), nil
 		case <-probeTimer.C:
 			// Normal poll
 		case <-surgeCh:
@@ -248,7 +250,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			}
 			if cancelled {
 				sp.stopEarlyChat(chatDl)
-				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+				return cancelledResult(), nil
 			}
 			consecutiveErrors = newCount // unchanged for network-class failures
 			if report == reportFailure {
@@ -446,6 +448,32 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 // between the primary probe path and the auth-probe-unclear fallback
 // (audit reports/worker.md F55).
 func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+	// The playability verdict the initial Process acts on, re-read on the
+	// go-live fetch — but only its credential cases, and only when the fetch
+	// came back with no formats to download. A members-only job whose cookies
+	// died during a long wait (or whose wall went up mid-wait) used to go on
+	// from here to "no download strategy available": a plain Error with no
+	// "Authentication Required" alert, which the credential-recovery sweep —
+	// it resumes COOKIES? rows only — never looked at again.
+	if errMsg, sentinel := sp.checkPlayability(fullInfo); errMsg != "" && credentialVerdict(fullInfo, sentinel) {
+		sp.logger.Warn("playability check failed at go-live",
+			"videoID", job.VideoID,
+			"playability", string(fullInfo.PlayabilityError),
+			"sessionAuth", string(fullInfo.SessionAuth),
+			"reason", errMsg)
+		// What the fetch says about the job still reaches the row, as on the
+		// initial Process's park: blanks filled, nothing overwritten (and no
+		// schedule notification for a job that is not going to record).
+		sp.updateJobMetadata(job, fullInfo, false)
+		sp.stopEarlyChat(chatDl)
+		return &StreamProcessResult{
+			VideoInfo:      fullInfo,
+			ShouldDownload: false,
+			Error:          errMsg,
+			ErrSentinel:    sentinel,
+		}
+	}
+
 	isVod := fullInfo.StreamStatus == youtube.StreamVOD || fullInfo.StreamStatus == youtube.StreamPostLive
 
 	if !isVod {
@@ -478,8 +506,8 @@ func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo 
 // onProgress is wired before Start so callers don't need a follow-up SetOnProgress
 // (per audit reports/worker.md F16 — keeps initial+retry paths in sync).
 //
-// Returns the downloader together with the flag its OnFinish sets when the run
-// ends — the input earlyChatNeedsRestart consults on each probe. Both are nil
+// Returns the downloader together with the flag runEarlyChat's defer sets when
+// the run ends — the input earlyChatNeedsRestart consults on each probe. Both are nil
 // when no downloader could be started. The flag belongs to THIS run: the
 // caller replaces it whenever it starts a new one. Once the stream goes live
 // and completeStreamTransition hands the downloader to the orchestrator the
@@ -558,7 +586,9 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		dl.SetOnProgress(onProgress)
 	}
 	dl.OnError = func(err error) {
-		sp.logger.Warn("[Chat] Early chat API error", "jobID", job.ID, "err", err)
+		// "downloader", not "API": disk failures (write, append, header,
+		// resume state) arrive here too.
+		sp.logger.Warn("[Chat] Early chat downloader error", "jobID", job.ID, "err", err)
 	}
 	// Transition chat_status from "pending" -> "downloading" only when chat
 	// actually starts receiving data (matches setupChatDownloader behavior).

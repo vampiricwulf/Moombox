@@ -578,7 +578,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 
 			n, err := d.outputFile.Write(data)
 			if err != nil {
-				return nextSeq, fmt.Errorf("write segment %d: %w", nextSeq, err)
+				return nextSeq, fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, nextSeq, err)
 			}
 			d.bytesWritten.Add(int64(n))
 			d.lastSegTime.StoreNow()
@@ -634,8 +634,14 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// an unflushed one is a real hole — while sequences at/above it were
 	// never handed to a worker and are simply future work. Every claim
 	// flushed means nextSeq == claimedUpTo and no gap fires.
+	//
+	// Nor does a cancel (Cancel() for a quality switch, or ctx): it abandons
+	// every in-flight claim through markFailed, and the successor downloader
+	// or the resume starts at nextSeq and fetches them like any other. A gap
+	// reported here became a "segment gap" warning and a persisted gap row on
+	// the job for segments nobody found missing.
 	claimedUpTo := rb.claimedUpTo()
-	if nextSeq < claimedUpTo {
+	if nextSeq < claimedUpTo && !d.isCancelled() && ctx.Err() == nil {
 		// Find how far the gap extends so the gap event covers the whole
 		// contiguous missing range up to the next buffered segment (or the
 		// end of the claimed span if the tail is all missing).

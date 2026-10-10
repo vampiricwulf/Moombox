@@ -27,12 +27,14 @@ const (
 	// unaffected — this is a read limit.
 	wsMaxMessageSize = 4 << 10 // 4 KiB
 	// wsReadIdleTimeout bounds how long a single Conn.Read may block
-	// waiting for a frame. Longer than 2× wsPingInterval (30s) so that
-	// a normally-responsive client — which keeps the peer alive via
-	// automatic pong replies — is never closed mid-session. If the
-	// peer goes silent AND the ping loop somehow still succeeds (e.g.,
-	// kernel-level TCP keepalives ACKing past an app-level zombie),
-	// the Read will eventually error out and readPump will tear down.
+	// waiting for a DATA frame from the client. Control frames do not count:
+	// the library answers pings and consumes pongs inside the same Read,
+	// under the same deadline, and server→client traffic never returns a
+	// server-side Read at all. So the client must send a data frame at least
+	// this often — the dashboard sends {"type":"ping"} every 15 s
+	// (web/public/app.js) — or the connection is closed and the client
+	// reconnects. That is also what reaps a peer whose TCP stack still ACKs
+	// past an app-level zombie.
 	wsReadIdleTimeout = 90 * time.Second
 	// wsWriteQueueSize bounds the per-client outbound queue so a stalled
 	// client can't accumulate unbounded backpressure (memory blow-up plus
@@ -49,6 +51,13 @@ const (
 type WSMessage struct {
 	Type    string `json:"type"`
 	Payload any    `json:"payload"`
+	// Seq is set on "log" frames only: the line's number in the logger's
+	// ring (logger.Line.Seq). initial_state carries the number of its newest
+	// line as payload.logSeq, and the dashboard skips a log frame at or below
+	// it — see BroadcastLog. Beside the payload rather than inside it, so a
+	// tab still running the previous app.js after an update keeps reading a
+	// plain string payload.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // InitialStateProvider supplies data for the initial state message.
@@ -64,6 +73,19 @@ type WebSocketHub struct {
 	clients map[*wsClient]struct{}
 	closed  bool
 
+	// jobVersions is the newest write version broadcast per job, in either
+	// frame (see jobVersioned); jobRowVersions is the newest a job_update
+	// carried, and has an entry only once one has been broadcast since the
+	// job's last job_deleted; jobLastTick is the job_progress frame sent at
+	// jobVersions while it is newer than every job_update. All three are
+	// guarded by jobVerMu — which is held across the check AND the enqueue,
+	// so two job frames can never reach the clients in the opposite order to
+	// their writes.
+	jobVerMu       sync.Mutex
+	jobVersions    map[string]uint64
+	jobRowVersions map[string]uint64
+	jobLastTick    map[string]any
+
 	// Initial state provider (set by main.go)
 	InitialState InitialStateProvider
 
@@ -77,6 +99,12 @@ type WebSocketHub struct {
 	// decision (trusted_proxies / X-Forwarded-For aware). Set by NewServer;
 	// nil falls back to the raw peer address.
 	ClientIP func(*http.Request) string
+
+	// LocalPeer reports whether that IP is one the network_access mode
+	// trusts as local — the peers AuthMiddleware waives (isLocalIPFor, which
+	// counts 100.64.0.0/10 on lan). Set by NewServer; nil falls back to the
+	// mode-free loopback-or-private test.
+	LocalPeer func(ip string) bool
 
 	// OriginCheck decides whether an upgrade's Origin header is acceptable,
 	// and returns the authority it was compared against so the refusal log
@@ -140,20 +168,47 @@ func NewWebSocketHub(logger interface {
 	Error(msg string, args ...any)
 }) *WebSocketHub {
 	return &WebSocketHub{
-		clients: make(map[*wsClient]struct{}),
-		logger:  logger,
+		clients:        make(map[*wsClient]struct{}),
+		jobVersions:    make(map[string]uint64),
+		jobRowVersions: make(map[string]uint64),
+		jobLastTick:    make(map[string]any),
+		logger:         logger,
 	}
 }
 
 // HandleUpgrade is the HTTP handler for WebSocket upgrade.
 func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
+	// The upgrade runs outside the router, so RecoveryMiddleware never sees a
+	// panic here — the DB-backed AuthCheck, or the snapshot built for the new
+	// client — and net/http's own recover writes to the discarded ErrorLog.
+	// Logged here instead, with the stack that panicked as RecoveryMiddleware
+	// logs it (panicStack), and with a registered client removed rather than
+	// left in the hub with no reader or pinger.
+	var client *wsClient
+	accepted := false
+	defer func() {
+		if rvr := recover(); rvr != nil {
+			hub.logger.Error("panic in websocket upgrade", "panic", rvr, "remoteAddr", r.RemoteAddr, "stack", panicStack())
+			if client != nil {
+				hub.removeClient(client, "upgrade panic")
+			}
+			if !accepted {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}
+	}()
+
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
 	if hub.AuthCheck != nil {
 		ip := ExtractIP(r)
 		if hub.ClientIP != nil {
 			ip = hub.ClientIP(r)
 		}
-		if !isLoopback(ip) && !isPrivateIP(ip) {
+		local := isLoopback(ip) || isPrivateIP(ip)
+		if hub.LocalPeer != nil {
+			local = hub.LocalPeer(ip)
+		}
+		if !local {
 			if !hub.AuthCheck(r) {
 				hub.logger.Debug("websocket upgrade rejected: auth required", "ip", ip)
 				http.Error(w, "Authentication required", http.StatusUnauthorized)
@@ -196,6 +251,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		hub.logger.Error("websocket upgrade failed", "err", err)
 		return
 	}
+	accepted = true
 
 	// Set read limit to prevent oversized messages
 	conn.SetReadLimit(int64(wsMaxMessageSize))
@@ -205,7 +261,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// after ReadTimeout (30s), which would close the WebSocket prematurely.
 	// The connection lifetime is managed by pingPump/readPump instead.
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &wsClient{
+	client = &wsClient{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
@@ -227,17 +283,27 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	hub.logger.Debug("websocket connected", "clients", clientCount)
 
-	// Per-client write loop drains `writes`. sendInitialState below writes
-	// DIRECTLY to the conn (not through the queue) so the snapshot can't be
-	// displaced by queue-overflow drops; that's safe because coder/websocket
-	// serializes concurrent writers internally — a broadcast queued during
-	// the initial-state write waits its turn rather than interleaving.
-	go hub.writePump(client)
-
-	// Send initial state immediately. A tab that falls behind in its first
-	// second gets its next full snapshot one wsResyncMinInterval from the seed
-	// above, not stacked straight on top of this one.
+	// Send initial state immediately, DIRECTLY to the conn (not through the
+	// queue) so the snapshot can't be displaced by queue-overflow drops — and
+	// BEFORE the write loop starts. Broadcasts from the moment of registration
+	// wait in client.writes until then, so every one of them follows the
+	// snapshot. With the loop already running, one could overtake it: a
+	// job_deleted committed after the snapshot's GetAllJobs went out first (a
+	// no-op on an empty client), and the snapshot then restored the deleted
+	// row. Replaying them after it is correct — they are idempotent upserts
+	// and deletes. Log frames are appends, not upserts: a line logged since
+	// registration (this Debug line, at DEBUG) is in the snapshot too, and
+	// the client skips its frame by number (BroadcastLog, logSeq). A tab
+	// that falls behind in its first second gets its next full snapshot one
+	// wsResyncMinInterval from the seed above, not stacked straight on top of
+	// this one.
 	hub.sendInitialState(client)
+	if client.ctx.Err() != nil {
+		return // the snapshot write failed and the client is already gone
+	}
+
+	// Per-client write loop drains `writes`.
+	go hub.writePump(client)
 
 	// Start server-initiated ping goroutine to keep connection alive
 	go hub.pingPump(client)
@@ -627,13 +693,11 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 		// Bound each Read with an idle timeout. The detached client.ctx
 		// has no expiry, so without this a stale peer (TCP still ACKing
 		// at the kernel but app-level silent) could park the goroutine
-		// here forever. The timeout is generous enough (>2× ping
-		// interval) that a healthy but chatty-less client is never
-		// reaped mid-session — library-internal pong handling refreshes
-		// nothing, but any message (including the browser's pong frame
-		// being processed) surfaces soon enough that Read returns well
-		// before wsReadIdleTimeout on a live connection that's actually
-		// exchanging traffic via BroadcastLog/job updates.
+		// here forever. Only a client DATA frame returns the Read and
+		// starts a fresh deadline (see wsReadIdleTimeout): pongs are
+		// handled inside the Read under this same deadline, and broadcasts
+		// flow the other way. The dashboard's 15 s {"type":"ping"} is what
+		// keeps a healthy browser connection under it.
 		readCtx, readCancel := context.WithTimeout(client.ctx, wsReadIdleTimeout)
 		msgType, data, err := client.conn.Read(readCtx)
 		readCancel()
@@ -678,6 +742,12 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 
 // Broadcast sends a message to all connected clients.
 func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
+	hub.broadcastMessage(WSMessage{Type: msgType, Payload: payload})
+}
+
+// broadcastMessage is Broadcast for a message already built — the one way a
+// frame carrying more than a type and a payload (a log line's Seq) goes out.
+func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
 	hub.mu.RLock()
 	n := len(hub.clients)
 	hub.mu.RUnlock()
@@ -685,7 +755,6 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 		return
 	}
 
-	msg := WSMessage{Type: msgType, Payload: payload}
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		return
@@ -716,7 +785,74 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 // BroadcastJobDeleted: a trailing-edge job_update could arrive after a delete
 // and resurrect the row via the client's upsert handler.
 func (hub *WebSocketHub) BroadcastJobUpdate(data any) {
-	hub.Broadcast("job_update", data)
+	hub.broadcastJobFrame("job_update", data)
+}
+
+// jobVersioned is a job frame that knows which database write produced it —
+// *database.Job and the progress frame both carry Job.Version. Named here
+// rather than imported so the hub stays ignorant of internal/database.
+type jobVersioned interface {
+	JobVersion() (id string, version uint64)
+}
+
+// broadcastJobFrame broadcasts a job frame unless the hub has already sent a
+// LATER write of what it carries. The database notifies after releasing its
+// lock, so two writers' frames can arrive here in the opposite order to their
+// writes; the older one, sent last, put a stale row on every tab — a progress
+// tick read back before a Muxing write, landing after it, showed the job
+// Downloading for the whole mux. A frame with no version (0, or a payload that
+// carries none) is always sent.
+//
+// What "later" means differs by frame. A job_progress carries the progress
+// columns and the status, which every frame carries, so it is dropped behind
+// any later frame. A job_update carries the whole row, and a later
+// job_progress restates none of the rest of it: a title or twitch_quality
+// write whose frame the next tick overtook (the tick read back after the
+// write, so its row held the new value, but its frame does not carry it) was
+// dropped, and the write never reached any tab. So a job_update is dropped
+// only behind a later job_update. One that is older than a tick already sent
+// takes the clients' progress columns and status back to its own write, so
+// that tick's frame is sent again after it, and the clients hold the newest
+// of every column.
+//
+// The first job_update for a job is always sent, however old: clients add a
+// row only from a job_update (a job_progress for a row they do not hold is
+// dropped), so dropping the row that introduces the job — a JobAdded overtaken
+// by the job's first progress tick — would leave it off every tab until the
+// next full resync.
+func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
+	v, ok := data.(jobVersioned)
+	if !ok {
+		hub.Broadcast(msgType, data)
+		return
+	}
+	id, version := v.JobVersion()
+	if version == 0 {
+		hub.Broadcast(msgType, data)
+		return
+	}
+	hub.jobVerMu.Lock()
+	defer hub.jobVerMu.Unlock()
+	if msgType != "job_update" {
+		if version <= hub.jobVersions[id] {
+			return
+		}
+		hub.jobVersions[id] = version
+		hub.jobLastTick[id] = data
+		hub.Broadcast(msgType, data)
+		return
+	}
+	if rowVersion, sent := hub.jobRowVersions[id]; sent && version <= rowVersion {
+		return
+	}
+	hub.jobRowVersions[id] = version
+	hub.Broadcast(msgType, data)
+	if version > hub.jobVersions[id] {
+		hub.jobVersions[id] = version
+		delete(hub.jobLastTick, id)
+	} else if tick, ok := hub.jobLastTick[id]; ok {
+		hub.Broadcast("job_progress", tick)
+	}
 }
 
 // BroadcastJobProgress sends the slim per-tick frame: only the fields a
@@ -727,7 +863,7 @@ func (hub *WebSocketHub) BroadcastJobUpdate(data any) {
 // payload shape is the caller's (cmd/moombox/job_progress.go); this hub stays
 // deliberately ignorant of internal/database.
 func (hub *WebSocketHub) BroadcastJobProgress(data any) {
-	hub.Broadcast("job_progress", data)
+	hub.broadcastJobFrame("job_progress", data)
 }
 
 // BroadcastJobsUpdate sends the full job list (on add/delete).
@@ -740,6 +876,11 @@ func (hub *WebSocketHub) BroadcastJobsUpdate(data any) {
 // without waiting for a full-list rebroadcast (which races against pending
 // job_update messages and can leave stale "Cancelled" rows visible).
 func (hub *WebSocketHub) BroadcastJobDeleted(jobID string) {
+	hub.jobVerMu.Lock()
+	delete(hub.jobVersions, jobID)
+	delete(hub.jobRowVersions, jobID)
+	delete(hub.jobLastTick, jobID)
+	hub.jobVerMu.Unlock()
 	hub.Broadcast("job_deleted", map[string]any{"id": jobID})
 }
 
@@ -772,14 +913,23 @@ func clipLogLine(line string) string {
 	return line[:n] + "... (truncated)"
 }
 
-// BroadcastLog sends a log line to all clients.
+// BroadcastLog sends a log line to all clients, with the sequence number the
+// logger's ring gave it.
 //
 // The hub keeps NO buffer of its own: the logger owns the only ring
-// (logger.GetRecentLines), ws_wiring.go always puts it in the initial-state
+// (logger.RecentLines), ws_wiring.go always puts it in the initial-state
 // payload, and the hub's copy was appended on every line and never read
 // (WEB-14).
-func (hub *WebSocketHub) BroadcastLog(line string) {
-	hub.Broadcast("log", clipLogLine(line))
+//
+// The number is what keeps a line from showing twice. A client joins the hub
+// BEFORE its snapshot reads the ring — the order that leaves no gap — so a
+// line logged in between is in the snapshot AND reaches the client as a
+// frame. Every frame here goes out after the snapshot is written (see
+// HandleUpgrade), so the dashboard drops the ones at or below the snapshot's
+// payload.logSeq: the hub's own "websocket connected" line, at DEBUG, was
+// such a line on every connect (W24-14).
+func (hub *WebSocketHub) BroadcastLog(line string, seq uint64) {
+	hub.broadcastMessage(WSMessage{Type: "log", Payload: clipLogLine(line), Seq: seq})
 }
 
 // ClientCount returns the number of connected clients.

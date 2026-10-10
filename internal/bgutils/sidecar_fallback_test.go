@@ -20,9 +20,9 @@ func (l silentLogger) Warn(msg string, args ...any)  { l.t.Logf("[WARN ] "+msg+"
 func (l silentLogger) Error(msg string, args ...any) { l.t.Logf("[ERROR] "+msg+" %v", args) }
 
 // TestSidecarFallsBackOnDeath verifies that when the sidecar process dies
-// mid-flight, PotProvider's generateAndMint detects the unhealthy state
-// and proceeds to its goja fallback path rather than hanging or
-// surfacing a stale "sidecar unhealthy" error to the caller forever.
+// mid-flight, PotProvider's generateAndMint detects the unhealthy state and
+// answers at once (errSidecarDown — there is no goja fallback in sidecar
+// mode) rather than hanging on the dead child.
 //
 // Gated on MOOMBOX_LIVE_BG_TEST=1 because:
 //   - Sidecar startup needs the real embed blobs (built by Phase 1+2).

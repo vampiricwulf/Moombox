@@ -110,8 +110,8 @@ type StatusBarModel struct {
 	offline bool
 	// sidecarDown indicates that the BotGuard sidecar is not running. An
 	// alert, not a status: while it is down, signature-ciphered formats
-	// cannot be resolved at all (sig has no goja fallback) and PO tokens
-	// fall to a path that errors.
+	// cannot be resolved at all (sig has no goja fallback) and a PO token
+	// mint fails at once.
 	sidecarDown bool
 	// counts is the job tally, recomputed once per SetJobs instead of once
 	// per frame. metricTiers used to call tallyJobs() on every render — one
@@ -616,9 +616,8 @@ func cookieFileErrorLabel(code string, t barTier) string {
 //     test for "twitch" and treat everything else as YouTube), and a status
 //     bar that partitioned platforms differently from the rows above it would
 //     be its own defect;
-//   - the rows that actually carry an empty Platform are pre-Twitch ones, and
-//     ImportFromJSON (database_jobs.go:905) already backfills exactly this
-//     value when it meets them;
+//   - the rows that actually carry an empty Platform are pre-Twitch ones,
+//     which were YouTube by definition;
 //   - of the three candidate rules it is the only one that neither loses the
 //     alert (reddening neither) nor asserts a Twitch failure on no evidence
 //     (reddening both). Reddening "whichever platform is configured" was the

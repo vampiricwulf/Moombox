@@ -112,10 +112,6 @@ auto_check_updates = false
 EOF
 fi
 
-# `moombox add <url>` is a positional subcommand (must stay argv[1]) —
-# pass it through untouched; it resolves config from the cwd (/data).
-if [ "${1:-}" = "add" ]; then
-    exec moombox "$@"
-fi
-
+# `moombox add <url>` takes the same -config as the daemon, so the job lands
+# in the database the daemon is using.
 exec moombox -config "$CONFIG_PATH" "$@"

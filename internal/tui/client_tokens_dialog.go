@@ -56,8 +56,8 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	}
 
 	// Compute label width from actual suffix widths (truncate plain text
-	// BEFORE assembling with styled parts — truncateString uses runewidth
-	// which miscounts ANSI escape sequences from DimStyle.Render).
+	// BEFORE assembling with styled parts, so the cut lands in the label
+	// and never in the styled suffix).
 	suffixW := 2 + lipgloss.Width(lastUsed) + 2 + lipgloss.Width(ipStr) // "  " + lastUsed + "  " + ipStr
 	maxLabelW := max(m.Width()-2-suffixW, 10)                           // 2 for prefix
 	label := truncateString(ct.Label, maxLabelW)
@@ -136,6 +136,7 @@ func (m *ClientTokensDialogModel) Open() {
 	m.loading = true
 	m.spinner = newSpinner()
 	m.list.SetItems(nil)
+	m.list.ResetSelected()
 	m.revokeConfirmID = ""
 	m.confirmTimer = time.Time{}
 	m.errorMsg = ""
@@ -170,7 +171,9 @@ func (m *ClientTokensDialogModel) SetTokens(tokens []*database.ClientToken) tea.
 	for i, ct := range tokens {
 		items[i] = clientTokenItem{token: ct}
 	}
-	return m.list.SetItems(items)
+	cmd := m.list.SetItems(items)
+	clampListCursor(&m.list)
+	return cmd
 }
 
 // SetError sets an error message.
@@ -200,6 +203,7 @@ func (m *ClientTokensDialogModel) RemoveToken(id string) {
 		ci, ok := item.(clientTokenItem)
 		if ok && ci.token.ID == id {
 			m.list.RemoveItem(i)
+			clampListCursor(&m.list)
 			m.revokeConfirmID = ""
 			break
 		}
@@ -259,9 +263,14 @@ func (m *ClientTokensDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cm
 		return "", nil
 	}
 
-	// Reset confirm on navigation
-	if key == keyUp || key == keyDown {
+	// Reset the revoke-confirm arming on ANY navigation key, timer included —
+	// the list also moves on paging and Home/End (newTokenList's key map), and
+	// an arming that survived those left a stale "Press D again" hint on a
+	// different row.
+	switch key {
+	case keyUp, keyDown, keyPgUp, keyPgDown, keyHome, keyEnd:
 		m.revokeConfirmID = ""
+		m.confirmTimer = time.Time{}
 		m.feedbackMsg = ""
 	}
 
@@ -344,5 +353,16 @@ func relativeTime(t time.Time) string {
 			return "1d ago"
 		}
 		return fmt.Sprintf("%dd ago", days)
+	}
+}
+
+// clampListCursor keeps a bubbles list's cursor on an item after the list
+// shrank. The list keeps its index across SetItems and RemoveItem, so with the
+// cursor on the row just deleted — or a dialog re-opened onto fewer rows than
+// it last showed — nothing was selected or drawn as selected, and D/A/R
+// silently did nothing until the operator pressed Up.
+func clampListCursor(l *list.Model) {
+	if n := len(l.Items()); l.Index() >= n {
+		l.Select(max(n-1, 0))
 	}
 }

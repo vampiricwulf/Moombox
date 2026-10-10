@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/sqliteuri"
 	_ "modernc.org/sqlite"
 )
 
@@ -90,7 +94,6 @@ type executor interface {
 // Database provides SQLite-backed persistence for Moombox.
 type Database struct {
 	db        *sql.DB
-	ctx       context.Context // Optional context for query cancellation
 	mu        sync.RWMutex
 	closeOnce sync.Once
 	logger    dbLogger
@@ -105,8 +108,8 @@ type Database struct {
 	// so callers can opt into the richer JobChange shape (full Job +
 	// changed columns) without disturbing legacy OnJobUpdate
 	// subscribers. onJobAdded is the lifecycle counterpart on the
-	// AddJob writer path; like onJobChange it coexists with the
-	// legacy onJobsChange dispatch until consumers migrate.
+	// AddJob writer path; onJobsChange is left to the two bulk writers
+	// (BatchSetWatched, DeleteJobsAndHistoryForChannel).
 	onJobUpdate    []jobUpdateSub
 	onJobChange    []jobChangeSub
 	onJobAdded     []jobAddedSub
@@ -115,6 +118,22 @@ type Database struct {
 	onJobsChange   []jobsChangeSub
 	nextSubID      uint64
 	subMu          sync.RWMutex
+
+	// jobsChangeSeq numbers each OnJobsChange snapshot as it is TAKEN (under
+	// db.mu, so in write order); jobsChangeDelivered is the newest number
+	// handed to subscribers, guarded by jobsChangeMu. dispatchJobsChange runs
+	// asynchronously, so two bulk writes in quick succession raced to the
+	// subscribers, and an older full list landing last brought pruned jobs
+	// back onto every dashboard. A snapshot older than one already delivered
+	// is dropped instead.
+	jobsChangeSeq       uint64
+	jobsChangeMu        sync.Mutex
+	jobsChangeDelivered uint64
+
+	// jobWriteVersion is the last Job.Version handed out; incremented under
+	// db.mu by every UpdateJobFields and AddJob read-back, so versions follow
+	// write order.
+	jobWriteVersion uint64
 
 	// Prepared statements
 	stmtGetJob *sql.Stmt
@@ -141,11 +160,11 @@ type Database struct {
 	statsCachedAt time.Time
 }
 
-// getCtx returns the stored context or context.Background().
+// getCtx is the context every statement runs under: context.Background().
+// Open takes no context and nothing cancels a statement mid-flight — a
+// "query cancellation" field this used to read was never assigned. This is
+// the one place to change if shutdown should ever cancel in-flight queries.
 func (db *Database) getCtx() context.Context {
-	if db.ctx != nil {
-		return db.ctx
-	}
 	return context.Background()
 }
 
@@ -159,8 +178,19 @@ const jobStatsCacheTTL = 5 * time.Second
 // unconditionally, and migrating the daemon's live DB from a second process
 // (e.g. a newer on-disk binary during the staged-update window) would leave
 // the running daemon's old code writing against a new schema.
+//
+// It reads the same file Open would: the earlier release's file when
+// legacyDatabaseFile finds one, so a `moombox add` during the update window
+// reads the database the running daemon writes.
 func FileSchemaVersion(dbPath string) (int, error) {
-	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", dbPath))
+	file, err := legacyDatabaseFile(dbPath)
+	if err != nil {
+		return 0, err
+	}
+	if file == "" {
+		file = dbPath
+	}
+	sqlDB, err := sql.Open("sqlite", sqliteuri.FileURI(file)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return 0, err
 	}
@@ -172,6 +202,117 @@ func FileSchemaVersion(dbPath string) (int, error) {
 	return v, nil
 }
 
+// legacySQLitePath is the file an earlier release opened for dbPath, which
+// pasted the path into the "file:" URI unescaped and let SQLite's URI parser
+// read it: a leading "//" began an authority, of which only an empty one and
+// "localhost" opened at all; the path ended at the first '?' or '#'; a %HH
+// escape was decoded, and %00 ended the path. It is "" when that URI named no
+// file, and dbPath itself for a path holding none of those.
+func legacySQLitePath(dbPath string) string {
+	p := dbPath
+	if strings.HasPrefix(p, "//") {
+		authority, rest, found := strings.Cut(p[2:], "/")
+		if authority != "" && authority != "localhost" {
+			return ""
+		}
+		p = ""
+		if found {
+			p = "/" + rest
+		}
+	}
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c == '?' || c == '#' {
+			break
+		}
+		if c == '%' && i+2 < len(p) && isHexDigit(p[i+1]) && isHexDigit(p[i+2]) {
+			c = hexValue(p[i+1])<<4 | hexValue(p[i+2])
+			i += 2
+			if c == 0 {
+				break
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func isHexDigit(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func hexValue(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
+}
+
+// sqliteHeader opens every SQLite database file.
+const sqliteHeader = "SQLite format 3\x00"
+
+// legacyDatabaseFile is the file an earlier release kept dbPath's database
+// in, when the upgrade would otherwise leave it behind, and "" when there is
+// none. Before sqliteuri.FileURI, a database_path holding '#', '?' or a %HH escape
+// opened legacySQLitePath's file instead; opening the literal path after the
+// upgrade would create an empty database there, with no jobs and no history
+// (so the monitors and the backfill would queue the archived videos again),
+// and leave the install's data where nothing reads it. So while the literal
+// path does not exist and that other file is a database holding a jobs table,
+// Open and FileSchemaVersion keep using it, as every earlier release did. A
+// file there that is not an SQLite database, or holds no jobs table, was
+// never this install's database, and the literal path is created as usual. A
+// database there that cannot be read is an error naming both paths rather
+// than a guess either way.
+func legacyDatabaseFile(dbPath string) (string, error) {
+	legacy := legacySQLitePath(dbPath)
+	if legacy == "" || legacy == dbPath {
+		return "", nil
+	}
+	if _, err := os.Stat(dbPath); !errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	f, err := os.Open(legacy)
+	if err != nil {
+		return "", nil
+	}
+	header := make([]byte, len(sqliteHeader))
+	_, readErr := io.ReadFull(f, header)
+	info, statErr := f.Stat()
+	f.Close()
+	if readErr != nil || statErr != nil || !info.Mode().IsRegular() || string(header) != sqliteHeader {
+		return "", nil
+	}
+	hasJobs, err := holdsJobsTable(legacy)
+	if err != nil {
+		return "", fmt.Errorf("database_path %q does not exist, and %q, where earlier releases kept the database for that path, cannot be read: %w",
+			dbPath, legacy, err)
+	}
+	if !hasJobs {
+		return "", nil
+	}
+	return legacy, nil
+}
+
+// holdsJobsTable reports whether the database at path, opened read-only,
+// has a jobs table.
+func holdsJobsTable(path string) (bool, error) {
+	sqlDB, err := sql.Open("sqlite", sqliteuri.FileURI(path)+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return false, err
+	}
+	defer sqlDB.Close()
+	var n int
+	if err := sqlDB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'jobs'`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // openDSN builds the SQLite connection string. Production keeps SQLite's
 // default synchronous level (FULL in WAL mode: an fsync per commit; the
 // durability ruling of 2026-07-03 stands). Under `go test` — and only there,
@@ -181,22 +322,39 @@ func FileSchemaVersion(dbPath string) (int, error) {
 // (5.6 s on Linux, where fsync is cheap). Nothing else about the test
 // database differs.
 func openDSN(dbPath string, underTest bool) string {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", dbPath)
+	dsn := sqliteuri.FileURI(dbPath) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	if underTest {
 		dsn += "&_pragma=synchronous(OFF)"
 	}
 	return dsn
 }
 
-// Open creates or opens a SQLite database at the given path.
+// Open creates or opens a SQLite database at the given path, or at the file
+// an earlier release kept that path's database in (legacyDatabaseFile, with a
+// Warn naming both).
 // The logger parameter is optional; if nil, database errors will be silently dropped.
 func Open(dbPath string, logger ...dbLogger) (*Database, error) {
+	var log dbLogger
+	if len(logger) > 0 && logger[0] != nil {
+		log = logger[0]
+	}
+	file, err := legacyDatabaseFile(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if file == "" {
+		file = dbPath
+	} else if log != nil {
+		log.Warn("database_path holds '#', '?' or '%', and earlier releases kept its database in another file — opening that one, which holds the jobs and history; "+
+			"to use database_path, stop Moombox and move the file, with its -wal and -shm, there",
+			"database_path", dbPath, "opened", file)
+	}
 	// modernc.org/sqlite only honors `_pragma=...` query parameters — the
 	// mattn-style `_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`
 	// form was silently ignored, leaving foreign keys OFF (the child tables'
 	// ON DELETE CASCADE never fired), journal mode DELETE, and busy timeout
 	// 0 (the `moombox add` second process got immediate SQLITE_BUSY).
-	sqlDB, err := sql.Open("sqlite", openDSN(dbPath, testing.Testing()))
+	sqlDB, err := sql.Open("sqlite", openDSN(file, testing.Testing()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -215,9 +373,7 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 		fieldToColumn: ftc,
 		jobLogs:       make(map[string][]string),
 		logRouted:     make(map[string]struct{}),
-	}
-	if len(logger) > 0 && logger[0] != nil {
-		db.logger = logger[0]
+		logger:        log,
 	}
 
 	// Run migrations
@@ -300,13 +456,17 @@ func intToBool(i int) bool {
 }
 
 // insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
-// executor (either *sql.DB or *sql.Tx). Single implementation shared by
-// AddJob and ImportFromJSON so the 43-column INSERT only exists once.
+// executor (either *sql.DB or *sql.Tx), so the 44-column INSERT exists
+// once.
 //
 // channel_id and queue_priority are written on EVERY insert (spec §10):
 // a nil ChannelID stores NULL — never "" — and the Go zero QueuePriority
 // stores an explicit 0, so no creator ever inherits the schema's
 // fail-closed DEFAULT 1 (which exists only for pre-v16 legacy rows).
+//
+// A Job field this list leaves out takes the schema default whatever the
+// caller set, silently. TestAddJobStoresEveryCreationField pins the split:
+// every field is either written here or on its runtime-only list.
 func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, error) {
 	return exec.ExecContext(ctx, `INSERT OR IGNORE INTO jobs (id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
@@ -316,10 +476,10 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		thumbnail_file, description_file,
 		twitch_quality, twitch_category, channel_avatar_url,
 		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
-		quality_preference, channel_id, queue_priority)
+		quality_preference, channel_id, queue_priority, file_size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?)`,
+		?, ?, ?, ?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -332,20 +492,76 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
-		job.QualityPreference, job.ChannelID, job.QueuePriority)
+		job.QualityPreference, job.ChannelID, job.QueuePriority, job.FileSize)
 }
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
 // This is useful when only a few fields need to change without loading the full job.
-// Returns the updated job after notifying subscribers, or nil on error.
+// Returns the updated job after notifying subscribers, or nil on error. The
+// job is the row GetJob would return, child rows included, unless the write
+// was a progress tick (IsProgressOnlyChange; see JobChange).
 //
 // Note: updated_at is bumped and OnJobUpdate fires on every call, even when the
 // supplied values match what's already on disk (no dirty check). Callers that
 // would otherwise emit duplicate writes — e.g. a status set to its current
 // value — should dedupe at the call site (audit reports/database.md U6).
 func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
+	job, _ := db.updateJobFieldsWhere(id, fields, "", nil)
+	return job
+}
+
+// UpdateJobFieldsIf is UpdateJobFields as a compare-and-set on the row's
+// status: the write applies only while the row's status is still expected,
+// and reports whether it did. A transition decided on a status read earlier
+// — the backlog scheduler's Queued → Upcoming admission — would otherwise
+// write over whatever landed between the read and the write: an operator's
+// Cancel, which the admission then turned back into a download.
+//
+// The check and the write are one UPDATE statement, so nothing can land
+// between them. updated_at and the OnJobUpdate / OnJobChange subscribers move
+// only when the write applied; a row whose status had moved on is left
+// exactly as it is, and so is a row that no longer exists (no
+// notifyJobDeleted either — the delete fired its own).
+func (db *Database) UpdateJobFieldsIf(id string, expected JobStatus, fields map[string]any) bool {
+	_, applied := db.updateJobFieldsWhere(id, fields, "status=?", []any{expected})
+	return applied
+}
+
+// UpdateJobFieldsUnless is UpdateJobFieldsIf's complement: the write applies
+// only while the row's status is NOT unwanted. For a write whose caller knows
+// the one status it must not overwrite rather than the one it expects — the
+// worker recording a job's failure must not turn an operator's Cancelled
+// into Error, whatever status the run itself had reached.
+func (db *Database) UpdateJobFieldsUnless(id string, unwanted JobStatus, fields map[string]any) bool {
+	_, applied := db.updateJobFieldsWhere(id, fields, "status<>?", []any{unwanted})
+	return applied
+}
+
+// UpdateJobFieldsUnlessTerminal is UpdateJobFieldsUnless over every terminal
+// status at once (Job.IsTerminal: Finished, Error, Cancelled): the write
+// applies only while the row has not reached an outcome. For a write that
+// must not undo whichever outcome landed since its caller read the row — the
+// operator's Cancel, decided on the status a UI showed, turned a job that had
+// finished or failed meanwhile into a Cancelled one.
+func (db *Database) UpdateJobFieldsUnlessTerminal(id string, fields map[string]any) bool {
+	args := make([]any, len(terminalStatuses))
+	for i, st := range terminalStatuses {
+		args[i] = st
+	}
+	cond := "status NOT IN (?" + strings.Repeat(", ?", len(args)-1) + ")"
+	_, applied := db.updateJobFieldsWhere(id, fields, cond, args)
+	return applied
+}
+
+// updateJobFieldsWhere is the dynamic SET machinery behind UpdateJobFields
+// and its two conditional forms. cond, when not empty, is ANDed to the
+// statement's WHERE id=? with condArgs as its arguments, and a statement it
+// matched no row for reports false and touches nothing else. Unconditional,
+// it behaves exactly as UpdateJobFields always has, and reports whether the
+// statement ran.
+func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond string, condArgs []any) (*Job, bool) {
 	if len(fields) == 0 {
-		return nil
+		return nil, false
 	}
 
 	db.mu.Lock()
@@ -367,7 +583,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 
 	if len(setClauses) == 0 {
 		db.mu.Unlock()
-		return nil
+		return nil, false
 	}
 
 	// Always update updated_at
@@ -376,13 +592,26 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	args = append(args, id)
 
 	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id=?"
-	_, err := db.db.ExecContext(db.getCtx(), query, args...)
+	if cond != "" {
+		query += " AND " + cond
+		args = append(args, condArgs...)
+	}
+	res, err := db.db.ExecContext(db.getCtx(), query, args...)
 	if err != nil {
 		db.mu.Unlock()
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields failed", "jobID", id, "err", err)
 		}
-		return nil
+		return nil, false
+	}
+	if cond != "" {
+		// A driver that cannot say how many rows changed is read as a
+		// match: the read-back below then publishes the row as it really
+		// is, the same assumption updateSingleColumnSilent makes.
+		if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+			db.mu.Unlock()
+			return nil, false
+		}
 	}
 
 	// Capture the schema column names that were actually written so
@@ -401,8 +630,17 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 
 	// Read back the full job under the same critical section so subscribers
 	// see consistent state. TUI + WebSocket need all fields; UpdateJobFields
-	// only wrote a subset, so a SELECT is required.
+	// only wrote a subset, so a SELECT is required. The whole row, child
+	// rows included, as GetJob reads it — except for a progress tick, which
+	// moves none of them and no subscriber replaces a row with (JobChange).
 	job, scanErr := scanJob(db.stmtGetJob.QueryRowContext(db.getCtx(), id))
+	if scanErr == nil {
+		if !IsProgressOnlyChange(changes) {
+			db.loadChildRows(job)
+		}
+		db.jobWriteVersion++
+		job.Version = db.jobWriteVersion
+	}
 	db.mu.Unlock() // Release BEFORE notify so subscribers can call back into Database without deadlocking. Audit C1.
 
 	if scanErr != nil {
@@ -423,11 +661,11 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 			// is a real failure operators need to see.
 			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
 		}
-		return nil
+		return nil, true
 	}
 
 	db.notifyJobUpdate(job, changes)
-	return job
+	return job, true
 }
 
 // silentColumns is the whitelist of columns that may be updated via

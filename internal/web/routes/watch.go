@@ -15,9 +15,8 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 	// GET /api/jobs/{id}/watch-state — lightweight read of mutable watch fields
 	r.Get("/api/jobs/{id}/watch-state", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
@@ -70,32 +69,41 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 		rw.WriteHeader(http.StatusNoContent)
 	})
 
-	// POST /api/jobs/{id}/watched — mark single job as watched
-	r.Post("/api/jobs/{id}/watched", func(rw http.ResponseWriter, req *http.Request) {
+	// setWatched is the single-job half of the watched toggle. It holds the
+	// batch routes' rule (BatchSetWatched touches Finished jobs only, as do
+	// both UIs' controls), so one ID cannot get a different answer from the
+	// two endpoints. Looking the job up first also keeps an unknown ID away
+	// from UpdateJobFields, whose read-back treats a missing row as a delete
+	// in progress and broadcasts job_deleted for it.
+	setWatched := func(rw http.ResponseWriter, req *http.Request, watched int) {
 		jobID := chi.URLParam(req, "id")
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
+			return
+		}
+		if job.Status != database.StatusFinished {
+			jsonError(rw, "Only finished jobs can be marked watched or unwatched", http.StatusBadRequest)
+			return
+		}
 		updated := db.UpdateJobFields(jobID, map[string]any{
-			"watched":         1,
+			"watched":         watched,
 			"resume_position": nil,
 		})
 		if updated == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+			jsonError(rw, "failed to update job", http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(rw, updated)
+	}
+
+	// POST /api/jobs/{id}/watched — mark single job as watched
+	r.Post("/api/jobs/{id}/watched", func(rw http.ResponseWriter, req *http.Request) {
+		setWatched(rw, req, 1)
 	})
 
 	// DELETE /api/jobs/{id}/watched — mark single job as unwatched
 	r.Delete("/api/jobs/{id}/watched", func(rw http.ResponseWriter, req *http.Request) {
-		jobID := chi.URLParam(req, "id")
-		updated := db.UpdateJobFields(jobID, map[string]any{
-			"watched":         0,
-			"resume_position": nil,
-		})
-		if updated == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
-			return
-		}
-		jsonResponse(rw, updated)
+		setWatched(rw, req, 0)
 	})
 
 	// POST /api/jobs/batch/watched — batch mark as watched

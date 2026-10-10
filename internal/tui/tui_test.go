@@ -134,6 +134,17 @@ func TestParseTimeToSeconds(t *testing.T) {
 		{"abc", 0, true},
 		{"1:60", 0, true},    // seconds > 59
 		{"1:00:60", 0, true}, // seconds > 59
+		// A fractional second below 60 is on the clock face.
+		{"1:59.5", 119.5, false},
+		{"0:00:59.9", 59.9, false},
+		// ParseFloat's NaN/Inf are not times — in either form.
+		{"NaN", 0, true},
+		{"inf", 0, true},
+		{"-Inf", 0, true},
+		{"1:NaN", 0, true},
+		{"1:00:+Inf", 0, true},
+		// Negative stays a value: the callers refuse it with their own words.
+		{"-5", -5, false},
 	}
 
 	for _, tc := range tests {
@@ -194,7 +205,8 @@ func TestStreamURL(t *testing.T) {
 		{"direct URL", &database.Job{URL: "https://example.com/stream"}, "https://example.com/stream"},
 		{"youtube videoID", &database.Job{VideoID: "dQw4w9WgXcQ"}, "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
 		{"twitch VOD", &database.Job{VideoID: "tw_v1234567890", Platform: "twitch", IsVod: true}, "https://www.twitch.tv/videos/1234567890"},
-		{"twitch channel", &database.Job{VideoID: "shroud", Platform: "twitch", ChannelName: "shroud"}, "https://www.twitch.tv/shroud"},
+		{"twitch channel with its URL", &database.Job{VideoID: "shroud", Platform: "twitch", ChannelName: "shroud", URL: "https://www.twitch.tv/shroud"}, "https://www.twitch.tv/shroud"},
+		{"twitch live with no URL", &database.Job{VideoID: "tw_316543210987", Platform: "twitch", ChannelName: "shroud"}, ""},
 		{"twitch no channelName", &database.Job{VideoID: "123", Platform: "twitch"}, ""},
 		{"empty", &database.Job{}, ""},
 	}
@@ -234,16 +246,27 @@ func TestIsCompletedStatus(t *testing.T) {
 
 // --- hasDisplayChange (DECISIONS #21 / audit tui.md F20) ---
 
+// Every change but a progress tick replaces the held row: the columns the
+// allow-list this replaced never named (watched, twitch_quality, the VOD's
+// resolution, incomplete_tail) are the rows that went stale.
+//
+// Mutants: an allow-list again (the watched / twitch_quality / video_width /
+// incomplete_tail rows fail); a progress tick let through (the tick rows
+// fail).
 func TestHasDisplayChange(t *testing.T) {
 	tests := []struct {
 		name    string
 		changes []string
 		want    bool
 	}{
-		{"empty changes", nil, false},
-		{"empty slice", []string{}, false},
-		{"progress-only update (10/sec path)", []string{"progress", "percent", "speed", "eta", "last_video_seq", "last_audio_seq"}, false},
-		{"silent column slipped through (shouldn't reach here, defensive)", []string{"resume_position", "chat_offset"}, false},
+		{"empty changes: unclassifiable, so the full path", nil, true},
+		{"empty slice", []string{}, true},
+		{"progress-only update (the ~60 Hz path)", []string{"progress", "percent", "speed", "eta", "last_video_seq", "last_audio_seq"}, false},
+		{"a chat-count-only tick", []string{"total_chat_messages"}, false},
+		{"single-job A W", []string{"watched", "resume_position"}, true},
+		{"a quality split's variant", []string{"twitch_quality"}, true},
+		{"a VOD's resolution", []string{"video_width", "video_height", "video_fps"}, true},
+		{"an unfetched tail", []string{"incomplete_tail"}, true},
 		{"status transition", []string{"status"}, true},
 		{"title rename", []string{"title"}, true},
 		{"channel name rename", []string{"channel_name"}, true},
@@ -256,7 +279,6 @@ func TestHasDisplayChange(t *testing.T) {
 		{"chat status changed", []string{"chat_status"}, true},
 		{"mixed: progress + status (status wins)", []string{"progress", "status", "eta"}, true},
 		{"mixed: progress + error (error wins)", []string{"percent", "error"}, true},
-		{"unknown column ignored", []string{"some_unknown_column"}, false},
 	}
 
 	for _, tc := range tests {
@@ -266,26 +288,6 @@ func TestHasDisplayChange(t *testing.T) {
 				t.Errorf("hasDisplayChange(%v) = %v, want %v", tc.changes, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestDisplayColumnsCoverage guards against drift between handleJobUpdate's
-// pre-migration 12-field compare and the column-set check that replaced it.
-// If a future audit recommends skipping a column (or adding one), update
-// both this test and the displayColumns map together.
-func TestDisplayColumnsCoverage(t *testing.T) {
-	want := []string{
-		"status", "title", "channel_name", "thumbnail_url", "description",
-		"stream_start_time", "stream_end_time", "error",
-		"output_file", "filename", "is_vod", "chat_status",
-	}
-	if len(displayColumns) != len(want) {
-		t.Fatalf("displayColumns size = %d, want %d (drift from handleJobUpdate's pre-migration field set)", len(displayColumns), len(want))
-	}
-	for _, col := range want {
-		if _, ok := displayColumns[col]; !ok {
-			t.Errorf("displayColumns missing %q", col)
-		}
 	}
 }
 
@@ -402,7 +404,8 @@ func TestApplyValuesRejectsBadTrustedProxy(t *testing.T) {
 
 // TestApplyValuesProbeTargets: comma-separated host:port list; one bad entry
 // blocks the save with a field error (config.Validate would refuse the whole
-// file), blank falls back to the defaults, valid entries land trimmed.
+// file), blank keeps the stored list (as the dashboard does), valid entries
+// land trimmed.
 func TestApplyValuesProbeTargets(t *testing.T) {
 	cfg := config.Defaults()
 	m := NewSettingsModel()
@@ -431,7 +434,7 @@ func TestApplyValuesProbeTargets(t *testing.T) {
 
 	m.values["probe_targets"] = "  "
 	m.applyValues()
-	if got := cfg.Connectivity.ProbeTargets; len(got) != 3 || got[0] != "1.1.1.1:443" {
-		t.Errorf("blank must restore the defaults, got %v", got)
+	if got := cfg.Connectivity.ProbeTargets; len(got) != 2 || got[0] != "1.0.0.1:443" {
+		t.Errorf("blank must keep the stored targets, got %v", got)
 	}
 }

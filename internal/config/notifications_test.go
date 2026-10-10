@@ -41,6 +41,10 @@ func TestValidatePublicURL(t *testing.T) {
 		{"fragment", "https://x.example/#top", "", true, "the fragment slot is what the deep link uses"},
 		{"userinfo", "https://user:pw@x.example", "", true,
 			"credentials in the base URL would be republished into every embed"},
+		{"userinfo with no scheme", "user:pw@x.example", "", true,
+			"refused for its '@' before anything reads \"user\" as a scheme and quotes it"},
+		{"@ in the path", "https://x.example/~user@home", "", true,
+			"an '@' anywhere is refused as userinfo: net/url cannot tell a path's from a password's"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ValidatePublicURL(tc.in)
@@ -310,5 +314,73 @@ func TestNotificationKeysRoundTripThroughSave(t *testing.T) {
 	}
 	if back.Notifications[2].IsEnabled() {
 		t.Error("target 2's enabled = false did not survive the round trip")
+	}
+}
+
+// TestPublicURLIssueCarriesNoUserinfo pins the userinfo half of the secrets
+// sweep: a hand-edited network.public_url = "https://user:password@host" is
+// refused for its userinfo, Load records the refusal in NormalizedOnLoad, and
+// the boot logs every entry there as a Warn (cmd/moombox/services.go) — with
+// the value quoted back whole, password and all. A value url.Parse refuses
+// was quoted a second time inside its parse error. The same error text is
+// the settings API's field error and the TUI form's message.
+//
+// A password a generator made can hold '/', '?' or '#', each of which ends
+// net/url's authority: "moombox:<password prefix>" is then read as host:port
+// and refused with `invalid port ":<password prefix>" after host`, which
+// quotes the password from inside the parse error's cause. With a numeric
+// prefix before a '#' the value even parses, and is refused for its
+// "fragment".
+//
+// Mutants (run):
+//   - validateOrNormalize quoting cfg.Network.PublicURL instead of
+//     redact.URLUserinfo(...): every row's boot issue carries the password.
+//   - ValidatePublicURL without its '@' check: the "refused for its userinfo"
+//     row is accepted and has no issue at all, and the '/', '?' and '#' rows'
+//     errors carry the password inside the invalid-port cause.
+//   - that check moved after url.Parse: the '/', '?' and '#' rows' errors
+//     carry it the same way.
+//   - URLUserinfo looking for the '@' only ahead of the first '?' or '#': the
+//     '?', '#' and "numeric before '#'" rows' issues quote the value whole.
+func TestPublicURLIssueCarriesNoUserinfo(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"refused for its userinfo", "https://moombox:hunter2SECRET@dash.example.com/moombox"},
+		{"unparseable", "https://moombox:hunter2SECRET@dash example.com"},
+		{"password with a '/'", "https://moombox:hunter2SECRET/tail@dash.example.com"},
+		{"password with a '?'", "https://moombox:hunter2SECRET?tail@dash.example.com"},
+		{"password with a '#'", "https://moombox:hunter2SECRET#tail@dash.example.com"},
+		{"numeric password before a '#'", "https://moombox:1234#SECRET@dash.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte("[network]\npublic_url = \""+tc.value+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var issue string
+			for _, s := range cfg.NormalizedOnLoad {
+				if strings.Contains(s, "network.public_url") {
+					issue = s
+				}
+			}
+			if issue == "" {
+				t.Fatalf("no network.public_url entry in NormalizedOnLoad %q", cfg.NormalizedOnLoad)
+			}
+			if strings.Contains(issue, "SECRET") || strings.Contains(issue, "hunter2") {
+				t.Errorf("the boot Warn's issue carries the password: %q", issue)
+			}
+			if !strings.Contains(issue, "<redacted>@dash") {
+				t.Errorf("issue = %q, want the value quoted with its userinfo cut", issue)
+			}
+			if cfg.Network.PublicURL != "" {
+				t.Errorf("public_url = %q, want it cleared", cfg.Network.PublicURL)
+			}
+			if _, err := ValidatePublicURL(tc.value); err == nil || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "hunter2") {
+				t.Errorf("ValidatePublicURL(%q) = %v, want an error that carries no password", tc.value, err)
+			}
+		})
 	}
 }

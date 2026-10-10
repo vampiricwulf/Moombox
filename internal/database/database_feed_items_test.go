@@ -120,6 +120,62 @@ func TestFeedScope_Q1UnionQ2(t *testing.T) {
 	}
 }
 
+// An RSS <published> is the announcement time, so a stream scheduled further
+// ahead than the window is older than the cutoff the moment it is first seen
+// — when its channel is added, or after downtime. It used to sit in neither
+// arm and was never probed, even once live. An unknown RSS row now stays in
+// scope while its first sighting is inside the window; a row first seen
+// before the window, and an unknown exact row from any other source, do not.
+//
+// Mutants: the arm without the first_seen bound (stale row in scope), and
+// without the source check (old 'videos' row in scope).
+func TestFeedScope_UnresolvedRSSRowFirstSeenInsideTheWindow(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	defer db.Close()
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -3).Format(time.RFC3339)
+	announced := now.AddDate(0, 0, -10).Format(time.RFC3339)
+	seenNow := now.Format(time.RFC3339)
+
+	add := func(vid, src, firstSeen string, pos int) {
+		t.Helper()
+		it := fi("UC1", vid, announced, "exact", src, "unknown", pos)
+		it.FirstSeen = firstSeen
+		if _, err := db.UpsertFeedItem(it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("scheduled", "rss", seenNow, 0)
+	add("stale", "rss", now.AddDate(0, 0, -20).Format(time.RFC3339), 1)
+	add("listed", "videos", seenNow, 2)
+
+	got, err := db.FeedScope("UC1", cutoff, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idsOf(got)
+	if !ids["scheduled"] {
+		t.Error("an unresolved RSS row first seen inside the window must be in scope, whatever its announcement date")
+	}
+	if ids["stale"] {
+		t.Error("an unresolved RSS row first seen before the window must stay out of scope")
+	}
+	if ids["listed"] {
+		t.Error("an unresolved exact row from a dated listing must stay out of scope")
+	}
+
+	// Once a probe resolves it, the row leaves the arm: an upcoming one is
+	// carried by status, a VOD is judged by its date like any other.
+	if err := db.ApplyProbeToFeedItem("UC1", "scheduled", "vod", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.FeedScope("UC1", cutoff, false)
+	if idsOf(got)["scheduled"] {
+		t.Error("a resolved VOD older than the window must leave scope")
+	}
+}
+
 func TestFeedScope_QueryPlan(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -270,18 +326,21 @@ func TestGetFeedItem(t *testing.T) {
 	}
 }
 
-func TestGetChannelRSSOK(t *testing.T) {
+// TestSetChannelRSSOK reads the column back directly: production reads it
+// only through GetChannelEstablished (a getter for it alone had no caller).
+func TestSetChannelRSSOK(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	defer db.Close()
-	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "" {
-		t.Fatalf("no row yet: ts=%q err=%v", ts, err)
-	}
 	if err := db.SetChannelRSSOK("UC1", "2026-07-16T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if ts, err := db.GetChannelRSSOK("UC1"); err != nil || ts != "2026-07-16T00:00:00Z" {
+	var ts string
+	if err := db.db.QueryRow(`SELECT last_rss_ok_at FROM channel_state WHERE channel_id = ?`, "UC1").Scan(&ts); err != nil || ts != "2026-07-16T00:00:00Z" {
 		t.Fatalf("got ts=%q err=%v", ts, err)
+	}
+	if est, err := db.GetChannelEstablished("UC1"); err != nil || !est {
+		t.Errorf("GetChannelEstablished after an RSS ok = %v, %v; want true", est, err)
 	}
 }
 

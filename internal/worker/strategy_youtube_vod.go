@@ -26,7 +26,9 @@ var errEmptyGvsToken = errors.New("PO token generator returned an empty token")
 // goja resolver used as the n-fallback path. Both are accepted (rather
 // than only routedSolver) so the wiring stays consistent with the
 // other YouTube strategies — the orchestrator passes whatever it has.
-func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
+// isOnline is the connectivity check the downloaders wait an outage out on,
+// as on the live strategies; nil disables the wait.
+func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	// pool is the format list selection, cipher re-selection and the
 	// alternate picker all draw from. It is the caller's slice until a
 	// missing_pot degrade swaps in a filtered COPY — never filtered in place.
@@ -142,6 +144,10 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		audioPoToken = vodPoToken
 	}
 
+	if err := setAsideLiveShapesForVod(job); err != nil { // staging_shapes.go
+		return nil, err
+	}
+
 	// Store video metadata on job (matching DASH strategy behavior)
 	if selected.Video != nil {
 		updates := map[string]any{}
@@ -169,31 +175,57 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// what the engine fetches.
 	if result.HasVideo && result.VideoPath != "" && videoResolved != "" {
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:        videoResolved,
-			OutputFile:     result.VideoPath,
-			StartSeq:       0,
-			EndSeq:         0, // Single file download
-			IsDirectURL:    true,
-			SegmentWorkers: job.Config.SegmentWorkers,
-			PoToken:        videoPoToken,
-			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			BaseURL:             videoResolved,
+			OutputFile:          result.VideoPath,
+			StartSeq:            0,
+			EndSeq:              0, // Single file download
+			IsDirectURL:         true,
+			StreamID:            vodStreamID(job.Job.VideoID, result.VideoFormat),
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			PoToken:             videoPoToken,
+			IsOnline:            isOnline,
+			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.VideoFormat, routedSolver, cipherSolver, potProvider, "VOD video"),
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 		})
 	}
 
 	if result.HasAudio && result.AudioPath != "" && audioResolved != "" {
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:        audioResolved,
-			OutputFile:     result.AudioPath,
-			StartSeq:       0,
-			EndSeq:         0,
-			IsDirectURL:    true,
-			SegmentWorkers: job.Config.SegmentWorkers,
-			PoToken:        audioPoToken,
-			Logger:         newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			BaseURL:             audioResolved,
+			OutputFile:          result.AudioPath,
+			StartSeq:            0,
+			EndSeq:              0,
+			IsDirectURL:         true,
+			StreamID:            vodStreamID(job.Job.VideoID, result.AudioFormat),
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			PoToken:             audioPoToken,
+			IsOnline:            isOnline,
+			OnCredentialRefresh: vodURLRefresh(ctx, job, videoInfo, *result.AudioFormat, routedSolver, cipherSolver, potProvider, "VOD audio"),
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 		})
 	}
 
 	return result, nil
+}
+
+// vodSelectionBounds folds the job's quality_preference into the whole-file
+// selector's two knobs. A preferred size below the cap becomes the cap — the
+// selector then takes that size, or the largest one below it, which is what
+// the live paths' preference matching does — and an explicit "…p60" asks for
+// 60 fps whatever prefer_60fps says; a suffix-less preference leaves the
+// setting in charge, as on the live paths. The VOD path read the preference
+// only for audio_only, so a "720p" channel's uploads and finished VODs
+// downloaded at the global 2160 cap.
+func vodSelectionBounds(job *JobContext) (maxRes int, prefer60fps bool) {
+	maxRes, prefer60fps = job.Config.MaxVideoResolution, job.Config.Prefer60fps
+	height, fps := ParseQualityPreference(job.Job.QualityPreference)
+	if height > 0 && (maxRes <= 0 || height < maxRes) {
+		maxRes = height
+	}
+	if fps > 0 {
+		prefer60fps = fps >= 50
+	}
+	return maxRes, prefer60fps
 }
 
 // selectVodFormats runs the VOD format selection over formats: the automatic
@@ -207,7 +239,8 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 // the drop swapped that format for its token-free shadow (the itag is still
 // in formats), says which client now serves it.
 func selectVodFormats(job *JobContext, formats, dropped []youtube.Format) (youtube.SelectedFormats, *DownloadResult) {
-	selected := youtube.SelectBestFormatsWithLogger(formats, job.Config.MaxVideoResolution, job.Config.Prefer60fps, job.Logger)
+	maxRes, prefer60fps := vodSelectionBounds(job)
+	selected := youtube.SelectBestFormatsWithLogger(formats, maxRes, prefer60fps, job.Logger)
 
 	// Per-job itag overrides (from manual format selection in the UI).
 	// A value of -1 means "explicitly no video/audio" (skip that track).
@@ -326,16 +359,23 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD video resolve failed; trying re-selection",
 				"itag", result.VideoFormat.Itag, "err", err)
-			retry := pickAlternateVodFormat(pool, true, result.VideoFormat.Itag)
-			if retry == nil {
+			alt := reselectVodWithout(job, pool, result.VideoFormat.Itag)
+			if !alt.HasVideo || alt.VideoFormat == nil {
 				return "", "", fmt.Errorf("VOD: video URL resolve failed and no alternate format: %w", err)
 			}
-			resolvedURL, err = resolveFormatURL(ctx, retry, routedSolver, cipherSolver, playerURL, job.Logger)
+			resolvedURL, err = resolveFormatURL(ctx, alt.VideoFormat, routedSolver, cipherSolver, playerURL, job.Logger)
 			if err != nil {
 				return "", "", fmt.Errorf("VOD: video URL resolve failed for primary and alternate: %w", err)
 			}
-			result.VideoFormat = retry
-			job.Logger.Info("[Cipher] VOD video re-selection succeeded", "newItag", retry.Itag)
+			// The re-selection's whole stream shape, not just its video: a
+			// progressive primary replaced by a video-only alternate needs the
+			// audio the selection paired with it (keeping the old shape made
+			// a silent file), and an adaptive one replaced by a progressive
+			// alternate needs no separate audio. The audio block below then
+			// resolves whatever audio this adopted.
+			result.HasVideo, result.VideoFormat, result.VideoPath = alt.HasVideo, alt.VideoFormat, alt.VideoPath
+			result.HasAudio, result.AudioFormat, result.AudioPath = alt.HasAudio, alt.AudioFormat, alt.AudioPath
+			job.Logger.Info("[Cipher] VOD video re-selection succeeded", "newItag", alt.VideoFormat.Itag)
 		}
 		videoResolved = resolvedURL
 	}
@@ -344,7 +384,7 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 		if err != nil {
 			job.Logger.Warn("[Cipher] VOD audio resolve failed; trying re-selection",
 				"itag", result.AudioFormat.Itag, "err", err)
-			retry := pickAlternateVodFormat(pool, false, result.AudioFormat.Itag)
+			retry := reselectVodWithout(job, pool, result.AudioFormat.Itag).AudioFormat
 			if retry == nil {
 				return "", "", fmt.Errorf("VOD: audio URL resolve failed and no alternate format: %w", err)
 			}
@@ -358,6 +398,23 @@ func resolveVodURLs(ctx context.Context, job *JobContext, result *DownloadResult
 		audioResolved = resolvedURL
 	}
 	return videoResolved, audioResolved, nil
+}
+
+// reselectVodWithout re-runs the job's own VOD selection over pool minus the
+// format whose URL would not resolve. The alternate it used to take was
+// simply the highest-bitrate format of the same kind, which ignored the
+// resolution cap, the quality preference, prefer_60fps and audio_only alike:
+// a 720p-capped job whose 720p format failed its signature downloaded the
+// 2160p one, and an audio-only job whose audio failed downloaded video.
+func reselectVodWithout(job *JobContext, pool []youtube.Format, failedItag int) *DownloadResult {
+	rest := make([]youtube.Format, 0, len(pool))
+	for _, f := range pool {
+		if f.Itag != failedItag {
+			rest = append(rest, f)
+		}
+	}
+	_, alt := selectVodFormats(job, rest, nil)
+	return alt
 }
 
 // withoutGvsRequiredFormats splits formats into the ones usable without a GVS

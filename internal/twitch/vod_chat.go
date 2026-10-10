@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +19,10 @@ const (
 	vodChatMaxConsecutiveErrors = 5
 	vodChatFlushInterval        = 5 * time.Second
 )
+
+// vodChatOnlinePoll is how often a paging loop parked on a connectivity outage
+// re-asks the probe. A variable so tests need not sleep it out.
+var vodChatOnlinePoll = 5 * time.Second
 
 // VodChatDownloader downloads chat messages from a Twitch VOD.
 //
@@ -43,7 +47,7 @@ type VodChatDownloader struct {
 	channelName  string
 	channelID    string
 	// authToken returns the CURRENT Twitch OAuth token, re-read on every
-	// comment page. Same reason as ChatDownloader.authToken: the paging loop
+	// comment page. Same reason as ChatDownloader.credentials: the paging loop
 	// runs for the length of a VOD, and a token captured at construction goes
 	// stale underneath it. nil-safe via currentAuthToken.
 	authToken     func() string
@@ -76,6 +80,11 @@ type VodChatDownloader struct {
 	// The IRC path's interruptSession is the same shape.
 	sessionCancelMu sync.Mutex
 	sessionCancel   context.CancelFunc
+
+	// isOnline is the device-connectivity probe SetIsOnline installs (nil =
+	// none): a page fetch that fails while it reports offline waits for the
+	// network instead of spending the consecutive-error budget.
+	isOnline atomic.Pointer[func() bool]
 
 	// wroteFile records that this downloader has successfully written its
 	// chat file at least once — the precondition for reading a missing output
@@ -139,6 +148,39 @@ func NewVodChatDownloader(api *API, opts VodChatOptions, logger interface {
 	}
 }
 
+// SetIsOnline installs the device-connectivity probe. Without it a page fetch
+// failing through an outage spent the whole consecutive-error budget in about
+// twenty seconds and gave the archive up, while the video beside it waited
+// the outage out. Safe to call before or after Start; nil removes the probe.
+func (vcd *VodChatDownloader) SetIsOnline(fn func() bool) {
+	if fn == nil {
+		vcd.isOnline.Store(nil)
+		return
+	}
+	vcd.isOnline.Store(&fn)
+}
+
+// offline reports whether the installed probe says the device has no network.
+func (vcd *VodChatDownloader) offline() bool {
+	fn := vcd.isOnline.Load()
+	return fn != nil && !(*fn)()
+}
+
+// waitOnline blocks until the probe reports the network back, polling every
+// vodChatOnlinePoll, and reports false when ctx ends first.
+func (vcd *VodChatDownloader) waitOnline(ctx context.Context) bool {
+	t := time.NewTicker(vodChatOnlinePoll)
+	defer t.Stop()
+	for vcd.offline() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
+	return true
+}
+
 // currentAuthToken reads the live OAuth token. Returns "" when no getter was
 // supplied — an anonymous comment fetch, exactly as an empty token behaved.
 func (vcd *VodChatDownloader) currentAuthToken() string {
@@ -149,12 +191,15 @@ func (vcd *VodChatDownloader) currentAuthToken() string {
 }
 
 // Start downloads all VOD chat comments.
-func (vcd *VodChatDownloader) Start(ctx context.Context) error {
+func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 	vcd.running.Store(true)
 	defer vcd.running.Store(false)
 	defer func() {
 		if r := recover(); r != nil {
 			vcd.logger.Error("VOD chat downloader panic", "panic", r, "vodID", vcd.vodID)
+			// A panic is an outcome, not a clean exit: the worker records
+			// chat_status "incomplete" for it instead of "finished".
+			retErr = fmt.Errorf("VOD chat downloader panic: %v", r)
 		}
 	}()
 
@@ -176,9 +221,27 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	var cursor string
 	consecutiveErrors := 0
 
-	// Try loading resume state
+	// A previous run on this instance — the orchestrator re-Starts the same
+	// downloader after a connectivity outage — can have left a batch its last
+	// flush could not write, with the sidecar still at the last good flush.
+	// The resume below restored that sidecar's count, replaced the dedup and
+	// paged again from its offset, so the same comments were buffered a second
+	// time behind the first: 13 records, 7 of them distinct. The run starts
+	// from what the disk holds, as a fresh downloader does, and the batch is
+	// fetched again from the resume offset. The IDs and the count go with it:
+	// kept where no sidecar replaces them, the dropped batch's IDs filtered out
+	// every comment fetched again in its place.
+	vcd.messages = nil
+	vcd.dedup.Restore(nil)
+	vcd.totalCount.Store(0)
+
+	// Try loading resume state. sidecarCounted records that it says the file
+	// holds messages: one that counted none had no history to lose with the
+	// file (the YouTube downloader draws the same line).
+	sidecarCounted := false
 	if state, err := vcd.loadResumeState(); err == nil && state != nil {
 		if state.StreamID == vcd.vodID {
+			sidecarCounted = state.MessageCount > 0
 			contentOffset = state.LastOffsetSeconds
 			vcd.totalCount.Store(int64(state.MessageCount))
 			vcd.dedup.Restore(state.RecentIDs)
@@ -188,6 +251,43 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 				"previousMessages", vcd.totalCount.Load(),
 			)
 		}
+	}
+	kept, salvaged := vcd.repairDamagedFile()
+	fileGone := sidecarCounted && !salvaged && vcd.outputFileMissing()
+	if salvaged || fileGone {
+		// The sidecar's offset, IDs and count describe the file as it was
+		// when they were saved, and the damage — or the file's loss — took
+		// part of that away. Kept, the run carried on from the sidecar's
+		// offset with its dedup, so the pages the disk lost were never asked
+		// for again: a file cut inside its fourth comment ended with six of
+		// twelve while the job read "finished". The file is what the archive
+		// holds, so the run continues from it — its count, its own IDs
+		// (adoptExistingFile below seeds them) and its newest offset, even
+		// when that is below the sidecar's, or 0 with no file at all. The
+		// YouTube downloader clears its dedup and replay mark the same way
+		// (internal/chat/downloader.go).
+		vcd.logger.Warn("[TwitchVodChat] the chat file no longer holds what the resume state covers; continuing from the file",
+			"vodID", vcd.vodID, "sidecarOffset", contentOffset, "fileMessages", kept, "fileGone", fileGone)
+		contentOffset = 0
+		vcd.dedup.Restore(nil)
+		vcd.totalCount.Store(int64(kept))
+	}
+	if fileOffset, ok := vcd.adoptExistingFile(); ok && fileOffset > contentOffset {
+		// The file reaches further than the sidecar says (or there is no
+		// sidecar at all): continue from the file's newest message. A run that
+		// found no sidecar started from offset 0 and re-appended everything the
+		// dedup's last chatDedupMax IDs did not cover — a VOD whose chat had
+		// already finished, re-run on a restart while its video was still
+		// downloading, came out with every message beyond 5000 twice.
+		vcd.logger.Info("continuing VOD chat from the existing file's newest message",
+			"vodID", vcd.vodID, "offset", fileOffset, "sidecarOffset", contentOffset)
+		contentOffset = fileOffset
+	}
+	if salvaged || fileGone {
+		// And the sidecar follows the file now, not at the first checkpoint:
+		// a process killed before then left the old one beside a file that
+		// reads intact, and the next run trusted it and lost the same pages.
+		vcd.saveResumeState(contentOffset)
 	}
 
 	lastFlush := time.Now()
@@ -214,10 +314,21 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 				vcd.finishInterrupted(contentOffset)
 				return ctx.Err()
 			}
+			// No network is not a fault of the page: wait for it, then ask
+			// for the same page again with the budget untouched.
+			if vcd.offline() {
+				vcd.logger.Warn("vod chat fetch failed while offline; waiting for connectivity", "err", err)
+				if !vcd.waitOnline(ctx) {
+					vcd.finishInterrupted(contentOffset)
+					return ctx.Err()
+				}
+				vcd.logger.Info("connectivity restored; resuming VOD chat download", "vodID", vcd.vodID)
+				consecutiveErrors = 0
+				continue
+			}
 			consecutiveErrors++
 			if consecutiveErrors >= vodChatMaxConsecutiveErrors {
-				vcd.flush()
-				vcd.saveResumeState(contentOffset)
+				vcd.checkpoint(contentOffset)
 				return fmt.Errorf("too many VOD chat errors: %w", err)
 			}
 			vcd.logger.Warn("vod chat fetch error", "err", err, "consecutive", consecutiveErrors)
@@ -341,8 +452,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 
 		// Periodic flush every 5 seconds
 		if time.Since(lastFlush) >= vodChatFlushInterval {
-			vcd.flush()
-			vcd.saveResumeState(contentOffset)
+			vcd.checkpoint(contentOffset)
 			lastFlush = time.Now()
 		}
 
@@ -367,7 +477,15 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		return nil
 	}
 
-	vcd.flush()
+	if err := vcd.flush(); err != nil {
+		// The last page is in, but the file would not take the last batch.
+		// This used to be ignored: the sidecar was removed, "download
+		// complete" logged and nil returned, so the job read "finished" over
+		// a chat missing its tail. Keep the sidecar at the offset the file
+		// does reach (checkpoint saves only after a good flush, so the one on
+		// disk is it) and report the capture incomplete.
+		return fmt.Errorf("vod chat: final flush failed, %d messages not written: %w", len(vcd.messages), err)
+	}
 
 	// Resolve and inject third-party emotes (7TV, BTTV, FFZ).
 	// Use a fresh context — the original ctx may already be cancelled.
@@ -417,8 +535,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 // chat_status row that tells an operator the archive stopped short — which
 // is why the Warn is not optional.
 func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reason string) error {
-	vcd.flush()
-	vcd.saveResumeState(contentOffset)
+	vcd.checkpoint(contentOffset)
 	// The orchestrator now records this error as chat_status = "incomplete"
 	// (recordChatOutcome, internal/worker/orchestrator_chat.go) — its own Warn
 	// there logs this same offset/cursor/reason again, via this error's
@@ -435,6 +552,96 @@ func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reaso
 	return fmt.Errorf("vod chat paging stalled at offset %v cursor %q: %s", contentOffset, cursor, reason)
 }
 
+// adoptExistingFile reconciles the run with a chat file already on disk:
+// the dedup learns the IDs of its last chatDedupMax messages and the total
+// rises to its count. The sidecar is saved right AFTER each flush, so a
+// process killed between the two left a file holding pages the sidecar's
+// offset and IDs did not cover; the resumed run re-fetched those pages and
+// appended them a second time, and its header count fell short. The YouTube
+// and Twitch IRC downloaders already re-read the file this way on resume.
+// Nothing on disk is a fresh start; a file that cannot be read is left alone
+// (a damaged one was salvaged by repairDamagedFile just before this).
+//
+// It also returns how far into the VOD (seconds) the file's newest message
+// is, so Start can continue from there when the sidecar says less — or is
+// missing — rather than re-page what the file already holds.
+func (vcd *VodChatDownloader) adoptExistingFile() (offsetSeconds float64, ok bool) {
+	if vcd.outputPath == "" {
+		return 0, false
+	}
+	summary, err := readChatPartFileSummary(vcd.outputPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			vcd.logger.Warn("cannot read the existing VOD chat file; resuming without its message IDs",
+				"vodID", vcd.vodID, "path", vcd.outputPath, "err", err)
+		}
+		return 0, false
+	}
+	for _, id := range summary.recentIDs {
+		vcd.dedup.Add(id)
+	}
+	if n := int64(summary.messages); n > vcd.totalCount.Load() {
+		vcd.totalCount.Store(n)
+	}
+	if summary.messages == 0 || !summary.hasOffset {
+		return 0, false
+	}
+	return float64(summary.maxOffsetMs) / 1000, true
+}
+
+// repairDamagedFile salvages a VOD chat file that no longer ends the way an
+// append needs (a crash-torn tail, a cut mid-record). Left as it was, every
+// flush failed against it and the completion path ignored that: the chat was
+// lost while the job read "finished". The intact messages are kept, the
+// original bytes are kept beside it as .corrupt, and the count follows.
+//
+// salvaged reports that the file was rewritten, and kept is how many messages
+// it holds now: what the damage took may be below the sidecar's offset, and
+// Start must not resume past it.
+func (vcd *VodChatDownloader) repairDamagedFile() (kept int, salvaged bool) {
+	if vcd.outputPath == "" {
+		return 0, false
+	}
+	if intact, err := utils.ChatFileEndIntact(vcd.outputPath); err != nil || intact {
+		return 0, false
+	}
+	vcd.logger.Warn("[TwitchVodChat] the existing chat file is damaged; salvaging it",
+		"vodID", vcd.vodID, "path", vcd.outputPath)
+	kept, err := rewriteChatFileWithHistory(vcd.outputPath, nil, vcd.logger, func(merged []TwitchChatMessage) error {
+		return vcd.writeFullFileCount(merged, len(merged))
+	})
+	if err != nil {
+		vcd.logger.Error("[TwitchVodChat] could not salvage the damaged chat file", "path", vcd.outputPath, "err", err)
+		return 0, false
+	}
+	vcd.totalCount.Store(int64(kept))
+	vcd.wroteFile.Store(true)
+	return kept, true
+}
+
+// outputFileMissing reports whether the chat file is positively absent — not
+// merely unreadable, which says nothing about what it holds.
+func (vcd *VodChatDownloader) outputFileMissing() bool {
+	if vcd.outputPath == "" {
+		return false
+	}
+	_, err := os.Stat(vcd.outputPath)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// checkpoint flushes and, only when that wrote everything, saves the resume
+// sidecar at contentOffset. Saving after a failed flush recorded an offset,
+// IDs and a count that covered messages only memory held, so the next run
+// never asked for those pages again and dropped their boundary as duplicates.
+// Left as it was, the previous sidecar points at what the file really holds.
+func (vcd *VodChatDownloader) checkpoint(contentOffset float64) {
+	if err := vcd.flush(); err != nil {
+		vcd.logger.Warn("[TwitchVodChat] flush failed; resume state left at the last good flush", "err", err)
+		return
+	}
+	vcd.saveResumeState(contentOffset)
+}
+
 // finishInterrupted is the exit every path that ends BEFORE the VOD's last
 // page shares: flush what is buffered and keep the resume sidecar, so a
 // relaunch inside the same job (or a restart of a still-Downloading job)
@@ -446,8 +653,7 @@ func (vcd *VodChatDownloader) pagingStalled(contentOffset float64, cursor, reaso
 // flush and no save at all — which, once Stop() starts cancelling, would have
 // thrown away exactly the batch the pre-cancel code preserved.
 func (vcd *VodChatDownloader) finishInterrupted(contentOffset float64) {
-	vcd.flush()
-	vcd.saveResumeState(contentOffset)
+	vcd.checkpoint(contentOffset)
 	vcd.logger.Info("VOD chat download stopped before completion; resume state preserved",
 		"vodID", vcd.vodID, "offset", contentOffset, "messages", vcd.totalCount.Load())
 }
@@ -465,9 +671,11 @@ func (vcd *VodChatDownloader) outputDirGone() bool {
 	return err != nil && os.IsNotExist(err)
 }
 
-func (vcd *VodChatDownloader) flush() {
+// flush writes the buffered messages to the chat file. A non-nil return means
+// they are still buffered (or, with the output directory gone, dropped).
+func (vcd *VodChatDownloader) flush() error {
 	if len(vcd.messages) == 0 || vcd.outputPath == "" {
-		return
+		return nil
 	}
 	if vcd.outputDirGone() {
 		// The job finalized and removed staging while this goroutine was still
@@ -475,13 +683,13 @@ func (vcd *VodChatDownloader) flush() {
 		// chat.json and a resume sidecar nothing ever cleans (TWITCH-11).
 		vcd.logger.Warn("[TwitchVodChat] output directory is gone; dropping the exit flush",
 			"path", vcd.outputPath, "pending", len(vcd.messages))
-		return
+		return fmt.Errorf("vod chat output directory %s is gone", filepath.Dir(vcd.outputPath))
 	}
 
 	dir := filepath.Dir(vcd.outputPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		vcd.logger.Error("create vod chat output dir", "err", err)
-		return
+		return err
 	}
 
 	// Check if this is the first flush (file doesn't exist yet)
@@ -492,56 +700,62 @@ func (vcd *VodChatDownloader) flush() {
 		// First flush: write complete file
 		if err := vcd.writeFullFile(vcd.messages); err != nil {
 			vcd.logger.Error("write vod chat file", "err", err)
-			return
+			return err
 		}
 	} else {
 		// Subsequent flushes: append new messages to existing file. The header
 		// count/downloadedAt refresh is folded into AppendChatMessages' open
 		// handle (warn-only on failure, as before).
 		count := int(vcd.totalCount.Load())
-		appendErr := utils.AppendChatMessages(vcd.outputPath, vcd.messages, count, vcd.logger)
+		appendErr := appendChatMessages(vcd.outputPath, vcd.messages, count, vcd.logger)
 		switch {
 		case appendErr == nil:
 			// header refreshed inside the append
 		case errors.Is(appendErr, utils.ErrChatFilePartialWrite):
-			// Truncated-then-failed write: the on-disk tail is broken, and a
-			// merge would parse-fail (dropping history). Per the sentinel's
-			// contract, advance past the batch.
-			vcd.logger.Error("partial vod chat append; advancing past batch", "err", appendErr)
+			// The write failed and the append put the file's end back: the
+			// file holds none of the batch, which stays buffered for the next
+			// flush. It used to be dropped while totalCount kept it.
+			vcd.logger.Error("partial vod chat append; keeping the batch for the next flush", "err", appendErr)
+			return appendErr
 		default:
-			// Merge-and-rewrite fallback (mirrors the IRC path): rewriting
+			// Rewrite with history (shared with the IRC path): rewriting
 			// with only the current batch would replace hours of flushed
-			// comments with the last few seconds' worth.
-			vcd.logger.Warn("append failed, merging existing file with current batch", "err", appendErr)
-			existing, readErr := readChatFileMessages(vcd.outputPath)
-			if readErr != nil {
+			// comments with the last few seconds' worth, and a damaged file
+			// keeps every intact message.
+			vcd.logger.Warn("append failed, rewriting the chat file with its history", "err", appendErr)
+			written, err := rewriteChatFileWithHistory(vcd.outputPath, vcd.messages, vcd.logger, func(merged []TwitchChatMessage) error {
+				return vcd.writeFullFileCount(merged, len(merged))
+			})
+			if err != nil {
 				// Can't recover without destroying data — keep the batch in
 				// memory and retry on the next flush.
-				vcd.logger.Error("append failed and cannot read existing file for merge; preserving file, retrying next flush", "err", readErr)
-				return
+				vcd.logger.Error("append failed and the chat file could not be rewritten; retrying next flush", "err", err)
+				return err
 			}
-			merged := append(existing, vcd.messages...)
-			if err := vcd.writeFullFile(merged); err != nil {
-				vcd.logger.Error("fallback merged write failed", "err", err)
-				return
-			}
+			vcd.totalCount.Store(int64(written))
 		}
 	}
 
 	// Clear messages from memory after successful write to prevent unbounded growth
 	vcd.messages = vcd.messages[:0]
 	vcd.wroteFile.Store(true)
+	return nil
 }
 
 // writeFullFile writes the complete file atomically using the shared helper.
 func (vcd *VodChatDownloader) writeFullFile(msgs []TwitchChatMessage) error {
+	return vcd.writeFullFileCount(msgs, int(vcd.totalCount.Load()))
+}
+
+// writeFullFileCount is writeFullFile with the header's messageCount given.
+func (vcd *VodChatDownloader) writeFullFileCount(msgs []TwitchChatMessage, count int) error {
 	chatData := TwitchChatData{
 		Platform:           "twitch",
 		ChannelLogin:       vcd.channelLogin,
 		ChannelDisplayName: vcd.channelName,
 		StreamID:           vcd.vodID,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
-		MessageCount:       int(vcd.totalCount.Load()),
+		MessageCount:       count,
 		EmoteOffsets:       chatEmoteOffsetsUTF16,
 		Messages:           msgs,
 	}
@@ -662,9 +876,4 @@ func EnrichWithEmotes(chatPath string, emoteData *TwitchEmoteData) error {
 
 	chatData.Emotes = emoteData
 	return utils.WriteChatFileAtomic(chatPath, &chatData)
-}
-
-// BuildChatFilename generates the chat output filename for a Twitch stream/VOD.
-func BuildChatFilename(channelLogin, streamOrVodID string) string {
-	return fmt.Sprintf("%s_%s_chat.json", strings.ToLower(channelLogin), streamOrVodID)
 }

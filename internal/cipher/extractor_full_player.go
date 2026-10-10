@@ -297,4 +297,4 @@ func buildSolverBindings(nGenerators, sigGenerators []string, urlClassName strin
 }
 
 // nBindingTemplate and fullPlayerSetupCode now live in `js/*.js` and are
-// loaded via go:embed in embedded_js.go (audit cipher.md T2).
+// loaded via go:embed in jsembed.go (audit cipher.md T2).

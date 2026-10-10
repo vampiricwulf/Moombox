@@ -60,7 +60,7 @@ func TestChromiumBrowsersHaveUniqueIds(t *testing.T) {
 }
 
 // TestChromiumBrowsersHaveUserDataSuffix locks the layout assumption
-// shared by ReadChromeCookies: every entry's userDataPath must end in
+// shared by ReadChromeCookiesStats: every entry's userDataPath must end in
 // "User Data" so loadChromeMasterKey's filepath.Dir(profilePath) lands
 // at the User Data root where Local State lives.
 func TestChromiumBrowsersHaveUserDataSuffix(t *testing.T) {
@@ -77,7 +77,7 @@ func TestChromiumBrowsersHaveUserDataSuffix(t *testing.T) {
 // dpapi_profile_dir must LOOK like a Chromium profile directory before the
 // fallback trusts it, because pointing the DPAPI reader at the wrong directory
 // produces "no cookies came out" with no hint about which of several causes it
-// was. The two structural facts are the ones ReadChromeCookies needs: the
+// was. The two structural facts are the ones ReadChromeCookiesStats needs: the
 // encrypted master key lives in a `Local State` that ChromeLocalStatePath can
 // find (beside the directory for Chromium, inside it for Opera), and the cookie
 // store is `Cookies` in the profile dir or `Network/Cookies` beside it on newer

@@ -142,3 +142,80 @@ func findHealth(h *healthTracker, id string) ChannelHealth {
 	}
 	return ChannelHealth{}
 }
+
+// TestEveryMonitorRestoresIntoItsOwnTracker: each monitor's RestoreUnhealthy
+// seeds the tracker its checks record into, so the healthy callback it was
+// given closes the restored outage on the first success.
+//
+// Mutant: an empty RestoreUnhealthy body on any one monitor — its close never
+// fires.
+func TestEveryMonitorRestoresIntoItsOwnTracker(t *testing.T) {
+	log := silentLogger{}
+	feed := NewFeedMonitor(nil, nil, log)
+	decapi := NewDecapiMonitor(nil, nil, log)
+	tw := NewTwitchMonitor(nil, nil, nil, log)
+	for name, m := range map[string]struct {
+		restore    func([]string)
+		setHealthy func(func(string))
+		health     *healthTracker
+	}{
+		"feed":   {feed.RestoreUnhealthy, feed.SetOnChannelHealthy, feed.health},
+		"decapi": {decapi.RestoreUnhealthy, decapi.SetOnChannelHealthy, decapi.health},
+		"twitch": {tw.RestoreUnhealthy, tw.SetOnChannelHealthy, tw.health},
+	} {
+		var closed []string
+		m.setHealthy(func(id string) { closed = append(closed, id) })
+		m.restore([]string{"ch"})
+		m.health.recordSuccess("ch")
+		if len(closed) != 1 || closed[0] != "ch" {
+			t.Errorf("%s: closes = %v, want the restored channel's", name, closed)
+		}
+	}
+}
+
+// TestRestoredUnhealthyChannelClosesOnItsFirstSuccess: a channel whose alert a
+// previous process raised and never closed behaves as if the streak had
+// survived the restart. Its first success fires onHealthy once; a failure
+// before that joins the streak silently, however long it runs; a channel not
+// restored is untouched; nothing restored shows in the snapshot before it is
+// checked; and prune drops a restored channel no longer configured.
+//
+// Mutants: drop takeRestored from recordSuccess (the close never fires); drop
+// it from recordError (the failing restored channel alerts a second time at
+// the threshold); never delete the restored entry (the second success closes
+// again); drop the restored half of prune (the de-configured channel closes).
+func TestRestoredUnhealthyChannelClosesOnItsFirstSuccess(t *testing.T) {
+	h := newHealthTracker()
+	var healthy, unhealthy []string
+	h.onHealthy = func(id string) { healthy = append(healthy, id) }
+	h.onUnhealthy = func(id string, _ int, _ string) { unhealthy = append(unhealthy, id) }
+	h.restoreUnhealthy([]string{"up", "down", "gone"})
+
+	if len(h.snapshot()) != 0 {
+		t.Errorf("snapshot = %v before any check, want nothing — a restored channel has not been checked", h.snapshot())
+	}
+
+	h.recordSuccess("up")
+	h.recordSuccess("up")
+	h.recordSuccess("never-alerted")
+	if len(healthy) != 1 || healthy[0] != "up" {
+		t.Fatalf("onHealthy = %v, want one close for the restored channel", healthy)
+	}
+
+	for i := 0; i < 2*unhealthyThreshold; i++ {
+		h.recordError("down", errors.New("still down"))
+	}
+	if len(unhealthy) != 0 {
+		t.Errorf("onUnhealthy = %v — the restored outage was already announced", unhealthy)
+	}
+	h.recordSuccess("down")
+	if len(healthy) != 2 || healthy[1] != "down" {
+		t.Fatalf("onHealthy = %v, want the restored outage closed on its first success", healthy)
+	}
+
+	h.prune(map[string]struct{}{"up": {}, "down": {}})
+	h.recordSuccess("gone")
+	if len(healthy) != 2 {
+		t.Errorf("onHealthy = %v — a channel pruned from the config still closed", healthy)
+	}
+}

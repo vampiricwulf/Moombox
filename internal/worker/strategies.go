@@ -11,6 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -38,9 +39,10 @@ type StrategyDeps struct {
 	// All YouTube strategies use it when non-nil.
 	PotProvider *bgutils.PotProvider
 
-	// IsOnline is the connectivity check used by manifest-fetching
-	// strategies (DASH, HLS) to bail out early during an offline blip.
-	// VOD doesn't poll for connectivity.
+	// IsOnline is the connectivity check every YouTube strategy hands its
+	// downloaders, so a fetch that fails during an outage waits it out
+	// instead of being charged; the manifest-fetching strategies (DASH,
+	// HLS) also bail out early on it during an offline blip.
 	IsOnline func() bool
 }
 
@@ -127,7 +129,7 @@ func (manifestlessDashStrategyT) Kind() string { return "manifestless_dash" }
 func (hlsStrategyT) Kind() string              { return "hls" }
 
 func (vodStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
-	return DownloadVod(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider)
+	return DownloadVod(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
 }
 
 func (dashStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
@@ -177,6 +179,15 @@ type DownloadResult struct {
 	VideoWidth  int
 	VideoHeight int
 	VideoFps    int
+	// VideoItag / AudioItag name the renditions a DASH or manifest-free DASH
+	// capture writes (0 when unknown — HLS variants carry no itag). A
+	// refresh that would continue the same files must keep them: the
+	// engine's append path is codec-blind, and two itags can share a
+	// width/height/fps tuple (avc1 299 and vp9 303 are both 1080p60), so the
+	// dimensions alone cannot rule out new-codec fragments under the old init
+	// segment (streamIdentityChanged).
+	VideoItag int
+	AudioItag int
 }
 
 // decryptNParamInURL finds and decrypts the 'n' parameter in a URL.
@@ -201,7 +212,9 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 	// YouTube's URL signature verification and causes HTTP 403.
 	parsed, err := url.Parse(result)
 	if err != nil {
-		return result, err
+		// url.Parse's refusal quotes the URL — a signed segment URL, the
+		// client's IP and the signature in it — and the caller logs it.
+		return result, redact.MediaError(err)
 	}
 	// Extract raw (percent-encoded) n-param for accurate string matching.
 	rawN, nParam := cipher.RawQueryParam(parsed.RawQuery, "n")
@@ -617,8 +630,8 @@ var fetchCookielessFormats = (*youtube.Service).CookielessFormats
 // It reads the SETUP pool: on the VOD path a missing_pot swap replaces an
 // itag's winner with its token-free shadow in a filtered copy only, so this
 // would still name the winner's client for a stream riding the shadow's URL.
-// DownloadVod wires no OnCredentialRefresh, so no caller reaches that shape;
-// a VOD refresh, if ever added, must be handed the served format's Source.
+// The VOD refresh (refreshVodURL) is therefore handed the served format
+// itself and never asks this.
 func formatSourceByItag(formats []youtube.Format, itag int) string {
 	for i := range formats {
 		if formats[i].Itag == itag {

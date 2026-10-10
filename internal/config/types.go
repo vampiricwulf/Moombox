@@ -37,6 +37,15 @@ type MoomboxConfig struct {
 	// to flush them to disk so they show up in the user's config.toml.
 	// Excluded from TOML and JSON marshalling (in-memory signal only).
 	NeedsAutoPersist bool `toml:"-" json:"-"`
+	// NormalizedOnLoad lists what loadFromFile's Normalize replaced with a
+	// default — values the file held that Validate rejects. Boot logs each
+	// one: the next save writes the default over the operator's value, and
+	// without the log nothing said so.
+	NormalizedOnLoad []string `toml:"-" json:"-"`
+	// IgnoredOnLoad lists the retired keys (retiredKeys) the file still
+	// carries. Nothing reads them; boot logs each one, and the next save
+	// leaves them out of the file.
+	IgnoredOnLoad []string `toml:"-" json:"-"`
 }
 
 // NetworkConfig holds server and network access settings.
@@ -83,16 +92,21 @@ type NetworkConfig struct {
 	// ("https://moombox.example.com", or "http://192.168.1.10:774" on a LAN).
 	// Empty means unset, which is the default and the pre-2.8.9 behaviour.
 	//
-	// Its only consumer is the notification manager: when set, a job embed's
+	// The notification manager is its main consumer: when set, a job embed's
 	// TITLE links to {public_url}/#job=<id> (the dashboard opens that job's
-	// details) and the platform page moves to the embed's author line. Moombox
-	// never binds to it, never validates that it reaches this process, and
-	// never redirects to it — it is a string the operator knows and Moombox
-	// does not (a reverse proxy, a tunnel, a port forward).
+	// details) and the platform page moves to the embed's author line. The web
+	// server's origin checks read it as the operator's word for the address a
+	// browser types: on external/public its host is a name a local peer may
+	// address the dashboard by, and on localhost/lan its port is one an Origin
+	// may name (internal/web/middleware.go). Moombox never binds to it, never
+	// validates that it reaches this process, and never redirects to it — it
+	// is a string the operator knows and Moombox does not (a reverse proxy, a
+	// tunnel, a port forward).
 	//
 	// Validated as an absolute http(s) URL with a host, no query, no fragment
 	// and no userinfo; a trailing slash is trimmed on the way in because the
-	// manager appends "/#job=". Hot-reloadable — read at send time.
+	// manager appends "/#job=". Hot-reloadable — read at send time and per
+	// request.
 	PublicURL string `toml:"public_url,omitempty" json:"public_url,omitempty"`
 }
 
@@ -236,12 +250,6 @@ type DownloaderConfig struct {
 	// gate then falls back to the silent drop and manual Reinitialize
 	// remains the recovery. 0 = never expire (preserve indefinitely).
 	IncompleteStagingExpiryDays FlexDuration `toml:"incomplete_staging_expiry_days" json:"incomplete_staging_expiry_days"`
-	// PoToken and VisitorData are session-scoped secrets. Like PasswordHash,
-	// they must never be returned by GET /api/config — use json:"-" to hide
-	// them from any encoder walking the Config struct. Operators who need to
-	// inspect them can read config.toml directly.
-	PoToken     string `toml:"po_token,omitempty" json:"-"`
-	VisitorData string `toml:"visitor_data,omitempty" json:"-"`
 }
 
 // CookiesConfig holds cookie file and auto-cookie acquisition settings.
@@ -254,15 +262,17 @@ type CookiesConfig struct {
 	// (default), the auto-cookies service uses DetectBrowser to pick
 	// the best available browser. When set, the auto-cookies service
 	// uses this exact executable path and BrowserType to drive
-	// extraction. Setting BrowserPath without BrowserType is a config
-	// error caught at validation.
+	// extraction. Setting BrowserPath without BrowserType is refused by
+	// both settings UIs (the web PUT and the TUI form); config.Validate
+	// does not check the pair, so a hand-edited file with BrowserPath
+	// alone has the pair treated as unset.
 	BrowserPath string `toml:"browser_path,omitempty" json:"browser_path,omitempty"`
 
 	// BrowserType identifies which extraction path applies to BrowserPath
 	// (firefox/chrome/brave/edge/etc.). Required when BrowserPath is set
 	// because the path alone doesn't tell us which extraction backend
-	// (Firefox cookies.sqlite vs Chromium CDP) to use. Validated against
-	// the same identifier list used by DetectBrowser.
+	// (Firefox cookies.sqlite vs Chromium CDP) to use. The settings UIs
+	// check it against the same identifier list DetectBrowser uses.
 	BrowserType string `toml:"browser_type,omitempty" json:"browser_type,omitempty"`
 
 	// Platforms is the platform list SEEDED on first run by
@@ -277,13 +287,19 @@ type CookiesConfig struct {
 	// platform with broken credentials, not an unconfigured one. Nothing
 	// automatic ever prunes it — the automatic writers only add — and the
 	// sole removal path is an operator replacing the list through
-	// PUT /api/config. Treat as read-only-from-config.
+	// PUT /api/config. Treat as read-only-from-config. Its auth-loss consumer
+	// (RefreshService.SetExpectedPlatforms) reads it at boot only, so a
+	// removal changes that seed from the next boot.
 	Platforms []string `toml:"platforms,omitempty" json:"platforms,omitempty"`
 
 	// ActivePlatforms is the user's explicit override. Takes precedence
 	// over Platforms when set. Read via GetActivePlatforms() which
-	// falls back to Platforms then to channel inference.
-	ActivePlatforms []string `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
+	// falls back to Platforms then to channel inference. nil means no
+	// override; an EMPTY list is an override too — the operator turned
+	// both platform indicators off — so neither tag carries omitempty:
+	// the TOML encoder already skips a nil slice, and omitempty would also
+	// drop the empty list that records "both off" (JSON sends nil as null).
+	ActivePlatforms []string `toml:"active_platforms" json:"active_platforms"`
 
 	RefreshInterval FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
 
@@ -355,6 +371,46 @@ type DiskConfig struct {
 	CriticalPercent int `toml:"disk_critical_percent" json:"disk_critical_percent"`
 }
 
+// DiskRecoveryMargin is how far, in percentage points, usage must fall below a
+// disk threshold before what reaching it set off ends: an open disk alert
+// closes or steps down (cmd/moombox's diskAlerts), and the backlog scheduler's
+// admission gate reopens (internal/worker). Without it a volume sitting on the
+// line — 90.0% one reading, 89.9% the next — sent a Warning and a Recovered on
+// every six-minute check, and the gate, which reads on every sweep, would
+// admit a backlog VOD each time the volume dipped under the line, onto the
+// disk it had just stopped admitting to.
+const DiskRecoveryMargin = 2.0
+
+// AtCritical reports whether usedPct has reached the critical threshold: AT
+// OR ABOVE it, and never while the threshold is 0. One rule for its two
+// readers — the disk alerts' level (routes.ComputeWarnLevel) and the backlog
+// scheduler's admission gate (internal/worker) — so the gate closes on exactly
+// the reading that sends disk_critical.
+func (d DiskConfig) AtCritical(usedPct float64) bool {
+	return d.CriticalPercent > 0 && usedPct >= float64(d.CriticalPercent)
+}
+
+// ClearOfCritical reports whether usedPct is DiskRecoveryMargin points or more
+// below the critical threshold — the reading that ends what AtCritical set
+// off: an open disk_critical alert steps down, and the backlog admission gate
+// reopens. Between the two a volume is neither: whatever the threshold set
+// off stays as it is. Always true while the threshold is 0.
+func (d DiskConfig) ClearOfCritical(usedPct float64) bool {
+	return clearOf(d.CriticalPercent, usedPct)
+}
+
+// ClearOfWarn is ClearOfCritical for the warning threshold: the reading that
+// closes an open disk_warning alert with disk_ok.
+func (d DiskConfig) ClearOfWarn(usedPct float64) bool {
+	return clearOf(d.WarnPercent, usedPct)
+}
+
+// clearOf is the recovery rule both thresholds share: usage at least
+// DiskRecoveryMargin below threshold, or the threshold disabled.
+func clearOf(threshold int, usedPct float64) bool {
+	return threshold <= 0 || usedPct <= float64(threshold)-DiskRecoveryMargin
+}
+
 // UpdatesConfig holds auto-update settings.
 type UpdatesConfig struct {
 	AutoCheckUpdates bool `toml:"auto_check_updates" json:"auto_check_updates"`
@@ -420,22 +476,26 @@ type ConnectivityConfig struct {
 type BgutilsConfig struct {
 	// UseSidecar enables the embedded Node + JSDOM + bgutils-js
 	// subprocess that produces real PO tokens via BotGuard. Defaults to
-	// true on Windows. When false (or when the sidecar fails to start),
-	// PotProvider falls back to the goja-only path which produces only
-	// websafe-fallback tokens.
+	// true. When false (or when the sidecar fails to start), PotProvider
+	// runs only the goja path, which BotGuard's timing check rejects — it
+	// mints no PO tokens.
 	UseSidecar bool `toml:"use_sidecar" json:"use_sidecar"`
 }
 
 // ChannelConfig holds channel-specific monitoring settings.
 type ChannelConfig struct {
-	ID                    string       `toml:"id" json:"id"`
-	Name                  string       `toml:"name,omitempty" json:"name,omitempty"`
-	Platform              string       `toml:"platform,omitempty" json:"platform,omitempty"`
-	Enabled               *bool        `toml:"enabled,omitempty" json:"enabled,omitempty"`
-	Terms                 ChannelTerms `toml:"terms,omitempty" json:"terms"`
-	NumDescLookbehind     *int         `toml:"num_desc_lookbehind,omitempty" json:"num_desc_lookbehind,omitempty"`
-	OutputDirectory       string       `toml:"output_directory,omitempty" json:"output_directory,omitempty"`
-	IncludeNonLiveContent bool         `toml:"include_non_live_content,omitempty" json:"include_non_live_content,omitempty"`
+	ID       string       `toml:"id" json:"id"`
+	Name     string       `toml:"name,omitempty" json:"name,omitempty"`
+	Platform string       `toml:"platform,omitempty" json:"platform,omitempty"`
+	Enabled  *bool        `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	Terms    ChannelTerms `toml:"terms,omitempty" json:"terms"`
+	// NumDescLookbehind is retired: terms match titles only (a feed_items row
+	// carries no description, and DECAPI and the browse sources never had
+	// one), so nothing reads it. Kept so an existing config loads and saves
+	// unchanged.
+	NumDescLookbehind     *int   `toml:"num_desc_lookbehind,omitempty" json:"num_desc_lookbehind,omitempty"`
+	OutputDirectory       string `toml:"output_directory,omitempty" json:"output_directory,omitempty"`
+	IncludeNonLiveContent bool   `toml:"include_non_live_content,omitempty" json:"include_non_live_content,omitempty"`
 	// ArchiveWindowDays/ArchiveSlots override the global monitors settings
 	// for this channel. Nil or <= 0 falls back to the global value.
 	ArchiveWindowDays *int   `toml:"archive_window_days,omitempty" json:"archive_window_days,omitempty"`

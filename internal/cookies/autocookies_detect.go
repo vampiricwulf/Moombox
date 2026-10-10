@@ -52,7 +52,7 @@ var (
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
-	Type string `json:"type"` // "firefox", "waterfox", "chrome", "brave", "opera", "edge"
+	Type string `json:"type"` // one of knownBrowserTypes (browser_validate.go): "firefox", "chrome", "edge", …
 	Path string `json:"path"`
 	Name string `json:"name"`
 }
@@ -89,7 +89,9 @@ var knownBrowsers = []browserInfo{
 	{"thorium", "Thorium", thoriumPaths, []string{`Thorium\Application\thorium.exe`}},
 	{"brave", "Brave", bravePaths, []string{`BraveSoftware\Brave-Browser\Application\brave.exe`}},
 	{"chrome", "Google Chrome", chromePaths, []string{`Google\Chrome\Application\chrome.exe`}},
-	{"opera", "Opera GX", operaPaths, []string{`Programs\Opera GX\opera.exe`, `Programs\Opera\opera.exe`}},
+	// "Opera", not "Opera GX": both installs map here, and on Linux the only
+	// candidate is a PATH `opera`, which is never GX.
+	{"opera", "Opera", operaPaths, []string{`Programs\Opera GX\opera.exe`, `Programs\Opera\opera.exe`}},
 	{"edge", "Microsoft Edge", edgePaths, []string{`Microsoft\Edge\Application\msedge.exe`}},
 }
 

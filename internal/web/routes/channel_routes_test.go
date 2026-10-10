@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -29,7 +30,9 @@ func newChannelRoutesFixture(t *testing.T) *channelRoutesFixture {
 
 	r := chi.NewRouter()
 	f := &channelRoutesFixture{router: r, store: store}
-	ChannelRoutes(r, store, func() { f.channelChange.Add(1) })
+	ChannelRoutes(r, store, func() { f.channelChange.Add(1) }, nil)
+	ChannelRemovalRoutes(r, &ChannelRemovalRoutesDeps{Store: store,
+		OnChannelChange: func() { f.channelChange.Add(1) }, Logger: nopRouteLogger{}})
 	return f
 }
 
@@ -67,8 +70,9 @@ func TestChannelAddInsertsNewChannel(t *testing.T) {
 }
 
 func TestChannelAddUpdatesExistingByID(t *testing.T) {
-	// Same ID = upsert, not duplicate. The route uses the position-in-slice
-	// for the in-place update so display order is stable across edits.
+	// Same ID with the edit mark = upsert, not duplicate. The route uses the
+	// position-in-slice for the in-place update so display order is stable
+	// across edits.
 	f := newChannelRoutesFixture(t)
 	if err := f.store.Update(func(c *config.MoomboxConfig) {
 		c.Channels = []config.ChannelConfig{{ID: "UCfoo", Name: "OldName", Platform: "youtube"}}
@@ -76,10 +80,11 @@ func TestChannelAddUpdatesExistingByID(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	body, _ := json.Marshal(config.ChannelConfig{
-		ID:       "UCfoo",
-		Name:     "NewName",
-		Platform: "youtube",
+	body, _ := json.Marshal(map[string]any{
+		"id":       "UCfoo",
+		"name":     "NewName",
+		"platform": "youtube",
+		"edit":     true,
 	})
 	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -111,6 +116,51 @@ func TestChannelAddRejectsEmptyID(t *testing.T) {
 	}
 	if f.channelsLen() != 0 {
 		t.Error("config should not have been mutated for invalid input")
+	}
+}
+
+// TestChannelAddRejectsUnknownPlatform: POST accepted any platform string,
+// while PUT /api/config rejected the same entry. The monitors poll anything
+// that is not "twitch" as YouTube, and the next full-form save 400'd on it.
+func TestChannelAddRejectsUnknownPlatform(t *testing.T) {
+	f := newChannelRoutesFixture(t)
+
+	body, _ := json.Marshal(config.ChannelConfig{ID: "someone", Platform: "kick"})
+	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown platform: want 400, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if f.channelsLen() != 0 {
+		t.Error("config should not have been mutated for invalid input")
+	}
+}
+
+// TestChannelAddTrimsTheID: an ID padded with whitespace is the same channel
+// as the unpadded one (PUT /api/config compares trimmed IDs), not a second
+// entry that no monitor can resolve.
+func TestChannelAddTrimsTheID(t *testing.T) {
+	f := newChannelRoutesFixture(t)
+	if err := f.store.Update(func(c *config.MoomboxConfig) {
+		c.Channels = []config.ChannelConfig{{ID: "UCfoo", Name: "OldName", Platform: "youtube"}}
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"id": "  UCfoo ", "name": "NewName", "platform": "youtube", "edit": true})
+	req := httptest.NewRequest("POST", "/api/config/channels", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("padded ID: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var chans []config.ChannelConfig
+	f.store.Read(func(c *config.MoomboxConfig) { chans = slices.Clone(c.Channels) })
+	if len(chans) != 1 || chans[0].ID != "UCfoo" || chans[0].Name != "NewName" {
+		t.Errorf("channels = %+v, want the one UCfoo entry renamed", chans)
 	}
 }
 
@@ -176,6 +226,50 @@ func TestChannelDeleteUnknownIDReturns404(t *testing.T) {
 	}
 	if f.channelChange.Load() != 0 {
 		t.Error("OnChannelChange should not fire on 404 delete")
+	}
+}
+
+// TestChannelDeleteDecodesEscapedID pins W25-13: the dashboard sends the ID
+// through encodeURIComponent, and chi matches on the escaped RawPath Go keeps
+// for '@' and ':' — so a channel stored as "@SomeHandle" or as a URL could
+// not be removed from the dashboard at all (404, channel still configured).
+// The literal-'%' rows pin the other half: an ID chi matched on the decoded
+// Path must not be decoded a second time.
+//
+// Mutants killed: pathParam returning chi.URLParam unchanged (the '@', URL
+// and "@50%" rows 404); pathParam decoding even without a RawPath (the
+// "a%40b" row removes nothing, then 404s).
+func TestChannelDeleteDecodesEscapedID(t *testing.T) {
+	for _, tc := range []struct {
+		id, target string
+	}{
+		{"@SomeHandle", "/api/config/channels/%40SomeHandle"},
+		{"https://www.youtube.com/@foo", "/api/config/channels/https%3A%2F%2Fwww.youtube.com%2F%40foo"},
+		{"@50%", "/api/config/channels/%4050%25"},
+		{"a%40b", "/api/config/channels/a%2540b"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			f := newChannelRoutesFixture(t)
+			if err := f.store.Update(func(c *config.MoomboxConfig) {
+				c.Channels = []config.ChannelConfig{{ID: tc.id, Platform: "youtube"}, {ID: "a@b", Platform: "youtube"}}
+			}); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", tc.target, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("DELETE %s: want 200, got %d (body: %s)", tc.target, rec.Code, rec.Body.String())
+			}
+			var left []string
+			f.store.Read(func(c *config.MoomboxConfig) {
+				for _, ch := range c.Channels {
+					left = append(left, ch.ID)
+				}
+			})
+			if !slices.Equal(left, []string{"a@b"}) {
+				t.Errorf("channels left after deleting %q: %q, want only a@b", tc.id, left)
+			}
+		})
 	}
 }
 

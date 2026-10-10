@@ -284,3 +284,33 @@ func TestLivenessFreshWindowStaysBelowTheDefaultInterval(t *testing.T) {
 			livenessFreshWindow, defaultRefreshInterval)
 	}
 }
+
+// TestTickerPanicCostsOneTickNotTheTimer: the ticker goroutine's recover sits
+// outside its loop, so a panic reaching it used to END the loop — one panic
+// in a pass, or in any callback it fans out to, stopped the session refresh
+// and all auth-loss detection for the life of the process. Each tick now has
+// its own recover.
+//
+// Mutant: call rs.doRefresh(ctx) bare in the ticker loop — passes stop at 2
+// (the recovered startup pass and the first tick).
+func TestTickerPanicCostsOneTickNotTheTimer(t *testing.T) {
+	healthyRefreshSeams(t)
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	rs.refreshInterval = 10 * time.Millisecond
+
+	var passes atomic.Int64
+	setPassHook(rs, func() {
+		passes.Add(1)
+		panic("synthetic panic in a refresh pass")
+	})
+
+	rs.Start(t.Context())
+	defer rs.Stop()
+	deadline := time.Now().Add(10 * time.Second)
+	for passes.Load() < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("passes = %d — the timer stopped after a panicking tick", passes.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

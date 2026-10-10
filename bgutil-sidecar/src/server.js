@@ -2,10 +2,12 @@
 //
 // Reads JSON-RPC requests from stdin (one object per line), dispatches to
 // bgutils-js running under a JSDOM window, writes JSON-RPC responses to
-// stdout. Errors and trace go to stderr (Moombox routes them to the Debug
-// log).
+// stdout. Errors and trace go to stderr, where Moombox's stderrPump routes
+// [bgutil-sidecar:error] lines to its Warn log and [bgutil-sidecar:warn]
+// lines, like any unprefixed chatter, to Debug.
 //
-// Wire protocol matches docs/investigations/botguard-sidecar-design.md §3.4:
+// Wire protocol as documented under "IPC protocol" in
+// docs/spec/platform-services.md:
 //   Request:  {"id":<int>,"method":<str>,"params":<obj>}
 //   Response: {"id":<int>,"result":<any>}    | {"id":<int>,"error":<str>}
 //
@@ -57,11 +59,12 @@ const ATT_GET_URL =
 const HOMEPAGE_URL = "https://www.youtube.com/";
 // Per-fetch ceiling for the BotGuard network round-trips. Node's fetch (undici)
 // has no overall request timeout — a hung YouTube endpoint would otherwise wedge
-// minterPromise for ~300s (undici's headers timeout), and since every mint awaits
-// that one promise, all mints cascade into the parent's 90s RPC timeout while the
-// sidecar still reports healthy. 30s is well above the happy path (a few seconds)
-// and well under the parent's 90s budget, so a genuine hang aborts fast and the
-// next mint retries from scratch instead of piggybacking a doomed attempt.
+// the minter generation (minterInflight / serializeChain) for ~300s (undici's
+// headers timeout), and since every mint awaits it, all mints cascade into the
+// parent's 90s RPC timeout while the sidecar still reports healthy. 30s is well
+// above the happy path (a few seconds) and well under the parent's 90s budget,
+// so a genuine hang aborts fast and the next mint retries from scratch instead
+// of piggybacking a doomed attempt.
 const FETCH_TIMEOUT_MS = 30_000;
 // Whole-generation ceiling. The three fetches above each carry
 // FETCH_TIMEOUT_MS, and 3 × 30s meets or exceeds the parent's 90s RPC
@@ -563,7 +566,7 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
 // execution at a time, no exceptions. (Named distinctly from the unrelated
 // `inflight` request counter in the stdin loop below, which tracks
 // in-progress RPC dispatches.)
-const minterInflight = new Map(); // challengeKey -> Promise
+const minterInflight = new Map(); // challengeKey -> { generation: Promise, mayReuse }
 let serializeChain = Promise.resolve();
 
 // /att/get callers (challenge === null) legitimately share one minter —
@@ -591,7 +594,10 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
 
     const key = normalizeChallengeKey(challengeKey);
 
-    const running = minterInflight.get(key);
+    // A generation started for a non-fresh caller may hand back the cached
+    // minter (see below), so a caller that needs a fresh one never joins it.
+    const inflightGen = minterInflight.get(key);
+    const running = inflightGen && !(freshMinter && inflightGen.mayReuse) ? inflightGen.generation : null;
     if (running) {
         // Same challenge as a generation already in flight: the minter it
         // resolves to really was built from OUR challenge, so reporting
@@ -602,8 +608,8 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
         // evicted the first key, so a third caller sharing the first
         // challenge missed the running generation and paid for a redundant
         // BotGuard pass.
-        const m = await running;
-        return { m, fresh: true };
+        const r = await running;
+        return { m: r.m, fresh: !r.reused };
     }
 
     // Different challenge (or nothing in flight yet). Queue behind whatever
@@ -613,6 +619,13 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
     const runAfter = serializeChain;
     const generation = (async () => {
         await runAfter;
+        // A caller that did not ask for a fresh minter takes the one the
+        // generation it queued behind may just have cached: it found the
+        // cache empty when it arrived, not when its turn came, and used to
+        // pay for a second BotGuard pass regardless.
+        if (!freshMinter && cachedMinter && Date.now() < cachedMinter.expiresAt) {
+            return { m: cachedMinter, reused: true };
+        }
         const prev = cachedMinter;
         const m = await minterFactory(challenge);
         cachedMinter = m;
@@ -632,13 +645,13 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
             }
         }
         stats.cachedMinters = 1;
-        return m;
+        return { m, reused: false };
     })();
 
     // Chain future generations behind this one regardless of outcome; a
     // rejected generation must not wedge the serialization queue.
     serializeChain = generation.catch(() => {});
-    minterInflight.set(key, generation);
+    minterInflight.set(key, { generation, mayReuse: !freshMinter });
     // .catch before .finally: a bare `generation.finally(...)` creates a
     // DERIVED promise with no rejection handler, so every failed generation
     // also emitted a process-level unhandledRejection — surfacing as a
@@ -646,13 +659,13 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
     // diagnostic channel this design cares about. The caller below still
     // awaits `generation` itself and sees the rejection.
     generation.catch(() => {}).finally(() => {
-        if (minterInflight.get(key) === generation) {
+        if (minterInflight.get(key)?.generation === generation) {
             minterInflight.delete(key);
         }
     });
 
-    const m = await generation;
-    return { m, fresh: true };
+    const r = await generation;
+    return { m: r.m, fresh: !r.reused };
 }
 
 async function generatePoToken(binding, challengeJSON, freshMinter) {

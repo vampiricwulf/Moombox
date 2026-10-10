@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -132,7 +133,7 @@ func TestMatchTerm(t *testing.T) {
 		{"regex anchored match", "stream", "/^stream$/", true},
 		{"(?i) prefix pattern", "HELLO WORLD", "(?i)hello", true},
 		{"invalid regex falls back to fuzzy", "hello [world", "[world", true},
-		{"invalid regex in /pattern/ falls back to fuzzy", "hello [world", "/[/", false},
+		{"invalid regex in /pattern/ falls back to fuzzy on the body", "hello [world", "/[/", true},
 		{"dot-star regex", "live stream 2024", "/live.*2024/", true},
 	}
 
@@ -143,6 +144,67 @@ func TestMatchTerm(t *testing.T) {
 				t.Errorf("matchTerm(%q, %q) = %v, expected %v", tt.text, tt.pattern, got, tt.expect)
 			}
 		})
+	}
+}
+
+// TestMatchTermJSOnlyFlags: the terms syntax is JavaScript's, and a term
+// written as /karaoke/g compiled to "(?gi)karaoke", which Go rejects — and the
+// fallback then substring-matched the RAW term, delimiters and flags included,
+// so the term silently never matched a title. The JS-only flags are dropped
+// before compiling; a body that still fails to compile falls back to a
+// substring match of the body alone.
+//
+// Mutants this kills:
+//   - flags passed through untouched   → the g/y/u/d rows all return false
+//   - every flag dropped               → the m and s rows return false
+//   - the fallback on the raw term     → the "falls back" rows return false
+func TestMatchTermJSOnlyFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		pattern string
+		expect  bool
+	}{
+		{"g flag is dropped", "Karaoke Night", "/karaoke/g", true},
+		{"gi flags", "Karaoke Night", "/karaoke/gi", true},
+		{"y flag is dropped", "Karaoke Night", "/karaoke/y", true},
+		{"u flag is dropped", "café stream", "/caf. stream/u", true},
+		{"d flag is dropped", "Karaoke Night", "/night$/d", true},
+		{"g flag does not loosen the match", "Minecraft", "/karaoke/g", false},
+		{"m flag passes through to Go", "line one\nkaraoke", "/^karaoke$/m", true},
+		{"s flag passes through to Go", "line one\nkaraoke", "/one.karaoke/s", true},
+		{"a flag Go rejects falls back to the body", "karaoke night", "/karaoke/x", true},
+		{"an invalid body falls back to the body, not the raw term", "set [a] stream", "/[a/", true},
+		{"the fallback still has to match", "hello world", "/[/", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchTerm(tt.text, tt.pattern)
+			if got != tt.expect {
+				t.Errorf("matchTerm(%q, %q) = %v, expected %v", tt.text, tt.pattern, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestGoRegexFlags(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"i", "i"},
+		{"gi", "i"},
+		{"g", ""},
+		{"gimsuyd", "ims"},
+		{"x", "x"},
+	}
+
+	for _, tt := range tests {
+		if got := goRegexFlags(tt.in); got != tt.want {
+			t.Errorf("goRegexFlags(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 
@@ -235,7 +297,6 @@ func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
 			return &VideoProbeResult{
 				StreamStatus: "live",
 				Title:        "Better Title",
-				ChannelName:  "TestChannel",
 			}, nil
 		},
 		Tracker: NewMetadataFailureTracker(),
@@ -248,13 +309,9 @@ func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
 	if result.Title != "Better Title" {
 		t.Errorf("title: got %q, want %q", result.Title, "Better Title")
 	}
-	if result.ChannelName != "TestChannel" {
-		t.Errorf("channelName: got %q, want %q", result.ChannelName, "TestChannel")
-	}
 }
 
 func TestProcessYouTubeVideo_NotAStream(t *testing.T) {
-	historyAdded := false
 	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
 		VideoID: "vid123",
 		Title:   "Regular Video",
@@ -262,19 +319,12 @@ func TestProcessYouTubeVideo_NotAStream(t *testing.T) {
 		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{StreamStatus: "not_a_stream"}, nil
 		},
-		AddToHistory: func(id string) error {
-			historyAdded = true
-			return nil
-		},
 		Tracker: NewMetadataFailureTracker(),
 		Logger:  &testMonitorLogger{},
 	})
 
 	if result.ShouldProcess {
 		t.Error("expected ShouldProcess=false for not_a_stream")
-	}
-	if !historyAdded {
-		t.Error("expected video to be added to history")
 	}
 }
 
@@ -384,28 +434,6 @@ func TestProbeAndClassify_Outcomes(t *testing.T) {
 	}))
 	if r.Outcome != OutcomeErrored {
 		t.Fatalf("errored: %+v", r)
-	}
-}
-
-func TestProbeAndClassify_NoHistoryWrites(t *testing.T) {
-	// The split exists because ProcessYouTubeVideo has AddToHistory side effects.
-	// probeAndClassify has NO AddToHistory parameter, which the compiler
-	// enforces — this test pins the DECAPI side instead: ProcessYouTubeVideo
-	// (composed) still writes history on a skipped vod.
-	var histCalls int
-	res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
-		Ctx: context.Background(), VideoID: "v", Channel: &config.ChannelConfig{Name: "c"},
-		ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
-			return &VideoProbeResult{StreamStatus: "vod", Title: "T", PlayabilityError: "ok"}, nil
-		},
-		AddToHistory: func(id string) error { histCalls++; return nil },
-		Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
-	})
-	if res.ShouldProcess {
-		t.Fatal("skipped vod (IncludeNonLiveContent false) must not process")
-	}
-	if histCalls != 1 {
-		t.Fatalf("DECAPI path must keep its history write, got %d calls", histCalls)
 	}
 }
 
@@ -718,9 +746,6 @@ func (silentLogger) Error(msg string, args ...any) {}
 //   - latch every refusal (deniedIsSettled -> always true, or `Denied: true`)
 //     -> the login_required subtest fails: one unlucky cycle would park
 //     DECAPI on a public video until the channel publishes something new.
-//   - write history on the denied arm -> histCalls becomes 1; a refusal is
-//     not "we dealt with this video", and a history row would make the
-//     members-only escalation's later sighting read as a re-probe.
 func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
 	for _, tc := range []struct {
 		playability string
@@ -730,15 +755,13 @@ func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
 		{"login_required", false},
 	} {
 		t.Run(tc.playability, func(t *testing.T) {
-			var histCalls int
 			res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
 				Ctx: context.Background(), VideoID: "v", Title: "T",
 				Channel: &config.ChannelConfig{Name: "c"},
 				ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
 					return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: tc.playability}, nil
 				},
-				AddToHistory: func(id string) error { histCalls++; return nil },
-				Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
+				Tracker: NewMetadataFailureTracker(), Logger: silentLogger{},
 			})
 			if res.ShouldProcess {
 				t.Errorf("ShouldProcess = true for a %s refusal — DECAPI would create an Upcoming job and park it in COOKIES?", tc.playability)
@@ -752,9 +775,6 @@ func TestProcessYouTubeVideo_DeniedIsNotAJob(t *testing.T) {
 			}
 			if res.StreamStatus != "upcoming" {
 				t.Errorf("StreamStatus = %q, want %q — the memo records what the probe said", res.StreamStatus, "upcoming")
-			}
-			if histCalls != 0 {
-				t.Errorf("AddToHistory called %d times — a refusal is not a video we dealt with", histCalls)
 			}
 		})
 	}
@@ -775,5 +795,51 @@ func TestProcessYouTubeVideo_ProbedUpcomingStillJobs(t *testing.T) {
 	})
 	if !res.ShouldProcess || res.Denied {
 		t.Fatalf("a public upcoming premiere must still job: %+v", res)
+	}
+}
+
+// matchTerm checks if text matches a single term pattern — the test-side
+// convenience over matchTermNormalized, which production calls with text it
+// has already normalized.
+func matchTerm(text, pattern string) bool {
+	return matchTermNormalized(normalizeText(text), text, pattern)
+}
+
+// TestProcessYouTubeVideo_GiveUpWarningNamesTheRealNextStep pins the give-up
+// warning's wording to what actually follows: "backing off" only when a
+// cooldown window will suppress the next probes, "retrying next cycle" when
+// the cooldown is disabled and the poll interval is the only throttle.
+func TestProcessYouTubeVideo_GiveUpWarningNamesTheRealNextStep(t *testing.T) {
+	failing := func(_ context.Context, _ string) (*VideoProbeResult, error) {
+		return nil, errors.New("probe failed")
+	}
+	cases := []struct {
+		name     string
+		cooldown *ProbeCooldown
+		want     string
+	}{
+		{"enabled", NewProbeCooldown(time.Hour), "backing off"},
+		{"disabled", NewProbeCooldown(0), "retrying next cycle"},
+		{"nil", nil, "retrying next cycle"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &warnRecordingLogger{}
+			tracker := NewMetadataFailureTracker()
+			for range maxMetadataFailures {
+				ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+					VideoID:    "vid1",
+					Channel:    &config.ChannelConfig{},
+					ProbeVideo: failing,
+					Tracker:    tracker,
+					Cooldown:   tc.cooldown,
+					Logger:     log,
+				})
+			}
+			last := log.warnings[len(log.warnings)-1]
+			if !strings.Contains(last, tc.want) {
+				t.Fatalf("give-up warning %q, want it to say %q", last, tc.want)
+			}
+		})
 	}
 }

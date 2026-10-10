@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -135,5 +136,94 @@ func TestDiskCompositeCloseSendsBothIncidents(t *testing.T) {
 	}
 	if got[0].Title != "Disk Monitoring Recovered" || got[1].Title != "Disk Space Recovered" {
 		t.Errorf("order = %q, %q — the monitoring close comes first", got[0].Title, got[1].Title)
+	}
+}
+
+// TestDiskAlertsNameTheAbsoluteOutputDirectory: every disk alert names the
+// directory the operator can act on. The failure alert alone carried the raw
+// config value, so one incident read "./output" when it opened and an
+// absolute path when it closed.
+func TestDiskAlertsNameTheAbsoluteOutputDirectory(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	now := time.Now()
+	want := absOutputDir("./output")
+	if !filepath.IsAbs(want) {
+		t.Fatalf("absOutputDir(%q) = %q, not absolute", "./output", want)
+	}
+
+	d.onReading(diskReading("warn", 91), "./output", now)
+	d.onReadFailure("./output")
+	d.onReadFailure("./output")
+	d.onReading(diskReading("ok", 40), "./output", now.Add(time.Minute))
+
+	calls := rec.Calls()
+	if len(calls) != 4 {
+		t.Fatalf("recorded %d calls, want 4 (warning, monitoring failed, monitoring recovered, space recovered)", len(calls))
+	}
+	for _, c := range calls {
+		if got, ok := c.Field("Output Directory"); !ok || got != want {
+			t.Errorf("%q: Output Directory = %q (present %v), want %q", c.Title, got, ok, want)
+		}
+	}
+}
+
+// TestDiskAlertsHoldAnIncidentAcrossAThresholdFlap: the cooldown spaces only
+// repeats of the SAME level, and an ok reading reset it, so a volume sitting
+// on the warn line (90.0% then 89.9%) sent a Warning and a Recovered on every
+// six-minute check, and one on the critical line alternated Critical and
+// Warning. An open alert now holds until usage falls config.DiskRecoveryMargin below
+// its threshold.
+//
+// Mutants: dropping the heldOpen check — the flaps alert every reading;
+// measuring the margin from the wrong threshold — the step-down or the
+// recovery arrives at the wrong reading.
+func TestDiskAlertsHoldAnIncidentAcrossAThresholdFlap(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	d.setThresholds(90, 95)
+	now := time.Now()
+	tick := func(level string, pct float64) {
+		now = now.Add(6 * time.Minute)
+		d.onReading(diskReading(level, pct), "./output", now)
+	}
+	events := func() []string {
+		var out []string
+		for _, c := range rec.Calls() {
+			out = append(out, c.Opts.Event)
+		}
+		return out
+	}
+
+	for range 5 { // an hour on the warn line
+		tick("warn", 90.0)
+		tick("ok", 89.9)
+	}
+	// The opening Warning and its one 30-minute repeat; never a Recovered.
+	if got := events(); len(got) != 2 || got[0] != "disk_warning" || got[1] != "disk_warning" {
+		t.Fatalf("an hour of warn-line flap sent %v, want [disk_warning disk_warning]", got)
+	}
+	rec.Reset()
+	tick("ok", 88.1)
+	if got := events(); len(got) != 0 {
+		t.Fatalf("88.1%% is inside the 2-point margin, but %v was sent", got)
+	}
+	tick("ok", 87.9)
+	if got := events(); len(got) != 1 || got[0] != "disk_ok" {
+		t.Fatalf("clearing the margin sent %v, want a disk_ok", got)
+	}
+
+	rec.Reset()
+	tick("critical", 95.0)
+	for range 2 { // under half an hour on the critical line
+		tick("warn", 94.9)
+		tick("critical", 95.0)
+	}
+	if got := events(); len(got) != 1 || got[0] != "disk_critical" {
+		t.Fatalf("critical-line flap sent %v, want one disk_critical", got)
+	}
+	tick("warn", 92.5)
+	if got := events(); len(got) != 2 || got[1] != "disk_warning" {
+		t.Fatalf("stepping down past the critical margin sent %v, want a disk_warning", got)
 	}
 }

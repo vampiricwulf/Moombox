@@ -37,6 +37,28 @@ func TestParseFFmpegVersion(t *testing.T) {
 	}
 }
 
+// TestFFmpegVersionLine: the setup wizard and the FFmpeg overlay print this as
+// the detected version, so the copyright boilerplate every build appends to
+// the first line of `ffmpeg -version` is dropped.
+func TestFFmpegVersionLine(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers\nbuilt with gcc 13\n", "ffmpeg version 6.1.1-3ubuntu5"},
+		{"ffmpeg version 2024-03-07-git-97beb63a66-full_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers\r\n", "ffmpeg version 2024-03-07-git-97beb63a66-full_build-www.gyan.dev"},
+		{"ffmpeg version 7.1\n", "ffmpeg version 7.1"},
+		{"", ""},
+	} {
+		got := ffmpegVersionLine(tt.in)
+		if got != tt.want {
+			t.Errorf("ffmpegVersionLine(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+		if _, _, okIn := parseFFmpegVersion(tt.in); okIn {
+			if _, _, okOut := parseFFmpegVersion(got); !okOut {
+				t.Errorf("trimming %q lost the version number", tt.in)
+			}
+		}
+	}
+}
+
 func TestFFmpegVersionWarning(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -2,23 +2,27 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TrimRoutes registers trim-related API routes.
-func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService) {
+// rl bounds trim creation (an FFmpeg process per call); nil leaves it
+// unbounded. POST answers 202 with the trim it started ({trim: TrimTask}):
+// the encode runs as the trim service's own task, not the request's.
+func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService, rl *web.RateLimiter) {
 	// POST /api/jobs/:id/trims
-	r.Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(limitedBy(rl)).Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
+		job, ok := loadJob(rw, db, jobID)
+		if !ok {
 			return
 		}
 
@@ -53,14 +57,38 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 			return
 		}
 
-		record, err := trimSvc.CreateTrim(req.Context(), job, *body.StartTime, *body.EndTime, nil)
+		// Started, not run: the encode is the trim service's own task, so a
+		// page closed or reloaded mid-encode no longer kills it (it was bound
+		// to req.Context(), and FFmpeg died with the tab). The checks a
+		// request can fail run before the answer; the outcome reaches the
+		// dashboard as trim_status frames, and a trim that broke sends
+		// trim_error.
+		task, err := trimSvc.StartTrim(job, *body.StartTime, *body.EndTime)
 		if err != nil {
-			// Match TS: don't expose internal error details
-			jsonError(rw, "Failed to create trim", http.StatusBadRequest)
+			// A refusal the user can act on (the job's state, the range, a
+			// duplicate, a trim already running) is shown as written: the
+			// dashboard toasts this message, and "Failed to create trim" told
+			// someone whose end time ran past the video nothing. Anything
+			// else is an internal failure — its detail (paths, ffmpeg output)
+			// stays out of the response, as before, and it is a 500 now
+			// rather than a 400 that blamed the request.
+			var refused *worker.TrimRefusedError
+			switch {
+			case errors.As(err, &refused) && refused.Conflict:
+				jsonError(rw, refused.Reason, http.StatusConflict)
+			case errors.As(err, &refused):
+				jsonError(rw, refused.Reason, http.StatusBadRequest)
+			default:
+				jsonError(rw, "Failed to create trim", http.StatusInternalServerError)
+			}
 			return
 		}
 
-		jsonResponse(rw, map[string]any{"trim": record})
+		// Content-Type before the explicit WriteHeader — headers set after it
+		// are dropped for non-gzip clients (jsonResponse's own Set is too late).
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusAccepted)
+		jsonResponse(rw, map[string]any{"trim": task})
 	})
 
 	// DELETE /api/jobs/:id/trims/:trimId
@@ -69,7 +97,11 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 		trimID := chi.URLParam(req, "trimId")
 
 		if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {
-			jsonError(rw, "failed to delete trim", http.StatusBadRequest)
+			if errors.Is(err, worker.ErrTrimNotFound) {
+				jsonError(rw, "trim not found", http.StatusNotFound)
+				return
+			}
+			jsonError(rw, "failed to delete trim", http.StatusInternalServerError)
 			return
 		}
 

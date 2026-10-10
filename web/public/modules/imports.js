@@ -11,6 +11,14 @@ export class ImportController {
     this.importInitialized = false;
     this._activeXhr = null;
     this._clearTimeout = null;
+    this._bodySent = false;
+  }
+
+  // The whole archive has gone out and the server is extracting it: the
+  // stretch between xhr.upload's "load" and the response. Nothing can be
+  // cancelled any more — see uploadImport.
+  _importing() {
+    return this._activeXhr !== null && this._bodySent;
   }
 
   initImports() {
@@ -21,8 +29,14 @@ export class ImportController {
     const submitBtn = document.getElementById("import-submit-btn");
     const clearBtn = document.getElementById("import-clear-btn");
 
-    // Click dropzone to browse
-    dropzone.addEventListener("click", () => fileInput.click());
+    // Click, Enter or Space on the dropzone browses — one `browse` for both
+    // input paths. The dropzone is a div (role="button" in the markup), so
+    // the key half is ours to provide.
+    const browse = () => fileInput.click();
+    dropzone.addEventListener("click", browse);
+    dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); browse(); }
+    });
 
     // File input change
     fileInput.addEventListener("change", () => {
@@ -66,7 +80,7 @@ export class ImportController {
   }
 
   cancelUpload() {
-    if (this._activeXhr) {
+    if (this._activeXhr && !this._importing()) {
       this._activeXhr.abort();
       this._activeXhr = null;
       this.importUploading = false;
@@ -101,6 +115,16 @@ export class ImportController {
   }
 
   setImportFile(file) {
+    // Swapping the file mid-upload hid the progress bar and its Cancel button
+    // while the old file kept uploading.
+    if (this.importUploading) {
+      this.app.showToast(this._importing()
+        ? "The archive is being imported — wait for it to finish before choosing another file"
+        : "An import is uploading — cancel it before choosing another file", "warning");
+      const fileInput = document.getElementById("import-file-input");
+      if (fileInput) fileInput.value = "";
+      return;
+    }
     this.importFile = file;
 
     // Cancel any pending clear timeout from a previous completed upload
@@ -127,6 +151,16 @@ export class ImportController {
   }
 
   clearImportFile() {
+    // Once the body is all sent there is no giving up on it from here — the
+    // server is importing it — so Clear, like the hidden Cancel, waits.
+    if (this._importing()) {
+      this.app.showToast("The archive is being imported — wait for it to finish", "warning");
+      return;
+    }
+    // Clearing the file is giving up on it: an upload still running would
+    // otherwise go on with its progress and Cancel button hidden, then toast
+    // a result out of nowhere.
+    if (this._activeXhr) this.cancelUpload();
     this.importFile = null;
 
     // Cancel any pending auto-clear timeout (e.g. from completed upload)
@@ -157,6 +191,7 @@ export class ImportController {
     if (!this.importFile || this.importUploading) return;
 
     this.importUploading = true;
+    this._bodySent = false;
 
     const submitBtn = document.getElementById("import-submit-btn");
     const progress = document.getElementById("import-progress");
@@ -203,6 +238,19 @@ export class ImportController {
       }
     });
 
+    // The body is all sent and the server is extracting the archive, which
+    // for a large one takes a while. Cancel stayed offered here and toasted
+    // "Upload cancelled" while the server went on to create the job, so a
+    // retry then met "job already exists". Hide it and say what is happening
+    // until the response arrives. (A client that goes anyway — a closed tab —
+    // is caught by the server, which then removes what it extracted.)
+    xhr.upload.addEventListener("load", () => {
+      if (this._activeXhr !== xhr) return;
+      this._bodySent = true;
+      this._hideCancelButton();
+      statusText.textContent = "Importing…";
+    });
+
     this._activeXhr = xhr;
 
     xhr.addEventListener("load", () => {
@@ -213,15 +261,35 @@ export class ImportController {
       this._hideCancelButton();
 
       if (xhr.status === 201) {
-        statusText.textContent = "Import complete!";
         progressBar.value = 100;
-        this.app.showToast("Archive imported successfully", "success");
+        // `import` says what became of a name already taken in imports/
+        // (import_routes.go importOutcome): a byte-identical file re-adopted,
+        // or a different one left alone while this archive took " (2)" — and
+        // any chat left out for matching no video's name.
+        let outcome = null;
+        try { outcome = JSON.parse(xhr.responseText).import || null; } catch {}
+        const note = outcome && outcome.note ? outcome.note : "";
+        if (note) {
+          // The note stays where it can be read — under the bar, with the
+          // submit hidden so the same archive is not sent again — until the
+          // next file or Clear, rather than going with the 1.5 s reset.
+          statusText.textContent = `Import complete — ${note}`;
+          submitBtn.style.display = "none";
+          // A rename, or a chat left out for matching no video's name, is a
+          // warning; files re-adopted as they were are a success.
+          const listed = (k) => Array.isArray(outcome[k]) && outcome[k].length > 0;
+          const warn = listed("renamed") || listed("unpairedChats");
+          this.app.showToast(`Archive imported — ${note}`, warn ? "warning" : "success");
+        } else {
+          statusText.textContent = "Import complete!";
+          this.app.showToast("Archive imported successfully", "success");
 
-        // Reset form after delay
-        this._clearTimeout = setTimeout(() => {
-          this._clearTimeout = null;
-          this.clearImportFile();
-        }, 1500);
+          // Reset form after delay
+          this._clearTimeout = setTimeout(() => {
+            this._clearTimeout = null;
+            this.clearImportFile();
+          }, 1500);
+        }
 
         // Refresh player job list if initialized
         if (this.app.player.playerInitialized) {

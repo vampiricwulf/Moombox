@@ -118,10 +118,17 @@ func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
 
 	if !isBatchable(e.Opts) {
 		// Deliberately AHEAD of the embeds already coalesced: an error must not
-		// wait 5 s behind a backfill sweep. This is the one ordering change
-		// batching makes — for a single job it means an `error` can land before
-		// that job's own `found` — and operations.md names it rather than
-		// claiming ordering is untouched.
+		// wait 5 s behind a backfill sweep. Ahead of OTHER jobs' embeds only,
+		// though: when the window holds one this embed follows — the same
+		// job's `found`, or the per-job "Authentication Required" an
+		// "Authentication Recovered" closes — the window goes first
+		// (holdsPredecessor). Without that a job's "Download Starting" landed
+		// above its own "Stream Found" whenever the worker got there inside
+		// the window, and a recovery the automatic refresh won quickly sat
+		// above the alarm it closed, leaving the alarm the last thing read.
+		if b.holdsPredecessor(e.Opts) {
+			b.Flush()
+		}
 		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
 		return
 	}
@@ -162,6 +169,23 @@ func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
 		}()
 		b.Flush()
 	})
+}
+
+// holdsPredecessor reports whether the open window holds an embed that an
+// immediate send of opts must not overtake: one for the same job, or — for an
+// auth recovery — a per-job auth alarm it closes.
+func (b *batcher) holdsPredecessor(opts SendOptions) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, p := range b.pending {
+		if opts.JobID != "" && p.Opts.JobID == opts.JobID {
+			return true
+		}
+		if opts.Event == "auth_recovered" && p.Opts.Event == "auth" {
+			return true
+		}
+	}
+	return false
 }
 
 // Flush emits every pending embed now. Called before closeDrain, and from

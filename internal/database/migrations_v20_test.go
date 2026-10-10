@@ -80,8 +80,10 @@ func TestMigrationV20UpgradesAV19Database(t *testing.T) {
 		t.Fatalf("v19 -> v20 upgrade failed: %v", err)
 	}
 	defer db2.Close()
-	if v, _ := db2.readUserVersion(); v != 20 {
-		t.Errorf("user_version = %d, want 20", v)
+	// Open runs every later block too, so the version lands on the current
+	// one, not 20.
+	if v, _ := db2.readUserVersion(); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 	j, err := db2.GetJob("yt_up")
 	if err != nil {

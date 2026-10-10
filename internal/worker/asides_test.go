@@ -18,9 +18,11 @@ import (
 
 // writeAsidePair drops one restart's worth of set-aside files into dir: the
 // video half at `<stem>.restart-<stamp>`, optionally its resume twin, and
-// optionally the audio half a DASH restart sets aside under the same second.
-// Bytes, not media — every assertion in this file is about the SCAN, which
-// never opens a file. The tests that actually mux use writeAsideFixture
+// optionally the audio half its capture sets aside under the same second —
+// audio.m4a, the whole-file download's other half: groupStagedAsides pairs a
+// half only with its own capture's other half (asideRecordingOf). Bytes, not
+// media — every assertion in this file is about the SCAN, which never opens a
+// file. The tests that actually mux use writeAsideFixture
 // (mux_lifecycle_test.go), which needs FFmpeg.
 func writeAsidePair(t *testing.T, dir, stamp string, size int, withSidecar, withAudio bool) {
 	t.Helper()
@@ -34,7 +36,7 @@ func writeAsidePair(t *testing.T, dir, stamp string, size int, withSidecar, with
 		}
 	}
 	if withAudio {
-		audio := filepath.Join(dir, "audio_stream"+engine.StagedRestartSuffix+stamp)
+		audio := filepath.Join(dir, "audio.m4a"+engine.StagedRestartSuffix+stamp)
 		if err := os.WriteFile(audio, make([]byte, size), 0o644); err != nil {
 			t.Fatalf("write audio aside: %v", err)
 		}
@@ -42,9 +44,9 @@ func writeAsidePair(t *testing.T, dir, stamp string, size int, withSidecar, with
 }
 
 // TestAsideReportGroupsEachRestartOnce is the shape the whole arc is built on:
-// one Aside per RESTART, not per file. A DASH restart sets the video and audio
-// halves aside under the same second, and both halves' bytes belong to the one
-// recording an operator will get back.
+// one Aside per RESTART, not per file. A two-stream capture's restart sets the
+// video and audio halves aside under the same second, and both halves' bytes
+// belong to the one recording an operator will get back.
 //
 // Mutants this kills:
 //   - reporting one Aside per FILE (dropping groupStagedAsides): the count is
@@ -293,11 +295,12 @@ func TestRecoverAsidesMuxesEveryGroupAndCarriesTheChatSidecar(t *testing.T) {
 //
 // The commonest shape this arc exists for is a Cancelled job whose staging
 // holds BOTH the fresh recording the restart began and the aside it replaced.
-// cleanupStagingAfterMux's four shields do not cover it: the asides are gone
+// None of cleanupStagingAfterMux's shields covers it: the asides are gone
 // (the recovery just consumed them), hasUnmuxedSegmentParts is false for a
-// single-file job with no seg_N dirs, the tail is not flagged and the chat is
-// not incomplete — so an unguarded cleanup calls os.RemoveAll and destroys the
-// main recording that /mux and A M exist to rescue.
+// single-file job with no seg_N dirs, unusedRootRecording finds no second
+// recording beside the one the root holds, the tail is not flagged and the
+// chat is not incomplete — so an unguarded cleanup calls os.RemoveAll and
+// destroys the main recording that /mux and A M exist to rescue.
 //
 // Mutants this kills:
 //   - the media guard dropped (the unconditional cleanupStagingAfterMux the

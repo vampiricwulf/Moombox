@@ -33,9 +33,9 @@ func TestJobDeletionPrunesOnlyThatJobsLogBuffer(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 	db.TrackJobForLogs("doomed")
-	db.AddJobLog("doomed", "line for doomed")
+	db.RouteLogToJobs("line for doomed")
 	db.TrackJobForLogs("ghost")
-	db.AddJobLog("ghost", "line for ghost")
+	db.RouteLogToJobs("line for ghost")
 
 	s := &runState{db: db, wsHub: web.NewWebSocketHub(sweepTestLogger{})}
 	s.onJobDeleted("doomed")

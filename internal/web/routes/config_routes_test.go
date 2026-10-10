@@ -1068,3 +1068,36 @@ func TestConfigPutAcceptsUnboundedResolution(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigPutRefreshIntervalNullAndStringForms: both forms used to reach
+// the store unchecked and come back as an opaque 500 "failed to save config".
+// null stored zero, which Validate refuses (10..10080 minutes); a string was
+// parsed by the apply path but skipped by the validator, so "5m" (5 minutes)
+// sailed through to the same refusal.
+//
+// MUTANT: restore the zero reset for null — the first PUT is a 500.
+// MUTANT: check only the float64 form in validateConfigUpdates — the string
+// PUT is a 500 instead of a 400 naming the field.
+func TestConfigPutRefreshIntervalNullAndStringForms(t *testing.T) {
+	f := newConfigRoutesFixture(t)
+	f.store.Update(func(c *config.MoomboxConfig) { c.Cookies.RefreshInterval = config.FlexDuration{Value: 60} })
+
+	putConfig(t, f, map[string]any{"cookies": map[string]any{"refresh_interval": nil}})
+	if got, want := f.store.Snapshot().Cookies.RefreshInterval.Value, config.Defaults().Cookies.RefreshInterval.Value; got != want {
+		t.Errorf("refresh_interval after null = %v, want the default %v", got, want)
+	}
+
+	raw, _ := json.Marshal(map[string]any{"cookies": map[string]any{"refresh_interval": "5m"}})
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(raw))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "cookies.refresh_interval") {
+		t.Errorf("PUT refresh_interval \"5m\": got %d %s, want a 400 naming cookies.refresh_interval",
+			rec.Code, rec.Body.String())
+	}
+
+	putConfig(t, f, map[string]any{"cookies": map[string]any{"refresh_interval": "2h"}})
+	if got := f.store.Snapshot().Cookies.RefreshInterval.Value; got != 120 {
+		t.Errorf("refresh_interval after \"2h\" = %v, want 120 minutes", got)
+	}
+}

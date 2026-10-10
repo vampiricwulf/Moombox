@@ -89,6 +89,37 @@ func (d *DiscordWebhook) execWaitURL() string {
 	return u.String()
 }
 
+// canonicalWebhookQuery is the one spelling of a webhook URL's query — raw
+// is what followed its "?" — with the "?", or "" when it carries no
+// parameter. canonicalDiscordURL's query half: buildTargets dedupes on the
+// resolved URL, so the same parameters in another order, a stray '&', or a
+// "?wait=true" each built a second target over one webhook, and every embed
+// posted twice.
+//
+// The parameters sorted by name, as url.Values encodes them — the spelling
+// execWaitURL and messageURL already put on the wire. Dropped: every
+// nameless one (an empty pair, "=x"), and wait, which is the sender's own:
+// execWaitURL sets it on the one request that reads the created message, and
+// messageURL strips it from the edit route, so a configured one changes
+// nothing but the key. Kept: thread_id, and every other named parameter, even
+// with an empty value — what an empty one means is Discord's to say, and
+// folding "?thread_id=" into the bare URL would post to the channel what was
+// configured for a thread. A query net/url refuses to parse (a ';'
+// separator, a bad escape) is kept as given: the pair the parse skipped is
+// still a parameter of the URL configured.
+func canonicalWebhookQuery(raw string) string {
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		return "?" + raw
+	}
+	delete(q, "")
+	delete(q, "wait")
+	if len(q) == 0 {
+		return ""
+	}
+	return "?" + q.Encode()
+}
+
 // messageURL is the per-message edit endpoint,
 // PATCH /webhooks/{id}/{token}/messages/{message_id} (Discord API docs,
 // resources/webhook.mdx). The route is a PATH suffix, so it is appended to the
@@ -133,7 +164,7 @@ func (d *DiscordWebhook) patchMessage(messageID string, body []byte) error {
 
 // postWaitOnce and patchMessageOnce are the shutdown twins of the two above:
 // ONE attempt, no backoff, no Retry-After sleep. The owner's ruling caps a
-// graceful shutdown at 10 s, and a single edit-mode job running the full
+// graceful shutdown at 15 s, and a single edit-mode job running the full
 // three-attempt loop could spend all of it — the same reason SendOnce exists
 // beside Send. The queue selects these while it is shutting down.
 func (d *DiscordWebhook) postWaitOnce(body []byte) (string, error) {
@@ -147,6 +178,7 @@ func (d *DiscordWebhook) postWaitOnce(body []byte) (string, error) {
 	case err != nil:
 		return "", fmt.Errorf("discord webhook request: %w", err)
 	case r.status == http.StatusTooManyRequests:
+		d.noteRateLimitGiveUp(r)
 		return "", fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	case r.status >= 400:
 		return "", discordStatusErr(r.status, r.snippet)
@@ -162,6 +194,7 @@ func (d *DiscordWebhook) patchMessageOnce(messageID string, body []byte) error {
 	case err != nil:
 		return fmt.Errorf("discord webhook request: %w", err)
 	case r.status == http.StatusTooManyRequests:
+		d.noteRateLimitGiveUp(r)
 		return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	case r.status >= 400:
 		return asEditRefusal(messageID, discordStatusErr(r.status, r.snippet))

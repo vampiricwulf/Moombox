@@ -82,6 +82,13 @@ func (r *StreamProcessResult) AsError() error {
 	return errors.New(r.Error)
 }
 
+// cancelledResult is what a wait returns when it is cancelled — its ctx done,
+// or its row cancelled or deleted. processJob routes it to handleCancellation
+// on the ErrCancelled sentinel.
+func cancelledResult() *StreamProcessResult {
+	return &StreamProcessResult{ShouldDownload: false, Error: "cancelled", ErrSentinel: ErrCancelled}
+}
+
 // StreamProcessor handles stream status probing and waiting.
 type StreamProcessor struct {
 	yt          *youtube.Service
@@ -175,10 +182,18 @@ func (sp *StreamProcessor) SetOnTwitchAuthLoss(fn func(reason string)) {
 // releaseArchiveSlot wakes the scheduler after a slot-release flip when the
 // job actually held a slot (priority 1). Ordinary broadcasts (priority 0)
 // free nothing, so no sweep is provoked for them.
+//
+// Both flip sites have just written queue_priority 0 to the row; this brings
+// the *Job that processJob carries for the rest of the run into line. It used
+// to keep the stale 1, and CookieResumeStatus reads the struct: a backlog
+// row that turned out to be a live broadcast, then lost its cookies mid-
+// capture, was resumed by the automatic refresh as Queued — a live broadcast
+// waiting for its channel's archive slot behind the VOD downloads.
 func (sp *StreamProcessor) releaseArchiveSlot(job *database.Job) {
 	if job.QueuePriority == 1 && sp.wakeScheduler != nil {
 		sp.wakeScheduler()
 	}
+	job.QueuePriority = 0
 }
 
 // Stop gracefully stops the stream processor and any active chat downloaders.
@@ -308,8 +323,9 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 			}
 			sp.logger.Info("not a stream but downloading as VOD",
 				"videoID", job.VideoID, "reason", reason)
+			// No status, as vodStatusUpdates writes none: the download-slot
+			// wait is still ahead.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"status": database.StatusDownloading,
 				"is_vod": true,
 			})
 			return &StreamProcessResult{
@@ -344,6 +360,39 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 	}
 }
 
+// RefreshVodInfo re-extracts a VOD's player response for a download that is
+// starting long after Process extracted it — the download-slot wait sits
+// between the two, and googlevideo format URLs expire (vodInfoStale). The
+// same full fetch and playability verdict Process applies, so a video that
+// went private or members-only while it queued fails the way it would have
+// failed up front. A stream no longer classified as finished is refused
+// rather than downloaded with the whole-file or post-live strategy.
+func (sp *StreamProcessor) RefreshVodInfo(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error) {
+	info, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+	if err != nil {
+		return nil, fmt.Errorf("full fetch failed: %w", err)
+	}
+	return judgeRefreshedVodInfo(info)
+}
+
+// judgeRefreshedVodInfo is RefreshVodInfo's reading of the player response it
+// fetched. A refusal is returned as an error, where Process returns one as a
+// result, so it is marked as the answer it is (vodRefreshVerdict): unmarked,
+// processJob's retry rule could not tell it from a fetch that failed, and a
+// backlog VOD that went private or members-only while it queued was sent back
+// to Queued for a retry instead of to the Error or COOKIES? its verdict names.
+func judgeRefreshedVodInfo(info *youtube.VideoInfo) (*youtube.VideoInfo, error) {
+	if errMsg, sentinel := playabilityVerdict(info); errMsg != "" {
+		res := &StreamProcessResult{Error: errMsg, ErrSentinel: sentinel}
+		return nil, &vodRefreshVerdict{err: res.AsError()}
+	}
+	switch info.StreamStatus {
+	case youtube.StreamVOD, youtube.StreamPostLive, youtube.StreamNotAStream:
+		return info, nil
+	}
+	return nil, &vodRefreshVerdict{err: fmt.Errorf("stream status changed to %s while the download waited for a slot", info.StreamStatus)}
+}
+
 // checkPlayability returns an error string and an optional sentinel for
 // classification when the video is not playable. The display string is
 // the user-facing error; the sentinel (ErrCookiesRequired for member /
@@ -359,6 +408,12 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 // produced the identical string and both parked the job in COOKIES?, so an
 // operator whose credentials were perfectly healthy was told to refresh them.
 func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, error) {
+	return playabilityVerdict(info)
+}
+
+// playabilityVerdict is checkPlayability's rule, free of the processor so the
+// live loop can apply it to a mid-capture player response too.
+func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
 	if info.PlayabilityError == "" || info.PlayabilityError == youtube.PlayabilityOK {
 		return "", nil
 	}
@@ -431,9 +486,15 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 // post-live. A job created Upcoming still carries the SCHEDULED start; for a
 // finished stream YouTube's ScheduledStartTime is the actual start the replay
 // chat offsets count from, so it is refreshed here (review 2026-09-03, T-F4).
+//
+// No status. A VOD still has the download-slot wait ahead of it, which can
+// last hours behind a busy pool, and writing Downloading here showed every
+// queued VOD as downloading through all of it. ExecuteWithChat writes
+// Downloading once the slot is held; until then the row keeps the status it
+// came in with and processJob's progress line says what it is waiting for
+// (vodSlotWaitProgress).
 func vodStatusUpdates(job *database.Job, info *youtube.VideoInfo) map[string]any {
 	updates := map[string]any{
-		"status": database.StatusDownloading,
 		"is_vod": true,
 	}
 	if info != nil && info.ScheduledStartTime != "" && info.ScheduledStartTime != job.StreamStartTime {
@@ -591,12 +652,15 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 		// Author both — would never apply. NotifyFacts also supplies the
 		// YouTube watch-URL fallback for a row whose url is still blank,
 		// which a freshly discovered upcoming stream's often is.
+		// Title and channel are job-supplied text, escaped as the builders
+		// escape them; Starts At carries <t:…> markup on purpose and must
+		// NOT be (see EscapeMarkdown's doc).
 		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Start Time Confirmed",
-			fmt.Sprintf("Scheduled: %s", job.Title),
+			fmt.Sprintf("Scheduled: %s", notifications.EscapeMarkdown(job.Title)),
 			notifications.TypeInfo,
 			[]notifications.Field{
-				{Name: "Channel", Value: job.ChannelName, Inline: true},
+				{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
 				{Name: "Starts At", Value: startsAt, Inline: true},
 			},
 			notifications.SendOptions{
@@ -622,10 +686,10 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 		// two are the same job's story.
 		f := NotifyFacts(job)
 		sp.notifier.Send("YouTube Schedule Changed",
-			fmt.Sprintf("Rescheduled: %s", job.Title),
+			fmt.Sprintf("Rescheduled: %s", notifications.EscapeMarkdown(job.Title)),
 			notifications.TypeInfo,
 			[]notifications.Field{
-				{Name: "Channel", Value: job.ChannelName, Inline: true},
+				{Name: "Channel", Value: notifications.EscapeMarkdown(job.ChannelName), Inline: true},
 				{Name: "Old Time", Value: fmtTime(oldStartTime), Inline: true},
 				{Name: "New Time", Value: fmtTime(info.ScheduledStartTime), Inline: true},
 			},

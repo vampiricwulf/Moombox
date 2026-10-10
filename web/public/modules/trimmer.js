@@ -91,6 +91,11 @@ export class TrimController {
     video.currentTime = 0;
     this._setPlayIcon(true);
 
+    // A dialog closed with its request still out left Create loading; this
+    // dialog has asked nothing yet.
+    this._el.submitBtn.loading = false;
+    this._el.submitBtn.disabled = false;
+
     // Reset inputs
     startInput.value = fmtPrecise(0);
     endInput.value = this.duration > 0 ? fmtPrecise(this.duration) : "";
@@ -129,6 +134,12 @@ export class TrimController {
     // Multi-segment: auto-advance on segment end
     video.addEventListener("ended", () => this._onSegmentEnded(), { signal: sig });
 
+    // A missing or refused file otherwise leaves a black box reading
+    // 0:00 / 0:00 with nothing said.
+    video.addEventListener("error", () => {
+      this.app.showToast("The trim preview could not load this recording", "danger");
+    }, { signal: sig });
+
     // Click video to toggle play/pause
     video.addEventListener("click", () => this._togglePlay(), { signal: sig });
 
@@ -160,12 +171,20 @@ export class TrimController {
     dialog.addEventListener("keydown", (e) => this._onKeyDown(e), { signal: sig });
 
     // Text input sync (inputs -> markers), clamped to opposite marker
+    // A refused value is put back and said, rather than left in the box while
+    // the marker and timeline keep the old one.
+    const refuse = (input, marker) => {
+      input.value = fmtPrecise(marker);
+      this.app.showToast(`Enter a time between 0:00 and ${fmtPrecise(this.duration)}`, "warning");
+    };
     startInput.addEventListener("sl-change", () => {
       const val = this.app.parseTimeInput(startInput.value);
       if (val !== null && val >= 0 && val <= this.duration) {
         this.startMarker = Math.min(val, this.endMarker);
         startInput.value = fmtPrecise(this.startMarker);
         this._updateTimeline();
+      } else {
+        refuse(startInput, this.startMarker);
       }
     }, { signal: sig });
 
@@ -175,6 +194,8 @@ export class TrimController {
         this.endMarker = Math.max(val, this.startMarker);
         endInput.value = fmtPrecise(this.endMarker);
         this._updateTimeline();
+      } else {
+        refuse(endInput, this.endMarker);
       }
     }, { signal: sig });
 
@@ -262,9 +283,14 @@ export class TrimController {
     this._el.range.style.left = `${startPct}%`;
     this._el.range.style.width = `${endPct - startPct}%`;
 
-    // Handles
+    // Handles — sliders to assistive tech, so their values follow the markers.
     this._el.handleStart.style.left = `${startPct}%`;
     this._el.handleEnd.style.left = `${endPct}%`;
+    for (const [handle, value] of [[this._el.handleStart, this.startMarker], [this._el.handleEnd, this.endMarker]]) {
+      handle.setAttribute("aria-valuemax", String(this.duration));
+      handle.setAttribute("aria-valuenow", String(value));
+      handle.setAttribute("aria-valuetext", fmtPrecise(value));
+    }
 
     // Range label
     const dur = this.endMarker - this.startMarker;
@@ -329,9 +355,9 @@ export class TrimController {
     track.setPointerCapture(e.pointerId);
 
     // Per-drag AbortController so pointermove/up/cancel are removed together.
-    // This nests inside the outer this._abort (set in open()) — if the dialog
-    // is destroyed mid-drag, the blur handler calls _dragCleanup, and
-    // destroy()'s outer abort also aborts this signal defensively.
+    // It is independent of the outer this._abort (set in open()): nothing
+    // links the two, so a dialog destroyed mid-drag relies on destroy()
+    // calling _dragCleanup() itself (the window blur handler does the same).
     const dragAbort = new AbortController();
     const sig = dragAbort.signal;
 
@@ -418,6 +444,9 @@ export class TrimController {
     // Ignore if focus is inside a text input (composedPath handles Shoelace shadow DOM)
     if (isTypingInInput(e)) return;
 
+    // Ctrl/Cmd/Alt combinations are the browser's (Ctrl+O is not a marker).
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
     // Don't intercept Space/Enter on buttons — let them activate normally
     if ((e.key === " " || e.key === "Enter") && e.composedPath().some(el =>
       el instanceof HTMLElement && (el.tagName === "SL-BUTTON" || el.tagName === "SL-ICON-BUTTON" || el.tagName === "BUTTON")
@@ -427,6 +456,23 @@ export class TrimController {
     // keydown for shortcuts, the player document keydown for transport)
     // can also act on it. Anything we handle here is trim-local.
     const handle = () => { e.preventDefault(); e.stopPropagation(); };
+
+    // A focused timeline handle is a slider: the arrows move ITS marker
+    // (1 s, Shift 5 s) instead of seeking the video.
+    const focusedHandle = e.composedPath().find((el) => el === this._el.handleStart || el === this._el.handleEnd);
+    if (focusedHandle && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      handle();
+      const delta = (e.shiftKey ? 5 : 1) * (e.key === "ArrowLeft" ? -1 : 1);
+      if (focusedHandle === this._el.handleStart) {
+        this.startMarker = Math.max(0, Math.min(this.startMarker + delta, this.endMarker));
+        this._el.startInput.value = fmtPrecise(this.startMarker);
+      } else {
+        this.endMarker = Math.min(this.duration, Math.max(this.endMarker + delta, this.startMarker));
+        this._el.endInput.value = fmtPrecise(this.endMarker);
+      }
+      this._updateTimeline();
+      return;
+    }
 
     switch (e.key) {
       case " ":
@@ -482,31 +528,45 @@ export class TrimController {
       return;
     }
 
-    this._el.submitBtn.loading = true;
-    this._el.submitBtn.disabled = true;
+    // The answer belongs to the dialog that asked. Cancel, Escape and a click
+    // outside all close the dialog while the request is out, and this one
+    // controller then serves whatever trim dialog opens next — so everything
+    // after the await acts on what is captured here: this job, these
+    // elements, and this dialog's own listener signal, which destroy()
+    // aborts. Read from `this` instead, a late answer for job A closed job
+    // B's trim dialog, or threw on the emptied refs and cleared the
+    // selection under job C's open details. The trim's own result comes
+    // later, as trim_status frames keyed to the job (app.handleTrimStatus).
+    const job = this.job;
+    const el = this._el;
+    const session = this._abort;
+    el.submitBtn.loading = true;
+    el.submitBtn.disabled = true;
+    let started = false;
     try {
-      // Restore selectedJobId so _refreshJobDetails can update the details content.
-      // It was cleared when the details dialog was hidden to open the trim dialog.
-      // Set it only during the async operation — if createTrim fails, clear it to
-      // avoid stale selectedJobId pointing at a job whose details dialog is closed.
-      this.app.selectedJobId = this.job.id;
-      await this.app.createTrim(this.job.id, startTime, endTime);
-      // Save ref before hide — destroy() clears _el on sl-after-hide,
-      // which fires before the timeout under prefers-reduced-motion.
-      const detailsDlg = this._el.details;
-      this._el.dialog.hide();
-      // Reopen details dialog to show updated trims
-      setTimeout(() => detailsDlg?.show(), 100);
-    } catch (error) {
-      // Error already shown by createTrim(). Clear selectedJobId since the details
-      // dialog is still closed — leaving it set would cause jobs_update WebSocket
-      // messages to call updateJobDetails() on empty content.
-      this.app.selectedJobId = null;
+      await this.app.createTrim(job.id, startTime, endTime);
+      started = true;
+    } catch {
+      // Error already shown by createTrim().
     } finally {
-      if (this._el?.submitBtn) {
-        this._el.submitBtn.loading = false;
-        this._el.submitBtn.disabled = false;
+      // The button is one element every trim dialog shares: once this
+      // dialog is gone it is the next one's, which open() reset and which
+      // may have a request of its own out.
+      if (!session.signal.aborted) {
+        el.submitBtn.loading = false;
+        el.submitBtn.disabled = false;
       }
+    }
+    if (started && !session.signal.aborted) {
+      // Back to the job's details, where its Trims section takes the
+      // result. The row as this page holds it now: job_update may have
+      // replaced the one the dialog opened with.
+      el.dialog.hide();
+      setTimeout(() => {
+        const current = this.app.jobs.find((j) => j.id === job.id)
+          || this.app.archivedJobs.find((j) => j.id === job.id) || job;
+        this.app.details.showJobDetails(current);
+      }, 100);
     }
   }
 }

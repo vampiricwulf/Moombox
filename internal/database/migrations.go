@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 20
+const schemaVersion = 21
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -342,6 +342,11 @@ func (db *Database) migrate() error {
 					db.logger.Warn("migration v2: failed to backfill chat_file", "jobID", b.id, "err", err)
 				}
 			}
+		} else if db.logger != nil {
+			// The version still advances (the backfill is best-effort, as each
+			// row's failure above is), so this is the only trace that it never
+			// ran: say so rather than skip it in silence.
+			db.logger.Warn("migration v2: chat_file backfill skipped — could not read jobs", "err", err)
 		}
 
 		err = db.writeUserVersion(2)
@@ -410,6 +415,9 @@ func (db *Database) migrate() error {
 					}
 				}
 			}
+		} else if db.logger != nil {
+			// Best-effort like v2's: the version still advances, so log the skip.
+			db.logger.Warn("migration v3: asset backfill skipped — could not read jobs", "err", err)
 		}
 
 		err = db.writeUserVersion(3)
@@ -419,7 +427,7 @@ func (db *Database) migrate() error {
 	}
 
 	if version < 4 {
-		// Add index for video_id (used by HasActiveJob, AddToHistory)
+		// Add index for video_id (used by HasActiveJob)
 		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_jobs_video_id ON jobs(video_id)`); err != nil {
 			return err
 		}
@@ -705,6 +713,22 @@ func (db *Database) migrate() error {
 			return err
 		}
 		if err := db.writeUserVersion(20); err != nil {
+			return err
+		}
+	}
+
+	if version < 21 {
+		// Nothing to apply. Development builds' v21 added
+		// jobs.twitch_quality_preference, a second column for the preference
+		// a Twitch job was created to record; before any release that
+		// preference was folded back into quality_preference, which every
+		// row already carried, and the ALTER and its startup backfill went.
+		// The version bump stays: a database those builds migrated reads 21,
+		// and a binary back at 20 would refuse it as a downgrade. Such a
+		// database keeps the column, unread and harmless — nothing selects
+		// it, and its NOT NULL DEFAULT '' fills it on every insert, none of
+		// which names it — and nothing here drops it.
+		if err := db.writeUserVersion(21); err != nil {
 			return err
 		}
 	}

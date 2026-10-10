@@ -87,7 +87,7 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 
 	browser := s.resolvedBrowser()
 	if browser == nil {
-		return fmt.Errorf("supported browser (Firefox, Chrome, Brave, Edge, Opera, or Waterfox) required: %w", ErrNoBrowserFound)
+		return fmt.Errorf("a supported browser (Firefox, Waterfox, LibreWolf, Zen, Chrome, Brave, Edge, Vivaldi, Thorium or Opera) is required: %w", ErrNoBrowserFound)
 	}
 
 	if err := os.MkdirAll(s.profileDir, 0o755); err != nil {
@@ -314,7 +314,7 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 	switch {
 	case readErr == nil:
 		if len(existingData) > 0 {
-			netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
+			netscapeCookies = mergeBrowserCookies(string(existingData), netscapeCookies)
 		}
 	case errors.Is(readErr, fs.ErrNotExist):
 		// No cookies.txt yet — the normal first-run case. Nothing to

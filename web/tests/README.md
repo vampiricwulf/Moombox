@@ -1,17 +1,10 @@
 # Frontend JS tests
 
-Uses Node.js's built-in test runner (`node:test`). Most suites are pure — no
-dependencies, no DOM — and just import from `../public/modules/`. Nineteen
-suites drive their module inside a jsdom document:
-`a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`,
-`archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`,
-`job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`,
-`open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`,
-`render-diff.test.mjs`, `resolution-picker.test.mjs`,
-`settings-notification-mode.test.mjs`, `settings-notifications.test.mjs`,
-`settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs` and
-`update-check-debounce.test.mjs`.
-jsdom is the only dev dependency, and it is **optional**.
+Uses Node.js's built-in test runner (`node:test`). Every `*.test.mjs` file here
+is one suite. The pure suites import from `../public/modules/` and need nothing
+else; the DOM suites drive the dashboard, the player or a standalone page
+inside a jsdom document. jsdom is the only dev dependency, and it is
+**optional**: without it the DOM suites skip.
 
 ## Running
 
@@ -32,12 +25,75 @@ node --test --test-name-pattern="selection" web/tests/player.test.mjs
 ```
 
 Requires Node.js 20+. The `.mjs` extension tells Node to parse files as ES
-modules.
+modules. CI (`.github/workflows/ci.yml`) runs `npm ci` here first, so it runs
+every suite, the DOM ones included.
+
+## The suites
+
+Pure — no DOM, nothing to install:
+
+| Suite | What it covers |
+|-------|----------------|
+| `chat-timeline.test.mjs` | `chat-timeline.js`: chat offsets, the YouTube start bias, the chat header and divider counts |
+| `filter-engine.test.mjs` | `filter-engine.js`: parsed filter tokens evaluated against jobs |
+| `filter-parser.test.mjs` | `filter-parser.js`: the filter language (text, `status:`/`channel:`/`platform:`, `-` negation, `a\|b`, quotes) parsed into tokens |
+| `logout.test.mjs` | `logout.js`: when the logout button shows, and what its click does |
+| `nico-geometry.test.mjs` | `nico-geometry.js`: the video's box inside the player (letterbox, pillarbox) for the chat overlay |
+| `nico-lanes.test.mjs` | `nico-lanes.js`: lane allocation for the scrolling chat overlay |
+| `nico-scheduler.test.mjs` | `nico-scheduler.js`: the overlay's cursor, anchor, pending list and drop count |
+| `template-preview.test.mjs` | the Settings page's output-template example, formatted as `config.ResolveTemplate` writes a name |
+| `utils.test.mjs` | `utils.js`: the formatters (`formatBytes`, timestamps, durations) and the small helpers beside them |
+
+DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-dom.mjs`
+(the player) or, for `boot-and-login.test.mjs`, the real pages directly:
+
+| Suite | What it covers |
+|-------|----------------|
+| `a11y-controls.test.mjs` | the status bar's and log panel's clickable controls reachable by keyboard and screen reader; two of its tests read `moombox.css`'s text and need no DOM |
+| `app.test.mjs` | rendering pins: job cards, Files rows and the details dialog against `fixtures/app-job-items.json` (see [The app harness](#the-app-harness)) |
+| `app-resync.test.mjs` | a mid-session `initial_state` replaces the job list and the log buffer, and keeps the details dialog |
+| `archive-boundary.test.mjs` | the dashboard's archive cutoff, the JS twin of `internal/jobfilter` |
+| `boot-and-login.test.mjs` | `boot-theme.js` and `login.js` evaluated against the real `index.html` and `login.html` |
+| `channel-removal.test.mjs` | removing a channel asks: keep its jobs (the default) or delete the pending ones, and the toast says what it did; its prompt-text tests are pure |
+| `dashboard-text.test.mjs` | small user-facing strings: a singular chat count, the Stats tab with no disk reading, a single-file recording's load error |
+| `details-mux-finished.test.mjs` | the details dialog's Mux button on a Finished job that still holds an unmuxed part |
+| `fetch-errors.test.mjs` | failed dashboard requests toast the server's reason |
+| `ffmpeg-path-check.test.mjs` | a checked FFmpeg path reaches the Settings form |
+| `files-panel.test.mjs` | the Files tab's rows: labelled delete controls, set-aside confirms, refusals |
+| `filter-bar.test.mjs` | the filter bar under real typing: the debounce, chips, the caret |
+| `import-placeholder.test.mjs` | an imported job's placeholder id draws no dead embed, Stream URL or Open URL; one pure helper test |
+| `imports-importing.test.mjs` | once an import's body is sent the panel says "Importing…" with no Cancel, and Clear and another file wait for the response |
+| `imports-upload.test.mjs` | the import panel's Clear and file choice while an upload runs, and the outcome note or refusal an import answers with |
+| `job-asides.test.mjs` | set-aside recordings in the details dialog, its Recover button, and the Files tab naming them |
+| `job-deeplink.test.mjs` | `#job=<id>` deep links open that job's details |
+| `job-progress.test.mjs` | `job_progress` frames merge onto the row the tab holds |
+| `job-selection-actions.test.mjs` | the Tasks list's selection and the batch and single actions that read it |
+| `keyboard-modifiers.test.mjs` | Ctrl/Cmd/Alt combinations never reach a dashboard or trim-dialog shortcut |
+| `log-panel.test.mjs` | the Logs panel: batched appends, the 500-line window, the snapshot and frame numbers (`logSeq`/`seq`) across connects and resyncs |
+| `open-folder.test.mjs` | Open Folder surfaces a refusal |
+| `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
+| `release-notes-toast.test.mjs` | a failed release-notes fetch toasts rather than blocking the tab |
+| `render-diff.test.mjs` | a repeated `job_update` makes no DOM write in the details dialog or the status bar |
+| `resolution-picker.test.mjs` | the Max Resolution picker in Settings and the setup wizard; its preset-mapping tests are pure |
+| `settings-active-platforms.test.mjs` | the active-platform toggles send an override only when the operator set one |
+| `settings-guard.test.mjs` | the unsaved-settings guard on every way out of a dirty Settings page |
+| `settings-notification-mode.test.mjs` | each notification target's delivery mode |
+| `settings-notifications.test.mjs` | the notification card's auto-saving controls and the Public Dashboard URL row |
+| `settings-reorder-budget.test.mjs` | the two reorder ceilings: 0 sent, an empty field omitted |
+| `settings-text.test.mjs` | Settings and setup text that pointed the wrong way or dropped the server's reason |
+| `settings-channels.test.mjs` | both Add Channel dialogs: a URL or bare `@handle` resolved first, a configured ID switching to editing it, the edit mark, and a stale list's `409` |
+| `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |
+| `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
+| `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
+| `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |
+| `verify-signature.test.mjs` | Verify Signature's wording for a checked manifest and for a signature alone |
+| `watched-state.test.mjs` | Mark Watched / Unwatched from the details dialog and the batch bar |
+
+A new suite gets a row in one of these tables.
 
 ## The DOM suites (jsdom)
 
-The nineteen suites listed above are the ones that need a DOM. Install jsdom
-**inside `web/tests/`** — never at the repo root:
+Install jsdom **inside `web/tests/`** — never at the repo root:
 
 ```bash
 cd web/tests
@@ -52,39 +108,20 @@ node --test web/tests/*.test.mjs
 ### How the skip works
 
 Each DOM suite probes `await import("jsdom")` at the top of the file. If that
-throws, every test in the file is registered with `{ skip: "..." }`, so a
-checkout without `npm ci` reports them as **skipped**, never failed — the 188
-DOM tests (player 63, render-diff 16, app 13, settings-notifications 13,
-a11y-controls 12, boot-and-login 12, job-deeplink 9, job-progress 8,
-job-asides 7, settings-notification-mode 6, log-panel 4, open-folder 4,
-resolution-picker 4, settings-reorder-budget 4,
-update-check-debounce 4, archive-boundary 3, sidecar-warning 3, app-resync 2,
-release-notes-toast 1), leaving 131 tests
-that need no DOM — the eight pure suites, the two stylesheet-text tests in
-`a11y-controls.test.mjs`, which read `moombox.css` and assert on its text, the
-five pure helper tests in `player.test.mjs` (task 3's two colour tests, task
-5's one, task 6's one and the chat-seek arithmetic), and the two mapping tests
-in `resolution-picker.test.mjs`, whose other four tests do need one:
+throws `ERR_MODULE_NOT_FOUND`, every test that needs a DOM is registered with
+`{ skip: "..." }`, so a checkout without `npm ci` reports them as **skipped**,
+never failed; the pure tests inside a DOM suite (the ones the table names) still
+run. Any other error from the probe fails the suite.
 
-```
-ℹ tests 319
-ℹ pass 131
-ℹ fail 0
-ℹ skipped 188
-```
+The harness (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) — and anything
+that imports it, such as `fixtures/app-render-inputs.mjs` — is imported
+**dynamically, only after the probe succeeds**: the harness imports jsdom
+itself, so a static import would fail the whole file without it instead of
+skipping, and a genuine fault in the harness is then a failure rather than a
+silent skip.
 
-With jsdom installed the same command reports `tests 319` / `pass 319` /
-`skipped 0`.
-
-The helper (`helpers/player-dom.mjs`, `helpers/app-dom.mjs`) is imported only
-after the probe succeeds, so a genuine fault in the harness is a failure rather
-than a silent skip.
-
-| Suite | Needs jsdom |
-|-------|-------------|
-| `chat-timeline.test.mjs`, `filter-engine.test.mjs`, `filter-parser.test.mjs`, `logout.test.mjs`, `nico-geometry.test.mjs`, `nico-lanes.test.mjs`, `nico-scheduler.test.mjs`, `utils.test.mjs` | no |
-| `a11y-controls.test.mjs`, `app.test.mjs`, `app-resync.test.mjs`, `archive-boundary.test.mjs`, `boot-and-login.test.mjs`, `job-asides.test.mjs`, `job-deeplink.test.mjs`, `job-progress.test.mjs`, `log-panel.test.mjs`, `open-folder.test.mjs`, `player.test.mjs`, `release-notes-toast.test.mjs`, `render-diff.test.mjs`, `settings-notification-mode.test.mjs`, `settings-notifications.test.mjs`, `settings-reorder-budget.test.mjs`, `sidecar-warning.test.mjs`, `update-check-debounce.test.mjs` | yes |
-| `resolution-picker.test.mjs` | partly — 2 pure mapping tests, 4 jsdom picker tests |
+Without jsdom the run ends with `fail 0` and the DOM tests counted under
+`skipped`; with it, `skipped 0`.
 
 ## The player harness
 
@@ -142,11 +179,12 @@ h.flush();                  // let promises settle
 ```
 
 Beyond the player harness's stubs it adds: a `WebSocket` that never connects
-(a live socket would replay `initial_state` into the renderers under test),
-`sl-alert.toast()` / `sl-dialog.show()` and friends, `navigator.clipboard` and
-`scrollIntoView` — and, unlike the player harness, a **frozen wall clock**
-(`NOW`) plus an en-US/UTC pin on `toLocaleString`, so relative timestamps
-render the same string on every machine.
+(a live socket would replay `initial_state` into the renderers under test; a
+test feeds frames through `h.app.handleMessage`), `sl-alert.toast()` /
+`sl-dialog.show()` and friends, `navigator.clipboard` and `scrollIntoView` —
+and, unlike the player harness, a **frozen wall clock** (`NOW`) plus an
+en-US/UTC pin on `toLocaleString`, so relative timestamps render the same
+string on every machine.
 
 `app.test.mjs` is a **pin**, not a behaviour suite: it snapshots what the
 dashboard draws so the controller extractions can be proved to change nothing.
@@ -177,27 +215,25 @@ fs.writeFileSync("fixtures/app-job-items.json", JSON.stringify({
 ## Scope
 
 Pure modules under `web/public/modules/` — parsers, formatters, timeline math,
-the lane allocator, the overlay scheduler — are covered by the plain suites.
-`player.js` and `app.js` — and the controllers `app.js` composes, reached
-through the app harness — are covered by the jsdom suites above, as are the two
-standalone page scripts `boot-theme.js` and `login.js` (`boot-and-login.test.mjs`,
-which evals them against the real `index.html` and `login.html`). The other
-UI-heavy modules (`settings.js`, `setup.js`, `trimmer.js`) have no harness of
-their own yet — `release-notes-toast.test.mjs`,
-`settings-notification-mode.test.mjs`, `settings-notifications.test.mjs` and
-`settings-reorder-budget.test.mjs` reach `settings.js` handlers only because
-`MoomboxApp` constructs `SettingsController` and wires its listeners, and
-`resolution-picker.test.mjs` reaches both resolution pickers the same way
-through the app harness, driving `populateConfigForm()` and `setupListeners()`
-on the live controllers while importing the two pure mapping helpers directly;
+the lane allocator, the overlay scheduler — are covered by the pure suites.
+`player.js` has the player harness; `app.js` and every controller it composes
+are reached through the app harness. That includes the Settings page, the setup
+wizard and the trim dialog (`settings.js`, `setup.js`, `trimmer.js`), whose
+suites drive the live controllers `MoomboxApp` constructs rather than a harness
+of their own; the two standalone page scripts, `boot-theme.js` and `login.js`,
+are evaluated against the real pages by `boot-and-login.test.mjs`.
 `helpers/player-dom.mjs` and `helpers/app-dom.mjs` are the pattern to extend if
-a real one is wanted.
+a module ever needs a harness of its own.
 
 ## Adding a test
 
-1. Create `web/tests/<module-name>.test.mjs`.
+1. Create `web/tests/<module-name>.test.mjs`, or add to the suite that already
+   covers the behaviour.
 2. Import from `../public/modules/<module-name>.js` (keep the `.js`).
 3. Use `import { test } from "node:test"` and `import assert from "node:assert/strict"`.
-4. For a DOM test, copy the jsdom probe at the top of `player.test.mjs` so the
-   file still skips cleanly without jsdom.
-5. Verify with `node --test web/tests/<module-name>.test.mjs`.
+4. For a DOM test, copy the jsdom probe and the dynamic harness import from the
+   top of `log-panel.test.mjs`, and pass `{ skip }` to every test that needs
+   the DOM, so the file still skips cleanly without jsdom.
+5. Give a new suite its row in [The suites](#the-suites).
+6. Verify with `node --test web/tests/<module-name>.test.mjs`, and once with
+   `web/tests/node_modules` moved aside to see the DOM tests skip.

@@ -401,6 +401,217 @@ test("the collapsed warnings icon is a button only while it stands for something
   assert.deepEqual(calls, ["yt-relogin"]);
 });
 
+// ── W5: the filter bars' clear-all and exclude controls, the import dropzone ─
+//
+// Three more mouse-only controls, held to the same standard as the four
+// above: role="button", tabindex="0", an accessible name, and Enter/Space
+// through the SAME handler the click uses.
+//
+// The two filter controls were bare <sl-icon>s, and the fix is a <span> around
+// each icon rather than role/tabindex on the icon itself: sl-icon with no
+// label re-asserts aria-hidden="true" and strips any role on its own host at
+// first render (shoelace icon.component.ts, handleLabelChange), which would
+// leave a Tab stop a screen reader cannot see. The tests below pin that shape
+// — a mutant that moves the attributes back onto the sl-icon passes in jsdom
+// (no Shoelace runs here) and fails in the browser, so the tag check is the
+// only witness this harness can offer.
+
+/** Focus the Tasks filter input, which renders the dropdown's items. */
+function openTasksDropdown(h) {
+  const container = h.el("tasks-filter");
+  container.querySelector(".unified-filter-input").focus();
+  return container;
+}
+const excludeControl = (h, label) =>
+  h.el("tasks-filter").querySelector(`.filter-item-exclude[aria-label="Exclude ${label}"]`);
+const tasksTokens = (h) =>
+  h.app.filterBar.tasksFilterTokens.map((t) => ({ type: t.type, value: t.value, negate: !!t.negate }));
+
+/** Type a structured query into the Tasks filter and commit it with Enter. */
+function typeTasksFilter(h, query) {
+  const input = h.el("tasks-filter").querySelector(".unified-filter-input");
+  input.value = query;
+  press(h, input, "Enter");
+}
+
+// MUTANT: drop role/tabindex/aria-label from either clear span or the
+// dropzone, or put them on the sl-icon instead of a span around it.
+test("the clear-all controls and the import dropzone are focusable, named buttons", { skip }, async () => {
+  const h = await harness.makeApp();
+  const clears = [...h.document.querySelectorAll(".unified-filter-clear")];
+  assert.equal(clears.length, 2, "one clear-all per filter bar (Tasks, Archived)");
+  for (const el of clears) {
+    assert.equal(el.tagName, "SPAN",
+      "the control must be a span AROUND the icon — role/tabindex on the sl-icon itself are stripped by Shoelace at first render");
+    assert.ok(el.querySelector("sl-icon"), "the glyph still comes from an sl-icon inside the control");
+    assert.equal(el.getAttribute("role"), "button");
+    assert.equal(el.getAttribute("tabindex"), "0");
+    assert.equal(el.getAttribute("aria-label"), "Clear all filters", "a glyph-only control needs a name");
+  }
+  const dropzone = h.el("import-dropzone");
+  assert.equal(dropzone.getAttribute("role"), "button");
+  assert.equal(dropzone.getAttribute("tabindex"), "0");
+  assert.match(dropzone.getAttribute("aria-label") || "", /\.zip/, "the name must say what the control picks");
+});
+
+// MUTANT: keep the exclude control an <sl-icon> (the shipped markup), or name
+// every one of them plain "Exclude" — a screen reader then hears a row of
+// identical buttons with nothing to tell YouTube's from Twitch's.
+test("the exclude controls are built as buttons named for their option", { skip }, async () => {
+  const h = await harness.makeApp();
+  openTasksDropdown(h);
+  const controls = [...h.el("tasks-filter").querySelectorAll(".filter-item-exclude")];
+  assert.ok(controls.length >= 5, "the three statuses and two platforms each carry an exclude control");
+  for (const el of controls) {
+    assert.equal(el.tagName, "SPAN", "a span around the icon, for the same reason as the clear-all control");
+    assert.ok(el.querySelector("sl-icon"));
+    assert.equal(el.getAttribute("role"), "button");
+    assert.equal(el.getAttribute("tabindex"), "0");
+    assert.equal(el.getAttribute("slot"), "suffix", "it still sits in the menu item's suffix slot");
+  }
+  assert.deepEqual(
+    controls.map((el) => el.getAttribute("aria-label")),
+    ["Exclude Active", "Exclude Issues", "Exclude Finished", "Exclude YouTube", "Exclude Twitch"],
+  );
+  assert.ok(excludeControl(h, "YouTube").closest("sl-menu-item"), "each control is inside its own menu item");
+});
+
+// MUTANT: a keydown copy that only clears the tokens and forgets the input's
+// text, or the chips, or the control's own hiding — the two paths disagree.
+// MUTANT: forget `input.focus()` on the key path — the control hides itself
+// on activation and focus falls to <body>, so the next Tab starts over from
+// the top of the page.
+test("Enter and click reach the same handler: clear all", { skip }, async () => {
+  const h = await harness.makeApp();
+  const container = h.el("tasks-filter");
+  const input = container.querySelector(".unified-filter-input");
+  const chips = container.querySelector(".unified-filter-chips");
+  const clear = container.querySelector(".unified-filter-clear");
+
+  const effectsOf = (activate) => {
+    typeTasksFilter(h, "status:live keyword");
+    assert.equal(chips.children.length, 1, "precondition: a chip to clear");
+    assert.equal(input.value, "keyword", "precondition: free text to clear");
+    assert.equal(clear.style.display, "", "precondition: the control is showing");
+    activate();
+    return { tokens: tasksTokens(h), chips: chips.children.length, input: input.value, display: clear.style.display };
+  };
+
+  const byClick = effectsOf(() => clear.click());
+  assert.deepEqual(byClick, { tokens: [], chips: 0, input: "", display: "none" });
+  const byKey = effectsOf(() => press(h, clear, "Enter"));
+  assert.deepEqual(byKey, byClick, "Enter must have exactly the click's effect — all four parts of it");
+  assert.equal(h.document.activeElement, input,
+    "the control just hid itself, so Enter must hand focus to the input instead of dropping it");
+});
+
+// MUTANT: a bubbling keydown listener (the obvious shape) — in the browser
+// sl-menu's own handler on its shadow slot runs first, clicks the CURRENT
+// menu item (a SELECT, not an exclude) and stops propagation, so Enter on the
+// exclude control adds the un-negated chip. Only a capture-phase listener on
+// the host runs ahead of it, and only stopPropagation keeps the select from
+// firing as well. jsdom runs no Shoelace, so the witness here is the item
+// itself: a listener on the sl-menu-item — nearer the target than the slot
+// is — must never see the key.
+test("Enter and click reach the same handler: the exclude controls", { skip }, async () => {
+  const h = await harness.makeApp();
+  openTasksDropdown(h);
+
+  const seenByItem = [];
+  const yt = excludeControl(h, "YouTube");
+  yt.closest("sl-menu-item").addEventListener("keydown", (e) => seenByItem.push(e.key));
+
+  const ev = press(h, yt, "Enter");
+  assert.equal(ev.defaultPrevented, true, "the control must claim the key");
+  assert.deepEqual(seenByItem, [], "the menu item — and so sl-menu's select handler beyond it — must never see Enter");
+  assert.deepEqual(tasksTokens(h), [{ type: "platform", value: "youtube", negate: true }],
+    "Enter must add the NEGATED chip, exactly as a click does");
+  const chips = h.el("tasks-filter").querySelector(".unified-filter-chips");
+  assert.deepEqual([...chips.children].map((c) => [c.textContent, c.variant]), [["-YouTube", "danger"]]);
+
+  // The click half is unchanged: it still goes through the same `exclude`.
+  // The dropdown was re-rendered by the first chip, so this also proves the
+  // delegated handlers follow a rebuild.
+  excludeControl(h, "Twitch").click();
+  assert.deepEqual(tasksTokens(h), [
+    { type: "platform", value: "youtube", negate: true },
+    { type: "platform", value: "twitch", negate: true },
+  ]);
+
+  // And Space on a fresh control after that rebuild.
+  press(h, excludeControl(h, "Finished"), " ");
+  assert.deepEqual(tasksTokens(h).at(-1), { type: "status", value: "finished", negate: true });
+
+  // The capture listener claims ONLY the exclude controls: Enter on the menu
+  // item itself is left to Shoelace, whose select it is.
+  const item = excludeControl(h, "Active").closest("sl-menu-item");
+  const onItem = press(h, item, "Enter");
+  assert.equal(onItem.defaultPrevented, false, "a key on the item itself must be left to sl-menu");
+});
+
+// MUTANT: a keydown copy that opens the picker some other way, or none —
+// the shipped dropzone, which only listened for click.
+test("Enter and click reach the same handler: the import dropzone", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.imports.initImports(); // bound lazily, on the Imports tab's first show
+  const dropzone = h.el("import-dropzone");
+  const fileInput = h.el("import-file-input");
+  let pickerOpened = 0;
+  fileInput.addEventListener("click", () => { pickerOpened++; });
+
+  dropzone.click();
+  assert.equal(pickerOpened, 1, "a click opens the picker exactly once — the input's own click bubbles back up and must not re-open it");
+  press(h, dropzone, "Enter");
+  assert.equal(pickerOpened, 2, "Enter must open the picker the way the click does");
+  press(h, dropzone, " ");
+  assert.equal(pickerOpened, 3, "so must Space");
+});
+
+// MUTANT: forget e.preventDefault() in any one of the three handlers — Space
+// scrolls the page under the user while it activates the control.
+test("Space does not also scroll the page: the filter and import controls", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.imports.initImports();
+  typeTasksFilter(h, "status:live");
+  openTasksDropdown(h);
+  for (const [name, el] of [
+    [".unified-filter-clear", h.el("tasks-filter").querySelector(".unified-filter-clear")],
+    [".filter-item-exclude", excludeControl(h, "YouTube")],
+    ["#import-dropzone", h.el("import-dropzone")],
+  ]) {
+    const ev = press(h, el, " ");
+    assert.equal(ev.defaultPrevented, true,
+      `${name}: Space is the page-scroll key; a control that handles it must preventDefault()`);
+  }
+});
+
+// The same guard the status-bar controls rely on (fix round 1 above): the
+// global shortcut handler stands aside for a key a control already claimed.
+// MUTANT: claim the key without preventDefault() — Enter on the dropzone
+// opens the picker AND the focused job's details.
+test("Enter on a filter or import control never also opens the focused job", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.document.querySelector('sl-tab-panel[name="tasks"]').setAttribute("active", "");
+  h.app.jobs = [{ id: "JOB1", status: "Live", title: "one", channelName: "c", platform: "youtube" }];
+  h.app.focusedJobIndex = 0;
+  const opened = [];
+  h.app.details.showJobDetails = (job) => opened.push(job.id);
+  h.app.imports.initImports();
+  typeTasksFilter(h, "status:live");
+  openTasksDropdown(h);
+
+  for (const [name, el] of [
+    [".unified-filter-clear", h.el("tasks-filter").querySelector(".unified-filter-clear")],
+    [".filter-item-exclude", excludeControl(h, "YouTube")],
+    ["#import-dropzone", h.el("import-dropzone")],
+  ]) {
+    opened.length = 0;
+    const ev = press(h, el, "Enter");
+    assert.equal(ev.defaultPrevented, true, `${name}: the control must handle Enter itself`);
+    assert.deepEqual(opened, [], `${name}: Enter must not ALSO open the focused job's details`);
+  }
+});
+
 // Reads the stylesheet as text, so it needs no jsdom and carries no `skip`.
 //
 // MUTANT: drop any one selector from the :focus-visible rule — that control
@@ -423,6 +634,7 @@ test("every keyboard-reachable control has the app's focus ring, not the UA's", 
   for (const sel of [
     "#check-countdown", "#status-warnings-icon", "#version-indicator",
     "#log-autoscroll-pill", ".status-warning", ".chat-msg-time",
+    ".unified-filter-clear", ".filter-item-exclude", "#import-dropzone",
   ]) {
     assert.ok(selectors.includes(`${sel}:focus-visible`), `${sel} has no focus ring of its own`);
   }
@@ -451,4 +663,57 @@ test("the divider row dims a card's block children, not only its spans", () => {
     "the divider-dim rule must reach every direct child, not only spans");
   assert.ok(!css.includes(".chat-msg.divider-before.future > span"),
     "the span-only form must be gone, not merely joined by a wider one");
+});
+
+// The first-run wizard and the "FFmpeg Not Found" screen cover the whole
+// page, but the dashboard under them stayed reachable: Tab walked on past
+// the overlay's last control into the hidden tabs, job list and status bar.
+// While either overlay is up, the dashboard's regions are inert.
+//
+// MUTANT: drop the toggleAttribute from setOverlayShown — the first
+// assertion fails. Make it follow only the overlay being changed instead of
+// any overlay — the "FFmpeg screen still up" assertion fails.
+const DASHBOARD_REGIONS = ["main.app-main", "#status-bar", "#batch-action-bar"];
+const inertRegions = (h) => DASHBOARD_REGIONS.filter((s) => h.document.querySelector(s).hasAttribute("inert"));
+
+test("a full-page overlay takes the dashboard behind it out of reach", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { setup: { isFirstRun: true, ffmpegValid: true } } });
+  assert.equal(h.el("setup-overlay").style.display, "flex");
+  assert.deepEqual(inertRegions(h), DASHBOARD_REGIONS, "the wizard is up: the dashboard is inert");
+
+  h.app.setup.showFFmpegOverlay();
+  h.app.setup.hide();
+  assert.deepEqual(inertRegions(h), DASHBOARD_REGIONS, "the FFmpeg screen is still up: still inert");
+
+  h.el("ffmpeg-skip-btn").click();
+  assert.equal(h.el("ffmpeg-overlay").style.display, "none");
+  assert.deepEqual(inertRegions(h), [], "both down: the dashboard is reachable again");
+});
+
+test("the dashboard is reachable when no overlay is up", { skip }, async () => {
+  const h = await booted();
+  assert.deepEqual(inertRegions(h), []);
+});
+
+// The wizard's Next/Back buttons live on the page they hide, so moving between
+// pages dropped focus to the body: a keyboard user Tabbed in from the top and
+// a screen reader announced nothing. Each page now takes focus as it appears,
+// and the current step indicator carries aria-current="step".
+// MUTANT: drop _focusPage from showPage or showAdvancedStep — focus stays on
+// the body. MUTANT: drop the aria-current lines — no step is current.
+test("the setup wizard moves focus into each page and marks the current step", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { setup: { isFirstRun: true, ffmpegValid: true } } });
+  const doc = h.el("setup-overlay").ownerDocument;
+  assert.equal(doc.activeElement, h.el("setup-mode-quick"), "the mode page opens on its first card");
+
+  h.el("setup-mode-quick").click();
+  await h.flush();
+  const cookiesHeading = h.el("setup-simple-cookies").querySelector(":scope > h2");
+  assert.equal(doc.activeElement, cookiesHeading, "Quick Setup focuses the cookie page's heading");
+
+  h.app.setup.showAdvancedStep(3);
+  const heading = h.el("setup-adv-step-3").querySelector(":scope > h2");
+  assert.equal(doc.activeElement, heading, "an advanced step focuses its heading");
+  const current = [...doc.querySelectorAll('#setup-adv-steps .setup-step[aria-current="step"]')];
+  assert.deepEqual(current.map((s) => s.dataset.step), ["3"], "exactly the shown step is current");
 });

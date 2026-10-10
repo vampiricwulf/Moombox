@@ -294,8 +294,8 @@ func TestLoadsFromTheStoreOnce(t *testing.T) {
 	st.rows["yt_1"] = map[string]string{"abc": "999"}
 	tr := newLifecycleTracker(st)
 
-	if id, ok := tr.messageID("yt_1", "abc"); !ok || id != "999" {
-		t.Fatalf("messageID = %q,%v — the stored id was not loaded", id, ok)
+	if id, _ := tr.messageID("yt_1", "abc"); id != "999" {
+		t.Fatalf("messageID = %q — the stored id was not loaded", id)
 	}
 	// Mutate the store behind the tracker's back: a second lookup must NOT
 	// re-read it.
@@ -314,8 +314,8 @@ func TestRecordSurvivesMissingRow(t *testing.T) {
 	tr := newLifecycleTracker(st)
 
 	tr.remember("yt_gone", "abc", "111")
-	if id, ok := tr.messageID("yt_gone", "abc"); !ok || id != "111" {
-		t.Errorf("in-memory id lost when the row write failed: %q,%v", id, ok)
+	if id, _ := tr.messageID("yt_gone", "abc"); id != "111" {
+		t.Errorf("in-memory id lost when the row write failed: %q", id)
 	}
 }
 
@@ -444,10 +444,11 @@ func TestSecondTargetKeepsHistoryAfterFirstTargetsRelease(t *testing.T) {
 // the OTHER target's terminal release takes the whole job entry — and with it
 // this target's History.
 //
-// MUTANT: remove `delete(j.closed, key)` from `remember`. Target B's
-// `finished` drops the entry although A had reopened, so A's terminal PATCH
-// renders a one-line History ("Finished") instead of the three states it saw.
-// Every other test in the suite stays green.
+// MUTANT: remove `delete(j.closed, key)` from `messageID` — the lookup every
+// create follows, so the clear `remember` used to make is made there. Target
+// B's `finished` drops the entry although A had reopened, so A's terminal
+// PATCH renders a one-line History ("Finished") instead of the three states it
+// saw.
 func TestClosedFlagClearsWhenATargetOpensANewMessage(t *testing.T) {
 	fa := newFakeDiscord(t, okCreated("MA"))
 	fb := newFakeDiscord(t, okCreated("MB"))
@@ -513,7 +514,7 @@ func TestTrackerCapsTrackedJobs(t *testing.T) {
 		t.Errorf("tracked jobs = %d, want <= %d", n, maxTrackedJobs)
 	}
 	// The newest must have survived the eviction, the oldest must not.
-	if _, ok := tr.messageID(fmt.Sprintf("yt_%d", maxTrackedJobs+99), "abc"); !ok {
+	if id, _ := tr.messageID(fmt.Sprintf("yt_%d", maxTrackedJobs+99), "abc"); id == "" {
 		t.Error("the most recently touched job was evicted")
 	}
 }
@@ -537,7 +538,7 @@ func TestNonEditableTransportFallsBack(t *testing.T) {
 	if got != 1 {
 		t.Errorf("plain sends = %d, want 1 — a non-editable transport must fall back, not drop", got)
 	}
-	if _, ok := m.tracker().messageID("yt_1", "abc"); ok {
+	if id, _ := m.tracker().messageID("yt_1", "abc"); id != "" {
 		t.Error("a fallback post must not record a message id")
 	}
 }
@@ -568,7 +569,7 @@ func TestPatch404RePostFailureForgetsTheID(t *testing.T) {
 	if err := m.dispatchOne(tgt, One("t", "d", 0, nil, SendOptions{Event: "muxing", JobID: "yt_1"}), false); err == nil {
 		t.Fatal("a refused re-POST was reported as success")
 	}
-	if id, ok := m.tracker().messageID("yt_1", targetMsgKey(f.URL())); ok {
+	if id, _ := m.tracker().messageID("yt_1", targetMsgKey(f.URL())); id != "" {
 		t.Errorf("the stale id %q is still held — the next event would PATCH a ghost", id)
 	}
 	if got := st.NotificationMsgs("yt_1")[targetMsgKey(f.URL())]; got != "STALE" {
@@ -578,7 +579,7 @@ func TestPatch404RePostFailureForgetsTheID(t *testing.T) {
 
 // TestShutdownEditIsSingleAttempt: after the queue reports it is shutting down,
 // an edit-mode lifecycle event makes exactly ONE request even against a 502 —
-// the owner's 10 s force-exit cap must not be spent on a retry ladder.
+// the owner's 15 s force-exit cap must not be spent on a retry ladder.
 func TestShutdownEditIsSingleAttempt(t *testing.T) {
 	f := newFakeDiscord(t, func(_ int, _ recordedReq, rw http.ResponseWriter) {
 		rw.WriteHeader(http.StatusBadGateway)
@@ -861,5 +862,49 @@ func TestNoStoreStillEdits(t *testing.T) {
 	}
 	if calls[0].Method != http.MethodPost || calls[1].Method != http.MethodPatch || calls[2].Method != http.MethodPatch {
 		t.Errorf("methods = %s,%s,%s — want POST,PATCH,PATCH", calls[0].Method, calls[1].Method, calls[2].Method)
+	}
+}
+
+// TestTerminalEventDoesNotRecreateAGoneMessage: a terminal event edits the
+// lifecycle message and posts its own embed, and by ruling never CREATES a
+// lifecycle message. When the operator had deleted that message mid-download,
+// the PATCH's "Unknown Message" fell through to the create path: Discord got
+// a new "Failed" lifecycle message AND the separate Job Failed embed — two
+// posts for one failure — and the stored id became a terminal-look message
+// that a later Retry would go on editing.
+//
+// Mutant: dropping the AlsoSeparate arm — the wire carries a second POST and
+// the stored id is the new message's.
+func TestTerminalEventDoesNotRecreateAGoneMessage(t *testing.T) {
+	f := newFakeDiscord(t, func(_ int, r recordedReq, rw http.ResponseWriter) {
+		if r.Method == http.MethodPatch {
+			rw.WriteHeader(http.StatusNotFound)
+			io.WriteString(rw, `{"message":"Unknown Message","code":10008}`)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusOK)
+		io.WriteString(rw, `{"id":"NEW777"}`)
+	})
+	st := newMemStore()
+	key := targetMsgKey(f.URL())
+	st.rows["yt_1"] = map[string]string{key: "STALE111"}
+	m := &Manager{logger: testLogger{}}
+	m.SetMessageStore(st)
+	tgt := notificationTarget{sender: &DiscordWebhook{URL: f.URL()}, mode: ModeEdit, msgKey: key}
+
+	if err := m.dispatchOne(tgt, One("Job Failed", "d", TypeError.Color(), nil,
+		SendOptions{Event: "error", JobID: "yt_1"}), false); err != nil {
+		t.Fatalf("dispatchOne: %v", err)
+	}
+	var seq []string
+	for _, c := range f.calls() {
+		seq = append(seq, c.Method+"?"+c.Query)
+	}
+	if len(seq) != 2 || seq[0] != http.MethodPatch+"?" || seq[1] != http.MethodPost+"?" {
+		t.Errorf("wire = %v, want the PATCH and then only the separate POST", seq)
+	}
+	if id := st.NotificationMsgs("yt_1")[key]; id == "NEW777" {
+		t.Error("the terminal event's separate post was stored as the job's lifecycle message")
 	}
 }

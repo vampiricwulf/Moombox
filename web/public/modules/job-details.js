@@ -2,7 +2,13 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, DELETE_STATUSES } from "./utils.js";
+
+/** A running trim's progress as the whole percentage its bar shows. */
+function trimPercent(progress) {
+  const n = Number(progress);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.floor(n))) : 0;
+}
 
 export class JobDetailsController {
   constructor(app) {
@@ -77,13 +83,11 @@ export class JobDetailsController {
           return;
         }
         if (e.target.closest("#details-mark-watched")) {
-          const res = await fetch(`/api/jobs/${this.app.selectedJobId}/watched`, { method: "POST" });
-          if (!res.ok) this.app.showToast("Failed to mark watched", "danger");
+          await this._setWatched(true);
           return;
         }
         if (e.target.closest("#details-mark-unwatched")) {
-          const res = await fetch(`/api/jobs/${this.app.selectedJobId}/watched`, { method: "DELETE" });
-          if (!res.ok) this.app.showToast("Failed to mark unwatched", "danger");
+          await this._setWatched(false);
           return;
         }
         const recoverBtn = e.target.closest("#details-recover-asides-btn");
@@ -101,6 +105,50 @@ export class JobDetailsController {
         }
       });
     }
+  }
+
+  /**
+   * The dialog's Mark Watched / Mark Unwatched buttons. The route answers
+   * with the updated row, and that answer is the only refresh this tab is
+   * owed: the hub never broadcasts a job_update for an archived Finished row
+   * (cmd/moombox/monitor_callbacks.go gates on jobfilter.IsArchivedAt), so
+   * with hide_finished_age_days = 0 nothing arrived and the pill, the buttons
+   * and the card's eye stayed as they were until the dialog was reopened.
+   */
+  async _setWatched(watched) {
+    const jobId = this.app.selectedJobId;
+    const failed = `Failed to mark ${watched ? "watched" : "unwatched"}`;
+    let res;
+    try {
+      res = await fetch(`/api/jobs/${jobId}/watched`, { method: watched ? "POST" : "DELETE" });
+    } catch (e) {
+      this.app.showToast(`${failed}: ${e.message}`, "danger");
+      return;
+    }
+    if (!res.ok) {
+      this.app.showToast(`${failed}: ${await serverErrorMessage(res)}`, "danger");
+      return;
+    }
+    const updated = await res.json().catch(() => null);
+    if (updated?.id) this._applyUpdatedJob(updated);
+  }
+
+  /**
+   * Apply a row the server handed back from a write to whichever list holds
+   * it, to its card, and to the dialog when it is the selected job. A raw DB
+   * row, like every WS payload, so the client-computed staging fields are
+   * carried forward the way the job_update handler carries them.
+   */
+  _applyUpdatedJob(updated) {
+    const activeIndex = this.app.jobs.findIndex(j => j.id === updated.id);
+    const list = activeIndex !== -1 ? this.app.jobs : this.app.archivedJobs;
+    const index = activeIndex !== -1 ? activeIndex : this.app.archivedJobs.findIndex(j => j.id === updated.id);
+    if (index !== -1) {
+      this._preserveStagingFields([list[index]], [updated]);
+      list[index] = updated;
+      this.app.updateJobCard(updated);
+    }
+    if (this.app.selectedJobId === updated.id) this.updateJobDetails(updated);
   }
 
   showJobDetails(job) {
@@ -133,6 +181,7 @@ export class JobDetailsController {
       job.hasSegments = enriched.hasSegments;
       job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
       job.keptChatSidecar = !!enriched.keptChatSidecar;
+      job.unmuxedParts = !!enriched.unmuxedParts;
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
         if (job.asides.length > 0) {
@@ -324,8 +373,119 @@ export class JobDetailsController {
       errorDiv.appendChild(document.createTextNode(" " + job.error));
     }
 
+    // A trim added or deleted elsewhere (the other UI, a trim that finished
+    // on the server) arrives as a job_update whose trims list moved; the
+    // section is redrawn only then, never on a progress tick.
+    this._syncTrims(job);
+
     // Update button visibility
     this.updateDetailsButtons(job);
+  }
+
+  /**
+   * The dialog's Trims section for `job`. Its own method, inside its own
+   * wrapper (#details-trims, display: contents), so a trim's result can
+   * redraw it in place without rebuilding the dialog — the embed, the logs —
+   * around it.
+   */
+  _trimsSectionHtml(job) {
+    const trims = Array.isArray(job.trims) ? job.trims : [];
+    const running = this._runningTrimsFor(job.id);
+    if (trims.length === 0 && running.length === 0) return "";
+    const esc = (v) => this.app.escapeHtml(v);
+    const rows = trims.map((trim) => {
+      const range = `${esc(this.app.formatTimestamp(trim.startTime))} - ${esc(this.app.formatTimestamp(trim.endTime))}`;
+      const duration = `${esc(Math.floor(trim.duration))}s`;
+      const size = trim.fileSize ? esc(this.app.formatBytes(trim.fileSize)) : '?';
+      return `
+              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
+                <span>
+                  <strong>${range}</strong> (${duration}, ${size})
+                </span>
+                <sl-button size="small" variant="danger" data-delete-trim data-job-id="${esc(job.id)}" data-trim-id="${esc(trim.id)}">
+                  Delete
+                </sl-button>
+              </div>
+            `;
+    }).join('');
+    // A trim the server is encoding: its range, a bar, and the percentage
+    // (updateRunningTrim moves the last two in place). Last, as the newest.
+    const runningRows = running.map((t) => {
+      const range = `${esc(this.app.formatTimestamp(t.startTime))} - ${esc(this.app.formatTimestamp(t.endTime))}`;
+      const pct = trimPercent(t.progress);
+      return `
+              <div class="trim-item trim-item-running" data-running-trim="${esc(t.id)}">
+                <span class="trim-running-range"><strong>${range}</strong> (trimming)</span>
+                <sl-progress-bar class="trim-progress" value="${pct}" label="Trimming ${range}"></sl-progress-bar>
+                <span class="trim-progress-text">${pct}%</span>
+              </div>
+            `;
+    }).join('');
+    const summary = running.length > 0
+      ? `Trims (${trims.length}, ${running.length} running)`
+      : `Trims (${trims.length})`;
+    return `
+      <sl-details summary="${esc(summary)}" open class="details-section">
+        <div class="trim-list">
+          ${rows}${runningRows}
+        </div>
+      </sl-details>
+      `;
+  }
+
+  /** The trims the server is running for jobId, oldest first. */
+  _runningTrimsFor(jobId) {
+    return Object.values(this.app.runningTrims || {})
+      .filter((t) => t.jobId === jobId)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  /**
+   * A running trim's frame. With its job's details open, the bar and the
+   * percentage move in place — a progress tick must not rebuild the list
+   * under the operator's pointer — and a trim with no row yet (its first
+   * frame) redraws the section. Another job's open details are left alone.
+   */
+  updateRunningTrim(task) {
+    if (this.app.selectedJobId !== task.jobId) return;
+    const row = [...document.querySelectorAll("#details-trims [data-running-trim]")]
+      .find((r) => r.dataset.runningTrim === task.id);
+    if (!row) {
+      const job = this.app.jobs.find((j) => j.id === task.jobId)
+        || this.app.archivedJobs.find((j) => j.id === task.jobId);
+      this._syncTrims(job);
+      return;
+    }
+    const pct = trimPercent(task.progress);
+    const bar = row.querySelector("sl-progress-bar");
+    if (bar && bar.value !== pct) bar.value = pct;
+    const text = row.querySelector(".trim-progress-text");
+    if (text && text.textContent !== `${pct}%`) text.textContent = `${pct}%`;
+  }
+
+  /**
+   * Which rows the Trims section shows, as one comparable string: the
+   * stored trims and the running ones. Progress is not in it — a tick moves
+   * a bar (updateRunningTrim), it does not redraw the list.
+   */
+  _trimsKey(job) {
+    const stored = (Array.isArray(job.trims) ? job.trims : []).map((t) => t.id).join("|");
+    const running = this._runningTrimsFor(job.id).map((t) => t.id).join("|");
+    return `${stored}#${running}`;
+  }
+
+  /**
+   * Redraw the open dialog's Trims section when it is showing `job` and what
+   * it should list has changed since it was drawn (or always, with force).
+   */
+  _syncTrims(job, { force = false } = {}) {
+    if (!job || this.app.selectedJobId !== job.id) return;
+    const wrap = document.getElementById("details-trims");
+    if (!wrap) return;
+    const key = this._trimsKey(job);
+    if (!force && wrap.dataset.trimsKey === key) return;
+    wrap.dataset.trimsKey = key;
+    wrap.innerHTML = this._trimsSectionHtml(job);
   }
 
   updateDetailsButtons(job) {
@@ -333,7 +493,11 @@ export class JobDetailsController {
     // the details view fetches staging; hide until it is known
     const canResume = canResumeJob(job, { requireKnownStaging: true });
     const canReinit = REINIT_STATUSES.has(job.status);
-    const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
+    // A Finished job is muxable only while a split part its finalize could
+    // not mux is still in staging (the server's unmuxedParts) — the same rule
+    // POST /api/jobs/{id}/mux applies.
+    const canMux = (MUX_STATUSES.has(job.status) && job.hasSegments) ||
+      (job.status === "Finished" && job.unmuxedParts === true);
     const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
@@ -360,6 +524,10 @@ export class JobDetailsController {
     );
     setDisplay("details-open-folder-btn", (hasFile || isActive) && isLocalhost);
     setDisplay("details-play-btn", hasFile);
+    // The import's placeholder url opens a YouTube page for a video that
+    // does not exist — see isImportPlaceholderId — and a row streamUrl has no
+    // page for (an imported Twitch live capture) has nothing to open.
+    setDisplay("details-open-url-btn", !isImportPlaceholderId(job.videoId) && streamUrl(job) !== "");
   }
 
   renderJobDetails(job) {
@@ -392,34 +560,52 @@ export class JobDetailsController {
     }
 
     const isTwitch = job.platform === "twitch";
-    // Extract Twitch login from URL or channelName for embed
-    const twitchLogin = isTwitch
-      ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0] : job.channelName || "").toLowerCase()
+    // The Twitch login for the embed, from the url alone: a row with no url
+    // is an imported live capture, whose channelName is no login — "Import",
+    // or a display name — and embedded that stranger's channel.
+    const twitchLogin = isTwitch && job.url
+      ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0].toLowerCase()
       : "";
     const twitchVodId = isTwitch && job.videoId.startsWith("tw_v") ? job.videoId.slice(4) : "";
+    // An imported archive with no real YouTube id carries the import's
+    // placeholder, and its url points at a video that does not exist: no
+    // embed to show and no Stream URL worth copying (Open URL is hidden by
+    // updateDetailsButtons for the same reason).
+    const isImport = isImportPlaceholderId(job.videoId);
 
     // Build embed HTML
-    let embedHtml;
-    if (isTwitch && twitchVodId) {
+    let embedHtml = "";
+    if (isImport) {
+      // nothing to embed
+    } else if (isTwitch && twitchVodId) {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.app.escapeHtml(twitchVodId)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
     } else if (isTwitch && twitchLogin) {
       embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.app.escapeHtml(twitchLogin)}&parent=${this.app.escapeHtml(window.location.hostname)}&autoplay=false&muted=true" allowfullscreen></iframe>`;
+    } else if (isTwitch) {
+      // A Twitch row with no page — never the YouTube embed below, whose
+      // id would be the Twitch stream id.
     } else {
-      embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.app.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+      // No `allow` list: YouTube's share snippet requests accelerometer,
+      // autoplay, clipboard-write, encrypted-media, gyroscope and
+      // picture-in-picture, but the page's Permissions-Policy
+      // (internal/web/middleware.go) grants none of them to another origin,
+      // so the request granted nothing and cost six console errors per open
+      // dialog. The Twitch embeds above never asked.
+      embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.app.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
     }
 
     content.innerHTML = `
-      <div class="details-top">
-        <div class="details-section">
+      <div class="details-top${embedHtml ? "" : " no-embed"}">
+        ${embedHtml ? `<div class="details-section">
           ${embedHtml}
-        </div>
+        </div>` : ""}
 
         <div class="details-section">
           <div class="details-row">
             <span class="details-label">${isTwitch ? "Stream ID:" : "Video ID:"}</span>
             <span class="details-value"><code>${this.app.escapeHtml(job.videoId)}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.app.escapeHtml(job.videoId)}"></sl-icon-button></span>
           </div>
-          ${streamUrl(job) ? `
+          ${streamUrl(job) && !isImport ? `
           <div class="details-row">
             <span class="details-label">Stream URL:</span>
             <span class="details-value"><code>${this.app.escapeHtml(streamUrl(job))}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy stream URL" data-copy="${this.app.escapeHtml(streamUrl(job))}"></sl-icon-button></span>
@@ -590,27 +776,7 @@ export class JobDetailsController {
       </div>
       ` : ""}
 
-      ${job.trims && job.trims.length > 0 ? `
-      <sl-details summary="Trims (${this.app.escapeHtml(job.trims.length)})" open class="details-section">
-        <div class="trim-list">
-          ${job.trims.map(trim => {
-            const range = `${this.app.escapeHtml(this.app.formatTimestamp(trim.startTime))} - ${this.app.escapeHtml(this.app.formatTimestamp(trim.endTime))}`;
-            const duration = `${this.app.escapeHtml(Math.floor(trim.duration))}s`;
-            const size = trim.fileSize ? this.app.escapeHtml(this.app.formatBytes(trim.fileSize)) : '?';
-            return `
-              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
-                <span>
-                  <strong>${range}</strong> (${duration}, ${size})
-                </span>
-                <sl-button size="small" variant="danger" data-delete-trim data-job-id="${this.app.escapeHtml(job.id)}" data-trim-id="${this.app.escapeHtml(trim.id)}">
-                  Delete
-                </sl-button>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </sl-details>
-      ` : ""}
+      <div id="details-trims" class="details-trims" data-trims-key="${this.app.escapeHtml(this._trimsKey(job))}">${this._trimsSectionHtml(job)}</div>
 
       ${(() => {
         const asides = Array.isArray(job.asides) ? job.asides : [];
@@ -714,7 +880,7 @@ export class JobDetailsController {
           const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
           rows += `<div class="details-row">
             <span class="details-label">Gaps:</span>
-            <span class="details-value" style="color: var(--sl-color-warning-600)">${this.app.escapeHtml(job.gaps.length)} segments${this.app.escapeHtml(detail)}</span>
+            <span class="details-value" style="color: var(--text-warning)">${this.app.escapeHtml(job.gaps.length)} segments${this.app.escapeHtml(detail)}</span>
           </div>`;
         }
         return `<div class="details-section"><strong>Media:</strong>${rows}</div>`;
@@ -816,8 +982,8 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar fields from
-   * oldJobs onto newJobs.
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts
+   * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
    * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
    */
@@ -838,6 +1004,9 @@ export class JobDetailsController {
       }
       if (job.keptChatSidecar === undefined && old.keptChatSidecar !== undefined) {
         job.keptChatSidecar = old.keptChatSidecar;
+      }
+      if (job.unmuxedParts === undefined && old.unmuxedParts !== undefined) {
+        job.unmuxedParts = old.unmuxedParts;
       }
     }
   }

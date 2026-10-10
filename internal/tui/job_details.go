@@ -13,7 +13,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -106,6 +106,15 @@ func NewJobDetailsModel() *JobDetailsModel {
 	return &JobDetailsModel{viewport: vp, progress: pb}
 }
 
+// blockWrapWidth is the width the Error and Description blocks wrap to: the
+// whole content width, the one renderRow is handed. Those lines carry no label
+// and render from column 0, so wrapping them to the value column (what they
+// used to do) left a blank labelWidth-wide strip down the right edge — at an
+// 80-column terminal a 42-column Details panel set its error text in 28.
+func (m *JobDetailsModel) blockWrapWidth() int {
+	return max(m.width-2, 1)
+}
+
 // titleValueWidth computes the available width for the title value column.
 func (m *JobDetailsModel) titleValueWidth() int {
 	valueW := max(m.width-2-labelWidth, 10)
@@ -134,7 +143,8 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 
 	// Transient view state (progress overlay, scroll position, marquee
 	// phase) resets only on a genuine job switch. SetJob is also called as
-	// a same-job re-sync whenever ANY job's display column changes — with
+	// a same-job re-sync whenever ANY job changes other than by a progress
+	// tick (hasDisplayChange) — with
 	// several active downloads, unconditional resets would blank the
 	// overlay and snap the scrolling title back to position 0 constantly.
 	if prevID != newID {
@@ -236,7 +246,7 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	// A width change (focus change, terminal resize, or the initial
 	// WindowSizeMsg arriving after jobs are already loaded) invalidates the
 	// rows themselves, not just their rendering: buildRows wraps the Error
-	// and Description blocks to the value column, so the wrap is baked into
+	// and Description blocks to the panel's width, so the wrap is baked into
 	// the row values. cycleFocus gives each panel a different share of the
 	// terminal, so this runs on every Tab press — and a re-render alone left
 	// the old wrap standing until the next rebuild, which the SetProgress
@@ -381,9 +391,10 @@ func (m *JobDetailsModel) buildRows() {
 		vidID = j.ID
 	}
 	m.addField(vidIDLabel, vidID)
-	// URL only shown if present
-	if j.URL != "" {
-		m.addFieldLink("URL", j.URL, j.URL)
+	// URL only shown if present — and never an import placeholder's, which
+	// names a video that does not exist (the dashboard hides it too).
+	if j.URL != "" && !isImportPlaceholderID(j.VideoID) {
+		m.addFieldLink("Stream URL", j.URL, j.URL) // the dashboard dialog's label
 	}
 	m.addFieldColor("Status", StatusLabel(status), StatusColor(status))
 	// VOD/Live type indicator (matching Web UI)
@@ -664,17 +675,13 @@ func (m *JobDetailsModel) buildRows() {
 		}
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: header})
-		contentW := max(m.width-2, 20)
-		valueW := contentW - labelWidth
-		if valueW < 10 {
-			valueW = contentW
-		}
-		for _, line := range wrapText(j.Error, valueW) {
+		for _, line := range wrapText(j.Error, m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: color})
 		}
 	}
 
-	// === File (J15 - label "File", truncate, gate on Filename to match TS) ===
+	// === Filename (J15 - truncate, gate on Filename to match TS; labelled as
+	// the dashboard dialog labels it) ===
 	if j.Filename != "" {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		// Build file:/// hyperlink from the full path (OutputFile) or OutputDirectory+Filename.
@@ -685,7 +692,7 @@ func (m *JobDetailsModel) buildRows() {
 			fullPath = filepath.Join(j.OutputDirectory, j.Filename)
 			fileLink = (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(fullPath)}).String()
 		}
-		m.addFieldLink("File", j.Filename, fileLink)
+		m.addFieldLink("Filename", j.Filename, fileLink)
 	}
 
 	// === Set-aside Recordings ===
@@ -722,9 +729,7 @@ func (m *JobDetailsModel) buildRows() {
 	if j.Description != "" && !m.hideDescription {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Description"})
-		// Match TS: wrap to value column width (contentWidth - 14), not full width
-		descW := max(m.width-2-labelWidth, 20)
-		for _, line := range wrapText(j.Description, descW) {
+		for _, line := range wrapText(j.Description, m.blockWrapWidth()) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
 		}
 	}
@@ -1029,7 +1034,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 			percent = m.progressOverlay.Percent
 		}
 		pctLabel := fmt.Sprintf(" %.1f%%", percent)
-		barW := min(maxW-labelWidth-runewidth.StringWidth(pctLabel), 30)
+		barW := min(maxW-labelWidth-ansi.StringWidth(pctLabel), 30)
 		if barW < 5 {
 			// Narrow fallback: plain text percentage
 			label := padRight("", labelWidth)
@@ -1092,7 +1097,7 @@ func progressGradient(status string) (color.Color, color.Color) {
 }
 
 func padRight(s string, w int) string {
-	sw := runewidth.StringWidth(s)
+	sw := ansi.StringWidth(s)
 	if sw >= w {
 		return s
 	}
@@ -1185,36 +1190,34 @@ func wrapText(text string, maxW int) []string {
 		words := strings.Fields(paragraph)
 		var line string
 		for _, word := range words {
-			// Split very long words that exceed maxW (match TS char-level break)
-			for runewidth.StringWidth(word) > maxW {
-				var prefix []rune
-				w := 0
-				for _, r := range word {
-					rw := runewidth.RuneWidth(r)
-					if w+rw > maxW {
-						break
-					}
-					prefix = append(prefix, r)
-					w += rw
+			// Split very long words that exceed maxW (match TS char-level
+			// break), in whole graphemes measured the way the renderer
+			// measures them.
+			for ansi.StringWidth(word) > maxW {
+				prefix := truncateWidth(word, maxW, "")
+				if prefix == "" {
+					// The first grapheme is wider than maxW on its own (a
+					// wide one at maxW 1): take it whole rather than loop.
+					prefix = truncateWidth(word, 2, "")
 				}
-				if len(prefix) == 0 {
-					// At least 1 rune to avoid infinite loop
-					runes := []rune(word)
-					prefix = runes[:1]
+				if prefix == "" || !strings.HasPrefix(word, prefix) {
+					// Not a clean prefix of the word (never for plain text):
+					// emit the rest as one line rather than loop.
+					prefix = word
 				}
 				if line != "" {
 					lines = append(lines, line)
 					line = ""
 				}
-				lines = append(lines, string(prefix))
-				word = string([]rune(word)[len(prefix):])
+				lines = append(lines, prefix)
+				word = word[len(prefix):]
 			}
 			if word == "" {
 				continue
 			}
 			if line == "" {
 				line = word
-			} else if runewidth.StringWidth(line+" "+word) <= maxW {
+			} else if ansi.StringWidth(line+" "+word) <= maxW {
 				line += " " + word
 			} else {
 				lines = append(lines, line)

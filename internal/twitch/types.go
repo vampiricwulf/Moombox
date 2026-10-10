@@ -178,6 +178,7 @@ type VodCommentEdge struct {
 type ChatResumeState struct {
 	MessageCount      int      `json:"messageCount"`
 	TotalCount        int      `json:"totalCount,omitempty"`
+	RollUnwritten     int      `json:"rollUnwritten,omitempty"` // IRC only: ChatDownloader.rollUnwritten
 	LastTimestampMs   int64    `json:"lastTimestampMs"`
 	LastOffsetSeconds float64  `json:"lastOffsetSeconds"`
 	Timestamp         int64    `json:"timestamp"`

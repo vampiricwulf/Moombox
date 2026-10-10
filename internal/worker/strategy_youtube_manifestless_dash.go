@@ -148,11 +148,12 @@ func DownloadManifestlessDash(
 
 	var videoStream, audioStream *DashStreamInfo
 	if videoItag != -1 {
-		videoStream = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference)
+		videoStream = SelectBestDashStream(videoStreams, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps)
 	}
 	if audioItag != -1 {
-		audioStream = SelectBestDashStream(audioStreams, audioItag, 0, false, "")
+		audioStream = SelectBestDashStream(audioStreams, audioItag, 0, false, "", false)
 	}
+	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 	if videoStream == nil && videoItag != -1 {
 		return nil, fmt.Errorf("manifestless DASH: no suitable video adaptive format")
 	}
@@ -178,7 +179,7 @@ func DownloadManifestlessDash(
 	excludedVideoItags := map[int]bool{}
 	excludedAudioItags := map[int]bool{}
 	if videoStream != nil {
-		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, videoStreams, videoStream, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedVideoItags, job.Logger)
+		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, videoStreams, videoStream, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedVideoItags, job.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("manifestless DASH: resolve video URL: %w", err)
 		}
@@ -188,7 +189,7 @@ func DownloadManifestlessDash(
 		videoStream.BaseURL = resolved
 	}
 	if audioStream != nil {
-		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, audioStreams, audioStream, audioItag, 0, false, "", routedSolver, cipherSolver, videoInfo.PlayerURL, excludedAudioItags, job.Logger)
+		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, audioStreams, audioStream, audioItag, 0, false, "", false, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedAudioItags, job.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("manifestless DASH: resolve audio URL: %w", err)
 		}
@@ -300,6 +301,7 @@ func DownloadManifestlessDash(
 		result.VideoWidth = videoStream.Width
 		result.VideoHeight = videoStream.Height
 		result.VideoFps = videoStream.FPS
+		result.VideoItag = videoStream.Itag
 		// A part that force-starts mid-stream (quality split / restart) begins
 		// at sq>0, but manifest-free DASH carries the ftyp+moov init only inline
 		// at sq=0. Point InitURL at sq=0 so the engine prepends the extracted
@@ -366,6 +368,7 @@ func DownloadManifestlessDash(
 
 	if audioStream != nil {
 		result.HasAudio = true
+		result.AudioItag = audioStream.Itag
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
 		audioInitURL := ""
 		if forceAudioSeq && audioStartSeq > 0 {

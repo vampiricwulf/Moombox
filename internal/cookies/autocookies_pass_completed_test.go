@@ -63,7 +63,7 @@ func TestNotePassCompletedWithNoHookIsSafe(t *testing.T) {
 //
 // The two, and why each is here rather than calling CheckNow itself:
 //
-//	StartPeriodicRefresh  the 30-minute browser refresh
+//	periodicTick          the 30-minute browser refresh's tick (StartPeriodicRefresh)
 //	StartProfileSeed      the one-shot import at boot, ~15 s in
 //
 // They are the only two credential-writing paths whose caller lives INSIDE this
@@ -77,7 +77,7 @@ func TestNotePassCompletedWithNoHookIsSafe(t *testing.T) {
 // PAIRED WITH TestNotePassCompletedIsGatedOnRanAtEverySite — this half proves
 // the call exists, that one proves it is still gated. Neither covers the other.
 func TestNotePassCompletedHasExactlyItsTwoWritingCallers(t *testing.T) {
-	want := []string{"StartPeriodicRefresh", "StartProfileSeed"} // sorted
+	want := []string{"StartProfileSeed", "periodicTick"} // sorted
 	got := callersOf(t, "notePassCompleted")
 
 	if len(got) == 0 {
@@ -99,11 +99,12 @@ func TestNotePassCompletedHasExactlyItsTwoWritingCallers(t *testing.T) {
 // recovery site, because deleting an `if result.Ran` leaves every behavioural
 // test green: the guarded call still happens.
 //
-// The gate is not decoration. Seven refreshDeclined() exits reach these two
+// The gate is not decoration. Eight refreshDeclined() exits reach these two
 // tails having written nothing at all — setup in progress, a refresh already in
-// flight, no browser, no profile, the service stopped — and firing the seam on
-// those spends a full in-process re-check, two validate round-trips, on a file
-// nobody touched, then logs a staleness warning that describes nothing.
+// flight, no browser, no profile, the service stopped, a profile another
+// browser holds — and firing the seam on those spends a full in-process
+// re-check, two validate round-trips, on a file nobody touched, then logs a
+// staleness warning that describes nothing.
 //
 // The mutations: `if result.Ran` → `if true` at either site; hoisting the call
 // out of the if entirely; and — the one the first version of this test let

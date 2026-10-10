@@ -61,9 +61,9 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - **Process restart** — Restart Moombox from the TUI or web dashboard when settings require it
 
 ### Integration
-- **Native PO Token generation** — Built-in BotGuard solver using [Goja](https://github.com/dop251/goja) (pure-Go JavaScript engine, no CGo or V8)
+- **Built-in PO Token generation** — BotGuard runs in an embedded Node.js + JSDOM sidecar shipped inside the binary, so no Node install is needed
 - **yt-dlp compatibility** — Built-in PO Token HTTP endpoint and bundled yt-dlp plugin
-- **YouTube cipher decryption** — Native implementation of signature and n-parameter decryption via Goja
+- **YouTube cipher decryption** — Signature and n-parameter solving through [yt-dlp/ejs](https://github.com/yt-dlp/ejs) in the same sidecar, with an in-process [Goja](https://github.com/dop251/goja) fallback for the n-parameter
 - **Discord webhook notifications** — Rich embeds for every stream and system event, with a per-target event filter
 - **Single binary** — Compiles to a single executable with embedded web assets, no external runtime dependencies
 - **Built-in FFmpeg installer** — Install FFmpeg via Chocolatey or Winget directly from the setup flow, with UAC elevation support and script review for non-admin users
@@ -78,7 +78,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - Docker (x64 or arm64 host) — FFmpeg is included in the image
 
 **Building from source:**
-- [Go](https://go.dev/dl/) 1.25 or later
+- [Go](https://go.dev/dl/) 1.27 or later
 - [FFmpeg](https://ffmpeg.org/download.html) in your PATH
 
 ## Quick Start
@@ -105,7 +105,7 @@ chmod +x moombox-linux-arm64
 ./moombox-linux-arm64
 ```
 
-A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **W** to open the web dashboard in your browser.
+A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **O** then **W** (`O W`) to open the web dashboard in your browser.
 
 ### Docker (x64 / arm64)
 
@@ -199,15 +199,50 @@ bridge network and never look like loopback. In both cases the dashboard
 has no password and needs none — the IP filter is the boundary, and
 loopback/private clients always skip authentication.
 
+On `localhost` and `lan`, open the dashboard by **IP address or
+`localhost`**, not by a hostname: a name the server cannot vouch for is
+refused, which is what stops a malicious web page from reaching the
+dashboard through DNS rebinding. (A TLS certificate whose names include
+the hostname lifts this for that name.) On `external` and `public` the
+same holds for clients on this machine or your LAN — the ones that skip
+the password — with the host of `network.public_url` admitted as well.
+
+On `localhost` and `lan` the dashboard also trusts only pages served on
+**its own port**: a page another program serves from the same address
+on a different port (a dev server on `127.0.0.1:3000`, a router's admin
+page) cannot drive it. An address with no port means its scheme's
+default, so `http://` is port 80 and `https://` is 443. A reverse proxy
+keeps working when the port the browser used reaches Moombox — in the
+`Host` it forwards, or in `X-Forwarded-Host` when the proxy is listed
+in `trusted_proxies`. nginx's `$host` drops the port: forward
+`$http_host` (or `$host:$server_port`) instead. Caddy and Traefik
+forward the browser's own `Host` by default. A proxy terminating TLS on
+443 forwards no port at all, so Moombox must also learn that the browser
+used HTTPS: list the proxy in `trusted_proxies` or turn on
+`trust_forwarded_proto`. Otherwise set `network.public_url` to the
+address you type into the browser, whose port is admitted as well.
+
 To reach the dashboard from outside that boundary, pick one of these —
 strongest first.
 
-### 1. VPN / Tailscale (recommended)
+### 1. VPN (recommended)
 
-Put the host on a tailnet or WireGuard network and change nothing in
-Moombox. VPN clients arrive with private addresses, so they pass the
+Put the host on a WireGuard (or similar) network that hands out private
+addresses (`10.x`, `172.16–31.x`, `192.168.x`) and change nothing in
+Moombox. VPN clients arrive with those addresses, so they pass the
 `lan` filter as if they were on the LAN. No open ports, no password to
 manage, and network membership is the authentication.
+
+**Tailscale works the same way.** Its `100.x.y.z` addresses come from
+the carrier-grade-NAT range (`100.64.0.0/10`), which the `lan` filter
+treats as private, so tailnet clients pass it and can open the dashboard
+at the host's `100.x.y.z` address. That trust is `lan`-only: the same
+range is what some ISPs hand their customers, so if the Moombox host
+itself sits behind such an ISP's NAT, its other customers could reach it
+under `lan` too. If that applies, let only the tailnet interface reach
+the port with a host firewall — Tailscale's own ACLs cannot see traffic
+that never entered the tailnet. Under `external`/`public` a `100.x.y.z`
+client is treated as an internet client and is asked for the password.
 
 ### 2. Reverse proxy with HTTPS
 
@@ -218,6 +253,7 @@ Terminate TLS at nginx/Caddy/Traefik and forward to Moombox. In
 network_access = "external"
 trusted_proxies = ["172.18.0.2"]  # the proxy's address — as narrow as possible
 trust_forwarded_proto = true      # proxy terminates TLS; Moombox sees plain HTTP
+public_url = "https://moombox.example.com"  # the address browsers type
 ```
 
 `trusted_proxies` is what makes this safe. Without it every forwarded
@@ -264,6 +300,17 @@ Note that `network_access` must be `external`/`public` here, not `lan`.
 Once `trusted_proxies` resolves the real client, that client is an
 internet address — the `lan` filter would 403 it, which is the whole
 point of resolving it.
+
+`public_url` is for the clients on your own network. A browser on this
+machine or the LAN that reaches the proxy by its public name (split DNS,
+or hairpin NAT) still arrives with a private address, so it skips the
+password — and is therefore held to the host rule in
+[Remote Access](#remote-access): the name it used must be the host of
+`network.public_url`, or a name on a certificate Moombox itself serves,
+which a TLS-terminating proxy leaves it without. Leave `public_url` unset
+and those browsers get `403 unrecognized host` while internet clients
+get in. It also makes notification embeds link to the dashboard (see
+[Mentions and dashboard links](#mentions-and-dashboard-links)).
 
 Then choose where authentication happens:
 
@@ -335,9 +382,7 @@ authenticating proxy keeps working.
   *private IPv4* address, making an internet IPv6 client look like a LAN
   client to the `lan` filter. The practical effect is that IPv6
   connections are refused at the container rather than misclassified:
-  **reach the dashboard over the host's IPv4 address.** A hostname with
-  an AAAA record generally still works, since browsers fall back to IPv4
-  after the refusal. This relies on Docker Engine 27+, where ip6tables is
+  **reach the dashboard over the host's IPv4 address.** This relies on Docker Engine 27+, where ip6tables is
   enabled by default; on older engines the misclassification remains and
   nothing in Moombox can detect it. Publishing as `0.0.0.0:774:774` stops
   the port accepting IPv6 in the first place. See the comments in
@@ -352,24 +397,26 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 
 ### Key Settings
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `port` | `774` | Web dashboard port |
-| `network_access` | `"localhost"` | `"localhost"`, `"lan"`, `"external"`, or `"public"` — `"public"` behaves like `"external"` and is only settable in `config.toml` ([Remote Access](#remote-access)) |
-| `trusted_proxies` | `[]` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
-| `log_level` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
-| `downloader.max_video_resolution` | `2160` | Cap on the SHORTER frame edge (so `2160` is 4K in either orientation); picks the largest rendition at or below it, else the closest above; `0` = unbounded |
-| `cookies.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
-| `downloader.download_chat` | `true` | Download live chat alongside streams |
-| `downloader.prefer_60fps` | `true` | Prefer 60fps when same resolution available |
-| `downloader.num_parallel_downloads` | `10` | Simultaneous download jobs |
-| `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
-| `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
-| `twitch_check_interval` | `15` | Seconds between Twitch GQL live-status checks (with jitter) |
-| `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
-| `memory.go_soft_limit_mb` | `256` | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
-| `memory.sidecar_soft_limit_mb` | `200` | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
-| `memory.sidecar_hard_limit_mb` | `512` | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
+| Setting | Default | Restart? | Description |
+|---------|---------|----------|-------------|
+| `port` | `774` | Yes | Web dashboard port |
+| `network_access` | `"localhost"` | Bind only | `"localhost"`, `"lan"`, `"external"`, or `"public"` — `"public"` behaves like `"external"` and is only settable in `config.toml` ([Remote Access](#remote-access)) |
+| `trusted_proxies` | `[]` | No | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored ([Remote Access](#remote-access)) |
+| `log_level` | `"INFO"` | No | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
+| `downloader.max_video_resolution` | `2160` | No | Cap on the SHORTER frame edge (so `2160` is 4K in either orientation); picks the largest rendition at or below it, else the closest above; `0` = unbounded |
+| `cookies.cookie_file` | `"./cookies.txt"` | Yes | Netscape-format cookie file |
+| `downloader.download_chat` | `true` | No | Download live chat alongside streams |
+| `downloader.prefer_60fps` | `true` | No | Prefer 60fps when same resolution available |
+| `downloader.num_parallel_downloads` | `10` | No | Simultaneous download jobs |
+| `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | No | Output path template |
+| `feed_check_interval` | `10` | No | Minutes between RSS feed checks (also accepts `"10m"`) |
+| `twitch_check_interval` | `15` | No | Seconds between Twitch GQL live-status checks (with jitter) |
+| `monitors.hide_finished_age_days` | `30` | No | Days before finished jobs move to Archived (also accepts `"30d"`) |
+| `memory.go_soft_limit_mb` | `256` | No | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
+| `memory.sidecar_soft_limit_mb` | `200` | No | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
+| `memory.sidecar_hard_limit_mb` | `512` | Yes | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
+
+"Restart?" is whether a change waits for a restart. `network_access` decides who is admitted as soon as it is saved; only moving off `localhost` needs the restart, to listen on the network. Settings marked "No" apply when saved — the downloader ones to jobs that start afterwards.
 
 ### Channel Monitoring
 
@@ -387,7 +434,7 @@ enabled = true                        # Toggle monitoring on/off (default: true)
 id = "channelname"                    # Twitch login name
 name = "Channel Name"
 platform = "twitch"                   # Required for Twitch channels
-quality_preference = "best"            # "best", "720p", "480p", or "audio_only"
+quality_preference = "best"            # Optional, any channel: "best", "1080p60", "720p", "audio_only", ...
 ```
 
 Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
@@ -442,6 +489,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | O C | Copy stream URL to clipboard |
 | O F | Open output/staging folder |
 | O G | Open GitHub page |
+| O L | Open the selected job's own log (live; scroll, PgUp/PgDn, / search with n/N, Esc closes) |
 | O S | Open stream page in browser |
 | O W | Open web dashboard |
 
@@ -459,7 +507,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | Key | Action |
 |-----|--------|
 | F | Cycle status filter (All/Active/Issues/Finished) |
-| / | Filter jobs (Tasks) / search (Logs) — status:active channel:"name" -platform:twitch. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs) |
+| / | Filter jobs (Tasks) / search (Logs, Job Log) — status:active channel:"name" -platform:twitch. Free text is a case-insensitive substring of the title, channel name or video ID (both UIs) |
 | Esc | Clear the active filter — text and status together (Tasks) |
 | M | Open action menu |
 | Q Q | Quit |
@@ -469,7 +517,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | ? | Toggle help overlay |
 | c | Clear log view (log panel focused) |
 
-**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs), Ctrl+U/Ctrl+D for a half page (Details, Logs), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
+**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
 
 ### Add Video Dialog
 
@@ -477,7 +525,7 @@ Press **A A** to open the Add Video dialog. By default it's in quick-add mode �
 
 - **Quick Add** — Paste a YouTube or Twitch URL and press Enter
 - **Advanced** — 5-step wizard: URL, Video Format, Audio Format, Timestamps, Confirm
-- **Import** — Upload a `.zip` archive with video + optional chat JSON
+- **Import** — Upload a `.zip` archive holding one recording (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it
 
 ## Web Dashboard
 
@@ -491,7 +539,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
   - Sidebar chat panel with auto-scroll and search (togglable); click a timestamp to jump the video to 3 s before that message
   - Super Chat and membership cards, Twitch sub/raid notices (other Twitch events as dimmer ones) and cheer chips in the sidebar; emoji support
   - Multi-segment playback with cross-segment seeking for quality-split recordings
-- **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback in the Player tab
+- **Imports tab** — Upload `.zip` archives holding one recording each (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it, for playback in the Player tab. YouTube and Moombox Twitch archives are both recognised; re-importing an archive whose files are still in `output/imports/` re-adopts identical files and never overwrites a different one
 - **Stats tab** — Disk usage, archive size, platform breakdown, job counts, and recent activity
 - **Logs tab** — Live log viewer
 - **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
@@ -514,7 +562,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
 | POST | `/api/jobs/{id}/retry` | Retry failed job |
 | DELETE | `/api/jobs/{id}` | Delete job |
-| POST | `/api/jobs/{id}/trims` | Create trimmed clip |
+| POST | `/api/jobs/{id}/trims` | Start a trimmed clip — answers 202 at once; the encode runs on the server, and its progress and result arrive as `trim_status` WebSocket messages |
 | POST | `/api/import` | Import zip archive |
 | GET | `/api/config` | Get configuration |
 | PUT | `/api/config` | Update configuration |
@@ -530,7 +578,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/stats` | Get download statistics |
 | GET | `/api/logs` | Get recent log lines (from the in-memory ring buffer) |
 
-WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `pong`
+WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `trim_status`, `pong`
 
 ## yt-dlp Integration
 
@@ -695,6 +743,11 @@ list of event keys, and what each one fires on, is the event table in
 both settings UIs offer the same list as toggles — chips in the web dashboard,
 checkboxes in the TUI — so you rarely need to write one by hand.
 
+An alert that has an all-clear — disk space, the BotGuard sidecar, a channel
+that stopped answering, an authentication failure — remembers that it is open
+in `open-alerts.json` beside the database, so a restart in between does not
+swallow the "recovered" message: the first healthy check after it sends it.
+
 ### Mentions and dashboard links
 
 `mention` pings alongside the events a target is configured for — embeds can't mention on their
@@ -704,7 +757,10 @@ which events carry it; leave it unset for the default six (`error`, `auth`,
 to `[]` for a mention that never fires. Set `network.public_url` to your
 dashboard's externally reachable address and a job embed's title links
 straight to that job (`{public_url}/#job=<id>`) instead of the platform page,
-which moves to the channel/author line. See
+which moves to the channel/author line. The dashboard also trusts that
+address as its own (see [Remote Access](#remote-access)): on `localhost`
+and `lan` a page on its port may drive the dashboard, so name the port
+you actually use. See
 [docs/spec/operations.md](docs/spec/operations.md#target-options) for the
 full rules.
 
@@ -729,11 +785,13 @@ behaviour.
 Upcoming -> Live -> Downloading -> Muxing -> Finished
 ```
 
-Special states: `Error`, `Cancelled`, `COOKIES?` (member content needs cookie refresh)
+A backlog VOD (found by a channel's history scan) waits in `Queued` until the channel's archive slots admit it to `Upcoming`; live and newly published content never waits there. Nothing is admitted once the output drive reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
+
+Special states: `Error`, `Cancelled`, `COOKIES?` (credentials needed — cookies expired or missing, a sign-in wall, or a membership the account does not hold; resumes on its own once the credentials check out, or for a membership refusal once the cookie file carries a different account)
 
 ## Architecture
 
-Moombox is a Go application (~37,000 lines) compiled to a single binary. All code lives under `internal/` with web assets embedded via `go:embed`.
+Moombox is a Go application (~140,000 lines, not counting tests) compiled to a single binary. All code lives under `internal/` with web assets embedded via `go:embed`.
 
 ```
 Monitors (RSS/DECAPI/Twitch) -> Job Database (SQLite) -> Download Worker -> YouTube/Twitch API
@@ -744,9 +802,9 @@ Monitors (RSS/DECAPI/Twitch) -> Job Database (SQLite) -> Download Worker -> YouT
 ```
 
 Key components:
-- **YouTube engine** — Multi-client Innertube API strategy. Cipher (sig + n) and BotGuard PO Token solving primarily flow through an embedded Node + V8 sidecar that wraps [yt-dlp/ejs](https://github.com/yt-dlp/ejs) (vendored, public-domain) and [bgutils-js](https://github.com/LuanRT/BgUtils). An in-process [Goja](https://github.com/dop251/goja) implementation serves as a fallback when the sidecar is disabled or down.
+- **YouTube engine** — Multi-client Innertube API strategy. Cipher (sig + n) and BotGuard PO Token solving primarily flow through an embedded Node + V8 sidecar that wraps [yt-dlp/ejs](https://github.com/yt-dlp/ejs) (vendored, public-domain) and [bgutils-js](https://github.com/LuanRT/BgUtils). An in-process [Goja](https://github.com/dop251/goja) implementation still solves the n-parameter when the sidecar is disabled or down; PO tokens and signature solving need the sidecar.
 - **Twitch engine** — GQL-based stream metadata, HLS segment downloading, IRC live chat, and VOD chat replay
-- **Download pipeline** — SegmentDownloader with parallel catch-up mode (6 concurrent segments), head sequence tracking, resume state, and gap detection
+- **Download pipeline** — SegmentDownloader with parallel catch-up mode (a `segment_workers` pool, 12 by default), head sequence tracking, resume state, and gap detection
 - **Chat system** — YouTube live chat polling + Twitch IRC with memory bounding, stale continuation recovery, and replay support
 - **Database** — SQLite with WAL mode, batch updates, and pub/sub for real-time UI updates
 - **Web server** — [chi](https://github.com/go-chi/chi) router with WebSocket real-time updates, CORS, CSP, rate limiting, password auth, and IP-based access control

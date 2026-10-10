@@ -20,6 +20,12 @@ type Monitor struct {
 	// HTTP-caller goroutines — resets it.
 	offlinePolls atomic.Int32
 	mu           sync.Mutex
+	// transitionMu serialises transitions, fan-out included: the Swap alone
+	// ordered the flag but not the callbacks, so a ReportSuccess on an HTTP
+	// goroutine could finish delivering "online" before the poll goroutine's
+	// earlier "offline" reached the same subscribers — who then kept
+	// "offline" while IsOnline() said true, until the next real flap.
+	transitionMu sync.Mutex
 	callbacks    map[uint64]func(online bool)
 	nextID       uint64
 	cancel       context.CancelFunc
@@ -87,8 +93,12 @@ func (m *Monitor) Start(ctx context.Context) {
 	// the first tick fires 5 seconds later. Without this, a machine that boots
 	// with no network will report online=true for up to 5 seconds.
 	if !m.checkFn() {
-		m.offlinePolls.Store(2) // skip the debounce — we already know we are offline
-		m.poll()
+		// Straight to offline: poll() would probe AGAIN, and on a dead
+		// network the probe only returns after probeRaceTimeout, so an
+		// offline boot paid the race twice on the startup path. Its only
+		// other input, the passive tracker, is empty this early.
+		m.offlinePolls.Store(2)
+		m.transition(false)
 	}
 
 	go func() {
@@ -133,10 +143,13 @@ func (m *Monitor) SetProbeTargets(targets []string) {
 // online↔offline. Returns an unsubscribe function.
 //
 // **Latency / serialisation:** callbacks fire serially in the goroutine that
-// detected the transition (typically the polling goroutine). A slow callback
-// blocks every subsequent subscriber AND delays the next poll. Keep handlers
-// short-running; if any work might block, hand off to a goroutine inside the
-// callback. Audit reports/small-packages.md.
+// detected the transition (typically the polling goroutine), and transitions
+// are delivered in order: one transition's fan-out finishes before the next
+// one's starts. A slow callback blocks every subsequent subscriber, the next
+// poll AND the next transition. Keep handlers short-running; if any work might
+// block, hand off to a goroutine inside the callback. A callback must not call
+// ReportSuccess/ReportFailure synchronously — it would wait on itself. Audit
+// reports/small-packages.md.
 func (m *Monitor) OnStateChange(fn func(online bool)) func() {
 	m.mu.Lock()
 	id := m.nextID
@@ -201,6 +214,8 @@ func (m *Monitor) poll() {
 }
 
 func (m *Monitor) transition(online bool) {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
 	old := m.online.Swap(online)
 	if old == online {
 		return

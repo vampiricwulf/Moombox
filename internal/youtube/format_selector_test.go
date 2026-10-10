@@ -265,7 +265,7 @@ func TestScoreAudioCodec(t *testing.T) {
 		want  int
 	}{
 		{"opus", 4},
-		{"mp4a.40.5", 3},
+		{"mp4a.40.5", 2},
 		{"mp4a.40.2", 2},
 		{"mp4a.40.1", 1},
 		{"unknown", 0},
@@ -428,5 +428,23 @@ func TestFormatCapDimension(t *testing.T) {
 	heightOnly := Format{Height: new(720)}
 	if got := heightOnly.CapDimension(); got != 720 {
 		t.Errorf("CapDimension() = %d for a height-only format, want 720", got)
+	}
+}
+
+// TestSelectBestAudioTakesAACLCOverHEAAC: with no Opus in the pool, the
+// selector took itag 139 (HE-AAC, 48 kbps) over itag 140 (AAC-LC, 128 kbps),
+// because it scored mp4a.40.5 above mp4a.40.2 and codec outranks bitrate.
+// yt-dlp ranks both as mp4a and picks 140.
+//
+// Mutant: score mp4a.40.5 above mp4a.40.2 again — itag 139 is chosen.
+func TestSelectBestAudioTakesAACLCOverHEAAC(t *testing.T) {
+	formats := []Format{
+		{Itag: 137, MimeType: `video/mp4; codecs="avc1.640028"`, Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://x/v"},
+		{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 129000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://x/lc"},
+		{Itag: 139, MimeType: `audio/mp4; codecs="mp4a.40.5"`, Bitrate: 48000, AudioQuality: "AUDIO_QUALITY_LOW", URL: "https://x/he"},
+	}
+	result := SelectBestFormats(formats, 1920, true)
+	if result.Audio == nil || result.Audio.Itag != 140 {
+		t.Fatalf("expected itag 140 (AAC-LC, 128 kbps), got %v", result.Audio)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -147,6 +148,132 @@ func TestVerifyMuxedDurationNamesTheNumbers(t *testing.T) {
 
 	if err := o.verifyMuxedDuration(context.Background(), "j1", 89, input, ""); err != nil {
 		t.Errorf("verifyMuxedDuration(output=89s, input=90s) = %v, want nil (within tolerance)", err)
+	}
+}
+
+// TestSpanSecTakesTheStartOffAFragmentedMovOnly pins how an input's length is
+// measured for the shortfall check. The mov demuxer reports a fragmented MP4's
+// duration as the end timestamp of its last fragment — start included — so a
+// DASH part that began 208 s into the broadcast probes as (start 208,
+// duration 298) for 90 s of media. The MPEG-TS demuxer estimates duration as
+// last minus first, so its duration already is the span and its start (hours,
+// for a Twitch capture joined mid-broadcast) must stay out of the sum.
+//
+// Mutants, one per row:
+//   - returning DurationSec unconditionally: the first row reads 298.
+//   - subtracting for every container: the mpegts row reads negative, and
+//     the check is silently disabled for every long Twitch recording.
+//   - subtracting a negative start: AAC priming inflates the span.
+func TestSpanSecTakesTheStartOffAFragmentedMovOnly(t *testing.T) {
+	const mov = "mov,mp4,m4a,3gp,3g2,mj2"
+	for _, tc := range []struct {
+		name  string
+		probe *ffprobeData
+		want  float64
+	}{
+		{"fragmented mov part that began at 208 s", &ffprobeData{FormatName: mov, StartSec: 208, DurationSec: 298}, 90},
+		{"mov from the start of the broadcast", &ffprobeData{FormatName: mov, StartSec: 0, DurationSec: 90}, 90},
+		{"mpegts keeps its estimated span", &ffprobeData{FormatName: "mpegts", StartSec: 209.4, DurationSec: 90}, 90},
+		{"negative start (priming) is left alone", &ffprobeData{FormatName: mov, StartSec: -0.046, DurationSec: 90}, 90},
+		{"unknown container", &ffprobeData{FormatName: "", StartSec: 100, DurationSec: 300}, 300},
+		{"nil probe", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.probe.spanSec(); got != tc.want {
+				t.Errorf("spanSec() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyMuxedDurationMeasuresAnOffsetInputBySpan is the field failure
+// against a REAL ffprobe: part 2 of a YouTube quality split began 208 s into
+// the broadcast, its 7668 s probed as duration 7876, and a whole copy was
+// rejected as "208s missing" — at finalize, again by segment recovery, and it
+// would have been again by the Mux action the error recommended. A whole copy
+// of such an input must pass, a genuinely short one must still fail naming
+// the span, and an MPEG-TS input with the same offset must keep its full
+// protection (its probed duration is already the span).
+//
+// Mutants:
+//   - comparing probe.DurationSec: the fragmented 90 s input reads 298 and a
+//     whole 90 s copy is rejected.
+//   - subtracting start_time for every container: the mpegts input's span
+//     goes negative, the floor skips it, and a 5 s copy of 90 s passes.
+func TestVerifyMuxedDurationMeasuresAnOffsetInputBySpan(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	dir := t.TempDir()
+	o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	frag := filepath.Join(dir, "video_stream")
+	writeOffsetFragmentFixture(t, ffmpegPath, frag, 90, 208)
+	if p := o.runFFprobe(ctx, frag); p == nil || p.StartSec < 200 || p.DurationSec < 290 {
+		t.Fatalf("fragment fixture probed as %+v — the offset did not take, and the test would pass vacuously", p)
+	}
+
+	if err := o.verifyMuxedDuration(ctx, "j1", 90, frag, ""); err != nil {
+		t.Errorf("a whole 90 s copy of a part that began at 208 s was rejected: %v", err)
+	}
+	err := o.verifyMuxedDuration(ctx, "j1", 5, frag, "")
+	if err == nil {
+		t.Fatal("a 5 s copy of a 90 s part passed — the shortfall check is gone, not corrected")
+	}
+	if !strings.Contains(err.Error(), "90") || strings.Contains(err.Error(), "298") {
+		t.Errorf("shortfall error %q should name the 90 s span, not the 298 s end timestamp", err)
+	}
+
+	ts := filepath.Join(dir, "video.ts")
+	writeOffsetTSFixture(t, ffmpegPath, ts, 90, 208)
+	if p := o.runFFprobe(ctx, ts); p == nil || p.StartSec < 200 {
+		t.Fatalf("mpegts fixture probed as %+v — the offset did not take", p)
+	}
+	if err := o.verifyMuxedDuration(ctx, "j1", 90, ts, ""); err != nil {
+		t.Errorf("a whole 90 s copy of an mpegts input starting at 208 s was rejected: %v", err)
+	}
+	if err := o.verifyMuxedDuration(ctx, "j1", 5, ts, ""); err == nil {
+		t.Error("a 5 s copy of a 90 s mpegts input passed — the start was taken off a span that never included it")
+	}
+}
+
+// TestLaterPartOfASplitMuxes drives the field failure through the part path
+// itself: a seg_1 recording that begins at 208 s of the broadcast must come
+// out of muxSegment as a persisted part of its real length, not as a
+// shortfall error that leaves it in staging.
+//
+// Mutant: measuring the input by its probed duration — muxSegment discards
+// the part and returns "208s missing".
+func TestLaterPartOfASplitMuxes(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-offset-part")
+	segDir := filepath.Join(staging, "seg_1")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	media := filepath.Join(segDir, "video_stream")
+	writeOffsetFragmentFixture(t, ffmpegPath, media, 90, 208)
+
+	job, _ := db.GetJob("j-offset-part")
+	jobCtx := w.buildJobContext(job)
+	seg, err := w.orchestrator.muxSegment(context.Background(), jobCtx, 1, 0, time.Now().Unix(),
+		QualityInfo{Label: "1080p"}, &DownloadResult{HasVideo: true, VideoPath: media})
+	if err != nil {
+		t.Fatalf("muxSegment on a part that began at 208 s = %v, want a muxed part — the copy carried all of it", err)
+	}
+	if seg == nil {
+		t.Fatal("muxSegment returned no segment for a whole copy")
+	}
+	if d := seg.DurationSeconds - 90; d < -2 || d > 2 {
+		t.Errorf("part duration = %.1fs, want ~90s", seg.DurationSeconds)
+	}
+	if left := mp4sIn(t, outputDir); len(left) != 1 {
+		t.Errorf("output dir holds %v, want the one part file", left)
+	}
+	if rows, _ := db.GetSegments("j-offset-part"); len(rows) != 1 || rows[0].SegmentIndex != 1 {
+		t.Errorf("segment rows = %+v, want one row at index 1", rows)
 	}
 }
 
@@ -490,6 +617,109 @@ func TestRestartMuxCancelledByStopLeavesTheRowResumable(t *testing.T) {
 	}
 }
 
+// TestOffQueueMuxHonoursTheOperatorsCancel: both UIs offer Cancel on a
+// Muxing row and the route writes Cancelled, but queue.Cancel only reaches
+// jobs the queue dequeued — the off-queue mux (/mux, A M, the boot re-mux)
+// ran on regardless, wrote Finished over the Cancelled row and announced
+// "Download Finished" after "Job Cancelled". The mux now listens for the
+// row's Cancelled itself. Driven through the download-slot wait so the
+// cancel lands deterministically before FFmpeg starts.
+//
+// Mutant: drop the OnJobUpdate listener and the row check from MuxJob —
+// once the slot frees, the mux runs and the row reads Finished.
+func TestOffQueueMuxHonoursTheOperatorsCancel(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	w.SetParallelDownloads(1)
+
+	staging, _ := muxFixtureJob(t, w, db, "j-usercancel")
+	writeMuxFixture(t, ffmpegPath, filepath.Join(staging, "video.mp4"), 90)
+
+	if !w.queue.AcquireDownloadSlot(context.Background(), "holder") {
+		t.Fatal("could not take the only download slot")
+	}
+	if err := w.MuxJob("j-usercancel"); err != nil {
+		t.Fatalf("MuxJob: %v", err)
+	}
+	// What the cancel route writes for a Muxing row the queue does not know.
+	db.UpdateJobFields("j-usercancel", map[string]any{"status": database.StatusCancelled})
+	w.queue.ReleaseDownloadSlot("holder")
+	w.Stop()
+
+	fresh, _ := db.GetJob("j-usercancel")
+	if fresh == nil || fresh.Status != database.StatusCancelled {
+		t.Fatalf("job after a cancelled off-queue mux = %v, want Cancelled (error=%q)", statusOf(fresh), errorOf(fresh))
+	}
+	if _, err := os.Stat(filepath.Join(staging, "video.mp4")); err != nil {
+		t.Errorf("staging media was removed by a cancelled mux: %v", err)
+	}
+}
+
+// TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing: an operator's Cancel
+// stops the off-queue mux's FFmpeg, and the mux then wrote Cancelled over
+// whatever the row held by the time it looked — read, then written
+// unconditionally — so the write meant for a row the mux's own Muxing write
+// had stranded also turned a Finished archive a racing mux wrote back into
+// Cancelled, and an operator's Resume of the cancelled row into a second
+// Cancel. The write now applies only to the row it exists for: one still
+// Muxing. The stand-in FFmpeg holds the mux open, and the row moves on ahead
+// of the mux's own listener, so the mux reads it after the move.
+//
+// Mutants: write the Cancelled with UpdateJobFields — the Finished archive
+// and the resumed row turn Cancelled; with UpdateJobFieldsUnlessTerminal —
+// the resumed row does; drop the write — the stranded row is left Muxing
+// with nothing running it.
+func TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in FFmpeg is a shell script")
+	}
+	for _, tc := range []struct {
+		name   string
+		landed database.JobStatus // what reaches the row after the route's Cancelled
+		want   database.JobStatus
+	}{
+		{"the mux's own Muxing write", database.StatusMuxing, database.StatusCancelled},
+		{"a racing mux's Finished", database.StatusFinished, database.StatusFinished},
+		{"the operator's Resume", database.StatusUpcoming, database.StatusUpcoming},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			const id = "j-cancel-landed"
+			staging, _ := muxFixtureJob(t, w, db, id)
+			if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("staged"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gates := t.TempDir()
+			started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
+			w.orchestrator.SetFfmpegPath(writeBlockingFFmpeg(t, started, release))
+			defer os.WriteFile(release, nil, 0o644) // a mux the cancel missed ends anyway
+
+			// Registered ahead of the mux's own listener, so it runs first:
+			// the mux hears the Cancelled with the row already moved on. Once
+			// only — the mux's own Cancelled must not set it off again.
+			var once sync.Once
+			unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+				if j.ID == id && j.Status == database.StatusCancelled {
+					once.Do(func() { db.UpdateJobFields(id, map[string]any{"status": tc.landed}) })
+				}
+			})
+			defer unsubscribe()
+
+			if err := w.MuxJob(id); err != nil {
+				t.Fatalf("MuxJob: %v", err)
+			}
+			waitForFile(t, started)
+			db.UpdateJobFields(id, map[string]any{"status": database.StatusCancelled}) // the cancel route's write
+			w.wg.Wait()                                                                // the mux has returned
+
+			if row, _ := db.GetJob(id); statusOf(row) != tc.want {
+				t.Errorf("status = %s after a cancelled mux found the row %s, want %s", statusOf(row), tc.landed, tc.want)
+			}
+		})
+	}
+}
+
 // TestIsStagedRestartPath pins the engine predicate package worker keys on: a
 // recording the no-truncate guard set aside is <file>.restart-<unix ts>, and
 // its resume sidecar shares that stem.
@@ -552,16 +782,15 @@ func TestRestartSiblingStem(t *testing.T) {
 	}
 }
 
-// TestStagedRecordingPartsOrdersAsidesFirst pins extra item (d): the engine
+// TestStagedRestartAsidesInRecordingOrder pins extra item (d): the engine
 // leaves a recording it could not resume beside the fresh one as
-// <file>.restart-<ts>, and the part list a staging dir yields is those asides
-// in recording order followed by the live recording — with the sidecar twin
-// excluded, since muxing a JSON file is not a recovery.
+// <file>.restart-<ts>, and the asides a staging dir yields come in recording
+// order — without the live recording, and with the sidecar twin excluded,
+// since muxing a JSON file is not a recovery.
 //
-// Mutants: ignoring the aside (the part list is just the live recording, and
-// the set-aside footage is invisible to every consumer), or treating the
-// .resume.json twin as a part.
-func TestStagedRecordingPartsOrdersAsidesFirst(t *testing.T) {
+// Mutants: ignoring the asides (the set-aside footage is invisible to every
+// consumer), or treating the .resume.json twin as one.
+func TestStagedRestartAsidesInRecordingOrder(t *testing.T) {
 	dir := t.TempDir()
 	live := filepath.Join(dir, "video.mp4")
 	aside := filepath.Join(dir, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
@@ -572,14 +801,14 @@ func TestStagedRecordingPartsOrdersAsidesFirst(t *testing.T) {
 		}
 	}
 
-	got := stagedRecordingParts(dir)
-	want := []string{older, aside, live}
+	got := stagedRestartAsides(dir)
+	want := []string{older, aside}
 	if len(got) != len(want) {
-		t.Fatalf("stagedRecordingParts = %v, want %v", got, want)
+		t.Fatalf("stagedRestartAsides = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("stagedRecordingParts = %v, want %v (recording order: asides oldest first, then the live recording)", got, want)
+			t.Fatalf("stagedRestartAsides = %v, want %v (recording order: oldest first)", got, want)
 		}
 	}
 }
@@ -846,6 +1075,44 @@ func writeMuxFixture(t *testing.T, ffmpegPath, path string, seconds int) {
 	}
 }
 
+// writeOffsetFragmentFixture renders seconds of video as a FRAGMENTED MP4
+// whose first fragment sits at offsetSec on its timeline — the shape of a
+// DASH staging file for a part that began after a split or a restart. The
+// mov demuxer probes it with the offset folded into its duration
+// (start_time=offsetSec, duration=offsetSec+seconds). No extension is
+// needed: the format is forced, as it is for a `video_stream`.
+//
+// frag_discont keeps the first tfdt at the packet's own timestamp instead of
+// rebasing the track to zero, and avoid_negative_ts=disabled stops the CLI
+// from shifting the offset back out on the way in.
+func writeOffsetFragmentFixture(t *testing.T, ffmpegPath, path string, seconds, offsetSec int) {
+	t.Helper()
+	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
+		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds),
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+		"-output_ts_offset", fmt.Sprint(offsetSec), "-avoid_negative_ts", "disabled",
+		"-movflags", "+frag_keyframe+empty_moov+default_base_moof+frag_discont",
+		"-f", "mp4", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate offset fragment fixture %s: %v\n%s", path, err, out)
+	}
+}
+
+// writeOffsetTSFixture renders the same seconds of video as MPEG-TS starting
+// at offsetSec — a Twitch or YouTube HLS staging file joined mid-broadcast.
+// The mpegts demuxer probes it as start_time≈offsetSec, duration=seconds.
+func writeOffsetTSFixture(t *testing.T, ffmpegPath, path string, seconds, offsetSec int) {
+	t.Helper()
+	cmd := exec.Command(ffmpegPath, "-nostdin", "-y",
+		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=64x64:rate=5:duration=%d", seconds),
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+		"-output_ts_offset", fmt.Sprint(offsetSec),
+		"-f", "mpegts", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate offset mpegts fixture %s: %v\n%s", path, err, out)
+	}
+}
+
 // writeAsideFixture renders the same fixture under a name with no media
 // extension — an aside is <file>.restart-<unix ts>, which FFmpeg cannot pick
 // an output format for, so it is written as .mp4 and moved into place the way
@@ -933,4 +1200,39 @@ func errorOf(job *database.Job) string {
 		return ""
 	}
 	return job.Error
+}
+
+// TestTruncatedAsideStaysInStaging is ENGINE-9 on the set-aside recovery: an
+// aside whose container is cut mid-mdat still probes at its full length,
+// `-c copy` stops at the first bad fragment and exits 0 — and muxStagedAsides
+// then deleted the aside, the only copy of that footage, behind a sibling
+// holding a third of it. A short copy is now discarded and the aside kept.
+//
+// Mutant: dropping the verifyMuxedDuration check from muxStagedAsides — the
+// aside is gone and a short sibling is reported recovered.
+func TestTruncatedAsideStaysInStaging(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	w, db := testWorkerSetup(t)
+	t.Cleanup(w.Stop)
+
+	staging, outputDir := muxFixtureJob(t, w, db, "j-aside-trunc")
+	full := filepath.Join(staging, "video.mp4")
+	writeMuxFixture(t, ffmpegPath, full, 90)
+	truncateFixture(t, full, 120000)
+	aside := full + engine.StagedRestartSuffix + "1700000000"
+	if err := os.Rename(full, aside); err != nil {
+		t.Fatal(err)
+	}
+
+	job, _ := db.GetJob("j-aside-trunc")
+	recovered := w.orchestrator.muxStagedAsides(context.Background(), w.buildJobContext(job), outputDir, "base")
+	if len(recovered) != 0 {
+		t.Errorf("a short copy was reported recovered: %v", recovered)
+	}
+	if _, err := os.Stat(aside); err != nil {
+		t.Errorf("the aside — the only copy of its footage — is gone after a short copy: %v", err)
+	}
+	if left := mp4sIn(t, outputDir); len(left) != 0 {
+		t.Errorf("the short sibling was left in the output dir: %v", left)
+	}
 }

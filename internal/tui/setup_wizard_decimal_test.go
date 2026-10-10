@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The first-run wizard was the sixth apply site for the two FlexDuration
 // fields and the only one that still parsed them as ints: "0.5" was
@@ -68,5 +71,30 @@ func TestWizardDecimalFieldsAcceptAPoint(t *testing.T) {
 	if seen != len(decimal) {
 		t.Errorf("found %d decimal fields, want %d — re-anchor this test rather than deleting it",
 			seen, len(decimal))
+	}
+}
+
+// TestAdvancedCookieStepBackLandsOnTheLastGroup: the cookie step follows the
+// completed form, and its "Esc: Back" rebuilt the form — which starts on its
+// FIRST group, so Back landed on Network rather than on Integrations, the
+// group the operator had just left.
+//
+// Mutant: dropping advancedFormToLastGroup — the form shows Network.
+func TestAdvancedCookieStepBackLandsOnTheLastGroup(t *testing.T) {
+	m := NewSetupWizardModel()
+	m.SetSize(100, 30)
+	m.visible = true
+	m.mode = setupModeAdvanced
+	m.advancedFormDone = true
+	m.advancedCookieDone = false
+
+	m.handleAdvancedKey(keyEsc)
+	if m.advancedForm == nil {
+		t.Fatal("Esc on the cookie step did not return to the form")
+	}
+	titles := advancedFormGroupTitles()
+	view := stripANSI(m.advancedForm.View())
+	if last := titles[len(titles)-1]; !strings.Contains(view, last) || strings.Contains(view, titles[0]) {
+		t.Errorf("Back landed on the wrong group (want %q):\n%s", last, view)
 	}
 }

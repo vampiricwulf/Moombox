@@ -80,8 +80,8 @@ type API struct {
 	// rateLimiter throttles outbound GQL requests. Process-wide bucket;
 	// per-channel was considered but the existing flows already fan out
 	// concurrently across channels, so a single shared bucket is the
-	// right place to enforce the ceiling. nil disables rate limiting
-	// (used in tests).
+	// right place to enforce the ceiling. Started on first use
+	// (initRateLimiter).
 	rateLimiter *time.Ticker
 	rateTokens  chan struct{}
 	rateOnce    sync.Once
@@ -156,8 +156,10 @@ func opLabel(opName string) string {
 }
 
 // gqlMaxRetries caps the number of retry attempts on transient failures
-// (5xx, 429, network errors). 3 retries with the backoff schedule below
-// give a worst-case total wait of 7s before giving up.
+// (5xx, 429, network errors). 3 retries on the backoff schedule below wait
+// 7s in all before giving up; a 429's Retry-After (at most gqlMaxRetryDelay)
+// replaces a retry's backoff, so throttled retries can wait up to
+// 3 × gqlMaxRetryDelay.
 const gqlMaxRetries = 3
 
 // gqlBaseRetryDelay is the first-retry wait. Doubles each subsequent
@@ -259,7 +261,10 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 				}
 				return nil, lastErr
 			}
-			if ra > 0 {
+			// No retry is left after the final attempt, so there is nothing to
+			// wait FOR: sleeping out the window there only delayed the same
+			// exhausted-retries error by up to gqlMaxRetryDelay.
+			if ra > 0 && attempt < gqlMaxRetries {
 				if a.logger != nil {
 					a.logger.Debug("twitch gql 429 honoring Retry-After", "op", opLabel(opName), "wait", ra.String())
 				}

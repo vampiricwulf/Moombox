@@ -18,8 +18,8 @@ name: CI
 #     stop skipping
 #   - gofmt / `go mod tidy -diff` / vet / the modernc.org/libc pin check /
 #     the Dockerfile Go-version check / staticcheck / build / full
-#     `go test`; ubuntu also runs `go test -race` on logger + database +
-#     web, cross-builds linux/arm64, and runs both node suites
+#     `go test`; ubuntu also runs `go test -race` over the whole module,
+#     cross-builds linux/arm64, and runs both node suites
 #     (bgutil-sidecar's `npm test` and `node --test` in web/tests after its
 #     own `npm ci`, so jsdom is present)
 #
@@ -175,14 +175,28 @@ jobs:
       - name: go test
         run: go test -count=1 ./...
 
-      - name: go test -race (logger, database, web)
-        # Owner ruling O-P. Three cheap packages, Linux only — the Windows
-        # leg is unchanged. internal/logger's lock-hierarchy comment, and the
-        # "run under -race" instructions in nine other test files, had never
-        # been checked by anything: `grep -rn -- "-race" .github/ docs/
-        # SPEC.md CLAUDE.md` returned zero hits before this step existed.
+      - name: go test -race
+        # The whole module, Linux only — the Windows leg is unchanged. Owner
+        # ruling O-P started this step on three cheap packages (logger,
+        # database, web) because internal/logger's lock-hierarchy comment, and
+        # the "run under -race" instructions in nine other test files, had
+        # never been checked by anything. Three packages left the goroutine-
+        # heavy ones — the engine, the worker, the cookie service, the
+        # sidecar supervisor, the TUI — checked only when someone remembered
+        # to; the module was race-clean when the step widened (2026-10-09), so
+        # the gate starts green. A test that budgets allocations or fits its
+        # probe inside one wall-clock second either widens its gate or skips
+        # under the race build (each such package's raceEnabled constant):
+        # the detector's instrumentation is not the code it budgets, and the
+        # plain `go test` step above still runs it on both legs.
+        #
+        # Its own timeout, under the job's 45: the whole-module race run is
+        # the step most likely to hang if a test deadlocks only under the
+        # detector's scheduling, and go test's per-package 10-minute default
+        # then dumps every goroutine before this limit cuts the log off.
         if: runner.os == 'Linux'
-        run: go test -race -count=1 ./internal/logger/... ./internal/database/... ./internal/web/...
+        timeout-minutes: 20
+        run: go test -count=1 -race ./...
 
       - name: Cross-build linux/arm64
         if: runner.os == 'Linux'

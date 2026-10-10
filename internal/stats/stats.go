@@ -26,8 +26,8 @@ type Snapshot struct {
 	Disk Disk
 
 	TotalSize      int64            // finished + error + cancelled bytes
-	JobCount       int              // finished + error + cancelled + active + muxing (queued excluded, as the route always did)
-	SizeByPlatform map[string]int64 // "youtube", "twitch"
+	JobCount       int              // every job, so it equals the per-platform counts summed
+	SizeByPlatform map[string]int64 // "youtube", "twitch" — the same three statuses, so they sum to TotalSize
 	SizeByStatus   map[string]int64 // "finished", "error", "cancelled"
 
 	TotalFinished     int
@@ -60,7 +60,10 @@ func Build(js *database.JobStats, d *Disk) Snapshot {
 	s.SizeByStatus["finished"] = js.FinishedSize
 	s.SizeByStatus["error"] = js.ErrorSize
 	s.SizeByStatus["cancelled"] = js.CancelledSize
-	s.JobCount = js.FinishedCount + js.ErrorCount + js.CancelledCount + js.ActiveCount + js.MuxingCount
+	// Every job. It used to be finished + error + cancelled + active + muxing,
+	// which left out upcoming, queued and parked jobs — so "Total Jobs" read
+	// less than the YouTube and Twitch job counts beside it added up to.
+	s.JobCount = js.TotalCount
 	s.TotalFinished = js.FinishedCount
 	s.TotalDuration = js.TotalDuration
 	s.TotalChatMessages = js.TotalChatMessages

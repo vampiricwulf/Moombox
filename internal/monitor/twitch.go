@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,11 +40,16 @@ type TwitchMonitor struct {
 	pendingKick bool
 	// warnedSlow rate-limits the oversubscribed warning; atomic because
 	// scheduleNext touches it outside the monitor mutex.
-	warnedSlow  atomic.Bool
-	timer       *time.Timer
-	ctx         context.Context
-	cancel      context.CancelFunc
-	NextCheckAt int64
+	warnedSlow atomic.Bool
+	// batchFailStreak counts consecutive whole-batch GQL failures. They are
+	// deliberately kept off every channel's health streak (see checkChunk),
+	// which left a persistent one — Twitch refusing the client — visible only
+	// at Debug while no Twitch channel was being checked at all.
+	batchFailStreak atomic.Int32
+	timer           *time.Timer
+	ctx             context.Context
+	cancel          context.CancelFunc
+	NextCheckAt     int64
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -57,6 +63,14 @@ type TwitchMonitor struct {
 	OnSchedule      func(nextCheckAt int64)
 	OnStreamFound   func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig)
 	OnStreamRecover func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig, jobID string)
+	// OnBroadcastOver is called for each Twitch job that stopped in Error on
+	// the unconfirmed-end latch (database.ParkReasonTwitchEndUnconfirmed) once
+	// a poll shows its broadcast over — the channel offline, or live with a
+	// different broadcast (worker.TwitchBroadcastOver). One poll is one
+	// sample; the receiver confirms before it acts (D-T4,
+	// worker.DownloadWorker.AutoMuxEndedBroadcast). Called on the monitor's
+	// goroutine, so it must not block.
+	OnBroadcastOver func(jobID string)
 	IsOnline        func() bool // nil = always online
 
 	// FetchBatch overrides the GQL batch call (tm.tw.GetStreamInfoBatch) for
@@ -86,6 +100,14 @@ func (tm *TwitchMonitor) SetOnChannelUnhealthy(fn func(channelID string, consecu
 // crossed the threshold answers a check again.
 func (tm *TwitchMonitor) SetOnChannelHealthy(fn func(channelID string)) {
 	tm.health.onHealthy = fn
+}
+
+// RestoreUnhealthy names the channels whose "not responding" alert a previous
+// process sent and never closed. Each is treated as a channel already past the
+// threshold: its first successful check fires the OnChannelHealthy callback
+// (the close), and failures stay silent until then. Call before Start.
+func (tm *TwitchMonitor) RestoreUnhealthy(channelIDs []string) {
+	tm.health.restoreUnhealthy(channelIDs)
 }
 
 // NewTwitchMonitor creates a new Twitch monitor. The Store carries the
@@ -167,8 +189,8 @@ func (tm *TwitchMonitor) CheckNow() {
 // scheduling: the delay is interval minus the elapsed cycle time, so the
 // configured interval is a true period — previously it was a GAP after
 // each cycle, silently inflating detection latency by the cycle duration
-// (~0.5s×N channels every cycle, permanently). Zero-value cycleStart
-// (initial Start scheduling) behaves as a plain interval.
+// (~0.5s×N channels every cycle, permanently). A zero-value cycleStart
+// behaves as a plain interval.
 func (tm *TwitchMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	// Same rule as runCycle's guard, for the path that arms the timer: a
 	// cancelled context means this chain was retired by Stop(), and a retired
@@ -399,8 +421,18 @@ func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelC
 
 	infos, errs, wholeErr := tm.streamInfoBatch(ctx, logins)
 	if wholeErr != nil {
-		tm.logger.Debug("twitch batch check failed", "channels", len(chunk), "err", wholeErr)
+		// Warn once per streak, at its start: every cycle repeats it, and a
+		// line every 15 s would bury the log.
+		if tm.batchFailStreak.Add(1) == 1 {
+			tm.logger.Warn("Twitch batch check failed; Twitch channels are not being checked until it recovers",
+				"channels", len(chunk), "err", wholeErr)
+		} else {
+			tm.logger.Debug("twitch batch check failed", "channels", len(chunk), "err", wholeErr)
+		}
 		return
+	}
+	if n := tm.batchFailStreak.Swap(0); n > 0 {
+		tm.logger.Info("Twitch batch checks recovered", "failedBatches", n)
 	}
 
 	for i := range chunk {
@@ -418,6 +450,80 @@ func (tm *TwitchMonitor) checkChunk(ctx context.Context, chunk []config.ChannelC
 			tm.logger.Debug("twitch process failed", "channel", ch.Name, "err", err)
 		}
 	}
+	tm.dispatchEndedBroadcasts(chunk, infos, errs)
+}
+
+// dispatchEndedBroadcasts hands OnBroadcastOver every job the unconfirmed-end
+// latch left in Error whose channel this chunk just answered for with its
+// broadcast over (D-T4): offline, or live with another broadcast. A channel
+// whose check failed answered nothing and is skipped; so is a job whose
+// channel the config no longer holds, which only the Mux action can archive.
+// The rows are read once per chunk — a handful at most, and usually none.
+func (tm *TwitchMonitor) dispatchEndedBroadcasts(chunk []config.ChannelConfig, infos []*twitch.TwitchStreamInfo, errs []error) {
+	if tm.OnBroadcastOver == nil {
+		return
+	}
+	jobs, err := tm.db.TwitchEndUnconfirmedJobs()
+	if err != nil {
+		tm.logger.Debug("TwitchEndUnconfirmedJobs query failed", "err", err)
+		return
+	}
+	for _, job := range jobs {
+		login := worker.TwitchJobLogin(job)
+		if login == "" {
+			continue
+		}
+		for i := range chunk {
+			if errs[i] != nil || !strings.EqualFold(chunk[i].ID, login) {
+				continue
+			}
+			if worker.TwitchBroadcastOver(job, infos[i]) {
+				tm.logger.Info("twitch broadcast of an errored capture is over — handing its staging to the automatic mux",
+					"jobID", job.ID, "channel", login)
+				tm.OnBroadcastOver(job.ID)
+			}
+			break
+		}
+	}
+}
+
+// manualJobClaims reports whether one of a channel's manually added jobs has
+// claimed the broadcast that started at startedAt. One waiting in
+// waitForTwitchLive (Upcoming, or Live on its way to downloading) takes
+// whatever goes live next; one downloading has claimed the broadcast it is
+// recording, the one its stream_start_time names. Anything else — parked in
+// COOKIES?, muxing an earlier broadcast — claims nothing: standing aside for
+// those blocked every later broadcast on the channel, indefinitely for a park
+// no sweep resumes.
+func manualJobClaims(jobs []*database.Job, startedAt string) bool {
+	for _, j := range jobs {
+		switch j.Status {
+		case database.StatusUpcoming, database.StatusLive:
+			return true
+		case database.StatusDownloading:
+			if sameTwitchStart(j.StreamStartTime, startedAt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sameTwitchStart is the worker's sameBroadcastStart rule
+// (internal/worker/stream_processor_twitch.go): stream_start_time is a
+// broadcast's stable identity across restarts, a minute of tolerance absorbs
+// the API's formatting jitter, and an unknown start matches.
+func sameTwitchStart(known, current string) bool {
+	if known == "" || current == "" {
+		return true
+	}
+	a, errA := time.Parse(time.RFC3339, known)
+	b, errB := time.Parse(time.RFC3339, current)
+	if errA != nil || errB != nil {
+		return true
+	}
+	d := b.Sub(a)
+	return d <= time.Minute && d >= -time.Minute
 }
 
 // processStreamInfo handles a channel that GetStreamInfoBatch reported LIVE:
@@ -466,6 +572,19 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 		return nil
 	}
 	if active {
+		return nil
+	}
+	// A manually added job for this channel may have claimed this broadcast
+	// (manualJobClaims). It is the operator's explicit request, so it stands
+	// whatever the channel's terms say.
+	manual, mErr := tm.db.ManualTwitchJobs(info.ChannelLogin)
+	if mErr != nil {
+		tm.logger.Debug("ManualTwitchJobs query failed", "channel", info.ChannelLogin, "err", mErr)
+		return nil
+	}
+	if manualJobClaims(manual, info.StartedAt) {
+		tm.logger.Debug("twitch stream already claimed by a manually added job",
+			"channel", info.ChannelLogin, "streamID", info.StreamID)
 		return nil
 	}
 

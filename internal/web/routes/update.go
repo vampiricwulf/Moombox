@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/updater"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // updateCheckDebounce bounds how often POST /api/update/check actually asks
@@ -29,7 +31,7 @@ const updateCheckDebounce = 30 * time.Second
 // ended the path and turned the rest into a query string. The host is fixed
 // and the method is GET, so this is hygiene rather than a hole, and this keeps
 // it that way. It admits every tag Moombox has published, with or without the
-// leading "v" (the Web sends the bare version, the TUI sends the tag) —
+// leading "v" (the Web sends the bare version; a pasted tag works too) —
 // including the pre-release suffixes release.yml preserves into main.version
 // (`-rc.N`, `-test.N`; the tag v2.6.0-test.1 exists). Without that suffix a
 // pre-release build's own "View Release Notes" 400d its own version, because
@@ -44,9 +46,20 @@ var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$
 // (reports/web.md S-8) explicitly wanted this tightened beyond the generic
 // CSRFMiddleware so a LAN peer can't trigger it even when network_access
 // is "lan" / "external". Returns true when the request originates from
-// loopback (no Origin header set, or Origin host is 127.0.0.1 / ::1 /
-// localhost).
+// loopback: the DIRECT peer is loopback, and the Origin (if any) names
+// 127.0.0.1 / ::1 / localhost.
+//
+// The peer test comes first because the Origin is the client's to choose: a
+// LAN peer could send `Origin: http://localhost:774` (with a matching Host,
+// which CSRF also accepts on lan) and pass an Origin-only gate — the very
+// case S-8 meant to close. The direct peer, not the forwarded one: a proxy
+// in front means the caller is not on this machine. (Docker's bridge peer is
+// never loopback either, and in-app update is not offered there — a pulled
+// image replaces the binary.)
 func updateApplyOriginAllowed(r *http.Request) bool {
+	if !web.IsLoopbackRequest(r) {
+		return false
+	}
 	// No Origin header on a mutating request is normally rejected by
 	// CSRFMiddleware before this handler runs; if we got here, that's a
 	// same-process caller (e.g. TUI presenting InternalToken).
@@ -82,11 +95,30 @@ type UpdateRouteDeps struct {
 	Version   string
 	OnRestart func()
 	OnFound   func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
-	// OnDismissed runs after a dismiss is persisted, carrying the tag that
-	// was skipped. The Web hides its own indicator from SharedUpdateInfo,
-	// but the TUI holds a separate copy of the pending release — this is
-	// how it learns to drop the badge. Optional.
-	OnDismissed func(tag string)
+	// OnCleared runs when the pending release is withdrawn, carrying its
+	// tag: after a dismiss is persisted, or when a check found nothing newer
+	// than the running version (ClearPendingUpdate). The Web reads
+	// SharedUpdateInfo on its next load, but an open dashboard and the TUI
+	// each hold a separate copy of the pending release — this is how they
+	// learn to drop the badge. Optional.
+	OnCleared func(tag string)
+	// Logger records why a check, apply or verify failed. Optional.
+	Logger interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
+}
+
+// logUpdateFailure is the log line the TUI's path already writes: the web
+// routes answered "check failed" / "update failed" and logged nothing, so a
+// dashboard update that failed at download or signature verification left
+// no trace anywhere.
+func (deps *UpdateRouteDeps) logUpdateFailure(what string, err error) {
+	if deps.Logger != nil {
+		deps.Logger.Error("[Updater] "+what+" failed", "err", err)
+	}
 }
 
 // DismissUpdate records tag as the skipped version and clears the shared
@@ -112,10 +144,39 @@ func DismissUpdate(store *config.Store, tag string) error {
 	return nil
 }
 
+// ClearPendingUpdate withdraws the pending release after a check found
+// nothing newer than the running version — the release it named was pulled
+// from GitHub, so the badge offered an update whose download no longer
+// exists. Returns the withdrawn tag, "" when nothing was withdrawn.
+//
+// seen is SharedUpdateInfo as the caller loaded it BEFORE the check: only that
+// release is withdrawn, by CompareAndSwap. Loaded here instead, the swap
+// covered nanoseconds and not the check's GitHub round trip, so a release
+// another check found in that time — or one the stale answer predated — was
+// withdrawn, and every UI's badge with it until the next daily check.
+func ClearPendingUpdate(seen *updater.ReleaseInfo) string {
+	if seen == nil || !SharedUpdateInfo.CompareAndSwap(seen, nil) {
+		return ""
+	}
+	return seen.TagName
+}
+
+// checkForUpdate is (*updater.Updater).CheckForUpdate, a seam for the test
+// that needs a check to answer without reaching GitHub.
+var checkForUpdate = (*updater.Updater).CheckForUpdate
+
+// applyUpdate is (*updater.Updater).ApplyUpdate, a seam for the test that
+// needs to see the context an apply runs under without replacing a binary.
+var applyUpdate = (*updater.Updater).ApplyUpdate
+
+// verifyCurrentSignature is (*updater.Updater).VerifyCurrentSignature, a seam
+// for the test that needs a verification to answer without reaching GitHub.
+var verifyCurrentSignature = (*updater.Updater).VerifyCurrentSignature
+
 // UpdateRoutes registers the update check/apply/dismiss API endpoints. The
-// Store carries the cfg + lock + savePath; /api/update/dismiss flips the
-// AutoCheckUpdates field and persists via store.SaveLocked, rolling back
-// the in-memory mutation if the save fails.
+// Store carries the cfg + lock + savePath; /api/update/dismiss records the
+// pending tag as Updates.SkippedVersion through DismissUpdate, which persists
+// via store.SaveLocked and rolls the in-memory value back if the save fails.
 func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 	updateCheckGate := newCallDebouncer(updateCheckDebounce)
 
@@ -150,9 +211,16 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
-		release, err := deps.Updater.CheckForUpdate(r.Context())
+		seen := SharedUpdateInfo.Load()
+		release, err := checkForUpdate(deps.Updater, r.Context())
 		if err != nil {
-			jsonError(w, "check failed", http.StatusInternalServerError)
+			// The cause, not a bare "check failed": the updater's own
+			// wording ("GitHub API rate limit exceeded (HTTP 403) — try
+			// again later", ...) is what tells the operator what to do. It
+			// carries only api.github.com URLs and status codes. 502: the
+			// failure is GitHub's answer, as on /release-notes.
+			deps.logUpdateFailure("Update check", err)
+			jsonError(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 
@@ -171,6 +239,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			resp["releaseNotes"] = release.ReleaseNotes
 			resp["releaseNotesHtml"] = release.ReleaseNotesHtml
 			resp["publishedAt"] = release.PublishedAt
+		} else if tag := ClearPendingUpdate(seen); tag != "" && deps.OnCleared != nil {
+			deps.OnCleared(tag)
 		}
 
 		jsonResponse(w, resp)
@@ -205,9 +275,18 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			return
 		}
 
-		if err := deps.Updater.ApplyUpdate(r.Context(), release); err != nil {
+		// Detached from the request: a slow link's download outlives what a
+		// browser waits for a response (Firefox gives up after 300 s), and
+		// the abort cancelled the request context — the very download the
+		// stall timer exists to let finish. The updater's stall timeout and
+		// two-hour backstop bound it instead; on success the restart below
+		// still runs, whether or not anyone is still listening.
+		if err := applyUpdate(deps.Updater, context.WithoutCancel(r.Context()), release); err != nil {
 			updateInProgress.Store(false)
-			jsonError(w, "update failed", http.StatusInternalServerError)
+			// The toast reads "Update failed: <this>"; it used to read
+			// "Update failed: update failed".
+			deps.logUpdateFailure("Update", err)
+			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -232,23 +311,28 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		}()
 	})
 
-	// POST /api/update/verify — verify current binary's signature
+	// POST /api/update/verify — verify the current binary's signature and,
+	// when its release publishes one, the signed manifest. manifest says
+	// whether that second check ran: false for a release that predates the
+	// manifest, which the dashboard reports as a signature-only check.
 	r.Post("/api/update/verify", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not available", http.StatusServiceUnavailable)
 			return
 		}
-		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
-			jsonError(w, "signature verification failed", http.StatusUnprocessableEntity)
+		manifest, err := verifyCurrentSignature(deps.Updater, r.Context())
+		if err != nil {
+			deps.logUpdateFailure("Signature verification", err)
+			jsonError(w, "signature verification failed: "+err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
-		jsonResponse(w, map[string]any{"verified": true})
+		jsonResponse(w, map[string]any{"verified": true, "manifest": manifest})
 	})
 
 	// GET /api/update/release-notes?version=X.Y.Z fetches release notes
 	// for a specific version. Defaults to the running version if no query
 	// param. Returns { tagName, releaseNotes (raw markdown), releaseNotesHtml }.
-	r.Get("/api/update/release-notes", func(w http.ResponseWriter, r *http.Request) {
+	r.With(web.RefuseCrossSite).Get("/api/update/release-notes", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not configured", http.StatusServiceUnavailable)
 			return
@@ -293,8 +377,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
-		if deps.OnDismissed != nil {
-			deps.OnDismissed(pending.TagName)
+		if deps.OnCleared != nil {
+			deps.OnCleared(pending.TagName)
 		}
 		jsonResponse(w, map[string]any{"success": true, "skipped": pending.TagName})
 	})

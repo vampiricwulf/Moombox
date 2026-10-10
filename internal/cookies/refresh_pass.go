@@ -268,6 +268,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		ytIdentity, prevYTIdentity string
 		twIdentity, prevTWIdentity string
 		twEffective                bool
+		reopenYT, reopenTW         bool
 		changed                    bool
 		statusCopy                 AuthStatus
 	)
@@ -438,6 +439,18 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		rs.prevTwitchIdentity = advanceIdentityBaseline(rs.prevTwitchIdentity, twIdentity, twEffective, twErr)
 		rs.hasCheckedOnce = true
 
+		// A failure a PREVIOUS process announced and never closed
+		// (SetUnrecoveredPlatforms) is consumed by the first check that finds
+		// the platform working, conclusively — the same test the recovered
+		// transition below applies — and by nothing else: a dead first check
+		// leaves it for the transition that follows the repair.
+		if rs.ytUnrecovered && ytAuth && ytErr == nil {
+			reopenYT, rs.ytUnrecovered = true, false
+		}
+		if rs.twUnrecovered && twEffective && twErr == nil {
+			reopenTW, rs.twUnrecovered = true, false
+		}
+
 		changed = authStatusChanged(prevStatus, rs.status)
 		// Snapshot under the lock: a concurrent doRefresh (ticker vs CheckNow)
 		// writes rs.status under rs.mu, so reading it after Unlock is a race —
@@ -496,12 +509,18 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 
 	// Detect recovery transitions: previously not authenticated -> now authenticated.
 	// Fired so callers can wake jobs parked in COOKIES? state.
-	if hasChecked && rs.OnAuthRecovered != nil {
-		if !prevYT && ytAuth && ytErr == nil {
+	//
+	// reopenYT/reopenTW are the same transition witnessed across a restart: the
+	// previous process saw the platform fail and said so, and this one cannot
+	// see the fall itself — its baseline is whatever SetExpectedPlatforms
+	// seeded, and hasChecked is false on a first pass — so without them the
+	// close for that announcement never came.
+	if rs.OnAuthRecovered != nil {
+		if ((hasChecked && !prevYT) || reopenYT) && ytAuth && ytErr == nil {
 			rs.logger.Info("youtube auth recovered")
 			rs.OnAuthRecovered("youtube")
 		}
-		if !prevTW && twEffective && twErr == nil {
+		if ((hasChecked && !prevTW) || reopenTW) && twEffective && twErr == nil {
 			rs.logger.Info("twitch auth recovered")
 			rs.OnAuthRecovered("twitch")
 		}

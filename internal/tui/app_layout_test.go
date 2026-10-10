@@ -7,8 +7,13 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
+
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestFeedbackColorChordMessages exercises the chord-prefix branch of
@@ -179,16 +184,16 @@ func renderedRank(t *testing.T, c color.Color) int {
 	}
 }
 
-// recheckColor renders one R C result AS THE OPERATOR SEES IT: composed,
-// clamped to the terminal width, and then coloured by exactly the expression
-// View uses.
+// recheckColor renders one R C result AS THE OPERATOR SEES IT: composed at the
+// terminal's width and then coloured by exactly the expression View uses.
 //
-// The clamp is the whole point. The previous version of this test fed
-// feedbackColor unclamped strings, which is the one domain where the property
-// held — fitFeedback runs inside cookieRecheckFeedback and feedbackColor runs
-// on what survives it, so a 40-column terminal truncated the marker away and
-// the line rendered green while announcing a recorded failure. Going through
-// the real Update path is what makes the assertion about what is displayed.
+// The width was the whole point. The previous version of this test fed
+// feedbackColor unclamped strings, which was the one domain where the property
+// held — fitFeedback ran inside cookieRecheckFeedback and feedbackColor ran on
+// what survived it, so a 40-column terminal truncated the marker away and the
+// line rendered green while announcing a recorded failure. The line wraps now
+// rather than being cut, but going through the real Update path is still what
+// makes the assertion about what is displayed.
 func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, color.Color) {
 	t.Helper()
 	app := NewApp()
@@ -205,13 +210,15 @@ func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, 
 // TWO DEFECTS, one root: severity was being re-derived from prose by a reader
 // standing downstream of the clamp and of the branch order.
 //
-//   - THE CLAMP. cookieRecheckFeedback appends the clause and then truncates
-//     the line to the terminal width; feedbackColor then reads the truncated
-//     line. At 40 columns "…| Last cookie error: the browser…" arrives as
-//     "…| Last cookie err…", the marker is gone, and the line falls through to
-//     the SUCCESS colour. An operator in a split pane presses R C, is told
-//     their cookies are fine, and the browser refresh has been failing for
-//     days.
+//   - THE CLAMP. cookieRecheckFeedback appended the clause and then truncated
+//     the line to the terminal width; feedbackColor then read the truncated
+//     line. At 40 columns "…| Last cookie error: the browser…" arrived as
+//     "…| Last cookie err…", the marker was gone, and the line fell through to
+//     the SUCCESS colour. An operator in a split pane pressed R C, was told
+//     their cookies were fine, and the browser refresh had been failing for
+//     days. The line wraps now (setWrappedFeedback) and is no longer cut
+//     before the colour is chosen; the widths stay, as the guard against a
+//     clamp coming back.
 //   - THE BRANCH ORDER. The gray "deleted:" branch sits above the warning
 //     branch, so a recorded error whose words contained it would render
 //     NEUTRAL. No setError composes that word today — this is the row that
@@ -220,8 +227,8 @@ func recheckColor(t *testing.T, width int, msg cookieRecheckResultMsg) (string, 
 //
 // Both close the same way: cookieRecheckFeedback states the severity from the
 // facts it holds, and feedbackColor obeys a stated severity over its own scan.
-// The widths below straddle the truncation point (~42 columns) on purpose; 0 is
-// the unclamped case, which is the domain the old test lived in.
+// The widths below straddle the old truncation point (~42 columns) on purpose;
+// 0 is the unclamped case, which is the domain the old test lived in.
 func TestLastCookieErrorNeverLowersSeverity(t *testing.T) {
 	verdicts := []struct {
 		name    string
@@ -284,10 +291,10 @@ func mustColor(t *testing.T, width int, verdict cookies.RefreshVerdict, lastErro
 // also satisfied by a colour that ignores the line entirely.
 //
 // The same result must render the same colour whatever the terminal is doing.
-// The message is allowed to shrink — that is what the clamp is for — but what
-// it MEANS does not change with the width of the pane it is displayed in, and
-// any colour that varies with the width is deriving severity from the wrong
-// thing.
+// The message may be laid out differently — wrapped, cut at the row cap — but
+// what it MEANS does not change with the width of the pane it is displayed in,
+// and any colour that varies with the width is deriving severity from the
+// wrong thing.
 func TestRecheckColourSurvivesTheClampUnchanged(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -451,5 +458,106 @@ func TestViewTerminalTooSmallNamesTheSize(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("terminal-too-small view lacks %q:\n%s", want, view)
 		}
+	}
+
+	// It must also FIT: shown only in terminals narrower than minTermWidth,
+	// the message is no use if the required size is past the right edge.
+	app.width = 40
+	for _, line := range strings.Split(app.View().Content, "\n") {
+		if w := runewidth.StringWidth(line); w > app.width {
+			t.Errorf("line %q is %d columns, wider than the %d-column terminal it is shown in", line, w, app.width)
+		}
+	}
+}
+
+// TestBothBannersAndLogsFocusFitTheFloorTerminal: with the restart and
+// security banners up, Logs focused gave the top row 25% of what was left —
+// 3 rows at 20 — while each top panel still draws 4, so the frame came out a
+// row taller than the terminal and bubbletea dropped the top line.
+//
+// Mutant: dropping the minPanelH clamp — the frame is 21 rows.
+func TestBothBannersAndLogsFocusFitTheFloorTerminal(t *testing.T) {
+	for _, w := range []int{60, 80} {
+		for _, focus := range []FocusPanel{PanelLogs, PanelTasks} {
+			cfg := config.Defaults()
+			cfg.Network.NetworkAccess = "external"
+			app := NewApp()
+			app.configStore = config.NewStore(cfg, "")
+			app.restartPending = true
+			app.width, app.height = w, 20
+			app.focusedPanel = focus
+			app.recalcLayout()
+			if n := strings.Count(app.View().Content, "\n") + 1; n > 20 {
+				t.Errorf("%dx20, focus %v: frame is %d rows", w, focus, n)
+			}
+		}
+	}
+}
+
+// TestFeedbackLineIsCutToTheWidth: only the R C line was clamped; any other
+// long one — "Deleted: <a 128-character title>" — ran past the terminal and
+// bubbletea clipped it, losing the end with no sign it was cut. The row is
+// cut at render with an ellipsis, so it stays within the width.
+//
+// Mutant: dropping the truncation in addOverlayMessage — the row is wider
+// than the terminal.
+func TestFeedbackLineIsCutToTheWidth(t *testing.T) {
+	app := NewApp()
+	app.width, app.height = 80, 24
+	app.recalcLayout()
+	app.setFeedback("Deleted: " + strings.Repeat("a very long stream title ", 6) + "(3s)")
+	for _, line := range strings.Split(app.View().Content, "\n") {
+		if w := ansi.StringWidth(line); w > 80 {
+			t.Fatalf("a %d-cell line on an 80-column terminal: %q", w, stripANSI(line))
+		}
+	}
+	if !strings.Contains(stripANSI(app.View().Content), "Deleted: a very long stream title") ||
+		!strings.Contains(stripANSI(app.View().Content), "…") {
+		t.Error("the long feedback line is not shown cut with an ellipsis")
+	}
+}
+
+// TestShiftTabCyclesFocusBackwards: the spec has always listed Shift-Tab
+// beside Tab, and the key was a silent no-op.
+//
+// Mutant: dropping the keyShiftTab case — focus stays put.
+func TestShiftTabCyclesFocusBackwards(t *testing.T) {
+	app := NewApp()
+	app.width, app.height = 100, 30
+	app.recalcLayout()
+	for _, want := range []FocusPanel{PanelLogs, PanelDetails, PanelTasks} {
+		app.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+		if app.focusedPanel != want {
+			t.Fatalf("Shift-Tab focused %v, want %v", app.focusedPanel, want)
+		}
+	}
+}
+
+// TestTUIDropsAJobUpdateOlderThanOneApplied: writers notify after releasing
+// the database lock, so a job's updates can arrive out of write order, and
+// the older one, applied last, put a stale row (Downloading during a mux)
+// back on the task list. The newest version wins — except that a JobAdded is
+// never dropped, so one overtaken by its job's first update is still added.
+//
+// Mutants: dropping the stale check — the list shows Downloading; dropping a
+// stale JobAdded — the overtaken add is lost.
+func TestTUIDropsAJobUpdateOlderThanOneApplied(t *testing.T) {
+	app := NewApp()
+	app.width, app.height = 100, 30
+	app.recalcLayout()
+	row := func(id string, st database.JobStatus, v uint64) *database.Job {
+		return &database.Job{ID: id, VideoID: id, Title: id, Platform: "youtube", Status: st, Version: v}
+	}
+	app.handleJobAdded(&database.JobAdded{Job: row("j", database.StatusUpcoming, 1)})
+	app.handleJobUpdate(&database.JobChange{Job: row("j", database.StatusMuxing, 7), Changes: []string{"status"}})
+	app.handleJobUpdate(&database.JobChange{Job: row("j", database.StatusDownloading, 6), Changes: []string{"status"}})
+	if got := app.taskList.GetJobByID("j"); got == nil || got.Status != database.StatusMuxing {
+		t.Errorf("task list holds %v, want the newer Muxing row", got)
+	}
+
+	app.handleJobUpdate(&database.JobChange{Job: row("k", database.StatusDownloading, 9), Changes: []string{"status"}})
+	app.handleJobAdded(&database.JobAdded{Job: row("k", database.StatusUpcoming, 8)})
+	if app.taskList.GetJobByID("k") == nil {
+		t.Error("a JobAdded overtaken by the job's first update was never added")
 	}
 }

@@ -211,6 +211,13 @@ type RefreshService struct {
 	ytEverConcluded bool
 	twEverConcluded bool
 
+	// ytUnrecovered / twUnrecovered carry an auth failure a PREVIOUS process
+	// announced and never closed (SetUnrecoveredPlatforms). The first
+	// conclusive authenticated check of that platform fires OnAuthRecovered
+	// whatever this process's own baseline says, and clears the flag.
+	ytUnrecovered bool
+	twUnrecovered bool
+
 	// twitchMark holds a Twitch credential failure that oauth2/validate cannot
 	// see, and it is why rs.status has TWO writers rather than one. Written
 	// under mu by NoteTwitchAuthLoss; consulted and cleared under mu by
@@ -480,6 +487,27 @@ func (rs *RefreshService) SetExpectedPlatforms(platforms []string) {
 	}
 }
 
+// SetUnrecoveredPlatforms names the platforms whose auth failure a previous
+// process announced and never closed. The first check of each that finds it
+// authenticated, conclusively, fires OnAuthRecovered — the close of that
+// announcement — even though this process never saw the platform fail: its
+// baseline is the persisted platform list (SetExpectedPlatforms) or nothing,
+// and on its first pass hasCheckedOnce is false, so the transition the close
+// rides is otherwise invisible after a restart. The recovery-needed side is
+// untouched. Call this before Start().
+func (rs *RefreshService) SetUnrecoveredPlatforms(platforms []string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for _, p := range platforms {
+		switch p {
+		case "youtube":
+			rs.ytUnrecovered = true
+		case "twitch":
+			rs.twUnrecovered = true
+		}
+	}
+}
+
 // Start begins the cookie refresh loop.
 func (rs *RefreshService) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -536,7 +564,20 @@ func (rs *RefreshService) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				rs.doRefresh(ctx)
+				// Its own recover: the goroutine's sits outside this loop and
+				// would END it, so one panic — in the pass or in any callback
+				// it fans out to (OnAuthChange, OnRecoveryNeeded,
+				// OnAuthRecovered, OnCredentialsChanged) — would stop the
+				// session refresh and all auth-loss detection for the life of
+				// the process. This way it costs one tick.
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							rs.logger.Error("cookie refresh tick panic", "panic", r)
+						}
+					}()
+					rs.doRefresh(ctx)
+				}()
 			}
 		}
 	}()

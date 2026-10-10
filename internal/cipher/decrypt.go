@@ -74,7 +74,16 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 			if gojaResolver == nil {
 				return nil, fmt.Errorf("cipher: routed sig failed and no goja fallback: %w", err)
 			}
-			return gojaResolver.ResolveURL(ctx, req)
+			resp, gojaErr := gojaResolver.ResolveURL(ctx, req)
+			if gojaErr != nil {
+				// Both paths failed. On its own the goja error reads the same
+				// whether the sidecar is down, the player is stale or ejs
+				// found no solution ("no sig solver available for player
+				// …"), so the routed cause rides along — and stays the one
+				// errors.Is sees (ErrPlayerJSStale, ErrSidecarUnavailable).
+				return nil, fmt.Errorf("cipher: routed sig: %w (goja fallback: %v)", err, gojaErr)
+			}
+			return resp, nil
 		}
 		sigKey := req.SignatureKey
 		if sigKey == "" {
@@ -105,11 +114,16 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	if nParam != "" && rawN != "" {
 		decryptedN, err := routedSolver.N(ctx, playerID, nParam)
 		if err != nil {
-			// Routed N failed — try goja legacy for this param only.
+			// Routed N failed — try goja legacy for this param only. When
+			// that fails too, the routed cause stays in the error (see the
+			// sig path above for why).
 			if gojaResolver != nil {
 				solvers, solverErr := gojaResolver.GetSolvers(ctx, req.PlayerURL)
 				if solverErr == nil && solvers.HasN() {
-					decryptedN, err = solvers.DecryptN(nParam)
+					routedErr := err
+					if decryptedN, err = solvers.DecryptN(nParam); err != nil {
+						err = fmt.Errorf("routed n: %w (goja fallback: %v)", routedErr, err)
+					}
 				}
 			}
 		}
@@ -151,20 +165,47 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 	}
 	playerID := PlayerIDFromURL(playerURL)
 
-	// decryptN attempts to decrypt with routed solver then goja fallback.
+	// decryptN attempts to decrypt with routed solver then goja fallback. The
+	// error it returns names every path that failed: the Warn its callers
+	// log is the only trace of a degrade, and "n decrypt unavailable" alone
+	// read the same for a dead sidecar, a stale player and an ejs "no
+	// solutions".
 	decryptFn := func(encrypted string) (string, error) {
+		var routedErr, gojaErr error
 		if routedSolver != nil {
-			if dec, err := routedSolver.N(ctx, playerID, encrypted); err == nil {
+			dec, err := routedSolver.N(ctx, playerID, encrypted)
+			if err == nil {
 				return dec, nil
 			}
+			routedErr = err
+			slog.Debug("cipher: routed n-param decryption failed, trying goja",
+				"player", playerID, "err", err)
 		}
 		if gojaResolver != nil {
 			solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
-			if err == nil && solvers.HasN() {
-				return solvers.DecryptN(encrypted)
+			switch {
+			case err != nil:
+				gojaErr = err
+			case !solvers.HasN():
+				gojaErr = fmt.Errorf("n unavailable for player %s", playerID)
+			default:
+				dec, err := solvers.DecryptN(encrypted)
+				if err == nil {
+					return dec, nil
+				}
+				gojaErr = err
 			}
 		}
-		return encrypted, fmt.Errorf("cipher: n decrypt unavailable for player %s", playerID)
+		switch {
+		case routedErr != nil && gojaErr != nil:
+			return encrypted, fmt.Errorf("cipher: routed n: %w (goja fallback: %v)", routedErr, gojaErr)
+		case routedErr != nil:
+			return encrypted, fmt.Errorf("cipher: routed n: %w (no goja fallback)", routedErr)
+		case gojaErr != nil:
+			return encrypted, fmt.Errorf("cipher: n decrypt unavailable for player %s: %w", playerID, gojaErr)
+		default:
+			return encrypted, fmt.Errorf("cipher: n decrypt unavailable for player %s", playerID)
+		}
 	}
 
 	result := rawURL

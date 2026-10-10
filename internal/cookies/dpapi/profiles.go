@@ -10,7 +10,7 @@ import (
 // BrowserProfile identifies one Chromium-family profile directory on disk.
 // The Path is the absolute path to the profile dir (e.g.
 // "C:\Users\Wulf\AppData\Local\Google\Chrome\User Data\Default"), which
-// is what ReadChromeCookies takes.
+// is what ReadChromeCookiesStats takes.
 //
 // Browser is the family identifier ("chrome", "edge", "brave", etc.) so
 // callers can route the result based on which browser the user actually

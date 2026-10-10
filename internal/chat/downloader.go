@@ -36,6 +36,10 @@ const (
 	// survive for a human to look at, not that every failed parse accumulates
 	// its own artifact in staging.
 	corruptChatSuffix = ".corrupt"
+	// replayRerunSuffix names the file a replay re-run writes while an
+	// archive it must not shrink sits at the output path (THE RE-RUN RULE in
+	// Start's doc comment). Removed when the run ends, swapped in or not.
+	replayRerunSuffix = ".rerun"
 	// liveChatPollDefault is the live endpoint's own fallback poll interval —
 	// what computePollDelay uses when YouTube sends no usable TimeoutMs. It is
 	// also the FLOOR under repeated stale-continuation recovery: a recovery
@@ -86,6 +90,13 @@ var errStaleRecoveryExhausted = errors.New("chat: gave up after repeated stale-c
 // broadcast was still live, this run stopped polling for good, and a nil
 // return would show the truncated archive as "finished".
 var errChatFetchExhausted = errors.New("chat: gave up after too many consecutive chat API errors")
+
+// errChatAuthLost is the terminal error Start reports when the chat API
+// refused the credentials (ErrAuthRequired, which it wraps). Same rule again:
+// the run stopped polling for good while the broadcast may still be going —
+// members-only cookies expiring mid-stream is the realistic case — and a nil
+// return showed the capture as "finished".
+var errChatAuthLost = fmt.Errorf("chat: gave up after the chat API refused the credentials: %w", ErrAuthRequired)
 
 // ChatDownloaderOptions configures a ChatDownloader.
 type ChatDownloaderOptions struct {
@@ -147,8 +158,10 @@ type ChatDownloader struct {
 	// goroutine and read by that waiter on another.
 	terminalErr error
 	// replayHighWaterUsec is the highest ABSOLUTE timestamp (timestampUsec)
-	// this run has committed, and hasReplayHighWater says whether one exists
-	// yet (a zero timestamp is a value, not a sentinel). It bounds a replay
+	// committed to the file — by this run, or by the run whose sidecar or file
+	// this one resumed (ChatResumeState.ReplayHighWaterUsec, adoption's
+	// newest message) — and hasReplayHighWater says whether one exists yet (a
+	// zero timestamp is a value, not a sentinel). It bounds a replay
 	// pass adopted mid-run: the watch page hands back the reload token, i.e.
 	// the START of the archive, and the 5000-ID dedup window cannot span an
 	// archive bigger than itself.
@@ -187,7 +200,7 @@ type ChatDownloader struct {
 	// exactly like testRecoveryOverride above it; production leaves it nil.
 	testFetchOverride func(ctx context.Context) (*ChatApiResponse, error)
 
-	// testBackoffOverride, when > 0, replaces the computed exponential-backoff
+	// testBackoffOverride, when > 0, replaces the computed linear-backoff
 	// duration in handleFetchError so tests don't have to sleep for real
 	// (5s-60s) intervals. Only set in tests; zero (disabled) in production.
 	testBackoffOverride time.Duration
@@ -349,9 +362,11 @@ func (cd *ChatDownloader) adoptFreshContinuation(token string, isReplay bool) {
 }
 
 // staleRecoveryDelay is the floor under REPEATED stale-continuation recovery.
-// n is how many consecutive recoveries have happened, counting this one, so
-// n == 1 (the first, which is usually a genuinely expired mid-stream token)
-// waits one ordinary poll and each one after that doubles to the ceiling.
+// n is how many consecutive recoveries came BEFORE this one — the caller
+// passes staleRecoveries-1, and only once that is at least one — so the first
+// recovery (usually a genuinely expired mid-stream token) is not delayed at
+// all, the second (n == 1) waits one ordinary poll, and each one after that
+// doubles to the ceiling.
 func staleRecoveryDelay(n int) time.Duration {
 	d := liveChatPollDefaultForTesting
 	for range max(n-1, 0) {
@@ -369,29 +384,38 @@ func staleRecoveryDelay(n int) time.Duration {
 //
 // THE COMPLETION RULE. Start clears the resume sidecar only on a GENUINE
 // completion: the orchestrator marked the stream ended (MarkStreamEnded), or
-// this was a replay/VOD run (!IsLiveOrUpcoming). The predicate is exactly
-// that — ANY exit of a replay run counts, not only a finished loop, so a
-// replay that dies on its 5-error budget clears too. That is the
-// pre-existing behaviour and it is right: a replay run that leaves its loop
-// has either reached the end of the archive or hit a permanent error, and
-// neither leaves a position worth resuming from. The one replay path that
-// DOES keep its sidecar is cancellation/shutdown, which the first arm of the
-// switch below handles before this rule is reached — and that is exactly the
-// path a resume needs, because a replay's sidecar continuation IS its
-// position in the archive (the resume block installs it over any fresh token;
-// see preferFresh), so keeping it is what stops a cancelled VOD chat
-// re-downloading from the top. Every
+// this was a replay/VOD run (!IsLiveOrUpcoming) whose loop reached the end of
+// the archive — it left with no terminal error. A replay that GIVES UP (its
+// error budget, an auth loss) is not a completion and keeps its sidecar, as a
+// cancelled or shut-down one always did: a replay's sidecar continuation IS
+// its position in the archive (the resume block installs it over any fresh
+// token; see preferFresh), so the next run resumes there instead of paging
+// from the top. Clearing it used to be the rule, on the grounds that a VOD's
+// chat can be re-fetched in full — but with the sidecar gone the next run
+// found the archive with nothing describing it, and rewrote it from its own
+// first page. Every
 // other exit of a live/upcoming run — stale-continuation exhaustion
 // (recoverStaleContinuation giving up after maxStaleContinuationAttempts),
 // handleFetchError's consecutive-error budget, ErrAuthRequired — is NOT the
 // stream ending: the broadcast is still coming and another run will follow.
 // Those exits KEEP the sidecar and refresh it (saveResume) on the way out, so
-// the continuation and count on disk match what this run reached. The
-// cancel/shutdown save in runChatLoop and the ioErrorOccurred guard (never
-// clear after a failed flush) are unchanged. Without this rule a
+// the continuation and count on disk match what this run reached, and so
+// does a cancelled/shut-down run. The ioErrorOccurred guard (never clear after
+// a failed flush) is unchanged. Without this rule a
 // waiting-room chat that YouTube reset after inactivity lost its whole
 // archive: the next run found no sidecar, started at count 0, and its first
 // message took the full-write path over chat.json.
+//
+// THE RE-RUN RULE. A replay run that finds an archive on disk with no
+// usable sidecar — one an earlier replay completed, a live capture whose
+// sidecar a replay refuses, or one an older build left — must never replace
+// it with a fragment, so it writes to <OutputFile>.rerun instead
+// (beginReplayRerun) and the archive changes only when the run ends with
+// something no worse: a genuine completion, or at least as many messages
+// (finishReplayRerun). Otherwise the archive it found stays, and so does its
+// count. Before this rule a re-run's first flush rewrote chat.json from its
+// own buffer, and a re-run that then gave up left a 200-message fragment
+// where a complete 2000-message archive had been.
 //
 // THE MODE RULE (the first thing Start decides, before either rule below). A
 // REPLAY run refuses a sidecar a LIVE/upcoming run wrote (ChatResumeState.Mode)
@@ -408,13 +432,15 @@ func staleRecoveryDelay(n int) time.Duration {
 // block's own comment below.
 //
 // THE OUTCOME. Start returns nil for every exit that is not a give-up. There
-// are two exceptions, and the worker turns either into chat_status
+// are four exceptions, and the worker turns any of them into chat_status
 // "incomplete" because messages can still be missing:
 //   - errStaleRecoveryExhausted — a stale-continuation cap firing on a
 //     still-live broadcast, either the consecutive-recovery one in runChatLoop
 //     or recoverStaleContinuation's own retry budget.
 //   - errChatFetchExhausted — handleFetchError's consecutive-error budget.
-func (cd *ChatDownloader) Start(ctx context.Context) error {
+//   - errChatAuthLost — the chat API refused the credentials (HTTP 401).
+//   - a recovered panic, reported as "chat downloader panic: ...".
+func (cd *ChatDownloader) Start(ctx context.Context) (retErr error) {
 	cd.mu.Lock()
 	if cd.running {
 		done := cd.done
@@ -442,10 +468,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// A fresh run carries no give-up verdict from a prior run on this same
 	// instance, for the same reason liveContinuationOpen is re-armed below.
 	cd.terminalErr = nil
-	// And no replay high-water mark: the mark is one RUN's "highest absolute
-	// timestamp committed so far", so carrying a prior run's would make this
-	// run's first replay pass drop everything below a boundary it never set.
-	// Re-armed here, beside terminalErr, for the same reason.
+	// And no replay high-water mark from a previous run on this instance: the
+	// mark is "the highest absolute timestamp committed to the file", and
+	// only what this Start loads — the sidecar, or the adopted file — says
+	// what that is now. Re-armed here, beside terminalErr, and set again by
+	// the resume or the adoption below.
 	cd.replayHighWaterUsec, cd.hasReplayHighWater = 0, false
 	// A fresh run starts with no resume signal, not whatever a PRIOR run on
 	// this same instance last left behind (e.g. a completed run that ended
@@ -465,8 +492,29 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	}
 	cd.mu.Unlock()
 
+	// Registered first so it runs LAST: done closes only after the recover
+	// below has recorded a panic's verdict, so a handoff waiter woken by the
+	// close reads that verdict rather than nil.
+	defer func() {
+		cd.mu.Lock()
+		cd.running = false
+		cd.cancelCtx = nil
+		done := cd.done
+		cd.done = nil
+		cd.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
+	}()
+
 	defer func() {
 		if r := recover(); r != nil {
+			// A panic is an outcome, not a clean exit: the capture stopped,
+			// so the run reports it like any other give-up and the worker
+			// records chat_status "incomplete" instead of "finished".
+			panicErr := fmt.Errorf("chat downloader panic: %v", r)
+			cd.setTerminalErr(panicErr)
+			retErr = panicErr
 			// Capture the stack at the point of panic so production crashes
 			// are diagnosable from the OnError sink alone.
 			stack := debug.Stack()
@@ -477,24 +525,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 					defer func() {
 						_ = recover()
 					}()
-					cd.OnError(fmt.Errorf("chat downloader panic: %v\n%s", r, stack))
+					cd.OnError(fmt.Errorf("%w\n%s", panicErr, stack))
 				}()
 			}
-			cd.mu.Lock()
-			cd.running = false
-			cd.mu.Unlock()
-		}
-	}()
-
-	defer func() {
-		cd.mu.Lock()
-		cd.running = false
-		cd.cancelCtx = nil
-		done := cd.done
-		cd.done = nil
-		cd.mu.Unlock()
-		if done != nil {
-			close(done)
 		}
 	}()
 
@@ -568,15 +601,50 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		if len(state.RecentIDs) > 0 {
 			cd.dedup.Restore(state.RecentIDs)
 		}
+		// The mark is the file's, like the count and the epoch: everything
+		// below it is already on disk. A run that starts on a replay token
+		// (the page flipped while no run was polling) pages the archive from
+		// the top, and only the mark keeps what the live half committed from
+		// being appended again — the 5000-ID window cannot span the archive.
+		if state.ReplayHighWaterUsec != nil {
+			cd.replayHighWaterUsec, cd.hasReplayHighWater = *state.ReplayHighWaterUsec, true
+		}
 		// Cross-check that the chat file actually exists on disk — guards
 		// against the case where the resume sidecar survived but the chat
 		// file was deleted/moved out from under us. Without this, the next
 		// write would take the incremental-append path and fail (audit
 		// chat.md G5).
 		cd.flushedToDisk = cd.messageCount > 0
-		if cd.flushedToDisk && cd.opts.OutputFile != "" {
-			if _, statErr := os.Stat(cd.opts.OutputFile); statErr != nil {
+		// Through getOutputPaths, like every other read of the paths outside
+		// the lock's owner: the waiting-room loop can SetOutputFile on this
+		// instance while its early run is starting.
+		outputFile, _ := cd.getOutputPaths()
+		if cd.flushedToDisk && outputFile != "" {
+			if _, statErr := os.Stat(outputFile); statErr != nil {
 				cd.flushedToDisk = false
+				// The history the sidecar counted went with the file. The
+				// first flush writes the file whole from this run's buffer,
+				// so the count starts from that: kept, the new header and
+				// the job row counted messages the array no longer had. The
+				// dedup and the replay mark describe that history too, and
+				// kept, a replay pass dropped every message they covered —
+				// all of it, gone from disk and never fetched again.
+				cd.messageCount = 0
+				cd.dedup.Restore(nil)
+				cd.replayHighWaterUsec, cd.hasReplayHighWater = 0, false
+			}
+		}
+		// The sidecar says the file holds history; check it still ends the way
+		// an append needs before trusting it with one. A crash can leave a
+		// zero-filled tail or a cut mid-record, and an append splices into
+		// that (or, with no ']' at all, the rewrite fallback used to replace
+		// everything with one batch). Repaired now, not at the first flush,
+		// so a run that gets no new message still leaves a parseable file.
+		if cd.flushedToDisk && outputFile != "" {
+			if intact, endErr := utils.ChatFileEndIntact(outputFile); endErr == nil && !intact {
+				cd.logInfo("chat: the resumed chat file is damaged; salvaging it",
+					"videoID", cd.opts.VideoID)
+				cd.rewriteWithHistory(outputFile)
 			}
 		}
 		resuming = true
@@ -594,6 +662,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	adopted := 0
 	if !resuming && cd.opts.IsLiveOrUpcoming {
 		adopted = cd.adoptExistingChatFile()
+	}
+	// The replay half of the same protection (THE RE-RUN RULE).
+	var rerun *replayRerun
+	if !resuming && !cd.opts.IsLiveOrUpcoming {
+		rerun = cd.beginReplayRerun()
 	}
 
 	if cd.OnStart != nil {
@@ -627,16 +700,40 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	ioErr := cd.ioErrorOccurred
 	// Genuine completion: the orchestrator declared the stream over, or this
-	// was a replay/VOD run and its loop reached the end of the archive.
-	completed := cd.streamEnded || !cd.opts.IsLiveOrUpcoming
+	// was a replay/VOD run and its loop reached the end of the archive — a
+	// give-up leaves a terminal error behind.
+	completed := cd.streamEnded || (!cd.opts.IsLiveOrUpcoming && cd.terminalErr == nil)
 	cd.mu.Unlock()
+	cancelled := cd.wasCancelledOrShutdown(ctx)
+	// A re-run that stopped short leaves the archive it found as the
+	// archive, described by nothing but itself — as before the run — so the
+	// completion rule is skipped: a sidecar saved now would describe the
+	// discarded re-run.
+	if rerun == nil || cd.finishReplayRerun(rerun, completed && !cancelled) {
+		cd.applyCompletionRule(cancelled, completed, ioErr)
+	}
+
+	if cd.OnFinish != nil {
+		cd.OnFinish()
+	}
+
+	return cd.terminalError()
+}
+
+// applyCompletionRule keeps or clears the resume sidecar on the way out of
+// Start (see its doc comment's completion rule).
+func (cd *ChatDownloader) applyCompletionRule(cancelled, completed, ioErr bool) {
 	switch {
-	case cd.wasCancelledOrShutdown(ctx):
-		// Cancellation / shutdown — runChatLoop already saved on its way out.
-	case !completed:
-		// A live/upcoming run that left for some reason OTHER than the stream
-		// ending. The next run needs the sidecar to know chat.json already
-		// holds history; refresh it so the continuation and count are current.
+	case cancelled, !completed:
+		// Cancellation / shutdown, a live/upcoming run that left for some
+		// reason OTHER than the stream ending, or a replay that gave up. The
+		// next run needs the sidecar to know chat.json already holds history
+		// (and, for a replay, where in the archive it stopped); save it here,
+		// after the final flush, so the continuation and count are current.
+		// The cancellation case is decided by Start rather than on the loop's
+		// way out: a Stop() that lands after the loop left on a give-up but
+		// before this switch takes this arm, and must not find the save
+		// skipped because the loop saw no cancellation when it exited.
 		if cd.flushedToDisk || len(cd.messages) > 0 {
 			cd.saveResume()
 		}
@@ -646,12 +743,81 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		// (audit chat.md C8).
 		cd.clearResume()
 	}
+}
 
-	if cd.OnFinish != nil {
-		cd.OnFinish()
+// replayRerun is a replay run writing beside an archive it must not shrink
+// (THE RE-RUN RULE): the archive's own paths, restored when the run ends, and
+// the message count it held when the run began.
+type replayRerun struct {
+	outputFile, resumeFile string
+	existing               int
+}
+
+// beginReplayRerun points a replay run that found an archive on disk at a
+// file of its own, <OutputFile>.rerun, its sidecar beside it. nil when there
+// is no archive to protect: no output path yet, no file, or one whose header
+// counts no message (a damaged header falls to the full rewrite, as before).
+// A .rerun an earlier re-run left is a fragment nothing points at; the first
+// flush writes over it whole.
+func (cd *ChatDownloader) beginReplayRerun() *replayRerun {
+	outputFile, resumeFile := cd.getOutputPaths()
+	if outputFile == "" {
+		return nil
 	}
+	n, ok := utils.ReadChatFileMessageCount(outputFile)
+	if !ok || n <= 0 {
+		return nil
+	}
+	tmp := outputFile + replayRerunSuffix
+	cd.mu.Lock()
+	cd.opts.OutputFile = tmp
+	cd.opts.ResumeFile = tmp + ".resume.json"
+	cd.mu.Unlock()
+	cd.logInfo("chat: a replay archive is already on disk; this run writes beside it and replaces it only if it gets at least as far",
+		"videoID", cd.opts.VideoID, "archiveMessages", n)
+	return &replayRerun{outputFile: outputFile, resumeFile: resumeFile, existing: n}
+}
 
-	return cd.terminalError()
+// finishReplayRerun settles a re-run: its file replaces the archive when the
+// run completed or holds at least as many messages, and is discarded
+// otherwise, the run's count going back to the archive's so MessageCount (and
+// the job row fed from it) describes the file that is actually there. Either
+// way the downloader's paths are the archive's again. Reports whether the
+// re-run is now the archive.
+//
+// A run whose flush failed is never swapped in: its file may not hold what
+// it counted.
+func (cd *ChatDownloader) finishReplayRerun(rr *replayRerun, completed bool) bool {
+	tmp, tmpResume := cd.getOutputPaths()
+	cd.mu.Lock()
+	got := cd.messageCount
+	ioErr := cd.ioErrorOccurred
+	cd.opts.OutputFile, cd.opts.ResumeFile = rr.outputFile, rr.resumeFile
+	cd.mu.Unlock()
+	if err := os.Remove(tmpResume); err != nil && !os.IsNotExist(err) {
+		cd.logDebug("chat: could not remove the re-run's resume state", "file", tmpResume, "err", err)
+	}
+	_, statErr := os.Stat(tmp)
+	if !ioErr && statErr == nil && (completed || got >= rr.existing) {
+		err := utils.ReplaceFile(tmp, rr.outputFile)
+		if err == nil {
+			cd.logInfo("chat: the replay re-run replaced the archive",
+				"videoID", cd.opts.VideoID, "messages", got, "archiveMessages", rr.existing, "complete", completed)
+			return true
+		}
+		cd.reportIOError(fmt.Errorf("replace the chat archive with the replay re-run: %w", err))
+	}
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		cd.logDebug("chat: could not remove the discarded re-run", "file", tmp, "err", err)
+	}
+	cd.mu.Lock()
+	cd.messageCount = rr.existing
+	cd.messages = nil
+	cd.flushedToDisk = true
+	cd.mu.Unlock()
+	cd.logInfo("chat: the replay re-run stopped short of the archive already on disk; that archive is kept",
+		"videoID", cd.opts.VideoID, "rerunMessages", got, "archiveMessages", rr.existing)
+	return false
 }
 
 // MarkStreamEnded signals that the stream has ended naturally.
@@ -959,13 +1125,6 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			cd.sleep(ctx, delay)
 		}
 	}
-
-	// Save resume state when cancelled or context cancelled (shutdown race).
-	// We save if there are unflushed messages OR any disk-flushed state exists
-	// (dedup IDs, continuation token) so a resume can pick up where we left off.
-	if cd.wasCancelledOrShutdown(ctx) && (len(cd.messages) > 0 || cd.flushedToDisk) {
-		cd.saveResume()
-	}
 }
 
 // fetchOne performs a single chat fetch, routing to the replay or live
@@ -984,8 +1143,8 @@ func (cd *ChatDownloader) fetchOne(ctx context.Context) (*ChatApiResponse, error
 // handleFetchError reacts to an error returned by fetchOne. Returns true when
 // the loop should break — context cancelled, auth failure (ErrAuthRequired),
 // or consecutive-error budget exhausted. On a transient error it calls
-// OnError, sleeps with exponential backoff, and returns false so the caller
-// can `continue`.
+// OnError, sleeps with a linear backoff (5 s per consecutive error, capped),
+// and returns false so the caller can `continue`.
 func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, consecutiveErrors *int) bool {
 	if ctx.Err() != nil {
 		return true
@@ -1004,6 +1163,8 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 	// a downloader that will never observe anything again.
 	if errors.Is(err, ErrAuthRequired) {
 		cd.setLiveContinuationOpen(false)
+		// A give-up, like the budget exhaustion below: see errChatAuthLost.
+		cd.setTerminalErr(errChatAuthLost)
 		if cd.OnError != nil {
 			cd.OnError(err)
 		}
@@ -1035,7 +1196,7 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 		return true
 	}
 
-	// Exponential backoff (cap at 30s for VOD, 60s for live)
+	// Linear backoff — 5 s per consecutive error (cap at 30s for VOD, 60s for live)
 	maxBackoff := 30000
 	if cd.isStreamActive() {
 		maxBackoff = 60000
@@ -1078,7 +1239,16 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 			}
 		}
 
-		if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
+		// ONE FILE, ONE EPOCH. A live/upcoming run writes every offset against
+		// cd.streamStartMs, the file's epoch — typically the SCHEDULED start.
+		// A replay pass inside that run (the page flipped to replay once the
+		// broadcast ended, or the run began on a replay token) is handed
+		// YouTube's videoOffsetTimeMsec, which counts from the ACTUAL start;
+		// kept, the replay half read early by the late-start delta under the
+		// one bias the player applies per file. So in such a run the offset
+		// always comes from the absolute timestamp. A replay/VOD run keeps
+		// YouTube's offsets: its file is replay-only (the mode rule).
+		if (!msg.HasOffset || cd.opts.IsLiveOrUpcoming) && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
 			if !hasUsec {
 				cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec)
 			} else if usec > 0 {
@@ -1279,59 +1449,86 @@ func (cd *ChatDownloader) getOutputPaths() (outputFile, resumeFile string) {
 //     read only the last bytes to locate ']', truncate there, then append new
 //     messages + closing structure. Memory cost: O(new messages) not O(file size).
 //
-// On success, clears the in-memory buffer and marks flushedToDisk = true.
+// On success, clears the in-memory buffer and marks flushedToDisk = true. On
+// failure the batch stays buffered and the next flush retries it: clearing it
+// regardless (as this did) lost the batch while the header still counted it.
 func (cd *ChatDownloader) writeChatFile() {
 	outputFile, _ := cd.getOutputPaths()
 	if outputFile == "" {
 		return // No output file set yet (early chat), buffer in memory
 	}
 	if err := os.MkdirAll(filepath.Dir(outputFile), 0o755); err != nil {
+		// Reported like every other write failure: silently returning let a
+		// run whose staging dir vanished end "finished" with nothing on disk.
+		cd.reportIOError(fmt.Errorf("create chat dir: %w", err))
 		return
 	}
 
 	if !cd.flushedToDisk {
 		// All messages in memory — write complete file atomically
-		cd.writeFullChatFile()
-		cd.messages = nil // All written to disk, free memory
-		cd.flushedToDisk = true
+		if cd.writeFullChatFile() {
+			cd.messages = nil // All written to disk, free memory
+			cd.flushedToDisk = true
+		}
 		return
 	}
 
-	// Incremental append: open existing file and append new messages.
-	// If any step fails, fall back to a full rewrite that prepends on-disk
-	// messages — both paths clear the in-memory buffer on success.
-	if cd.incrementalAppend(outputFile) {
+	// Incremental append: open the existing file and append the batch.
+	err := cd.incrementalAppend(outputFile)
+	switch {
+	case err == nil:
 		cd.messages = nil
-	} else {
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		cd.messages = nil
+		return
+	case errors.Is(err, utils.ErrChatFilePartialWrite):
+		// The append's write failed and it put the file's end back, so the
+		// file holds what it held before: keep the batch for the next flush.
+		// It used to be dropped here while cd.messageCount kept counting it,
+		// so the header and the job row over-counted the array for good. If
+		// the end could not be put back either, the next append finds the
+		// damage and takes the rewrite below.
+		return
 	}
+	// Any other failure — a damaged file included — rewrites the file whole:
+	// its history, salvaged if need be, then the batch.
+	cd.rewriteWithHistory(outputFile)
 }
 
-// incrementalAppend performs an in-place append of cd.messages to the existing
-// chat file on disk via utils.AppendChatMessages. Returns true on success or
-// on the truncate-then-write-failure path (file broken but caller should
-// advance in-memory state, per utils.ErrChatFilePartialWrite). Returns false
-// when the caller should fall back to a full rewrite.
-func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
-	newMessages := cd.messages
-	if len(newMessages) == 0 {
-		return true
-	}
+// appendChatMessages is utils.AppendChatMessages; a test replaces it to make
+// an append fail the way a full disk does mid-write.
+var appendChatMessages = utils.AppendChatMessages[ChatMessage]
 
-	err := utils.AppendChatMessages(outputFile, newMessages, cd.messageCount, chatWarnAdapter{cd})
-	if err == nil {
+// incrementalAppend appends cd.messages to the chat file on disk through
+// utils.AppendChatMessages, reporting any failure (which also keeps the
+// resume sidecar, audit chat.md C8).
+func (cd *ChatDownloader) incrementalAppend(outputFile string) error {
+	if len(cd.messages) == 0 {
+		return nil
+	}
+	err := appendChatMessages(outputFile, cd.messages, cd.messageCount, chatWarnAdapter{cd})
+	if err != nil {
+		cd.reportIOError(fmt.Errorf("chat file append: %w", err))
+	}
+	return err
+}
+
+// rewriteWithHistory writes the chat file whole: the history already on disk,
+// then the buffered batch. Returns whether it did. On a failed write the
+// buffer goes back to just the batch, so the retry does not count the history
+// twice — the history is still on disk for it.
+func (cd *ChatDownloader) rewriteWithHistory(outputFile string) bool {
+	cd.mu.Lock()
+	pending, pendingCount := cd.messages, cd.messageCount
+	cd.mu.Unlock()
+	if !cd.prependExistingMessages(outputFile) {
+		return false
+	}
+	if cd.writeFullChatFile() {
+		cd.messages = nil
 		return true
 	}
-	cd.reportIOError(fmt.Errorf("chat file append: %w", err))
-	if errors.Is(err, utils.ErrChatFilePartialWrite) {
-		// File was truncated but WriteAt failed — falling back to full rewrite
-		// would read the broken file, recover zero prior messages, and drop
-		// history. Advance in-memory state instead; the C8 reportIOError path
-		// already preserved the resume file (audit chat.md C8).
-		return true
-	}
+	cd.mu.Lock()
+	cd.messages, cd.messageCount = pending, pendingCount
+	cd.mu.Unlock()
 	return false
 }
 
@@ -1348,9 +1545,16 @@ func (cd *ChatDownloader) epochRFC3339() string {
 	return cd.opts.StreamStartTime
 }
 
-func (cd *ChatDownloader) writeFullChatFile() {
+func (cd *ChatDownloader) writeFullChatFile() bool {
 	outputFile, _ := cd.getOutputPaths()
 
+	messages := cd.messages
+	if messages == nil {
+		// "[]", never "null": an append needs the array's ']' to find, and a
+		// salvage that kept nothing would otherwise make the next append fail
+		// (and report) before rewriting the file.
+		messages = []ChatMessage{}
+	}
 	data := ChatData{
 		VideoID:         cd.opts.VideoID,
 		VideoTitle:      cd.opts.VideoTitle,
@@ -1358,12 +1562,14 @@ func (cd *ChatDownloader) writeFullChatFile() {
 		StreamStartTime: cd.epochRFC3339(),
 		DownloadedAt:    time.Now().UTC().Format(time.RFC3339),
 		MessageCount:    cd.messageCount,
-		Messages:        cd.messages,
+		Messages:        messages,
 	}
 
 	if err := utils.WriteChatFileAtomic(outputFile, &data); err != nil {
 		cd.reportIOError(fmt.Errorf("write chat file: %w", err))
+		return false
 	}
+	return true
 }
 
 // chatFileAdoptionSummary is everything adoptExistingChatFile needs out of a
@@ -1373,6 +1579,10 @@ type chatFileAdoptionSummary struct {
 	streamStartTime string
 	messages        int
 	ids             []string
+	// maxUsec / hasUsec: the highest timestampUsec in the file, which seeds
+	// the replay high-water mark exactly as the sidecar's saved one does.
+	maxUsec int64
+	hasUsec bool
 }
 
 // chatFileReadBuffer sizes the reader the summary streams a chat file through.
@@ -1472,10 +1682,11 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 		return fmt.Errorf("parse chat messages: not an array")
 	}
 	for dec.More() {
-		// id only: the decoder skips every other field without materialising
-		// it, so a 2 KB message costs nothing but the scan.
+		// id and timestamp only: the decoder skips every other field without
+		// materialising it, so a 2 KB message costs nothing but the scan.
 		var msg struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			TimestampUsec string `json:"timestampUsec"`
 		}
 		if err := dec.Decode(&msg); err != nil {
 			return fmt.Errorf("parse chat messages: %w", err)
@@ -1484,41 +1695,15 @@ func decodeChatFileMessageIDs(dec *json.Decoder, summary *chatFileAdoptionSummar
 		if msg.ID != "" {
 			summary.ids = append(summary.ids, msg.ID)
 		}
+		if usec, perr := strconv.ParseInt(msg.TimestampUsec, 10, 64); perr == nil &&
+			(!summary.hasUsec || usec > summary.maxUsec) {
+			summary.maxUsec, summary.hasUsec = usec, true
+		}
 	}
 	if _, err := dec.Token(); err != nil { // the array's ']'
 		return fmt.Errorf("parse chat messages: %w", err)
 	}
 	return nil
-}
-
-// readExistingChatData attempts to read the previously-flushed chat file on
-// disk in full (header included). The only caller left is
-// prependExistingMessages, writeChatFile's append-failure fallback; adoption
-// reads the header through readChatFileAdoptionSummary (a stream, not a whole
-// slurp) since T4-35, so this full read never runs on the adoption path. The
-// error is returned (rather than folded into a nil result) so callers can tell
-// "no file" from "a file that does not parse" — those two need opposite
-// handling.
-func (cd *ChatDownloader) readExistingChatData(path string) (*ChatData, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var chatData ChatData
-	if err := json.Unmarshal(data, &chatData); err != nil {
-		return nil, err
-	}
-	return &chatData, nil
-}
-
-// readExistingMessages is a thin wrapper over readExistingChatData for
-// callers that only need the message slice.
-func (cd *ChatDownloader) readExistingMessages(path string) ([]ChatMessage, error) {
-	d, err := cd.readExistingChatData(path)
-	if err != nil {
-		return nil, err
-	}
-	return d.Messages, nil
 }
 
 // adoptExistingChatFile is THE ADOPTION RULE: when Start finds no usable
@@ -1601,30 +1786,100 @@ func (cd *ChatDownloader) adoptExistingChatFile() int {
 	for _, id := range summary.ids {
 		cd.dedup.Add(id)
 	}
+	// And the replay high-water mark, as a sidecar resume restores it: a run
+	// on a replay token pages the archive from the top, and everything up to
+	// the file's newest message is already in it. The same far-future guard
+	// processBatch applies to a live batch applies to the file's.
+	if summary.hasUsec && summary.maxUsec <= time.Now().Add(replayMarkFutureSlack).UnixMicro() {
+		cd.replayHighWaterUsec, cd.hasReplayHighWater = summary.maxUsec, true
+	}
 	return adopted
 }
 
-// prependExistingMessages reads previously-flushed messages from disk and prepends
-// them to cd.messages. It also registers their IDs in seenIDs to prevent duplicates
-// on subsequent API responses that may overlap with the recovered messages.
-func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
-	existing, err := cd.readExistingMessages(outputFile)
-	if err != nil || existing == nil {
-		return
+// prependExistingMessages puts the history already on disk ahead of the
+// buffered batch, for rewriteWithHistory, and registers its IDs with the
+// dedup so an overlapping poll cannot duplicate them. The count becomes the
+// length of what will be written: the array is the data.
+//
+// A missing file has no history. A file that no longer parses keeps every
+// message before the damage, and its bytes are kept beside it as
+// <file>.corrupt first, since whatever followed the damage is lost to the
+// rewrite. This used to read the damaged file as nothing at all, and the
+// rewrite replaced the whole history with one batch while the header went on
+// counting it. A file that cannot be read at all returns false: rewriting
+// would overwrite history this run never saw, so the batch waits for the next
+// flush instead.
+func (cd *ChatDownloader) prependExistingMessages(outputFile string) bool {
+	existing, damaged, err := utils.SalvageChatMessages[ChatMessage](outputFile)
+	if err != nil && !os.IsNotExist(err) {
+		cd.reportIOError(fmt.Errorf("read chat file for rewrite: %w", err))
+		return false
+	}
+	if damaged {
+		corruptPath := outputFile + corruptChatSuffix
+		cd.reportIOError(fmt.Errorf("chat file damaged; keeping its %d intact messages and the original as %s", len(existing), corruptPath))
+		if perr := utils.PreserveFileCopy(outputFile, corruptPath); perr != nil {
+			cd.reportIOError(fmt.Errorf("preserve damaged chat file: %w", perr))
+		}
+	}
+	// A batch message the file already holds is not written twice: an append
+	// whose write failed and whose end could not be put back left the
+	// messages it did write in the file, and the salvage finds them there.
+	onDisk := make(map[string]struct{}, len(existing))
+	for _, msg := range existing {
+		if msg.ID != "" {
+			onDisk[msg.ID] = struct{}{}
+		}
 	}
 	// Locked for the same reason as processBatch: MessageCount() reads
 	// messageCount from another goroutine.
 	cd.mu.Lock()
-	cd.messages = append(existing, cd.messages...)
+	pending := cd.messages[:0:0]
+	for _, msg := range cd.messages {
+		if _, dup := onDisk[msg.ID]; dup && msg.ID != "" {
+			continue
+		}
+		pending = append(pending, msg)
+	}
+	cd.messages = append(existing, pending...)
 	cd.messageCount = len(cd.messages)
 	cd.mu.Unlock()
-	// Register recovered message IDs in the dedup to prevent duplicates
-	// on subsequent polls.
-	for _, msg := range existing {
+	if damaged {
+		// What the damage took is gone from disk, so nothing may treat it as
+		// committed: the dedup and the replay high-water mark are rebuilt from
+		// what the rewrite will hold. Kept, a replay pass dropped every lost
+		// message below the old mark, and the dedup every recent one.
+		cd.dedup.Restore(nil)
+		cd.replayHighWaterUsec, cd.hasReplayHighWater = replayMarkOf(cd.messages)
+	}
+	// Register what the rewrite will hold in the dedup, so an overlapping
+	// poll cannot duplicate it: the recovered history, and — after a rebuild —
+	// the batch too.
+	for _, msg := range cd.messages {
 		if msg.ID != "" {
 			cd.dedup.Add(msg.ID)
 		}
 	}
+	return true
+}
+
+// replayMarkOf is the replay high-water mark a set of committed messages
+// implies: their highest timestampUsec, ignoring the far-future values
+// processBatch's own guard refuses (see replayMarkFutureSlack).
+func replayMarkOf(msgs []ChatMessage) (int64, bool) {
+	limit := time.Now().Add(replayMarkFutureSlack).UnixMicro()
+	var mark int64
+	has := false
+	for _, m := range msgs {
+		usec, err := strconv.ParseInt(m.TimestampUsec, 10, 64)
+		if err != nil || usec > limit {
+			continue
+		}
+		if !has || usec > mark {
+			mark, has = usec, true
+		}
+	}
+	return mark, has
 }
 
 // updateChatFileHeader updates messageCount and downloadedAt in the JSON
@@ -1641,7 +1896,8 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 }
 
 func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
-	store := utils.ResumeStore[ChatResumeState]{Path: cd.opts.ResumeFile}
+	_, resumeFile := cd.getOutputPaths()
+	store := utils.ResumeStore[ChatResumeState]{Path: resumeFile}
 	state, err := store.Load()
 	if err != nil {
 		return nil, err
@@ -1673,6 +1929,11 @@ func (cd *ChatDownloader) saveResume() {
 		RecentIDs:     recentIDs,
 		StreamStartMs: cd.streamStartMs,
 		Mode:          resumeModeFor(cd.opts.IsLiveOrUpcoming),
+	}
+	// Loop-goroutine state, and saveResume runs on the loop goroutine.
+	if cd.hasReplayHighWater {
+		mark := cd.replayHighWaterUsec
+		state.ReplayHighWaterUsec = &mark
 	}
 	cd.mu.Unlock()
 

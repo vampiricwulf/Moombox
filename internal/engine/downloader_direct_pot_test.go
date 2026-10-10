@@ -246,7 +246,7 @@ func refusedURL(t *testing.T) string {
 // error` and the job's stored error. The token is redacted in place while the
 // error chain stays intact for errors.Is / errors.As.
 //
-// Mutant (run): returning err unchanged from redactPoToken fails every
+// Mutant (run): returning err unchanged from redact.MediaError fails every
 // "contains SECRETTOKEN" row below.
 func TestFallbackTransportErrorRedactsPoToken(t *testing.T) {
 	t.Run("dial refused", func(t *testing.T) {
@@ -293,44 +293,4 @@ func TestFallbackTransportErrorRedactsPoToken(t *testing.T) {
 			t.Fatalf("error = %q, want the untouched URL %q", err.Error(), raw)
 		}
 	})
-}
-
-// TestRedactPoToken pins the helper's contract directly: a *url.Error found
-// anywhere in the chain loses its pot value; the chain and every other
-// error pass through untouched.
-func TestRedactPoToken(t *testing.T) {
-	cause := errors.New("boom")
-	cases := []struct {
-		name    string
-		err     error
-		want    string
-		samePtr bool
-	}{
-		{"nil", nil, "", true},
-		{"not a url.Error", cause, "boom", true},
-		{"no pot", &url.Error{Op: "Get", URL: "https://h/v?itag=1", Err: cause}, `Get "https://h/v?itag=1": boom`, true},
-		{"bare", &url.Error{Op: "Get", URL: "https://h/v?itag=1&pot=SECRET&x=2", Err: cause}, `Get "https://h/v?itag=1&pot=<redacted>&x=2": boom`, false},
-		{"wrapped", fmt.Errorf("download: %w", &url.Error{Op: "Get", URL: "https://h/v?pot=SECRET", Err: cause}), `download: Get "https://h/v?pot=<redacted>": boom`, false},
-		{"unparseable URL", &url.Error{Op: "Get", URL: "http://[::1%zz/v?pot=SECRET&a=b", Err: cause}, `Get "http://[::1%zz/v?pot=<redacted>&a=b": boom`, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := redactPoToken(tc.err)
-			if tc.err == nil {
-				if got != nil {
-					t.Fatalf("redactPoToken(nil) = %v", got)
-				}
-				return
-			}
-			if got.Error() != tc.want {
-				t.Fatalf("Error() = %q, want %q", got.Error(), tc.want)
-			}
-			if tc.samePtr && got != tc.err {
-				t.Fatalf("redactPoToken returned a new error for %q, want it untouched", tc.name)
-			}
-			if !errors.Is(got, cause) && tc.err != nil && errors.Is(tc.err, cause) {
-				t.Fatalf("errors.Is(cause) lost")
-			}
-		})
-	}
 }

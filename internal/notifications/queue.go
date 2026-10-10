@@ -42,6 +42,24 @@ const dropWarnInterval = 5 * time.Second
 type queued struct {
 	msg  Message
 	tier Tier
+	// ctl, when set, makes this item a step for the sender to run rather than
+	// a message to deliver: enqueueControl's way of doing something to this
+	// target's edit-mode state AFTER every item queued before it. Never
+	// delivered, never shed (its tier is not TierLow), never discarded, and
+	// never counted toward notificationQueueCap (targetQueue.steps).
+	ctl func()
+	// unpin lets go of the job's tracker entry the item was pinned with at
+	// enqueue (targetQueue.pin) — nil when it was not. Every way an item
+	// leaves the queue lets go of it, exactly once (letGo): delivered, shed,
+	// refused or discarded. One missed keeps its job's entry for good.
+	unpin func()
+}
+
+// letGo releases the item's pin, if it holds one.
+func (it queued) letGo() {
+	if it.unpin != nil {
+		it.unpin()
+	}
 }
 
 // targetQueue is one destination, its FIFO, and the single goroutine that
@@ -58,6 +76,10 @@ type targetQueue struct {
 	// on. Reload matches on it so a surviving target keeps this queue, its
 	// pending items, and the rate bucket its sender has learned.
 	key string
+	// msgKey is the target's targetMsgKey, the key its edit-mode message ids
+	// are held under — what Manager.forgetInOrder drops on this queue. Fixed
+	// for the queue's life: it is derived from key, and a survivor keeps both.
+	msgKey string
 	// shuttingDown is the Manager's flag, shared by pointer. When it is set,
 	// deliveries make a single attempt instead of running the retry ladder.
 	shuttingDown *atomic.Bool
@@ -71,11 +93,19 @@ type targetQueue struct {
 	// mu guards everything below. A plain mutex over a slice rather than a
 	// buffered channel: a channel cannot drop its OLDEST element, which is
 	// exactly what the overflow policy has to do.
-	mu      sync.Mutex
-	events  map[string]bool // nil means all events
-	items   []queued
+	mu     sync.Mutex
+	events map[string]bool // nil means all events
+	items  []queued
+	// steps is how many of items are enqueueControl steps. The cap counts
+	// messages only: a batch delete queues one step per job on every
+	// edit-mode target, and counted, a few hundred of them behind a slow
+	// delivery made the queue "full" and shed the next alert.
+	steps   int
 	closing bool // drain what is queued, then exit (Wait)
 	discard bool // drop what is queued, then exit (a removed target)
+	// exited is set by the pop that tells the goroutine to return: nothing
+	// appended after it would ever run, so enqueueControl refuses from then on.
+	exited bool
 
 	// The ping, as buildTargets resolved it. Guarded by mu like events,
 	// because a Reload swaps them on a surviving queue while Send reads them.
@@ -91,6 +121,24 @@ type targetQueue struct {
 	// it did before edit mode existed. Guarded by mu like mention/events,
 	// because applyTargets rebinds it on a surviving queue.
 	dispatch func(msg Message, once bool) error
+	// pin is dispatch's twin at enqueue, bound with it: for a message
+	// dispatch will manage it pins the job's tracker entry until the item
+	// leaves the queue (Manager.pinLifecycle), and returns nil for any other.
+	// nil when no Manager bound one. Guarded by mu like dispatch.
+	pin func(msg Message) (unpin func())
+	// mode is the delivery mode dispatch was bound in, and editing whether
+	// this queue may still create or edit a lifecycle message: set by a bind
+	// in edit mode, and cleared only when a delivery starts under a
+	// separate-mode bind — a flip away from edit mode leaves the delivery in
+	// flight on the edit path, and its POST can still record an id. Read by
+	// editKeys: a queue that cannot hold a job's edit-mode state gets no
+	// ForgetJob step. Both guarded by mu.
+	mode    string
+	editing bool
+	// legacyMsgKeys are the bound target's old-spelling keys
+	// (notificationTarget.legacyMsgKeys), which a step drops with msgKey.
+	// Guarded by mu: a Reload can add or remove a spelling on a survivor.
+	legacyMsgKeys []string
 
 	// The overflow Warn's coalescing state — see dropWarnInterval. Both kinds
 	// of shed are counted separately because they mean different things: the
@@ -123,10 +171,14 @@ func newTargetQueue(t notificationTarget, logger interface {
 	q := &targetQueue{
 		sender:         t.sender,
 		key:            t.key,
+		msgKey:         t.msgKey,
 		events:         t.events,
 		mention:        t.mention,
 		mentionAllowed: t.mentionAllowed,
 		mentionEvents:  t.mentionEvents,
+		mode:           normalizeTargetMode(t.mode),
+		editing:        normalizeTargetMode(t.mode) == ModeEdit,
+		legacyMsgKeys:  t.legacyMsgKeys,
 		shuttingDown:   shuttingDown,
 		logger:         logger,
 		wake:           make(chan struct{}, 1),
@@ -151,12 +203,22 @@ func newTargetQueue(t notificationTarget, logger interface {
 // mention the flush chose — and hands it to the ordinary FIFO. Named apart
 // from enqueue, which takes an already-built queued item and is what this
 // calls.
+//
+// It is also where an item is pinned (pin), before enqueue takes q.mu: the pin
+// can read the store, and enqueue lets go of an item it does not keep.
 func (q *targetQueue) enqueueBatch(msg Message) {
 	tier := TierNormal
 	if batchIsLowTier(msg.Embeds) {
 		tier = TierLow
 	}
-	q.enqueue(queued{msg: msg, tier: tier})
+	q.mu.Lock()
+	pin := q.pin
+	q.mu.Unlock()
+	var unpin func()
+	if pin != nil {
+		unpin = pin(msg)
+	}
+	q.enqueue(queued{msg: msg, tier: tier, unpin: unpin})
 }
 
 // signal nudges the draining goroutine without ever blocking the caller —
@@ -202,7 +264,9 @@ func (q *targetQueue) setEvents(events map[string]bool) {
 //
 // Alias-aware by the same rule and the same eventAliases table as allows, so a
 // target that asked to be pinged for the broader legacy event is still pinged
-// for the more specific one that split from it. Unlike allows, an EMPTY event
+// for the more specific one that split from it — except a close (closeEvents),
+// whose all-clear pings nobody through its alert's entry. Unlike allows, an
+// EMPTY event
 // pings nobody: an empty Event bypasses the delivery filter by design, and
 // carrying that exemption over to the ping would mean any send that forgot its
 // event name mentioned everyone.
@@ -218,7 +282,7 @@ func (q *targetQueue) mentionFor(event string) (string, *AllowedMentions) {
 	// The ok-check matters for the same reason it does in allows: a bare map
 	// miss yields "", and an "" key in the filter would then match every
 	// non-aliased event.
-	if alias, hasAlias := eventAliases[event]; hasAlias && q.mentionEvents[alias] {
+	if alias, hasAlias := eventAliases[event]; hasAlias && !closeEvents[event] && q.mentionEvents[alias] {
 		return q.mention, q.mentionAllowed
 	}
 	return "", nil
@@ -241,11 +305,38 @@ func (q *targetQueue) setMention(t notificationTarget) {
 // Reload — the twin of setEvents and setMention, and required for the same
 // reason: applyTargets keeps a survivor's queue and discards the freshly
 // built notificationTarget, so a `mode` change would otherwise be accepted
-// by both UIs, written to the file, and ignored until restart.
-func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error) {
+// by both UIs, written to the file, and ignored until restart. t is the
+// target fn was bound for; its mode and old-spelling keys move with fn, under
+// the same hold, and so does pin, the enqueue-side half of the same decision.
+func (q *targetQueue) setDispatch(t notificationTarget, fn func(msg Message, once bool) error, pin func(msg Message) (unpin func())) {
 	q.mu.Lock()
 	q.dispatch = fn
+	q.pin = pin
+	q.mode = normalizeTargetMode(t.mode)
+	q.legacyMsgKeys = t.legacyMsgKeys
+	if q.mode == ModeEdit {
+		q.editing = true
+	}
 	q.mu.Unlock()
+}
+
+// editKeys returns the keys a ForgetJob or RetainJobs step on this queue
+// drops, or nil when the queue cannot hold edit-mode state (see editing) —
+// a separate-mode target never reads or records a message id, and a step
+// there was only a queue slot spent on nothing.
+//
+// The old-spelling keys too. A job open across the upgrade can hold this
+// target's id under one, loaded from its row and not yet adopted (messageID
+// adopts on this target's own next send); a key no step covered was dropped
+// at once, and this target's queued cancel then found no id and posted
+// plain, leaving the message reading "Downloading" for good.
+func (q *targetQueue) editKeys() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.msgKey == "" || !q.editing {
+		return nil
+	}
+	return append([]string{q.msgKey}, q.legacyMsgKeys...)
 }
 
 // dispatchFor runs the bound decision function under mu (a Reload rebinds it
@@ -254,6 +345,9 @@ func (q *targetQueue) setDispatch(fn func(msg Message, once bool) error) {
 func (q *targetQueue) dispatchFor(msg Message) error {
 	q.mu.Lock()
 	d := q.dispatch
+	// The delivery about to start runs under this bind, so a queue flipped
+	// to separate mode can hold no new edit-mode state from here on.
+	q.editing = q.mode == ModeEdit
 	q.mu.Unlock()
 	once := q.shuttingDown != nil && q.shuttingDown.Load()
 	if d == nil {
@@ -262,7 +356,8 @@ func (q *targetQueue) dispatchFor(msg Message) error {
 	return d(msg, once)
 }
 
-// pending is the queue depth, for tests and for the discard report.
+// pending is the queue depth, steps included. Test-facing: pop reads
+// len(q.items) itself.
 func (q *targetQueue) pending() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -280,11 +375,12 @@ func (q *targetQueue) enqueue(it queued) {
 	q.mu.Lock()
 	if q.closing || q.discard {
 		q.mu.Unlock()
+		it.letGo()
 		q.logger.Warn("dropping notification — the target is shutting down",
 			"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
 	}
-	if len(q.items) < notificationQueueCap {
+	if len(q.items)-q.steps < notificationQueueCap {
 		q.items = append(q.items, it)
 		q.mu.Unlock()
 		q.signal()
@@ -300,6 +396,7 @@ func (q *targetQueue) enqueue(it queued) {
 	if victim < 0 {
 		nOldest, nNewest, warn := q.noteDrop(false)
 		q.mu.Unlock()
+		it.letGo()
 		if warn {
 			q.logger.Warn("notification queue full — shedding notifications",
 				"cap", notificationQueueCap, "dropped_newest", nNewest,
@@ -313,6 +410,7 @@ func (q *targetQueue) enqueue(it queued) {
 	q.items = append(q.items, it)
 	nOldest, nNewest, warn := q.noteDrop(true)
 	q.mu.Unlock()
+	dropped.letGo()
 	if warn {
 		q.logger.Warn("notification queue full — shedding notifications",
 			"cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
@@ -320,6 +418,40 @@ func (q *targetQueue) enqueue(it queued) {
 			"event", dropped.msg.logEvent(), "title", dropped.msg.logTitle())
 	}
 	q.signal()
+}
+
+// enqueueControl queues fn to run on this target's sender goroutine after
+// everything already queued — and after the delivery in flight — and reports
+// whether it will run. It refuses only once the goroutine has returned.
+//
+// Outside the policies that govern a message: past the cap, and never counted
+// toward it either (a step is not a delivery: shedding one would leave the
+// state it exists to clear, and counting one would shed a message in its
+// place), onto a queue draining for shutdown (the drain runs it), and onto a
+// retired one (pop's discard runs the steps it holds before the goroutine
+// returns).
+func (q *targetQueue) enqueueControl(fn func()) bool {
+	q.mu.Lock()
+	if q.exited {
+		q.mu.Unlock()
+		return false
+	}
+	q.items = append(q.items, queued{ctl: fn})
+	q.steps++
+	q.mu.Unlock()
+	q.signal()
+	return true
+}
+
+// runControl runs one enqueueControl step. Its own recover for the reason
+// deliver has one: a panicking step must not take the sender with it.
+func (q *targetQueue) runControl(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			q.logger.Error("panic in notification queue step", "panic", fmt.Sprint(r))
+		}
+	}()
+	fn()
 }
 
 // noteDrop counts one shed notification and reports whether this is the moment
@@ -370,10 +502,29 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		// A removed target reports the count and nothing else. The queued
 		// items belong to a webhook the operator has just deleted from their
 		// config; delivering them after the fact would be the opposite of what
-		// the edit asked for.
-		n := len(q.items)
+		// the edit asked for. Its queued STEPS still run: each clears state a
+		// delivery may have left (ForgetJob), and the in-flight delivery they
+		// were queued behind has finished.
+		var steps []func()
+		var dropped []queued
+		for _, it := range q.items {
+			if it.ctl != nil {
+				steps = append(steps, it.ctl)
+				continue
+			}
+			dropped = append(dropped, it)
+		}
+		n := len(dropped)
 		q.items = nil
+		q.steps = 0
+		q.exited = true
 		q.mu.Unlock()
+		for _, it := range dropped {
+			it.letGo()
+		}
+		for _, fn := range steps {
+			q.runControl(fn)
+		}
 		if n > 0 {
 			q.logger.Warn("notification target removed — discarding its queued notifications", "dropped", n)
 		}
@@ -386,6 +537,9 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		// a burst that sheds 1,743 items in 35ms is ONE window, and without
 		// this the log would claim it shed one.
 		closing := q.closing
+		if closing {
+			q.exited = true
+		}
 		nOldest, nNewest, report := q.flushDrops()
 		q.mu.Unlock()
 		if report {
@@ -396,6 +550,9 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 	}
 	it = q.items[0]
 	q.items = q.items[1:]
+	if it.ctl != nil {
+		q.steps--
+	}
 	q.mu.Unlock()
 	return it, true, false
 }
@@ -449,7 +606,14 @@ func (q *targetQueue) deliver(it queued) {
 			q.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
 		}
 	}()
-	// Owner ruling: shutdown sends are single-attempt and the 10s force-exit
+	if it.ctl != nil {
+		q.runControl(it.ctl)
+		return
+	}
+	// After the dispatch, which reads the pinned entry, and deferred so a
+	// panicking one lets go too.
+	defer it.letGo()
+	// Owner ruling: shutdown sends are single-attempt and the 15s force-exit
 	// stays — dispatch carries the flag through to the edit path too, because
 	// a 2s+5s retry ladder cannot finish inside a window the worker stop may
 	// already have spent.

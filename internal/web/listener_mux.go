@@ -247,6 +247,14 @@ func newSchemeMuxWithRetryWait(real net.Listener, logger interface {
 // cache permanent redirects, and a user who later toggles https_enabled
 // would be trapped in a cached cross-scheme redirect loop.
 //
+// The redirect DOWN to http also clears HSTS. With https on, every response
+// pins the host for a year (SecurityHeadersMiddleware), and a browser that
+// trusted the certificate keeps the pin after https is turned off — so it
+// upgrades http:// to https://, this handler sends it back to http://, and
+// the two loop until ERR_TOO_MANY_REDIRECTS. The redirect is served over TLS
+// with the same certificate, so the browser honours max-age=0 on it and
+// drops the pin before following.
+//
 // listenPort is the port this service is actually bound to ("" to trust
 // r.Host verbatim). It matters because the SAME socket serves both schemes:
 // when the request arrived on the source scheme's default port, browsers
@@ -275,6 +283,9 @@ func schemeRedirectHandler(targetScheme, listenPort string) http.Handler {
 					host = net.JoinHostPort(bare, listenPort)
 				}
 			}
+		}
+		if targetScheme == "http" {
+			w.Header().Set("Strict-Transport-Security", "max-age=0")
 		}
 		// r.URL.RequestURI() (not r.RequestURI) keeps origin-form even for
 		// proxy-style absolute-form request lines, which would otherwise

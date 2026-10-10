@@ -137,7 +137,10 @@ export class UpdateController {
         this.app.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
       }
     } catch (e) {
-      this.app.showToast("Update failed: " + e.message, "danger");
+      // No answer is not a failure: the server keeps downloading after the
+      // browser stops waiting (a slow link outlives its response timeout),
+      // and restarts on its own when the update lands.
+      this.app.showToast(`Lost contact with the server (${e.message}) — the update may still be downloading; the dashboard reconnects when it restarts.`, "warning");
     } finally {
       if (btn) { btn.loading = false; btn.disabled = false; }
     }

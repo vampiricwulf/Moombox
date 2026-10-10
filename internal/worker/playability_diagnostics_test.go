@@ -219,10 +219,10 @@ func TestSetJobErrorCookieRefreshWiring(t *testing.T) {
 
 			called := false
 			gotPlatform := ""
-			w.OnCookieRefreshNeeded = func(platform string) bool {
+			w.OnCookieRefreshNeeded = func(platform string) CookieRefreshOutcome {
 				called = true
 				gotPlatform = platform
-				return false
+				return CookieRefreshNotRestored
 			}
 
 			w.setJobError(job, tc.err)
@@ -354,7 +354,7 @@ func TestSetJobErrorPersistsParkReason(t *testing.T) {
 			if _, err := db.AddJob(job); err != nil {
 				t.Fatal(err)
 			}
-			w.OnCookieRefreshNeeded = func(string) bool { return false }
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 
 			w.setJobError(job, tc.err)
 
@@ -385,7 +385,7 @@ func TestSetJobErrorOverwritesStaleParkReason(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	w.OnCookieRefreshNeeded = func(string) bool { return false }
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 
 	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
 		(&StreamProcessResult{Error: "m", ErrSentinel: ErrNotAMember}).AsError())
@@ -461,7 +461,7 @@ func TestSetJobErrorRecordsParkIdentity(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			w.OnCookieRefreshNeeded = func(string) bool { return false }
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 
 			called := false
 			w.CurrentCredentialIdentity = func(platform string) string {
@@ -501,7 +501,7 @@ func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	w.OnCookieRefreshNeeded = func(string) bool { return false }
+	w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshNotRestored }
 	w.CurrentCredentialIdentity = nil
 
 	w.setJobError(&database.Job{ID: jobID, Platform: "youtube"},
@@ -516,5 +516,57 @@ func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
 	}
 	if got.ParkIdentity != "" {
 		t.Errorf("park_identity = %q, want empty", got.ParkIdentity)
+	}
+}
+
+// TestCookieRefreshResumesBacklogThroughTheScheduler: a successful in-process
+// cookie refresh used to send every parked job back to Upcoming and straight
+// onto the queue, so a backlog VOD skipped the archive-slots pacing that the
+// cookie-parked sweep honours (and CountBacklogInFlight over-counted). Both
+// paths now share CookieResumeStatus: a backlog VOD goes to Queued and is left
+// for the scheduler — with or without its feed_items row, since a removed
+// channel's kept backlog has lost its row to the departure prune and the
+// scheduler admits it all the same (W25-09); anything else is Upcoming and
+// enqueued.
+//
+// Mutant: write Upcoming unconditionally again — the backlog rows are
+// Upcoming and the queue holds them.
+func TestCookieRefreshResumesBacklogThroughTheScheduler(t *testing.T) {
+	cases := []struct {
+		name       string
+		prio       int
+		feedRow    bool
+		wantStatus database.JobStatus
+		wantQueued bool
+	}{
+		{"backlog VOD with its feed row waits for the scheduler", 1, true, database.StatusQueued, false},
+		{"backlog VOD of a removed channel, its feed row gone, waits for the scheduler too", 1, false, database.StatusQueued, false},
+		{"live/upcoming work is re-queued at once", 0, false, database.StatusUpcoming, true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			chID := "UCresume"
+			videoID := fmt.Sprintf("vid%d", i)
+			if _, err := db.AddJob(&database.Job{ID: videoID, VideoID: videoID, URL: "u", Platform: "youtube",
+				Status: database.StatusDownloading, ChannelID: &chID, QueuePriority: tc.prio}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.feedRow {
+				addFeedItemRow(t, db, chID, videoID, "2026-07-01T00:00:00Z")
+			}
+			job, _ := db.GetJob(videoID)
+			w.OnCookieRefreshNeeded = func(string) CookieRefreshOutcome { return CookieRefreshRestored }
+
+			w.setJobError(job, (&StreamProcessResult{Error: "cookies", ErrSentinel: ErrCookiesRequired}).AsError())
+
+			got, _ := db.GetJob(videoID)
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %s, want %s", got.Status, tc.wantStatus)
+			}
+			if queued := w.queue.PendingCount() > 0; queued != tc.wantQueued {
+				t.Errorf("queued = %v, want %v", queued, tc.wantQueued)
+			}
+		})
 	}
 }

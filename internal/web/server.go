@@ -56,6 +56,7 @@ type Server struct {
 	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
+	tlsActive   atomic.Bool      // whether Start's listener serves HTTPS (set with actualPort)
 	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
@@ -100,6 +101,8 @@ func NewServer(store *config.Store, logger interface {
 	// resolve the same effective client IP as the middleware chain, or a
 	// trusted reverse proxy would re-open the auth bypass there.
 	s.ws.ClientIP = func(r *http.Request) string { return EffectiveClientIP(store, r) }
+	// ...and class it by the same mode-aware rule AuthMiddleware waives by.
+	s.ws.LocalPeer = func(ip string) bool { return isLocalPeer(store, ip) }
 
 	// ...and the same Origin decision: before this the upgrade read r.Host
 	// only and wildcarded the port, so a Host-rewriting reverse proxy loaded
@@ -119,10 +122,14 @@ func NewServer(store *config.Store, logger interface {
 	// reports/cmd-moombox.md C-main:165-166.
 	r.Use(s.DrainMiddleware)
 	r.Use(RecoveryMiddleware(logger))
+	// The IP and Host gates come before CSRF: CSRF logs every refused origin,
+	// and a peer the IP gate refuses must not be able to fill the log (and
+	// every dashboard it is broadcast to) with lines it chose.
+	r.Use(IPGateMiddleware(store))
+	r.Use(HostGateMiddleware(store))
 	r.Use(CORSMiddleware(store))
 	r.Use(SecurityHeaders)
 	r.Use(CSRFMiddleware(store, token, logger))
-	r.Use(IPGateMiddleware(store))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
@@ -150,6 +157,13 @@ func (s *Server) SetCommit(c string) {
 // exceeds 65535.
 func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
 
+// TLSActive reports whether the listener Start bound serves HTTPS. Like the
+// bind address, the scheme is fixed at boot: network.https_enabled saved
+// later takes effect at the next restart, so a local client that must reach
+// THIS listener asks here rather than reading the setting. Meaningful once
+// ActualPort is non-zero.
+func (s *Server) TLSActive() bool { return s.tlsActive.Load() }
+
 // setActualPort records the bound port. Called once, by Start.
 func (s *Server) setActualPort(port int) { s.actualPort.Store(int32(port)) }
 
@@ -165,18 +179,20 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := EffectiveClientIP(s.configStore, r)
 
-		// Loopback and private IPs skip auth
-		if isLoopback(ip) || isPrivateIP(ip) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// No auth required if not configured
 		var networkAccess, passwordHash string
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			networkAccess = c.Network.NetworkAccess
 			passwordHash = c.Network.PasswordHash
 		})
+
+		// Loopback and private IPs skip auth (100.64.0.0/10 is private on
+		// lan only — isPrivateIPFor)
+		if isLocalIPFor(ip, networkAccess) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// No auth required if not configured
 		if !IsAuthRequired(networkAccess, passwordHash) {
 			next.ServeHTTP(w, r)
 			return
@@ -223,7 +239,7 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			if cookie, err := r.Cookie("moombox_client"); err == nil && cookie.Value != "" {
 				if valid, sessionToken := s.ClientTokenCheck(cookie.Value, ip); valid {
 					SetSessionCookie(w, r, sessionToken)
-					next.ServeHTTP(w, r)
+					next.ServeHTTP(w, withSessionCookie(r, sessionToken))
 					return
 				}
 			}
@@ -412,6 +428,46 @@ func (s *Server) assetETag(fsys fs.FS, name string) string {
 	return tag
 }
 
+// interceptUpgrades wraps router so a WebSocket upgrade on any path goes to
+// wsHandler (matches TS noServer mode) and every other request to router.
+// Split out of Start so the gates it re-applies are under test.
+func interceptUpgrades(store *config.Store, router http.Handler, wsHandler http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			// The upgrade path bypasses the router's middleware chain —
+			// re-apply the IP gate here, or a non-private client against
+			// a "lan"-mode deployment would get the live broadcast
+			// stream (job titles, logs, state) that every HTTP route
+			// 403s, with only the forgeable Origin check in its way.
+			if !ipAllowedByNetworkAccess(store, r) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			// And the external/public host rule HostGateMiddleware
+			// applies: the rebinding page's socket would otherwise carry
+			// the live stream its GETs are refused (externalHostRefused).
+			if externalHostRefused(store, r) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			wsHandler(w, r)
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+}
+
+// serverHandler is the http.Server's handler: the router, with WebSocket
+// upgrades taken ahead of it (interceptUpgrades) when a handler for them is
+// installed, all of it inside outermostRecovery.
+func (s *Server) serverHandler() http.Handler {
+	var handler http.Handler = s.router
+	if s.wsHandler != nil {
+		handler = interceptUpgrades(s.configStore, s.router, s.wsHandler)
+	}
+	return outermostRecovery(s.logger, handler)
+}
+
 // Start begins listening for HTTP connections.
 func (s *Server) Start(ctx context.Context) error {
 	port := s.cfg.Network.Port
@@ -428,33 +484,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	// Wrap router to intercept WebSocket upgrades on any path (matches TS noServer mode)
-	var handler http.Handler = s.router
-	if s.wsHandler != nil {
-		wsHandler := s.wsHandler
-		router := s.router
-		store := s.configStore
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-				// The upgrade path bypasses the router's middleware chain —
-				// re-apply the IP gate here, or a non-private client against
-				// a "lan"-mode deployment would get the live broadcast
-				// stream (job titles, logs, state) that every HTTP route
-				// 403s, with only the forgeable Origin check in its way.
-				if !ipAllowedByNetworkAccess(store, r) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
-				}
-				wsHandler(w, r)
-				return
-			}
-			router.ServeHTTP(w, r)
-		})
-	}
-
 	s.server = &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           s.serverHandler(),
 		ReadHeaderTimeout: 30 * time.Second, // Protects against slowloris; clears deadline after headers are read
 		WriteTimeout:      0,                // Disable for WebSocket and video streaming
 		IdleTimeout:       120 * time.Second,
@@ -532,6 +564,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Log the actual URL (matches TS: "Web dashboard available at ...")
 	actualPort := ln.Addr().(*net.TCPAddr).Port
+	s.tlsActive.Store(tlsConfig != nil)
 	s.setActualPort(actualPort)
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
@@ -647,9 +680,24 @@ func CompressionMiddleware(next http.Handler) http.Handler {
 			ResponseWriter: w,
 			minSize:        gzipMinSize,
 		}
-		defer gz.Close()
+		// A handler that panics before anything reached the wire must leave
+		// the response uncommitted. Close would commit it on the way out —
+		// the 200 flushStatus defaults to, plus whatever half-built body sat
+		// in the buffer — and RecoveryMiddleware, further out, would then
+		// find headers sent and skip its 500: every browser asks for gzip,
+		// so a panicking API call reached the dashboard as an empty 200.
+		// Nothing is pooled before the headers go out, so there is nothing
+		// to release either. Once they have, Close runs as before.
+		completed := false
+		defer func() {
+			if !completed && !gz.headerSent {
+				return
+			}
+			gz.Close()
+		}()
 
 		next.ServeHTTP(gz, r)
+		completed = true
 	})
 }
 
@@ -809,9 +857,10 @@ func (g *gzipResponseWriter) Flush() {
 	} else {
 		g.commitPlain()
 	}
-	if f, ok := g.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	// Through the controller, not a type assertion: the writer underneath is
+	// RecoveryMiddleware's, and an assertion only sees what that wrapper
+	// itself implements.
+	_ = http.NewResponseController(g.ResponseWriter).Flush()
 }
 
 // Unwrap allows http.ResponseController to access the underlying ResponseWriter.
@@ -835,6 +884,26 @@ func (g *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("hijack not supported")
 }
 
+// withSessionCookie returns r carrying token as its moombox_session cookie.
+// The client-token fallback mints a session and sets it on the RESPONSE, but
+// the handler reads the REQUEST's cookie: there the stale or missing session
+// still stood, so a logout invalidated the old token and left the new one
+// alive for its whole TTL, and set-password answered 401 to a remote client
+// the middleware had just authenticated. A copy, not an edit of r's headers.
+func withSessionCookie(r *http.Request, token string) *http.Request {
+	r2 := new(http.Request)
+	*r2 = *r
+	r2.Header = r.Header.Clone()
+	r2.Header.Del("Cookie")
+	for _, c := range r.Cookies() {
+		if c.Name != "moombox_session" {
+			r2.AddCookie(c)
+		}
+	}
+	r2.AddCookie(&http.Cookie{Name: "moombox_session", Value: token})
+	return r2
+}
+
 // recoveryWriter tracks whether headers have been sent so the recovery
 // middleware can avoid writing a 500 response after a partial write.
 type recoveryWriter struct {
@@ -852,11 +921,81 @@ func (rw *recoveryWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// Flush passes a handler's Flush through to the connection. Without it the
+// whole chain swallowed every Flush: this wrapper sits outside the gzip one,
+// whose Flush asserted http.Flusher on it and found nothing, so the handlers
+// that answer before a blocking re-check (POST /api/cookies/import, the
+// setup wizard's finish) held their response until the re-check ended —
+// seconds, up to 45 — in production, while tests built on a bare router saw
+// it arrive at once.
+func (rw *recoveryWriter) Flush() {
+	rw.headersSent = true
+	_ = http.NewResponseController(rw.ResponseWriter).Flush()
+}
+
 func (rw *recoveryWriter) Unwrap() http.ResponseWriter {
 	return rw.ResponseWriter
 }
 
-// RecoveryMiddleware catches panics and returns 500.
+// panicStackFrames bounds the stack RecoveryMiddleware logs with a handler
+// panic. The frames an operator needs — the function that panicked and the
+// handler that called it — are the innermost ones; the outermost are the
+// middleware chain and net/http's connection loop, the same for every request.
+const panicStackFrames = 32
+
+// panicStack renders the stack of the goroutine that is recovering a panic as
+// ONE line, innermost frame first — "function (file:line)" per frame, joined
+// by " < ", starting below the runtime's own panic machinery — and at most
+// panicStackFrames frames of it. Call it from the deferred function that
+// recovered: that is where the panicking frames are still on the stack.
+//
+// Built from program counters rather than debug.Stack. One line, because the
+// same line reaches the ring buffer, every dashboard and the TUI log panel,
+// none of which escape a newline the way the file handler does. And no
+// argument values: debug.Stack prints each frame's raw argument words, the
+// one part of a trace that comes from the request rather than from the code.
+func panicStack() string {
+	pcs := make([]uintptr, 128)
+	n := runtime.Callers(2, pcs) // from the deferred function down
+	frames := runtime.CallersFrames(pcs[:n])
+	var all []runtime.Frame
+	start := 0
+	for {
+		f, more := frames.Next()
+		all = append(all, f)
+		if f.Function == "runtime.gopanic" {
+			start = len(all) // what panicked is below gopanic, not above it
+		}
+		if !more {
+			break
+		}
+	}
+	all = all[start:]
+
+	var sb strings.Builder
+	for i, f := range all {
+		if i == panicStackFrames {
+			atLeast := ""
+			if n == len(pcs) {
+				atLeast = "at least " // the capture itself was cut short
+			}
+			fmt.Fprintf(&sb, " < … %s%d more", atLeast, len(all)-i)
+			break
+		}
+		if i > 0 {
+			sb.WriteString(" < ")
+		}
+		file := f.File
+		if slash := strings.LastIndexByte(file, '/'); slash >= 0 {
+			file = file[slash+1:]
+		}
+		fmt.Fprintf(&sb, "%s (%s:%d)", f.Function, file, f.Line)
+	}
+	return sb.String()
+}
+
+// RecoveryMiddleware catches panics, logs them with the stack that raised
+// them, and returns 500.
 func RecoveryMiddleware(logger interface {
 	Error(msg string, args ...any)
 }) func(http.Handler) http.Handler {
@@ -869,13 +1008,17 @@ func RecoveryMiddleware(logger interface {
 					// any other log lines emitted during this request handling
 					// (audit reports/web.md S-22). method+remoteAddr added per
 					// audit Q-25 to make panic reports actionable without
-					// needing the user to reproduce.
+					// needing the user to reproduce. The stack is what locates
+					// the bug: without it a panic reported from the field said
+					// what went wrong and never where (W24-15). Path, not URL —
+					// the query string can carry a token.
 					logger.Error("panic recovered in HTTP handler",
 						"panic", rvr,
 						"method", r.Method,
 						"path", r.URL.Path,
 						"remoteAddr", r.RemoteAddr,
 						"reqID", chimiddleware.GetReqID(r.Context()),
+						"stack", panicStack(),
 					)
 					if !rw.headersSent {
 						w.Header().Set("Content-Type", "application/json")
@@ -887,6 +1030,54 @@ func RecoveryMiddleware(logger interface {
 			next.ServeHTTP(rw, r)
 		})
 	}
+}
+
+// outermostRecovery is the server's own outermost handler (serverHandler),
+// for a panic every recover inside it misses: chi's RequestID and
+// DrainMiddleware run ahead of RecoveryMiddleware by design, and
+// interceptUpgrades' own gates (ipAllowedByNetworkAccess,
+// externalHostRefused) ahead of the router and of HandleUpgrade's recover.
+// Such a panic reached net/http's own recover, which writes its report to
+// the server's ErrorLog — discarded — so it was logged nowhere, and the
+// client saw its connection dropped.
+//
+// Logged here as RecoveryMiddleware logs one: the panic value, the method,
+// the path (never the query, which can carry a token), the peer and the
+// bounded, argument-free panicStack. No request ID: RequestID, inside, has
+// not necessarily run. The client gets the same 500 when nothing has
+// reached it yet; when something has, the panic goes back to net/http as
+// http.ErrAbortHandler, which drops the connection without a report of its
+// own. A handler that panics with http.ErrAbortHandler itself is aborting on
+// purpose, and passes through untouched and unlogged.
+func outermostRecovery(logger interface {
+	Error(msg string, args ...any)
+}, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &recoveryWriter{ResponseWriter: w}
+		defer func() {
+			rvr := recover()
+			if rvr == nil {
+				return
+			}
+			if rvr == http.ErrAbortHandler {
+				panic(rvr)
+			}
+			logger.Error("panic recovered outside the HTTP middleware chain",
+				"panic", rvr,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remoteAddr", r.RemoteAddr,
+				"stack", panicStack(),
+			)
+			if rw.headersSent {
+				panic(http.ErrAbortHandler)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"Internal server error"}`))
+		}()
+		next.ServeHTTP(rw, r)
+	})
 }
 
 // OpenPathCommand builds the command that hands `target` — a URL or a

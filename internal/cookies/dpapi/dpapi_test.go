@@ -134,7 +134,7 @@ func TestDecryptV10Cookie_TooShort(t *testing.T) {
 
 // TestDecryptV10Cookie_BadMasterKey confirms a key mismatch surfaces
 // as an AES-GCM open error (auth tag check fails). This is the row
-// the live ReadChromeCookies path silently skips.
+// the live ReadChromeCookiesStats path silently skips.
 func TestDecryptV10Cookie_BadMasterKey(t *testing.T) {
 	rightKey := make([]byte, 32)
 	wrongKey := make([]byte, 32)

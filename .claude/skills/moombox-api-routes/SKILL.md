@@ -58,13 +58,13 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 - `BroadcastJobDeleted(jobID)` — targeted row removal; clients drop the row immediately
 - `BroadcastCheckTimers(data)` — next monitor check times
 - `BroadcastConnectivity(online)` — `{online}` when reachability flips
-- `BroadcastLog(line)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`). The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `ws_wiring.go` puts `logger.GetRecentLines` into every `initial_state`.
+- `BroadcastLog(line, seq)` — one log line, clipped to 4096 bytes on a rune boundary (`clipLogLine`), with its number in the logger's ring as `seq` beside the payload. The hub keeps NO ring of its own (WEB-14): the logger owns the only one, and `ws_wiring.go` puts `logger.RecentLines` — the lines and the newest one's number, `logSeq` — into every `initial_state`; the dashboard skips a frame at or below `logSeq`, a line the snapshot already holds.
 
 ### 2. Wire the Source
 Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`. Common patterns:
 - **Database subscriber**: `db.OnJobChange(func(ev) { wsHub.BroadcastJobUpdate(ev.Job) })`
 - **Direct call**: From a service callback (e.g., disk status, update check)
-- **Log subscriber**: `log.Subscribe()` channel → `BroadcastLog()`
+- **Log subscriber**: `log.SubscribeLines()` channel → `BroadcastLog(line.Text, line.Seq)` (`wireLogForwarding`)
 
 ### 3. Frontend Handler
 `web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types, in the switch's own order: `initial_state`, `jobs_update`, `job_update`, `job_progress`, `config_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `backfill_status`, `update_available`, `connectivity`, `pong`.
@@ -72,7 +72,7 @@ Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`.
 ### 4. TUI Handler
 TUI does **not** receive WebSocket messages. Instead, it gets data via:
 - Database callbacks: `db.OnJobUpdate()`, `db.OnJobsChange()` → sends custom `tea.Msg` types (e.g., `JobUpdateMsg`, `JobsUpdateMsg`)
-- Log subscription: `log.Subscribe()` channel → `LogBatchMsg`
+- Log subscription: `log.SubscribeLines()` channel → `LogBatchMsg`, skipping the lines the `RecentLines` backfill already holds (`forwardTUILogs`)
 - Service callbacks: wired in `main.go` → sends typed messages via non-blocking channel
 
 Define your custom `tea.Msg` type in `app.go`, send via non-blocking channel select, handle in `Update()`.

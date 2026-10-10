@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -171,6 +172,92 @@ func TestDoRetryRequestWithoutADeadlineUsesEveryAttempt(t *testing.T) {
 	}
 	if n := hits.Load(); n != 4 {
 		t.Errorf("server saw %d requests, want 4 — every attempt must run when there is no deadline", n)
+	}
+}
+
+// lapsingCtx is a context whose Err() flips to `after` once the test server
+// has answered the first attempt. Done() stays open on purpose: the HTTP
+// client aborts an in-flight request through Done(), and the window under
+// test is the one where the attempt COMPLETED — a 503 was read in full — and
+// the context expired before the loop came back round to check it. A real
+// deadline cannot be placed in that window deterministically.
+type lapsingCtx struct {
+	context.Context
+	after  error
+	lapsed atomic.Bool
+}
+
+func (c *lapsingCtx) Err() error {
+	if c.lapsed.Load() {
+		return c.after
+	}
+	return c.Context.Err()
+}
+
+// serve503OnceLapsing runs a server that answers 503 and trips ctx on the
+// way, so the retry loop's next ctx.Err() check sees the context ended right
+// after the attempt that produced the HTTP error.
+func serve503OnceLapsing(t *testing.T, ctx *lapsingCtx) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		ctx.lapsed.Store(true)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// TestDoRetryRequestKeepsTheHTTPErrorWhenTheDeadlineLapsesDuringTheAttempt
+// closes the window the deadline guard cannot see: the budget lapses while
+// the 503 attempt itself is in flight. The loop-top ctx.Err() check ran
+// BEFORE the guard and returned the bare context.DeadlineExceeded, discarding
+// the "HTTP 503" that worker/probe_classify.go keys on — the very text the
+// function's own doc promises to keep.
+//
+// Mutant named: the unconditional `return nil, ctx.Err()` at the loop top.
+func TestDoRetryRequestKeepsTheHTTPErrorWhenTheDeadlineLapsesDuringTheAttempt(t *testing.T) {
+	scaleRetryBackoff(t, time.Millisecond)
+	ctx := &lapsingCtx{Context: context.Background(), after: context.DeadlineExceeded}
+	srv, hits := serve503OnceLapsing(t, ctx)
+
+	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
+	if err == nil {
+		t.Fatal("a 503 answer must produce an error")
+	}
+	if !strings.Contains(err.Error(), "HTTP 503") {
+		t.Errorf("err = %v, want the last HTTP error (HTTP 503), not the deadline", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, the lapsed deadline must not replace the HTTP error", err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("server saw %d requests, want 1 — the context had ended before any retry", n)
+	}
+}
+
+// TestDoRetryRequestCancellationBeatsTheLastHTTPError is the other half of
+// retryExitErr's rule: a CANCELLED context is the user's or the shutdown's
+// verdict — engine's cancelErr reports it as context.Canceled and
+// probe_classify.go's classCancelled abandons on it — so a stale 503 must not
+// be reported in its place and turn an abort into a counted failure.
+//
+// Mutant named: retryExitErr preferring lastErr for every context error.
+func TestDoRetryRequestCancellationBeatsTheLastHTTPError(t *testing.T) {
+	scaleRetryBackoff(t, time.Millisecond)
+	ctx := &lapsingCtx{Context: context.Background(), after: context.Canceled}
+	srv, hits := serve503OnceLapsing(t, ctx)
+
+	_, err := newRetryTestAPI().doRetryRequest(ctx, srv.URL, []byte(`{}`), nil, nil, "Innertube", "abc12345678")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "HTTP 503") {
+		t.Errorf("err = %v, a cancelled context must not report the stale HTTP error", err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("server saw %d requests, want 1", n)
 	}
 }
 

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -20,6 +22,11 @@ const (
 	minTermWidth  = 60
 	minTermHeight = 20
 )
+
+// minPanelH is the fewest rows a bordered panel renders: two border rows, its
+// header and one content row. A height below it is padded back up to it, so
+// the layout must never hand one out.
+const minPanelH = 4
 
 func (a *App) recalcLayout() {
 	// Status bar is 1 row at the bottom
@@ -41,15 +48,18 @@ func (a *App) recalcLayout() {
 		contentH -= bannerH
 	}
 
-	// Top panels: 70% focused, 25% unfocused (A4 - match TypeScript)
+	// Top panels: 70% focused, 25% unfocused (A4 - match TypeScript) — but
+	// never below the rows a bordered panel draws anyway (minPanelH). With
+	// both banners up at 20 rows the 25% share was 3, each top panel still
+	// drew 4, and the frame came out a row taller than the terminal.
 	var topH, logH int
 	if a.focusedPanel == PanelLogs {
 		topH = contentH * 25 / 100
-		logH = contentH - topH
 	} else {
 		topH = contentH * 70 / 100
-		logH = contentH - topH
 	}
+	topH = max(min(topH, contentH-minPanelH), minPanelH)
+	logH = contentH - topH
 
 	// Task list vs details width split (A5 - match TypeScript)
 	var taskW, detailW int
@@ -76,6 +86,7 @@ func (a *App) recalcLayout() {
 	a.clientTokensDlg.SetSize(a.width, a.height)
 	a.ytdlpDlg.SetSize(a.width, a.height)
 	a.statsDlg.SetSize(a.width, a.height)
+	a.jobLog.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
 	a.ffmpegCheck.SetSize(a.width, a.height)
 	a.actionMenu.SetSize(a.width, a.height)
@@ -105,7 +116,10 @@ func (a *App) View() tea.View {
 		return a.viewWithMode("Initializing...")
 	}
 	if a.width < minTermWidth || a.height < minTermHeight {
-		return a.viewWithMode(fmt.Sprintf("Terminal too small: %d×%d (Moombox needs at least %d×%d)",
+		// Two short lines, not one: the one-line form ran to 67 columns, so
+		// in the narrow terminals it is shown in the required size — the
+		// half that says what to do — was cut off the right edge.
+		return a.viewWithMode(fmt.Sprintf("Terminal too small: %d×%d\nMoombox needs at least %d×%d",
 			a.width, a.height, minTermWidth, minTermHeight))
 	}
 
@@ -152,6 +166,9 @@ func (a *App) View() tea.View {
 	if a.statsDlg.IsVisible() {
 		return a.viewWithMode(a.statsDlg.View())
 	}
+	if a.jobLog.IsVisible() {
+		return a.viewWithMode(a.jobLog.View())
+	}
 
 	// Sync status bar state before rendering
 	a.statusBar.ShowChordHint = !a.seenChordHint
@@ -174,12 +191,18 @@ func (a *App) View() tea.View {
 	mainParts = append(mainParts, topRow, a.logs.View(), a.statusBar.View())
 	content := lipgloss.JoinVertical(lipgloss.Left, mainParts...)
 
-	// Feedback / confirmation messages
+	// Feedback / confirmation messages. Coloured row by row, after the
+	// wrap: a row is styled whole, never cut through its escapes.
 	if a.feedback.msg != "" {
-		msgColor := feedbackColor(a.feedback.msg, a.feedback.sev)
-		content = addOverlayMessage(content, a.width,
-			lipgloss.NewStyle().Foreground(msgColor).Render(a.feedback.msg),
-		)
+		style := lipgloss.NewStyle().Foreground(feedbackColor(a.feedback.msg, a.feedback.sev))
+		rows := []string{a.feedback.msg}
+		if a.feedback.wrap {
+			rows = wrapFeedback(a.feedback.msg, a.width, feedbackRowCap(a.height))
+		}
+		for i := range rows {
+			rows[i] = style.Render(rows[i])
+		}
+		content = addOverlayMessage(content, a.width, rows...)
 	}
 
 	return a.viewWithMode(content)
@@ -200,7 +223,10 @@ func restartBanner(width int) string {
 		Bold(true).
 		Padding(0, 1).
 		Width(width)
-	return style.Render("⚠ Restart required — saved config differs from running process. Press ` then Save & Restart, or restart Moombox.")
+	// R P is the Restart Program chord (buildMenuItems); the settings overlay
+	// has no restart button, its buttons are Save & Return / Return. It is
+	// confirm-gated, so the full sequence is R P P — the form the help shows.
+	return style.Render("⚠ Restart required — saved config differs from running process. Press R P P to restart Moombox, or restart it yourself.")
 }
 
 // securityBannerText returns the persistent security warning shown above the
@@ -242,34 +268,121 @@ func securityBanner(width int, msg string) string {
 	return style.Render(msg)
 }
 
-func addOverlayMessage(content string, width int, msg string) string {
+// feedbackIndent is the leading "  " addOverlayMessage puts before each row.
+const feedbackIndent = 2
+
+// addOverlayMessage writes rows over the rows above the status bar, the last
+// one directly above it, each padded to the width — and cut to it with an
+// ellipsis: bubbletea clips a line wider than the terminal, so a long one (a
+// 128-character title in "Deleted: …") simply lost its end, closing quote and
+// "(3s)" countdown included, with nothing to say so.
+//
+// One row is every line but a wrapped one (wrapFeedback), whose rows already
+// fit and climb over the bottom of the log panel. Rows are written over the
+// frame and never added to it, so it keeps its height; any that would climb
+// past its top are dropped, which wrapFeedback's cap keeps from happening.
+func addOverlayMessage(content string, width int, rows ...string) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) > 2 {
-		idx := len(lines) - 2
-		padded := "  " + msg
-		paddedW := lipgloss.Width(padded)
-		lines[idx] = padded + strings.Repeat(" ", max(0, width-paddedW))
+		rows = rows[:min(len(rows), len(lines)-1)]
+		top := len(lines) - 1 - len(rows)
+		for i, row := range rows {
+			padded := strings.Repeat(" ", feedbackIndent) + row
+			if width > 0 {
+				padded = truncateWidth(padded, width, "…")
+			}
+			paddedW := lipgloss.Width(padded)
+			lines[top+i] = padded + strings.Repeat(" ", max(0, width-paddedW))
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// feedbackRowCap is the most rows a wrapped feedback line may take: half the
+// terminal, so a runaway error string cannot bury the whole frame, and the
+// top half — the task list's head — stays in view. The block takes only the
+// rows its line needs, which is fewer than that wherever it matters: R C's
+// line with a held profile's sentence (about 310 columns, both platforms and a
+// home-directory lock path) is 7 rows at the 60x20 minimum, where a third of
+// the terminal (6) cut its tail, and 4 at 80 columns. Never less than one row,
+// which is what a line had before.
+func feedbackRowCap(height int) int {
+	return max(1, height/2)
+}
+
+// wrapFeedback lays a feedback line out as the rows View draws it on: broken
+// at spaces into rows that fit the width inside addOverlayMessage's indent,
+// at most maxRows of them, the last cut with an ellipsis when even those are
+// not enough. The order of the line decides what the cap eats: its tail.
+//
+// Only at spaces, unlike ansi.Wrap, which also breaks after any hyphen: the
+// rows are there to carry a path to delete, and "browser-profile" split
+// across two rows is a path no one can copy whole. A word wider than a row —
+// a path deeper than the terminal is wide — is broken where the row ends,
+// since nothing else would show it at all.
+//
+// Below the first WindowSizeMsg there is no width, and the line is one row:
+// there is no frame to lay out yet, and wrapping to a width nobody has
+// reported would put every word on a row of its own.
+func wrapFeedback(msg string, width, maxRows int) []string {
+	room := width - feedbackIndent
+	if room <= 0 {
+		return []string{msg}
+	}
+	var rows []string
+	line := ""
+	for _, word := range strings.Fields(msg) {
+		switch {
+		case line == "":
+			line = word
+		case ansi.StringWidth(line)+1+ansi.StringWidth(word) <= room:
+			line += " " + word
+		default:
+			rows = append(rows, line)
+			line = word
+		}
+		for ansi.StringWidth(line) > room {
+			head := truncateWidth(line, room, "")
+			if head == "" {
+				// A rune wider than the whole row: it goes alone, and
+				// addOverlayMessage's cut deals with it.
+				_, size := utf8.DecodeRuneInString(line)
+				head = line[:size]
+			}
+			rows = append(rows, head)
+			line = line[len(head):]
+		}
+	}
+	if line != "" || len(rows) == 0 {
+		rows = append(rows, line)
+	}
+	if maxRows = max(1, maxRows); len(rows) > maxRows {
+		rest := strings.Join(rows[maxRows-1:], " ")
+		rows = append(rows[:maxRows-1], truncateWidth(rest, room, "…"))
+	}
+	return rows
 }
 
 // feedbackSeverity is what the COMPOSER of a feedback line knew about it, as
 // opposed to what a scan of the finished sentence can guess.
 //
-// THE SCAN IS DOWNSTREAM OF TWO LOSSY STEPS and that is why this type exists.
-// feedbackColor reads a.feedback.msg, which is the line AFTER fitFeedback has
-// clamped it to the terminal width — so at 40 columns
+// THE SCAN WAS DOWNSTREAM OF TWO LOSSY STEPS and that is why this type exists.
+// feedbackColor reads a.feedback.msg, and while R C's line was cut to one row
+// that was the line AFTER fitFeedback had clamped it to the terminal width —
+// so at 40 columns
 //
 //	"Cookies: YouTube OK | Last cookie error: the browser profile held no…"
 //
-// arrives as "Cookies: YouTube OK | Last cookie err…", the marker the warning
-// branch matches on is gone, and a line announcing a recorded failure renders
-// in the SUCCESS colour. An operator in a split pane presses R C, is told their
-// cookies are fine, and the browser refresh has been failing for days. The
-// second step is subtler: precedence in the scan is decided by branch order
-// over the whole string, so an appended clause can move the colour in either
-// direction — the gray "deleted:" branch sits above the warning branch, so a
-// recorded error whose words happened to contain it would render NEUTRAL.
+// arrived as "Cookies: YouTube OK | Last cookie err…", the marker the warning
+// branch matches on was gone, and a line announcing a recorded failure
+// rendered in the SUCCESS colour. An operator in a split pane pressed R C, was
+// told their cookies were fine, and the browser refresh had been failing for
+// days. The line wraps now (setWrappedFeedback) and nothing cuts it before
+// this reader, but the second step is still there, and subtler: precedence in
+// the scan is decided by branch order over the whole string, so an appended
+// clause can move the colour in either direction — the gray "deleted:" branch
+// sits above the warning branch, so a recorded error whose words happened to
+// contain it would render NEUTRAL.
 //
 // Both are the same defect: severity was being re-derived from prose by a
 // reader that never saw the facts. The composer HAS the facts — the verdicts
@@ -348,13 +461,13 @@ func feedbackColor(msg string, stated feedbackSeverity) color.Color {
 		// already apply.
 		//
 		// R C NO LONGER DEPENDS ON THIS, and the reason is the same one that
-		// moved the LastError clause below: at 30 columns the clamp leaves
-		// "Cookies: YouTube not authen…" and this substring is gone, so the
-		// conclusive refusal rendered GREEN. cookieRecheckFeedback states
-		// severityError for RefreshFailed and the stated severity wins at the
-		// top of this function. The entry stays as the fallback for factless
-		// callers and is exercised as such by TestFeedbackColorErrorMessages;
-		// the rendered R C line is pinned by
+		// moved the LastError clause below: at 30 columns the clamp R C's line
+		// had while it was one row left "Cookies: YouTube not authen…" and
+		// this substring was gone, so the conclusive refusal rendered GREEN.
+		// cookieRecheckFeedback states severityError for RefreshFailed and the
+		// stated severity wins at the top of this function. The entry stays as
+		// the fallback for factless callers and is exercised as such by
+		// TestFeedbackColorErrorMessages; the rendered R C line is pinned by
 		// TestRecheckColourSurvivesTheClampUnchanged.
 		strings.Contains(lower, "not authenticated") {
 		return ColorRed
@@ -381,17 +494,17 @@ func feedbackColor(msg string, stated feedbackSeverity) color.Color {
 		// cookieRecheckFeedback), kept as a FALLBACK and no longer as the
 		// guard. cookieRecheckFeedback states severityWarning or higher
 		// whenever it appends this clause, and a stated severity wins above —
-		// which is what actually delivers the property, because this branch
-		// cannot: the marker is at the END of the line and fitFeedback has
-		// already truncated it away on any terminal narrower than about 42
-		// columns, at which point the line falls through to green.
+		// which is what actually delivered the property, because this branch
+		// could not: the marker is at the END of the line, and while the line
+		// was one row fitFeedback truncated it away on any terminal narrower
+		// than about 42 columns, at which point the line fell through to green.
 		//
 		// It stays because it costs nothing and because a future composer that
 		// writes this clause without stating a severity would otherwise get the
 		// green default. It is exercised in that factless domain by
 		// TestFeedbackColorWarningMessages; the domain that matters is pinned
-		// by TestLastCookieErrorNeverLowersSeverity, which now renders through
-		// the real clamp.
+		// by TestLastCookieErrorNeverLowersSeverity, which renders through the
+		// real Update path.
 		strings.Contains(lower, "last cookie error") ||
 		strings.Contains(lower, "already exists") ||
 		strings.HasPrefix(msg, "Already up to date") {

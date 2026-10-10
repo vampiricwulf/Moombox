@@ -2,23 +2,23 @@
 
 ## Scope
 
-This document specifies every data persistence layer in Moombox: the SQLite database (schema, connection tuning, batch coalescing, pub/sub), the TOML configuration system (sections, types, migrations, validation), the cookie management subsystem (jar, refresh, auto-cookie), the logger (file rotation, ring buffer, pub/sub), and the on-disk file output conventions (staging, output templates, resume state, chat files). It is the authoritative reference for how Moombox reads, writes, and organizes persistent and transient data.
+This document specifies every data persistence layer in Moombox: the SQLite database (schema, connection tuning, the synchronous write path, pub/sub), the TOML configuration system (sections, types, migrations, validation), the cookie management subsystem (jar, refresh, auto-cookie), the logger (file rotation, ring buffer, pub/sub), and the on-disk file output conventions (staging, output templates, resume state, chat files). It is the authoritative reference for how Moombox reads, writes, and organizes persistent and transient data.
 
 ## Rules and Constraints
 
 These are hard rules. An AI assisting with Moombox development must follow them without exception:
 
-- **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc.org/sqlite only honors `_pragma=...` parameters (the mattn-style `_journal_mode=...` form is silently ignored). Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
-- **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (40 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object. Returns the updated `*Job`.
-- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 40 entries mapping Go field names to SQLite column names (identity mapping in all cases). Adding a new column to the jobs table requires adding a corresponding entry here.
+- **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc.org/sqlite only honors `_pragma=...` parameters (the mattn-style `_journal_mode=...` form is silently ignored). `<path>` is `database_path` with `%`, `?` and `#` percent-escaped (`FileURI`, `internal/sqliteuri/sqliteuri.go`; a leading `//` also gets an empty authority before it): modernc opens a `file:` DSN as an SQLite URI, so unescaped they cut the path short or decoded it, and the database landed in a file nobody configured. `FileSchemaVersion` builds its read-only DSN the same way, and so do the two browser cookie readers (`queryFirefoxCookieDB`, `internal/cookies/autocookies_firefox.go`, and the DPAPI reader's `openCookieDB`, `internal/cookies/dpapi/dpapi.go`), whose unescaped paths — a profile path, or the temp directory the Firefox snapshot lands in — failed the read as a corrupt cookie database. An install upgraded from those releases still has its database in that other file, so while the literal `database_path` does not exist, `Open` and `FileSchemaVersion` keep using the file the raw path resolved to (`legacySQLitePath`) when it is an SQLite database holding a `jobs` table, and `Open` warns on every start naming both paths until the operator moves the file, with its `-wal` and `-shm`, into place (`legacyDatabaseFile`, same file); opening the literal path instead would have started an empty database, whose empty history lets the monitors and the backfill queue every archived video again. A file there that cannot be read as a database refuses the open with an error naming both paths. Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
+- **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (51 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job — the row and its gaps, trims and segments, as `GetJob` reads them — to notify subscribers with a complete `*Job` object, except after a progress tick (`IsProgressOnlyChange`), whose `*Job` is the row alone. Returns the updated `*Job`.
+- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 51 entries mapping Go field names to SQLite column names (identity mapping in all cases). Deliberately left out: `notification_msgs` (`UpdateNotificationMsgs` is its only writer), `channel_id` (set at insert — feed affiliation never changes, and a partial write of `""` would fake-empty a NULL), and the identity and bookkeeping columns `id`, `video_id`, `url`, `platform`, `created_at`, `updated_at`. Adding a new column that `UpdateJobFields` should be able to write requires adding a corresponding entry here.
 - **`JobStatus` is `type JobStatus string`.** Status values are string constants, not integers or enums. Timestamps are ISO 8601 / RFC3339 strings. Optional numeric fields (sequence counters, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`).
-- **Batch update coalescing: 100ms signal-driven window, zero IO when idle.** The `batchUpdateLoop` goroutine sleeps on a channel until the first update arrives, then waits 100ms to accumulate more updates, then flushes all pending updates in a single transaction. When no updates are pending, the goroutine consumes zero CPU and performs zero IO.
+- **Job writes are synchronous; there is no batching.** `UpdateJobFields` executes its `UPDATE` immediately under `db.mu`, re-reads the row in the same critical section, releases the lock and then notifies subscribers. There is no update channel, writer goroutine or coalescing window — the only goroutine the package starts is the `OnJobsChange` fan-out — so when nothing is being written, nothing runs and the database performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
-- **FlexDuration parses config values as minutes or days, context-dependent.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` it means days. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the context-appropriate unit.
-- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v15. Each migration checks the current version before applying. Migrations run at startup in `Database.Init()`. There is no rollback mechanism.
+- **FlexDuration parses config values in each field's own unit.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` days; in `probe_cooldown` seconds. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the field's unit.
+- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v21 (`schemaVersion` in `internal/database/migrations.go`; `appendix-metrics.md` mirrors it). Each migration checks the current version before applying. Migrations run at startup in `Database.migrate()`, called from `Open()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
-- **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `max_files` are deleted.
-- **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, and stream ID. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation is what used to truncate hours of recording on every daemon restart.
+- **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `log_max_files` are deleted.
+- **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, base URL, stream ID and, for a whole-file download, the probed total size. Validated on load by IDENTITY (`resumeIdentityMismatch`: explicit StreamID first, then YouTube URL fingerprinting; opaque URLs with no identity — Twitch weaver — are deliberately TRUSTED) plus a file-size check, and cleared only on clean stream completion. Raw URL equality must NOT be used as the identity check: Twitch weaver URLs rotate every fetch, and URL-equality validation is what used to truncate hours of recording on every daemon restart.
 - **Chat files use incremental append, not full rewrite.** After the first flush, new messages are appended by seeking to the closing `]` bracket, truncating there, and writing new messages plus the closing structure. The `messageCount` field in the JSON header is padded to 20 characters so it can be updated in-place without shifting the rest of the file.
 
 ---
@@ -54,68 +54,55 @@ Source: `Open()` in `internal/database/database.go`.
 ```go
 type Database struct {
     db        *sql.DB
-    ctx       context.Context
     mu        sync.RWMutex
     closeOnce sync.Once
     logger    dbLogger
 
-    // Batch update coalescing
-    updateCh  chan *Job     // buffer 100
-    batchDone chan struct{} // closed when batchUpdateLoop exits
+    // Per-instance snapshot of the package-level map, taken at Open()
+    fieldToColumn map[string]string
 
-    // Pub/sub
-    onJobUpdate  []func(*Job)
-    onJobsChange []func([]*Job)
-    subMu        sync.RWMutex
+    // Pub/sub — six subscriber kinds
+    onJobUpdate    []jobUpdateSub
+    onJobChange    []jobChangeSub
+    onJobAdded     []jobAddedSub
+    onJobDeleted   []jobDeletedSub
+    onTrimsChanged []trimsChangedSub
+    onJobsChange   []jobsChangeSub
+    nextSubID      uint64
+    subMu          sync.RWMutex
 
     // Prepared statements
-    stmtGetJob *sql.Stmt
+    stmtGetJob    *sql.Stmt
+    preparedStmts []*sql.Stmt // everything prepared via prepareStmt, released by Close
 
     // Per-job in-memory log buffers
     jobLogsMu sync.RWMutex
     jobLogs   map[string][]string
+    logRouted map[string]struct{} // the job IDs RouteLogToJobs scans
+
+    // GetJobStats cache
+    statsMu       sync.Mutex
+    statsCached   *JobStats
+    statsCachedAt time.Time
 }
 ```
 
 Key details:
 
 - `mu` (sync.RWMutex) guards all database operations. Read operations acquire `RLock`; write operations acquire `Lock`.
-- `updateCh` is a buffered channel (capacity 100) that feeds the batch update goroutine.
-- `batchDone` is closed when the batch loop exits, allowing `Close()` to wait for pending flushes.
-- `stmtGetJob` is the only prepared statement (hot-path SELECT for `GetJob`).
-- `jobLogs` is an in-memory map of per-job log buffers (not persisted to SQLite). Capped at 200 lines per job; when exceeded, trimmed to the last 100.
+- `fieldToColumn` is a per-instance copy of the package-level map, snapshotted at `Open()` so the map is read-only at runtime.
+- `stmtGetJob` is the prepared hot-path SELECT behind `GetJob` and the row read-back in `UpdateJobFields`. `preparedStmts` tracks every statement prepared through `prepareStmt` so `Close()` can release them.
+- Each subscriber slice holds `{id, fn}` entries; `nextSubID` hands out the ids that the unsubscribe closures remove by.
+- `jobLogs` is an in-memory map of per-job log buffers (not persisted to SQLite). Capped at 200 lines per job; when exceeded, trimmed to the last 100. `logRouted` is the separate set of job IDs that `RouteLogToJobs` scans — only non-terminal jobs — so a finished job's buffer outlives its tracking.
+- `statsCached` memoises `GetJobStats` (a full-table scan) for `jobStatsCacheTTL` (5 s); it is not invalidated on writes.
 
-### Batch Update Coalescing
+### Write Path (no batching)
 
-The `batchUpdateLoop()` goroutine implements signal-driven coalescing to reduce write amplification during rapid job progress updates.
+Every job write is synchronous. There is no update channel, no writer goroutine and no coalescing window: `UpdateJobFields` executes its `UPDATE` on the caller's goroutine under `db.mu`, re-reads the row through `stmtGetJob` in the same critical section, releases the lock, and then notifies subscribers (see Partial Updates below for the step list).
 
-**Algorithm:**
+**Where write amplification is bounded:** upstream, in `ProgressTracker` (`internal/worker/progress.go`), which writes one job row per report and reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms default), flushing gap rows at most once a second. Every other `UpdateJobFields` caller is event-driven.
 
-1. The goroutine blocks on `updateCh` until the first `*Job` arrives.
-2. It starts a 100ms coalesce timer.
-3. Any additional jobs arriving during the 100ms window are accumulated in a `map[string]*Job` (keyed by job ID, last-write-wins).
-4. When the timer fires, all pending jobs are flushed in a single SQL transaction via `flushUpdates()`.
-5. The goroutine returns to step 1.
-
-**Flush process (`flushUpdates`):**
-
-1. Begin transaction.
-2. For each pending job, execute a full-row UPDATE (all columns). Failures are logged but do not abort the transaction for other jobs.
-3. Commit transaction.
-4. Snapshot subscribers under `subMu.RLock`.
-5. For each successfully persisted job, call `safeCallJobUpdate(fn, job)` for all OnJobUpdate subscribers.
-
-**Edge cases:**
-
-- When `updateCh` is full (100 pending), `UpdateJob()` falls back to a synchronous direct write under `db.mu.Lock`.
-- When `Close()` is called, `updateCh` is closed. The batch loop drains remaining items, flushes them, then closes `batchDone`.
-- If the transaction commit fails, no subscribers are notified.
-
-**Performance characteristics:**
-
-- Zero IO when idle (goroutine blocks on empty channel).
-- During active downloads, typically 1 transaction per 100ms covering all active jobs.
-- Non-blocking send to `updateCh` means callers (download workers) never block on database writes.
+**Idle cost:** zero. Nothing in the package ticks, and the only goroutine it ever starts is the `OnJobsChange` fan-out (`dispatchJobsChange`, used by the two bulk writers).
 
 ### Partial Updates (UpdateJobFields)
 
@@ -126,10 +113,10 @@ The `batchUpdateLoop()` goroutine implements signal-driven coalescing to reduce 
 1. Iterate `fields` map; for each key, look up the column name in `fieldToColumn`. Unknown keys are silently skipped.
 2. Build dynamic `SET col1=?, col2=?, ..., updated_at=?` clause.
 3. Execute the UPDATE under `db.mu.Lock`.
-4. Re-read the full job row via SELECT (subscribers need all fields, not just the changed ones).
-5. Notify all `onJobUpdate` subscribers with the complete `*Job`.
+4. Re-read the full job row via the prepared `stmtGetJob` in the same critical section (subscribers need all fields, not just the changed ones), and its gaps, trims and segments with it (`loadChildRows`, which `GetJob` uses too), then release `db.mu` — BEFORE notifying, so a subscriber can call back into the database. Both UIs replace the row they hold with the one this delivers, so a read-back without the child rows — what it used to be for every write — swapped a row that had them for one that did not (`Gaps`, `Trims` and `Segments` are `omitempty`, so the dashboard's JSON lost the keys): every status transition, rename or Mark Watched emptied the details' Parts, Trims and Gaps sections, sent the trimmer to `/api/jobs/{id}/video` instead of the parts and emptied the TUI trim dialog, until a reload. A progress tick is the one write that skips them: `IsProgressOnlyChange` (`internal/database/database_subscribers.go`) — every written column in `progressColumns` — is the ~60 Hz path, a tick moves no child row, and no subscriber replaces a row with a tick's `*Job` (the dashboard merges the `job_progress` frame built from it; the TUI reads it into its progress store).
+5. Notify all `onJobUpdate` subscribers with the complete `*Job`, and all `onJobChange` subscribers with the job plus the list of columns written (`updated_at` excluded). If the read-back finds no row — deleted between the UPDATE and the SELECT — `notifyJobDeleted` fires instead.
 
-**fieldToColumn map (40 entries):**
+**fieldToColumn map (51 entries):**
 
 ```
 status, progress, percent, eta, speed, error, title, channel_name,
@@ -137,51 +124,58 @@ thumbnail_url, description, output_file, filename, output_directory,
 download_started_at, stream_start_time, stream_end_time, length_seconds,
 last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
 total_chat_messages, chat_status, chat_filename, chat_file, thumbnail_file,
-description_file, is_vod, video_width, video_height, video_fps, file_size,
-last_recheck_at, twitch_quality, twitch_category, channel_avatar_url,
-quality_preference, watched, resume_position, chat_offset
+description_file, is_vod, manually_added, allow_non_stream, video_width,
+video_height, video_fps, file_size, last_recheck_at, twitch_quality,
+twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag,
+start_time, end_time, quality_preference, watched, resume_position, chat_offset,
+auto_retry_count, queue_priority, incomplete_tail, park_reason, park_identity
 ```
 
-All entries use identity mapping (Go key name == SQLite column name).
+All entries use identity mapping (Go key name == SQLite column name). `notification_msgs` is absent on purpose: `UpdateNotificationMsgs` writes it.
 
 **Usage example:**
 
 ```go
 db.UpdateJobFields(jobID, map[string]any{
     "status":   database.StatusDownloading,
-    "progress": "V:1234 A:5678 C:900",
+    "progress": "(V: 1234/1300 A: 1234/1300 C: 900)",
     "percent":  42.5,
 })
 ```
 
-This differs from `UpdateJob()` which queues a full-row write through the batch coalescer. `UpdateJobFields` is synchronous, immediate, and triggers subscribers directly.
+There is no full-row `UpdateJob()` counterpart: `UpdateJobFields` is the only job writer, synchronous and immediate, and it triggers subscribers directly once `db.mu` is released.
+
+**Conditional writes.** Three forms of it apply only while the row's status allows, and report whether they did: `UpdateJobFieldsIf(id, expected, fields)` while the status is still `expected` — a compare-and-set — `UpdateJobFieldsUnless(id, unwanted, fields)` while it is anything but `unwanted`, and `UpdateJobFieldsUnlessTerminal(id, fields)` while it is none of the terminal statuses (`Finished`, `Error`, `Cancelled`, the set `Job.IsTerminal` reads) (`internal/database/database.go`). The condition is ANDed into the same `UPDATE` (`updateJobFieldsWhere`, the machinery all four share), so nothing can land between the check and the write. A write that did not apply touches nothing: no `updated_at`, no read-back, no subscriber — and no `OnJobDeleted` for a row that is gone either, since the delete fired its own. They exist for a transition decided on a status read earlier, which, written unconditionally, overwrote whatever landed in between: the backlog scheduler's `Queued` → `Upcoming` admission is `UpdateJobFieldsIf(..., Queued, ...)`, every resume out of `COOKIES?` (the credential sweeps' and the worker's after an automatic cookie refresh) is `UpdateJobFieldsIf(..., COOKIES?, ...)`, and the worker's failure write (`setJobError`) and its backlog requeue write with `UpdateJobFieldsUnless(..., Cancelled, ...)` — all of them used to turn an operator's Cancel that landed between the read and the write into a download, an Error or a requeue. The off-queue mux (`MuxJob`, `internal/worker/worker.go`) puts back the `Cancelled` its own `Muxing` write can land on top of, once the operator's Cancel has stopped its FFmpeg, with `UpdateJobFieldsIf(..., Muxing, ...)`: read and then written unconditionally, that `Cancelled` also landed on whatever came after the Cancel — a `Finished` a racing mux wrote, the operator's Resume of the cancelled row. The Cancel itself is the other way round: `CancelJob` writes `Cancelled` with `UpdateJobFieldsUnlessTerminal`, because it is decided on the status a UI showed, and a job that finished or failed since used to become a Cancelled one.
 
 ### Pub/Sub System
 
-Two callback types:
+Six callback types (`internal/database/database_subscribers.go`):
 
 | Callback | Signature | Trigger |
 |----------|-----------|---------|
-| `OnJobUpdate` | `func(*Job)` | After each job is written (both batch flush and `UpdateJobFields`) |
-| `OnJobsChange` | `func([]*Job)` | After `AddJob`, `DeleteJob`, `AddTrim`, `DeleteTrim` (structural changes) |
+| `OnJobUpdate` | `func(*Job)` | After every `UpdateJobFields` write, and every `UpdateJobFieldsIf` / `UpdateJobFieldsUnless` / `UpdateJobFieldsUnlessTerminal` write that applied |
+| `OnJobChange` | `func(*JobChange)` | Same moment as `OnJobUpdate`; the event carries the full job plus the list of columns written |
+| `OnJobAdded` | `func(*JobAdded)` | After `AddJob` |
+| `OnJobDeleted` | `func(*JobDeleted)` | After `DeleteJob`, and from `UpdateJobFields` when the row is gone at read-back |
+| `OnTrimsChanged` | `func(*TrimsChanged)` | After `AddTrim`, `DeleteTrim` |
+| `OnJobsChange` | `func([]*Job)` | Full-list refresh — only the two bulk writers, `BatchSetWatched` and `DeleteJobsAndHistoryForChannel`, dispatch it; a single add, delete or trim change never does |
 
-Both registration methods return an unsubscribe function. Unsubscription nils out the callback slot (avoids slice reallocation).
+Every registration method returns an unsubscribe function. Each subscriber slice holds `{id, fn}` entries; unsubscribing removes the entry by id, and the `shrink*Subs` helpers reallocate the slice once its capacity exceeds four times its length so steady-state memory stays reasonable.
 
 **Panic safety:**
 
 - `safeCallJobUpdate(fn, job)` wraps each callback in `defer func() { if r := recover(); ... }()`.
-- `safeCallJobsChange(fn, jobs)` does the same.
+- `safeCallJobChange`, `safeCallJobAdded`, `safeCallJobDeleted`, `safeCallTrimsChanged` and `safeCallJobsChange` do the same for the other kinds.
 - A panicking subscriber cannot prevent other subscribers from being notified.
 
-**Notification flow for `notifyJobsChange()`:**
+**Notification flow:**
 
-1. Called while `db.mu` is already held.
-2. Uses `getAllJobsUnlocked()` (skips acquiring `db.mu`) to get the full job list.
-3. Fires callbacks in a separate goroutine to avoid blocking the caller.
+- The per-job kinds (`notifyJobUpdate`, `notifyJobAdded`, `notifyJobDeleted`, `notifyTrimsChanged`) snapshot the subscriber slice under `subMu.RLock` and call the callbacks synchronously on the writer's goroutine, after `db.mu` has been released.
+- `dispatchJobsChange(jobs)` is the one asynchronous path: the caller must NOT hold `db.mu`; it snapshots the subscribers and runs them sequentially in a fresh goroutine (with its own top-level `recover`) so the bulk writer returns immediately. A nil slice (no subscribers) is a no-op.
 
 ### Schema
 
-**Current version: 17**
+**Current version: 21** (`schemaVersion`, `internal/database/migrations.go`)
 
 #### Tables
 
@@ -217,19 +211,19 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | thumbnail_url | TEXT | NULL | |
 | description | TEXT | NULL | |
 | output_file | TEXT | NULL | Absolute path to final output file |
-| filename | TEXT | NULL | Basename only |
-| output_directory | TEXT | NULL | Directory path |
+| filename | TEXT | NULL | The archive's path relative to the job's output directory (`output_directory` when set, else the global one), the template's subdirectories included; for a job that finalized as parts, the base the parts share, without an extension. The player, the chat route and Open Folder join it to that directory, and so does the orphan sweep — to the current global directory as well (`rowRelativeLocations`, `internal/worker/orphans.go`), which still finds a single-file archive after the archive tree is moved and `paths.output_directory` repointed. A split job's base names no file: its parts are found through their segment rows, re-rooted the same way (`output_directory` below) |
+| output_directory | TEXT | NULL | The job's own output directory: a per-channel or per-job override, or the global one as it stood at creation, which the monitor and an import store when the channel has none of its own. `filename` and `chat_filename` are relative to it. The absolute columns that lie under it — `output_file`, `chat_file`, `thumbnail_file`, `description_file`, and each part's `file_path` and `chat_file` — name it in their own spelling, so after the archive tree is moved and `paths.output_directory` repointed the orphan sweep finds each of them under the current global directory as well (`rowAbsoluteLocations`, `internal/worker/orphans.go`); a column outside it is found only as stored |
 | video_width | INTEGER | NULL | Pixels |
 | video_height | INTEGER | NULL | Pixels |
 | video_fps | INTEGER | NULL | |
 | file_size | INTEGER | NULL | Bytes (int64 in Go) |
-| chat_status | TEXT | NULL | `pending` / `downloading` / `finished` / `unavailable` / `incomplete`; the terminal value comes from the downloader's OUTCOME (`chatStatusForOutcome`, `internal/worker/orchestrator_chat.go`), not its message count — `incomplete` means the capture stopped short |
+| chat_status | TEXT | NULL | `pending` / `downloading` / `finished` / `unavailable` / `incomplete`; the terminal value comes from the downloader's OUTCOME (`chatStatusForOutcome`, `internal/worker/orchestrator_chat.go`), not its message count — `incomplete` means the capture stopped short, or that finalize could not copy it beside the archive (`copyAssets`, `internal/worker/orchestrator_mux.go`): either way the archive lacks a whole chat, and the value is what makes the staging cleanup keep the capture rather than delete it. A part whose chat cannot be copied is not recorded at all, so its `seg_N` stays unmuxed and shielded until a retry. `pending` until the capture actually starts (both platforms; a Twitch VOD's download-slot wait included), then `downloading`. A user cancel settles a still-running value (`cancelledChatStatus`, `internal/worker/worker.go`): `downloading` becomes `incomplete` and `pending` is cleared; a shutdown leaves it for the capture to resume |
 | total_chat_messages | INTEGER | NULL | |
-| chat_filename | TEXT | NULL | Basename |
+| chat_filename | TEXT | NULL | The chat archive's path relative to the job's output directory, resolved as `filename` is |
 | chat_file | TEXT | NULL | Absolute path (added v2) |
 | thumbnail_file | TEXT | NULL | Absolute path (added v3) |
 | description_file | TEXT | NULL | Absolute path (added v3) |
-| twitch_quality | TEXT | NULL | e.g. "1080p60" |
+| twitch_quality | TEXT | NULL | The variant the capture is recording, by its playlist name ("chunked", "720p60"): written at the capture start, live and VOD (`StreamProcessor.startTwitchVariant`), and again whenever a split moves the capture to another variant (`recordVariant` in `ExecuteTwitch`). Empty until a capture starts. Both UIs show it as "Quality". Nothing selects from it — until D-T9 it was ALSO the preference: set to it at creation, overwritten at the stream start, and read back as the preference by the next selection. The preference is `quality_preference` |
 | twitch_category | TEXT | NULL | |
 | channel_avatar_url | TEXT | NULL | |
 | selected_video_itag | INTEGER | NULL | YouTube itag, -1 = audio-only |
@@ -237,7 +231,7 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | start_time | REAL | NULL | Trim start (seconds, float64) |
 | end_time | REAL | NULL | Trim end (seconds, float64) |
 | last_recheck_at | TEXT | NULL | RFC3339 |
-| quality_preference | TEXT | '' | e.g. "1080p60", "best" (added v5) |
+| quality_preference | TEXT | '' | The quality the job was created to record, e.g. "1080p60", "best" (added v5): the channel's setting, or the manual add's. Written at insert and never overwritten. Every variant selection reads it — on Twitch the capture start's, live and VOD, and every re-selection during the capture, never `twitch_quality`. A Twitch row records `"best"` when nothing was named: the Twitch monitor (`newTwitchStreamJob`, `cmd/moombox/monitor_callbacks.go`), the Web add, and `moombox add` (`newCLITwitchJob`, `cmd/moombox/addvideo.go`), which used to record none. An empty value — on a Twitch row from before that rule, or any YouTube row with no preference — selects as `"best"` |
 | watched | INTEGER | 0 | Boolean (0/1), watched status (added v8) |
 | resume_position | REAL | NULL | Playback resume position in seconds (added v8) |
 | chat_offset | REAL | 0 | Chat timing offset in seconds, can be negative (added v9, migrated from player_prefs) |
@@ -245,9 +239,9 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | channel_id | TEXT | NULL | Config channel ID of the monitor channel that created the job (added v16). NULL for manually added and pre-v16 jobs. Set at insert, never updated. |
 | queue_priority | INTEGER | NOT NULL, 1 | Backlog marker (added v16): 0 = broadcast or newly discovered VOD (admitted immediately), 1 = backlog VOD (paced by the archive-slots scheduler) |
 | incomplete_tail | INTEGER | NOT NULL, 0 | Boolean (0/1), added v17. Marks a `Finished` job whose recording is known to be missing tail segments (finalized behind head after the VOD-branch refresh loop's retries). Staging dir + resume sidecar are preserved instead of cleaned up; Resume is allowed on the flagged job (Retry is NOT — it deletes staging via ReinitializeJob, which would destroy exactly what the flag protects) and unconditionally rewrites this column, so a clean re-run clears it. |
-| park_reason | TEXT | NOT NULL, `''` | Why the job stopped at `COOKIES?` (added v18). `'auth'` = the request was not signed in (cookies missing or dead); `'membership'` = the request WAS signed in and the platform still refused, so the account simply lacks the channel's membership; `''` = not parked, or parked before this column existed. Meaningful only while status is `COOKIES?`; every park path rewrites it and every un-park path clears it. Drives which recovery sweep may resume the job — see the `COOKIES?` -> `Upcoming` transition rules in `architecture.md`. |
+| park_reason | TEXT | NOT NULL, `''` | Why the job stopped at `COOKIES?` (added v18). `'auth'` = the request was not signed in (cookies missing or dead); `'membership'` = the request WAS signed in and the platform still refused, so the account simply lacks the channel's membership; `''` = not parked, or parked before this column existed. Meaningful only while status is `COOKIES?` — with one Error-row value: `'twitch_end_unconfirmed'` marks a live Twitch capture that stopped on its unconfirmed-end latch with staging kept, the one row the Twitch monitor's automatic mux takes once it confirms the broadcast over (owner decision D-T4; `ParkReasonTwitchEndUnconfirmed`, `internal/database/types.go`), cleared whenever the staging's mux starts, the automatic one or the Mux action's (`muxJob`, `internal/worker/worker.go`), and when an automatic mux cannot start — except when it is refused because another operation holds the job's staging (`ErrStagingBusy`), which was no attempt, so the marker stays for the next poll. Every park path (and every error transition, `setJobError`) rewrites it and every un-park path clears it. Drives which recovery sweep may resume the job — see the `COOKIES?` -> `Upcoming` transition rules in `architecture.md`. |
 | park_identity | TEXT | NOT NULL, `''` | Opaque fingerprint of WHICH account refused the job (added v19), recorded only for a `'membership'` park. A membership park resumes when the current account differs from this one — a durable comparison, so it survives restarts and cannot be consumed by a missed in-process transition. `''` means "parked under an unknown account" and resolves permissively (one retry, not a strand). Credential-derived: `json:"-"`, never serialized to clients. |
-| notification_msgs | TEXT | NULL | JSON object added v20, mapping a notification target's key (first 16 hex digits of SHA-256 over the RESOLVED webhook URL) to the id of the one Discord message that target rewrites in place for this job (`mode = "edit"`). NULL for every job on a separate-mode install, which is the default. Written once per (job, target) on the first successful POST through `UpdateNotificationMsgs` — a silent single-column write that bumps no `updated_at` and wakes no subscriber. A corrupt or half-written value decodes to nil and the job simply posts a new message. Credential-adjacent: `json:"-"`, never serialized to clients. |
+| notification_msgs | TEXT | NULL | JSON object added v20, mapping a notification target's key (first 16 hex digits of SHA-256 over the RESOLVED webhook URL) to the id of the one Discord message that target rewrites in place for this job (`mode = "edit"`). NULL for every job on a separate-mode install, which is the default. Written once per (job, target) on the first successful POST through `UpdateNotificationMsgs` — a silent single-column write that bumps no `updated_at` and wakes no subscriber. A corrupt or half-written value decodes to nil and the job simply posts a new message. A row written by 2.8.9 or 2.8.10 may key an id on a spelling of the webhook that now resolves differently (a `ptb.`/`canary.` host, a trailing slash, a bare `?`, a query's parameter order, a stray `&` or a `wait`); the notifier reads that key when the current one misses — where that spelling's old resolution named the same webhook, which a `discord://ID/TOKEN/?thread_id=…` did not: it resolved to the bare channel webhook, and the channel's ids are not the thread's — and the job's next write stores the id under the current key (`legacyResolvedURL`, `internal/notifications/manager.go`; [operations.md](operations.md)). An old key holding a different id than the current one is a second message — the webhook was configured in two spellings, which those releases ran as two targets — and stays on the row, edited beside the first. Credential-adjacent: `json:"-"`, never serialized to clients. |
 
 **Indexes on jobs:** `idx_jobs_status(status)`, `idx_jobs_updated_at(updated_at)`, `idx_jobs_video_id(video_id)` (added v4).
 
@@ -267,11 +261,11 @@ Index: `idx_gaps_job_id(job_id)`.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | TEXT | PRIMARY KEY (UUID) |
+| id | TEXT | PRIMARY KEY. `trim_<job id>_<Unix ms>`, not a UUID: the ID of the encode that wrote the file, given when the trim is prepared (`prepare`, `internal/worker/trim.go`) and carried by its `trim_status` frames before the row exists |
 | job_id | TEXT | NOT NULL, FK -> jobs(id) ON DELETE CASCADE |
 | start_time | REAL | Seconds |
 | end_time | REAL | Seconds |
-| filename | TEXT | Output filename |
+| filename | TEXT | `trim/<video id> [<start>s-<end>s].mp4` under the directory of the job's own `filename`, so relative to the JOB's output directory — its `output_directory` when set, else the global one. That column is set far more often than an override implies: a per-channel or per-job override stores its own directory, and the monitor and an import store the global directory as it stood at creation when the channel has none. The file is written beside the job's output (or beside the part the range begins in), in `trim/`. Bounds are whole seconds, so a range that rounds to a taken name gets ` (2)`, ` (3)`… (`uniqueTrimBasename`, `internal/worker/trim.go`) rather than overwriting it. The orphan sweep resolves the row against the job's `output_directory`, the current global directory, and `trim/` beside the job's output and each of its parts, and a file any of those names is owned (`trimFileLocations`, `internal/worker/orphans.go`) — the global directory as well as the job's own, so a trim stays owned after the archive tree is moved and `paths.output_directory` repointed at it, while its job still names the old tree |
 | created_at | TEXT | RFC3339 |
 | duration | REAL | Seconds |
 | file_size | INTEGER | Bytes, nullable |
@@ -281,13 +275,15 @@ Index: `idx_trims_job_id(job_id)`.
 **segments** (added v5) — one row per output *part* of a multi-part job.
 Parts are produced by quality splits (resolution changed mid-stream, both
 platforms) and by Twitch live gap splits (segments expired unrecoverably from
-the CDN; each part file is internally gapless):
+the CDN; each part file is internally gapless). An archive import of a split
+recording carries its parts too: `AddJob` inserts them with the row, in its
+transaction, so the `JobAdded` both UIs learn of the row by carries them:
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | INTEGER | PRIMARY KEY AUTOINCREMENT |
 | job_id | TEXT | NOT NULL, FK -> jobs(id) ON DELETE CASCADE |
-| segment_index | INTEGER | 0-based ordering within a job; stable across restarts (maps to staging dirs: root = 0, `seg_N` = N). Filenames use `segment_index + 1` as the part number |
+| segment_index | INTEGER | 0-based ordering within a job; stable across restarts (maps to staging dirs: root = 0 unless `seg_0` exists, `seg_N` = N). Filenames use `segment_index + 1` as the part number. A split job whose complete from-the-start download replaces its parts loses its rows: the parts' files stay beside the archive as `.restart-` siblings (`supersedePartsWithVod`, `internal/worker/vod_supersede.go`) |
 | unix_start | INTEGER | Unix timestamp |
 | unix_end | INTEGER | Unix timestamp |
 | quality | TEXT | e.g. "1080p60" |
@@ -301,6 +297,13 @@ the CDN; each part file is internally gapless):
 | chat_file | TEXT | (v15) Absolute path of this part's chat JSON, `''` when the part has no chat (pre-v15 rows, chat disabled, YouTube — only Twitch live IRC chat rolls per part) |
 
 Index: `idx_segments_job_id(job_id)`.
+
+Every part of one recording takes the FIRST part's directory and base (`muxSegment`), so a retitle or
+channel rename mid-job — a restart re-reads stream info — cannot scatter one recording across names or
+folders. A finalize that keeps more than one part pins the job's own columns and assets to the same place
+(`pinnedPartLocation`): `filename`, `chat_filename`, the description and the thumbnail sit beside the
+parts, not under the freshly resolved template. A finalize left with a single part moves it to the fresh
+template's plain name instead (`renameSinglePartToPlain`).
 
 **client_tokens** (added v6):
 
@@ -349,7 +352,7 @@ Capped at 10,000 entries; oldest pruned on insert.
 | backfilled_at | TEXT | RFC3339 — when the full-catalog backfill last completed; NULL = never backfilled (sweep re-queues) |
 | backfilled_window_days | INTEGER | Window depth that backfill covered — a later, wider `archive_window_days` triggers a deeper rescan |
 | backfilled_with_membership | INTEGER | Boolean — whether the membership tab was included; enabling membership later triggers a rescan |
-| backfill_state | TEXT | Resumable scan cursor (JSON); cleared on completion or deliberate restart |
+| backfill_state | TEXT | Resumable scan cursor (JSON: the window its done tabs were judged against, and per-tab continuation / next position / done); cleared on completion or deliberate restart, and discarded by a retry at a wider window; kept when the channel is disabled mid-scan, so enabling it again resumes |
 | last_rss_ok_at | TEXT | RFC3339 — last successful RSS fetch; the "established channel" gate |
 
 **Schema version:**
@@ -382,6 +385,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v18 | Added `park_reason TEXT NOT NULL DEFAULT ''` column to `jobs`: records WHY a job parked at `COOKIES?` so the credential-recovery sweeps can tell a dead-cookie park from a not-a-member one. No backfill — nothing on a pre-v18 row says retroactively which it was, so they keep `''` and therefore their existing resume behavior |
 | v19 | Added `park_identity TEXT NOT NULL DEFAULT ''` column to `jobs`: the account fingerprint a membership park was refused under, so a credential sweep can tell a real account change from a session rotation. No backfill — the value is a fingerprint of credentials as they were at park time and cannot be reconstructed afterwards |
 | v20 | Added `notification_msgs TEXT` (nullable) to `jobs`: the per-target Discord message ids an edit-mode notification target rewrites in place. No backfill — an id exists only once a message has been posted, and there is nothing to reconstruct for jobs that predate the column |
+| v21 | A version bump with nothing to apply. Development builds' v21 added a `twitch_quality_preference` column to `jobs` (D-T9), filled at startup for older Twitch rows; before any release the Twitch preference was folded back into `quality_preference`, which every row already carried and the quality-split re-selections already read, and the column and both of its backfills went. The bump stays because a database those builds migrated reads 21, which a binary at 20 would refuse as a downgrade; such a database keeps the column, unread and harmless (`NOT NULL DEFAULT ''` fills it on every insert, none of which names it). Pinned by `TestMigrationV21UpgradesAV20Database` and `TestMigrationV21DevelopmentDatabaseKeepsWorking` (`internal/database/migrations_v21_test.go`) |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 
@@ -403,7 +407,9 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 **Normal flow:** `Upcoming` -> `Live` -> `Downloading` -> `Muxing` -> `Finished`
 
-**Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`.
+A VOD skips `Live`, and stays at the status it came in with (`Upcoming` for a fresh one) while it queues for a download slot — its progress line says so — until `ExecuteWithChat` (`ExecuteTwitch` for a Twitch VOD) writes `Downloading` with the slot held.
+
+**Backlog flow:** backlog VODs only enter as `Queued` and are admitted to `Upcoming` by the archive-slots scheduler; broadcasts and newly discovered content never wait in `Queued`. A backlog VOD returns to `Queued` from a cookie repair (its feed row or not: a removed channel's kept backlog has lost it to the departure prune, and `NextQueuedJobs` LEFT-JOINs `feed_items`) and from a transient pre-download fetch failure or a download that ran out of disk, held from re-admission for a backoff and only up to three runs in a row before it ends in `Error` (`requeueBacklogAfterTransientFailure` and `requeueBacklogAfterDiskFull`, `internal/worker/backlog_retry.go`). The scheduler admits nothing while the connectivity monitor reports offline, nor from the moment the output volume reaches `disk_critical_percent` until usage is 2 points below it (`Scheduler.diskGateClosed`, `internal/worker/scheduler.go`).
 
 **Error paths:** Any status -> `Error`, `Cancelled`, or `COOKIES?`
 
@@ -422,24 +428,23 @@ Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppres
 
 ### Per-Job Log Buffers
 
-The database maintains in-memory per-job log buffers (`jobLogs map[string][]string`) for real-time log viewing in the Web UI and TUI. These are not persisted to SQLite.
+The database maintains in-memory per-job log buffers (`jobLogs map[string][]string`) for real-time log viewing in the Web UI and TUI: the dashboard's job dialog reads one through `GET /api/jobs/{id}/logs`, the TUI's `O L` Job Log overlay through `db.GetJobLogs` directly (`OnGetJobLogs`, wired in `cmd/moombox/tui_wiring.go`). These are not persisted to SQLite.
 
-- `AddJobLog(jobID, line)` appends a line. Capped at 200 lines; when exceeded, trimmed to last 100.
-- `RouteLogToJobs(line)` scans the ROUTED SET of job IDs (`logRouted`, a second map beside `jobLogs`) and routes the line to the first matching buffer (substring match on job ID in log line).
+- `RouteLogToJobs(line)` is the only writer: it scans the ROUTED SET of job IDs (`logRouted`, a second map beside `jobLogs`) and appends the line to the first matching buffer (substring match on job ID in log line). Each buffer is capped at 200 lines; when exceeded, it is trimmed to the last 100.
+- **It runs inside the log call**, as the logger's line router (`Logger.SetLineRouter`, wired by `wireLogForwarding` in `cmd/moombox/monitor_callbacks.go`), never on a subscriber's goroutine. The routed set changes synchronously — a status write that makes a job terminal untracks it inside `UpdateJobFields` — so a line has to be matched against the set as it stood when the line was logged. Routed by the log forwarder, a line logged just before a terminal write (`setJobError`'s "job error") lost the race to the untrack for roughly one failed job in twelve and was missing from the very log an operator opens after a failure; the brackets `cleanupStagingAfterMux` and `RecoverAsides` put around their last lines lost it the same way. A subscriber that falls behind no longer costs a job its lines either: the logger drops lines for a full subscriber channel, not for the router.
 - `TrackJobForLogs(jobID)` starts routing to a job and initializes its buffer (nil slice).
 - `UntrackJobForLogs(jobID)` stops routing to a job and KEEPS its buffer — the job that just failed is the one whose log an operator opens next.
-- `SyncJobLogTracking(jobs)` applies both rules to a whole list: non-terminal jobs tracked, terminal ones untracked. The boot seed and the `OnJobsChange` fan-out both call it (`cmd/moombox/monitor_callbacks.go`), while single-job transitions go through that file's `syncJobLogRouting` — from `OnJobAdded` (the ZIP import really does add a `Finished` job) and from `OnJobChange` whenever the `status` column was written, which is what re-routes a job that LEAVES a terminal state: `/retry`, `/resume` and auto-retry each resurrect a job with a plain `UpdateJobFields(status=…)`.
+- `SyncJobLogTracking(jobs)` applies both rules to a whole list: non-terminal jobs tracked, terminal ones untracked. The boot seed calls it (`cmd/moombox/monitor_callbacks.go`); after boot routing follows each job's own events, through that file's `syncJobLogRouting` — from `OnJobAdded` (the ZIP import really does add a `Finished` job) and from `OnJobChange` whenever the `status` column was written, which is what re-routes a job that LEAVES a terminal state: `/retry`, `/resume` and auto-retry each resurrect a job with a plain `UpdateJobFields(status=…)`.
 - The per-line cost is a substring scan per TRACKED id — proportional to the number of LIVE jobs, not constant, and not to the size of the `jobs` table: ~99 ns at 5 live, ~76 µs at 5,000 live (the pre-fix cost, when every row the database had ever held was tracked). Live jobs are bounded by the archive slots and `num_parallel_downloads`; a long-lived tracked set is what must never come back.
-- `PruneJobLogs(activeIDs)` removes buffers — and routing — for jobs no longer in the database.
-- `ClearJobLogs(jobID)` removes a specific buffer and its routing.
+- `ClearJobLogs(jobID)` removes a specific buffer and its routing. `OnJobDeleted` drops a single deleted job's that way (`onJobDeleted`), and `DeleteJobsAndHistoryForChannel` drops each row it deleted itself, under `db.mu` before it returns (`clearJobLogsOf` over the ids its `DELETE … RETURNING id` named) — so a job `AddJob` re-creates under one of those ids waits for it, and keeps the routing its own `OnJobAdded` gives it.
+- The bulk writers' `OnJobsChange` fan-out (`onJobsChange`) does nothing to routing. Neither `BatchSetWatched` nor `DeleteJobsAndHistoryForChannel` writes a status, and the `SyncJobLogTracking` over the whole table it used to run untracked every terminal job — including one that `RecoverAsides` or `cleanupStagingAfterMux` was routing its last lines to, so a Mark Watched on any rows during a recovery sent the rest of its progress to no job's log. The `PruneJobLogs` it ran after that dropped every buffer and routed id missing from its list, which is read at commit and reaches the subscribers later, on a goroutine of their own: a job `AddJob` created in between — a stream a monitor found, a `Queued` row a backfill scan added — lost the routing its `OnJobAdded` had just set up, and logged nothing to its own log until its next status write.
 
 ### Auxiliary Data Operations
 
-- **History:** `HasProcessed(videoID)` / `AddToHistory(videoID)` tracks previously seen video IDs (10,000 cap with LRU pruning).
-- **Feed-history store** (`database_feed_items.go`): `UpsertFeedItem` (insert-or-update, reports whether the row is new), `ApplyProbeToFeedItem` (probe writes status/title/date back), `FeedScope` (the window + always-covered upcoming/live read), `SetFeedItemSource`, `RenumberCatalog`/`ListFeedOrderRows` (backfill ordering pass), `SaveBackfillCursor`/`LoadBackfillCursor`, `SetChannelBackfilled`/`GetChannelBackfill`, `SetChannelRSSOK`/`GetChannelRSSOK`, `GetChannelEstablished`, `ListFeedChannelIDs`, `DeleteChannelFeedData` (channel-removal prune).
+- **History:** `HasProcessed(videoID)` / `AddToHistory(videoID)` records the video IDs a job was created for (10,000 cap, `historyCap`: the oldest rows by `added_at` are pruned on insert, and re-recording a present ID does not refresh its date). Only the host writes it, at job creation (`cmd/moombox/monitor_callbacks.go`) — the monitors' re-add guard and both archive steps' VOD gate read it, so a row for a video that was merely skipped or failed to probe would keep it from ever being archived.
+- **Feed-history store** (`database_feed_items.go`): `UpsertFeedItem` (insert-or-update, reports whether the row is new), `ApplyProbeToFeedItem` (probe writes status/title/date back), `FeedScope` (the window + always-covered upcoming/live read, plus the unresolved arm: `unknown` rows at `assumed` precision, and `unknown` RSS rows first seen inside the window — an RSS `<published>` is the announcement time, so a stream scheduled further ahead than the window is older than the cutoff the moment it is first seen, and without this arm it was never probed, even once live; for the same reason a VOD-family probe of an RSS row dated before the cutoff fetches the real date (`probeRowDated`) rather than trusting the 'exact' announcement, which windowed out the VOD of a broadcast that aired inside the window), `SetFeedItemSource`, `RenumberCatalog`/`ListFeedOrderRows` (backfill ordering pass), `SaveBackfillCursor`/`LoadBackfillCursor`, `SetChannelBackfilled`/`GetChannelBackfill`, `SetChannelRSSOK`, `GetChannelEstablished`, `ListFeedChannelIDs`, `DeleteChannelFeedData` (channel-removal prune).
 - **Client tokens:** Full CRUD operations (`AddClientToken`, `GetClientTokenByPrefix`, `ListClientTokens`, `UpdateClientTokenUsage`, `DeleteClientToken`, `DeleteAllClientTokens`).
 - **Job stats:** `GetJobStats()` returns aggregate counts and sizes via a single SQL query with CASE expressions.
-- **JSON import:** `ImportFromJSON(path)` imports data from the TypeScript-era `moombox.json` format in a single transaction.
 
 ---
 
@@ -473,7 +478,18 @@ building the store — so a config found in `./config/` is written back to `./co
 into a fresh `./config.toml` that would shadow it on the next boot (the first write is often the
 boot-time `NeedsAutoPersist` flush, so the fork used to happen without anyone touching a setting). When
 NOTHING is found, the path that was asked for stays the target and the file is created there —
-`storePathFor` in `cmd/moombox/helpers.go` is that rule.
+`storePathFor` in `cmd/moombox/helpers.go` is that rule (with no `-config`, `<cwd>/config.toml`).
+
+**Out-of-range values are replaced, and said so.** `loadFromFile` runs `Normalize`, which puts each
+value `Validate` rejects back to its default; the issues `Validate` found first are kept in
+`NormalizedOnLoad` (`internal/config/types.go`) and boot logs one Warn per issue. The default is what
+the next save writes, so without the line a hand-edited value disappeared from the file unexplained.
+
+**Retired keys are ignored, and said so.** `retiredKeys` (`internal/config/config.go`) lists keys an
+older file may still hold that nothing reads — today `downloader.po_token` and `downloader.visitor_data`,
+which were saved as a "manual PO token override" no code path ever consulted (PO tokens are minted per
+session through `[bgutils]`). `loadFromFile` records the ones present in `IgnoredOnLoad`, boot logs one
+Warn per key, and the next save leaves them out of the file.
 
 ### Configuration Sections
 
@@ -483,14 +499,14 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 |-------|------|---------|----------|-------|
 | Port | int | 774 | `port` | Valid range: 1-65535 |
 | NetworkAccess | string | "localhost" | `network_access` | "localhost", "lan", "external", or "public" — "public" is a config-file-only synonym for "external" (rejected as an API input, absent from both UIs) |
-| HTTPSEnabled | bool | false | `https_enabled` | |
+| HTTPSEnabled | bool | false | `https_enabled` | Restart-required: the listener's scheme is fixed when the web server starts. Everything local that must reach that listener — the TUI's API client, `O W`, the yt-dlp plugin status and install — asks the bound server (`Server.TLSActive`) rather than reading this field, so a save without the restart cannot point them at the wrong scheme. |
 | TLSCertPath | string | "" | `tls_cert_path` | |
 | TLSKeyPath | string | "" | `tls_key_path` | |
 | PasswordHash | string | "" | `password_hash` | scrypt hash, omitted from JSON; a plaintext value is auto-converted on the next start |
-| ClientTokenTTLDays | int | 365 | `client_token_ttl_days` | Valid range: 1-3650. Also enforced by `PUT /api/config` (`validateConfigUpdates`), so an out-of-range value is a field error, not a silent clamp. |
+| ClientTokenTTLDays | int | 365 | `client_token_ttl_days` | Lifetime of a "remember me" client token, enforced on the server against the token's `created_at` (not only the cookie's `Max-Age`). Valid range: 1-3650. Also enforced by `PUT /api/config` (`validateConfigUpdates`), so an out-of-range value is a field error, not a silent clamp. |
 | TrustForwardedProto | bool | false | `trust_forwarded_proto` | Only behind a TLS-terminating proxy that strips the client's own header. Hot-reloadable: a config save re-applies it (`OnTrustForwardedProtoChange`). |
 | TrustedProxies | []string | `[]` | `trusted_proxies` | Reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is honored. Entries must parse as an IP or CIDR (invalid ones are reported and dropped). Hot-reloadable — no restart. See [security.md](security.md) |
-| PublicURL | string | "" | `public_url` | Externally reachable dashboard base URL. Empty means unset. Consumed only by the notification manager, which links a job embed's title to `{public_url}/#job=<id>`. Must be an absolute http(s) URL with a host and no query, fragment, or userinfo — validated by `ValidatePublicURL`, which also trims a trailing slash. An unusable value is reported and cleared, never substituted. Hot-reloadable — read at send time. |
+| PublicURL | string | "" | `public_url` | Externally reachable dashboard base URL. Empty means unset. The notification manager links a job embed's title to `{public_url}/#job=<id>`; the web server's origin checks read it too — on `external`/`public` its host is a name a loopback or private peer may address the dashboard by (`externalHostRefused`), and on `localhost`/`lan` its port is one an Origin may name (`originPortServed`, `internal/web/middleware.go`; [security.md](security.md) § 4. CORSMiddleware). Must be an absolute http(s) URL with a host and no query, fragment, or userinfo — validated by `ValidatePublicURL`, which also trims a trailing slash. An unusable value is reported and cleared, never substituted. A value with an `@` anywhere in it is refused as userinfo before it is parsed, with a message that quotes nothing (a path holding an `@` goes too): net/url ends the authority at the first `/`, `?` or `#`, so a password holding one is read as host:port and url.Parse's refusal (`invalid port ":<password>" after host`) would quote it. Any other parse error carries only url.Parse's cause, never the value. The report quotes the value with everything before its last `@` cut out (`redact.URLUserinfo`, `internal/redact/url.go`): a hand-edited `https://user:password@host` is refused for exactly that part, and `Load` turns the report into a boot Warn on every start. Hot-reloadable — read at send time and per request. |
 
 #### [paths]
 
@@ -502,7 +518,14 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | StagingDirectory | string | "./staging" | `staging_directory` |
 | FfmpegPath | string | "" | `ffmpeg_path` |
 
-`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims, muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
+`database_path` also places `open-alerts.json`, the notifications sent and not yet closed and the backlog disk gate's hold, in the same directory (`openAlertsPath`, `cmd/moombox/open_alerts.go`; see operations.md, Event Types), so a volume or a moved install carries both.
+
+`ffmpeg_path` is hot-reloadable: a save from either UI calls `TrimService.SetFfmpegPath` and `DownloadWorker.SetFfmpegPath` (the orchestrator's muxer), so new trims (a finished job's post-download one included — it runs through the trim service), muxes, probes and part merges use the new binary; operations already running keep the muxer they started with.
+
+`staging_directory` is not restart-required, but it is read per job: `buildJobContext` snapshots it when a job
+starts, and the Mux and Resume lookups, `A R` / `A S` and the orphan scan all read the CURRENT value. A change
+therefore applies to jobs that start after it, and anything already staged under the old directory is no
+longer found by any of them until its folder is moved across; both help texts say so.
 
 #### [logs]
 
@@ -532,31 +555,29 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | OutputTemplate | string | `${channel}/${start_date} ${title} [${id}]` | `output_template` |
 | MaxVideoResolution | int | 2160 | `max_video_resolution` | Min 0; **`0` = unbounded**. Compares the SHORTER frame dimension, so `2160` recognises both 3840x2160 and 2160x3840. Resolves to the largest rendition at or below the cap, or the closest one ABOVE it when a stream offers nothing that small — it never leaves a job with nothing to download. One rule for all four selection sites (`CapDimension`/`SelectByCap`, `internal/utils/resolution.go`). Both UIs offer it as a preset picker (Unbounded/480p/720p/1080p/1440p/4K/8K plus Custom); the stored value is still the integer and there is no migration. |
 | NumParallelDownloads | int | 10 | `num_parallel_downloads` | Min: 1. Peak concurrent VOD **jobs** across all channels — broadcasts never wait on the pool, so total concurrent downloads can reach (live streams) + this. Not to be confused with SegmentWorkers below, which gates concurrency *within* one download; a live broadcast's catch-up speed is governed entirely by SegmentWorkers, since this setting never applies to it. |
-| SegmentWorkers | int | 12 | `segment_workers` | Min: 1, **no max**. Concurrent segment fetches within a single download (catch-up on a live DASH stream, parallel VOD HLS). Values above `config.SegmentWorkersWarnThreshold` (16) log a startup warning and are flagged in both UIs' help text: a wide simultaneous fan-out to YouTube is a traffic shape that attracts bot detection. Measured 2026-08-15 on a live stream mid-archive, at the pre-rewrite fixed 6-worker baseline: Moombox sustained 5.96 MB/s, against 2.86 MB/s for one `curl` connection and 11.28 MB/s for six parallel `curl` connections — the headroom the new configurable default (12 workers) and the rolling-window catch-up rewrite exist to close (a harness test of the same rewrite dropped 4.888s of batched catch-up to 0.84s). Not restart-required. |
+| SegmentWorkers | int | 12 | `segment_workers` | Min: 1, **no max**. Concurrent segment fetches within a single download (catch-up on a live DASH stream, parallel VOD HLS). Values above `config.SegmentWorkersWarnThreshold` (16) log a warning at startup and on every save from either UI that changes it to one (`warnSegmentWorkers`, `cmd/moombox/hot_reload.go` — a save that leaves it alone says nothing, from the TUI as from the Web) and are flagged in both UIs' help text: a wide simultaneous fan-out to YouTube is a traffic shape that attracts bot detection. Measured 2026-08-15 on a live stream mid-archive, at the pre-rewrite fixed 6-worker baseline: Moombox sustained 5.96 MB/s, against 2.86 MB/s for one `curl` connection and 11.28 MB/s for six parallel `curl` connections — the headroom the new configurable default (12 workers) and the rolling-window catch-up rewrite exist to close (a harness test of the same rewrite dropped 4.888s of batched catch-up to 0.84s). Not restart-required. |
 | ReorderBufferMB | int | 1024 (256 on arm64) | `reorder_buffer_mb` | Min: 0, **no max**; `0` = unbounded. Megabytes of out-of-order segment data ONE download may hold in RAM while its head-of-order segment works through its retry ladder — the ceiling on `engine.reorderBuffer`, fed by both parallel paths (`runParallelCatchUp` on live DASH catch-up, `runHlsVodParallel` on VOD HLS). The head segment is admitted regardless, so a stalled head can put one segment over. This is the first config default that differs by platform: the value was originally chosen for an arm-class box, and owner ruling R3 (2026-09-24) scoped every arm-motivated cap to arm64 only — see `platformDefaults` (`internal/config/config.go`). Applied through `engine.ConfigureReorder` at boot and on every save; not restart-required. |
 | ReorderBudgetMB | int | 4096 (1024 on arm64) | `reorder_budget_mb` | Min: 0, **no max**; `0` = unbounded. The same megabytes, summed across EVERY live reorder buffer in the process. Nothing bounded that sum before: at the per-job ceiling alone, ten concurrent VOD jobs could admit ten ceilings' worth of segments. A non-head segment waits on this ceiling as well as its own buffer's; the head is exempt from both, because nothing frees either without a flush and nothing flushes without its head. A `reorder_buffer_mb` above this budget is incoherent as written and is clamped to it at read time (`DownloaderConfig.ReorderLimitBytes`), with one warning naming both keys. Applied through `engine.ConfigureReorder` at boot and on every save; not restart-required. |
 | ProgressIntervalMS | int | 16 | `progress_interval_ms` | Min: 1, **no max**. Milliseconds between one job's progress reports — `ProgressTracker.maybeUpdate`'s gate (`internal/worker/progress.go`), and therefore the upstream rate limit on both the WebSocket hub (which throttles nothing of its own) and the TUI's rows. Unlike the two reorder ceilings above, `0` is NOT a documented "unbounded" value: an ungated tracker would write the database once per arriving segment callback on every download at once, so anything below 1 resets to the default. The knob exists so 8 ms — about 120 reports a second, matching the TUI's 120 fps renderer — can be tried on a fast machine without a rebuild (owner ruling F1, 2026-09-25); each report costs one `UpdateJobFields` write and one fan-out, so lower values buy smoothness with CPU and disk. Snapshotted per job start into `JobConfig.ProgressInterval` by `buildJobContext` (`internal/worker/worker.go`), like MaximumTimeout and SegmentWorkers, so a save applies to the NEXT job and a running tracker keeps the interval it started with. Not restart-required, and absent from both restart-required lists because it has no Settings row: a config-file-only key by the same ruling, like DpapiProfileDir below — no control in either UI, no API setter, so in practice it is edit-and-restart with the edit made while Moombox is stopped. |
 | DownloadChat | bool | true | `download_chat` | |
 | Prefer60fps | bool | true | `prefer_60fps` | |
 | MaximumTimeout | int | 600 | `maximum_timeout` | Seconds; YouTube livestreams. Min: 30 |
-| InterruptionTimeout | FlexDuration | 120 (minutes) | `interruption_timeout` | Min: 0, no max. How long a live YouTube download's MaxTimeout-backstop finalize may keep deferring while `engine.SegmentDownloader.MayResume` reports the broadcast may still resume (`stallForPossibleResume`, `internal/engine/downloader.go`) — the interruption-resume design's Tier 1 stall. `0` disables the STALL only, not Tier 2 preservation: `attachMayResume` (`internal/worker/interruption.go`) installs `MayResume` unconditionally, and every live strategy site maps the config value through `engineInterruptionTimeout` before it reaches `engine.DownloaderOptions.InterruptionTimeout` — a positive value passes through as the ceiling, `0` (or a defensive negative) maps onto the sentinel `engine.InterruptionNoStall` (`-1`). `stallForPossibleResume`'s `InterruptionNoStall` branch still consults `MayResume` once per call and still latches `finalizedDuringInterruption` when it reports true, but always returns `false` — no stall, no clock. A parallel worker-side latch, `resumeWaitLatch` (fed by `noteRefreshFailure`/`resumeEvidence` in `internal/worker/interruption.go`), gives the same treatment to the `ErrQualityLost` refresh-failure path: evidence latches `incomplete_tail` even when `shouldWaitForResume` itself never permits an actual wait. So a `0` job never blocks finalize, but a genuinely-interrupted `0` job still finalizes with staging + resume data preserved exactly like an enabled one that gave up. Snapshotted per job start (`buildJobContext`), like `MaximumTimeout`/`SegmentWorkers` above; not restart-required. |
-| IncompleteStagingExpiryDays | FlexDuration | 7 (days) | `incomplete_staging_expiry_days` | Min: 0, no max. How long the two EXPIRING staging shields hold. `jobNeedsStaging` (`internal/worker/orphans.go`) keeps a Finished job's staging out of orphan cleanup for FOUR reasons, and this window governs two of them: the job is flagged `incomplete_tail` (the tail is Resume-able), or its chat capture ended incomplete (`chatStatusIncomplete` — the chat resume sidecar in staging is what a later Retry pages on from). Both lapse on the one age rule, `incompleteStagingExpired` (`internal/worker/orphans.go`). The other two shields carry NO age rule at all, because each holds captured media that exists nowhere else: staging still holding a recording the engine set aside rather than truncated (`stagedAsideRecordings`, `internal/worker/orchestrator_mux.go`) and staging still holding an unmuxed captured part (`hasUnmuxedSegmentParts`, `internal/worker/worker.go`, recoverable via the Mux action) are shielded until they are muxed or the job is deleted. Only the disk-heavy staging shield expires — the flag (the "may be missing its tail" badge) never does: YouTube cannot resume a broadcast days later, so aged interruption staging has no resume value, while the badge stays honest indefinitely. Age is measured from the job's `updated_at`, so any activity restarts the window; unparseable timestamps preserve. After expiry the staging becomes an ordinary orphan-scanner candidate; auto-resume's staging-existence gate then falls to the silent drop and manual Reinitialize remains the recovery. `0` = preserve forever. Read live per scan; not restart-required. |
-| PoToken | string | "" | `po_token` | Manual PO token override |
-| VisitorData | string | "" | `visitor_data` | Manual visitor data override |
+| InterruptionTimeout | FlexDuration | 120 (minutes) | `interruption_timeout` | Min: 0, no max. How long a live YouTube download's MaxTimeout-backstop finalize may keep deferring while `engine.SegmentDownloader.MayResume` reports the broadcast may still resume (`stallForPossibleResume`, `internal/engine/downloader.go`) — the interruption-resume design's Tier 1 stall. `0` disables the STALL only, not Tier 2 preservation: `attachMayResume` (`internal/worker/interruption.go`) installs `MayResume` unconditionally, and every live strategy site maps the config value through `engineInterruptionTimeout` before it reaches `engine.DownloaderOptions.InterruptionTimeout` — a positive value passes through as the ceiling, `0` (or a defensive negative) maps onto the sentinel `engine.InterruptionNoStall` (`-1`). `stallForPossibleResume`'s `InterruptionNoStall` branch still consults `MayResume` once per call and still latches `finalizedDuringInterruption` when it reports true, but always returns `false` — no stall, no clock. A parallel worker-side latch, `resumeWaitLatch` (fed by `noteRefreshFailure`/`resumeEvidence` in `internal/worker/interruption.go`), gives the same treatment to the live loop's refresh failures (the `ErrQualityLost` refresh and the stream-end verify's): evidence latches `incomplete_tail` even when `shouldWaitForResume` itself never permits an actual wait. When it does permit one, this value is also that wait's ceiling (`waitDeadline`, `internal/worker/interruption.go`). So a `0` job never blocks finalize, but a genuinely-interrupted `0` job still finalizes with staging + resume data preserved exactly like an enabled one that gave up. Snapshotted per job start (`buildJobContext`), like `MaximumTimeout`/`SegmentWorkers` above; not restart-required. |
+| IncompleteStagingExpiryDays | FlexDuration | 7 (days) | `incomplete_staging_expiry_days` | Min: 0, no max. How long the two EXPIRING staging shields hold. `jobNeedsStaging` (`internal/worker/orphans.go`) keeps a Finished job's staging out of orphan cleanup for FIVE reasons, and this window governs two of them: the job is flagged `incomplete_tail` (the tail is Resume-able), or its chat capture ended incomplete (`chatStatusIncomplete` — no verb re-pages from the capture kept in staging, since `/retry` refuses a Finished job and Reinitialize starts over, but it can be the only copy of those comments when the archive's chat copy failed, an aside recovery carries it beside the recovered recording, and the operator can take it by hand). Both lapse on the one age rule, `incompleteStagingExpired` (`internal/worker/orphans.go`). The other three shields carry NO age rule at all, because each holds captured media that can exist nowhere else: staging still holding a recording the engine set aside rather than truncated (`stagedAsideRecordings`, `internal/worker/orchestrator_mux.go`) and staging still holding an unmuxed captured part (`hasUnmuxedSegmentParts`, `internal/worker/worker.go`, recoverable via the Mux action) are shielded until they are muxed or the job is deleted, and so is a staging root holding a recording the finalize did not use (`unusedRootRecording`, `internal/worker/vod_supersede.go` — the shield `cleanupStagingAfterMux` keeps the dir for, which the sweep used to offer as an ordinary orphan). Only the disk-heavy staging shield expires — the flag (the "may be missing its tail" badge) never does: YouTube cannot resume a broadcast days later, so aged interruption staging has no resume value, while the badge stays honest indefinitely. Age is measured from the job's `updated_at`, so any activity restarts the window; unparseable timestamps preserve. After expiry the staging becomes an ordinary orphan-scanner candidate; auto-resume's staging-existence gate then falls to the silent drop and manual Reinitialize remains the recovery. `0` = preserve forever. Read live per scan; not restart-required. |
 
 #### [cookies]
 
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
-| CookieFile | string | "./cookies.txt" | `cookie_file` | **Restart-required.** `AutoCookieService` is constructed from this once, at startup (`initServices`, `cmd/moombox/services.go`). |
-| AutoEnabled | bool | false | `auto_enabled` | **Restart-required.** Owns exactly three things: the headless-browser periodic timer, the one automatic recovery attempt, and the `SetExpectedPlatforms` seeding at `cmd/moombox/main.go:276-278`. See §Auto-Cookie Service for the full settled meaning. |
+| CookieFile | string | "./cookies.txt" | `cookie_file` | **Restart-required.** `AutoCookieService` is constructed from this once, at startup (`initServices`, `cmd/moombox/services.go`). Advice that names the file to replace — the auth alerts (`cookieFilePath`, `cmd/moombox/helpers.go`) and the worker's failed-refresh line (`CookieFileInUse`) — names the file the running services use (the jar's path), so a save without the restart cannot send the operator to a file nothing reads. |
+| AutoEnabled | bool | false | `auto_enabled` | **Restart-required for half of what it owns.** It owns the headless-browser periodic timer and the `SetExpectedPlatforms` seeding (`run`, `cmd/moombox/main.go`), both decided once at boot, and the automatic recovery attempts — the monitors' one recovery attempt (`monitor_callbacks.go`) and the worker's refresh on an auth failure (`OnCookieRefreshNeeded`, `services.go`) — which read it live, as does `BrowserLaunchAllowed`. Both help texts say which half waits. See §Auto-Cookie Service for the full settled meaning. |
 | BrowserProfileDir | string | "./browser-profile" | `browser_profile_dir` | **Restart-required.** The directory's *existence* is not part of the start condition — `periodicRefreshHasSource` (`internal/cookies/autocookies_periodic.go`) asks per tick. |
 | BrowserPath | string | "" | `browser_path` | Explicit browser override. Only a real override when paired with `browser_type` (`browserOverrideConfigured`, `internal/cookies/autocookies_browser_resolve.go`). |
 | BrowserType | string | "" | `browser_type` | Which extraction backend applies to `browser_path` — Firefox `cookies.sqlite` vs Chromium CDP. Validated against `knownBrowserTypes` (`internal/cookies/browser_validate.go`). |
-| Platforms | []string | [] | `platforms` | Platforms with verified cookies. Seeded on first run by `detectCookiePlatforms` (`cmd/moombox/services.go`) — sidecar first, loose cookie-name predicates second. Nothing automatic ever prunes it; the sole removal path is an operator replacing the list through `PUT /api/config`. |
-| ActivePlatforms | []string | [] | `active_platforms` | Explicit override for UI display; consumed by `config.GetActivePlatforms`. Two persistence policies, both deliberate and pre-existing: both first-run wizards (`web/public/modules/setup.js`, `internal/tui/setup_wizard.go`) list a platform here on an ACCEPTED verdict — hedged verdicts included — while the `platforms` row above is fed through the `PersistPlatforms` callback (`internal/cookies/autocookies.go`) only on a VERIFIED one. The two lists answer different questions (what to display; what was proven); unifying them is an owner call nobody has asked for. |
+| Platforms | []string | [] | `platforms` | Platforms with verified cookies. Seeded by `detectCookiePlatforms` (`cmd/moombox/services.go`) — sidecar first, loose cookie-name predicates second — on the first boot that has a config file: during a first run the save would create config.toml and mark it loaded, skipping both setup wizards, so that write and `PersistPlatforms`' go through `Store.UpdateIfLoaded` (`internal/config/store.go`), which does nothing until the operator's first save. Nothing automatic ever prunes it; the sole removal path is an operator replacing the list through `PUT /api/config`. Its auth-loss consumer reads it once, at boot (`RefreshService.SetExpectedPlatforms` seeds the "previously authenticated" state before the first check), so a runtime removal changes that seed from the next boot; the running service already tracks each platform's real verdict from its own checks, and the status-bar fallback (`GetActivePlatforms`) follows the list at once. |
+| ActivePlatforms | []string | unset | `active_platforms` | Explicit override for UI display; consumed by `config.GetActivePlatforms`. Unset (nil) means no override, and the display falls back to `platforms`, then to the enabled channels; an EMPTY list is an override too — both indicators off — so the field carries no `omitempty` (the TOML encoder skips nil on its own). The settings forms write it only once a toggle has been changed (or an override already exists): the toggles otherwise show the inferred answer, and saving that back would freeze it. Two persistence policies, both deliberate and pre-existing: both first-run wizards (`web/public/modules/setup.js`, `internal/tui/setup_wizard.go`) list a platform here on an ACCEPTED verdict — hedged verdicts included — while the `platforms` row above is fed through the `PersistPlatforms` callback (`internal/cookies/autocookies.go`) only on a VERIFIED one. The two lists answer different questions (what to display; what was proven); unifying them is an owner call nobody has asked for. |
 | RefreshInterval | FlexDuration | 360 (minutes = 6h) | `refresh_interval` | Valid: 10-10080 minutes. Drives `AutoCookieService.StartPeriodicRefresh` (the browser timer) only — **not** `RefreshService`, whose interval is the hardcoded 30-minute default. **Restart-required**, in both lists: the ticker is built from this value once when the loop starts (`internal/cookies/autocookies_periodic.go`) and is never `Reset`, and `cmd/moombox/main.go` reads the same value to decide whether to start the loop at all — so a save changes nothing until the next start, and up to a week (10080 minutes) can pass before that is visible. |
-| DpapiFallback | bool | false | `dpapi_fallback` | Windows-only. Opt-in: reads the user's REAL Chromium-family profile via `CryptUnprotectData` when the CDP refresh cannot acquire the managed profile. |
+| DpapiFallback | bool | false | `dpapi_fallback` | Windows-only. Opt-in: reads the user's REAL Chromium-family profile via `CryptUnprotectData` when the CDP refresh cannot acquire the managed profile. Not restart-required: `AutoCookieService.DpapiFallback` reads it live on every failed refresh. |
 | DpapiProfileDir | string | "" | `dpapi_profile_dir` | Windows-only, and empty by default. Names a Chromium-family PROFILE directory for the DPAPI fallback to read, REPLACING the discovery walk rather than joining it — discovery knows eleven fixed `%LOCALAPPDATA%` `User Data` layouts, so a portable Chromium, a `--user-data-dir` profile and Opera are invisible to it. `dpapi.ValidateProfileDir` (`internal/cookies/dpapi/profiles.go`) checks the three structural facts the reader needs — an existing directory that is not a symlink or junction; a `Local State` that `ChromeLocalStatePath` can find *beside* it (Chromium's `User Data` root) or *inside* it (Opera's self-contained layout, the parent preferred so a stray copy cannot displace the real key); and `Cookies` or `Network/Cookies` inside — and a directory that fails them is an error rather than a fall-back to discovery, because falling back would answer "no profiles found under LOCALAPPDATA" about a setting the operator had just written. The same helper resolves the master key for `loadChromeMasterKey` (`internal/cookies/dpapi/dpapi_windows.go`), so validation and the reader cannot disagree. The launch-boundary deny-list (`dangerousProfilePathSubstrings`) is deliberately **not** applied here: it exists to stop a headless browser being *launched* against a real user profile, this value is only ever *read* (a `mode=ro` SQLite open plus a `Local State` read — pinned by `TestDpapiProfileDirNeverReachesALaunch`), and applying it refused a portable Chromium and every Opera while adding nothing, since the discovery walk reads the same real profiles with no deny-list at all. Relative values resolve against Moombox's working directory, like `paths.*`. **Not** restart-required by design: `AutoCookieService.DpapiProfileDir` reads it live at the start of every DPAPI pass, so a change applies to the next pass — though today nothing but a `config.toml` edit can change it (no UI control, no API setter), so in practice it is edit-and-restart, with the edit made while Moombox is stopped. `Validate` checks the path's shape only (no `..` traversal), never its existence — a container writes its config before the volume is mounted — and the boot-time verdict is a Warn from `LogDpapiProfileDirVerdict` (`internal/cookies/autocookies_dpapi.go`), never a boot failure; it fires off Windows, when `dpapi_fallback` is off (the default, so the likeliest case), and when the directory is unusable. |
 | Acquisition | string | "auto" | `acquisition` | `auto` \| `profile`. Decides how a REFRESH acquires credentials: `auto` (a resolvable browser launches, a host with none imports the profile — the pre-existing rule), `profile` (never launch for a refresh; read `browser_profile_dir` read-only even on a desktop with a browser). Two values by ruling — the audit's `browser` behaved exactly like `auto` and was dropped. **Not** restart-required — `AutoCookieService.AcquisitionMode` reads it live. Composes with `auto_enabled`, which still owns whether a pass may launch at all. `StartSetup` never consults it. Absent or empty means `auto` and needs no migration: `Load` decodes over `Defaults()`. |
 
@@ -567,13 +588,19 @@ NOTHING is found, the path that was asked for stays the target and the file is c
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
 | WarnPercent | int | 90 | `disk_warn_percent` | Valid: 1-99 |
-| CriticalPercent | int | 95 | `disk_critical_percent` | Must be > WarnPercent |
+| CriticalPercent | int | 95 | `disk_critical_percent` | Must be > WarnPercent. Also the backlog scheduler's admission gate: no backlog VOD is admitted from the reading at or past it until usage is 2 points below it |
 
 #### [updates]
 
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
 | AutoCheckUpdates | bool | true | `auto_check_updates` |
+
+`runUpdateCheckLoop` (`cmd/moombox/helpers.go`) checks GitHub shortly after boot and then daily, each time
+only while the flag is on — re-read on every check, so turning it off stops the schedule without a
+restart. It also re-reads the flag every minute and checks at once when it has turned ON, so enabling it
+at runtime no longer waits up to a day; reading the store covers every writer (both settings UIs, the
+setup wizard, the update banner's dismiss).
 
 #### [memory]
 
@@ -601,12 +628,12 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
-| ID | string | "" | `id` | YouTube channel ID or Twitch username |
+| ID | string | "" | `id` | YouTube channel ID or Twitch username. Every writer stores it through `utils.NormalizeChannelID` — trimmed, a URL or bare `@handle` resolved — and `Validate` refuses an ID with surrounding whitespace or one another entry has, compared case-insensitively, so `Save` refuses either; `Normalize` (Load) trims it and drops the later duplicate. |
 | Name | string | "" | `name` | Display name |
 | Platform | string | "youtube" | `platform` | "youtube" or "twitch" |
 | Enabled | *bool | nil (true) | `enabled` | nil defaults to true |
 | Terms | ChannelTerms | empty | `terms` | Regex filter (string or map of named patterns) |
-| NumDescLookbehind | *int | nil | `num_desc_lookbehind` | Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
+| NumDescLookbehind | *int | nil | `num_desc_lookbehind` | Retired: terms match titles only, so nothing reads it. Not on either channel editor; kept so an existing config loads and saves unchanged. |
 | OutputDirectory | string | "" | `output_directory` | Per-channel override. Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
 | IncludeNonLiveContent | bool | false | `include_non_live_content` | |
 | ArchiveWindowDays | *int | nil | `archive_window_days` | Per-channel override (1-3650). Editable in both channel editors (Web dialog, TUI form); blank = the global value. |
@@ -626,10 +653,11 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 
 ### FlexDuration
 
-`FlexDuration` is a custom type that stores a `float64` value whose unit is determined by context:
+`FlexDuration` is a custom type that stores a `float64` value whose unit is determined by the field (`flexDurationFields` in `internal/config/flex_duration.go`):
 
-- When used as `feed_check_interval`: the value represents **minutes**.
-- When used as `hide_finished_age_days`: the value represents **days**.
+- **seconds**: `probe_cooldown`
+- **minutes**: `feed_check_interval`, `interruption_timeout`, `refresh_interval`
+- **days**: `hide_finished_age_days`, `incomplete_staging_expiry_days`
 
 **Parsing rules:**
 
@@ -637,14 +665,14 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 |-------|------|--------|
 | `10` | int/float | Stored as-is (10.0) |
 | `"10"` | string (plain number) | Stored as 10.0 |
-| `"30m"` | string (duration) | Parsed as 30 minutes; stored as 30.0 when unit is "minutes", or 0.0208... when unit is "days" |
+| `"30m"` | string (duration) | Parsed as 30 minutes; stored as 1800.0 when unit is "seconds", 30.0 when "minutes", or 0.0208... when "days" |
 | `"7d"` | string (duration) | Parsed as 7 days; stored as 10080.0 when unit is "minutes", or 7.0 when unit is "days" |
 
 **Supported duration suffixes:** `ms`, `s`, `m`, `h`, `d`, `w`.
 
 **Serialization:** `MarshalTOML()` writes a plain number. `MarshalJSON()` writes a plain number. This prevents the encoder from producing a nested `{Value = 5.0}` table.
 
-**TOML deserialization:** `UnmarshalTOML()` handles int64, float64, string (plain number or duration string), and map (legacy `{Value = 5.0}` format from earlier serialization).
+**TOML deserialization:** `UnmarshalTOML()` handles int64, float64, string (plain number or duration string), and map (legacy `{Value = 5.0}` format from earlier serialization). It cannot see which field it is decoding, so a duration string's value there is provisional; `loadFromFile` then re-reads every duration string in its field's unit (`resolveFlexDurationStrings`). Before that step the guess (days for a `d`/`w` suffix, else minutes) was final, and `probe_cooldown = "2m"` loaded as 2 seconds.
 
 ### ChannelTerms
 
@@ -685,12 +713,13 @@ Handles backward compatibility with older flat config formats. All migrations ar
 - DecapiCheckInterval: 15-3600 seconds (or nil)
 - TwitchCheckInterval: 5-3600 seconds (or nil)
 - NumParallelDownloads: min 1
-- SegmentWorkers: min 1, no max (values above `SegmentWorkersWarnThreshold`, 16, log a startup warning instead of failing validation)
+- SegmentWorkers: min 1, no max (values above `SegmentWorkersWarnThreshold`, 16, log a warning at startup and on a save that changes it, instead of failing validation)
 - ReorderBufferMB: min 0, no max (`0` = unbounded)
 - ReorderBudgetMB: min 0, no max (`0` = unbounded). The cross-check is NOT made by `validate` — a per-job ceiling above the process budget is legal config that `DownloaderConfig.ReorderLimitBytes` clamps at read time, with one warning, rather than a value rewritten on disk
 - ProgressIntervalMS: min 1, no max. The one downloader key where `0` is an error rather than a documented "disabled" value, because an ungated progress tracker writes the database once per segment callback
 - MaxVideoResolution: min 0 (`0` = unbounded; only a negative value resets to the default)
 - MaximumTimeout: min 30 seconds (no maximum)
+- OutputTemplate: non-empty, at most `OutputTemplateMaxLen` (500) bytes — one rule for every writer; the web PUT and the TUI also refuse a longer one up front, naming the field
 - DiskWarnPercent: 1-99, DiskCriticalPercent: must be > WarnPercent (auto-adjusted if not)
 - CookieRefreshInterval: min 10 minutes
 - QualityPreference: validated against a fixed set of allowed values (best, 2160p60, 2160p, 1440p60, 1440p, 1080p60, 1080p, 900p60, 900p, 720p60, 720p, 480p, 360p, 160p, audio_only)
@@ -712,13 +741,28 @@ File permissions: `0o600` (owner read/write only).
 
 | Variable | Source | Sanitization |
 |----------|--------|--------------|
-| `${title}` | Video/stream title | Filesystem-unsafe characters removed; Unicode preserved |
+| `${title}` | Video/stream title | Filesystem-unsafe characters removed; Unicode preserved; cut to 180 bytes on a rune boundary (`templateTitleMaxBytes`) |
 | `${id}` | Video/stream ID | No sanitization (IDs are alphanumeric) |
-| `${channel}` | Channel name | Filesystem-unsafe characters removed; Unicode preserved |
+| `${channel}` | Channel name | Filesystem-unsafe characters removed; Unicode preserved; cut to 200 bytes (`templateChannelMaxBytes`) |
 | `${start_date}` | Stream start time (or now) | Formatted as `YYYYMMDD` |
 | `${start_time}` | Stream start time (or now) | Formatted as `HHMM` |
 
-Sanitization preserves CJK, Japanese kana, and full-width characters via a regex allowlist.
+Sanitization preserves CJK, Japanese kana, and full-width characters via a regex allowlist. Those keep
+three bytes a character, and Linux caps a name at 255 BYTES, so the byte caps are what keep a long
+Japanese title from failing the finalize with ENAMETOOLONG: with the default template a capped title
+leaves room for the id and the longest suffix a job writes beside its archive. No ASCII title reaches
+the cap (YouTube allows 100 characters, Twitch 140). Those caps fit the default layout only, so the
+expansion is also fitted per path component (`fitTemplateComponents`, `internal/config/config.go`): a
+directory to 255 bytes and the archive's own name to `templateStemMaxBytes` (210 — the default template at
+the caps with an 18-byte Twitch id, leaving room for the 42-byte longest suffix). A component over its
+budget shrinks `${title}` and `${channel}` where they appear, levelling the two rather than cutting one
+away, down to 30 bytes each; literal text and `${id}` never shrink, so a name keeps the id that tells two
+archives apart, and only a component still over once both are at that floor (long literal text) is cut
+on a rune boundary. A custom `${channel} - ${title} [${id}]` used to resolve to about 400 bytes and fail
+the finalize. After expansion every path component that names a
+Windows device (`CON`, `NUL`, `COM1`, … with or without an extension — `utils.IsWindowsReservedName`)
+gets a leading underscore, on every platform, so a channel called `CON` no longer makes the
+`${channel}/…` directory impossible to create on Windows.
 
 ### Auto-Hash
 
@@ -800,7 +844,7 @@ A file holding SAPISID with LOGIN_INFO cleared is a CONFIGURED platform with BRO
 - `CheckNow(ctx)` is `POST /api/cookies/recheck` and the TUI's `R C`, also `allowFallback=false`: it runs on a handler goroutine and must not buy a full page fetch.
 - `doRefresh(ctx)` is the ticker, and the only path allowed `allowFallback=true`.
 
-All three single-flight on `RefreshService.refreshInFlight` (guarded by `rs.mu`). A second caller is a **no-op** that returns `started=false` and logs at Debug — it does not queue and does not wait. It is **never** a `RefreshDeclinedCauses` member: that vocabulary belongs to `AutoCookieService`'s browser refresh and is pinned across three consumers. A dropped ticker tick waits a full interval rather than doubling up. A caller that has just rewritten `cookies.txt` and wants *that file* re-verified cannot be given that guarantee — the in-flight pass may have read the old file — so every caller in that position logs the skip at **Info**, through one helper — `recheckAfterCookieWrite` (`cmd/moombox/monitor_callbacks.go`), which says "status may lag until the next refresh" and names the gesture. Its callers are the post-recovery re-check (hoisted above `runCookieRecovery`'s verdict switch and gated on `RefreshResult.Ran`, so a pass that ran and FAILED is re-read too — it moved the credential fingerprint just as a working one would), the post-`R F` re-check, the worker's job-triggered refresh (`OnCookieRefreshNeeded`), the TUI setup wizard's finish (gated on `SetupResult.Wrote`, the setup path's counterpart to `Ran`, since a wizard finish reports `SetupResult{}` on every error path and there is otherwise nothing to gate on), and the TUI's `E I` cookie-file import (gated on `ImportResult.Wrote`, the same flag the Web import route gates its own re-check on — `ImportCookies` is the fifth writer of `cookies.txt` and this is the `cmd/moombox` half of its "the caller runs the re-check" contract). Two credential writers share one further injected seam — `AutoCookieService.OnPassCompleted`, fired by both `StartPeriodicRefresh`'s tick and `StartProfileSeed`'s boot import, each gated on `Ran` — and that seam's body is wrapped in `postRefreshRecheckHook` (`cmd/moombox/services.go`) for its own recover, since an escaping panic there would end the periodic timer for the life of the process rather than costing one pass. The three `internal/web/routes` callers — the dashboard/Settings browser refresh, the setup wizard's finish and `POST /api/cookies/import` — call `CheckNow` bare, because that package has no operational logger. The wizard finish and the import are additionally DETACHED onto their own 45-second timeout rather than the request's context, and both answer with an explicit `Content-Length` (`jsonResponseSized` / `jsonErrorSized`, `internal/web/routes/cookies.go`) before flushing, so a client that navigates away can neither cancel the fingerprint comparison its own write caused nor be made to wait out a re-check it has already been answered for. The length is the load-bearing half and was missing until 2026-09-17 (owner decision O-L): with no `Content-Length` net/http falls back to chunked encoding and writes the terminating chunk only when the HANDLER returns, so the flush released the headers and `fetch().json()` — which awaits the body — sat through the entire re-check, inside a 60-second dialog budget that also has to cover `FinishSetup`. Every exit written inline in either handler literal goes through those two writers, success and refusal alike, and each keeps the trailing newline `json.Encoder.Encode` wrote so no body's bytes moved. `writeBrowserReadError` and `readCookieImportBody`'s refusals stay unsized, deliberately: both answer before the deferred re-check exists, leaving `Wrote` false, so no client is waiting on a pass behind them. They are safe under `CompressionMiddleware` only below its 1024-byte `gzipMinSize`, where `commitPlain` sends the identity body and leaves the header alone; above it `startGzip` deletes `Content-Length` and re-chunks, and the gzip trailer is written after the handler returns — accepted rather than exempted because the widest body either handler produces is a ~282-byte import success (three maps: the status snapshot, the relogin map and `activePlatforms`). The re-check stays BLOCKING on the handler goroutine rather than being detached: that is the property the AST call-site test protects, and a goroutine would satisfy the test while deleting it. Each is gated on the pass having written (`SetupResult.Wrote` / `ImportResult.Wrote`), which is true on the jar-reload error exit as well as on success — the one error path that runs over a file already replaced, and the one where the re-check is worth most. **Every gesture that can write `cookies.txt` ends in one of these**, and that is a requirement rather than an observation: `refresh`'s status block is the only place the Twitch credential fingerprint is compared and the auth mark cleared, so a writer that reaches no pass is invisible until the ticker. The `POST /api/cookies/recheck` handler ignores the bool on purpose — its payload is a status snapshot, not a claim that this request produced it. Before the guard existed, a manual recheck landing during a ticker pass produced two guide fetches, two `Set-Cookie` merges and two interleaved `updateCookieFile` rewrites of the same file. An operator counting passes from clicks will therefore occasionally see a recheck produce no new pass in the log; that is the guard, not a broken button.
+All three single-flight on `RefreshService.refreshInFlight` (guarded by `rs.mu`). A second caller is a **no-op** that returns `started=false` and logs at Debug — it does not queue and does not wait. It is **never** a `RefreshDeclinedCauses` member: that vocabulary belongs to `AutoCookieService`'s browser refresh and is pinned across three consumers. A dropped ticker tick waits a full interval rather than doubling up. A caller that has just rewritten `cookies.txt` and wants *that file* re-verified cannot be given that guarantee — the in-flight pass may have read the old file — so every caller in that position logs the skip at **Info**, through one helper — `recheckAfterCookieWrite` (`cmd/moombox/monitor_callbacks.go`), which says "status may lag until the next refresh" and names the gesture. Its callers are the post-recovery re-check (hoisted above `runCookieRecovery`'s verdict switch and gated on `RefreshResult.Ran`, so a pass that ran and FAILED is re-read too — it moved the credential fingerprint just as a working one would), the post-`R F` re-check, the worker's job-triggered refresh (`OnCookieRefreshNeeded`), the TUI setup wizard's finish (gated on `SetupResult.Wrote`, the setup path's counterpart to `Ran`, since a wizard finish reports `SetupResult{}` on every error path and there is otherwise nothing to gate on), and the TUI's `E I` cookie-file import (gated on `ImportResult.Wrote`, the same flag the Web import route gates its own re-check on — `ImportCookies` is the fifth writer of `cookies.txt` and this is the `cmd/moombox` half of its "the caller runs the re-check" contract). Two credential writers share one further injected seam — `AutoCookieService.OnPassCompleted`, fired by both `StartPeriodicRefresh`'s tick and `StartProfileSeed`'s boot import, each gated on `Ran` — and that seam's body is wrapped in `postRefreshRecheckHook` (`cmd/moombox/services.go`) for its own recover, so a panic there costs only the re-check. Both cookie timers (this one and `RefreshService`'s ticker) also run each tick under its own recover (`runPeriodicTick`; the ticker's inline wrap), because their goroutines recover outside the loop and an escaping panic would otherwise end the timer for the life of the process rather than costing one tick. The three `internal/web/routes` callers — the dashboard/Settings browser refresh, the setup wizard's finish and `POST /api/cookies/import` — call `CheckNow` bare, because that package has no operational logger. The wizard finish and the import are additionally DETACHED onto their own 45-second timeout rather than the request's context, and both answer with an explicit `Content-Length` (`jsonResponseSized` / `jsonErrorSized`, `internal/web/routes/cookies.go`) before flushing, so a client that navigates away can neither cancel the fingerprint comparison its own write caused nor be made to wait out a re-check it has already been answered for. The length is the load-bearing half and was missing until 2026-09-17 (owner decision O-L): with no `Content-Length` net/http falls back to chunked encoding and writes the terminating chunk only when the HANDLER returns, so the flush released the headers and `fetch().json()` — which awaits the body — sat through the entire re-check, inside a 60-second dialog budget that also has to cover `FinishSetup`. Every exit written inline in either handler literal goes through those two writers, success and refusal alike, and each keeps the trailing newline `json.Encoder.Encode` wrote so no body's bytes moved. `writeBrowserReadError` and `readCookieImportBody`'s refusals stay unsized, deliberately: both answer before the deferred re-check exists, leaving `Wrote` false, so no client is waiting on a pass behind them. They are safe under `CompressionMiddleware` only below its 1024-byte `gzipMinSize`, where `commitPlain` sends the identity body and leaves the header alone; above it `startGzip` deletes `Content-Length` and re-chunks, and the gzip trailer is written after the handler returns — accepted rather than exempted because the widest body either handler produces is a ~282-byte import success (three maps: the status snapshot, the relogin map and `activePlatforms`). The re-check stays BLOCKING on the handler goroutine rather than being detached: that is the property the AST call-site test protects, and a goroutine would satisfy the test while deleting it. Each is gated on the pass having written (`SetupResult.Wrote` / `ImportResult.Wrote`), which is true on the jar-reload error exit as well as on success — the one error path that runs over a file already replaced, and the one where the re-check is worth most. **Every gesture that can write `cookies.txt` ends in one of these**, and that is a requirement rather than an observation: `refresh`'s status block is the only place the Twitch credential fingerprint is compared and the auth mark cleared, so a writer that reaches no pass is invisible until the ticker. The `POST /api/cookies/recheck` handler ignores the bool on purpose — its payload is a status snapshot, not a claim that this request produced it. Before the guard existed, a manual recheck landing during a ticker pass produced two guide fetches, two `Set-Cookie` merges and two interleaved `updateCookieFile` rewrites of the same file. An operator counting passes from clicks will therefore occasionally see a recheck produce no new pass in the log; that is the guard, not a broken button.
 
 **Every `rs.mu` section inside `refresh` releases through `defer`.** This is a standing rule, not a style preference. The guard-release defer takes `rs.mu`, and `rs.mu` is a plain non-reentrant `RWMutex`: a panic unwinding with the write lock held would block that defer forever, park the goroutine holding `rs.mu`, and turn a loud crash into a silent hang in which every later `GetStatus()` blocks. The status update is scoped into a func literal for exactly that reason. Two unexported test seams, `refreshPassHook` (outside the lock) and `refreshLockedHook` (inside it), exist because the two windows need opposite things.
 
@@ -844,7 +888,7 @@ authenticated before always still does.
 **One guide exchange, one writer.** `youtubeGuideExchange` (`internal/cookies/refresh_youtube.go`) makes the POST, reads the body to a verdict, closes it, and hands the verdict *and* the response back. It never writes anything. Two callers:
 
 - `checkYouTubeAuth` — the VERIFY path, exported as `CheckYouTubeAuth` and wired into `AutoCookieService.VerifyYouTubeAuth` (`cmd/moombox/services.go`), where `checkPlatformAuth` runs it on the **rollback** decision on all three writing paths — `platformsToRestore` (the mounted-profile import, both arms) and `platformsToRestoreOnRegression` (the browser refresh and the operator's pasted import, regression arm only). It discards the response. A shared exchange that merged `Set-Cookie` headers itself would write the jar from the very response being used to judge the write.
-- `checkAndRefreshYouTube` — the sole writer. Only on an authenticated, readable reply does it call `processYouTubeSetCookies`. Every error path and the never-configured gate return a nil response, so "a reply we could not read is not a reply anyone may write the jar from" is a fact about the return values rather than a rule to remember.
+- `checkAndRefreshYouTube` — the sole writer. Only on an authenticated, readable reply does it call `processYouTubeSetCookies`. Every error path and the never-configured gate return a nil response, so "a reply we could not read is not a reply anyone may write the jar from" is a fact about the return values rather than a rule to remember. It also records whose session the request carried (`youTubeSessionKey`, taken before the request — `YouTubeIdentity`'s hash, but present whenever SAPISID is, because `YouTubeIdentity` is "" without LOGIN_INFO and an empty key switched the check off for such a session) and `updateCookieFile` writes the rotations only into a file that still holds that session: the file is re-read at write time, and an import that replaced it while the request was in flight used to receive the old session's rotated `__Secure-1PSIDTS` on top of the new session's rows (`errCookieSessionReplaced`, skipped at Debug).
 
 `youtubeGuideExchange`'s three entry gates encode one rule, and only the FIRST may answer `(false, nil)`: nothing configured at all is a silent negative; configured-but-no-request-could-be-built errors with `ErrAuthCheckNotAttempted`, because a check that did not happen is not dead credentials. A jar with SAPISID and a cleared LOGIN_INFO is configured with broken credentials and its verdict has to come from YouTube.
 
@@ -887,7 +931,7 @@ Other write-path rules (`updateCookieFile`, `internal/cookies/refresh_cookiefile
 
 "Conclusive" is the three-outcome rule above, not merely "no network error": a non-200, an answer from the wrong host, and a 200 whose body carries no recognisable marker are all inconclusive too, and none of them fires recovery, moves the previous-auth baseline, or marks the platform concluded.
 
-`SetExpectedPlatforms(platforms)` seeds the previous auth state from persisted config platforms so auth loss is detectable after a restart. `OnAuthRecovered` fires on the inverse transition. `OnCredentialsChanged` is separate and not a weaker `OnAuthRecovered`: a job parked because the signed-in account lacks a membership parked while auth was HEALTHY, so swapping accounts produces no auth transition to ride. It fires for BOTH platforms, against per-platform baselines (`prevYouTubeIdentity` / `prevTwitchIdentity`), and the two mean different things: a YouTube fire is "the signed-in ACCOUNT may have changed", a Twitch fire is "the credential PAIR changed". The Twitch fire has a second subscriber — `cmd/moombox` broadcasts it to every live Twitch IRC chat downloader through `DownloadWorker.ReauthenticateTwitchChats`, which tells each one to re-read its credentials and reconnect (the count is downloaders TOLD, never "authenticated"). `OnAuthRecovered` broadcasts the same thing on its own edge, which is what a capture already in flight needs for the case this fire cannot see: a transient refusal that heals with the fingerprint UNCHANGED fires no `OnCredentialsChanged` at all. `shouldObserveCredentials` and `advanceIdentityBaseline` (both pure, both platform-agnostic) govern both — the baseline advances only on a check that was conclusive **and** authenticated, so a stale intermediate export cannot consume the edge, and the `baseline == ""` case fires once per process on purpose so an offline cookie swap is noticed at all.
+`SetExpectedPlatforms(platforms)` seeds the previous auth state from persisted config platforms so auth loss is detectable after a restart. `OnAuthRecovered` fires on the inverse transition — and, for a platform named by `SetUnrecoveredPlatforms(platforms)` (an auth failure a previous process announced and never closed, read from the open-alert state `cmd/moombox` persists), on that platform's first conclusive authenticated check, once, whatever the seeded baseline or `hasCheckedOnce` says: the fall happened before this process could witness it, and without this its `auth_recovered` close never came. The recovery-needed side is untouched. `OnCredentialsChanged` is separate and not a weaker `OnAuthRecovered`: a job parked because the signed-in account lacks a membership parked while auth was HEALTHY, so swapping accounts produces no auth transition to ride. It fires for BOTH platforms, against per-platform baselines (`prevYouTubeIdentity` / `prevTwitchIdentity`), and the two mean different things: a YouTube fire is "the signed-in ACCOUNT may have changed", a Twitch fire is "the credential PAIR changed". The Twitch fire has a second subscriber — `cmd/moombox` broadcasts it to every live Twitch IRC chat downloader through `DownloadWorker.ReauthenticateTwitchChats`, which tells each one to re-read its credentials and reconnect (the count is downloaders TOLD, never "authenticated"). `OnAuthRecovered` broadcasts the same thing on its own edge, which is what a capture already in flight needs for the case this fire cannot see: a transient refusal that heals with the fingerprint UNCHANGED fires no `OnCredentialsChanged` at all. `shouldObserveCredentials` and `advanceIdentityBaseline` (both pure, both platform-agnostic) govern both — the baseline advances only on a check that was conclusive **and** authenticated, so a stale intermediate export cannot consume the edge, and the `baseline == ""` case fires once per process on purpose so an offline cookie swap is noticed at all.
 
 **Two-tier liveness, and its pilot is ARMED.** Tier 1 is the auth check above. Tier 2 is `ObserveLiveness(platform, loggedIn)`, fed by three producers — two YouTube: the per-channel membership probe (every un-memoized channel each feed cycle, plus ONE nominated memoized non-member — the non-member memo's TTL is `membershipMemoTTL` in `internal/monitor/feed.go`, 6 h, and `armMembershipLiveness` nominates the memoized channel with the earliest horizon **that has not recently errored** (`membershipFetchErrored`, `internal/monitor/feed.go`) so the signal keeps firing on an install where every channel is memoized — when every candidate has errored the earliest errored one is tried anyway, bounded by `membershipLivenessMaxTries`) and the channel-independent `FallbackLiveness` probe injected by `cmd/moombox` (this package cannot import `internal/youtube`) — and one Twitch, below. Callers must filter their own inconclusive results out; reaching the method means "the platform told us", not "we asked". Twitch's producer is the channel-independent `TwitchFallbackLiveness` probe, injected by `cmd/moombox` for the same reason and one more — `internal/twitch` imports `internal/cookies`, so the call is an import cycle in either direction. It asks `internal/twitch.Service.ProbeSessionLiveness` for a playback access token on one enabled configured Twitch channel (the first in config order) and reads `user_id` out of the token document (`PlaybackTokenSession`) — the question `checkTwitchAuth` cannot answer, because `oauth2/validate` returns 200 for a token that is valid but no longer entitled to authenticated playback. It runs under the YouTube twin's three conditions plus one: the jar must hold an `auth-token` right now (`HasTwitchAuthCookies`, the narrow predicate), because the probe SENDS that token and an install without it would get an anonymous playback token by design. A 401/403 is INCONCLUSIVE, not signed-out — `gqlRequest` raises `ErrTwitchAuthExpired` for both statuses and 403 is an edge block as often as a credential verdict. Nothing on this path writes `AuthStatus`; Arc 10's capture-time mark (`NoteTwitchAuthLoss`) remains the only direct writer outside `doRefresh`'s own status block.
 
@@ -924,7 +968,7 @@ Four maps, deliberately separate (`internal/cookies/refresh.go`):
 
 ### Auto-Cookie Service
 
-`AutoCookieService` acquires credentials into `cookies.txt` four ways — an interactive browser login, a headless browser refresh, a browser-free import of a mounted browser profile (which `cookies.acquisition = "profile"` also selects on a desktop that HAS a browser), and `ImportCookies`, the operator-supplied Netscape file that `POST /api/cookies/import` and the TUI's `E I` chord both deliver. That last one is the FIFTH writer of `cookies.txt` (with the refresh service's rotation write) and inherits the same catalogue as the rest: read through the `readCookieFile` seam and abort on anything but ENOENT, merge through `mergeCookieFiles` keyed by name+domain+path (RFC 6265 identity — Secure and HttpOnly are attributes, not identity, and stay out; the jar itself remains path-blind, so two paths still load as one entry and the file merely stops losing the other row), write through `writeFileAtomic`, and never emit an empty-valued row — it filters those out of the paste before merging AND out of the merged text before writing, which also repairs any an older writer left behind. The five share no lock, and they never will: the containment is a SLOT, not a mutex over `cookies.txt` (owner decision O-D, 2026-09-17, superseding the Arc 8 ruling of 2026-08-29). `ImportCookies` now claims the same `refreshCmd` sentinel `RefreshCookiesDetailed` and `StartSetup` already gate on, and answers `ErrRefreshInProgress` — "please try again shortly", HTTP 409 on the Web route, the identical sentence `/api/cookies/auto-setup/start` gives for the identical sentinel — while a pass holds it. What reopened the Arc 8 ruling was not the width of the window but the DIRECTION of the loss: the ruling priced it as "loses at most a rotation the next 30-minute pass repairs", and the reproduction showed the pass destroying the OPERATOR'S PASTE, replacing it on the recovery path with the dead rows that raised the alarm, while the import reported `Wrote=true` with both platforms `ok`. The window it closes is the read → verify → write gap, which since 2.8.7 also contains the pre-write snapshot's two verification round trips — `checkPlatformAuth` bounds those with one `authVerifyTimeout` (12 s) PER PLATFORM, run concurrently, so the gap is bounded by ~12 s rather than by the merge alone. The re-read-and-re-merge containment the Arc 8 text named as its preferred fix was NOT taken: it keeps the import always-accepted at the cost of an extra read and merge in every pass, and a refusal the operator retries within two minutes is the cheaper honest answer. One residual is deliberate and stated: the setup wizard's finish is another writer, a third party to this exclusion, with its own read → write gap, gated by the SETUP slot rather than this one, and widening the import's gate to cover it would refuse a container operator's only re-authentication route for the 60 s grace a stale setup slot lingers.
+`AutoCookieService` acquires credentials into `cookies.txt` four ways — an interactive browser login, a headless browser refresh, a browser-free import of a mounted browser profile (which `cookies.acquisition = "profile"` also selects on a desktop that HAS a browser), and `ImportCookies`, the operator-supplied Netscape file that `POST /api/cookies/import` and the TUI's `E I` chord both deliver. That last one is the FIFTH writer of `cookies.txt` (with the refresh service's rotation write) and inherits the same catalogue as the rest: read through the `readCookieFile` seam and abort on anything but ENOENT, merge through `mergeCookieFiles` keyed by name+domain+path (RFC 6265 identity — Secure and HttpOnly are attributes, not identity, and stay out; the jar itself remains path-blind, so two paths still load as one entry and the file merely stops losing the other row), write through `writeFileAtomic`, and never emit an empty-valued row — it filters those out of the paste before merging AND out of the merged text before writing, which also repairs any an older writer left behind. The browser refresh and the setup finish merge through `mergeBrowserCookies`, which leaves the browser's empty-valued rows out the same way: a Firefox NULL or an unencrypted Chromium row read as empty used to replace a working `LOGIN_INFO` by name+domain+path and sign the jar out. The five share no lock, and they never will: the containment is a SLOT, not a mutex over `cookies.txt` (owner decision O-D, 2026-09-17, superseding the Arc 8 ruling of 2026-08-29). `ImportCookies` now claims the same `refreshCmd` sentinel `RefreshCookiesDetailed` and `StartSetup` already gate on, and answers `ErrRefreshInProgress` — "please try again shortly", HTTP 409 on the Web route, the identical sentence `/api/cookies/auto-setup/start` gives for the identical sentinel — while a pass holds it. What reopened the Arc 8 ruling was not the width of the window but the DIRECTION of the loss: the ruling priced it as "loses at most a rotation the next 30-minute pass repairs", and the reproduction showed the pass destroying the OPERATOR'S PASTE, replacing it on the recovery path with the dead rows that raised the alarm, while the import reported `Wrote=true` with both platforms `ok`. The window it closes is the read → verify → write gap, which since 2.8.7 also contains the pre-write snapshot's two verification round trips — `checkPlatformAuth` bounds those with one `authVerifyTimeout` (12 s) PER PLATFORM, run concurrently, so the gap is bounded by ~12 s rather than by the merge alone. The re-read-and-re-merge containment the Arc 8 text named as its preferred fix was NOT taken: it keeps the import always-accepted at the cost of an extra read and merge in every pass, and a refusal the operator retries within two minutes is the cheaper honest answer. One residual is deliberate and stated: the setup wizard's finish is another writer, a third party to this exclusion, with its own read → write gap, gated by the SETUP slot rather than this one, and widening the import's gate to cover it would refuse a container operator's only re-authentication route for the 60 s grace a stale setup slot lingers.
 
 **A paste is verified before it is committed, and reversible per platform.** `ImportCookies` runs the same protection the two refresh paths do, on the same machinery: `snapshotPlatformAuth` (`internal/cookies/autocookies_profile.go`) verifies both platforms BEFORE the write — skipped when there is no `cookies.txt`, so a first acquisition costs no round trips — the post-write check goes through `platformsToRestoreOnRegression`, and a platform it names gets its previous rows back through `restorePlatformRows`. Until 2.8.7 the import had none of this: a paste whose rows for one platform were dead REPLACED that platform's working rows (the merge lets the pasted value win by name+domain+path), the operator was told the credentials failed rather than the paste, and the sibling platform — carried verbatim by the merge, and verifying — made the whole import look partly successful. The **regression arm only**, deliberately: `credentialAccepted` already accepts an inconclusive check over a credential a human just supplied, so rolling that same credential off the disk would report it accepted and gone. `ImportResult` carries a per-platform outcome. Four of them reach the wire — `ImportInstalled`, `ImportRolledBack`, `ImportRejected` (rejected with nothing established to give back) and `ImportUnchanged` (the paste carried no row for that platform) — and a fifth, `ImportUnknown`, never does: it is the zero value, the guard for the exits that fail with `cookies.txt` already replaced, and every one of those returns an error the route answers with a `jsonErrorSized` before the payload is built. It also carries `RollbackProtected`, which is false both when there was nothing to protect and when the pre-write load failed ("rollback protection is off", the refresh path's own sentence; the import proceeds either way, because refusing it would throw away credentials the operator supplied by hand). The two per-platform outcomes reach the dashboard as `youtubeImport` / `twitchImport`; a rollback leaves `authenticated` **true** and the verification `"ok"` — truthfully, about the restored rows — so those keys are the only thing that stops the toast reporting a discarded paste as a success. A rollback that cannot be written or reloaded FAILS the call rather than being reported as one.
 
@@ -1012,9 +1056,9 @@ The anti-automation flags are mirrored on the headless launch deliberately: YouT
 
 | Engine | Source | Method |
 |--------|--------|--------|
-| Firefox | `cookies.sqlite` in the profile dir | `readFirefoxCookies` (`internal/cookies/autocookies_firefox.go`) SNAPSHOTS the DB **together with its `-wal` sidecar** into a temp dir and queries the copy; copying without the sidecar silently returns rows that are missing every uncommitted write. Falls back to querying in place if the snapshot itself fails, and retries up to 5 times at 500 ms for WAL lock contention and torn snapshots, breaking early on anything non-retryable. NULL columns are defaulted and unusable rows counted, both reported by the caller |
+| Firefox | `cookies.sqlite` in the profile dir | `readFirefoxCookies` (`internal/cookies/autocookies_firefox.go`) SNAPSHOTS the DB **together with its `-wal` sidecar** into a temp dir and queries the copy; copying without the sidecar silently returns rows that are missing every uncommitted write. Falls back to querying in place if the snapshot itself fails, and retries up to 5 times at 500 ms for WAL lock contention and torn snapshots, breaking early on anything non-retryable. NULL columns are defaulted and unusable rows counted, both reported by the caller. Only the default browsing context is read (`firefoxCookieContext`, from `originAttributes`): a Multi-Account Container's rows (`userContextId`) are another account's session, and a Total Cookie Protection partition's (`partitionKey`) are cookies an embedded player set inside another site; read with the rest, the last row of a name won and mixed them into the default session. First-party isolation's `firstPartyDomain` rows are kept |
 | Chromium | the live browser over CDP | `cdpGetCookiesAsNetscape` (`internal/cookies/autocookies_chromium.go`) runs a three-tier ladder: browser-level `Storage.getCookies`, then per-page `Network.getAllCookies`, then per-page `Network.getCookies`. The gate between tiers is the RELEVANT row count, not the raw one, so a tier-1 answer full of other sites' cookies does not stop the ladder |
-| Chromium (opt-in fallback) | the user's REAL profile under `%LOCALAPPDATA%`, decrypted with `CryptUnprotectData` | `dpapiExtractAsNetscape` (`internal/cookies/autocookies_dpapi.go`). Reached only when the browser refresh already returned an error, `cookies.dpapi_fallback` is on, and the resolved browser is non-Firefox — DPAPI launches nothing, so it sidesteps "Chromium is already running our profile" entirely. Off by default: it reads the user's actual signed-in cookies, so it is a privacy surface they have to enable consciously |
+| Chromium (opt-in fallback) | the user's REAL profile under `%LOCALAPPDATA%`, decrypted with `CryptUnprotectData` | `dpapiExtractAsNetscape` (`internal/cookies/autocookies_dpapi.go`). A row Chrome stored unencrypted is read from its plain `value` column first (as yt-dlp does); reading only `encrypted_value` turned it into an empty cookie. Reached only when the browser refresh already returned an error, `cookies.dpapi_fallback` is on, and the resolved browser is non-Firefox — DPAPI launches nothing, so it sidesteps "Chromium is already running our profile" entirely. Off by default: it reads the user's actual signed-in cookies, so it is a privacy surface they have to enable consciously |
 
 An empty result and an unanswered read are different facts. `cdpCookieReadOutcome` distinguishes them: `ErrBrowserLadderBlocked` when a structural failure (the `/json` target listing) stopped the fallbacks from running at all, `ErrBrowserReadUnanswered` when no query answered. Neither is `IsNoBrowserProfile`, so neither triggers rung 3 — both come from a pass that RAN, and a plain recheck cannot fix either. `writeBrowserReadError` (`internal/web/routes/cookies.go`) maps the first to **409** and the second to **502**, each with a machine-readable `cause`, and passes the composed message through verbatim.
 
@@ -1024,10 +1068,15 @@ An empty result and an unanswered read are different facts. `cdpCookieReadOutcom
 
 **Lock file cleanup.** Before launching, the service removes stale lock files that would otherwise prevent a launch:
 
-- Chromium (`cleanChromiumLockFiles`): `lockfile`, `SingletonLock`, `SingletonSocket`, `SingletonCookie`, plus the `Singleton*` and `*lockfile*` globs for variants newer builds leave behind.
+- Chromium (`cleanChromiumLockFiles`): `SingletonLock` FIRST, then `lockfile`, `SingletonSocket`, `SingletonCookie`, plus the `Singleton*` and `*lockfile*` globs for variants newer builds leave behind. It stops at the first lock a live browser may hold and returns that lock's `ErrProfileInUse`, and both Chromium launch sites — the headless refresh and the interactive setup — start nothing on that answer.
 - Firefox (`cleanFirefoxLockFiles`): `parent.lock`, `.parentlock`.
 
-Both go through `removeStaleLock`, which **skips any file touched within `lockFileFreshThreshold` (5 s)** — a truly stale lock from a crashed run is older than that, while one held by a live browser is not, so this cannot yank the lock out from under a running instance.
+Both go through `removeStaleLock` (`internal/cookies/autocookies_chromium.go`), which applies one of two rules by the lock's shape:
+
+- **A symlink whose target reads `<hostname>-<pid>`** is Chromium's POSIX `SingletonLock`, judged by the holder it names (`singletonLockHolder`). The target is a name, never a file, so the age rule cannot read it — `os.Stat` follows the link and always fails — and before this rule that failure read as "not present" and the lock was deleted **under a live browser every time**. Now exactly one answer deletes: this machine's hostname (`os.Hostname`) AND a pid that no longer answers (`pidRunning`: signal 0 on POSIX — only `ESRCH` means gone, `EPERM` is someone else's live process — and `OpenProcess` through `os.FindProcess` on Windows). Another host's lock is **never** deleted, whatever its pid: that pid cannot be signalled from here, so a live browser and a dead one look the same — the host's browser seen from a container through a mounted profile is the case — and the launch is skipped instead. A hostname this machine cannot read is treated the same way. A pid that answers is kept even though it may have been reused: a reused pid costs a skipped pass whose sentence names it, never a lock broken under a live browser. The target is split at its LAST hyphen (hostnames carry them) and the pid must be a positive 32-bit decimal; a target that does not parse falls to the age rule, as Chromium itself treats an unparseable lock as invalid.
+- **Anything else keeps the age rule** and **skips any file touched within `lockFileFreshThreshold` (5 s)** — a truly stale lock from a crashed run is older than that, while one held by a live browser is not. That covers every Windows lock (`lockfile` is a plain file there and Windows has no symlink lock, so its behaviour is unchanged), both Firefox locks, and the two symlinks whose targets name no holder — `SingletonSocket` (the live socket's path) and `SingletonCookie` (a random number). Those two are why `SingletonLock` is judged first: the age rule would unlink them under the very browser the lock has just said is running.
+
+**A held profile is a skip that says why, not a failure.** `RefreshCookiesDetailed` answers `ErrProfileInUse` with a DECLINED result — `Ran` false, so no auth re-check is owed for a file nobody wrote, and `Mechanism` `"browser"` because that branch was chosen — and records the sentence with `setError`, so `AutoCookieStatus.LastError`, which both UIs render as the last cookie error (the TUI's `R C` line wraps so the path is drawn whole, and so does `R F`'s line, which is the same sentence), says `browser profile in use by <host> …` and names the lock by its full path (the one Moombox sees — inside a container, the mounted profile's) with the way out only the operator can check: another machine's lock reads `close it there, or delete "<path>" if no browser on <host> is using that profile`; a live local pid's reads `or delete "<path>" if that pid is no longer one`; an unreadable hostname's ends `delete "<path>" if no browser on <host> is using that profile`. A lock whose browser crashed on another machine is never cleared by any pass, so without the path the profile stayed skipped with nothing on screen saying which file was in the way. Moombox itself still never deletes it on any of these answers. It is checked ahead of the DPAPI fallback, which answers a launch that failed; this one was never attempted. `StartSetup` returns it unchanged and records it the same way: its slot claim clears `LastError` before the launcher has judged the lock, so a refusal that only returned the sentence left the status blank while the profile was still held and every later refresh still skipped — and with no active jobs no refresh runs to put it back. Both routes map it to 409 with the sentence verbatim (see [user-interfaces.md](user-interfaces.md)). Every surface that reports the pass calls it a skip: `R F` and the dashboard's refresh toast show the sentence alone in the warning colour (the refresh route's `cause` `profile-in-use` is what lets the toast tell it from a locked cookie DB), the periodic tick and a job-triggered refresh log `… skipped — a browser holds the profile` at Warn with the sentence as the reason — the job-triggered one answers the worker `CookieRefreshSkipped`, so the worker's next line says the job stays parked for a refresh that can run or a replaced cookie file, not `auto cookie refresh failed — the cookie file has to be replaced by hand` — and a recovery sends `Cookie Auto-Refresh Skipped` (see Credential Notifications in [operations.md](operations.md)). Each used to call it a failure — red, `failed`, `error`, or a notification telling the operator to replace cookies nothing had rejected.
 
 **Orphaned temp files and directory permissions.** `writeFileAtomic` writes `<base>.<random>.tmp` beside the target and renames; a crash, a kill or a panic in between leaves a full copy of `cookies.txt` — the highest-value secret in the app — under a name nothing reads. `sweepStaleCookieTempFiles` (`internal/cookies/cookie_files.go`) removes those, ONCE per process (`cookieTempFileSweepOnce`, wired at `NewAutoCookieService` because that is the one place holding the real cookie path up front), matching only `<base>.*.tmp` in the cookie file's own directory and only when older than `cookieTempFileMaxAge` (1 hour). Age is the only guard against sweeping a write in progress. Every failure is Debug-logged with the path only and left for the next start.
 
@@ -1054,7 +1103,11 @@ The motivating case is the image: `cookies.txt` and `config.toml` both live in `
 
 ### Staging Directory
 
-In-progress downloads write to the staging directory (default: `./staging`). Files are moved to the output directory only after successful muxing. This prevents incomplete files from appearing in the final output location.
+In-progress downloads write to the staging directory (default: `./staging`). Nothing is written to the output directory until the mux: FFmpeg muxes from staging straight into it, and staging is cleaned up only after that succeeds. This prevents incomplete files from appearing in the final output location.
+
+One job's staging dir holds ONE current recording in its root: the whole-file VOD download sets an earlier live-shape capture aside before it writes (`setAsideLiveShapesForVod`, `internal/worker/staging_shapes.go`), and a VOD run on a job that already split into parts moves part 0's capture into `seg_0` and marks the root as the from-the-start recording's (`vodRootMarkerFile`, `internal/worker/vod_supersede.go`) — `downloading` while it runs, `complete` once nothing is missing from it, which is when it replaces the parts as the archive.
+
+**Boot leftovers.** Each start, the worker deletes the staging leftovers a previous run left behind that are PROVABLY redundant, on its own goroutine so the queue never waits on it (`reclaimBootLeftovers`, `internal/worker/boot_leftovers.go`), and logs each deletion with its path and reason. Two kinds qualify. A set-aside recording carrying a recovered marker (`asideRecoveredMarker`) whose muxed sibling — the path the marker holds — is on disk as a non-empty file goes, with its resume twin and the marker, in the root and every `seg_N` dir, whatever the job's row says (`removeVerifiedRecoveredAsides`); a marker whose sibling has since been moved or deleted keeps its aside, which is then the only copy, and so does one whose removal fails. And the whole staging dir of a `Finished` job goes when the row records a download of its own (`download_started_at`, stamped as a run starts and cleared only by a Reinitialize that deletes staging with it — an imported row has none, and the staging under its video ID can be an unmuxed capture a deleted job of the same ID left behind), every archive file its row names is on disk (`output_file` and each part's file, `missingArchiveFile`), no aside marked recovered is left in it — the post-mux cleanup does not count a marked aside, since straight after a finalize its sibling has just been written, so one the sweep kept would otherwise go with the dir — and the post-mux cleanup's own decision says remove: `decideStagingCleanup` (`internal/worker/worker.go`) is the decision `cleanupStagingAfterMux` acts on, so the boot sweep applies exactly its shields — set-aside recordings, unmuxed parts, an unused root recording, an incomplete tail, an incomplete chat capture — and never a looser copy; a chat-incomplete dir is not even pruned. That covers a finalize whose cleanup never ran or did not finish: the process died between the Finished write and the delete, or Windows held a handle. An active job — skipped BEFORE the per-job claim is taken, and checked again under it: the sweep runs beside `enqueueExistingJobs`, whose restart mux of a `Muxing` row takes the same claim and, refused, falls back to resetting the row to `Downloading` — a job whose staging an off-queue operation holds (the per-job claim, which the sweep takes as `opBootCleanup`, and the output claims), and anything not provably redundant — no row, an unreadable row, a row that never downloaded, a missing archive, a kept shield — are left exactly as they are for the orphan sweep and its confirm-before-delete.
 
 ### Output Template
 
@@ -1098,14 +1151,26 @@ the file with fragments that reference a different `moov`.
 
 1. Identity, in precedence order: (a) when both the saved state and the
    current options carry an explicit `StreamID` (Twitch broadcast/VOD id), a
-   mismatch discards the state; (b) otherwise YouTube URL fingerprinting
-   (`videoID/itag` extracted from either URL shape) — differing or mixed
+   mismatch discards the state — the YouTube whole-file VOD path sets one
+   per stream (video, itag, `clen`; `vodStreamID`,
+   `internal/worker/strategy_youtube_vod_wiring.go`), since every rendition
+   stages to the same `video.mp4` / `audio.m4a`; (b) otherwise YouTube URL
+   fingerprinting (`videoID/itag` from the path or query shape, or a finished
+   VOD's `id=o-…` URL read as its itag plus `clen`) — differing or mixed
    fingerprints discard; (c) when NEITHER URL carries an extractable
    identity (Twitch weaver URLs), the state is TRUSTED — raw URL equality
    has no signal there and rejecting on it used to truncate hours of
    recording on every restart.
 2. Output file must exist and be at least as large as `BytesWritten`; states
-   older than 7 days (`maxResumeStateAge`) are discarded.
+   older than 7 days (`maxResumeStateAge`) are discarded. A whole-file
+   download is then held to its file once the probe answers: a total other
+   than the recorded `TotalSize`, or a partial longer than the file, means a
+   different file, and `runDirectDownload` starts over
+   (`internal/engine/downloader_direct.go`). When the probe fails, the
+   streaming fallback holds it to the total its resume Range's answer states
+   instead, and a 416 short of the recorded `TotalSize` is an error that
+   keeps the sidecar, never a completed file; a 206 whose body ends short
+   of its stated or the recorded total is asked for the rest.
 3. If validation fails, the resume file is discarded — but the staged
    bytes are not. NO caller truncates them. The shared no-truncate guard in
    `Start` (`internal/engine/downloader.go`) runs whenever the engine could
@@ -1186,7 +1251,7 @@ type ChatResumeState struct {
 }
 ```
 
-Saved as `<chat_file>.resume.json`. Updated on every disk flush (at most once per `writeInterval`, 1 s) — `maybeFlush` writes the chat file and the sidecar together, so the two never describe different positions. `streamStartMs` is the epoch every `offsetMs` already written to the chat file was computed against; a restarted run reads it back and keeps it even when its own `StreamStartTime` option carries a newer (actual, vs. scheduled) start — one chat file, one epoch, never two. `mode` is `"live"` or `"replay"` — which kind of run wrote the sidecar (the mode rule: a replay run refuses a live run's sidecar and starts from scratch, since its count, continuation, dedup IDs and epoch all describe the live half of the file; an empty `mode`, written before the field existed, is adopted as before). (An older `lastTimestampUsec` field may still appear in sidecars written before this field existed — it is ignored on load and no longer written.)
+Saved as `<chat_file>.resume.json`. Updated on every disk flush (at most once per `writeInterval`, 1 s) — `maybeFlush` writes the chat file and the sidecar together, so the two never describe different positions. `streamStartMs` is the epoch every `offsetMs` already written to the chat file was computed against; a restarted run reads it back and keeps it even when its own `StreamStartTime` option carries a newer (actual, vs. scheduled) start — one chat file, one epoch, never two. `mode` is `"live"` or `"replay"` — which kind of run wrote the sidecar (the mode rule: a replay run refuses a live run's sidecar and starts from scratch, since its count, continuation, dedup IDs and epoch all describe the live half of the file; an empty `mode`, written before the field existed, is adopted as before). (An older `lastTimestampUsec` field may still appear in sidecars written before this field existed — it is ignored on load and no longer written.) A replay that gives up keeps its sidecar, like a cancelled one; only a run that reached the end of the archive clears it. A replay run that finds an archive and no usable sidecar writes `<chat_file>.rerun` beside it and swaps it in only on a completion or at least as many messages (`finishReplayRerun`, `internal/chat/downloader.go`) — `keepOnlyChatCapture` keeps a `.rerun` left behind, as it keeps every `chat.json.*` file.
 
 **Batching:**
 
@@ -1202,10 +1267,14 @@ The `Logger` wraps Go's `slog` package with file rotation, a ring buffer for rec
 
 ### Multi-Writer Output
 
-Log output is sent to both:
+Log output is sent to both, in this order:
 
-1. **Stdout** via a `switchableWriter` that can be toggled off when the TUI is running (BubbleTea owns the alternate screen; raw writes would corrupt the display). `SuppressStdout()` / `RestoreStdout()` control this.
-2. **Log file** via the Logger itself (which implements `io.Writer` with rotation).
+1. **Log file** via the Logger itself (which implements `io.Writer` with rotation).
+2. **Stdout** via a `switchableWriter` that can be toggled off when the TUI is running (BubbleTea owns the alternate screen; raw writes would corrupt the display). `SuppressStdout()` / `RestoreStdout()` control this.
+
+**Stdout is best effort and can never cost the file a line.** The `lineSinks` fan-out writes the file first, so the line is on disk before stdout is touched, and ignores each sink's error, so neither keeps the line from the other. `io.MultiWriter(stdout, file)` once did the job, and it returns at the first writer's error: a stdout that fails every write for the rest of the run — the hung-up tty of an SSH session that started `moombox --headless` and logged out (EIO), a process started with fd 1 closed (EBADF), a console-less Windows child's invalid handle — kept every line out of `moombox.log`, the only persistent log, while the ring buffer and the dashboard looked normal. The same writer with the file first would have handed the bug to the console: a full disk would keep every line off it.
+
+**A broken pipe is an error, not a death sentence (Unix).** When stdout or stderr is a pipe whose reader went away — an `ssh host moombox --headless` session without a pty that dropped, a `| tee` that exited, and the launcher's child, which inherits the launcher's fd 1 — the Go runtime kills a process that writes to it, from inside the write, unless the process asked for SIGPIPE; a parent that started it with SIGPIPE ignored does not change that. No error would ever reach the sinks, and the process — every later line, every recording in progress — would be gone. `SurviveBrokenPipes` asks for SIGPIPE (`signal.Notify` on a channel nobody reads; not `signal.Ignore`, which FFmpeg and the Node sidecar would inherit across exec), so the write fails with EPIPE like any other and the sinks swallow it. `New` calls it, and `main` calls it before anything else, for the launcher's crash-supervision and rollback notices and the child's startup banner, which are written without a Logger. Windows has no SIGPIPE: a broken pipe there is an ordinary write error.
 
 ### File Rotation
 
@@ -1234,9 +1303,11 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 
 `GetRecentLines()` returns lines in chronological order regardless of current buffer position.
 
+**Every line the ring takes is numbered** (`ringSeq`, 1 for the first line of the process), and `RecentLines()` returns the lines together with the number of the newest, in one read. A reader that pairs a snapshot with a live feed subscribes FIRST (`SubscribeLines`, whose lines carry their number) and reads the snapshot second, so no line falls between the two; a line logged in between is then in both, and the reader skips every fed line numbered at or below the snapshot's. Both such readers do: the dashboard, through `initial_state`'s `logSeq` and each `log` frame's `seq`, and the TUI's log forwarder (`forwardTUILogs`, `cmd/moombox/tui_wiring.go`) against its backfill. Without the number the line showed twice — at DEBUG the hub's own "websocket connected" line, on every dashboard connect.
+
 ### Per-Job Log Buffers
 
-The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs). Only NON-TERMINAL jobs are scanned for — see § Per-Job Log Buffers above for the routed set.
+The LIVE per-job log pipeline is the database's: the logger's line router (`SetLineRouter`, called inside every log call, before `Debug`/`Info`/`Warn`/`Error` return) feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.ClearJobLogs` drops a deleted job's buffer). Only NON-TERMINAL jobs are scanned for — see § Per-Job Log Buffers above for the routed set.
 
 The Logger type once carried a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` buffer API; nothing in production ever wired it (the buffers stayed permanently empty at runtime), and it was removed in 2026-07. Per-job log consumers use the database pipeline above.
 
@@ -1246,7 +1317,9 @@ The Logger type once carried a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` 
 
 `Unsubscribe(ch)` removes the channel from the subscriber list. The channel is not closed (to avoid a race with concurrent `broadcast()` calls); it is left for GC.
 
-`broadcast(line)` sends to all subscribers. If a subscriber's channel is full, the line is dropped (non-blocking send).
+`SubscribeLines()` / `UnsubscribeLines(ch)` are the same with each line delivered as a `Line{Seq, Text}` — its number in the ring beside the text (see § Ring Buffer).
+
+`broadcast(line, seq)` sends to all subscribers of both kinds. If a subscriber's channel is full, the line is dropped (non-blocking send).
 
 ### Log Levels
 
@@ -1277,18 +1350,20 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 
 ```
 %LOCALAPPDATA%/Moombox/sidecar/
-├── node.exe                         (~83 MB extracted from embed's gzipped 33 MB)
+├── moombox-sidecar[.exe]            (the Node binary, ~83 MB extracted from the platform's gzipped ~33-44 MB node-<goos>-<goarch>.gz)
 ├── package.json
 ├── package-lock.json
 ├── version.txt                      (the embedded Node manifest + "sidecar@<sha256 of sidecar.tar.gz>" — cache-invalidation key)
 ├── src/
-│   └── server.js                    (~250 lines, JSON-RPC server)
+│   ├── server.js                    (~900 lines, JSON-RPC server)
+│   ├── cipher.js                    (ejs signature/n solving)
+│   └── homepage.js                  (homepage challenge extraction)
 └── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~17 MB)
 ```
 
 ### Lifecycle
 
-- **First launch:** `extractIfNeeded(cacheDir)` creates the dir, applies `utils.ApplyUserOnlyDACL` to tighten permissions to current-user-only (matches the config-dir hardening), gunzips `node.exe.gz`, gunzip+tar-extracts `sidecar.tar.gz` using stdlib `archive/tar` + `compress/gzip` (no system tar required), writes `version.txt` last.
+- **First launch:** `extractIfNeeded(cacheDir)` creates the dir, applies `utils.ApplyUserOnlyDACL` to tighten permissions to current-user-only (matches the config-dir hardening), gunzips the platform's `node-<goos>-<goarch>.gz` into `moombox-sidecar[.exe]`, gunzip+tar-extracts `sidecar.tar.gz` using stdlib `archive/tar` + `compress/gzip` (no system tar required), writes `version.txt` last.
 - **Subsequent launches:** Compares the on-disk `version.txt` against the stamp `buildCacheStamp` computes: the embedded `bgembed.Version` (the Node pin) plus `sidecar@<sha256>` of the embedded tarball. The tarball hash is what makes a sidecar JS change a mismatch; `Version` alone does not move with it. On match AND key files present, skips extraction. On mismatch (Node version bump, sidecar JS update), deletes the old `version.txt`, then re-extracts the whole payload, removing what the dir held under each top-level name the tarball writes (`src`, `node_modules`, `vendor`, the manifests) so nothing from the previous payload is left behind. Files the tarball does not name are left alone.
 - **Tar-slip defense:** Rejects any tar entry whose target path escapes `cacheDir`.
 - **DACL hoist:** Runs even on cache-hit so users upgrading from v2.5.x (whose pre-existing dir was created with the looser inherited ACL) get the tightened DACL on the next launch.
@@ -1301,14 +1376,15 @@ Not currently auto-cleaned. The cache survives Moombox uninstall — operators w
 
 ## Cross-References
 
-- **[architecture.md](architecture.md)** -- Batch coalescing as a concurrency pattern; pub/sub as an inter-component communication mechanism; service initialization order (Config -> Logger -> Database -> ...).
+- **[architecture.md](architecture.md)** -- The synchronous write path and where write amplification is actually bounded; pub/sub as an inter-component communication mechanism; service initialization order (Config -> Logger -> Database -> ...).
 - **[security.md](security.md)** -- Password auto-hashing in config; client_tokens table and scrypt token hashing; cookie file permissions.
 - **[platform-services.md](platform-services.md)** -- How YouTube and Twitch services consume cookies from the jar; SAPISIDHASH generation; PO token dependency on cookies.
 - **[operations.md](operations.md)** -- Config file search paths; database file location; log file paths; staging vs output directories.
 
 ### Source Files
 
-- `internal/database/database.go` -- Database struct, Open(), batch coalescing, UpdateJobFields, pub/sub, CRUD operations
+- `internal/database/database.go` -- Database struct, Open(), UpdateJobFields, CRUD operations
+- `internal/database/database_subscribers.go` -- The six subscriber kinds, safeCall* wrappers, dispatchJobsChange
 - `internal/database/types.go` -- Job, Gap, Segment, TrimRecord, ClientToken, JobStatus, JobStats type definitions
 - `internal/database/migrations.go` -- Schema DDL, versioned migrations
 - `internal/config/config.go` -- Load(), Save(), migrateOldFormat(), validate(), ResolveTemplate()

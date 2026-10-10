@@ -122,13 +122,16 @@ type mergeRun struct {
 // independent files are the last remaining copy of their span.
 //
 // Chat-merge failure aborts the RUN, not the batch: if any part in a run
-// carries a ChatFile and mergeChatFiles fails on it (the only production
-// case today is a Twitch gap-split run — its chat is twitch.TwitchChatData,
-// whose "message" field is a string, while mergeChatFiles unmarshals
-// chat.ChatData, whose "message" is []MessagePart, so the unmarshal always
-// errors), that run's video is discarded too (its temp concat output is
+// carries a ChatFile and mergeChatFiles fails on it, that run's video is
+// discarded too (its temp concat output is
 // removed) and its ORIGINAL per-part segments are pushed back into the
 // replacement slice unchanged — identical to a len(run)==1 passthrough.
+// No production run carries a ChatFile today: finalizeMultiSegmentJob calls
+// the merge for YouTube jobs only, and only Twitch live IRC chat rolls per
+// part (a Twitch run would fail here anyway — twitch.TwitchChatData's
+// "message" is a string, chat.ChatData's a []MessagePart). The chat merge is
+// kept so a future per-part YouTube chat cannot slip a run through with its
+// chat dropped.
 // Nothing about that run's parts, rows, or chat files is ever touched, and
 // the run never reaches `pending` so post-commit cleanup never runs for it
 // either. Other runs in the same finalize call are unaffected and still
@@ -251,14 +254,10 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 				// C1 ruling: chat-merge failure aborts THIS RUN's identity
 				// entirely, not just its chat -- media is not merged
 				// either, so the parts, their rows, and every per-part
-				// chat file all stay exactly as they were. This is the
-				// only way a Twitch gap-split run (the sole production
-				// case with per-part ChatFile) ever reaches here today,
-				// since its chat is twitch.TwitchChatData ("message" a
-				// string) and mergeChatFiles unmarshals chat.ChatData
-				// ("message" a []MessagePart) -- the schema mismatch
-				// always errors. Other runs in this same finalize proceed
-				// independently; see merge's doc comment.
+				// chat file all stay exactly as they were. Unreachable in
+				// production today (no merged run carries a ChatFile; see
+				// merge's doc comment). Other runs in this same finalize
+				// proceed independently.
 				pm.logger.Warn("part merge: chat merge failed, aborting this run's merge -- media left split, every per-part chat file untouched", "err", err, "jobID", jobID, "run", runIdx)
 				os.Remove(videoTemp) // this run never reaches pending, so nothing else will clean up its orphaned temp output
 				for _, idx := range run {
@@ -292,8 +291,23 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 		return segments
 	}
 
+	// Tombstone every superseded part's pre-mux staging dir BEFORE the
+	// commit. The commit is what deletes those parts' rows; a crash in the
+	// window between it and the cleanup below left row-less, untombstoned
+	// seg_N media, which the next finalize's muxUnrecordedSegments re-muxed
+	// as new parts and this merge then concatenated AGAIN after the merged
+	// file that already held them — the recording grew a duplicated span. A
+	// tombstone on a dir whose part is still recorded changes nothing: every
+	// stagedSegDirs consumer skips only what a finalize never needs from a
+	// recorded part. Taken back if the commit fails.
+	tombstoned := writeSupersededTombstones(pm.logger, jobID, stagingDir, segments, pending)
 	if err := pm.replace(jobID, replacement); err != nil {
 		pm.logger.Warn("part merge: db replace failed, aborting merge", "err", err, "jobID", jobID)
+		for _, marker := range tombstoned {
+			if rmErr := os.Remove(marker); rmErr != nil && !os.IsNotExist(rmErr) {
+				pm.logger.Warn("part merge: failed to take back a tombstone after a failed commit", "err", rmErr, "jobID", jobID, "marker", marker)
+			}
+		}
 		return abort()
 	}
 
@@ -361,16 +375,18 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 				// required, not cosmetic.
 				if stagingDir != "" {
 					segDir := filepath.Join(stagingDir, fmt.Sprintf("seg_%d", seg.SegmentIndex))
-					// Tombstone BEFORE attempting removal (I7 fix): a crash
-					// mid-RemoveAll, or a locked-dir failure below, must
-					// still leave a durable marker behind so
-					// stagedSegDirs' three consumers never resurrect this
-					// dir's already-merged content. Best-effort — if the
-					// dir is already gone (or write fails for some other
-					// reason) there's nothing left to resurrect anyway, so
-					// this doesn't block the removal attempt that follows.
-					if err := os.WriteFile(filepath.Join(segDir, mergeTombstoneFile), []byte(time.Now().UTC().Format(time.RFC3339)), 0o644); err != nil && !os.IsNotExist(err) {
-						pm.logger.Warn("part merge: failed to write tombstone marker before removing superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
+					// Tombstoned before the commit (writeSupersededTombstones),
+					// so a crash mid-RemoveAll or a locked-dir failure below
+					// still leaves the durable marker (I7). A recording the
+					// engine set aside in here is NOT merged content — it is
+					// footage the finalize recovers after this merge
+					// (muxStagedAsides), possibly the only copy — so a dir
+					// still holding one is left for the staging cleanup,
+					// whose aside shield sees tombstoned dirs too.
+					if asides := stagedRestartAsides(segDir); len(asides) > 0 {
+						pm.logger.Warn("part merge: keeping a superseded part's staging dir — it holds a set-aside recording",
+							"jobID", jobID, "dir", segDir, "asides", strings.Join(asides, " | "))
+						continue
 					}
 					if err := os.RemoveAll(segDir); err != nil {
 						pm.logger.Warn("part merge: failed to delete superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
@@ -446,6 +462,32 @@ func mergedSegmentRow(run []database.Segment, outPath string, size int64) databa
 	}
 
 	return merged
+}
+
+// writeSupersededTombstones writes the merge tombstone into the pre-mux
+// staging dir of every part a pending run folds into its first part, and
+// returns the markers it wrote so a failed commit can take them back. A dir
+// that does not exist has nothing to resurrect and gets none.
+func writeSupersededTombstones(lg logger, jobID, stagingDir string, segments []database.Segment, pending []mergeRun) []string {
+	if stagingDir == "" {
+		return nil
+	}
+	stamp := []byte(time.Now().UTC().Format(time.RFC3339))
+	var written []string
+	for _, pr := range pending {
+		for _, idx := range pr.indices[1:] {
+			segDir := filepath.Join(stagingDir, fmt.Sprintf("seg_%d", segments[idx].SegmentIndex))
+			marker := filepath.Join(segDir, mergeTombstoneFile)
+			if err := os.WriteFile(marker, stamp, 0o644); err != nil {
+				if !os.IsNotExist(err) {
+					lg.Warn("part merge: failed to tombstone a superseded part's staging dir", "err", err, "jobID", jobID, "dir", segDir)
+				}
+				continue
+			}
+			written = append(written, marker)
+		}
+	}
+	return written
 }
 
 // mergeBaseName recovers the shared "<base>" from a part filename ("<base>

@@ -1716,3 +1716,55 @@ func TestCookielessFormats(t *testing.T) {
 		}
 	})
 }
+
+// TestInnertubeErrorNamesTheClient: the error a refused client returns is
+// what reaches the job's error column, and it used to read "Innertube API
+// error: HTTP 403" for every web-family client, so the operator could not
+// tell which one YouTube refused.
+//
+// Mutant this kills: the constant "Innertube" label restored.
+func TestInnertubeErrorNamesTheClient(t *testing.T) {
+	tr := &clientKeyedTransport{responses: map[string]struct {
+		status int
+		body   string
+	}{"7": {http.StatusForbidden, "{}"}}}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), noopLogger{})
+	_, err := p.fetchWithClient(context.Background(), "test1234567", constants.TVDowngradedClient, DefaultYtcfg(), 0)
+	if err == nil || !strings.Contains(err.Error(), constants.TVDowngradedClient.ClientName+" API error: HTTP 403") {
+		t.Fatalf("err = %v, want it to name %s", err, constants.TVDowngradedClient.ClientName)
+	}
+}
+
+// TestCancelledExtractionDoesNotWarnExhaustion: a cancelled job fails every
+// client with context.Canceled, and the operator used to get a Warn that no
+// Innertube client produced a player response for their own stop.
+//
+// Mutant this kills: the context.Canceled arm dropped (Warn always).
+func TestCancelledExtractionDoesNotWarnExhaustion(t *testing.T) {
+	origFetch := fetchWatchPage
+	fetchWatchPage = func(ctx context.Context, _, _ string) (*WatchPageResult, error) {
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { fetchWatchPage = origFetch })
+	tr := &clientKeyedTransport{}
+	orig := apiClient
+	apiClient = &http.Client{Transport: tr}
+	t.Cleanup(func() { apiClient = orig })
+
+	lg := &warnCapturingLogger{}
+	p := NewPlayerAPI(NewAuth(cookies.NewCookieJar(), noopLogger{}), lg)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.GetVideoInfoPublic(ctx, "test1234567"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation to surface", err)
+	}
+	for _, w := range lg.warns {
+		if strings.Contains(w, "no Innertube client produced") {
+			t.Fatalf("a cancelled extraction warned %q", w)
+		}
+	}
+}

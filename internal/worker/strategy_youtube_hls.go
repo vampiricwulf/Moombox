@@ -100,10 +100,15 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 
 	// Step 3: Select best variant respecting max_video_resolution and quality preference
 	qualityPref := job.Job.QualityPreference
+	// HLS variants carry no itag, so a manual pin cannot be honoured here;
+	// say so rather than record some other variant without a word.
+	if pin := pinnedVideoItag(job); pin > 0 {
+		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d cannot be honoured on an HLS stream (its variants carry no itag); selecting automatically", pin))
+	}
 	if qualityPref == "audio_only" {
 		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
 	}
-	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution)
+	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution, job.Config.Prefer60fps)
 	if bestVariant == nil {
 		return nil, fmt.Errorf("invalid HLS master playlist (no variants found)")
 	}
@@ -200,7 +205,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 //
 // Returns nil only for an empty variant list — DownloadHls rejects a master
 // playlist with no variants before calling this.
-func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int) *engine.HlsVariant {
+func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes int, prefer60fps bool) *engine.HlsVariant {
 	if len(variants) == 0 {
 		return nil
 	}
@@ -235,10 +240,11 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	if qualityPref != "" && qualityPref != "best" {
 		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
 		if targetHeight > 0 {
-			if v := selectHlsByHeight(capped, targetHeight, targetFPS); v != nil {
+			prefer := fpsPreference(targetFPS, prefer60fps)
+			if v := selectHlsByHeight(capped, targetHeight, prefer); v != nil {
 				return v
 			}
-			if v := selectNextLowerHls(capped, targetHeight); v != nil {
+			if v := selectNextLowerHls(capped, targetHeight, prefer); v != nil {
 				return v
 			}
 			// No lower heights — fall through to source/best
@@ -257,34 +263,42 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 			atSize = exact
 		}
 	}
-	best := atSize[0]
-	for _, v := range atSize[1:] {
-		if v.Bandwidth > best.Bandwidth {
-			best = v
-		}
+	return atSize[rankByFPSThenBandwidth(atSize, hlsFieldAccessor, fpsPreference(0, prefer60fps))]
+}
+
+// pinnedVideoItag is the manual video itag the job asks for, the per-job
+// selection over the config default, or 0 for none (-1, "no video", is not a
+// pin of a rendition).
+func pinnedVideoItag(job *JobContext) int {
+	pin := job.Config.VideoItag
+	if job.Job.SelectedVideoItag != nil {
+		pin = *job.Job.SelectedVideoItag
 	}
-	return best
+	return max(pin, 0)
+}
+
+// hlsFieldAccessor measures a variant by its frame's shorter edge — see
+// dashFieldAccessor.
+func hlsFieldAccessor(v *engine.HlsVariant) (int, int, int) {
+	return utils.CapDimension(v.Width, v.Height), v.FPS, v.Bandwidth
 }
 
 // selectHlsByHeight finds an HLS variant matching the target height, optionally with FPS.
 // Thin wrapper around the generic selectAtHeightIdx (audit reports/worker.md F35).
-func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight, targetFPS int) *engine.HlsVariant {
-	idx := selectAtHeightIdx(variants, func(v *engine.HlsVariant) (int, int, int) {
-		return v.Height, v.FPS, v.Bandwidth
-	}, targetHeight, targetFPS)
+func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight int, prefer func(int) bool) *engine.HlsVariant {
+	idx := selectAtHeightIdx(variants, hlsFieldAccessor, targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}
 	return variants[idx]
 }
 
-// selectNextLowerHls finds the best HLS variant below the target height,
-// descending through available heights. Thin wrapper around selectNextLowerIdx
-// (audit reports/worker.md F36).
-func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int) *engine.HlsVariant {
-	idx := selectNextLowerIdx(variants, func(v *engine.HlsVariant) (int, int) {
-		return v.Height, v.Bandwidth
-	}, targetHeight)
+// selectNextLowerHls finds the HLS variant a preference picks at the next
+// lower size below the target height, ranked by frame rate (prefer) and then
+// bandwidth. Thin wrapper around selectNextLowerIdx (audit reports/worker.md
+// F36).
+func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int, prefer func(int) bool) *engine.HlsVariant {
+	idx := selectNextLowerIdx(variants, hlsFieldAccessor, targetHeight, prefer)
 	if idx < 0 {
 		return nil
 	}

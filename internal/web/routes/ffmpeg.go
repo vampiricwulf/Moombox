@@ -152,7 +152,7 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 	store := deps.Store
 
 	// GET /api/ffmpeg/check — check if ffmpeg is available on PATH or configured path
-	r.Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(web.RefuseCrossSite).Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
 		var path string
 		store.Read(func(c *config.MoomboxConfig) {
 			path = c.Paths.FfmpegPath
@@ -211,11 +211,22 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 			jsonError(rw, msg, http.StatusBadRequest)
 			return
 		}
+		// And the name rule, always: this route RUNS the path.
+		if msg := ffmpegPathError(path); msg != "" {
+			jsonError(rw, msg, http.StatusBadRequest)
+			return
+		}
 
 		valid, version, warning := checkFFmpeg(path)
 		if valid {
 			if err := applyValidatedFfmpegPath(store, path, deps.OnFfmpegPathChange); err != nil {
 				deps.Logger.Error("Failed to save ffmpeg path to config", "error", err.Error())
+				// Not a 200 "valid": the setup step writes the path into its
+				// cached config on that answer because the server saved it —
+				// and the live mux/trim never got it either — so the UI and
+				// the disk would disagree with nothing on screen saying so.
+				jsonError(rw, "FFmpeg works at that path, but it could not be saved to the config", http.StatusInternalServerError)
+				return
 			}
 		}
 
@@ -396,11 +407,18 @@ func checkFFmpeg(path string) (valid bool, version string, warning string) {
 	if err != nil {
 		return false, "", ""
 	}
-	// Extract first line which contains version info
-	output := string(out)
-	output, _, _ = strings.Cut(output, "\n")
-	version = strings.TrimSpace(output)
+	version = ffmpegVersionLine(string(out))
 	return true, version, ffmpegVersionWarning(version)
+}
+
+// ffmpegVersionLine is the part of `ffmpeg -version` worth showing: the first
+// line, without the " Copyright (c) 2000-2023 the FFmpeg developers" every
+// build appends to it — the setup wizard and the FFmpeg overlay print this
+// value as the detected version.
+func ffmpegVersionLine(output string) string {
+	line, _, _ := strings.Cut(output, "\n")
+	line, _, _ = strings.Cut(line, " Copyright")
+	return strings.TrimSpace(line)
 }
 
 // truncateOutput keeps the last maxBytes of output, prepending a truncation

@@ -3,22 +3,27 @@ package tui
 import (
 	"strings"
 
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // marqueeWaitTicks is the number of 150ms ticks to pause at each end (~2 seconds).
 const marqueeWaitTicks = 13
 
 // Marquee provides auto-scrolling text that bounces left/right when it exceeds maxWidth.
+//
+// Offsets are in terminal cells and every width is measured with x/ansi, the
+// grapheme-aware measure the renderer itself uses. It used to walk runes with
+// go-runewidth, which counts an emoji with a variation selector ("❤️", "1️⃣")
+// one cell narrower than the terminal draws it, so the padded window came out
+// a cell too wide and the row wrapped.
 type Marquee struct {
 	text        string // full text
 	maxWidth    int    // display width
-	offset      int    // current rune offset into text
+	offset      int    // current cell offset into text
 	direction   int    // +1 (forward) or -1 (backward)
 	waitTicks   int    // countdown ticks for pause at each end
 	needsScroll bool   // true if text exceeds maxWidth
-	maxOffset   int    // precomputed max offset (in runes)
-	runes       []rune // text as runes for efficient slicing
+	maxOffset   int    // largest offset, in cells, whose window still ends at the text's end
 }
 
 // Reset sets new text and maxWidth, restarting the animation.
@@ -28,29 +33,15 @@ func (m *Marquee) Reset(text string, maxWidth int) {
 	m.offset = 0
 	m.direction = 1
 	m.waitTicks = marqueeWaitTicks // initial pause before scrolling starts
-	m.runes = []rune(text)
 
-	if runewidth.StringWidth(text) <= maxWidth {
+	totalW := ansi.StringWidth(text)
+	if totalW <= maxWidth {
 		m.needsScroll = false
 		m.maxOffset = 0
 		return
 	}
-
 	m.needsScroll = true
-
-	// Compute max offset: find smallest rune offset where remaining text fits.
-	// Precompute total width, then subtract rune widths from the front until
-	// the remainder fits within maxWidth.
-	totalW := runewidth.StringWidth(text)
-	cumW := 0
-	m.maxOffset = len(m.runes) // fallback
-	for i, r := range m.runes {
-		if totalW-cumW <= maxWidth {
-			m.maxOffset = i
-			break
-		}
-		cumW += runewidth.RuneWidth(r)
-	}
+	m.maxOffset = totalW - maxWidth
 }
 
 // Tick advances the marquee animation by one step (called every 150ms).
@@ -87,30 +78,15 @@ func (m *Marquee) Tick() bool {
 	return true
 }
 
-// View returns the visible portion of text at the current offset, padded to maxWidth.
+// View returns the visible portion of text at the current offset, padded to
+// maxWidth. A wide character the window's left edge falls inside is dropped
+// whole rather than split, and the padding makes up the cell.
 func (m *Marquee) View() string {
 	if !m.needsScroll {
 		return m.text
 	}
-
-	// Slice from offset, take as many runes as fit within maxWidth
-	start := min(m.offset, len(m.runes))
-
-	var result []rune
-	w := 0
-	for _, r := range m.runes[start:] {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > m.maxWidth {
-			break
-		}
-		result = append(result, r)
-		w += rw
-	}
-
-	s := string(result)
-	// Pad to maxWidth
-	sw := runewidth.StringWidth(s)
-	if sw < m.maxWidth {
+	s := cutWidth(m.text, m.offset, m.offset+m.maxWidth)
+	if sw := ansi.StringWidth(s); sw < m.maxWidth {
 		s += strings.Repeat(" ", m.maxWidth-sw)
 	}
 	return s

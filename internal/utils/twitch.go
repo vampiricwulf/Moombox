@@ -72,8 +72,9 @@ func ExtractTwitchTarget(input string) *TwitchTarget {
 		return nil
 	}
 
-	// Normalize bare twitch.tv/... input without protocol
-	if strings.HasPrefix(input, "twitch.tv/") || strings.HasPrefix(input, "www.twitch.tv/") || strings.HasPrefix(input, "clips.twitch.tv/") {
+	// Normalize bare twitch.tv/... input without protocol. The host is
+	// case-insensitive, here as in the parse below: "Twitch.tv/shroud".
+	if lower := strings.ToLower(input); strings.HasPrefix(lower, "twitch.tv/") || strings.HasPrefix(lower, "www.twitch.tv/") || strings.HasPrefix(lower, "clips.twitch.tv/") {
 		input = "https://" + input
 	}
 

@@ -28,12 +28,13 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		switch key {
 		case "y", "Y":
 			m.closeConfirm = false
-			return m.saveAndClose()
+			return m.thenAfterClose(m.saveAndClose())
 		case "n", "N":
 			m.closeConfirm = false
-			return m.discardAndClose()
+			return m.thenAfterClose(m.discardAndClose())
 		case keyEsc:
 			m.closeConfirm = false
+			m.afterClose = ""
 		}
 		return ""
 	}
@@ -87,9 +88,20 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		return m.handleFieldKey(key)
 	}
 
-	// Paths section: "I" shortcut to open FFmpeg installer (only on ffmpeg_path field).
-	// The "i" key is suppressed in UpdateComponents so it doesn't reach the text input.
-	if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" && key == "i" {
+	// Paths section: Ctrl+O opens the FFmpeg installer (only on the
+	// ffmpeg_path field). A control key, not a letter: the field is edited
+	// inline, and the old "i" binding made every path with an i in it —
+	// /usr/local/bin/ffmpeg, C:\ffmpeg\bin\ffmpeg.exe — impossible to type.
+	if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" && key == keyCtrlO {
+		// The installer replaces this panel, and closing it silently threw
+		// every unsaved edit away — the one close path without the Save
+		// changes? prompt. With edits pending it asks first, and opens the
+		// installer once the answer is Save or Discard.
+		if m.dirty {
+			m.closeConfirm = true
+			m.afterClose = "open_ffmpeg"
+			return ""
+		}
 		return "open_ffmpeg"
 	}
 
@@ -243,6 +255,18 @@ func (m *SettingsModel) handleButtonKey(key string) string {
 	return ""
 }
 
+// thenAfterClose swaps a completed prompted close for the action that asked
+// for the prompt (afterClose). A save that failed or needs a restart returns
+// "" and the pending action is dropped with it.
+func (m *SettingsModel) thenAfterClose(action string) string {
+	after := m.afterClose
+	m.afterClose = ""
+	if action == "close" && after != "" {
+		return after
+	}
+	return action
+}
+
 func (m *SettingsModel) handleClose() string {
 	if m.dirty && m.status != saveError {
 		m.closeConfirm = true
@@ -284,13 +308,14 @@ func (m *SettingsModel) snapshotConfig() config.MoomboxConfig {
 // applyValues and not to it.
 //
 // The one shape that would defeat the shallow copy: applyValues ends with
-// `m.cfg.Channels = m.channels` (and the same for Notifications), so after a
-// SUCCESSFUL save the live config ALIASES the model's own slice — and the
-// channel/notification editors write elements in place
-// (m.channels[i] = ch). That combination is unreachable today only because a
-// successful save closes the panel and Open re-copies both slices on the way
+// `m.cfg.Notifications = m.notifications`, so after a SUCCESSFUL save the
+// live config ALIASES the model's own slice — and the notification editor
+// writes elements in place. That is unreachable today only because a
+// successful save closes the panel and Open re-copies the slice on the way
 // back in. If the panel is ever left open and editable after a save,
-// Channels and Notifications must be deep-copied into the snapshot.
+// Notifications must be deep-copied into the snapshot. Channels do not
+// alias: mergeChannelEdits builds a new slice, and a save re-copies the
+// editor's list from the saved one (resyncChannels).
 //
 // Known window: a background writer (cookie refresh, a Web PUT) can commit
 // through config.Store.Update between snapshotConfig and this restore; the
@@ -346,9 +371,11 @@ func (m *SettingsModel) saveAndClose() string {
 		m.status = saveSaved
 		m.dirty = false
 		m.structDirty = false
+		m.handOverChannelPrunes()
 		needsRestart := m.hasRestartChanges()
 		m.originalValues = make(map[string]string, len(m.values))
 		maps.Copy(m.originalValues, m.values)
+		m.resyncChannels()
 		if needsRestart {
 			// Surface a persistent banner so dismissing the modal with
 			// Esc still leaves a visual reminder that the on-disk config
@@ -460,9 +487,13 @@ func (m *SettingsModel) settingsContentHeight() int {
 			previewRows++
 		}
 	}
+	// The focused field's help line is one of the eight rows below; a long
+	// one wraps (up to ~170 characters of help at 50-odd columns), and those
+	// extra rows used to push the header off the top of the screen.
+	infoRows := fieldInfoRows(sections[m.sectionIndex], m.settingsInnerWidth()) - 1
 	if sections[m.sectionIndex].name == "Network" {
 		// Network reserves 4 extra lines for the compact security block.
-		return max(h-12-buttonLine-previewRows, 1)
+		return max(h-12-buttonLine-previewRows-infoRows, 1)
 	}
-	return max(h-8-buttonLine-previewRows, 1)
+	return max(h-8-buttonLine-previewRows-infoRows, 1)
 }

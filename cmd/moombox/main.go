@@ -16,6 +16,7 @@ import (
 
 	isatty "github.com/mattn/go-isatty"
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/updater"
@@ -36,10 +37,11 @@ const exitCodeRestart = 42
 // a web bind that cannot succeed in headless mode. The launcher treats it as
 // "this install's environment is wrong", never as "the update is broken": no
 // automatic rollback, no skipped version, the rollback artifact preserved
-// with instructions. Before this, the classification depended on whether the
-// operator pressed Enter at waitForKeypress inside postUpdateFailureWindow
-// (CORE-23). Launchers that predate this constant have no case for it and
-// fall through to exactly today's behaviour, so the change is forward-only.
+// with instructions — and never crash-respawned. Its timing decides nothing
+// (classifyChildExit): the child waits at waitForKeypress before exiting, so
+// how long it ran measures the operator, which once decided both the
+// rollback (CORE-23) and whether a slow keypress was respawned into the same
+// prompt five times.
 const exitCodeStartupError = 3
 
 func init() {
@@ -117,24 +119,20 @@ const (
 )
 
 func main() {
-	// Subcommands (like `moombox add <url>`) do not need the launcher/child
-	// split — they run briefly in-process and exit. Checking for them before
-	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
-	// (saves ~100ms and prevents a silent ghost spawn on CLI add commands).
-	if len(os.Args) > 1 && os.Args[1] == "add" {
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: moombox add <video_id_or_url>")
-			os.Exit(1)
-		}
-		addVideo(os.Args[2])
-		return
-	}
+	// First, before anything writes: on Unix a stdout or stderr pipe whose
+	// reader went away (an ssh session without a pty that dropped, a
+	// `| tee` that exited) kills the process inside the write unless SIGPIPE
+	// is asked for. The launcher writes its crash-supervision and rollback
+	// notices to stderr and the child its banner to stdout, all without (or
+	// before) a Logger, which asks for itself (logger.SurviveBrokenPipes).
+	logger.SurviveBrokenPipes()
 
 	configPath := flag.String("config", "", "Path to config file")
-	logLevel := flag.String("log-level", "", "Override log level (DEBUG, INFO, WARN, ERROR)")
+	logLevel := flag.String("log-level", "", "Override the log level for this run only, without saving it (DEBUG, INFO, WARN, ERROR)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
-	headless := flag.Bool("headless", false, "Run without TUI (web-only mode)")
-	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode)")
+	headless := flag.Bool("headless", false, "Same as -no-tui")
+	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode; also MOOMBOX_NO_TUI=1)")
+	flag.Usage = printUsage
 
 	// Read-only diagnostics must not pass through the launcher: they would
 	// trip the single-instance lock ("another instance is already running")
@@ -157,16 +155,35 @@ func main() {
 	// update applied). This keeps one stable parent holding the console so
 	// the child's TUI restores terminal state cleanly on exit, and avoids
 	// process chain buildup across multiple restarts.
-	if os.Getenv("_MOOMBOX_CHILD") != "1" {
-		launchAndSupervise()
+	flag.Parse()
+
+	// The literal -version/--version is answered above without parsing; a
+	// spelled-out -version=true lands here, still ahead of the launcher gate
+	// for the same reason (no instance lock, no child just to print a line).
+	if *showVersion {
+		fmt.Printf("moombox %s (%s)\n", version, commit)
 		return
 	}
 
-	flag.Parse()
+	// Subcommands (like `moombox add <url>`) do not need the launcher/child
+	// split — they run briefly in-process and exit. Dispatching them before
+	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
+	// (saves ~100ms and prevents a silent ghost spawn on CLI add commands).
+	// They are found after the flags, so `moombox -config X add URL` adds
+	// rather than booting the daemon with its arguments silently dropped.
+	if flag.NArg() > 0 {
+		if flag.Arg(0) != "add" {
+			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", flag.Arg(0))
+			printUsage()
+			os.Exit(2)
+		}
+		runAddCommand(*configPath, flag.Args()[1:])
+		return
+	}
 
-	if *showVersion {
-		fmt.Printf("moombox %s (%s)\n", version, commit)
-		os.Exit(0)
+	if os.Getenv("_MOOMBOX_CHILD") != "1" {
+		launchAndSupervise()
+		return
 	}
 
 	// TTY detection: only use TUI if both stdin/stdout are terminals
@@ -180,19 +197,12 @@ func main() {
 		fmt.Println()
 	}
 
-	// Resolve config path
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to get working directory: %v\n", err)
-		}
-		cfgPath = filepath.Join(cwd, "config.toml")
-	}
-
 	// Run the application. If a restart is requested (config change or
-	// update), exit with exitCodeRestart so the launcher respawns us.
-	if run(cfgPath, *logLevel, useTUI) {
+	// update), exit with exitCodeRestart so the launcher respawns us. An
+	// empty -config is passed through as is: config.Load treats any named
+	// path as the only candidate, so naming <cwd>/config.toml here skipped
+	// the ./config/ and ~/.config/moombox/ search (see loadConfig).
+	if run(*configPath, *logLevel, useTUI) {
 		os.Exit(exitCodeRestart)
 	}
 }
@@ -225,6 +235,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// release.
 	if err := s.initServices(logLevelOverride); err != nil {
 		fmt.Fprintf(os.Stderr, "Startup error: %v\n", err)
+		// Into the log too, when initServices got far enough to open it (a
+		// database or cache-dir failure): otherwise the file ends at
+		// "Starting Moombox" with no cause, and the only trace is a console
+		// that, on Windows, closes on the keypress below.
+		if s.log != nil {
+			s.log.Error("Startup error", slog.String("error", err.Error()))
+			if s.closeLog != nil {
+				s.closeLog()
+			}
+		}
 		waitForKeypress()
 		os.Exit(exitCodeStartupError)
 	}
@@ -252,6 +272,20 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		tuiUpdateStatusCh = s.tuiUpdateStatusCh
 		tuiDiskStatusCh   = s.tuiDiskStatusCh
 	)
+
+	// The alerts a previous run sent and never closed, beside the database.
+	// Loaded ahead of every alerter's wiring — the channel and auth
+	// alerters in wireMonitorCallbacks, the sidecar's below it, the disk
+	// ticker and the cookie refresh further down — so each starts seeded and
+	// the first healthy observation sends the close.
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		s.openAlerts = loadOpenAlerts(openAlertsPath(c.Paths.DatabasePath), log)
+		s.openAlerts.dropUnmonitored(c)
+	})
+	// The backlog disk gate too, ahead of dlWorker.Start below: the hold it
+	// left, or an open disk_critical, starts it closed, and it records its
+	// hold in the same file from here on.
+	restoreDiskGate(s.openAlerts, dlWorker.Scheduler())
 
 	// Register all routes. See routes_wiring.go.
 	importCleanup := s.wireRoutes()
@@ -328,6 +362,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		if cfg.Cookies.AutoEnabled && len(cfg.Cookies.Platforms) > 0 {
 			cookieRefresh.SetExpectedPlatforms(cfg.Cookies.Platforms)
 		}
+		// An auth failure a previous run announced and never closed: the
+		// first check that finds the platform working sends its
+		// auth_recovered (withPersistedAuthFailureCooldown holds the stamp).
+		cookieRefresh.SetUnrecoveredPlatforms(s.openAlerts.authPlatforms())
 		cookieRefresh.Start(ctx)
 	} else {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
@@ -419,23 +457,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}()
 	}
 
-	// Expose the port the listener actually bound. It is not always the
-	// configured one: Start probes the next ten ports when the preferred one is
-	// in use (internal/web/server.go), and the TUI, the yt-dlp plugin writer and
-	// the update notification all have to say the real number.
-	//
-	// In memory only. The auto-pick write-back that used to live here was
-	// unreachable: it fired on `configuredPort == 0`, and validateOrNormalize
-	// rewrites 0 to the 774 default before anything binds
-	// (internal/config/config.go, TestNormalizeRewritesPortZero). A probed port
-	// is this run's accident rather than the user's setting, so persisting it
-	// would silently rewrite their config file.
-	if actualPort := webServer.ActualPort(); actualPort > 0 {
-		mu := s.configStore.RWMutex()
-		mu.Lock()
-		cfg.Network.Port = actualPort
-		mu.Unlock()
-	}
+	// The port the listener actually bound is not always the configured one:
+	// Start probes the next ten ports when the preferred one is in use
+	// (internal/web/server.go). Readers that need the real number ask
+	// s.currentWebPort (the TUI through SetWebPort, the yt-dlp plugin writer)
+	// instead of finding it in the config: this used to write it into
+	// cfg.Network.Port, which is the struct every later save encodes, so the
+	// first save after a probed boot made the probed port the setting.
 
 	// First-successful-boot milestone: the database opened (initServices)
 	// and the web-server bind resolved above — this binary has proven it
@@ -560,14 +588,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			if len(content) > 600 {
 				content = content[:600] // markers are ASCII; plain byte cut is safe
 			}
+			details := string(content) + sweptFailedReleaseNote(string(content), exeSelf+failedBinarySuffix)
 			log.Error("previous self-update failure marker present — manual attention needed",
-				slog.String("marker", marker), slog.String("details", string(content)))
+				slog.String("marker", marker), slog.String("details", details))
 			notifyMgr.Send("Previous Update Failed",
 				"A marker from a failed self-update is present — verify the running binary, then delete the marker file",
 				notifications.TypeError,
 				[]notifications.Field{
 					{Name: "Marker", Value: marker},
-					{Name: "Details", Value: string(content)},
+					{Name: "Details", Value: details},
 				},
 				notifications.SendOptions{Event: "update_failed"},
 			)
@@ -603,6 +632,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						slog.String("version", pendingTag))
 				}
 			}
+			// Before the breadcrumb goes: its age is what proves the update
+			// that landed came AFTER an earlier failure's marker.
+			if cleared, clrErr := clearSupersededFailureMarker(exeSelf, pendingPath, pendingTag, version); clrErr != nil {
+				log.Warn("failed to remove a failed-update marker a later update superseded",
+					slog.String("marker", exeSelf+".update-failed"), slog.String("error", clrErr.Error()))
+			} else if cleared != "" {
+				log.Info("removed a failed-update marker: a later update has applied successfully, so its rollback instructions are stale",
+					slog.String("marker", cleared), slog.String("version", pendingTag))
+			}
 			if rmErr := os.Remove(pendingPath); rmErr != nil {
 				log.Warn("failed to remove pending-version breadcrumb",
 					slog.String("path", pendingPath), slog.String("error", rmErr.Error()))
@@ -610,12 +648,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 	}
 
-	// Auto-update check: initial check + daily ticker. The goroutine runs
-	// whenever the updater exists and re-reads auto_check_updates on EVERY
-	// iteration — previously the flag was consulted once at boot, so
-	// disabling checks (the dismiss route / settings toggle) couldn't stop
-	// an armed ticker until restart, and enabling the toggle did nothing
-	// without one.
+	// Auto-update check: initial check + daily ticker, plus a check within a
+	// minute of the toggle turning on (runUpdateCheckLoop). The goroutine runs
+	// whenever the updater exists and re-reads auto_check_updates every time
+	// — previously the flag was consulted once at boot, so disabling checks
+	// (the dismiss route / settings toggle) couldn't stop an armed ticker
+	// until restart.
 	if upd != nil {
 		go func() {
 			defer func() {
@@ -633,29 +671,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// One notification per pending version, not one per tick —
 			// state lives here because this goroutine is the only caller.
 			var lastNotifiedTag string
-
-			// Initial check (slight delay to avoid slowing startup)
-			select {
-			case <-time.After(5 * time.Second):
-			case <-ctx.Done():
-				return
-			}
-			if checkEnabled() {
+			runUpdateCheckLoop(ctx, checkEnabled, func() {
 				checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-			}
-
-			ticker := time.NewTicker(24 * time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if checkEnabled() {
-						checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-					}
-				}
-			}
+			}, updateCheckTiming{initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute})
 		}()
 	}
 
@@ -672,6 +690,65 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		var prevHeapMB float64
 		diskCheckCounter := 0
 		diskAlerter := newDiskAlerts(notifyMgr, log)
+		// Before the boot reading below, so a disk alert a previous run left
+		// open is closed by the first reading that clears it.
+		diskAlerter.restoreFrom(s.openAlerts)
+		// The boot-time reading (UpdateDiskStatus above) goes through the
+		// alert decision too: the ticker's first disk check is three ticks
+		// away, so a volume already full at boot was not announced for six
+		// minutes while recordings kept writing to it.
+		if ds := routes.SharedDiskStatus.Load(); ds != nil {
+			var bootOutputDir string
+			var warnPct, critPct int
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				bootOutputDir = c.Paths.OutputDirectory
+				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
+			})
+			diskAlerter.setThresholds(warnPct, critPct)
+			diskAlerter.onReading(ds, bootOutputDir, time.Now())
+		}
+		// checkDisk takes a reading, publishes it to both UIs and runs the
+		// alert decision. The ticker calls it every third tick; a save that
+		// changes the thresholds or the output directory asks for one at once
+		// (requestDiskRecheck), so the gauge and the alerts do not keep the
+		// old settings for up to six minutes.
+		checkDisk := func() {
+			var diskOutputDir string
+			var warnPct, critPct int
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				diskOutputDir = c.Paths.OutputDirectory
+				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
+			})
+			diskAlerter.setThresholds(warnPct, critPct)
+			if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
+				// Broadcast to web clients
+				wsHub.Broadcast("disk_status", map[string]any{
+					"free":      ds.Free,
+					"total":     ds.Total,
+					"usedPct":   ds.UsedPct,
+					"warnLevel": ds.WarnLevel,
+				})
+
+				// Push to TUI
+				select {
+				case tuiDiskStatusCh <- tui.DiskStatusMsg{
+					Free: ds.Free, UsedPct: ds.UsedPct, Warn: ds.WarnLevel,
+				}:
+				default:
+				}
+
+				// The whole notification decision — the 30-minute
+				// cooldown, the level escalation, and the all-clear
+				// that closes them — lives in diskAlerts, where it
+				// can be tested.
+				diskAlerter.onReading(ds, diskOutputDir, time.Now())
+			} else {
+				// GetDiskSpace failed (volume offline, I/O error): the
+				// dashboard disk gauge and low-disk notifications are
+				// frozen at the last good reading until it recovers.
+				diskAlerter.onReadFailure(diskOutputDir)
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -752,39 +829,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// existing ticker).
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
-					var diskOutputDir string
-					s.configStore.Read(func(c *config.MoomboxConfig) {
-						diskOutputDir = c.Paths.OutputDirectory
-					})
-					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
-						// Broadcast to web clients
-						wsHub.Broadcast("disk_status", map[string]any{
-							"free":      ds.Free,
-							"total":     ds.Total,
-							"usedPct":   ds.UsedPct,
-							"warnLevel": ds.WarnLevel,
-						})
-
-						// Push to TUI
-						select {
-						case tuiDiskStatusCh <- tui.DiskStatusMsg{
-							Free: ds.Free, UsedPct: ds.UsedPct, Warn: ds.WarnLevel,
-						}:
-						default:
-						}
-
-						// The whole notification decision — the 30-minute
-						// cooldown, the level escalation, and the all-clear
-						// that closes them — lives in diskAlerts, where it
-						// can be tested.
-						diskAlerter.onReading(ds, diskOutputDir, time.Now())
-					} else {
-						// GetDiskSpace failed (volume offline, I/O error): the
-						// dashboard disk gauge and low-disk notifications are
-						// frozen at the last good reading until it recovers.
-						diskAlerter.onReadFailure(diskOutputDir)
-					}
+					checkDisk()
 				}
+			case <-s.diskRecheck:
+				checkDisk()
 			}
 		}
 	}()

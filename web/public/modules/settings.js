@@ -4,6 +4,8 @@
 import {
   applyChannelOverrides,
   browserPathValidationOutcome,
+  channelRemovalPrompt,
+  channelRemovedToast,
   channelTermsForSave,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
@@ -11,6 +13,8 @@ import {
   cookieSetupProbe,
   cookieSetupRejectedMessage,
   formatRelativeTime,
+  needsChannelResolve,
+  NOT_A_CHANNEL_URL,
   restartValuesChanged,
   serverErrorMessage,
   snapshotRestartValues,
@@ -33,6 +37,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "error", label: "Error" },
       { id: "cancelled", label: "Cancelled" },
       { id: "auth", label: "Auth" },
+      { id: "auth_recovered", label: "Auth Recovered" },
     ],
   },
   {
@@ -123,21 +128,27 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "bgutils.use_sidecar", id: "cfg-bgutils-use-sidecar" },
 ];
 
-/** Render a template preview string using sample data. */
+/**
+ * Render a template preview string using sample data, in the formats
+ * config.ResolveTemplate writes (${start_date} YYYYMMDD, ${start_time} HHMM,
+ * local time) and with the muxer's .mp4 — the TUI's preview calls the
+ * resolver itself, so this is the copy that has to keep pace with it.
+ */
 export function renderTemplatePreview(template) {
   const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
   const vars = {
     channel: "Miko Ch",
     title: "Singing Stream",
     id: "dQw4w9WgXcQ",
-    start_date: now.toISOString().split("T")[0],
-    start_time: "20-00-00",
+    start_date: `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`,
+    start_time: "2000",
   };
   let result = template || "";
   for (const [key, val] of Object.entries(vars)) {
     result = result.replaceAll("${" + key + "}", val);
   }
-  return result ? "Example: " + result + ".mkv" : "";
+  return result ? "Example: " + result + ".mp4" : "";
 }
 
 /**
@@ -279,10 +290,10 @@ export class SettingsController {
     if (channelIdInput) {
       channelIdInput.addEventListener("sl-input", () => {
         if (this.editingChannelId) return; // Don't auto-switch when editing
-        const val = (channelIdInput.value || "").trim();
+        const val = (channelIdInput.value || "").trim().toLowerCase();
         const platformSelect = document.getElementById("channel-platform-select");
         if (!platformSelect || platformSelect.disabled) return;
-        if (val.includes("youtube.com") || val.includes("youtu.be")) {
+        if (val.startsWith("@") || val.includes("youtube.com") || val.includes("youtu.be")) {
           if (platformSelect.value !== "youtube") {
             platformSelect.value = "youtube";
             this.updateChannelDialogForPlatform("youtube");
@@ -337,7 +348,14 @@ export class SettingsController {
       result.textContent = "";
       try {
         const resp = await fetch("/api/update/check", { method: "POST" });
-        if (!resp.ok) throw new Error(resp.statusText);
+        if (!resp.ok) {
+          // The server's reason (rate limit, no release, ...), not a bare
+          // "Check failed".
+          result.textContent = `Check failed: ${await serverErrorMessage(resp)}`;
+          result.style.color = "var(--text-danger)";
+          btn.loading = false;
+          return;
+        }
         const data = await resp.json();
         if (data.debounced) {
           // The server spends one of GitHub's 60/h unauthenticated requests
@@ -347,19 +365,23 @@ export class SettingsController {
           // rendered in this button's own result span, where "Up to date" and
           // "Check failed" already go.
           result.textContent = `Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`;
-          result.style.color = "var(--sl-color-neutral-500)";
+          result.style.color = "var(--sl-color-neutral-600)";
         } else if (data.available) {
           result.textContent = `v${data.version} available!`;
-          result.style.color = "var(--sl-color-success-600)";
+          result.style.color = "var(--text-success)";
           this.app._updateAvailable = data;
           this.app.updateVersionIndicator();
         } else {
           result.textContent = "Up to date";
-          result.style.color = "var(--sl-color-neutral-500)";
+          result.style.color = "var(--sl-color-neutral-600)";
+          // Nothing newer than the running version: a pending release this
+          // page still offers was pulled, and its download no longer exists.
+          this.app._updateAvailable = null;
+          this.app.updateVersionIndicator();
         }
       } catch {
         result.textContent = "Check failed";
-        result.style.color = "var(--sl-color-danger-500)";
+        result.style.color = "var(--text-danger)";
       }
       btn.loading = false;
     });
@@ -378,7 +400,7 @@ export class SettingsController {
             // Every other failure in this dashboard toasts; a blocking
             // browser alert reads as a page fault rather than a Moombox
             // message, and it freezes the whole tab while it is up.
-            this.app.showToast("Failed to fetch release notes", "danger");
+            this.app.showToast("Failed to fetch release notes: " + await serverErrorMessage(resp), "danger");
             return;
           }
           const data = await resp.json();
@@ -433,16 +455,22 @@ export class SettingsController {
         try {
           const resp = await fetch("/api/update/verify", { method: "POST" });
           const data = await resp.json();
-          if (resp.ok && data.verified) {
-            result.textContent = "Signature valid";
-            result.style.color = "var(--sl-color-success-600)";
+          if (resp.ok && data.verified && data.manifest) {
+            result.textContent = "Signature and release manifest valid";
+            result.style.color = "var(--text-success)";
+          } else if (resp.ok && data.verified) {
+            // The signature alone says the key signed these bytes, not that
+            // they are this release's: a release with no signed manifest gets
+            // that said, and not in the full check's green.
+            result.textContent = "Signature valid — this release publishes no signed manifest, so only the signature was checked";
+            result.style.color = "var(--text-warning)";
           } else {
             result.textContent = data.error || "Verification failed";
-            result.style.color = "var(--sl-color-danger-500)";
+            result.style.color = "var(--text-danger)";
           }
         } catch {
           result.textContent = "Verification failed";
-          result.style.color = "var(--sl-color-danger-500)";
+          result.style.color = "var(--text-danger)";
         }
         btn.loading = false;
       });
@@ -501,14 +529,18 @@ export class SettingsController {
       autoCookieCancelBtn.addEventListener("click", () => this.cancelAutoCookieSetup());
     }
 
-    // Active platform toggles
+    // Active platform toggles. They only show/hide their platform's setup
+    // button — not the full updateAutoCookieUI, whose status reload rebuilds
+    // the browser selector from the SAVED config: flipping a switch used to
+    // put an unsaved browser choice back to the stored one and hide a typed
+    // custom path, which the save then cleared.
     const activeYtSwitch = document.getElementById("cfg-active-youtube");
     if (activeYtSwitch) {
-      activeYtSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
+      activeYtSwitch.addEventListener("sl-change", () => this._syncAutoCookieSetupButtons());
     }
     const activeTwSwitch = document.getElementById("cfg-active-twitch");
     if (activeTwSwitch) {
-      activeTwSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
+      activeTwSwitch.addEventListener("sl-change", () => this._syncAutoCookieSetupButtons());
     }
 
     // Unsaved changes warning
@@ -722,6 +754,17 @@ export class SettingsController {
         activeTwSwitch.checked = this.app.activePlatforms?.twitch === true;
       }
     }
+    // What the toggles showed at load. Without an explicit override they
+    // show the server's INFERRED answer, and saving that back unedited would
+    // freeze it (a channel added later would never light its platform), so
+    // a save sends active_platforms only once there is an override already
+    // or a toggle has been changed. An empty list is that override too —
+    // both platforms off.
+    this._activePlatformsShown = {
+      explicit: Array.isArray(activePlats),
+      youtube: !!activeYtSwitch?.checked,
+      twitch: !!activeTwSwitch?.checked,
+    };
 
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {
@@ -777,8 +820,16 @@ export class SettingsController {
       this._dirtyListenersAdded = true;
       const settingsContent = document.querySelector(".settings-content");
       if (settingsContent) {
-        settingsContent.addEventListener("sl-change", () => this._markDirty());
-        settingsContent.addEventListener("sl-input", () => this._markDirty());
+        // Controls on the page that Save never sends — the password form and
+        // the cookie-import paste box act through their own buttons — raised
+        // the unsaved banner and the leave-page prompts over nothing, and a
+        // dirty form then skipped the reload that follows a password change.
+        const markDirty = (e) => {
+          if (e.target?.closest?.("#security-set-password-form, #cookie-import-text")) return;
+          this._markDirty();
+        };
+        settingsContent.addEventListener("sl-change", markDirty);
+        settingsContent.addEventListener("sl-input", markDirty);
       }
     }
 
@@ -907,6 +958,10 @@ export class SettingsController {
     const activePlatforms = [];
     if (activeYtSwitch?.checked) activePlatforms.push("youtube");
     if (activeTwSwitch?.checked) activePlatforms.push("twitch");
+    const shown = this._activePlatformsShown;
+    const sendActivePlatforms = !shown || shown.explicit ||
+      shown.youtube !== !!activeYtSwitch?.checked ||
+      shown.twitch !== !!activeTwSwitch?.checked;
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     const autoEnabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
     const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
@@ -1024,7 +1079,7 @@ export class SettingsController {
       },
       cookies: {
         cookie_file: cookieFile,
-        active_platforms: activePlatforms,
+        active_platforms: sendActivePlatforms ? activePlatforms : undefined,
         auto_enabled: autoEnabled,
         acquisition,
         browser_profile_dir: autoCookiesProfileDir,
@@ -1151,6 +1206,13 @@ export class SettingsController {
             config[key] = val;
           }
         }
+        if (sendActivePlatforms) {
+          this._activePlatformsShown = {
+            explicit: true,
+            youtube: activePlatforms.includes("youtube"),
+            twitch: activePlatforms.includes("twitch"),
+          };
+        }
         this._dirty = false;
         this._updateUnsavedIndicator();
         document.getElementById("settings-unsaved-banner").style.display = "none";
@@ -1195,7 +1257,7 @@ export class SettingsController {
       // shown a list naming four things they did not touch reads this as a
       // prompt about something else and dismisses it — which is the failure the
       // cookie entries exist to prevent.
-      "Some settings require a restart to take effect (port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings).\n\nRestart Moombox now?",
+      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings).\n\nRestart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {
@@ -1261,7 +1323,7 @@ export class SettingsController {
     const resetButton = () => { if (btn) { btn.loading = false; btn.disabled = false; } };
 
     if (btn) { btn.loading = true; btn.disabled = true; }
-    setResult("Restarting…", "var(--sl-color-neutral-500)");
+    setResult("Restarting…", "var(--sl-color-neutral-600)");
     this.app.showToast("Restarting Moombox…", "primary");
 
     try {
@@ -1270,7 +1332,7 @@ export class SettingsController {
         const data = await resp.json().catch(() => ({ error: resp.statusText }));
         const msg = "Failed to restart: " + (data.error || resp.statusText);
         this.app.showToast(msg, "danger");
-        setResult(msg, "var(--sl-color-danger-500)");
+        setResult(msg, "var(--text-danger)");
         resetButton();
         return;
       }
@@ -1284,7 +1346,7 @@ export class SettingsController {
     // reconnect logic restores the UI once the new process is up. Reset the
     // button as a fallback in case the page outlives the restart (same
     // host:port — there is no navigation/reload).
-    setResult("Reconnecting once Moombox is back…", "var(--sl-color-neutral-500)");
+    setResult("Reconnecting once Moombox is back…", "var(--sl-color-neutral-600)");
     setTimeout(() => { resetButton(); setResult("", ""); }, 10000);
   }
 
@@ -1358,7 +1420,7 @@ export class SettingsController {
             </div>
           </div>
           <div class="channel-card-actions">
-            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" data-action="toggle" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-switch>
+            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" data-action="toggle" data-channel-id="${this.app.escapeHtml(ch.id)}"><span class="visually-hidden">Monitor ${this.app.escapeHtml(ch.name || ch.id)}</span></sl-switch>
             <sl-icon-button name="pencil" label="Edit" data-action="edit" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-icon-button>
             <sl-icon-button name="trash" label="Delete" data-action="delete" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-icon-button>
           </div>
@@ -1508,8 +1570,16 @@ export class SettingsController {
     }
   }
 
-  showAddChannelDialog(channel = null) {
+  /**
+   * Open the channel dialog: on `channel` to edit it, or empty to add one.
+   * `alreadyConfigured` is the Add that named a configured channel — the
+   * dialog opens on that channel's stored settings, with a note saying so.
+   */
+  showAddChannelDialog(channel = null, { alreadyConfigured = false } = {}) {
     this.editingChannelId = channel ? channel.id : null;
+
+    const existingNote = document.getElementById("channel-existing-note");
+    if (existingNote) existingNote.style.display = alreadyConfigured && channel ? "" : "none";
 
     document.getElementById("channel-id-input").value = channel?.id || "";
     document.getElementById("channel-name-input").value = channel?.name || "";
@@ -1526,7 +1596,6 @@ export class SettingsController {
     document.getElementById("channel-include-vods").checked =
       channel?.include_non_live_content || false;
 
-    this.app.setInputValue("channel-lookbehind-input", channel?.num_desc_lookbehind ?? "");
     this.app.setInputValue("channel-output-dir-input", channel?.output_directory ?? "");
     this.app.setInputValue("channel-archive-window-input", channel?.archive_window_days ?? "");
     this.app.setInputValue("channel-archive-slots-input", channel?.archive_slots ?? "");
@@ -1590,6 +1659,12 @@ export class SettingsController {
     }
   }
 
+  /** The configured channel whose ID is `id`, compared as the server does (case-insensitively). */
+  configuredChannel(id) {
+    const want = String(id ?? "").trim().toLowerCase();
+    return (this.app.config?.channels || []).find((c) => String(c.id ?? "").toLowerCase() === want) || null;
+  }
+
   async saveChannel() {
     let id = document.getElementById("channel-id-input").value.trim();
     let name = document.getElementById("channel-name-input").value.trim();
@@ -1610,8 +1685,8 @@ export class SettingsController {
     const enabledSwitch = document.getElementById("channel-enabled-switch");
     const enabled = enabledSwitch ? enabledSwitch.checked : true;
 
-    // Resolve channel URL if it looks like a URL (only for new channels)
-    if (!this.editingChannelId && (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv"))) {
+    // Resolve a channel URL or a bare @handle (only for new channels)
+    if (!this.editingChannelId && needsChannelResolve(id)) {
       const saveBtn = document.getElementById("channel-save-btn");
       if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
@@ -1622,6 +1697,12 @@ export class SettingsController {
         });
         if (resp.ok) {
           const resolved = await resp.json();
+          // The route echoes input it does not recognise; that is no
+          // channel, and saving it would store a URL (or "@…") as an ID.
+          if (resolved.resolved === false) {
+            this.app.showToast(NOT_A_CHANNEL_URL, "danger");
+            return;
+          }
           if (resolved.id) {
             id = resolved.id;
             document.getElementById("channel-id-input").value = id;
@@ -1647,6 +1728,19 @@ export class SettingsController {
         return;
       } finally {
         if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+      }
+    }
+
+    // An Add naming a configured channel — by its ID, or by a URL or @handle
+    // that resolved to it — is not an add. It used to post {id, enabled}
+    // over the stored entry, wiping its terms, output directory and
+    // overrides behind a "Channel added" toast. The dialog switches to
+    // editing that channel instead, filled with what it stores.
+    if (!this.editingChannelId) {
+      const configured = this.configuredChannel(id);
+      if (configured) {
+        this.showAddChannelDialog(configured, { alreadyConfigured: true });
+        return;
       }
     }
 
@@ -1683,7 +1777,6 @@ export class SettingsController {
     }
 
     const overrides = applyChannelOverrides(channel, {
-      numDescLookbehind: this.app.getInputNumber("channel-lookbehind-input"),
       outputDirectory: document.getElementById("channel-output-dir-input")?.value ?? "",
       archiveWindowDays: this.app.getInputNumber("channel-archive-window-input"),
       archiveSlots: this.app.getInputNumber("channel-archive-slots-input"),
@@ -1693,6 +1786,9 @@ export class SettingsController {
       return;
     }
     const channelPayload = overrides.channel;
+    // The server replaces a configured channel only for a request marked as
+    // an edit, and answers an unmarked one 409.
+    if (this.editingChannelId) channelPayload.edit = true;
 
     const saveBtn = document.getElementById("channel-save-btn");
     if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
@@ -1710,6 +1806,17 @@ export class SettingsController {
           "success",
         );
         this.app.loadConfig();
+      } else if (response.status === 409 && !this.editingChannelId) {
+        // Configured since this page last loaded the list (another tab, the
+        // TUI): reload it and edit that channel, as the check above would have.
+        await this.app.loadConfig();
+        const configured = this.configuredChannel(id);
+        if (configured) {
+          this.showAddChannelDialog(configured, { alreadyConfigured: true });
+        } else {
+          const data = await response.json().catch(() => ({ error: response.statusText }));
+          this.app.showToast(data.error || "Failed to save channel", "danger");
+        }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.app.showToast(data.error || "Failed to save channel", "danger");
@@ -1721,27 +1828,80 @@ export class SettingsController {
     }
   }
 
+  // Removing a channel asks what to do with its jobs (channelRemovalPrompt,
+  // utils.js): keep them all — the default — or delete the pending ones. The
+  // counts come from the server, which alone can see which parked rows hold
+  // footage.
   async deleteChannel(channelId) {
-    if (!await this.app.showConfirm("Are you sure you want to remove this channel?", { okLabel: "Remove", okVariant: "danger" })) return;
+    const path = `/api/config/channels/${encodeURIComponent(channelId)}`;
+    const channel = this.app.config?.channels?.find((c) => c.id === channelId);
+    let summary = null;
+    try {
+      const res = await fetch(`${path}/removal`);
+      if (res.ok) summary = await res.json();
+    } catch {
+      // Uncounted: the prompt offers keep and Cancel only.
+    }
+    const choice = await this.chooseChannelRemoval(channelRemovalPrompt(channel?.name || channelId, summary));
+    if (!choice) return;
 
     try {
-      const response = await fetch(
-        `/api/config/channels/${encodeURIComponent(channelId)}`,
-        {
-          method: "DELETE",
-        },
-      );
-
+      const response = await fetch(`${path}?jobs=${choice}`, { method: "DELETE" });
       if (response.ok) {
-        this.app.showToast("Channel removed", "success");
-        this.app.loadConfig();
+        const data = await response.json().catch(() => ({}));
+        this.app.showToast(channelRemovedToast(choice, summary, data), "success");
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.app.showToast(data.error || "Failed to remove channel", "danger");
       }
+      // A 500 can come after the channel was removed ("…deleting its pending
+      // jobs failed"), so the list is reloaded either way.
+      this.app.loadConfig();
     } catch (e) {
       this.app.showToast("Failed to remove channel: " + e.message, "danger");
     }
+  }
+
+  /**
+   * Shows #channel-remove-dialog with `prompt` (channelRemovalPrompt) and
+   * resolves with "keep", "delete", or null for Cancel or a dialog closed any
+   * other way. The buttons are replaced by fresh copies first, so the previous
+   * prompt's listeners go with the old nodes (as showConfirm does).
+   */
+  chooseChannelRemoval(prompt) {
+    return new Promise((resolve) => {
+      const dlg = document.getElementById("channel-remove-dialog");
+      document.getElementById("channel-remove-message").textContent = prompt.message;
+      const fresh = (id) => {
+        const el = document.getElementById(id);
+        const copy = el.cloneNode(true);
+        el.replaceWith(copy);
+        return copy;
+      };
+      const keep = fresh("channel-remove-keep");
+      const del = fresh("channel-remove-delete");
+      const cancel = fresh("channel-remove-cancel");
+      keep.textContent = prompt.keepLabel;
+      del.textContent = prompt.deleteLabel ?? "";
+      del.style.display = prompt.deleteLabel ? "" : "none";
+
+      let settled = false;
+      const finish = (choice) => {
+        if (settled) return;
+        settled = true;
+        dlg.removeEventListener("sl-after-hide", onHide);
+        resolve(choice);
+        dlg.hide();
+      };
+      // Only the dialog's own close: a tooltip inside it fires the same
+      // event as it hides, and bubbles it here.
+      const onHide = (e) => { if (e.target === dlg) finish(null); };
+      keep.addEventListener("click", () => finish("keep"));
+      del.addEventListener("click", () => finish("delete"));
+      cancel.addEventListener("click", () => finish(null));
+      dlg.addEventListener("sl-after-hide", onHide);
+      dlg.show();
+    });
   }
 
   async toggleChannel(channelId, enabled) {
@@ -1752,7 +1912,7 @@ export class SettingsController {
       const response = await fetch("/api/config/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...channel, enabled }),
+        body: JSON.stringify({ ...channel, enabled, edit: true }),
       });
 
       if (response.ok) {
@@ -1782,7 +1942,7 @@ export class SettingsController {
       } else if (resp.ok && data.success) {
         this.app.showToast("Re-scanning feed history…", "success");
       } else {
-        this.app.showToast("Re-scan failed", "danger");
+        this.app.showToast(data.error ? `Re-scan failed: ${data.error}` : "Re-scan failed", "danger");
       }
     } catch {
       this.app.showToast("Re-scan failed: could not reach server", "danger");
@@ -1801,6 +1961,13 @@ export class SettingsController {
       return;
     }
 
+    // The chips are <sl-tag>s, whose base is a plain span: without these
+    // they were click-only, unreachable from the keyboard and announced as
+    // text. pressed is the toggle state; null for a plain action chip. The
+    // delegate below answers Enter/Space on them.
+    const chip = (pressed) =>
+      `role="button" tabindex="0"${pressed === null ? "" : ` aria-pressed="${pressed}"`}`;
+
     container.innerHTML = notifications
       .map((notif, idx) => {
         const hasFilter = Array.isArray(notif.events) && notif.events.length > 0;
@@ -1812,7 +1979,7 @@ export class SettingsController {
               .map((evt) => {
                 const active = notif.events.includes(evt.id);
                 const variant = active ? 'variant="primary"' : "";
-                return `<sl-tag size="small" ${variant} data-notif-action="toggle-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
+                return `<sl-tag size="small" ${variant} ${chip(active)} data-notif-action="toggle-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
               })
               .join("");
             return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
@@ -1821,7 +1988,7 @@ export class SettingsController {
             <div class="notification-events">
               ${grouped}
               <div class="notification-event-group">
-                <sl-tag size="small" variant="neutral" data-notif-action="clear-filter" data-notif-index="${idx}">Clear filter</sl-tag>
+                <sl-tag size="small" variant="neutral" ${chip(null)} data-notif-action="clear-filter" data-notif-index="${idx}">Clear filter</sl-tag>
               </div>
             </div>`;
         } else {
@@ -1830,7 +1997,7 @@ export class SettingsController {
               <div class="notification-event-group">
                 <span class="notification-events-label">Events:</span>
                 <sl-tag size="small" variant="success">All events</sl-tag>
-                <sl-tag size="small" variant="neutral" data-notif-action="enable-filter" data-notif-index="${idx}">Filter...</sl-tag>
+                <sl-tag size="small" variant="neutral" ${chip(null)} data-notif-action="enable-filter" data-notif-index="${idx}">Filter...</sl-tag>
               </div>
             </div>`;
         }
@@ -1846,8 +2013,9 @@ export class SettingsController {
           const grouped = NOTIFICATION_EVENT_GROUPS.map((group) => {
             const chips = group.events
               .map((evt) => {
-                const variant = active.includes(evt.id) ? 'variant="primary"' : "";
-                return `<sl-tag size="small" ${variant} data-notif-action="toggle-mention-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
+                const on = active.includes(evt.id);
+                const variant = on ? 'variant="primary"' : "";
+                return `<sl-tag size="small" ${variant} ${chip(on)} data-notif-action="toggle-mention-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
               })
               .join("");
             return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
@@ -1866,7 +2034,7 @@ export class SettingsController {
         // than leaving "separate" to be inferred from a missing control.
         const mode = notif.mode === "edit" ? "edit" : "separate";
         const modeChip = (value, label) =>
-          `<sl-tag size="small" ${mode === value ? 'variant="primary"' : ""} ` +
+          `<sl-tag size="small" ${mode === value ? 'variant="primary"' : ""} ${chip(mode === value)} ` +
           `data-notif-action="set-mode" data-notif-index="${idx}" data-mode="${value}">${label}</sl-tag>`;
         const modeHtml = `
             <div class="notification-events">
@@ -1904,6 +2072,14 @@ export class SettingsController {
     // mention field would PUT every time it is focused.
     if (!container._notifDelegated) {
       container._notifDelegated = true;
+      // Enter/Space on a chip does what its click does (see chip() above).
+      container.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        const el = e.target.closest?.('sl-tag[role="button"][data-notif-action]');
+        if (!el) return;
+        e.preventDefault();
+        el.click();
+      });
       container.addEventListener("click", (e) => {
         const el = e.target.closest("[data-notif-action]");
         if (!el) return;
@@ -2313,7 +2489,11 @@ export class SettingsController {
       // Show installed port if relevant
       if (status.installed && status.installedPort) {
         portRow.style.display = "";
-        portEl.textContent = `${status.installedPort}${status.portMismatch ? ` (current: ${status.currentPort})` : ""}`;
+        // With the scheme: a mismatch in the scheme alone (https toggled, the
+        // port unchanged) used to read "8080 (current: 8080)".
+        const scheme = (s) => (s ? ` (${s})` : "");
+        const current = `${status.currentPort}${scheme(status.httpsEnabled ? "https" : "http")}`;
+        portEl.textContent = `${status.installedPort}${scheme(status.installedScheme)}${status.portMismatch ? ` — current: ${current}` : ""}`;
       } else {
         portRow.style.display = "none";
       }
@@ -2375,7 +2555,7 @@ export class SettingsController {
 
       if (response.ok && data.success) {
         if (data.alreadyInstalled) {
-          this.app.showToast("yt-dlp plugin already installed with correct port", "primary");
+          this.app.showToast("yt-dlp plugin already installed and up to date", "primary");
         } else {
           this.app.showToast("yt-dlp plugin installed successfully", "success");
         }
@@ -2586,13 +2766,13 @@ export class SettingsController {
     try {
       const response = await fetch("/api/client-tokens");
       if (!response.ok) {
-        container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">Unable to load tokens</span>';
+        container.innerHTML = '<span style="color: var(--sl-color-neutral-600);">Unable to load tokens</span>';
         return;
       }
       const tokens = await response.json();
 
       if (!tokens || tokens.length === 0) {
-        container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">No connected clients</span>';
+        container.innerHTML = '<span style="color: var(--sl-color-neutral-600);">No connected clients</span>';
         return;
       }
 
@@ -2624,7 +2804,7 @@ export class SettingsController {
       }
     } catch (e) {
       console.error("Failed to load client tokens:", e);
-      container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">Error loading tokens</span>';
+      container.innerHTML = '<span style="color: var(--sl-color-neutral-600);">Error loading tokens</span>';
     }
   }
 
@@ -2644,11 +2824,6 @@ export class SettingsController {
     }
   }
 
-  formatRelativeTime(isoDate) {
-    if (!isoDate) return "never";
-    return formatRelativeTime(isoDate);
-  }
-
   // ─── Auto Cookie Methods ─────────────────────────────────────
 
   // NOT gated on cfg-auto-cookies-enabled, deliberately. Everything below is
@@ -2665,7 +2840,7 @@ export class SettingsController {
   // flag was on — an install with the flag off is exactly the install that needs
   // the manual path, and it was the one with the buttons hidden.
   //
-  // The per-platform toggles below still apply: a "Setup Twitch" button for a
+  // The per-platform toggles below still apply: a "Set up Twitch" button for a
   // platform the operator has switched off is noise.
   updateAutoCookieUI() {
     const actionsDiv = document.getElementById("auto-cookie-actions");
@@ -2676,19 +2851,23 @@ export class SettingsController {
     if (selectorDiv) {
       selectorDiv.style.display = "";
     }
-    // Show/hide per-platform setup buttons based on active toggles
-    const ytActive = document.getElementById("cfg-active-youtube")?.checked;
-    const twActive = document.getElementById("cfg-active-twitch")?.checked;
-    const ytBtn = document.getElementById("btn-auto-cookie-setup-yt");
-    const twBtn = document.getElementById("btn-auto-cookie-setup-tw");
-    if (ytBtn) ytBtn.style.display = ytActive ? "" : "none";
-    if (twBtn) twBtn.style.display = twActive ? "" : "none";
+    this._syncAutoCookieSetupButtons();
     // Unconditional too, and it has to be: it is what fills the browser
     // selector we just showed and what writes "No supported browser detected"
     // into auto-cookie-browser-info. Showing an empty selector would be worse
     // than hiding it. It also flips _browserSelectLoaded, which is what lets a
     // save carry the browser choice — see saveConfig.
     this.loadAutoCookieStatus();
+  }
+
+  /** Show/hide the per-platform cookie setup buttons from the active toggles. */
+  _syncAutoCookieSetupButtons() {
+    const ytActive = document.getElementById("cfg-active-youtube")?.checked;
+    const twActive = document.getElementById("cfg-active-twitch")?.checked;
+    const ytBtn = document.getElementById("btn-auto-cookie-setup-yt");
+    const twBtn = document.getElementById("btn-auto-cookie-setup-tw");
+    if (ytBtn) ytBtn.style.display = ytActive ? "" : "none";
+    if (twBtn) twBtn.style.display = twActive ? "" : "none";
   }
 
   populateBrowserSelector(status) {
@@ -2808,7 +2987,7 @@ export class SettingsController {
         if (lastErrorEl) {
           const lastError = status.lastError || "";
           lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
-          lastErrorEl.style.color = "var(--sl-color-warning-600)";
+          lastErrorEl.style.color = "var(--text-warning)";
           lastErrorEl.style.display = lastError ? "" : "none";
         }
 
@@ -2943,7 +3122,7 @@ export class SettingsController {
       if (countdownEl) {
         countdownEl.textContent = `${remaining}s remaining`;
         if (remaining <= 10) {
-          countdownEl.style.color = "var(--sl-color-warning-600)";
+          countdownEl.style.color = "var(--text-warning)";
         }
       }
       if (remaining <= 0) clearInterval(countdownInterval);
@@ -3005,7 +3184,7 @@ export class SettingsController {
           resultEl.textContent = cookieSetupRejectedMessage(
             platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
           );
-          resultEl.style.color = "var(--sl-color-danger-600)";
+          resultEl.style.color = "var(--text-danger)";
         }
       }
     } catch (e) {
@@ -3055,7 +3234,7 @@ export class SettingsController {
       }
       if (resultEl) {
         resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } finally {
       clearInterval(countdownInterval);
@@ -3110,7 +3289,7 @@ export class SettingsController {
     if (!pasted && !chosen) {
       if (resultEl) {
         resultEl.textContent = "Paste the contents of a cookies.txt, or choose a file to upload.";
-        resultEl.style.color = "var(--sl-color-warning-600)";
+        resultEl.style.color = "var(--text-warning)";
       }
       return;
     }
@@ -3191,12 +3370,12 @@ export class SettingsController {
             ? data.youtubeVerification
             : data.twitchVerification,
         );
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } catch (e) {
       if (resultEl) {
         resultEl.textContent = e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } finally {
       if (btn) { btn.loading = false; btn.disabled = false; }

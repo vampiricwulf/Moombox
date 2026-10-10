@@ -98,7 +98,7 @@ func (d *SegmentDownloader) ensureHlsInit(ctx context.Context, mapURI string) er
 	}
 	n, werr := d.outputFile.Write(data)
 	if werr != nil {
-		return fmt.Errorf("%w: %v", errHlsInitWrite, werr)
+		return fmt.Errorf("%w: %w: %v", ErrLocalWrite, errHlsInitWrite, werr)
 	}
 	d.bytesWritten.Add(int64(n))
 	d.hlsInitWritten = true
@@ -122,6 +122,7 @@ func (d *SegmentDownloader) waitOnline(ctx context.Context) error {
 		return err
 	}
 	d.lastSegTime.StoreNow()
+	d.hlsOutages++
 	return nil
 }
 
@@ -250,6 +251,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// stream actually ended, or advance past the segment if not.
 	stuckSeq := int64(-1)
 	stuckSeqRetries := 0
+	stuckOutages := 0 // d.hlsOutages when stuckSeq's count began
 	// lastSavedSeq tracks the currentSeq at the last resume-state save so the
 	// per-iteration save can skip no-progress refreshes (see below). -1 forces
 	// the first save.
@@ -311,7 +313,13 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 			d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
 				"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
-			d.streamEnded.Store(true)
+			// Not a confirmed end, so streamEnded stays unset and the loop's
+			// exit keeps the resume sidecar — the DASH backstop's rule
+			// (downloader_dash.go). The worker re-verifies after this return,
+			// and when YouTube still says live it refreshes the capture, which
+			// must resume from the sidecar: cleared here, the fresh downloader
+			// met the staged media with no sidecar, refused to start over it
+			// (ErrStagedMediaPresent), and the job ended in Error.
 			return nil
 		}
 
@@ -574,15 +582,32 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 							"url_prefix", truncateURL(newURL, 120))
 					}
 				}
+				// A failure while the device is offline says nothing about the
+				// segment: wait the outage out and retry it then. Charged to
+				// the stuck count instead, a network that dropped a few times
+				// skipped a segment a VOD can never fetch again.
+				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.emitActivity(ActivityReconnecting)
+					d.logger.Warn("segment fetch failed while device offline, waiting for connectivity",
+						"seq", d.currentSeq.Load())
+					if err := d.waitOnline(ctx); err != nil {
+						return err
+					}
+					segFailed = true
+					break
+				}
 				// Track repeated failures of the same sequence so we can
 				// escalate when a permanently-unavailable segment is
-				// stuck in the playlist.
+				// stuck in the playlist. The count restarts after an
+				// outage (see hlsOutages): a failure the playlist path
+				// caught offline is not one the segment earned.
 				curSeqNow := d.currentSeq.Load()
-				if curSeqNow == stuckSeq {
+				if curSeqNow == stuckSeq && stuckOutages == d.hlsOutages {
 					stuckSeqRetries++
 				} else {
 					stuckSeq = curSeqNow
 					stuckSeqRetries = 1
+					stuckOutages = d.hlsOutages
 				}
 				// Don't skip -- break to re-fetch playlist and retry.
 				// If CDN purged it, gap detection handles it next iteration.
@@ -703,11 +728,17 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			hlsSeq := int(d.currentSeq.Load())
 			n, writeErr := d.outputFile.Write(segData)
 			if writeErr != nil {
-				return fmt.Errorf("write HLS segment %d: %w", hlsSeq, writeErr)
+				return fmt.Errorf("%w: write HLS segment %d: %w", ErrLocalWrite, hlsSeq, writeErr)
 			}
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
 			d.lastSegTime.StoreNow()
+			if d.reportFirstSegment {
+				d.reportFirstSegment = false
+				if d.opts.OnFirstSegment != nil {
+					d.opts.OnFirstSegment(seg.ProgramDateTime)
+				}
+			}
 
 			if d.OnProgress != nil {
 				// Seq reports the just-WRITTEN sequence — the same convention
@@ -943,9 +974,18 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 					rb.markFailed(item.idx)
 					continue // drain channel
 				}
+				data := fetchItem(item)
+				if data == nil && (d.isCancelled() || ctx.Err() != nil) {
+					// A fetch cut short by cancellation is not a gap: a
+					// sentinel here would advance currentSeq past a segment
+					// nobody found missing, and the resume would skip it
+					// for good. Treat it like the teardown drain above.
+					rb.markFailed(item.idx)
+					continue
+				}
 				// admit blocks while the buffer is full and this is not the
 				// head segment; a false return means the consumer is gone.
-				if !rb.admit(item.idx, fetchItem(item)) {
+				if !rb.admit(item.idx, data) {
 					return
 				}
 				select {
@@ -1051,7 +1091,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 			n, err := d.outputFile.Write(data)
 			if err != nil {
-				return fmt.Errorf("write HLS VOD segment %d: %w", nextIdx, err)
+				return fmt.Errorf("%w: write HLS VOD segment %d: %w", ErrLocalWrite, nextIdx, err)
 			}
 			d.bytesWritten.Add(int64(n))
 			// Seq reports the just-WRITTEN sequence — the same last-written
@@ -1083,17 +1123,22 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	// Close a gap still open at consumer exit. nextIdx-1 is the last flushed
 	// index — equal to totalSegs-1 after full consumption (every index emits a
 	// result, so the flush loop drains to totalSegs), but the honest bound on
-	// early exit via cancellation: drained workers emit nothing, and closing at
-	// totalSegs-1 would record the entire unflushed remainder as a gap even
-	// though those segments were never determined missing.
+	// early exit via cancellation: drained workers, and workers whose fetch
+	// the cancellation cut short, emit nothing, and closing at totalSegs-1
+	// would record the entire unflushed remainder as a gap even though those
+	// segments were never determined missing.
 	closeGap(nextIdx - 1)
+
+	// Cancelled: currentSeq is the first segment not written, and
+	// runHlsLoop's deferred save records it as the resume point.
+	if err := d.cancelErr(ctx); err != nil {
+		return err
+	}
 
 	// The whole VOD playlist has been consumed — natural end. Mark ended so
 	// runHlsLoop's deferred ClearResume removes the sidecar (see the ENDLIST
 	// path above).
-	if !d.isCancelled() && ctx.Err() == nil {
-		d.streamEnded.Store(true)
-	}
+	d.streamEnded.Store(true)
 	d.saveResume()
 	return nil
 }

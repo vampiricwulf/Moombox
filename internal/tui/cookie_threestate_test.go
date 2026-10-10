@@ -235,8 +235,7 @@ func TestParkedJobsEscalateOnlyTheirOwnPlatform(t *testing.T) {
 
 // TestParkedJobWithNoPlatformEscalatesYouTube pins the decision made for
 // Job.Platform == "", which is a real stored value and not a hypothetical:
-// pre-Twitch rows carry it, and ImportFromJSON (database_jobs.go:905) has
-// always backfilled exactly "youtube" when it meets one.
+// pre-Twitch rows carry it, and every one of them was a YouTube job.
 //
 // Of the three candidate rules — redden both, redden neither, redden YouTube —
 // only this one both keeps the alert and refrains from asserting a Twitch

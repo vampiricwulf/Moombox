@@ -387,15 +387,18 @@ func (l *warnChanLogger) Warn(msg string, args ...any) {
 // The ruling, clause by clause: exactly ONE AcquireLifecycleSlot call in the
 // package's non-test sources; it is inside processJob; it comes AFTER the
 // `if !result.ShouldDownload` decline block (a declined job never touches the
-// count) and BEFORE acquireDownloadSlot (the slot covers the download and
-// nothing else takes it first); and processJob's deferred queue.Complete — the
-// release that every exit path after the take runs through — is registered
-// before it.
+// count), AFTER acquireDownloadSlot (a VOD queueing for the download pool must
+// not hold a lifecycle slot while it waits — enough of them starved the live
+// broadcasts, which skip that pool, of slots) and BEFORE the platform
+// orchestrators start downloading; and processJob's deferred queue.Complete —
+// the release that every exit path after the take runs through — is
+// registered before it.
 //
 // Mutants:
 //   - moving the take above the decline block: the "before the decline" arm
 //     fires, and a declined job is back to holding a slot it never uses.
-//   - moving it below acquireDownloadSlot: the ordering arm fires.
+//   - moving it above acquireDownloadSlot, or below the Execute calls: the
+//     ordering arms fire.
 //   - adding a second take site anywhere in the package: the count arm fires,
 //     so no second claim can appear without a decision about its release.
 //   - deleting the deferred Complete, or registering it after the take: the
@@ -457,10 +460,21 @@ func TestLifecycleSlotTakenOnceAfterShouldDownload(t *testing.T) {
 	if len(dl) != 1 {
 		t.Fatalf("acquireDownloadSlot call sites inside processJob = %d, want 1", len(dl))
 	}
-	if take > dl[0] {
-		t.Errorf("AcquireLifecycleSlot at line %d runs after acquireDownloadSlot (line %d): the "+
-			"lifecycle slot must be claimed before any download work starts",
+	if take < dl[0] {
+		t.Errorf("AcquireLifecycleSlot at line %d runs before acquireDownloadSlot (line %d): a VOD "+
+			"would hold a lifecycle slot while it queues for the download pool",
 			fset.Position(take).Line, fset.Position(dl[0]).Line)
+	}
+	for _, exec := range []string{"ExecuteWithChat", "ExecuteTwitch"} {
+		calls := methodCallPositions(processJob, exec)
+		if len(calls) == 0 {
+			t.Fatalf("processJob no longer calls %s", exec)
+		}
+		if take > calls[0] {
+			t.Errorf("AcquireLifecycleSlot at line %d runs after %s (line %d): the lifecycle slot "+
+				"must be claimed before the download starts",
+				fset.Position(take).Line, exec, fset.Position(calls[0]).Line)
+		}
 	}
 
 	completeDefer := deferredCallPos(processJob, "Complete")

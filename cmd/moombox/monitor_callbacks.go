@@ -12,7 +12,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/jobfilter"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
@@ -81,33 +80,10 @@ func sweepShouldResume(job *database.Job, platform, currentIdentity string) bool
 // how many were resumed. Split out of the callback closures so the decision
 // and the database loop it actually drives can both be tested directly.
 //
-// THE TARGET STATUS DEPENDS ON queue_priority, and getting it wrong breaks the
-// pacing in one direction or strands a job in the other:
-//
-//   - priority 1 (backlog) resumes to Queued and the scheduler is woken. It is
-//     the only path out of Queued, so it re-admits these archive_slots at a
-//     time. Sending them to Upcoming instead — what this did before — handed
-//     the whole of a channel's parked backlog to the worker's heartbeat poller
-//     at once, bypassed archive-slots entirely, and left CountBacklogInFlight
-//     over-counting until they drained.
-//   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
-//     scheduler never admits a priority-0 row, so Queued would strand it.
-//   - priority 1 with NO feed_items partner also resumes to Upcoming — the
-//     pre-MON-4 path — because Queued would strand it just as surely.
-//     CancelAndPrune (channel REMOVAL) deletes the channel's never-started
-//     jobs and then its feed_items rows, but deliberately leaves a RUNNING
-//     download alone; a backlog VOD that was Downloading at that moment
-//     therefore survives with no partner, and it is exactly the row that
-//     parks in COOKIES? later. NextQueuedJobs INNER-JOINs feed_items, so the
-//     scheduler would never return it on any sweep, /retry and /resume both
-//     refuse Queued, and ShouldProcess(Queued) is false — the row would be
-//     lost permanently and silently. Pacing is not a property worth having
-//     for a channel that no longer exists.
-//
-// The partner check is the EXISTING GetFeedItem read (nil, nil for no row) —
-// no new query, no schema change, no UpdateJobFields change. A read that
-// ERRORS resumes to Upcoming too: the cheap answer is the one that can still
-// finish the download.
+// THE TARGET STATUS DEPENDS ON queue_priority: worker.CookieResumeStatus
+// holds the rule and why, shared with the worker's own in-process refresh so
+// the two cannot drift. A backlog row resumed to Queued waits for the
+// scheduler, which is why the sweep wakes it.
 //
 // wake is the scheduler's Wake (production: runState.schedulerWake). Called
 // once, after the loop, and only when something was resumed: Wake coalesces
@@ -130,23 +106,21 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 		if !sweepShouldResume(job, platform, currentIdentity) {
 			continue
 		}
-		status := database.StatusUpcoming
-		if job.QueuePriority == 1 && job.ChannelID != nil {
-			it, err := db.GetFeedItem(*job.ChannelID, job.VideoID)
-			switch {
-			case err != nil:
-				log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
-					"job", job.ID, "platform", platform, "err", err)
-			case it != nil:
-				status = database.StatusQueued
-			}
-		}
-		db.UpdateJobFields(job.ID, map[string]any{
+		status := worker.CookieResumeStatus(job)
+		// Only while the row is still parked: GetAllJobs read it COOKIES?,
+		// and an operator's Cancel can land before this write — which,
+		// written unconditionally, turned the Cancelled row back into a
+		// download.
+		if !db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
 			"status":        status,
 			"error":         "",
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
-		})
+		}) {
+			log.Debug("cookie-parked sweep: the job left COOKIES? before its resume; leaving it",
+				"job", job.ID, "platform", platform)
+			continue
+		}
 		resumed++
 	}
 	// Outside the loop and outside any lock the caller holds: one signal is
@@ -369,6 +343,17 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 	// they failed and which this transition therefore cannot fix.
 	s.cookieRefresh.OnAuthRecovered = func(platform string) {
 		reauth(platform)
+		// The re-login flag's own clearers — a browser refresh, setup, an
+		// import — never see a recovery made here: a cookies.txt replaced by
+		// hand, as the failure notification suggests, or a transient
+		// signed-out reading that healed. Both dashboards rank the flag above
+		// "Authenticated", so they kept showing "Re-login required" until a
+		// restart. OnAuthChange has already pushed the badges with the flag
+		// still up, so the TUI's are sent again.
+		if s.autoCookieSvc != nil && s.autoCookieSvc.ClearManualRelogin(platform) {
+			s.log.Info("auth recovered — cleared the re-login flag", "platform", platform)
+			s.resendTUICookieStatus()
+		}
 		// A YouTube session that has just come back from not-authenticated
 		// may have left non-member memos behind, and each one suppresses the
 		// only path by which members-only content is discovered at all. The
@@ -400,9 +385,12 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			if resumed == 0 {
 				desc = fmt.Sprintf(authRecoveredNoParkedBody, platform)
 			}
-			// Event "auth" pairs with the worker's "Authentication Required"
-			// emit — an empty Event would bypass every target's allowlist
-			// (unfilterable) since the filter only applies when Event != "".
+			// Event "auth_recovered" is the close of the worker's
+			// "Authentication Required" (event "auth"), aliased to it so an
+			// "auth" filter still delivers it, but not pinged through auth's
+			// mention — an all-clear asks nothing of anyone. Never empty: an
+			// empty Event would bypass every target's allowlist (unfilterable)
+			// since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
 				desc,
 				notifications.TypeInfo,
@@ -410,7 +398,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 					{Name: "Platform", Value: platform, Inline: true},
 					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
 				},
-				notifications.SendOptions{Event: "auth"},
+				notifications.SendOptions{Event: "auth_recovered"},
 			)
 		}
 	}
@@ -474,8 +462,9 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			// and a login name rather than a Google account, and the old
 			// wording would have been simply wrong there.
 			//
-			// Same "auth" event as the recovery notification above, for the
-			// same reason: an empty Event bypasses every target's allowlist.
+			// Same "auth_recovered" event as the recovery notification above,
+			// for the same reasons: a re-evaluation is no alarm, and an empty
+			// Event bypasses every target's allowlist.
 			s.notifyMgr.Send("Parked Jobs Re-evaluated",
 				fmt.Sprintf(credentialsObservedResumedBody, resumed, platform),
 				notifications.TypeInfo,
@@ -483,7 +472,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 					{Name: "Platform", Value: platform, Inline: true},
 					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
 				},
-				notifications.SendOptions{Event: "auth"},
+				notifications.SendOptions{Event: "auth_recovered"},
 			)
 		}
 	}
@@ -532,6 +521,15 @@ func siblingReachable(siblings []channelHealthReporter, channelID string, now ti
 // it does not know that the alert was suppressed because a sibling monitor
 // still reaches the channel. Closing a suppressed streak would announce a
 // recovery from an incident the operator was never told about.
+//
+// incidents is that set, shared by every monitor covering the platform's
+// channels. The alert says NO monitor reaches the channel, so it is one
+// incident per channel, not one per monitor: with a set each, a real YouTube
+// outage — the feed and DECAPI both failing — sent two identical "Channel Not
+// Responding" embeds, and when DECAPI reached the channel again while RSS
+// kept failing, only DECAPI's closed and the feed's stayed open for good. Now
+// the second monitor's alert finds the incident already announced, and the
+// first monitor to reach the channel closes it.
 func channelHealthNotifiers(
 	n notifications.Sender,
 	log interface {
@@ -541,10 +539,9 @@ func channelHealthNotifiers(
 		Error(msg string, args ...any)
 	},
 	platform string,
+	incidents *channelIncidents,
 	siblings ...channelHealthReporter,
 ) (func(channelID string, consecutive int, lastErr string), func(channelID string)) {
-	var mu sync.Mutex
-	sent := map[string]bool{}
 
 	unhealthy := func(channelID string, consecutive int, lastErr string) {
 		// Cross-monitor confirmation: a channel is only "not responding" if
@@ -559,9 +556,14 @@ func channelHealthNotifiers(
 		}
 		log.Warn("channel failing monitor checks — verify it still exists",
 			"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
-		mu.Lock()
-		sent[channelID] = true
-		mu.Unlock()
+		incidents.mu.Lock()
+		announced := incidents.sent[channelID]
+		incidents.sent[channelID] = true
+		incidents.mu.Unlock()
+		if announced {
+			return // another monitor already reported this channel's outage
+		}
+		incidents.persist(channelID)
 		n.Send("Channel Not Responding",
 			fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
 			notifications.TypeWarning,
@@ -575,13 +577,14 @@ func channelHealthNotifiers(
 	}
 
 	healthy := func(channelID string) {
-		mu.Lock()
-		fire := sent[channelID]
-		delete(sent, channelID)
-		mu.Unlock()
+		incidents.mu.Lock()
+		fire := incidents.sent[channelID]
+		delete(incidents.sent, channelID)
+		incidents.mu.Unlock()
 		if !fire {
 			return
 		}
+		incidents.persist(channelID)
 		log.Info("channel responding again", "platform", platform, "channel", channelID)
 		n.Send("Channel Responding Again",
 			fmt.Sprintf("A %s channel that stopped answering monitor checks is being reached again", platform),
@@ -595,6 +598,56 @@ func channelHealthNotifiers(
 	}
 
 	return unhealthy, healthy
+}
+
+// channelIncidents is the set of channels whose "Channel Not Responding" was
+// sent and not yet closed, shared by the monitors covering one platform
+// (channelHealthNotifiers).
+type channelIncidents struct {
+	mu   sync.Mutex
+	sent map[string]bool
+
+	// state and platform are where the set is persisted (restoreFrom), so an
+	// outage open across a restart still gets its channel_healthy. nil state
+	// = memory only.
+	state    *openAlerts
+	platform string
+}
+
+func newChannelIncidents() *channelIncidents {
+	return &channelIncidents{sent: map[string]bool{}}
+}
+
+// restoreFrom seeds the set with the platform's channels whose alert a
+// previous process sent and never closed, persists every later open and close
+// to st, and returns the restored channel IDs. The caller hands those to every
+// monitor covering the platform (RestoreUnhealthy), whose trackers only fire
+// the healthy callback after a streak they saw cross the threshold — without
+// that, the restored outage would never be closed.
+func (c *channelIncidents) restoreFrom(st *openAlerts, platform string) []string {
+	ids := st.snapshot().Channels[platform]
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state, c.platform = st, platform
+	for _, id := range ids {
+		c.sent[id] = true
+	}
+	return ids
+}
+
+// persist writes one channel's membership. It is read inside the store's own
+// lock, so two monitors racing an alert and a close for the same channel leave
+// the file holding whichever is current.
+func (c *channelIncidents) persist(channelID string) {
+	c.mu.Lock()
+	st := c.state
+	c.mu.Unlock()
+	st.update(func(d *openAlertsDoc) {
+		c.mu.Lock()
+		open := c.sent[channelID]
+		c.mu.Unlock()
+		d.setChannel(c.platform, channelID, open)
+	})
 }
 
 // resumeOnRedetect decides what a live re-detection of an EXISTING job does.
@@ -617,7 +670,24 @@ func resumeOnRedetect(existing *database.Job, disposition monitor.JobDisposition
 	if !stagingExists {
 		return false
 	}
-	return now.Sub(lastAutoResume) >= 5*time.Minute
+	return now.Sub(lastAutoResume) >= autoResumeCooldown
+}
+
+// autoResumeCooldown is the least time between two auto-resumes of one job
+// (resumeOnRedetect).
+const autoResumeCooldown = 5 * time.Minute
+
+// recordAutoResume notes an auto-resume of videoID at now, first dropping the
+// entries whose cooldown has run out: an expired entry decides nothing a
+// missing one would not, and the map is keyed by every job ever auto-resumed
+// for the life of the process.
+func recordAutoResume(last map[string]time.Time, videoID string, now time.Time) {
+	for id, at := range last {
+		if now.Sub(at) >= autoResumeCooldown {
+			delete(last, id)
+		}
+	}
+	last[videoID] = now
 }
 
 // jobCreationForDisposition maps a monitor.JobDisposition to the created
@@ -642,6 +712,24 @@ func jobCreationForDisposition(d monitor.JobDisposition) (status database.JobSta
 		// Queued job would rest until the scheduler noticed it; a wrongly
 		// admitted job merely downloads early (today's behavior).
 		return database.StatusUpcoming, 0, true
+	}
+}
+
+// announcesJobFound reports whether creating a job for this disposition sends
+// the "Stream Found" notification. A backlog VOD does not: a deep backfill on
+// an include_non_live_content channel queues one per catalog VOD, and each
+// already announces itself with "YouTube Download Starting" when the
+// archive-slots scheduler admits it (orchestrator.go sends it on every
+// ExecuteWithChat entry) — paced, where the queueing is a burst.
+func announcesJobFound(d monitor.JobDisposition) bool {
+	return d != monitor.DispositionBacklogVOD
+}
+
+// announceYouTubeJobFound is createYouTubeJob's "Stream Found" for the job it
+// just created, held back for a disposition announcesJobFound excludes.
+func announceYouTubeJobFound(n notifications.Notifier, job *database.Job, d monitor.JobDisposition) {
+	if announcesJobFound(d) && n.HasTargets() {
+		notifyStreamFound(n, job, "", "")
 	}
 }
 
@@ -699,8 +787,33 @@ type authFailureNotifier func(platform, title, desc string, ntype notifications.
 // family — the loudest thing Moombox sends — and no close at all. This map is
 // the only record of whether the operator was ever told, so the close reads it.
 func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, func(platform string) bool) {
+	return withPersistedAuthFailureCooldown(send, nil)
+}
+
+// withPersistedAuthFailureCooldown is withAuthFailureCooldown with the stamp
+// map persisted to st: seeded from the failures a previous process announced
+// and never closed — each keeping the time it was sent, so the cooldown runs
+// on across the restart — and written on every stamp and every close. The
+// close itself needs the cookie refresh service told about the same platforms
+// (RefreshService.SetUnrecoveredPlatforms), because the not-authenticated →
+// authenticated transition it rides happened, if at all, before this process
+// could see it. A nil st is the memory-only original.
+func withPersistedAuthFailureCooldown(send authFailureNotifier, st *openAlerts) (authFailureNotifier, func(platform string) bool) {
 	var mu sync.Mutex
 	last := make(map[string]time.Time)
+	for platform, at := range st.snapshot().Auth {
+		last[platform] = at
+	}
+	// persist writes one platform's stamp, read inside the store's lock so a
+	// stamp and a close racing for the same platform leave the current one.
+	persist := func(platform string) {
+		st.update(func(d *openAlertsDoc) {
+			mu.Lock()
+			at := last[platform]
+			mu.Unlock()
+			d.setAuth(platform, at)
+		})
+	}
 	notify := func(platform, title, desc string, ntype notifications.NotificationType) {
 		mu.Lock()
 		if time.Since(last[platform]) < 30*time.Minute {
@@ -709,10 +822,12 @@ func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, fun
 		}
 		last[platform] = time.Now()
 		mu.Unlock()
+		persist(platform)
 		send(platform, title, desc, ntype)
 	}
-	// A non-zero stamp means a failure was ANNOUNCED for this platform in this
-	// process. The close CONSUMES it: one close per failure episode, and the
+	// A non-zero stamp means a failure was ANNOUNCED for this platform — in
+	// this process, or in an earlier one whose close never came (the stamps
+	// seeded from st). The close CONSUMES it: one close per failure episode, and the
 	// next failure after a close is a new episode that announces at once
 	// rather than sitting inside the old one's cooldown. Clearing the stamp
 	// (rather than keeping a separate "already closed" bool) is what makes
@@ -720,11 +835,13 @@ func withAuthFailureCooldown(send authFailureNotifier) (authFailureNotifier, fun
 	// repeats INSIDE an episode, and a recovery ends the episode.
 	wasNotified := func(platform string) bool {
 		mu.Lock()
-		defer mu.Unlock()
 		if last[platform].IsZero() {
+			mu.Unlock()
 			return false
 		}
 		delete(last, platform)
+		mu.Unlock()
+		persist(platform)
 		return true
 	}
 	return notify, wasNotified
@@ -807,9 +924,10 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	// re-check cannot delay the line that tells the operator what happened.
 	//
 	// Gated on Ran, which is an OVER-approximation and deliberately so. Ran is
-	// false at all seven refreshDeclined() exits — setup in progress, a refresh
-	// already in flight, nothing configured, the service stopped — where
-	// nothing was written and there is nothing to re-read. It is true at the
+	// false at all eight refreshDeclined() exits — setup in progress, a refresh
+	// already in flight, nothing configured, the service stopped, a profile
+	// another browser holds — where nothing was written and there is nothing
+	// to re-read. It is true at the
 	// FIVE aborts that failed before the write as well as at the three that
 	// failed after it: an empty profile import, a browser refresh that errored,
 	// a failed MkdirAll, the S9 read abort, and the write itself failing. Each
@@ -853,6 +971,32 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 					"readable by the account Moombox runs as (in a container, confirm the volume actually mounted). Do not replace cookies.txt "+
 					"over this — Moombox will retry automatically once it can read the file again.",
 					s.cookieFilePath(), platform),
+				notifications.TypeError)
+			return
+		}
+		// A profile another browser holds is a SKIP that says why, not a
+		// failure: the pass declined and launched nothing. The generic copy
+		// below called it "failed" and named replacing the cookies as the
+		// only way out, while the sentence names the host to close the
+		// browser on and the lock to delete, after which the next pass runs.
+		// Warn, as the disabled branch's "nothing was attempted" is.
+		//
+		// Everything else about the generic arm holds here and is kept: the
+		// verdict that fired this was conclusive, so the session IS dead and
+		// recordings that need it will fail until a pass can run or the
+		// cookies are replaced — which is why this still raises the re-login
+		// flag and still notifies at Error, the disabled branch's level for
+		// the same "nothing will restore it on its own".
+		if errors.Is(err, cookies.ErrProfileInUse) {
+			s.log.Warn("auto-cookie recovery skipped — a browser holds the profile",
+				"platform", platform, "reason", err)
+			if s.autoCookieSvc != nil {
+				s.autoCookieSvc.FlagManualRelogin(platform)
+			}
+			notify(platform, "Cookie Auto-Refresh Skipped",
+				fmt.Sprintf("Moombox is not authenticated to %s, and the automatic cookie refresh that would restore it "+
+					"was skipped: %s. Recordings that need an account will fail until that refresh can run or the "+
+					"cookies are replaced. "+cookieReplacementGuidance, platform, err.Error(), s.cookieFilePath()),
 				notifications.TypeError)
 			return
 		}
@@ -1154,6 +1298,50 @@ func membershipConfirmedNonMember(verdict youtube.SessionAuthState, hasAccess bo
 	return verdict == youtube.SessionAuthLoggedIn && !hasAccess
 }
 
+// newTwitchStreamJob is the row the Twitch monitor creates for a broadcast it
+// found on a configured channel: immediately Live (GQL just confirmed it), and
+// carrying the channel's quality_preference — "best" when the channel names
+// none — as its own: the one preference every Twitch variant selection reads,
+// never overwritten. twitch_quality is left empty: it names the variant the
+// capture records (D-T9), and nothing is recording yet.
+func newTwitchStreamJob(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, outputDir string, now time.Time) *database.Job {
+	stamp := now.UTC().Format(time.RFC3339)
+	title := info.ChannelDisplayName + " — " + info.Title
+	if info.Title == "" {
+		title = info.ChannelDisplayName + " — " + stamp
+	}
+	return &database.Job{
+		ID:                twitch.BuildJobID(info.StreamID, false),
+		VideoID:           info.StreamID,
+		URL:               "https://twitch.tv/" + info.ChannelLogin,
+		Title:             title,
+		ChannelName:       info.ChannelDisplayName,
+		Platform:          "twitch",
+		Status:            database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
+		ThumbnailURL:      info.ThumbnailURL,
+		ChannelAvatarURL:  info.ProfileImageURL,
+		TwitchCategory:    info.GameCategory,
+		QualityPreference: worker.TwitchJobQualityPreference(ch.QualityPreference),
+		StreamStartTime:   info.StartedAt,
+		OutputDirectory:   outputDir,
+		CreatedAt:         stamp,
+		UpdatedAt:         stamp,
+	}
+}
+
+// trimStatusFrames is the trim service's event hook: each worker.TrimEvent
+// goes out as one trim_status frame, the payload exactly the event (its id,
+// jobId, range, progress and state, then the record or the reason). A
+// function of its own so the frame's name is pinned without a dialled
+// socket (trim_status_test.go).
+func trimStatusFrames(hub interface {
+	Broadcast(msgType string, payload any)
+}) func(worker.TrimEvent) {
+	return func(ev worker.TrimEvent) {
+		hub.Broadcast("trim_status", ev)
+	}
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -1164,12 +1352,12 @@ func membershipConfirmedNonMember(verdict youtube.SessionAuthState, hasAccess bo
 //
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
-	notifyAuthFailure, authFailureAnnounced := withAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
+	notifyAuthFailure, authFailureAnnounced := withPersistedAuthFailureCooldown(func(platform, title, desc string, ntype notifications.NotificationType) {
 		s.notifyMgr.Send(title, desc, ntype,
 			[]notifications.Field{{Name: "Platform", Value: platform, Inline: true}},
 			notifications.SendOptions{Event: "auth"},
 		)
-	})
+	}, s.openAlerts)
 
 	// Cooldown for auto-resume on broadcast re-detection: a restarted
 	// broadcast can be re-detected on every monitor cycle (as often as
@@ -1229,7 +1417,6 @@ func (s *runState) wireMonitorCallbacks() {
 		return &monitor.VideoProbeResult{
 			StreamStatus:       string(meta.StreamStatus),
 			Title:              meta.Title,
-			ChannelName:        meta.ChannelName,
 			PublishedAt:        meta.PublishedAt,
 			PublishedPrecision: meta.PublishedPrecision,
 			PlayabilityError:   string(meta.PlayabilityError),
@@ -1240,8 +1427,9 @@ func (s *runState) wireMonitorCallbacks() {
 
 	// Date-completing fetch for the two-phase probe (§9): the ANDROID_VR/TV
 	// status probes carry no microformat, so vod-family results arrive
-	// dateless; both monitors call this (one anonymous WEB player fetch)
-	// when a date is actually needed for a window decision.
+	// dateless; both monitors call this (one WEB player fetch carrying the
+	// jar's credentials) when a date is actually needed for a window
+	// decision.
 	probeDateFunc := func(ctx context.Context, videoID string) (string, string, error) {
 		return s.ytService.ProbeVideoDate(ctx, videoID)
 	}
@@ -1261,7 +1449,6 @@ func (s *runState) wireMonitorCallbacks() {
 		return &monitor.VideoProbeResult{
 			StreamStatus:       string(meta.StreamStatus),
 			Title:              meta.Title,
-			ChannelName:        meta.ChannelName,
 			PublishedAt:        meta.PublishedAt,
 			PublishedPrecision: meta.PublishedPrecision,
 			PlayabilityError:   string(meta.PlayabilityError),
@@ -1326,13 +1513,13 @@ func (s *runState) wireMonitorCallbacks() {
 		// the verdict it now returns is unreachable.
 		//
 		// This value reaches FOUR consumers via membershipActive()
-		// (internal/monitor/feed.go:645). Widening was checked against all
-		// four, not just the first:
+		// (internal/monitor/feed.go). Widening was checked against all four,
+		// not just the first:
 		//
-		//	feed.go:513     the discovery arm — upserts only videos it finds
-		//	walk.go:90      skips membership-source rows when inactive
-		//	walk.go:247     same-cycle escalation to the authed probe
-		//	archive.go:131  skips membership-source rows when inactive
+		//	feed.go checkChannel   the discovery arm — upserts only videos it finds
+		//	walk.go walk           skips membership-source rows when inactive
+		//	walk.go probeRow       same-cycle escalation to the authed probe
+		//	archive.go archive     skips membership-source rows when inactive
 		//
 		// None writes durable state for a dead session: a refusal is
 		// OutcomeDenied, applyProbe runs only on OutcomeProbed, and archive's
@@ -1344,11 +1531,11 @@ func (s *runState) wireMonitorCallbacks() {
 		// There IS a real cost, in two parts, and the second is the larger.
 		//
 		// Per membership ROW: with a half-cleared session those rows are no
-		// longer parked at walk.go:90 / archive.go:131, so each burns one
-		// refused authenticated probe per cycle, and walk.go:247's same-cycle
+		// longer parked by walk's and archive's gates, so each burns one
+		// refused authenticated probe per cycle, and probeRow's same-cycle
 		// escalation fires too.
 		//
-		// Per membership CHANNEL: the discovery arm at feed.go:513 now also runs,
+		// Per membership CHANNEL: checkChannel's discovery arm now also runs,
 		// so every feed cycle pays a full authenticated /channel/<id>/membership
 		// page fetch and parse — the ~1MB payload FetchMembershipVideos
 		// describes, capped by utils.MaxFetchBodySize at 50MB
@@ -1364,11 +1551,25 @@ func (s *runState) wireMonitorCallbacks() {
 		return enabled && s.ytService.HasAnyAuthCookie()
 	}
 
+	// channelMonitored asks the live config whether a channel is still
+	// configured and enabled — the backfill worker's own check.
+	channelMonitored := liveChannelEnabled(s.configStore)
+
 	// createYouTubeJob creates a YouTube job per the disposition's creation
 	// semantics (spec §10's creator table, via jobCreationForDisposition).
 	// Stream-status classification is handled by the monitors via
 	// ProcessYouTubeVideo.
 	createYouTubeJob := func(videoID, title, videoURL string, ch *config.ChannelConfig, source string, d monitor.JobDisposition) {
+		// A monitor cycle takes its channel list as it starts, so a channel
+		// removed or disabled since can still reach here until the cycle
+		// ends — and a removal that deleted the channel's pending jobs had
+		// them created again, history and all, by the cycle already under
+		// way (W25-09). The live config decides instead.
+		if ch.ID != "" && !channelMonitored(ch.ID) {
+			s.log.Info("Video found for a channel no longer monitored; no job created",
+				slog.String("source", source), slog.String("videoID", videoID), slog.String("channel", ch.ID))
+			return
+		}
 		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID),
 			slog.String("title", title), slog.String("disposition", d.String()))
 
@@ -1446,9 +1647,10 @@ func (s *runState) wireMonitorCallbacks() {
 			}
 
 			resumeMu.Lock()
-			shouldResume := resumeOnRedetect(existing, d, stagingExists, lastAutoResume[videoID], time.Now())
+			resumeAt := time.Now()
+			shouldResume := resumeOnRedetect(existing, d, stagingExists, lastAutoResume[videoID], resumeAt)
 			if shouldResume {
-				lastAutoResume[videoID] = time.Now()
+				recordAutoResume(lastAutoResume, videoID, resumeAt)
 			}
 			resumeMu.Unlock()
 			if !shouldResume {
@@ -1474,6 +1676,11 @@ func (s *runState) wireMonitorCallbacks() {
 		// History fires for EVERY disposition — it is what makes
 		// HasProcessed mean "a job was created" (spec §10/§15).
 		s.db.AddToHistory(videoID)
+		// Announced BEFORE the worker is handed the job: each target delivers
+		// in queue order, and an edit-mode target's "Found" queued behind the
+		// worker's first event would edit the message it created back to
+		// "Found" until the next event, possibly hours later.
+		announceYouTubeJobFound(s.notifyMgr, job, d)
 		if enqueueNow {
 			s.dlWorker.EnqueueJob(videoID)
 		} else {
@@ -1485,9 +1692,6 @@ func (s *runState) wireMonitorCallbacks() {
 		// AddJob's OnJobAdded handler (wired below) handles the WS
 		// broadcast for the new job; no explicit BroadcastJobsUpdate
 		// needed here. DECISIONS #21 consumer migration.
-		if s.notifyMgr.HasTargets() {
-			notifyStreamFound(s.notifyMgr, job, "", "")
-		}
 	}
 
 	// Monitor -> Worker: create jobs for found videos. Panic recovery
@@ -1519,32 +1723,7 @@ func (s *runState) wireMonitorCallbacks() {
 		jobID := twitch.BuildJobID(info.StreamID, false)
 		s.log.Info("Stream found by Twitch monitor", slog.String("jobID", jobID), slog.String("title", info.Title))
 
-		outputDir := resolveOutputDir(ch, s.configStore)
-
-		now := time.Now().UTC().Format(time.RFC3339)
-		title := info.ChannelDisplayName + " — " + info.Title
-		if info.Title == "" {
-			title = info.ChannelDisplayName + " — " + time.Now().UTC().Format(time.RFC3339)
-		}
-
-		job := &database.Job{
-			ID:                jobID,
-			VideoID:           info.StreamID,
-			URL:               "https://twitch.tv/" + info.ChannelLogin,
-			Title:             title,
-			ChannelName:       info.ChannelDisplayName,
-			Platform:          "twitch",
-			Status:            database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
-			ThumbnailURL:      info.ThumbnailURL,
-			ChannelAvatarURL:  info.ProfileImageURL,
-			TwitchCategory:    info.GameCategory,
-			TwitchQuality:     ch.QualityPreference,
-			QualityPreference: ch.QualityPreference,
-			StreamStartTime:   info.StartedAt,
-			OutputDirectory:   outputDir,
-			CreatedAt:         now,
-			UpdatedAt:         now,
-		}
+		job := newTwitchStreamJob(info, ch, resolveOutputDir(ch, s.configStore), time.Now())
 		added, err := s.db.AddJob(job)
 		if err != nil {
 			s.log.Error("Failed to add Twitch job", slog.String("error", err.Error()))
@@ -1561,13 +1740,14 @@ func (s *runState) wireMonitorCallbacks() {
 		// live, manifesting as a false "twitch channel is offline" error).
 		s.dlWorker.StashTwitchStreamInfo(info)
 		s.db.AddToHistory(jobID)
+		// Announced before the enqueue, as on the YouTube path.
+		if s.notifyMgr.HasTargets() {
+			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
+		}
 		s.dlWorker.EnqueueJob(jobID)
 		// Same as the YouTube path — AddJob's OnJobAdded handler
 		// broadcasts the new job; no explicit BroadcastJobsUpdate
 		// needed. DECISIONS #21 consumer migration.
-		if s.notifyMgr.HasTargets() {
-			notifyStreamFound(s.notifyMgr, job, "https://twitch.tv/"+info.ChannelLogin, info.GameCategory)
-		}
 	}
 
 	s.twitchMon.OnStreamRecover = func(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, jobID string) {
@@ -1591,6 +1771,20 @@ func (s *runState) wireMonitorCallbacks() {
 			slog.String("jobID", jobID),
 			slog.String("channel", info.ChannelDisplayName),
 			slog.String("streamID", info.StreamID))
+	}
+
+	// A live Twitch capture that failed with its broadcast's end unconfirmed
+	// kept its staging in Error; once the monitor sees that broadcast over,
+	// the worker confirms it and muxes the staging as the Mux action would,
+	// once (D-T4). Disjoint from OnStreamRecover by construction: that one
+	// fires for the SAME broadcast still live and a different error.
+	s.twitchMon.OnBroadcastOver = func(jobID string) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("Panic in OnBroadcastOver (twitch)", slog.Any("panic", r))
+			}
+		}()
+		s.dlWorker.AutoMuxEndedBroadcast(jobID)
 	}
 
 	// Backfill worker -> UIs: progress surfacing (spec §11), modeled on the
@@ -1673,27 +1867,36 @@ func (s *runState) wireMonitorCallbacks() {
 	// Channel-health notifications: a channel that fails every check for a
 	// sustained streak (renamed/banned Twitch login, dead YouTube channel,
 	// 404 RSS) previously rotted at Debug level until a stream was missed.
-	// One notification per streak, per monitor; the /api/status
-	// channelHealth surface shows the live state. platform label is set per
-	// monitor so the operator knows which source flagged it.
+	// One notification per channel outage — the YouTube monitors share it —
+	// and the /api/status channelHealth surface shows the live state per
+	// monitor.
 	//
 	// YouTube channels are covered by both the RSS feed and DECAPI monitors, so
 	// each cross-confirms against the other before alerting. Twitch has a single
 	// (reliable GQL) monitor with no sibling to confirm against.
 	//
-	// Each monitor gets its OWN pair, so each keeps its own `sent` set — which
-	// is right: the feed monitor losing a channel and DECAPI losing it are
-	// separate incidents with separate closes, exactly as the two alerts are
-	// separate today.
-	feedUnhealthy, feedHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", s.decapiMon)
+	// Each monitor gets its own pair, and the two YouTube monitors share one
+	// incident set: the alert says no monitor reaches the channel, which is one
+	// incident however many monitors observe it (channelHealthNotifiers).
+	//
+	// Each set is seeded with the outages a previous run left open, and so is
+	// every monitor that can close one: whichever reaches the channel first
+	// sends the close, as it would have without the restart.
+	youtubeIncidents := newChannelIncidents()
+	restoredYouTube := youtubeIncidents.restoreFrom(s.openAlerts, "youtube")
+	s.feedMon.RestoreUnhealthy(restoredYouTube)
+	s.decapiMon.RestoreUnhealthy(restoredYouTube)
+	feedUnhealthy, feedHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", youtubeIncidents, s.decapiMon)
 	s.feedMon.SetOnChannelUnhealthy(feedUnhealthy)
 	s.feedMon.SetOnChannelHealthy(feedHealthy)
 
-	decapiUnhealthy, decapiHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", s.feedMon)
+	decapiUnhealthy, decapiHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "youtube", youtubeIncidents, s.feedMon)
 	s.decapiMon.SetOnChannelUnhealthy(decapiUnhealthy)
 	s.decapiMon.SetOnChannelHealthy(decapiHealthy)
 
-	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch")
+	twitchIncidents := newChannelIncidents()
+	s.twitchMon.RestoreUnhealthy(twitchIncidents.restoreFrom(s.openAlerts, "twitch"))
+	twitchUnhealthy, twitchHealthy := channelHealthNotifiers(s.notifyMgr, s.log, "twitch", twitchIncidents)
 	s.twitchMon.SetOnChannelUnhealthy(twitchUnhealthy)
 	s.twitchMon.SetOnChannelHealthy(twitchHealthy)
 
@@ -1717,29 +1920,22 @@ func (s *runState) wireMonitorCallbacks() {
 	// UpdateJobFields caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
-		// Follow the job's status for per-job log routing (CORE-12). Ahead
-		// of the archive gate below, which returns early for exactly the
-		// rows that most need it.
+		// Follow the job's status for per-job log routing (CORE-12).
 		s.syncJobLogRoutingOnChange(ev)
-		// Skip broadcasting updates for archived (old finished) jobs — same
-		// classification as the list filter, via the shared
-		// jobfilter.IsArchivedAt predicate so the two can never disagree
-		// about which jobs are archived.
-		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
-			var hideAgeDays float64
-			s.configStore.Read(func(c *config.MoomboxConfig) {
-				hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
-			})
-			if jobfilter.IsArchivedAt(job, hideAgeDays, time.Now()) {
-				return
-			}
-		}
+		// No archive gate. One used to skip broadcasting rows the list
+		// classifies as archived, but every event here comes from
+		// UpdateJobFields, which stamps updated_at with the write time — so it
+		// could only ever fire at hide_finished_age_days = 0, where a row is
+		// archived the second it is written, and there it swallowed the
+		// Muxing → Finished transition itself: the dashboard kept a "Muxing"
+		// card until the next reconnect. The client archives a Finished row
+		// it is sent on its own (_evaluateArchiveBoundary).
 		// A tick that moved only progress columns is broadcast as the slim
 		// job_progress frame; everything else — every state transition,
 		// status included — stays on job_update, which the client handles
 		// exactly as before. The cadence is untouched: this makes each update
 		// cheaper, never rarer (WEB-5 / O-O).
-		if isProgressOnlyChange(ev.Changes) {
+		if database.IsProgressOnlyChange(ev.Changes) {
 			s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))
 			return
 		}
@@ -1775,6 +1971,16 @@ func (s *runState) wireMonitorCallbacks() {
 		s.wsHub.BroadcastJobUpdate(job)
 	})
 
+	// Trim service -> WebSocket: a dashboard trim runs detached from the
+	// request that started it, so its outcome reaches the page as
+	// trim_status frames (worker.TrimEvent: "running", then "finished" with
+	// the record or "failed" with a reason). A finish lands after the
+	// OnTrimsChanged job_update above — AddTrim notifies synchronously,
+	// before the service announces the trim.
+	if s.trimSvc != nil {
+		s.trimSvc.SetOnEvent(trimStatusFrames(s.wsHub))
+	}
+
 	// OnJobDeleted subscriber: send a targeted job_deleted WS event so the
 	// frontend drops the row immediately. This replaces the prior full-list
 	// rebroadcast (jobs_update) which raced against the preceding
@@ -1783,31 +1989,12 @@ func (s *runState) wireMonitorCallbacks() {
 		s.onJobDeleted(ev.JobID)
 	})
 
-	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
-		// Keep per-job log tracking in sync (matches TS knownJobIds update):
-		// live jobs routed, terminal ones dropped from the scan (CORE-12).
-		activeIDs := make(map[string]struct{}, len(jobs))
-		for _, j := range jobs {
-			activeIDs[j.ID] = struct{}{}
-		}
-		s.db.SyncJobLogTracking(jobs)
-		s.db.PruneJobLogs(activeIDs)
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
-	})
+	// OnJobsChange subscriber: the bulk writers' full-list refresh (see
+	// onJobsChange).
+	s.unsubWSJobsChange = s.db.OnJobsChange(s.onJobsChange)
 
-	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
-	s.logSub = s.log.Subscribe()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.log.Error("log forwarder panic", "panic", r)
-			}
-		}()
-		for line := range s.logSub {
-			s.wsHub.BroadcastLog(line)
-			s.db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
-		}
-	}()
+	// Logger -> per-job buffers + WebSocket.
+	s.wireLogForwarding()
 
 	// Connectivity -> monitors + WebSocket: kick monitors on reconnect,
 	// broadcast state — and notify. The web/TUI broadcasts are ephemeral;
@@ -1850,6 +2037,52 @@ func (s *runState) wireMonitorCallbacks() {
 			notifications.SendOptions{Event: "connectivity_restored"},
 		)
 	})
+}
+
+// wireLogForwarding sends every log line to the per-job buffers and to the
+// dashboards.
+//
+// The per-job half is the logger's line router, which runs INSIDE the log
+// call (logger.SetLineRouter), not a step of the forwarder below. The routed
+// set changes synchronously — a status write untracks a job that goes
+// terminal inside UpdateJobFields (syncJobLogRoutingOnChange) — so a line
+// routed later, on the forwarder's goroutine, was matched against a set that
+// had already moved on: setJobError logs "job error" and then writes
+// status=Error, and for 8 of 100 failed jobs the line missed the failed job's
+// own log, the one an operator opens next (W24-11). Routed in the log call, a
+// line logged before a status write is routed before it, and the bracket
+// cleanupStagingAfterMux and RecoverAsides put around their last lines holds.
+// Nor does it depend on the forwarder keeping up any more: a line the logger
+// drops for a slow subscriber still reaches its job.
+func (s *runState) wireLogForwarding() {
+	s.log.SetLineRouter(s.db.RouteLogToJobs)
+
+	// Logger -> WebSocket: broadcast log lines, each with its ring sequence
+	// number, which a dashboard compares with its snapshot's logSeq so a line
+	// both carry is shown once (BroadcastLog).
+	s.logSub = s.log.SubscribeLines()
+	s.logSubDone = make(chan struct{})
+	logSub, logSubDone := s.logSub, s.logSubDone
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("log forwarder panic", "panic", r)
+			}
+		}()
+		// Not `range logSub`: UnsubscribeLines never closes the channel (see
+		// Logger.Subscribe), so shutdown closes logSubDone after it.
+		for {
+			select {
+			case <-logSubDone:
+				return
+			case line, ok := <-logSub:
+				if !ok {
+					return
+				}
+				s.wsHub.BroadcastLog(line.Text, line.Seq)
+			}
+		}
+	}()
 }
 
 // syncJobLogRouting starts or stops per-job log routing for one job, by its
@@ -1896,7 +2129,9 @@ func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
 }
 
 // onJobDeleted is the OnJobDeleted subscriber's body: drop exactly the deleted
-// job's log buffer and tell the dashboards the row is gone.
+// job's log buffer, tell the dashboards the row is gone, and drop the
+// notification manager's edit-mode state for it — a re-added job with the
+// same id must open its own message, not edit the deleted one's.
 //
 // ClearJobLogs, not the activeIDs + PruneJobLogs walk this used to do. That old
 // walk read the whole jobs table per delete to answer a question it already
@@ -1907,6 +2142,36 @@ func (s *runState) syncJobLogRoutingOnChange(ev *database.JobChange) {
 func (s *runState) onJobDeleted(jobID string) {
 	s.db.ClearJobLogs(jobID)
 	s.wsHub.BroadcastJobDeleted(jobID)
+	if s.notifyMgr != nil {
+		s.notifyMgr.ForgetJob(jobID)
+	}
+}
+
+// onJobsChange is the OnJobsChange subscriber's body — onJobDeleted's twin for
+// the bulk writers, a method for the same reason: a test can drive it.
+func (s *runState) onJobsChange(jobs []*database.Job) {
+	// Per-job log routing is not touched here at all. Neither bulk writer
+	// writes a status, and every status write already re-routes its own job
+	// (syncJobLogRoutingOnChange): a SyncJobLogTracking over the whole list
+	// changed nothing it needed to, and untracked every terminal job — ending
+	// the routing RecoverAsides and cleanupStagingAfterMux hold open for a
+	// terminal job's last lines. The bulk delete drops its own rows' logs
+	// under db.mu (DeleteJobsAndHistoryForChannel), because this list is read
+	// at commit and arrives later: a prune of every id missing from it also
+	// dropped the routing of a job AddJob created in between.
+	//
+	// The bulk deletes (a departed channel's prune) fire only this event, so
+	// the notifier's edit-mode state for their jobs goes here, as onJobDeleted
+	// drops a single job's. RetainJobs is written for a list that may be older
+	// than a job added since (it never marks one dropping).
+	if s.notifyMgr != nil {
+		activeIDs := make(map[string]struct{}, len(jobs))
+		for _, j := range jobs {
+			activeIDs[j.ID] = struct{}{}
+		}
+		s.notifyMgr.RetainJobs(activeIDs)
+	}
+	s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 }
 
 // outageAlert builds the Outage Alert notification for a connectivity

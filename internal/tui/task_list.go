@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"slices"
@@ -12,7 +13,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
+	"golang.org/x/text/collate"
+	"golang.org/x/text/language"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobfilter"
@@ -113,6 +115,15 @@ func (d taskDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 
 // TaskListModel manages the job list panel.
 type TaskListModel struct {
+	// titleCollator and titleKeys order active rows by title the way the
+	// dashboard does (localeCompare, sensitivity "base"): case and accents
+	// ignored, so "école" sorts beside "ecole" rather than after "zebra" as
+	// a lowercased byte compare put it. Keys are cached per title because
+	// the list re-sorts on every progress tick. Both are touched only from
+	// rebuildVirtualList, on the update goroutine.
+	titleCollator *collate.Collator
+	titleKeys     map[string][]byte
+
 	jobs     []*database.Job
 	jobIndex map[string]int // job ID → index in jobs slice (O(1) lookup)
 	// virtualIndex maps job ID → position in the bubbles/list-level items
@@ -269,7 +280,10 @@ func (m *TaskListModel) refilterSelectTop() {
 // live typing, Esc, ClearSearch) goes through here so parse and rebuild
 // never fall out of step.
 func (m *TaskListModel) applyQuery(q string) {
-	m.queryText = strings.TrimSpace(q)
+	// Parse's own trim, not strings.TrimSpace: the two differ on U+0085,
+	// which JavaScript's trim keeps, and the box would otherwise hold a
+	// query the dashboard reads differently.
+	m.queryText = jobfilter.TrimQuery(q)
 	m.tokens = jobfilter.Parse(m.queryText)
 	m.refilterSelectTop()
 }
@@ -462,6 +476,15 @@ func (m *TaskListModel) rebuildJobIndex() {
 	for i, j := range m.jobs {
 		m.jobIndex[j.ID] = i
 	}
+	// A selected job that is gone leaves the selection too. Nothing pruned it,
+	// so a job deleted from the dashboard kept "1 selected" in the status bar
+	// with no ✓ row to show for it, and armed batch confirms for a ghost. The
+	// Web prunes its own selection on every list refresh.
+	for id := range m.selected {
+		if _, ok := m.jobIndex[id]; !ok {
+			delete(m.selected, id)
+		}
+	}
 }
 
 // GetJobByID returns a job by ID, or nil if not found.
@@ -618,6 +641,13 @@ func (m *TaskListModel) SelectAtOffset(y int) bool {
 	if perPage <= 0 {
 		return false
 	}
+	// The offset must be a row of THIS page. The panel's bottom border sits at
+	// offset perPage (and the search box, while open, takes that row instead),
+	// so without the bound a click on either resolved to the first row of the
+	// next page. Same bound the action menu applies to its clicks.
+	if y < 0 || y >= perPage {
+		return false
+	}
 	globalIdx := m.list.Paginator.Page*perPage + y
 	if globalIdx < 0 || globalIdx >= len(m.list.Items()) {
 		return false
@@ -691,7 +721,7 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 	}
 	// Include progress width for active jobs
 	progressText, _ := m.progressCellText(job)
-	progressTextWidth := runewidth.StringWidth(progressText)
+	progressTextWidth := ansi.StringWidth(progressText)
 	tw := max(contentW-selectorWidth-iconWidth-progressTextWidth-platformTagWidth-watchedW, 5)
 	return tw
 }
@@ -872,12 +902,26 @@ func (m *TaskListModel) rebuildVirtualList() {
 	m.archivedSet = make(map[string]bool, len(m.jobs))
 	for _, j := range m.jobs {
 		if !m.passes(j) {
+			// A job the filter hides leaves the selection: a batch action
+			// acts on what is on screen. Kept, a job ticked before the filter
+			// changed was still counted in the confirm and still deleted or
+			// cancelled by it. The Web prunes its selection the same way.
+			delete(m.selected, j.ID)
 			continue
 		}
 
 		if isJobArchived(j, cutoff) {
 			m.archivedSet[j.ID] = true
 			archived = append(archived, j)
+			// A collapsed archive hides its rows as surely as the filter
+			// does, so they leave the selection too. Kept, a row ticked while
+			// the archive was open — or one that aged into it while ticked —
+			// was counted in the next batch's confirm and deleted by it with
+			// no ✓ on screen. The Web keeps one selection per tab, so a
+			// Tasks batch never reaches an Archived row either.
+			if !m.archiveExpanded {
+				delete(m.selected, j.ID)
+			}
 			continue
 		}
 		m.archivedSet[j.ID] = false
@@ -905,15 +949,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 			}
 			return 0
 		}
-		la := strings.ToLower(a.Title)
-		lb := strings.ToLower(b.Title)
-		if la < lb {
-			return -1
-		}
-		if la > lb {
-			return 1
-		}
-		return 0
+		return bytes.Compare(m.titleSortKey(a.Title), m.titleSortKey(b.Title))
 	})
 
 	// Sort archived: newest first
@@ -1061,8 +1097,18 @@ func (m *TaskListModel) View() string {
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
 				DimStyle.Render("or A A to add a video.")
 		default:
-			listContent = DimStyle.Render("No tasks. Press A to add, or use Web UI.")
+			listContent = DimStyle.Render("No tasks. Press A A to add a video, or use the Web UI.")
 		}
+		// Rendered outside the list, which pads and clips itself to its
+		// rows; this block has to do both on its own. Wrapped at the panel
+		// width and cut at the rows the list would have had — with Logs
+		// focused the top row is a quarter of the screen, and the setup
+		// message alone used to push the panel's top border off it.
+		rows := m.contentHeight()
+		if m.searching {
+			rows = max(rows-1, 1)
+		}
+		listContent = lipgloss.NewStyle().Width(contentW).MaxHeight(rows).Render(listContent)
 	} else {
 		listContent = m.list.View()
 	}
@@ -1148,12 +1194,15 @@ func (m *TaskListModel) renderHeader(w int) string {
 	// Scroll range display
 	var scrollFull, scrollShort string
 	total := len(m.list.Items())
-	contentH := m.contentHeight()
-	if total > contentH {
-		perPage := m.list.Paginator.PerPage
-		if perPage <= 0 {
-			perPage = contentH
-		}
+	// Measured against the page the list actually shows: with the search
+	// box open it pages at one row less than contentHeight (applyListSize),
+	// and a list exactly one row longer than that lost its range indicator
+	// while the cursor sat on a second page.
+	perPage := m.list.Paginator.PerPage
+	if perPage <= 0 {
+		perPage = m.contentHeight()
+	}
+	if total > perPage {
 		start := m.list.Paginator.Page*perPage + 1
 		end := min(start+perPage-1, total)
 		scrollFull = fmt.Sprintf("[%d-%d/%d]", start, end, total)
@@ -1245,7 +1294,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	label := fmt.Sprintf("%s Archived (%d)", icon, count)
 
-	totalRule := max(maxW-runewidth.StringWidth(label)-6, 2)
+	totalRule := max(maxW-ansi.StringWidth(label)-6, 2)
 	ruleLeft := totalRule / 2
 	ruleRight := totalRule - ruleLeft // absorbs odd-width remainder
 
@@ -1263,7 +1312,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	// Pad line to full width BEFORE styling so the background color
 	// extends to the right edge when selected.
-	lineW := runewidth.StringWidth(line)
+	lineW := ansi.StringWidth(line)
 	if lineW < maxW {
 		line += strings.Repeat(" ", maxW-lineW)
 	}
@@ -1299,7 +1348,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 		title = truncateString(title, titleWidth)
 	}
 	// Pad title to fill remaining width (match TS padEndToWidth)
-	tw := runewidth.StringWidth(title)
+	tw := ansi.StringWidth(title)
 	if tw < titleWidth {
 		title += strings.Repeat(" ", titleWidth-tw)
 	}
@@ -1409,5 +1458,48 @@ func formatCountdown(d time.Duration) string {
 // but a future caller passing styled text now gets a correct line instead
 // of a corrupted one.
 func truncateString(s string, maxW int) string {
-	return ansi.Truncate(s, maxW, "…")
+	return truncateWidth(s, maxW, "…")
+}
+
+// truncateWidth is ansi.Truncate held to ansi.StringWidth's count — the count
+// the renderer draws with. The two disagree on keycap sequences ("1️⃣", "#️⃣"):
+// Truncate fits one in a single cell where StringWidth counts two, so a cut
+// keycap title came out a cell wider than asked and the row wrapped. The
+// limit is tightened until the result measures inside maxW; plain text, wide
+// runes and every other emoji are done on the first call.
+func truncateWidth(s string, maxW int, tail string) string {
+	out := ansi.Truncate(s, maxW, tail)
+	for limit := maxW - 1; limit >= 0 && ansi.StringWidth(out) > maxW; limit-- {
+		out = ansi.Truncate(s, limit, tail)
+	}
+	return out
+}
+
+// cutWidth is ansi.Cut held to the same count (see truncateWidth): the cells
+// [left, right) of s, never wider than right-left.
+func cutWidth(s string, left, right int) string {
+	out := ansi.Cut(s, left, right)
+	for r := right - 1; r > left && ansi.StringWidth(out) > right-left; r-- {
+		out = ansi.Cut(s, left, r)
+	}
+	return out
+}
+
+// titleSortKey is title's collation key (see titleCollator), cached. The cache
+// is dropped when it outgrows the jobs it serves several times over, so the
+// titles of deleted jobs do not pile up for the life of the process.
+func (m *TaskListModel) titleSortKey(title string) []byte {
+	if k, ok := m.titleKeys[title]; ok {
+		return k
+	}
+	if m.titleCollator == nil {
+		m.titleCollator = collate.New(language.Und, collate.IgnoreCase, collate.IgnoreDiacritics)
+	}
+	if m.titleKeys == nil || len(m.titleKeys) > 4*len(m.jobs)+64 {
+		m.titleKeys = make(map[string][]byte, len(m.jobs))
+	}
+	var buf collate.Buffer
+	k := slices.Clone(m.titleCollator.KeyFromString(&buf, title))
+	m.titleKeys[title] = k
+	return k
 }

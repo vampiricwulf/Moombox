@@ -76,6 +76,25 @@ test("status: finished is Finished only — Cancelled moved to issues", () => {
   assert.deepEqual(bucketWith("status:finished"), ["f"]);
 });
 
+// One job per status, so each bucket's membership is pinned status by status.
+// The shared `jobs` hold no Downloading or Queued row, so either could leave
+// the active bucket with every suite green — and backlog VODs wait in Queued,
+// which status:active (the Active chip here, F → Active in the TUI) must show.
+// internal/jobfilter's TestStatusBucketsHoldExactlyTheirStatuses is the Go
+// twin, and its TestStatusBucketsMatchTheDashboard runs this module against
+// Go's Match, so the twins cannot drift apart either.
+//
+// Mutants: "Queued" or "Downloading" dropped from STATUS_FILTER_MAP.active, or
+// any status moved between buckets.
+const STATUSES = ["Queued", "Upcoming", "Live", "Downloading", "Muxing", "Finished", "Error", "Cancelled", "COOKIES?"];
+const statusJobs = STATUSES.map(status => ({ id: status, title: "", channelName: "", status, platform: "youtube" }));
+test("each status bucket holds exactly its statuses, Queued in active", () => {
+  const ids = (query) => applyFilterTokens(statusJobs, parseFilterQuery(query)).map(j => j.id).sort();
+  assert.deepEqual(ids("status:active"), ["Downloading", "Live", "Muxing", "Queued", "Upcoming"]);
+  assert.deepEqual(ids("status:issues"), ["COOKIES?", "Cancelled", "Error"]);
+  assert.deepEqual(ids("status:finished"), ["Finished"]);
+});
+
 test("status: errors stays an alias of issues for hand-typed queries", () => {
   assert.deepEqual(bucketWith("status:errors"), bucketWith("status:issues"));
 });
@@ -102,4 +121,24 @@ test("negated namespaced filter", () => {
 
 test("unknown status value yields zero matches", () => {
   assert.deepEqual(filterWith("status:unknown"), []);
+});
+
+// A status: value is user text looked up in STATUS_FILTER_MAP. A plain
+// property read handed status:constructor / status:__proto__ an
+// Object.prototype member — not an array — so `allowed.includes` threw, and
+// because the filter bar stores the token before it renders, every later
+// render threw too and the list froze. The Go twin (internal/jobfilter)
+// returns no matches; so does this one now.
+test("status: an Object.prototype name matches nothing instead of throwing", () => {
+  for (const key of ["constructor", "__proto__", "hasOwnProperty", "toString"]) {
+    assert.deepEqual(filterWith(`status:${key}`), [], key);
+  }
+});
+
+test("status: a negated Object.prototype name keeps every job", () => {
+  assert.deepEqual(filterWith("-status:constructor"), ["1", "2", "3", "4", "5"]);
+});
+
+test("status: an Object.prototype name in an OR group leaves the other branch working", () => {
+  assert.deepEqual(filterWith("status:constructor|status:finished"), ["2"]);
 });

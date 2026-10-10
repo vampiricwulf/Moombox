@@ -120,7 +120,7 @@ func TestDpapiFallbackWarnIsGatedOnWindows(t *testing.T) {
 			if err := s.jar.Load(cookiePath); err != nil {
 				t.Fatal(err)
 			}
-			s.DpapiFallback = true
+			s.DpapiFallback = func() bool { return true }
 			s.VerifyYouTubeAuth = func(context.Context) (bool, error) { return false, nil }
 			s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 

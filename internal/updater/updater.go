@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -65,14 +66,16 @@ type logger = interface {
 
 // ReleaseInfo holds information about an available update.
 type ReleaseInfo struct {
-	Version          string `json:"version"`                // "2.0.16" (stripped "v" prefix)
-	TagName          string `json:"tagName"`                // "v2.0.16"
-	DownloadURL      string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
-	SignatureURL     string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
-	ReleaseNotes     string `json:"releaseNotes"`           // stripped raw markdown (for TUI glamour rendering)
-	ReleaseNotesHtml string `json:"releaseNotesHtml"`       // sanitized HTML (for web UI innerHTML)
-	PublishedAt      string `json:"publishedAt"`
-	ReleaseURL       string `json:"releaseUrl,omitempty"` // GitHub release page (html_url) — clickable link for notifications
+	Version              string `json:"version"`                        // "2.0.16" (stripped "v" prefix)
+	TagName              string `json:"tagName"`                        // "v2.0.16"
+	DownloadURL          string `json:"downloadUrl"`                    // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
+	SignatureURL         string `json:"signatureUrl,omitempty"`         // asset browser_download_url for the matching .sig
+	ManifestURL          string `json:"manifestUrl,omitempty"`          // the signed release manifest (ManifestAsset); empty when the release publishes none, which ApplyUpdate refuses
+	ManifestSignatureURL string `json:"manifestSignatureUrl,omitempty"` // its signature (ManifestSignatureAsset)
+	ReleaseNotes         string `json:"releaseNotes"`                   // stripped raw markdown (for TUI glamour rendering)
+	ReleaseNotesHtml     string `json:"releaseNotesHtml"`               // sanitized HTML (for web UI innerHTML)
+	PublishedAt          string `json:"publishedAt"`
+	ReleaseURL           string `json:"releaseUrl,omitempty"` // GitHub release page (html_url) — clickable link for notifications
 }
 
 // assetNames bundles the GitHub release asset names for one platform.
@@ -119,6 +122,14 @@ type Updater struct {
 	// and race verify-then-rename into a corrupted live binary.
 	applying atomic.Bool
 
+	// applied latches once an update has been placed: from then on the exe
+	// path holds the new binary, .old holds the running one — the only
+	// rollback artifact — and the process is restart-pending. A second apply
+	// in the same process (R U pressed again inside triggerRestart's grace
+	// window, or a TUI apply after a Web one) would make .old the NEW binary
+	// and lose the running one, so every later apply is refused.
+	applied atomic.Bool
+
 	// apiBaseURL is the GitHub API origin. Tests override to point at an
 	// httptest server so CheckForUpdate doesn't hit github.com.
 	apiBaseURL string
@@ -128,12 +139,43 @@ type Updater struct {
 	verifySignature func(binaryPath, sigPath string) error
 }
 
-// downloadClient is the shared HTTP client used for binary downloads.
-// Backed by the shared httpx transport. The 5-minute timeout is
-// generous to accommodate slow connections on 20-30 MB update
-// payloads; the per-request u.client (10s timeout) is reserved for
-// quick GitHub API calls.
-var downloadClient = httpx.Client(5 * time.Minute)
+// downloadClient is the shared HTTP client used for binary downloads,
+// backed by the shared httpx transport; the per-request u.client (10s
+// timeout) is reserved for quick GitHub API calls.
+//
+// Its timeout is only a backstop. What ends a download that has stopped is
+// downloadStallTimeout: a release binary is 78-87 MB, and the 5-minute total
+// deadline this used to carry killed every download slower than about
+// 2.3 Mbit/s however steadily it was arriving — on exactly the connections
+// that most needed the time.
+var downloadClient = httpx.Client(downloadMaxDuration)
+
+// downloadMaxDuration bounds one download whatever its progress — a trickle
+// of a byte a minute never stalls. Two hours is about 12 KB/s for the
+// largest binary.
+const downloadMaxDuration = 2 * time.Hour
+
+// downloadStallTimeout is how long a download may go without receiving a
+// byte, response headers included, before it is abandoned. A var so a test
+// can shorten it.
+var downloadStallTimeout = 60 * time.Second
+
+// errDownloadStalled is the cause downloadFile cancels a stalled request with.
+var errDownloadStalled = errors.New("download stalled")
+
+// stallReader resets the stall timer on every read that returned data.
+type stallReader struct {
+	r     io.Reader
+	timer *time.Timer
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(downloadStallTimeout)
+	}
+	return n, err
+}
 
 // githubRelease is the subset of the GitHub API response we parse.
 type githubRelease struct {
@@ -268,13 +310,17 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("auto-update unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	var downloadURL, signatureURL string
+	var downloadURL, signatureURL, manifestURL, manifestSigURL string
 	for _, asset := range release.Assets {
 		switch {
 		case strings.EqualFold(asset.Name, assets.binary):
 			downloadURL = asset.BrowserDownloadURL
 		case strings.EqualFold(asset.Name, assets.sig):
 			signatureURL = asset.BrowserDownloadURL
+		case strings.EqualFold(asset.Name, ManifestAsset):
+			manifestURL = asset.BrowserDownloadURL
+		case strings.EqualFold(asset.Name, ManifestSignatureAsset):
+			manifestSigURL = asset.BrowserDownloadURL
 		}
 	}
 	if downloadURL == "" {
@@ -288,34 +334,75 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		"current", u.currentVersion,
 		"latest", remoteVersion,
 	)
+	// Still offered — the operator should hear a release exists, and see its
+	// notes — but ApplyUpdate will refuse it (verifiedManifestEntry). Only a
+	// release before FirstManifestVersion is one to install by hand: from it
+	// on the manifest missing is a failure, and a binary installed by hand
+	// would fail VerifyCurrentSignature for the same assets.
+	if manifestURL == "" || manifestSigURL == "" {
+		if releaseCarriesManifest(remoteVersion) {
+			u.logger.Warn("[Updater] Release publishes no signed manifest, though every release from FirstManifestVersion on does — it will be refused, and must not be installed by hand",
+				"latest", remoteVersion,
+				"firstManifestVersion", FirstManifestVersion,
+			)
+		} else {
+			u.logger.Warn("[Updater] Release publishes no signed manifest — it must be installed manually",
+				"latest", remoteVersion,
+			)
+		}
+	}
 
 	strippedBody := stripDownloadLinks(release.Body)
 	return &ReleaseInfo{
-		Version:          remoteVersion,
-		TagName:          release.TagName,
-		DownloadURL:      downloadURL,
-		SignatureURL:     signatureURL,
-		ReleaseNotes:     strippedBody,
-		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
-		PublishedAt:      release.PublishedAt,
-		ReleaseURL:       release.HTMLURL,
+		Version:              remoteVersion,
+		TagName:              release.TagName,
+		DownloadURL:          downloadURL,
+		SignatureURL:         signatureURL,
+		ManifestURL:          manifestURL,
+		ManifestSignatureURL: manifestSigURL,
+		ReleaseNotes:         strippedBody,
+		ReleaseNotesHtml:     renderReleaseNotesHtml(strippedBody),
+		PublishedAt:          release.PublishedAt,
+		ReleaseURL:           release.HTMLURL,
 	}, nil
 }
 
-// ApplyUpdate downloads the new binary and replaces the running executable.
-// On Windows, the running exe is renamed to .old before the new one is placed.
+// ApplyUpdate downloads the new binary and replaces the running executable,
+// keeping the running one at .old (on every platform).
 //
-// **Rename-window race**: between the os.Rename of the running exe to .old
-// and the os.Rename of .new into place (~milliseconds), the original exe
-// path does not exist. A concurrent process trying to launch Moombox during
-// this window will fail. The caller MUST trigger a restart immediately after
-// this returns nil — the launcher will pick up the freshly-renamed .exe and
-// the running process exits cleanly. Audit reports/small-packages.md.
+// Nothing is placed unless the release's signed manifest names this release
+// and a version newer than the running one, and the downloaded binary both
+// carries a valid signature and hashes to the manifest's entry for this
+// platform (manifest.go). A release with no manifest is refused outright.
+//
+// **Rename window (Windows only)**: a running image cannot be renamed over,
+// so there the running exe is renamed to .old before .new is renamed into
+// place, and for those milliseconds the exe path does not exist — a launch
+// in that window fails, and a kill or power loss in it leaves no binary at
+// the plain name. Elsewhere .old is a hard link and .new replaces the exe in
+// one rename, so the path always holds the old binary or the new one (see
+// keepBackupByLink). The caller MUST trigger a restart immediately after this
+// returns nil — the launcher will pick up the new binary and the running
+// process exits cleanly. Audit reports/small-packages.md.
 func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	if !u.applying.CompareAndSwap(false, true) {
 		return fmt.Errorf("update already in progress")
 	}
 	defer u.applying.Store(false)
+	if u.applied.Load() {
+		return fmt.Errorf("an update is already applied — restart pending")
+	}
+	if err := u.swapLeftBroken(); err != nil {
+		return err
+	}
+
+	// The signed manifest first: it is a few hundred bytes, and a release it
+	// refuses — no manifest, another version's, not newer, no entry for this
+	// platform — costs no binary download.
+	entry, err := u.verifiedManifestEntry(ctx, release)
+	if err != nil {
+		return err
+	}
 
 	u.logger.Info("[Updater] Downloading update",
 		"version", release.Version,
@@ -347,23 +434,42 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
 	os.Remove(sigPath)
-	u.logger.Info("[Updater] Signature verified", "version", release.Version)
+	// The signature proves the key signed these bytes, not that they are
+	// this release's binary for this platform — the manifest's hash does.
+	if err := verifyFileSHA256(newPath, entry.SHA256); err != nil {
+		os.Remove(newPath)
+		return fmt.Errorf("manifest check failed: %w", err)
+	}
+	u.logger.Info("[Updater] Signature and manifest verified", "version", release.Version)
 
-	// Rename current exe to .old
 	oldPath := u.exePath + ".old"
 	os.Remove(oldPath) // remove stale .old if exists
-	if err := os.Rename(u.exePath, oldPath); err != nil {
+	if keepBackupByLink(u.exePath, oldPath) {
+		// .old is a second name for the running binary, so placing .new is
+		// one rename over the exe path — never empty, and nothing to roll
+		// back when it fails.
+		if err := renameFile(newPath, u.exePath); err != nil {
+			os.Remove(oldPath)
+			os.Remove(newPath)
+			return fmt.Errorf("failed to place new binary: %w", err)
+		}
+		u.updateApplied(release)
+		return nil
+	}
+
+	// Rename current exe to .old
+	if err := renameFile(u.exePath, oldPath); err != nil {
 		os.Remove(newPath)
 		return fmt.Errorf("failed to rename current binary: %w", err)
 	}
 
 	// Rename .new to current
-	if err := os.Rename(newPath, u.exePath); err != nil {
+	if err := renameFile(newPath, u.exePath); err != nil {
 		// Attempt rollback
 		u.logger.Error("[Updater] Failed to place new binary, rolling back",
 			"error", err.Error(),
 		)
-		if rbErr := os.Rename(oldPath, u.exePath); rbErr != nil {
+		if rbErr := renameFile(oldPath, u.exePath); rbErr != nil {
 			// Both steps failed: the running binary no longer exists on disk
 			// at its original path. Log very loudly so the user notices even
 			// if the logger's file target is gone, and drop a marker file
@@ -376,7 +482,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 				"placeError", err.Error(),
 				"rollbackError", rbErr.Error(),
 			)
-			markerPath := u.exePath + ".update-broken"
+			markerPath := u.exePath + brokenUpdateSuffix
 			msg := fmt.Sprintf("Moombox update failed at %s\nplace error: %v\nrollback error: %v\nOriginal binary may be at %s and staged binary at %s — manual recovery required.\n",
 				time.Now().UTC().Format(time.RFC3339), err, rbErr, oldPath, newPath)
 			if mErr := os.WriteFile(markerPath, []byte(msg), 0o644); mErr != nil {
@@ -396,11 +502,38 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("failed to place new binary: %w", err)
 	}
 
-	// Record the tag this install is updating TO (see PendingVersionSuffix):
-	// the post-restart boot resolves it — a successful boot deletes it, and a
-	// boot that finds it alongside a failed-update marker (the launcher
-	// auto-rolled back) marks the version skipped. Best-effort: without it
-	// the skip feature degrades, nothing else.
+	u.updateApplied(release)
+	return nil
+}
+
+// brokenUpdateSuffix names the marker a swap writes when both placing the new
+// binary and renaming the running one back failed.
+const brokenUpdateSuffix = ".update-broken"
+
+// swapLeftBroken refuses an apply over a swap that failed both ways. That
+// failure leaves the exe path empty and .old holding the running binary —
+// the only copy — with .new kept beside it, and reports an error, so nothing
+// latches and both UIs keep offering the update. A retry's first steps were
+// to overwrite .new with the download and remove .old, then fail its rename
+// for want of an exe: no binary left anywhere. Recovery from that state is
+// by hand, as the marker says.
+func (u *Updater) swapLeftBroken() error {
+	if _, err := os.Stat(u.exePath + brokenUpdateSuffix); err == nil {
+		return fmt.Errorf("an earlier update left the install broken (%s) — recover by hand before updating", u.exePath+brokenUpdateSuffix)
+	}
+	if _, err := os.Stat(u.exePath); err != nil {
+		return fmt.Errorf("the running binary is missing from %s — recover by hand before updating", u.exePath)
+	}
+	return nil
+}
+
+// updateApplied finishes a placed update by recording the tag this install
+// is updating TO (see PendingVersionSuffix). The post-restart boot resolves
+// it: a successful boot deletes it, and a boot that finds it alongside a
+// failed-update marker (the launcher auto-rolled back) marks the version
+// skipped. Best-effort: without it the skip feature degrades, nothing else.
+func (u *Updater) updateApplied(release *ReleaseInfo) {
+	u.applied.Store(true)
 	pendingPath := u.exePath + PendingVersionSuffix
 	if err := os.WriteFile(pendingPath, []byte(release.TagName), 0o644); err != nil {
 		u.logger.Warn("[Updater] Failed to write pending-version breadcrumb",
@@ -410,7 +543,20 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	u.logger.Info("[Updater] Update applied successfully",
 		"version", release.Version,
 	)
-	return nil
+}
+
+// renameFile is os.Rename, a seam for the test that watches the swap.
+var renameFile = os.Rename
+
+// keepBackupByLink keeps the file at path also at backup, as a hard link,
+// where a rename can then replace path in one step. Windows refuses to
+// rename over a running image, so it reports false there and the swap takes
+// the two-rename path; so does a filesystem without hard links.
+func keepBackupByLink(path, backup string) bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	return os.Link(path, backup) == nil
 }
 
 // PendingVersionSuffix is appended to the executable path to form the
@@ -423,9 +569,24 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 // breadcrumb ignore it, and the next aware boot cleans it up.
 const PendingVersionSuffix = ".update-pending"
 
-// VerifyCurrentSignature downloads the .sig for the current version from GitHub
-// and verifies it against the running binary. Returns nil if the signature is valid.
-func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
+// VerifyCurrentSignature checks the running binary against the GitHub release
+// tagged with the running version. It verifies the binary's own .sig and then,
+// when that release publishes a signed manifest (ManifestAsset and its .sig),
+// that the manifest names this release and that the running platform's entry
+// hashes to the running binary (verifyRunningAgainstManifest). The .sig alone
+// says only that the key signed these bytes, which another release's or
+// another platform's binary satisfies as well.
+//
+// From FirstManifestVersion on the manifest is the binding check. Every such
+// release publishes one, so a running version at or past it whose release
+// lacks the manifest, or publishes it unsigned, FAILS — deleting those assets
+// would otherwise be all it took for another release's validly signed binary
+// to pass. manifest reports whether the second check ran: false, with a nil
+// error, only for a version before FirstManifestVersion whose release
+// publishes no signed manifest, where the .sig is all there is to check — the
+// UIs say so rather than call that a full verification. Returns an error when
+// either check fails.
+func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, err error) {
 	tag := "v" + u.currentVersion
 
 	url := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s",
@@ -433,36 +594,36 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("User-Agent", "Moombox/"+u.currentVersion)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to fetch release: %w", err)
+		return false, fmt.Errorf("failed to fetch release: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("no release found for %s (local/dev build?)", tag)
+		return false, fmt.Errorf("no release found for %s (local/dev build?)", tag)
 	}
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
+		return false, fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return false, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
 
 	var release githubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return fmt.Errorf("failed to parse release: %w", err)
+		return false, fmt.Errorf("failed to parse release: %w", err)
 	}
 
 	// Find the platform-appropriate sig asset.
 	assets, ok := currentPlatformAssets()
 	if !ok {
-		return fmt.Errorf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+		return false, fmt.Errorf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	var signatureURL string
 	for _, asset := range release.Assets {
@@ -472,28 +633,56 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 		}
 	}
 	if signatureURL == "" {
-		return fmt.Errorf("no signature file in release %s (pre-signing release?)", tag)
+		return false, fmt.Errorf("no signature file in release %s (pre-signing release?)", tag)
 	}
 
 	// Download sig to temp file
 	sigFile, err := os.CreateTemp("", "moombox-verify-*.sig")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return false, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	sigPath := sigFile.Name()
 	sigFile.Close()
 	defer os.Remove(sigPath)
 
 	if err := u.downloadFile(ctx, signatureURL, sigPath); err != nil {
-		return fmt.Errorf("signature download failed: %w", err)
+		return false, fmt.Errorf("signature download failed: %w", err)
 	}
 
-	if err := VerifySignature(u.exePath, sigPath); err != nil {
-		return err
+	if err := u.verifySignature(u.exePath, sigPath); err != nil {
+		return false, err
 	}
 
-	u.logger.Info("[Updater] Current binary signature verified", "version", u.currentVersion)
-	return nil
+	// The release's signed manifest. Both assets or neither, as
+	// CheckForUpdate reads them: an unsigned manifest binds nothing.
+	var manifestURL, manifestSigURL string
+	for _, asset := range release.Assets {
+		switch {
+		case strings.EqualFold(asset.Name, ManifestAsset):
+			manifestURL = asset.BrowserDownloadURL
+		case strings.EqualFold(asset.Name, ManifestSignatureAsset):
+			manifestSigURL = asset.BrowserDownloadURL
+		}
+	}
+	if manifestURL == "" || manifestSigURL == "" {
+		if releaseCarriesManifest(u.currentVersion) {
+			if manifestURL == "" {
+				return false, fmt.Errorf("release %s publishes no manifest (%s), though every release from %s on is published with a signed one — the binary's signature is valid, but without the manifest it cannot be tied to this release",
+					tag, ManifestAsset, FirstManifestVersion)
+			}
+			return false, fmt.Errorf("release %s publishes its manifest without a signature (%s), though every release from %s on signs it — the binary's signature is valid, but an unsigned manifest cannot tie it to this release",
+				tag, ManifestSignatureAsset, FirstManifestVersion)
+		}
+		u.logger.Info("[Updater] Current binary signature verified; its release predates the signed manifest",
+			"version", u.currentVersion)
+		return false, nil
+	}
+	if err := u.verifyRunningAgainstManifest(ctx, tag, manifestURL, manifestSigURL); err != nil {
+		return false, err
+	}
+
+	u.logger.Info("[Updater] Current binary signature and release manifest verified", "version", u.currentVersion)
+	return true, nil
 }
 
 // CleanupOldBinary removes stale files left over from previous updates:
@@ -547,7 +736,23 @@ func (u *Updater) CleanupOldBinary() {
 	}
 }
 
-func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
+// downloadFile downloads url to dest, refusing an HTML error page and
+// anything over the size cap.
+//
+// The request is cancelled with errDownloadStalled when no byte arrives for
+// downloadStallTimeout — response headers included — and the error then
+// says so rather than "context canceled".
+func (u *Updater) downloadFile(parent context.Context, url, dest string) (err error) {
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	stall := time.AfterFunc(downloadStallTimeout, func() { cancel(errDownloadStalled) })
+	defer stall.Stop()
+	defer func() {
+		if err != nil && errors.Is(context.Cause(ctx), errDownloadStalled) {
+			err = fmt.Errorf("download stalled: no data for %s", downloadStallTimeout)
+		}
+	}()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
@@ -560,6 +765,7 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	body := &stallReader{r: resp.Body, timer: stall}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
@@ -575,7 +781,7 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	// HTML doctype or tag, so this catches the real problem here, by name.
 	const sniffSize = 512
 	sniff := make([]byte, sniffSize)
-	sn, err := io.ReadFull(resp.Body, sniff)
+	sn, err := io.ReadFull(body, sniff)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		return err
 	}
@@ -603,7 +809,7 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	// above counts toward the cap, so the limit reader only needs to cover
 	// what is left of it.
 	const maxDownloadSize = 200 << 20
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize+1-int64(sn)))
+	n, err := io.Copy(f, io.LimitReader(body, maxDownloadSize+1-int64(sn)))
 	if err != nil {
 		f.Close()
 		return err

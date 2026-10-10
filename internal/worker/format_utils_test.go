@@ -391,7 +391,7 @@ func TestSelectBestDashStream(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := SelectBestDashStream(tt.streams, tt.preferItag, tt.maxRes, tt.isVideo, tt.qualityPref)
+			result := SelectBestDashStream(tt.streams, tt.preferItag, tt.maxRes, tt.isVideo, tt.qualityPref, true)
 			if tt.expectedIdx == -1 {
 				if result != nil {
 					t.Errorf("SelectBestDashStream() = %+v, want nil", result)

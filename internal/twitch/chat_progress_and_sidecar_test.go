@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -191,9 +192,10 @@ func TestChatDownloaderPanicStillSavesTheFreshResumeSidecar(t *testing.T) {
 
 	cd.logger = &panicOnceLogger{} // panics on runIRCSession's first line, before any dial or lock
 
-	if err := cd.Start(context.Background()); err != nil {
-		t.Fatalf("Start returned %v after a recovered panic, want nil (a recovered panic with "+
-			"no named return yields the zero value)", err)
+	// A recovered panic is an outcome, not a clean exit: Start reports it so
+	// the worker records chat_status "incomplete" rather than "finished".
+	if err := cd.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("Start returned %v after a recovered panic, want an error naming the panic", err)
 	}
 
 	state := cd.loadResumeState()

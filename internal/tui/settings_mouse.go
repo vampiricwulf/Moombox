@@ -147,29 +147,45 @@ func (m *SettingsModel) scrollFields(down bool, sec settingsSection) {
 	}
 }
 
-// handleMouseTabClick maps a click X position to a section tab.
+// handleMouseTabClick maps a click X position to a section tab, through the
+// window of tabs the last renderHeader drew (headerTabStart/End). A click on
+// the ‹ or › marker opens the hidden section next to it.
 func (m *SettingsModel) handleMouseTabClick(relX int) {
-	// The header is: "Settings ─ Section1 │ Section2 │ ..."
-	// Match renderHeader layout: "Settings" (8) + " ─ " (3) = 11 cells prefix.
-	pos := 11 // "Settings" + " \u2500 "
-
-	for i, sec := range sections {
-		if i > 0 {
-			sepLen := 3 // " │ " — 3 cells
-			if relX >= pos && relX < pos+sepLen {
+	start, end := m.headerTabStart, m.headerTabEnd
+	if end == 0 {
+		return // header not rendered yet
+	}
+	pos := settingsHeaderPrefixW
+	if start > 0 {
+		if relX >= pos && relX < pos+settingsTabMarkerW {
+			m.selectSectionByClick(start - 1)
+			return
+		}
+		pos += settingsTabMarkerW
+	}
+	for i := start; i < end; i++ {
+		if i > start {
+			if relX >= pos && relX < pos+settingsTabSepW {
 				return // Clicked on separator
 			}
-			pos += sepLen
+			pos += settingsTabSepW
 		}
-		nameLen := len(sec.name) // Section names are ASCII
+		nameLen := len(sections[i].name) // Section names are ASCII
 		if relX >= pos && relX < pos+nameLen {
-			if i != m.sectionIndex {
-				m.switchSection(i)
-				m.updateTextInputForField()
-			}
+			m.selectSectionByClick(i)
 			return
 		}
 		pos += nameLen
+	}
+	if end < len(sections) && relX >= pos && relX < pos+settingsTabMarkerW {
+		m.selectSectionByClick(end)
+	}
+}
+
+func (m *SettingsModel) selectSectionByClick(i int) {
+	if i != m.sectionIndex {
+		m.switchSection(i)
+		m.updateTextInputForField()
 	}
 }
 
@@ -266,15 +282,17 @@ func (m *SettingsModel) handleCycleClick(fd fieldDef, relX int, labelWidth int) 
 
 // handleToggleClick determines if Yes or No was clicked and sets it directly.
 func (m *SettingsModel) handleToggleClick(fd fieldDef, relX int, labelWidth int) {
-	// Prefix is 2 chars, label padded to labelWidth+2, then "Yes / No"
+	// Prefix is 2 chars, label padded to labelWidth+2, then renderToggle's
+	// "[Yes] / No" or "Yes / [No]" — the selected half is bracketed, so the
+	// "Yes" half's width depends on the current value.
 	valueX := relX - 2 - labelWidth - 2
 	if valueX < 0 {
 		return
 	}
-	// "Yes" is 3 chars, " / " is 3 chars, "No" is 2 chars
-	if valueX < 3 {
+	yesW := toggleYesWidth(m.values[fd.key])
+	if valueX < yesW {
 		m.values[fd.key] = "Yes"
-	} else if valueX >= 6 {
+	} else if valueX >= yesW+len(" / ") {
 		m.values[fd.key] = "No"
 	}
 	m.recheckDirty()
@@ -361,6 +379,13 @@ func (m *SettingsModel) handleMouseChannelClick(contentY int) {
 				m.cycleChannelOption(field, 1)
 			}
 		}
+		return
+	}
+
+	// The removal prompt takes several lines above the list, so a click maps
+	// to no row while it is up: it cancels the prompt, as a key would.
+	if m.channelDeleteConf {
+		m.channelDeleteConf = false
 		return
 	}
 

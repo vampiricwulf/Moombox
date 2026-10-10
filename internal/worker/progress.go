@@ -99,7 +99,15 @@ type ProgressTracker struct {
 	startTime     time.Time // B8: for ETA calculation
 	vodPercent    float64   // VOD download progress percentage (from chunked download)
 	vodTotalBytes int64     // Total file size for VOD chunked download (0 if not VOD)
-	gaps          []database.Gap
+	// The whole-file VOD ETA's inputs (calculateETA): each stream's offset
+	// against its own probed total, and when this session's first such
+	// event landed. The ETA used to divide the VIDEO total minus bytesTotal
+	// — which sums both streams AND the bytes a resumed run found on disk —
+	// by bytesTotal over the tracker's age, so audio counted as video
+	// progress and a resume read as a burst of speed (audit W19a V7).
+	vodVideo, vodAudio vodStreamBytes
+	vodSessionStart    time.Time
+	gaps               []database.Gap
 
 	// Per-stream wait activity. Video and audio downloaders share this tracker
 	// but can stall independently, so each keeps its own reason + start; the
@@ -119,13 +127,66 @@ type ProgressTracker struct {
 	lastSegmentAt      time.Time // last time either stream delivered a segment
 	lastActivityWrite  time.Time // throttle for activity DB writes
 	activityTickerOn   bool      // refresh goroutine running (guarded by mu)
-	closed             bool      // Finalize ran — no further activity writes or tickers
+	closed             bool      // Finalize/Close ran — no further activity or progress-line writes, no tickers
 }
 
 // speedSample is one (time, cumulative-bytes) reading in the speed window.
 type speedSample struct {
 	t     time.Time
 	bytes int64
+}
+
+// vodStreamBytes is one whole-file stream's place in this session: its
+// probed total, its latest offset, and how far this session has moved it —
+// never counting the bytes a resumed run inherited from disk, which this
+// session did not transfer.
+type vodStreamBytes struct {
+	seen          bool
+	latest, total int64
+	moved         int64
+}
+
+// left is what the stream still has to transfer.
+func (s vodStreamBytes) left() int64 { return max(s.total-s.latest, 0) }
+
+// percent is the stream's offset against its total.
+func (s vodStreamBytes) percent() float64 {
+	if s.total <= 0 {
+		return 0
+	}
+	return min(float64(s.latest)/float64(s.total)*100, 100)
+}
+
+// noteVodBytesLocked records a whole-file progress event for stream s and
+// reports whether it was one. An event carrying the probed total opens the
+// stream: the first opens the session clock, and its offset is where this
+// session starts. Once open, an event without a total moves it too: the
+// streaming fallback states none, and the chunked loop hands its transfer to
+// that fallback on a mid-download 200. Reading only the chunked events froze
+// the offset at the handoff while the clock ran on, so the ETA climbed as the
+// file neared completion. The total last stated still bounds what is left.
+//
+// An offset below the last one is a restart — the fallback discarding a
+// partial the origin would not resume, and streaming the file again — and
+// moves nothing; the count goes on from there. Caller holds mu.
+func (pt *ProgressTracker) noteVodBytesLocked(s *vodStreamBytes, p engine.DownloadProgress) bool {
+	if p.TotalBytes <= 0 && !s.seen {
+		return false
+	}
+	if pt.vodSessionStart.IsZero() {
+		pt.vodSessionStart = pt.now()
+	}
+	if !s.seen {
+		s.seen, s.latest = true, p.Bytes
+	}
+	if p.Bytes > s.latest {
+		s.moved += p.Bytes - s.latest
+	}
+	s.latest = p.Bytes
+	if p.TotalBytes > 0 {
+		s.total = p.TotalBytes
+	}
+	return true
 }
 
 // streamKind identifies which downloader an activity/progress event came from.
@@ -184,9 +245,15 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 		if pt.videoTotal > 0 && pt.videoTotal < pt.videoSeq {
 			pt.videoTotal = pt.videoSeq
 		}
-		// Track VOD chunked download progress
+		// Track VOD whole-file download progress. The streaming fallback
+		// states no percent, so one is read off the total the chunked loop
+		// last stated (noteVodBytesLocked) — the progress line froze at the
+		// handoff otherwise.
 		if p.TotalBytes > 0 {
 			pt.vodTotalBytes = p.TotalBytes
+		}
+		if pt.noteVodBytesLocked(&pt.vodVideo, p) && p.Percent <= 0 {
+			pt.vodPercent = pt.vodVideo.percent()
 		}
 		if p.Percent > 0 {
 			pt.vodPercent = p.Percent
@@ -241,6 +308,9 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 		if pt.audioTotal > 0 && pt.audioTotal < pt.audioSeq {
 			pt.audioTotal = pt.audioSeq
 		}
+		// A whole-file audio stream counts toward the VOD ETA alongside the
+		// video one; the percent and progress line stay video's.
+		pt.noteVodBytesLocked(&pt.vodAudio, p)
 		// Re-baseline on downloader replacement — see AttachVideoDownloader.
 		if p.Bytes < pt.lastAudioBytes {
 			pt.lastAudioBytes = p.Bytes
@@ -515,6 +585,22 @@ func (pt *ProgressTracker) maybeUpdate() {
 	}
 	pt.lastUpdate = now
 
+	// Closed (Finalize/Close ran): the finalize-phase line — the
+	// orchestrator's "V:100% A:100% C: n" or its honest incomplete string,
+	// with its percent — is the row's now, and this path must not render
+	// over it. Only the chat count still moves: a VOD's replay chat keeps
+	// paging after the video finished (resolveVodChatOutcome), and each batch
+	// lands here through SetChatCount. That one column is persisted on its
+	// own, so the details panels keep ticking while the progress line,
+	// percent and speed stay as finalize left them. noteFetch and
+	// setActivity already stop at the same flag.
+	if pt.closed {
+		count := pt.chatCount
+		pt.mu.Unlock()
+		pt.db.UpdateJobFields(pt.jobID, map[string]any{"total_chat_messages": count})
+		return
+	}
+
 	// Sample the byte counter into the sliding window and average across it
 	// — see sampleSpeedLocked for the source choice and window mechanics.
 	speedBps := pt.sampleSpeedLocked(now)
@@ -691,21 +777,28 @@ func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
 }
 
 // calculateETA estimates time remaining based on segment or byte progress (B8).
+//
+// A whole-file VOD measures from this session's first progress event and
+// counts only what the session transferred (vodStreamBytes.moved, the
+// streaming fallback's bytes included) — never the offset a resume started
+// from — against what both streams still have to fetch, each against its own
+// probed total. The streams download concurrently, so their combined rate is
+// what drains their combined remainder.
 func (pt *ProgressTracker) calculateETA() string {
-	elapsed := pt.now().Sub(pt.startTime).Seconds()
-	if elapsed < 5 {
-		return "" // Too early for meaningful estimate
-	}
-
 	var remaining float64
 
-	if pt.vodTotalBytes > 0 && pt.bytesTotal > 0 {
-		// VOD chunked download: bytes-based ETA
-		bytesPerSec := float64(pt.bytesTotal) / elapsed
+	if pt.vodVideo.seen || pt.vodAudio.seen {
+		elapsed := pt.now().Sub(pt.vodSessionStart).Seconds()
+		if elapsed < 5 {
+			return "" // Too early for meaningful estimate
+		}
+		bytesPerSec := float64(pt.vodVideo.moved+pt.vodAudio.moved) / elapsed
 		if bytesPerSec <= 0 {
 			return ""
 		}
-		remaining = float64(pt.vodTotalBytes-pt.bytesTotal) / bytesPerSec
+		remaining = float64(pt.vodVideo.left()+pt.vodAudio.left()) / bytesPerSec
+	} else if elapsed := pt.now().Sub(pt.startTime).Seconds(); elapsed < 5 {
+		return "" // Too early for meaningful estimate
 	} else if pt.videoTotal > 0 && pt.videoSeq > 0 {
 		// Segment-based ETA
 		segsPerSec := float64(pt.videoSeq) / elapsed

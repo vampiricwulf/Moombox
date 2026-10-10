@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -112,9 +113,25 @@ func (rl *RateLimiter) SetLogger(logger rateLimiterLogger) {
 	rl.logger = logger
 }
 
+// bucketKey is the key a client address is limited under. A global IPv6
+// address is masked to its /64: one subscriber is handed a whole /64, so
+// keyed by the full address an attacker rotated through it for a fresh
+// bucket per request — five scrypt-verified login guesses per address — and
+// churned past the entry cap to evict their own history. LAN addresses
+// (ULA, link-local, loopback) stay exact, so a household's devices on one
+// subnet do not share a bucket, and IPv4 is unchanged.
+func bucketKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() {
+		return ip
+	}
+	return (&net.IPNet{IP: parsed.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String()
+}
+
 // AllowWithRetry checks if a request from the given IP is allowed.
 // Returns (allowed, retryAfterSeconds).
 func (rl *RateLimiter) AllowWithRetry(ip string) (bool, int) {
+	ip = bucketKey(ip)
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 

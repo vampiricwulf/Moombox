@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/paginator"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -320,6 +322,25 @@ func (m *ActionMenuModel) mainCursorUp() {
 	}
 }
 
+// settleMain moves the cursor off a category header or blank spacer after a
+// jump (a page, Home, End): to the nearest action in the given direction, or —
+// when there is none that way — the nearest one the other way.
+func (m *ActionMenuModel) settleMain(forward bool) {
+	step := 1
+	if !forward {
+		step = -1
+	}
+	n := len(m.mainList.Items())
+	for _, dir := range []int{step, -step} {
+		for i := m.mainList.Index(); i >= 0 && i < n; i += dir {
+			if m.isMainSelectable(i) {
+				m.mainList.Select(i)
+				return
+			}
+		}
+	}
+}
+
 // selectedAction returns the ActionMenuItem at the current cursor, or nil.
 func (m *ActionMenuModel) selectedAction() *ActionMenuItem {
 	sel := m.mainList.SelectedItem()
@@ -357,6 +378,18 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 		m.mainCursorUp()
 	case keyDown:
 		m.mainCursorDown()
+	case keyPgDown:
+		m.mainList.NextPage()
+		m.settleMain(true)
+	case keyPgUp:
+		m.mainList.PrevPage()
+		m.settleMain(true)
+	case keyHome:
+		m.mainList.GoToStart()
+		m.settleMain(true)
+	case keyEnd:
+		m.mainList.GoToEnd()
+		m.settleMain(false)
 	case keyEnter:
 		item := m.selectedAction()
 		if item == nil {
@@ -420,6 +453,18 @@ func (m *ActionMenuModel) handleJobSelectKey(key string) string {
 		m.jobConfirm = false
 	case keyDown:
 		m.jobList.CursorDown()
+		m.jobConfirm = false
+	case keyPgDown:
+		m.jobList.NextPage()
+		m.jobConfirm = false
+	case keyPgUp:
+		m.jobList.PrevPage()
+		m.jobConfirm = false
+	case keyHome:
+		m.jobList.GoToStart()
+		m.jobConfirm = false
+	case keyEnd:
+		m.jobList.GoToEnd()
 		m.jobConfirm = false
 	case keyEnter:
 		sel := m.jobList.SelectedItem()
@@ -575,7 +620,7 @@ func (m *ActionMenuModel) renderMain(contentW, boxW int) string {
 		strings.Repeat(" ", max(0, contentW-36)) +
 		DimStyle.Render("↑↓ navigate | Enter | Esc")
 
-	footer := DimStyle.Render("M to close")
+	footer := withPageIndicator(DimStyle.Render("M to close"), m.mainList.Paginator, contentW)
 
 	content := header + "\n" + m.mainList.View() + "\n" + footer
 	box := FocusedBorder.Width(boxW).Render(content)
@@ -593,6 +638,7 @@ func (m *ActionMenuModel) renderJobSelect(boxW int) string {
 	} else {
 		footer = DimStyle.Render("Enter: select | Esc: back")
 	}
+	footer = withPageIndicator(footer, m.jobList.Paginator, boxW-2)
 
 	content := header + "\n" + m.jobList.View() + "\n" + footer
 	box := FocusedBorder.Width(boxW).Render(content)
@@ -617,6 +663,26 @@ func (m *ActionMenuModel) renderConfirm(boxW int) string {
 	content := header + "\n" + strings.Join(lines, "\n")
 	box := FocusedBorder.Width(boxW).Render(content)
 	return centerBox(box, m.width, m.height)
+}
+
+// withPageIndicator right-aligns "‹page›/‹pages› PgUp/PgDn" after footer when
+// the list spans more than one page. Both lists page rather than scroll, with
+// bubbles' own pagination dots switched off, so nothing else says the Open and
+// Extras sections (or the rest of a long job list) are there at all. Shortened
+// to the bare "‹page›/‹pages›" when the key names do not fit, and left off
+// entirely when even that would wrap.
+func withPageIndicator(footer string, p paginator.Model, contentW int) string {
+	if p.TotalPages <= 1 {
+		return footer
+	}
+	pages := fmt.Sprintf("%d/%d", p.Page+1, p.TotalPages)
+	footerW := lipgloss.Width(footer)
+	for _, ind := range []string{pages + " PgUp/PgDn", pages} {
+		if gap := contentW - footerW - ansi.StringWidth(ind); gap >= 1 {
+			return footer + strings.Repeat(" ", gap) + DimStyle.Render(ind)
+		}
+	}
+	return footer
 }
 
 // padToWidth pads a string with spaces to reach at least width w (by visual width).

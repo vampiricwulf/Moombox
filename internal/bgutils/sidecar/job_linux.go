@@ -23,11 +23,18 @@ func (j *processJob) close()                   {}
 // KILL_ON_JOB_CLOSE, covering the crash path where Stop() never runs.
 // Without it, every Moombox crash leaks an orphaned Node process.
 //
+// It also puts the sidecar in its own process group. A terminal delivers
+// Ctrl+C (and a `timeout`/supervisor its signal) to the whole foreground
+// group, so the sidecar used to die at the same instant as Moombox and every
+// ordinary shutdown logged a stdout-EOF "unhealthy" warning plus a failed
+// cache invalidation — the very noise the graceful Stop() in shutdown exists
+// to avoid. Moombox stops it itself; Pdeathsig still covers a crash.
+//
 // Caveat: Pdeathsig fires when the spawning THREAD exits, and Go can in
 // principle retire that thread while the process lives — which would kill
 // the sidecar spuriously. If that ever happens, readPump sees stdout EOF,
-// marks the sidecar unhealthy, and callers fall back to the goja path: a
-// degraded-but-safe outcome, strictly better than orphan accumulation.
+// marks the sidecar unhealthy, and the Supervisor restarts it: a brief
+// outage, strictly better than orphan accumulation.
 func configureCmdSysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 }

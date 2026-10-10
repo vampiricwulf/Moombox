@@ -412,16 +412,77 @@ func TestInsertionAtTheCapDoesNotReWrapTheBuffer(t *testing.T) {
 	}
 }
 
-// wrapLogLine's width guard is what keeps the unsized panel (BackfillLogs
-// seeds the ring buffer before the first WindowSizeMsg) from dividing by
-// zero. Nothing else calls it with 0 now that rebuildFiltered routes every
-// line through it, so it gets its own assertion.
-//
-// Mutant: delete the `width <= 0` early return — this panics with an integer
-// divide by zero.
+// An unsized panel (BackfillLogs seeds the ring buffer before the first
+// WindowSizeMsg) wraps nothing: wrapLogLine's width guard returns the line
+// whole. Nothing else calls it with 0 now that rebuildFiltered routes every
+// line through it, so it gets its own assertion. (The guard once also kept the
+// exact-column cut from dividing by zero; ansi.Wrap answers a zero width with
+// the line as it is, so today it states the contract rather than averting a
+// crash.)
 func TestWrapLogLineAtZeroWidthReturnsTheLine(t *testing.T) {
 	got := wrapLogLine("abc", 0)
 	if len(got) != 1 || got[0] != "abc" {
 		t.Errorf("wrapLogLine(%q, 0) = %#v, want one unwrapped element", "abc", got)
+	}
+}
+
+// TestLogFilterHidingEveryLineSaysSo: with lines in the buffer and a level
+// filter that hides them all, the panel read "No logs yet." under a header
+// saying "Logs (0) [WARN+]" — as if nothing had been logged at all.
+//
+// Mutant: dropping the filtered-empty arm — "No logs yet." again.
+func TestLogFilterHidingEveryLineSaysSo(t *testing.T) {
+	m := NewLogViewerModel()
+	m.SetSize(80, 10)
+	m.AddLine("2026-10-05 12:00:00 INFO  something ordinary happened")
+	m.CycleLevel() // INFO+
+	m.CycleLevel() // WARN+
+	view := stripANSI(m.View())
+	if strings.Contains(view, "No logs yet.") || !strings.Contains(view, "No WARN+ lines") {
+		t.Errorf("a filter hiding every line is not named:\n%s", view)
+	}
+
+	empty := NewLogViewerModel()
+	empty.SetSize(80, 10)
+	empty.CycleLevel()
+	if !strings.Contains(stripANSI(empty.View()), "No logs yet.") {
+		t.Error("an empty buffer no longer says No logs yet.")
+	}
+}
+
+// Log lines wrap at their spaces: the exact-column cut split the very tokens
+// a line is read for ("addr=127.0.0." on one row, "1:7743" on the next). A
+// word longer than a whole row still breaks, and nothing is lost either way.
+//
+// Mutant: wrapLogLine cutting at exact columns again.
+func TestWrapLogLineKeepsTokensWhole(t *testing.T) {
+	line := "2026-10-05 04:15:51 INFO web server starting addr=127.0.0.1:7743 scheme=http"
+	rows := wrapLogLine(line, 58)
+	if len(rows) < 2 {
+		t.Fatalf("the fixture must wrap at 58: %q", rows)
+	}
+	whole := false
+	for _, r := range rows {
+		if w := ansi.StringWidth(r); w > 58 {
+			t.Errorf("row is %d columns: %q", w, r)
+		}
+		whole = whole || strings.Contains(r, "addr=127.0.0.1:7743")
+	}
+	if !whole {
+		t.Errorf("addr=127.0.0.1:7743 was split across rows: %q", rows)
+	}
+	if got := strings.Join(rows, " "); got != line {
+		t.Errorf("rejoined %q, want %q", got, line)
+	}
+
+	long := strings.Repeat("x", 100)
+	rows = wrapLogLine("a "+long, 40)
+	for _, r := range rows {
+		if ansi.StringWidth(r) > 40 {
+			t.Errorf("an over-long word was not broken: %q", r)
+		}
+	}
+	if got := strings.ReplaceAll(strings.Join(rows, ""), " ", ""); got != "a"+long {
+		t.Errorf("the over-long word lost characters: %q", rows)
 	}
 }

@@ -16,7 +16,9 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -73,10 +75,11 @@ var ErrNotAMember = errors.New("not a channel member")
 // pings about content that was never going to succeed.
 var ErrNonActionable = errors.New("non-actionable error")
 
-// ErrCancelled is the sentinel used by the StreamProcessor when a
-// download was cancelled mid-flight (ctx.Done before live, user-cancel
-// during upcoming wait). Lets the worker pick the cancelled-status
-// branch without comparing error strings.
+// ErrCancelled marks a run that was cancelled rather than failed: the
+// StreamProcessor's waits return it (cancelledResult — ctx done, or the row
+// cancelled or deleted while upcoming), and ExecuteWithChat returns it when
+// the row was already Cancelled as it started. processJob routes it to
+// handleCancellation instead of comparing error strings.
 var ErrCancelled = errors.New("cancelled")
 
 // The three ways the off-queue staging verbs refuse. All three are the
@@ -156,6 +159,12 @@ type JobContext struct {
 	// made, and only ever read through the pointer the orchestrator hands to
 	// muxAndFinalize.
 	ChatStatus string
+	// CapturedMux marks the operator's Mux of a job that was not already
+	// muxing — an Error, Cancelled or parked row, set by MuxJob. What is
+	// staged may be all there is, so the muxing embed does not claim the
+	// download completed. A boot re-mux of an interrupted Muxing row leaves
+	// it false: that download did complete.
+	CapturedMux bool
 }
 
 // JobConfig holds per-job configuration derived from the global config.
@@ -231,14 +240,32 @@ type DownloadWorker struct {
 	stagingClaimMu sync.Mutex
 	stagingClaims  map[string]string
 
+	// afterExitPending holds the jobs with an afterJobExit reset waiting on
+	// their previous run, so a second click does not queue a second reset.
+	afterExitPending sync.Map
+
+	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
+	// monitor poll that lands while one is in flight does not start another;
+	// autoMuxMu makes autoMuxNow's re-check and claim one step. See
+	// twitch_end_unconfirmed.go.
+	autoMuxPending sync.Map
+	autoMuxMu      sync.Mutex
+	// twitchLiveness overrides confirmTwitchStreamInfo for
+	// AutoMuxEndedBroadcast's confirmation. nil in production; tests set it.
+	twitchLiveness func(ctx context.Context, login string) (*twitch.TwitchStreamInfo, error)
+
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should
-	// be attempted. Returns true if THE NAMED PLATFORM ended up authenticated.
+	// be attempted. Returns CookieRefreshRestored if THE NAMED PLATFORM ended
+	// up authenticated, CookieRefreshSkipped if the refresh was skipped for a
+	// reason the callback has logged, CookieRefreshUnconfirmed if it ran and
+	// could not establish whether the platform's cookies work, CookieRefreshOff if
+	// automatic refresh is turned off, and CookieRefreshNotRestored otherwise.
 	//
 	// The platform argument is not decoration. Without it the callback could
 	// only answer "did any platform end up authenticated", so a healthy Twitch
 	// told a YouTube job to retry — spending a probe attempt and a slot on a
 	// request that had just conclusively failed, on every cycle.
-	OnCookieRefreshNeeded func(platform string) bool
+	OnCookieRefreshNeeded func(platform string) CookieRefreshOutcome
 
 	// CurrentCredentialIdentity returns an opaque fingerprint of the account
 	// the platform's cookies currently belong to (cookies.CookieJar's
@@ -247,6 +274,32 @@ type DownloadWorker struct {
 	// account has actually changed. Optional: a nil slot simply records "",
 	// which the sweep resolves permissively.
 	CurrentCredentialIdentity func(platform string) string
+
+	// backlogRetries counts each backlog job's consecutive runs that went
+	// back to Queued (requeueBacklog). In memory, like the scheduler's holds:
+	// a restart grants a fresh budget, which still ends a permanently broken
+	// video in Error, and so do an operator's Cancel, Retry and Resume
+	// (endBacklogStreak). Lazily allocated.
+	backlogRetryMu sync.Mutex
+	backlogRetries map[string]int
+
+	// processStreamFn and refreshVodInfoFn replace streamProc.Process and
+	// streamProc.RefreshVodInfo when set — a test seam, since youtube.Service
+	// has none of its own. nil in production (processStream,
+	// refreshVodInfo).
+	processStreamFn  func(ctx context.Context, job *database.Job) (*StreamProcessResult, error)
+	refreshVodInfoFn func(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error)
+
+	// diskSpace replaces disk.GetDiskSpace in readOutputDisk when set — a
+	// test seam standing in a volume of any fullness. nil in production.
+	diskSpace func(path string) (*disk.DiskSpace, error)
+
+	// CookieFileInUse returns the cookie file the running services read and
+	// write (the jar's path). cookies.cookie_file is restart-required, so after
+	// a save without the restart the setting names a file nothing touches, and
+	// advice to replace it pointed the operator at the wrong one. Optional: nil
+	// or "" falls back to the setting.
+	CookieFileInUse func() string
 }
 
 // readConfig runs fn under configStore's read lock when the store has been
@@ -281,6 +334,12 @@ type DownloadWorkerDeps struct {
 	TwitchService *twitch.Service
 	Notifier      notifications.Sender
 	Conn          Connectivity
+
+	// TrimService is the trim service both UIs use; the post-download trim
+	// runs through it, so its one-trim-per-job slot, RunningTrims and Stop
+	// cover that trim too. Without one, a post-download trim sends Trim
+	// Failed instead of running.
+	TrimService *TrimService
 }
 
 // NewDownloadWorker creates a new download worker.
@@ -300,6 +359,7 @@ func NewDownloadWorker(
 	var tw *twitch.Service
 	var nm notifications.Sender
 	var conn Connectivity
+	var trims *TrimService
 	if deps != nil {
 		cs = deps.CipherSolver
 		routedCs = deps.RoutedCipherSolver
@@ -307,6 +367,7 @@ func NewDownloadWorker(
 		tw = deps.TwitchService
 		nm = deps.Notifier
 		conn = deps.Conn
+		trims = deps.TrimService
 	}
 
 	sp := NewStreamProcessor(yt, tw, cfg, db, logger)
@@ -318,6 +379,7 @@ func NewDownloadWorker(
 	}
 
 	sched := newScheduler(db, queue, logger)
+	sched.conn = conn
 	// Slot-release flips (spec §10) free an archive slot mid-flight — a
 	// backlog job going Live or entering the upcoming wait stops counting in
 	// M. The wake lets the scheduler admit the channel's next backlog VOD
@@ -331,8 +393,9 @@ func NewDownloadWorker(
 	twitchChats := newTwitchChatRegistry()
 	orchestrator := NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn)
 	orchestrator.twitchChats = twitchChats
+	orchestrator.trims = trims
 
-	return &DownloadWorker{
+	w := &DownloadWorker{
 		db:           db,
 		yt:           yt,
 		tw:           tw,
@@ -346,11 +409,45 @@ func NewDownloadWorker(
 		logger:       logger,
 		notifyJob:    make(chan struct{}, 1),
 	}
+	// The scheduler reads the disk through the worker, which holds the
+	// config: the output directory and the critical threshold both follow a
+	// Settings save without a restart.
+	sched.readDisk = w.readOutputDisk
+	// A deleted row takes its backlog retry streak with it. The id is the
+	// video id, so a backlog rescan can create the row again, and it would
+	// have inherited the old count and hold. For the worker's lifetime,
+	// which is the process's.
+	//
+	// Two subscriptions for the two ways a row goes: DeleteJob fires
+	// OnJobDeleted, while a channel removal's "delete its pending jobs"
+	// (DeleteJobsAndHistoryForChannel) deletes in bulk and fires only one
+	// OnJobsChange, with the list it left behind (endStreaksGoneFrom). That
+	// list is delivered off the writer's goroutine, so a third makes the
+	// rule exact however the timing falls: a row AddJob inserts has had no
+	// run to earn a streak, so whatever one its id still has is stale.
+	if db != nil {
+		db.OnJobDeleted(func(ev *database.JobDeleted) { w.endBacklogStreak(ev.JobID) })
+		db.OnJobsChange(w.endStreaksGoneFrom)
+		db.OnJobAdded(func(ev *database.JobAdded) { w.endBacklogStreak(ev.Job.ID) })
+	}
+	return w
 }
 
 // Start begins the worker loop, processing jobs from the queue.
 func (w *DownloadWorker) Start(ctx context.Context) {
 	w.logger.Info("download worker started")
+
+	// Staging leftovers a previous run left behind that are provably
+	// redundant (reclaimBootLeftovers). Off the queue's path: a slow delete
+	// must not hold up a live capture waiting to start.
+	w.wg.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("panic in the boot staging cleanup", "panic", fmt.Sprint(r))
+			}
+		}()
+		w.reclaimBootLeftovers()
+	})
 
 	// Enqueue existing pending jobs
 	w.enqueueExistingJobs()
@@ -372,9 +469,14 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 		w.wg.Go(func() {
 			defer func() {
+				// processJob records its own panic (recordRunPanic), ahead
+				// of the Complete that ends the run; this one is what
+				// recording it panics into, and writes the guarded Error
+				// alone — the run's flag and settled mark went with that
+				// Complete.
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
-					w.db.UpdateJobFields(jobID, map[string]any{
+					w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 						"status": database.StatusError,
 						"error":  fmt.Sprintf("internal panic: %v", r),
 					})
@@ -399,6 +501,36 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 	case w.notifyJob <- struct{}{}:
 	default:
 	}
+}
+
+// CookieResumeStatus is where a job parked in COOKIES? goes once its
+// credentials are repaired — by the cookie-parked sweep and by the worker's
+// own in-process refresh alike. The answer depends on queue_priority, and
+// getting it wrong breaks the pacing in one direction or strands a job in
+// the other:
+//
+//   - priority 1 (backlog) resumes to Queued, for the scheduler to re-admit
+//     archive_slots at a time; the caller wakes it. Upcoming instead handed
+//     a channel's whole parked backlog to the worker at once, bypassed
+//     archive-slots entirely, and left CountBacklogInFlight over-counting
+//     until they drained.
+//   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
+//     scheduler never admits a priority-0 row, so Queued would strand it; so
+//     would a priority-1 row with no channel, since the scheduler only sweeps
+//     channels (QueuedChannels skips a NULL channel_id).
+//
+// A backlog row of a REMOVED channel resumes to Queued like any other. Its
+// feed_items partner is gone — the departure prune deletes the channel's feed
+// history, and the row was kept, either by the removal's default or as a
+// download already running — and it used to resume to Upcoming for that,
+// because NextQueuedJobs INNER-JOINed feed_items and would never have
+// returned it. The join is a LEFT JOIN now (W25-09), and the scheduler admits
+// such a row under the global archive_slots.
+func CookieResumeStatus(job *database.Job) database.JobStatus {
+	if job.QueuePriority != 1 || job.ChannelID == nil {
+		return database.StatusUpcoming
+	}
+	return database.StatusQueued
 }
 
 // Scheduler returns the worker's archive-slots scheduler. Creation sites
@@ -438,16 +570,37 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 	return w.streamProc.TwitchHintStats()
 }
 
-// CancelJob cancels a running job and updates its status.
-// CancelJob cancels a job. Returns true when an actively-processing run was
-// flagged — that run's handleCancellation emits the "cancelled"
-// notification, so callers that notify should skip their own emission.
-func (w *DownloadWorker) CancelJob(jobID string) bool {
-	flagged := w.queue.Cancel(jobID)
-	w.db.UpdateJobFields(jobID, map[string]any{
+// CancelJob is the operator's Cancel: it writes the job's status Cancelled and
+// stops its run, if one is in flight. cancelled reports whether it did. When
+// it did, flagged reports whether an actively-processing run was flagged —
+// that run's handleCancellation emits the "cancelled" notification, so
+// callers that notify should skip their own emission. A run that has already
+// settled its outcome (a failure recorded, a backlog requeue, a run the write
+// alone ended — JobQueue.settle) is not flagged: it no longer reads the flag,
+// and the caller sends the notification itself.
+//
+// A Cancel is decided on a status read earlier — the row a UI showed, the
+// cancel route's own read — and the write is never over a terminal one
+// (UpdateJobFieldsUnlessTerminal). Written unconditionally, it turned a job
+// that finished or failed in between into a Cancelled one: a Finished
+// archive or an Error the operator had yet to read, gone. A Cancel that finds
+// the job ended does nothing at all — no flag, no stopped run, no streak
+// ended — and answers cancelled false, so its caller says so rather than
+// claiming a cancel.
+//
+// The write comes first and the flag after, so it is the write that decides.
+// The write alone ends a run (its listeners cancel the download); one that
+// gets to WasCancelled before the flag is settled by it, and is the caller's
+// to report.
+func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool) {
+	if !w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 		"status": database.StatusCancelled,
-	})
-	return flagged
+	}) {
+		return false, false
+	}
+	flagged = w.queue.Cancel(jobID)
+	w.endBacklogStreak(jobID)
+	return true, flagged
 }
 
 // WaitForJobExit blocks until the job's orchestrator goroutine has returned,
@@ -554,6 +707,9 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 
 				jobs, err := w.db.GetAllJobs()
 				if err != nil {
+					// Logged like every sibling read: a failing DB otherwise
+					// leaves this safety net dead with nothing in the log.
+					w.logger.Warn("heartbeat: GetAllJobs failed", "err", err)
 					continue
 				}
 				for _, job := range jobs {
@@ -585,9 +741,21 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 // guard is needed: ReleaseDownloadSlot and Complete are both keyed by
 // holdingDlSlot, so a never-acquired broadcast's release calls are no-ops.
 // Returns false only when ctx was cancelled while waiting.
+//
+// A VOD that has to queue says so in its progress line for the length of the
+// wait (vodSlotWaitProgress), and the line is cleared however the wait ends —
+// left behind, a cancelled row would go on claiming it was queueing. One that
+// finds a slot free writes nothing.
 func (w *DownloadWorker) acquireDownloadSlot(ctx context.Context, jobID string, isVod bool) bool {
 	if !isVod {
 		return true
+	}
+	if w.queue.TryAcquireDownloadSlot(jobID) {
+		return true
+	}
+	if w.db != nil { // nil only in a zero-value test worker
+		w.db.UpdateJobFields(jobID, map[string]any{"progress": vodSlotWaitProgress})
+		defer w.db.UpdateJobFields(jobID, map[string]any{"progress": ""})
 	}
 	return w.queue.AcquireDownloadSlot(ctx, jobID)
 }
@@ -644,6 +812,19 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		// heartbeat. Coalesced + non-blocking; harmless when nothing freed.
 		w.scheduler.Wake()
 	}()
+	// Deferred after the Complete above, so it runs before it: Complete
+	// drops the run's user-cancel flag, and Start's recover — which used to
+	// record a panic alone — found nothing left to say a Cancel had flagged
+	// the run, so the Job Cancelled the cancel route left to it was never
+	// sent. Its own defer, not a recover inside the one above: a panic in
+	// the record goes on to Start's recover and still passes through the
+	// Complete.
+	var job *database.Job
+	defer func() {
+		if r := recover(); r != nil {
+			w.recordRunPanic(jobID, job, r)
+		}
+	}()
 
 	job, err := w.db.GetJob(jobID)
 	if err != nil {
@@ -656,9 +837,23 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
-	// Check if job is already in a terminal state (stale check)
-	if isTerminalStatus(job.Status) {
-		w.logger.Debug("skipping terminal job", "jobID", jobID, "status", job.Status)
+	// Stale check: the row must still be one the queue processes. Terminal
+	// rows were the only ones skipped, but a heartbeat that read the row
+	// before a run parked it in COOKIES? (or a sweep that sent it back to
+	// Queued) can enqueue it once that run exits — and this run would then
+	// probe, notify and refresh cookies for a parked row all over again, or
+	// download a backlog VOD the scheduler never admitted.
+	if !ShouldProcess(job) {
+		if job.Status == database.StatusCancelled && w.queue.WasCancelled(jobID) {
+			// Cancelled between Dequeue and here: queue.Cancel flagged this
+			// run, so the cancel route left the notification to it.
+			w.logger.Info("job cancelled by user", "jobID", jobID)
+			if w.notifier != nil {
+				w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
+			}
+			return
+		}
+		w.logger.Debug("skipping job no longer in a processable state", "jobID", jobID, "status", job.Status)
 		return
 	}
 
@@ -687,31 +882,44 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	w.logger.Info("processing job", "jobID", jobID, "videoID", job.VideoID)
 
 	// Process stream (probe, wait for live, etc.)
-	result, err := w.streamProc.Process(ctx, job)
+	result, err := w.processStream(ctx, job)
+	// When the format URLs were extracted, near enough: for a VOD, Process
+	// returns straight after its fetch. refreshStaleVodInfo measures the slot
+	// waits below from here.
+	extractedAt := time.Now()
 	if err != nil {
 		if ctx.Err() != nil {
 			w.handleCancellation(job)
 			return
 		}
-		w.setJobError(job, err)
+		requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
+		if !requeued {
+			w.setJobError(job, err)
+		}
 		return
 	}
 
 	if !result.ShouldDownload {
-		if result.Error == "cancelled" {
-			// "cancelled" comes from waitForLive on ctx.Done() or DB status change.
-			// Route through handleCancellation so shutdown preserves state.
+		if errors.Is(result.ErrSentinel, ErrCancelled) {
+			// A wait cancelled by ctx.Done() or the row's status (see
+			// cancelledResult). Route through handleCancellation so shutdown
+			// preserves state.
 			w.handleCancellation(job)
 			return
 		}
-		if result.Error != "" {
-			// AsError preserves any ErrSentinel attached by the producer
-			// (e.g. ErrCookiesRequired from checkPlayability) so
-			// setJobError's errors.Is checks fire correctly. Without
-			// this wrap, the prior code's errors.New stripped the
-			// sentinel and forced setJobError back to string-matching.
-			w.setJobError(job, result.AsError())
+		if result.Error == "" {
+			// Every producer of ShouldDownload:false names a reason today.
+			// One that did not would leave the row in whatever non-terminal
+			// state it had, with nothing driving it and nothing said; make
+			// that visible instead.
+			result.Error = "stream processing declined the job without a reason"
 		}
+		// AsError preserves any ErrSentinel attached by the producer (e.g.
+		// ErrCookiesRequired from checkPlayability) so setJobError's
+		// errors.Is checks fire correctly. Without this wrap, the prior
+		// code's errors.New stripped the sentinel and forced setJobError
+		// back to string-matching.
+		w.setJobError(job, result.AsError())
 		return
 	}
 
@@ -721,26 +929,48 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
+	// Download slot first — for VODs, blocks until one is available;
+	// broadcasts pass through ungated (see acquireDownloadSlot). BEFORE the
+	// lifecycle slot, not after it: a VOD that took its lifecycle slot and
+	// then parked on the download pool held one of the 100 for nothing, so
+	// enough admitted backlog (Σ archive_slots across channels) filled the
+	// lifecycle pool with VODs that were merely queueing, and a live
+	// broadcast — which never waits on the download pool — blocked behind
+	// them and lost footage. A VOD now waits holding nothing that a broadcast
+	// needs.
+	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
+		// Context cancelled while waiting for download slot
+		w.handleCancellation(job)
+		return
+	}
+
 	// Lifecycle slot (owner decision O-F): claimed HERE, once stream
 	// processing has decided this job downloads, and never earlier. Dequeue
 	// used to claim it, which meant every Upcoming job and every
 	// manually-added offline Twitch channel held one of the 100 for its whole
-	// wait — and a job stream processing then DECLINED (disabled channel,
-	// filter, duplicate) held one it never used. Every exit path from here on
-	// runs through the deferred queue.Complete above, which releases it.
+	// wait — and a job stream processing then refused held one it never used.
+	// It bounds the whole download half; the download slot above bounds the
+	// VOD pool. Every exit path from here on runs through the deferred
+	// queue.Complete above, which releases both.
 	if !w.queue.AcquireLifecycleSlot(ctx, jobID) {
 		// Only ctx cancellation ends that wait.
 		w.handleCancellation(job)
 		return
 	}
 
-	// Acquire download slot — for VODs, blocks until a slot is available;
-	// broadcasts pass through ungated (see acquireDownloadSlot). The lifecycle
-	// slot above bounds the whole download half; this one bounds the VOD pool
-	// inside it.
-	if !w.acquireDownloadSlot(ctx, jobID, result.IsVod) {
-		// Context cancelled while waiting for download slot
-		w.handleCancellation(job)
+	// Both waits are over. A VOD's format URLs were extracted before them,
+	// and a googlevideo URL lives ~6 h: one that queued longer than that
+	// failed its first request with a 403 that nothing retried. Re-extract a
+	// stale one now that the download is really starting.
+	if err := w.refreshStaleVodInfo(ctx, job, result, extractedAt); err != nil {
+		if ctx.Err() != nil {
+			w.handleCancellation(job)
+			return
+		}
+		requeued, err := w.requeueBacklogAfterTransientFailure(job, err)
+		if !requeued {
+			w.setJobError(job, err)
+		}
 		return
 	}
 
@@ -748,21 +978,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	jobCtx := w.buildJobContext(job)
 
 	// Route to platform-specific orchestrator
-	var maxRes int
-	w.readConfig(func(c *config.MoomboxConfig) {
-		maxRes = c.Downloader.MaxVideoResolution
-	})
 	var dlErr error
 	if job.Platform == "twitch" && result.TwitchVariant != nil {
-		variant := &TwitchVariantInfo{
-			URL:           result.TwitchVariant.URL,
-			Name:          result.TwitchVariant.Name,
-			Width:         result.TwitchVariant.Width,
-			Height:        result.TwitchVariant.Height,
-			FPS:           result.TwitchVariant.FPS,
-			QualityPref:   job.QualityPreference,
-			MaxResolution: maxRes,
-		}
+		variant := newTwitchVariantInfo(job, result.TwitchVariant, jobCtx.Config)
 		// Stable broadcast identity for engine resume validation: the live
 		// stream ID when known, else the job's video/VOD ID.
 		if result.TwitchStreamInfo != nil && result.TwitchStreamInfo.StreamID != "" {
@@ -821,14 +1039,25 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	}
 
 	if dlErr != nil {
-		if ctx.Err() != nil {
+		// ErrCancelled: the row was already Cancelled when ExecuteWithChat
+		// started. That early return used to be nil, which this read as a
+		// finished download — it deleted the staging of a job the operator
+		// had just cancelled and might Mux or Resume, and skipped the
+		// cancellation's own handling.
+		if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
 			w.handleCancellation(job)
 			return
 		}
-		w.setJobError(job, dlErr)
+		// A backlog VOD that ran out of disk waits in Queued for the space
+		// instead of ending in Error (requeueBacklogAfterDiskFull).
+		requeued, err := w.requeueBacklogAfterDiskFull(job, dlErr)
+		if !requeued {
+			w.setJobError(job, err)
+		}
 		return
 	}
 
+	w.forgetBacklogRetries(job.ID)
 	w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
 }
 
@@ -861,15 +1090,9 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	w.db.TrackJobForLogs(jobID)
 	defer w.restoreLogRouting(jobID)
 	fresh, _ := w.db.GetJob(jobID)
-	preserveForTail := fresh != nil && fresh.IncompleteTail
-	// A chat capture that ended without completing leaves its resume
-	// sidecar in staging; deleting the dir turns a recoverable truncation
-	// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
-	// shape as the incomplete_tail preservation above it, and the orphan
-	// scanner mirrors it in jobNeedsStaging — but only the chat files are
-	// kept, not the muxed-away media (see keepOnlyChatCapture).
-	preserveForChat := fresh != nil && fresh.ChatStatus == chatStatusIncomplete
-	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
+	v := decideStagingCleanup(w.db, fresh, jobID, stagingDir)
+	switch v.keep {
+	case keepStagingForAsides:
 		// A recording the engine could not resume was set aside rather than
 		// truncated (engine.StagedRestartSuffix), and nothing in the mux
 		// pipeline has consumed it: the fresh capture that replaced it is not
@@ -878,14 +1101,23 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		// the strength of a shorter one finishing cleanly. Named in recording
 		// order so an operator muxing them by hand knows which came first.
 		w.logger.Warn("preserving staging dir: a set-aside recording was never merged into the archive; these are in recording order, oldest first",
-			"asides", strings.Join(asides, " | "), "path", stagingDir, "jobID", jobID)
-	} else if w.hasUnmuxedParts(jobID, stagingDir) {
+			"asides", strings.Join(v.asides, " | "), "path", stagingDir, "jobID", jobID)
+	case keepStagingForUnmuxedPart:
 		w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
 			"path", stagingDir, "jobID", jobID)
-	} else if preserveForTail {
-		w.logger.Warn("preserving staging dir: recording tail incomplete; Retry will resume from the sidecar",
+	case keepStagingForUnusedRoot:
+		// The staging root holds a recording the finalize did not use: the
+		// from-the-start download beside a job that finalized as parts (one
+		// that did not complete, or one from before the root was claimed for
+		// it), or a second recording beside the one a single-file finalize
+		// muxed. Either can be the longer copy; deleting it here is how a
+		// complete VOD download used to vanish (vod_supersede.go).
+		w.logger.Warn("preserving staging dir: the staging root holds a recording the finalize did not use",
+			"recording", v.unusedRoot, "path", stagingDir, "jobID", jobID)
+	case keepStagingForTail:
+		w.logger.Warn("preserving staging dir: recording tail incomplete; Resume will append the missing segments from the sidecar",
 			"path", stagingDir, "jobID", jobID)
-	} else if preserveForChat {
+	case keepStagingChatOnly:
 		// Keep the chat capture, drop everything else: the media in here
 		// is already muxed into the output file, so shielding the whole
 		// dir for downloader.incomplete_staging_expiry_days (7 by
@@ -897,11 +1129,68 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 		}
 		w.logger.Warn("preserving staging dir: chat capture incomplete; the chat resume sidecar is kept for a re-run",
 			"path", stagingDir, "jobID", jobID)
-	} else if err := os.RemoveAll(stagingDir); err != nil {
-		w.logger.Warn("failed to remove staging directory", "path", stagingDir, "err", err)
-	} else {
-		w.logger.Debug("removed staging directory", "path", stagingDir)
+	default:
+		if err := os.RemoveAll(stagingDir); err != nil {
+			w.logger.Warn("failed to remove staging directory", "path", stagingDir, "err", err)
+		} else {
+			w.logger.Debug("removed staging directory", "path", stagingDir)
+		}
 	}
+}
+
+// stagingKeep is what decideStagingCleanup concluded about a finalized job's
+// staging directory: delete it (removeStaging), keep all of it for one of four
+// reasons, or prune it down to the chat capture.
+type stagingKeep int
+
+const (
+	removeStaging stagingKeep = iota
+	keepStagingForAsides
+	keepStagingForUnmuxedPart
+	keepStagingForUnusedRoot
+	keepStagingForTail
+	keepStagingChatOnly
+)
+
+// stagingVerdict is decideStagingCleanup's answer, with what the Warn that
+// keeps the directory names: the set-aside recordings, or the root recording
+// the finalize did not use.
+type stagingVerdict struct {
+	keep       stagingKeep
+	asides     []string
+	unusedRoot string
+}
+
+// decideStagingCleanup is cleanupStagingAfterMux's decision, without the
+// acting on it — split out so the boot sweep (reclaimBootLeftovers) deletes a
+// finalized job's staging on exactly the rules this function would have, and
+// never on a looser copy of them. The shields are checked in the order the
+// cleanup has always checked them, so the Warn an operator reads names the
+// first that holds. fresh may be nil (the row read failed or the row is
+// gone): the tail and chat shields then do not apply, as they never did.
+func decideStagingCleanup(db *database.Database, fresh *database.Job, jobID, stagingDir string) stagingVerdict {
+	if asides := stagedAsideRecordings(stagingDir); len(asides) > 0 {
+		return stagingVerdict{keep: keepStagingForAsides, asides: asides}
+	}
+	if hasUnmuxedPartsForJob(db, jobID, stagingDir) {
+		return stagingVerdict{keep: keepStagingForUnmuxedPart}
+	}
+	if unused := unusedRootRecording(db, jobID, stagingDir); unused != "" {
+		return stagingVerdict{keep: keepStagingForUnusedRoot, unusedRoot: unused}
+	}
+	if fresh != nil && fresh.IncompleteTail {
+		return stagingVerdict{keep: keepStagingForTail}
+	}
+	// A chat capture that ended without completing leaves its resume
+	// sidecar in staging; deleting the dir turns a recoverable truncation
+	// into a permanent one (sweep-2 TWITCH-3, verifier merge M5). Same
+	// shape as the incomplete_tail preservation above it, and the orphan
+	// scanner mirrors it in jobNeedsStaging — but only the chat files are
+	// kept, not the muxed-away media (see keepOnlyChatCapture).
+	if fresh != nil && fresh.ChatStatus == chatStatusIncomplete {
+		return stagingVerdict{keep: keepStagingChatOnly}
+	}
+	return stagingVerdict{keep: removeStaging}
 }
 
 // keepOnlyChatCapture deletes everything under a preserved staging dir except
@@ -1039,7 +1328,7 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 	for _, s := range segs {
 		recorded[s.SegmentIndex] = true
 	}
-	if segDirs[0].idx != 0 && !recorded[0] && discoverStagingMedia(stagingDir) != nil {
+	if rootIsPartZero(stagingDir) && !recorded[0] && discoverStagingMedia(stagingDir) != nil {
 		return true // root is part 0 and it was never recorded
 	}
 	for _, sd := range segDirs {
@@ -1048,6 +1337,62 @@ func hasUnmuxedSegmentParts(db *database.Database, jobID, stagingDir string) boo
 		}
 	}
 	return false
+}
+
+// recordRunPanic records a processJob run that panicked, from processJob's own
+// recover — ahead of its deferred Complete, which drops the run's user-cancel
+// flag. job is the row the run read, nil when it panicked before reading one.
+//
+// Settled the way setJobError settles a failure (JobQueue.settle). A Cancel
+// that flagged the run first left its Job Cancelled to the run, so the run
+// ends as a cancelled one and sends it (handleCancellation) — unless the
+// run's own outcome landed over the Cancel: a Finished archive whose tail
+// panicked stands, as below. Otherwise the run is settled now, and a Cancel
+// from here on is its caller's to report.
+//
+// A flagged run whose row is gone ends cancelled too, as setJobError ends it:
+// a Cancelled row is deleted at once (the delete route waits on no run for
+// one), and a run unwinding from that Cancel that then panicked sent nothing
+// — its Job Cancelled was still the run's to send, and an edit-mode message
+// stayed at its last state. Only a run that panicked before it read its row,
+// which is gone, has nothing to send it for, as processJob ends a row that
+// vanished before its run.
+//
+// The panic's Error is not written over an outcome: the run may have finished
+// or failed before it panicked, or the operator cancelled it while it ran —
+// written unconditionally, that Cancelled came back as "internal panic".
+// processJob runs no row that is already terminal, so whichever one it holds
+// landed during this run and stands. Nor over an outcome the run recorded and
+// settled before it panicked, terminal or not (JobQueue.settleRun): a COOKIES?
+// park, which a credential repair resumes; a backlog VOD requeued to Queued;
+// the Upcoming a successful automatic cookie refresh resumed it to; the row a
+// shutdown leaves to resume on restart. Guarded by the terminal statuses
+// alone, a panic in what was left of the run — setJobError's notification,
+// the cookie refresh that can hold it for minutes — turned each of them into
+// "internal panic", which only a manual Retry undid.
+func (w *DownloadWorker) recordRunPanic(jobID string, job *database.Job, r any) {
+	w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
+	flagged, already := w.queue.settleRun(jobID)
+	if already {
+		w.logger.Info("panic after the run recorded its outcome; leaving it as is", "jobID", jobID)
+		return
+	}
+	if flagged {
+		row, err := w.db.GetJob(jobID)
+		if err == nil && (row == nil || row.Status == database.StatusCancelled || !row.IsTerminal()) {
+			if job == nil {
+				job = row
+			}
+			if job != nil {
+				w.handleCancellation(job)
+				return
+			}
+		}
+	}
+	w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
+		"status": database.StatusError,
+		"error":  fmt.Sprintf("internal panic: %v", r),
+	})
 }
 
 // handleCancellation handles a cancelled/shutdown job.
@@ -1059,34 +1404,56 @@ func (w *DownloadWorker) handleCancellation(job *database.Job) {
 	// (no DB write), so the free-slot-before-DB-writes ordering below holds.
 	userCancelled := w.queue.WasCancelled(job.ID)
 
-	// Free the queue slot before any DB writes — symmetric with setJobError
-	// (see I2 race comment there). Idempotent against the deferred Complete.
-	w.queue.Complete(job.ID)
+	if userCancelled {
+		// Written while the run is still registered: a Retry/Resume/
+		// Reinitialize clicked while this run unwound waits for its Done
+		// (afterJobExit), which only processJob's deferred Complete closes —
+		// so this Cancelled (CancelJob already wrote one) cannot land on top
+		// of the retry's fresh status.
+		updates := map[string]any{"status": database.StatusCancelled}
+		if fresh, err := w.db.GetJob(job.ID); err == nil && fresh != nil {
+			if cs, ok := cancelledChatStatus(fresh.ChatStatus); ok {
+				updates["chat_status"] = cs
+			}
+		}
+		w.db.UpdateJobFields(job.ID, updates)
+	}
+
+	// Free the slots — before the notification, symmetric with setJobError.
+	// The run itself ends at processJob's deferred Complete.
+	w.queue.ReleaseSlots(job.ID)
+	w.forgetBacklogRetries(job.ID) // nor does this run end back in Queued
 
 	if userCancelled {
-		// User-initiated cancel: update status, notify
 		w.logger.Info("job cancelled by user", "jobID", job.ID)
-
-		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status": database.StatusCancelled,
-		})
-
 		if w.notifier != nil {
 			w.notifier.Send(notifications.JobCancelled(NotifyFacts(job)))
 		}
 	} else {
-		// Shutdown: preserve existing status so job resumes on restart
-		w.logger.Info("job interrupted by shutdown, preserving state", "jobID", job.ID)
+		// Shutdown: the existing status stays so the job resumes on restart.
+		// Or the row was deleted (processJob's OnJobDeleted listener cancels
+		// the same ctx), and there is nothing left to write.
+		w.logger.Info("job interrupted (shutdown or row deleted), leaving its state as is", "jobID", job.ID)
 	}
 }
 
-func isTerminalStatus(status database.JobStatus) bool {
-	switch status {
-	case database.StatusFinished, database.StatusError, database.StatusCancelled:
-		return true
-	default:
-		return false
+// cancelledChatStatus settles the chat_status a user cancel leaves behind.
+// Neither orchestrator's cancel arm records a chat verdict — it stops the
+// downloader and returns, and on a shutdown that is right, since the row keeps
+// its state and the capture resumes on the next start. A user cancel is
+// terminal, though, and both UIs render the value verbatim, so a Cancelled job
+// went on showing its chat as "downloading" (or "pending") indefinitely. A
+// capture that was running stopped short — "incomplete", the same verdict a
+// cut-off capture gets everywhere else; one that never started has nothing to
+// report. A settled verdict is left as it is (ok false).
+func cancelledChatStatus(current string) (string, bool) {
+	switch current {
+	case "downloading":
+		return chatStatusIncomplete, true
+	case "pending":
+		return "", true
 	}
+	return "", false
 }
 
 func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
@@ -1219,9 +1586,16 @@ func cookieRefreshWorthAttempting(err error) bool {
 //
 // Returns ParkReasonNone for anything that does not park at StatusCookies, so
 // callers can write the field unconditionally and never leave a stale
-// classification behind on a job that failed for an unrelated reason.
+// classification behind on a job that failed for an unrelated reason — with
+// one Error-row exception: a live Twitch capture that stopped on its
+// unconfirmed-end latch (ErrTwitchEndUnconfirmed) is recorded as
+// ParkReasonTwitchEndUnconfirmed, the marker the automatic mux keys on
+// (AutoMuxEndedBroadcast, D-T4).
 func parkReasonForError(err error) database.ParkReason {
 	if !cookiesStatusError(err) {
+		if errors.Is(err, ErrTwitchEndUnconfirmed) {
+			return database.ParkReasonTwitchEndUnconfirmed
+		}
 		return database.ParkReasonNone
 	}
 	if errors.Is(err, ErrNotAMember) {
@@ -1265,14 +1639,25 @@ func errorStage(errMsg string) string {
 }
 
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
-	// Free the queue slot BEFORE committing the error to DB so a concurrent
-	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
-	// IsProcessing dedup. processJob's deferred Complete is idempotent and
-	// remains as a safety net (covers panics that bypass this helper).
-	// Closes the I2 race documented in the v2.6.10 final review.
-	w.queue.Complete(job.ID)
+	// Give the slots back before the tail below (notifications, and an
+	// automatic cookie refresh that can take minutes), so the next download
+	// does not wait on it. Only the slots: the run stays registered until
+	// processJob's deferred Complete — see JobQueue.ReleaseSlots. Whatever
+	// re-enqueues this job meanwhile (AutoReinitializeJob, the cookie
+	// resume below) waits for that exit through afterJobExit instead of
+	// starting a second run beside this one.
+	w.queue.ReleaseSlots(job.ID)
+	// This run ends out of Queued, so a backlog retry streak is over.
+	w.forgetBacklogRetries(job.ID)
 
-	errMsg := err.Error()
+	// The one text every sink below shares — the "job error" line, the
+	// stored error the dashboard and the TUI show, and the Job Failed embed —
+	// so a googlevideo URL's credentials (the GVS PO token, the client's
+	// public IP, the signatures) that reached this error by any route are cut
+	// out once, here. The producers redact at the source too
+	// (redact.MediaError on the fetch errors that quote a media URL); this is
+	// the last stop before the text is kept and posted.
+	errMsg := redact.MediaText(err.Error())
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
 
 	status := database.StatusError
@@ -1294,12 +1679,28 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	if reason == database.ParkReasonMembership && w.CurrentCredentialIdentity != nil {
 		identity = w.CurrentCredentialIdentity(job.Platform)
 	}
-	w.db.UpdateJobFields(job.ID, map[string]any{
+	// Never over an operator's Cancel. processJob reads its context before
+	// it comes here, and a Cancel that lands after that read — CancelJob
+	// cancels the run and writes Cancelled — was overwritten by this write:
+	// the job showed Error, sent Job Failed, and the Job Cancelled the cancel
+	// route had left to this run (the run was flagged) was never sent. The
+	// operator's verdict stands, and the run ends as a cancelled one: when a
+	// Cancel flagged it before this failure settled (JobQueue.settle) —
+	// though its Cancelled write may not have landed yet — or when the row
+	// already reads Cancelled — CancelJob writes before it flags.
+	// Settled here, a Cancel from now on is its caller's to report: this
+	// run's tail no longer reads the flag.
+	if w.queue.settle(job.ID) || !w.db.UpdateJobFieldsUnless(job.ID, database.StatusCancelled, map[string]any{
 		"status":        status,
 		"error":         errMsg,
 		"park_reason":   reason,
 		"park_identity": identity,
-	})
+	}) {
+		w.logger.Info("job failure not recorded: the job was cancelled (or deleted) as it failed",
+			"jobID", job.ID, "err", errMsg)
+		w.handleCancellation(job)
+		return
+	}
 
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do
@@ -1319,7 +1720,8 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		errMsg == TwitchOfflineErrMsg &&
 		job.LastVideoSeq == nil &&
 		job.AutoRetryCount < MaxTwitchAutoRetries
-	suppressNotification := errors.Is(err, ErrNonActionable) || (job.AutoRetryCount > 0 && retryLikely)
+	nonActionable := errors.Is(err, ErrNonActionable)
+	suppressNotification := nonActionable || (job.AutoRetryCount > 0 && retryLikely)
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
@@ -1333,9 +1735,9 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			// 400 that drops the whole embed, and a raw title beside an
 			// escaped one renders two ways in one embed.
 			authFields := notifications.NewFieldBuilder().
-				AddInlineIf(job.ChannelName != "", "Channel", job.ChannelName).
+				AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
 				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
-				Add("Reason", reason).
+				Add("Reason", notifications.EscapeMarkdown(reason)).
 				Build()
 			// The same row→facts mapper the Job Failed send below uses, for
 			// the same three reasons and one more. This is a PER-JOB auth
@@ -1361,63 +1763,16 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				},
 			)
 		} else {
-			// The one row→facts mapper, so the only job send that is not a
-			// builder call still carries the identity every builder sets: the
-			// URL with its watch fallback, the author line, the platform and
-			// the job id. Arc N3's terminal edit on "error" and Arc N2b's deep
-			// link both key on Opts.JobID, and an embed with none can be
-			// neither edited nor linked.
-			f := NotifyFacts(job)
-			var stagingBase string
-			w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
-			// "preserved" is the same predicate the resume route gates on
-			// (HasStagingFiles), and Resume is YouTube-only in both UIs — a
-			// Twitch job told "Resume available" gets a 400.
-			staging := "removed"
-			if HasStagingFiles(stagingBase, job.ID) {
-				staging = "preserved"
-				if job.Platform != "twitch" {
-					staging = "preserved — Resume available"
-				}
-			}
-			asides := len(ScanAsides(stagingBase, job.ID).Groups)
-
-			fields := notifications.NewFieldBuilder().
-				// Guarded for the same reason the builders guard their id
-				// field: Field.Value carries no omitempty, clampEmbed never
-				// drops an empty value, and Discord answers one with a 400 that
-				// discord.go treats as permanent — the whole embed is dropped
-				// after a single attempt.
-				AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
-				AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
-				// Error is ALREADY wrapped by N1 — this Error field is one of
-				// the four sites N1 escapes. Carry N1's line through unchanged;
-				// a second wrap renders every \* as \\*. ChannelName is NOT one
-				// of N1's four, so the wrap above is new and single. (No line
-				// number: the one this comment used to carry was stale within
-				// the arc, and nothing checks comments.)
-				Add("Error", notifications.EscapeMarkdown(errMsg)).
-				AddInline("Stage", errorStage(errMsg)).
-				AddInline("Staging", staging).
-				AddIf(job.AutoRetryCount > 0, "Automatic Retries",
-					fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
-				AddIf(asides > 0, "Set-aside recordings",
-					fmt.Sprintf("%d — Recover to mux them", asides)).
-				Build()
-			w.notifier.Send("Job Failed",
-				fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
-				notifications.TypeError,
-				fields,
-				notifications.SendOptions{
-					URL:       f.URL,
-					Thumbnail: f.ThumbnailURL,
-					Event:     "error",
-					Author:    notifyAuthor(f),
-					Platform:  f.Platform,
-					JobID:     f.ID,
-				},
-			)
+			w.sendJobFailed(job, errMsg, false)
 		}
+	} else if w.notifier != nil && nonActionable && status == database.StatusError {
+		// The failure report is suppressed, but an edit-mode target may hold
+		// this job's lifecycle message open at "Found" or "Downloading" — and
+		// with no terminal send it stayed there for good. An EditOnly send
+		// closes it and posts nothing (notifications.SendOptions.EditOnly).
+		// The Twitch retry suppression is not this: the monitor restarts that
+		// job, and its next event goes on editing the same message.
+		w.sendJobFailed(job, errMsg, true)
 	}
 
 	// Automatic cookie recovery. Deliberately OUTSIDE the notifier branch
@@ -1430,6 +1785,97 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		w.attemptCookieRefresh(job, err)
 	}
 }
+
+// sendJobFailed sends the "Job Failed" embed for job. editOnly marks the
+// non-actionable case: the report is suppressed and the send only closes an
+// open lifecycle message (notifications.SendOptions.EditOnly).
+func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, editOnly bool) {
+	// The one row→facts mapper, so the only job send that is not a
+	// builder call still carries the identity every builder sets: the
+	// URL with its watch fallback, the author line, the platform and
+	// the job id. Arc N3's terminal edit on "error" and Arc N2b's deep
+	// link both key on Opts.JobID, and an embed with none can be
+	// neither edited nor linked.
+	f := NotifyFacts(job)
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	// "preserved" is the same predicate the resume route gates on
+	// (HasStagingFiles), and Resume is YouTube-only in both UIs — a
+	// Twitch job told "Resume available" gets a 400.
+	staging := "removed"
+	if HasStagingFiles(stagingBase, job.ID) {
+		staging = "preserved"
+		if job.Platform != "twitch" {
+			staging = "preserved — Resume available"
+		}
+	}
+	asides := len(ScanAsides(stagingBase, job.ID).Groups)
+
+	fields := notifications.NewFieldBuilder().
+		// Guarded for the same reason the builders guard their id
+		// field: Field.Value carries no omitempty, clampEmbed never
+		// drops an empty value, and Discord answers one with a 400 that
+		// discord.go treats as permanent — the whole embed is dropped
+		// after a single attempt.
+		AddInlineIf(job.ChannelName != "", "Channel", notifications.EscapeMarkdown(job.ChannelName)).
+		AddInlineIf(job.VideoID != "", notifications.IDLabel(job.Platform), job.VideoID).
+		// Error is ALREADY wrapped by N1 — this Error field is one of
+		// the four sites N1 escapes. Carry N1's line through unchanged;
+		// a second wrap renders every \* as \\*. ChannelName is NOT one
+		// of N1's four, so the wrap above is new and single. (No line
+		// number: the one this comment used to carry was stale within
+		// the arc, and nothing checks comments.)
+		Add("Error", notifications.EscapeMarkdown(errMsg)).
+		AddInline("Stage", errorStage(errMsg)).
+		AddInline("Staging", staging).
+		AddIf(job.AutoRetryCount > 0, "Automatic Retries",
+			fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+		AddIf(asides > 0, "Set-aside recordings",
+			fmt.Sprintf("%d — Recover to mux them", asides)).
+		Build()
+	w.notifier.Send("Job Failed",
+		fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
+		notifications.TypeError,
+		fields,
+		notifications.SendOptions{
+			URL:       f.URL,
+			Thumbnail: f.ThumbnailURL,
+			Event:     "error",
+			Author:    notifyAuthor(f),
+			Platform:  f.Platform,
+			JobID:     f.ID,
+			EditOnly:  editOnly,
+		},
+	)
+}
+
+// CookieRefreshOutcome is OnCookieRefreshNeeded's answer for one platform.
+type CookieRefreshOutcome int
+
+const (
+	// CookieRefreshNotRestored: the refresh failed — the platform's
+	// credentials were checked and refused, or there are none, or the pass
+	// declined to run or errored. The zero value, so an answer nobody chose leaves the job parked
+	// with the advice to replace the cookie file.
+	CookieRefreshNotRestored CookieRefreshOutcome = iota
+	// CookieRefreshRestored: the named platform ended up authenticated, so
+	// the job is retried.
+	CookieRefreshRestored
+	// CookieRefreshSkipped: the refresh did not run, for a reason the callback
+	// has already logged and a person can clear — a browser holds the profile
+	// (cookies.ErrProfileInUse). Nothing judged the cookies, so the job stays
+	// parked without the advice to replace them.
+	CookieRefreshSkipped
+	// CookieRefreshUnconfirmed: the pass ran and ended without establishing
+	// whether the platform's cookies work (cookies.RefreshUnknown — it could
+	// not reach the service or make the check). Nothing judged the cookies, so
+	// the job stays parked, and a recheck says whether they work.
+	CookieRefreshUnconfirmed
+	// CookieRefreshOff: cookies.auto_enabled is off, so nothing was attempted.
+	// The job stays parked; replacing the cookie file or turning the refresh
+	// on is the way out.
+	CookieRefreshOff
+)
 
 // attemptCookieRefresh runs (or deliberately declines to run) the automatic
 // cookie refresh for a job that just parked at StatusCookies, and — when it
@@ -1491,24 +1937,106 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 	// for a human. Guessing "youtube" here would trade that safe outcome for
 	// a second defaulting rule to keep in sync with the creators.
 	w.logger.Info("attempting automatic cookie refresh...", "platform", job.Platform)
-	if w.OnCookieRefreshNeeded(job.Platform) {
+	outcome := w.OnCookieRefreshNeeded(job.Platform)
+	if outcome == CookieRefreshSkipped {
+		// A browser holds the profile, and the callback's skip line says
+		// which host and which lock. This used to fall to the advice below:
+		// the skip, then "auto cookie refresh failed — the cookie file has
+		// to be replaced by hand" one line later, replacement named as the
+		// only remedy for cookies nothing had rejected. Freeing the profile
+		// is the remedy; replacing the file still works, so it is named
+		// second.
+		w.logger.Info("the job stays parked — the automatic cookie refresh was skipped, not failed",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"next", "it waits for a refresh that can run (the skip line above names what holds the profile) or a replaced cookie file, and resumes once the cookies work")
+		return
+	}
+	if outcome == CookieRefreshRestored {
 		w.logger.Info("cookie refresh succeeded, retrying job", "platform", job.Platform)
-		// Set to Upcoming so StreamProcessor.Process re-probes and
-		// correctly classifies the stream (live/VOD/upcoming). Using
-		// Live was wrong when the stream had transitioned to post-live
-		// or had not yet started (per audit reports/worker.md Finding 21).
-		w.db.UpdateJobFields(job.ID, map[string]any{
-			"status":        database.StatusUpcoming,
+		// Upcoming, not Live, so StreamProcessor.Process re-probes and
+		// classifies the stream afresh (per audit reports/worker.md
+		// Finding 21) — or Queued for a backlog VOD, which re-enters through
+		// the scheduler's pacing like the cookie-parked sweep's resumes.
+		status := CookieResumeStatus(job)
+		// Only while the row is still parked. The refresh can take two
+		// minutes, and both UIs offer Cancel on a COOKIES? row: written
+		// unconditionally, this turned the operator's Cancelled back into
+		// Upcoming (Queued for a backlog VOD) and the hand-off below
+		// enqueued it — the cancelled job downloaded after all. setJobError
+		// settled this run, so that Cancel was its caller's to report and
+		// nothing more is owed here.
+		if !w.db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
+			"status":        status,
 			"error":         "",
 			"park_reason":   database.ParkReasonNone,
 			"park_identity": "",
+		}) {
+			// The credential sweep the refresh's own re-check sets off
+			// (cmd/moombox resumeCookieParkedJobs) resumes every parked row
+			// of the platform, usually this one among them, before the
+			// refresh returns. That resume is the one this would have made,
+			// and still wants the hand-off: the sweep wakes the scheduler
+			// but leaves an Upcoming row to the heartbeat. Anything else —
+			// Cancelled, retried, deleted — is not this run's to resume.
+			var now database.JobStatus // "" when the row is gone
+			if cur, gerr := w.db.GetJob(job.ID); gerr == nil && cur != nil {
+				now = cur.Status
+			}
+			if now != database.StatusUpcoming && now != database.StatusQueued {
+				w.logger.Info("the job left COOKIES? while the cookie refresh ran; not resuming it",
+					"jobID", job.ID, "status", now)
+				return
+			}
+			status = now
+		}
+		// This runs inside the parked run's own tail, which is still
+		// registered: an Enqueue now would be dropped as a duplicate (and the
+		// job left for the heartbeat), so the hand-off waits for the run to
+		// exit.
+		w.afterJobExit(job.ID, "cookie-refresh resume", func() {
+			if status == database.StatusQueued {
+				if w.scheduler != nil {
+					w.scheduler.Wake()
+				}
+			} else {
+				w.queue.Enqueue(job.ID, database.StatusUpcoming)
+			}
 		})
-		w.queue.Enqueue(job.ID, database.StatusUpcoming)
+		return
+	}
+
+	if outcome == CookieRefreshUnconfirmed {
+		// The callback's line above says the pass could not establish
+		// whether the cookies work. They may be fine — most of the ways here
+		// leave the session healthy — so this does not follow it with the
+		// advice to replace them, as it once did for every outcome but a
+		// restore. Info, as the skip's line is: nothing was rejected, and a
+		// recheck answers the question this pass could not.
+		w.logger.Info("auto cookie refresh could not confirm the cookies — the job stays parked; R C / Recheck will tell",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"platform", job.Platform)
 		return
 	}
 
 	var cookieFile string
-	w.readConfig(func(c *config.MoomboxConfig) { cookieFile = c.Cookies.CookieFile })
+	if w.CookieFileInUse != nil {
+		cookieFile = w.CookieFileInUse()
+	}
+	if cookieFile == "" {
+		w.readConfig(func(c *config.MoomboxConfig) { cookieFile = c.Cookies.CookieFile })
+	}
+	if outcome == CookieRefreshOff {
+		// Nothing was attempted, so "failed" was the wrong word for it; the
+		// two ways out are the operator's, which is why this stays a Warn.
+		w.logger.Warn("automatic cookie refresh is off — replace the cookie file or turn it on in Settings",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"cookieFile", cookieFile,
+			"setting", "cookies.auto_enabled")
+		return
+	}
 	if cookieFile == "" {
 		w.logger.Warn("auto cookie refresh failed — no cookie file is configured",
 			"fix", "set cookies.cookie_file to a Netscape cookies.txt exported from a browser signed in to the account")
@@ -1522,16 +2050,24 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 }
 
 // fetchURL is a helper to download a URL's body.
+//
+// Its errors go through redact.MediaError. The live DASH and HLS strategies
+// fetch their manifest here — a signed googlevideo URL carrying the client's
+// public IP and the URL's signature, with the GVS PO token appended as a
+// /pot/<token> path segment — and a transport failure, or a URL net/url
+// refuses, is a *url.Error quoting the whole URL: returned as it was, all of
+// it reached the "job error" log line, the job's stored error and the Job
+// Failed embed.
 func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, redact.MediaError(err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	resp, err := workerHTTPClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, redact.MediaError(err)
 	}
 	defer resp.Body.Close()
 
@@ -1539,9 +2075,20 @@ func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	return data, resp.StatusCode, err
 }
 
+// inFlightWait is how long Stop waits for in-flight jobs to finish before it
+// cancels their muxes.
+const inFlightWait = 10 * time.Second
+
 // muxCancelGrace is how long Stop waits for FFmpeg to die after the mux root
 // is cancelled, before giving up and exiting anyway.
 const muxCancelGrace = 2 * time.Second
+
+// StopBudget is the longest Stop can take: the in-flight wait plus the grace
+// after mux cancellation. A caller's force-exit backstop must outlast it, or
+// the process exits before Stop reaches CancelMuxes and FFmpeg is left
+// writing into a staging dir the restarted child re-muxes with -y (owner
+// decision O-E).
+const StopBudget = inFlightWait + muxCancelGrace
 
 // Stop signals the worker to stop processing new jobs and waits for in-flight
 // jobs to finish (up to 10 seconds) so downloads aren't interrupted mid-write.
@@ -1568,7 +2115,7 @@ func (w *DownloadWorker) Stop() {
 	select {
 	case <-done:
 		w.logger.Info("download worker: all in-flight jobs finished")
-	case <-time.After(10 * time.Second):
+	case <-time.After(inFlightWait):
 		// Owner decision O-E: the jobs still running at this point are almost
 		// always draining a mux, and exiting now would leave FFmpeg writing
 		// into a staging dir the restarted child re-muxes with -y. Cancel the
@@ -1656,14 +2203,56 @@ func (w *DownloadWorker) ReauthenticateTwitchChats() int {
 // so any future error fires its notification — Resume is user-driven, so the
 // "suppress retry-failure notifications" guard in setJobError must not apply.
 func (w *DownloadWorker) ResumeJob(jobID string) {
-	w.db.UpdateJobFields(jobID, map[string]any{
-		"status":           database.StatusDownloading,
-		"error":            "",
-		"park_reason":      database.ParkReasonNone,
-		"park_identity":    "",
-		"auto_retry_count": 0,
+	w.afterJobExit(jobID, "resume", func() {
+		// A fresh backlog retry budget too, whatever ended the last run.
+		w.endBacklogStreak(jobID)
+		w.db.UpdateJobFields(jobID, map[string]any{
+			"status":           database.StatusDownloading,
+			"error":            "",
+			"park_reason":      database.ParkReasonNone,
+			"park_identity":    "",
+			"auto_retry_count": 0,
+		})
+		w.EnqueueJob(jobID)
 	})
-	w.EnqueueJob(jobID)
+}
+
+// afterJobExitTimeout bounds how long a deferred Resume/Reinitialize waits for
+// the job's previous run to unwind (a chat capture's shutdown grace is the
+// long pole) before giving up rather than racing it.
+const afterJobExitTimeout = 60 * time.Second
+
+// afterJobExit runs fn now when jobID has no run in flight, or once the run
+// that is still unwinding has exited. The cancel route writes Cancelled
+// before the run has stopped, so Retry and Resume appear at once — and one
+// clicked in that window used to race the run: Enqueue dropped the job as
+// still processing, handleCancellation then wrote Cancelled over the fresh
+// status, and Reinitialize deleted the staging the run was still writing its
+// chat resume sidecar into. Callers stay synchronous (the TUI calls these on
+// its update goroutine); the wait happens here, one per job.
+func (w *DownloadWorker) afterJobExit(jobID, what string, fn func()) {
+	if !w.queue.IsProcessing(jobID) {
+		fn()
+		return
+	}
+	if _, waiting := w.afterExitPending.LoadOrStore(jobID, struct{}{}); waiting {
+		return // a reset is already waiting on this run
+	}
+	w.logger.Info("waiting for the job's previous run to stop before "+what, "jobID", jobID)
+	w.wg.Go(func() {
+		defer w.afterExitPending.Delete(jobID)
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("panic in deferred "+what, "jobID", jobID, "panic", fmt.Sprint(r))
+			}
+		}()
+		if !w.WaitForJobExit(jobID, afterJobExitTimeout) {
+			w.logger.Warn(what+" skipped: the job's previous run did not stop", "jobID", jobID,
+				"waited", afterJobExitTimeout)
+			return
+		}
+		fn()
+	})
 }
 
 // clearJobParts removes a job's persisted parts for a fresh restart: the
@@ -1690,8 +2279,13 @@ func (w *DownloadWorker) clearJobParts(jobID string) {
 }
 
 // ReinitializeJob resets a job to a fresh state and re-enqueues it.
-// Clears all progress fields and deletes the staging directory.
+// Clears all progress fields and deletes the staging directory — after the
+// job's previous run has stopped, when one is still unwinding (afterJobExit).
 func (w *DownloadWorker) ReinitializeJob(jobID string) {
+	w.afterJobExit(jobID, "reinitialize", func() { w.reinitializeNow(jobID) })
+}
+
+func (w *DownloadWorker) reinitializeNow(jobID string) {
 	// Read config for staging path
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -1710,6 +2304,9 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	// files, silently discarding the freshly-downloaded media. (AutoReinit
 	// deliberately does NOT do this — see that method.)
 	w.clearJobParts(jobID)
+
+	// The backlog retry budget is in memory, not a column: a fresh one too.
+	w.endBacklogStreak(jobID)
 
 	// Clear all non-input fields. auto_retry_count resets here because
 	// user-driven reinit grants the job a fresh budget; auto-recovery
@@ -1769,6 +2366,14 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 // (discoverResumeSegment returns maxRecorded+1). Clearing here would throw away
 // captured footage of a live broadcast — the opposite of recovery.
 func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
+	// The monitor reacts to the Error row the moment setJobError writes it,
+	// while that run is still finishing its tail: wait for it to exit, as a
+	// user's Reinitialize does, rather than reset the row and staging under
+	// it (and have the Enqueue dropped as a duplicate).
+	w.afterJobExit(jobID, "auto-reinitialize", func() { w.autoReinitializeNow(jobID) })
+}
+
+func (w *DownloadWorker) autoReinitializeNow(jobID string) {
 	prev, err := w.db.GetJob(jobID)
 	if err != nil || prev == nil {
 		w.logger.Warn("AutoReinitializeJob: job not found", "jobID", jobID, "err", err)
@@ -1852,6 +2457,13 @@ func (w *DownloadWorker) Asides(jobID string) (AsideReport, error) {
 // MuxJob force-muxes a cancelled/errored job's staging files.
 // Bypasses the download queue — runs directly in a wg-tracked goroutine.
 func (w *DownloadWorker) MuxJob(jobID string) error {
+	return w.muxJob(jobID, func(err error) string { return err.Error() })
+}
+
+// muxJob is MuxJob with the error a failed mux leaves on the row chosen by
+// the caller: the Mux action's is the mux error itself, the automatic mux of
+// an ended Twitch broadcast says it was automatic (autoMuxFailure).
+func (w *DownloadWorker) muxJob(jobID string, failure func(error) string) error {
 	// Read config for staging check
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -1872,8 +2484,20 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		return err
 	}
 
+	// Read before the Muxing write below overwrites it: a row already Muxing
+	// is a boot re-mux of a download that completed; anything else is the
+	// operator muxing whatever was captured (JobContext.CapturedMux).
+	capturedMux := true
+	if prior, _ := w.db.GetJob(jobID); prior != nil && prior.Status == database.StatusMuxing {
+		capturedMux = false
+	}
+	// A mux of the staging ends what an unconfirmed-end marker was waiting
+	// for, whoever started it: cleared here, an operator's Mux that fails
+	// is not followed by an automatic one when the channel next reads
+	// offline (D-T4). On every other row the value is already empty.
 	w.db.UpdateJobFields(jobID, map[string]any{
-		"status": database.StatusMuxing,
+		"status":      database.StatusMuxing,
+		"park_reason": database.ParkReasonNone,
 	})
 
 	w.wg.Go(func() {
@@ -1881,12 +2505,47 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		defer func() {
 			if r := recover(); r != nil {
 				w.logger.Error("panic in MuxJob", "jobID", jobID, "panic", fmt.Sprint(r))
-				w.db.UpdateJobFields(jobID, map[string]any{
+				// Not over an outcome, as in Start's recover: a mux that
+				// wrote Finished and panicked in its tail (the notification,
+				// the staging cleanup) turned the archive into an Error, and
+				// so did an operator's Cancel that landed on the Muxing row.
+				// The Muxing write above came before this goroutine, so
+				// whichever terminal status the row holds landed during this
+				// mux and stands.
+				w.db.UpdateJobFieldsUnlessTerminal(jobID, map[string]any{
 					"status": database.StatusError,
 					"error":  fmt.Sprintf("internal panic: %v", r),
 				})
 			}
 		}()
+
+		// Owner decision O-E: the orchestrator's mux root, never
+		// context.Background() — a Stop reaches this FFmpeg instead of leaving
+		// it writing into a staging dir the restarted child re-muxes with -y.
+		root := w.orchestrator.muxRoot()
+
+		// The operator's Cancel reaches this FFmpeg too. Both UIs offer Cancel
+		// on a Muxing row and the route writes Cancelled, but queue.Cancel
+		// only knows the jobs it dequeued — this one it never saw — so the
+		// mux ran on, wrote Finished over the Cancelled row and sent a
+		// "Download Finished" embed after the "Job Cancelled" one. Listened
+		// for the way ExecuteWithChat listens, and a deleted row stops it the
+		// way processJob's listener does. Subscribed BEFORE the row is read,
+		// so a cancel that lands first is seen in the row instead.
+		ctx, cancelMux := context.WithCancel(root)
+		defer cancelMux()
+		unsubscribe := w.db.OnJobUpdate(func(updated *database.Job) {
+			if updated.ID == jobID && updated.Status == database.StatusCancelled {
+				cancelMux()
+			}
+		})
+		defer unsubscribe()
+		unsubscribeDel := w.db.OnJobDeleted(func(deleted *database.JobDeleted) {
+			if deleted.JobID == jobID {
+				cancelMux()
+			}
+		})
+		defer unsubscribeDel()
 
 		job, err := w.db.GetJob(jobID)
 		if err != nil {
@@ -1903,12 +2562,12 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 			w.logger.Debug("MuxJob: job vanished before muxing", "jobID", jobID)
 			return
 		}
+		if job.Status == database.StatusCancelled {
+			cancelMux()
+		}
 
 		jobCtx := w.buildJobContext(job)
-		// Owner decision O-E: the orchestrator's mux root, never
-		// context.Background() — a Stop reaches this FFmpeg instead of leaving
-		// it writing into a staging dir the restarted child re-muxes with -y.
-		ctx := w.orchestrator.muxRoot()
+		jobCtx.CapturedMux = capturedMux
 
 		// This mux takes the same download slot a queued job takes: a boot
 		// that finds N interrupted Muxing rows would otherwise start N
@@ -1916,12 +2575,29 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		// The wait ends on the mux root's cancellation, so a shutdown does not
 		// sit here holding the process open.
 		if !w.queue.AcquireDownloadSlot(ctx, jobID) {
+			if root.Err() == nil {
+				w.logger.Info("MuxJob: cancelled while waiting for a mux slot; staging is kept", "jobID", jobID)
+				return
+			}
 			w.logger.Info("MuxJob: shutdown while waiting for a mux slot; the row stays Muxing for the next start", "jobID", jobID)
 			return
 		}
 		defer w.queue.ReleaseDownloadSlot(jobID)
 
 		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			if ctx.Err() != nil && root.Err() == nil {
+				// Cancelled (or deleted) by the operator; staging stays for a
+				// later Mux or Resume. The row says Cancelled unless the mux's
+				// own Muxing write landed just after the route's — re-assert
+				// it so the row cannot be left Muxing with nothing running.
+				// On a row still Muxing only: read and then written
+				// unconditionally, the Cancelled also landed on whatever came
+				// after the route's — a Finished archive a racing mux wrote,
+				// the operator's Resume of the cancelled row.
+				w.logger.Info("MuxJob: cancelled; staging is kept", "jobID", jobID)
+				w.db.UpdateJobFieldsIf(jobID, database.StatusMuxing, map[string]any{"status": database.StatusCancelled})
+				return
+			}
 			if ctx.Err() != nil {
 				// Cancelled by Stop, not a failure: leave the row Muxing with
 				// its staging intact so the restarted child re-muxes it
@@ -1933,7 +2609,7 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
 			w.db.UpdateJobFields(jobID, map[string]any{
 				"status": database.StatusError,
-				"error":  err.Error(),
+				"error":  failure(err),
 			})
 			return
 		}
@@ -1978,8 +2654,9 @@ func (w *DownloadWorker) claimJobOperation(jobID, op string) (func(), error) {
 // the buffer kept) once terminal.
 //
 // The counterpart to the TrackJobForLogs RecoverAsides does on the way in.
-// That bracket exists because RouteLogToJobs scans only db.logRouted, and
-// SyncJobLogTracking deletes every terminal job from it (CORE-12) — so a
+// That bracket exists because RouteLogToJobs scans only db.logRouted, which
+// holds no terminal job (CORE-12: the status write that makes a job terminal
+// untracks it, and the boot seed's SyncJobLogTracking tracks none) — so a
 // recovery, which runs ONLY on a terminal job and deliberately never writes a
 // status, would emit every one of its log lines into nothing. MuxJob has no
 // such problem: it flips the row to Muxing first.
@@ -2033,13 +2710,20 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	if err != nil {
 		return err
 	}
+	// The recovery keeps the row's status, so a Cancelled or Error job's
+	// staging still reads as an orphan to the Files sweep — offered for
+	// deletion while FFmpeg reads the asides out of it. Claimed for the run.
+	releaseStaging := claimOutputStem(jobID, filepath.Join(stagingBase, jobID))
 	// The job is terminal, so nothing is routing its log lines (CORE-12).
 	// Both UIs point the operator at the job's log for this run's progress, so
-	// route to it for the duration and hand it back at the end. Best-effort,
-	// not a guarantee: SyncJobLogTracking drops every terminal ID from the
-	// routed set and re-runs on each OnJobsChange fan-out, i.e. on every AddJob
-	// and DeleteJob — so a stream discovered while a long aside is muxing
-	// silently ends the routing and the rest of this run's lines go nowhere.
+	// route to it for the duration and hand it back at the end. Nothing that
+	// happens to another job ends it: cmd/moombox re-routes a job only on its
+	// own events — its OnJobAdded, a status write through OnJobChange, its
+	// OnJobDeleted — the bulk writers' OnJobsChange leaves routing alone
+	// (onJobsChange), and the channel prune drops only the rows it deleted
+	// (DeleteJobsAndHistoryForChannel). A status write on THIS job does
+	// re-route it by its new status, and deleting it ends the routing with
+	// the row.
 	w.db.TrackJobForLogs(jobID)
 
 	w.wg.Go(func() {
@@ -2055,6 +2739,7 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 			}
 		}()
 		defer release()
+		defer releaseStaging()
 
 		jobCtx := w.buildJobContext(job)
 		// The orchestrator's mux root, never context.Background(), for the
@@ -2081,14 +2766,17 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 		}
 
 		// Every aside is out of staging now — but that is NOT enough to hand
-		// the directory to cleanupStagingAfterMux. Its four shields are:
-		// asides present (just consumed), hasUnmuxedParts (FALSE for a
-		// single-file job, because hasUnmuxedSegmentParts returns false with
-		// no seg_N dirs), IncompleteTail, and chat-incomplete. A Cancelled or
-		// Error job whose staging holds both the fresh video.mp4 and an aside
-		// — the commonest shape after a mid-stream restart, and exactly what
-		// /mux and A M exist to rescue — falls through all four to
-		// os.RemoveAll. Recovering the asides would delete the main recording.
+		// the directory to cleanupStagingAfterMux. Its shields are: asides
+		// present (just consumed), hasUnmuxedParts (FALSE for a single-file
+		// job, because hasUnmuxedSegmentParts returns false with no seg_N
+		// dirs), unusedRootRecording (for a single-file job, only a
+		// whole-file download beside a live-shape capture — never the one
+		// recording a root holds), IncompleteTail, and chat-incomplete. A
+		// Cancelled or Error job whose staging holds both the fresh video.mp4
+		// and an aside — the commonest shape after a mid-stream restart, and
+		// exactly what /mux and A M exist to rescue — falls through every one
+		// of them to os.RemoveAll. Recovering the asides would delete the
+		// main recording.
 		//
 		// So: reclaim only when the directory holds no recognised media
 		// (discoverStagingMedia, the same discovery muxFromStaging uses) and

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -174,7 +175,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				count++
 			}
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Resumed %d jobs", count))
+			if count == 0 {
+				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
+				return a, nil
+			}
+			a.setFeedback("Resumed " + jobCount(count))
 		} else if job != nil && a.OnResumeJob != nil {
 			a.OnResumeJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
@@ -194,7 +199,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				count++
 			}
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Reinitialized %d jobs", count))
+			if count == 0 {
+				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
+				return a, nil
+			}
+			a.setFeedback("Reinitialized " + jobCount(count))
 		} else if job != nil && a.OnReinitializeJob != nil {
 			a.OnReinitializeJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
@@ -220,7 +229,10 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A C":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
-			count := 0
+			// ended counts the jobs the list showed cancellable that had
+			// finished, failed or been cancelled by the time the cancel
+			// reached them: OnCancelJob leaves those as they ended.
+			count, ended := 0, 0
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -233,18 +245,29 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				default:
 					continue
 				}
-				a.OnCancelJob(id)
-				count++
+				if a.OnCancelJob(id) {
+					count++
+				} else {
+					ended++
+				}
 			}
 			a.taskList.ClearSelection()
-			if count > 0 {
-				a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
-			} else {
-				a.setFeedback("No cancellable jobs in selection")
+			switch {
+			case ended > 0 && count > 0:
+				a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
+			case ended > 0:
+				a.setFeedbackWithSeverity("Not cancelled: "+jobCount(ended)+" had already ended", severityWarning)
+			case count > 0:
+				a.setFeedback("Cancelled " + jobCount(count))
+			default:
+				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
 			}
 		} else if job != nil && a.OnCancelJob != nil {
-			a.OnCancelJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+			if a.OnCancelJob(job.ID) {
+				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+			} else {
+				a.setFeedbackWithSeverity(fmt.Sprintf("Not cancelled — %s had already ended", job.Title), severityWarning)
+			}
 		}
 	case "A D":
 		// OnDeleteJob blocks in WaitForJobExit (up to 5s per job) — run the
@@ -263,10 +286,10 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			}
 			a.taskList.ClearSelection()
 			if len(ids) == 0 {
-				a.setFeedback("No deletable jobs in selection")
+				a.setFeedbackWithSeverity("No deletable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setFeedback(fmt.Sprintf("Deleting %d jobs...", len(ids)))
+			a.setFeedback("Deleting " + jobCount(len(ids)) + "...")
 			deleteFn := a.OnDeleteJob
 			return a, safeCmd(func() tea.Msg {
 				for _, id := range ids {
@@ -285,7 +308,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A W":
 		if a.OnSetWatched == nil {
-			a.setFeedback("Watched toggling is unavailable")
+			a.setFeedbackWithSeverity("Watched toggling is unavailable", severityWarning)
 			return a, nil
 		}
 		setFn := a.OnSetWatched
@@ -302,7 +325,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				}
 			}
 			if len(finished) == 0 {
-				a.setFeedback("No finished jobs in selection")
+				a.setFeedbackWithSeverity("No finished jobs in selection", severityWarning)
 				return a, nil
 			}
 			a.taskList.ClearSelection()
@@ -392,14 +415,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// same way: with no status callback the chord is not registered, so
 		// processSecondKey never reaches this case.
 		if a.OnYtdlpPluginStatus == nil {
-			a.setFeedback("yt-dlp plugin status is unavailable in this process")
+			a.setFeedbackWithSeverity("yt-dlp plugin status is unavailable in this process", severityWarning)
 			return a, nil
 		}
 		a.ytdlpDlg.SetSize(a.width, a.height)
 		return a, tea.Batch(a.ytdlpDlg.Open(), a.ytdlpStatusCmd())
 	case "E T":
 		if a.OnGetStats == nil {
-			a.setFeedback("Statistics are unavailable")
+			a.setFeedbackWithSeverity("Statistics are unavailable", severityWarning)
 			return a, nil
 		}
 		a.clearFeedback()
@@ -440,7 +463,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			return a, nil
 		}
 		if a.OnFetchReleaseNotes == nil || a.version == "" {
-			a.setFeedback("Cannot fetch release notes (offline build or unconfigured)")
+			a.setFeedbackWithSeverity("Cannot fetch release notes (offline build or unconfigured)", severityWarning)
 			return a, nil
 		}
 		// No pending update — fetch current version's notes asynchronously.
@@ -462,11 +485,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback("Verifying signature...")
 			verifyFn := a.OnVerifySignature
 			return a, safeCmd(func() tea.Msg {
-				err := verifyFn()
+				manifest, err := verifyFn()
 				if err != nil {
 					return signatureVerifyResultMsg{Err: err.Error()}
 				}
-				return signatureVerifyResultMsg{}
+				return signatureVerifyResultMsg{Manifest: manifest}
 			})
 		}
 	case "R P":
@@ -519,20 +542,31 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 					}),
 				)
 			}
-			a.setFeedback("No URL to copy")
+			a.setFeedbackWithSeverity("No URL to copy", severityWarning)
 		}
 	case "O W":
 		scheme := "http"
-		if a.configStore != nil {
-			a.configStore.Read(func(c *config.MoomboxConfig) {
-				if c.Network.HTTPSEnabled {
-					scheme = "https"
-				}
-			})
+		if a.httpsActive() {
+			scheme = "https"
 		}
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))
 		openBrowser(url)
+	case "O L":
+		if job == nil {
+			return a, nil
+		}
+		if a.OnGetJobLogs == nil {
+			a.setFeedbackWithSeverity("Job logs are unavailable", severityWarning)
+			return a, nil
+		}
+		a.clearFeedback()
+		a.jobLog.SetSize(a.width, a.height)
+		a.jobLog.Open(job)
+		// The only place a refresh chain starts, and — as for E T — the tick
+		// goes last in the batch.
+		a.jobLogEpoch++
+		return a, tea.Batch(a.fetchJobLogCmd(a.jobLogEpoch, job.ID), jobLogRefreshTick(a.jobLogEpoch))
 	case "O G":
 		a.setFeedback("Opening: " + constants.ProjectRepoURL)
 		openBrowser(constants.ProjectRepoURL)
@@ -586,8 +620,13 @@ func (a *App) chordFeedback(prefix string) string {
 		if !strings.HasPrefix(item.Chord, upperPrefix+" ") {
 			continue
 		}
-		// For NeedsJob items, check if selected job passes the filter
-		if item.NeedsJob && (job == nil || (item.JobFilter != nil && !item.JobFilter(job))) {
+		// For NeedsJob items, check if selected job passes the filter — unless
+		// the chord will act on the batch selection instead, which is what
+		// processSecondKey does for a batch-capable chord whenever jobs are
+		// selected (the hint used to hide those chords whenever the CURSOR
+		// job was ineligible, although pressing them dispatched the batch).
+		batch := item.SupportsBatch && a.taskList.SelectedCount() > 0
+		if item.NeedsJob && !batch && (job == nil || (item.JobFilter != nil && !item.JobFilter(job))) {
 			continue
 		}
 		// Extract the second key character from the chord (e.g. "A K" → "K")
@@ -627,13 +666,39 @@ func canOpenFolder(j *database.Job) bool {
 	return false
 }
 
-// canOpenStream returns true if the job has a stream URL to open.
+// canOpenStream returns true if the job has a stream URL to open — exactly
+// when streamURL has one, so the menu never offers O S / O C for a job the
+// chord then answers "No stream URL available" for.
 func canOpenStream(j *database.Job) bool {
-	return j.URL != "" || j.VideoID != ""
+	return streamURL(j) != ""
 }
 
-// streamURL returns the stream page URL for a job, or "" if unavailable.
+// importPlaceholderRe matches the stand-in id an archive import mints when the
+// zip carries no YouTube id: "imp_" and randomHex(4)'s eight lowercase hex
+// digits (internal/web/routes/import_routes.go). The dashboard's twin is
+// isImportPlaceholderId in web/public/modules/utils.js.
+var importPlaceholderRe = regexp.MustCompile(`^imp_[0-9a-f]{8}$`)
+
+// isImportPlaceholderID reports whether id is an import's stand-in. Such a
+// job's URL is built from it and names a video that does not exist.
+func isImportPlaceholderID(id string) bool {
+	return importPlaceholderRe.MatchString(id)
+}
+
+// streamURL returns the stream page URL for a job, or "" if unavailable —
+// including for an import's placeholder id, whose URL the dashboard hides
+// for the same reason: it opens (or copies) a page for no video at all.
+//
+// A Twitch live row with no URL has no page. Every Twitch row Moombox
+// creates carries its URL; the one that does not is an imported live
+// capture, whose stream id names no page and whose channel name is no login
+// — the import's "Import" placeholder, or the chat's display name — so
+// twitch.tv/<channel name> was somebody else's channel, or no page at all.
+// A VOD's id names its own page.
 func streamURL(j *database.Job) string {
+	if isImportPlaceholderID(j.VideoID) {
+		return ""
+	}
 	if j.URL != "" {
 		return j.URL
 	}
@@ -645,10 +710,7 @@ func streamURL(j *database.Job) string {
 			vodID := strings.TrimPrefix(j.VideoID, "tw_v")
 			return "https://www.twitch.tv/videos/" + vodID
 		}
-		if j.ChannelName == "" {
-			return ""
-		}
-		return "https://www.twitch.tv/" + j.ChannelName
+		return ""
 	}
 	return "https://www.youtube.com/watch?v=" + j.VideoID
 }
@@ -743,16 +805,27 @@ func JobIsActive(s database.JobStatus) bool {
 }
 
 // asidesFor returns the selected job's set-aside summary, probing the disk at
-// most once per job ID. An active job answers empty without a probe: its
-// staging dir is mid-write, and nothing in it is recoverable yet.
+// most once per version of the job's row. An active job answers empty without
+// a probe: its staging dir is mid-write, and nothing in it is recoverable yet.
+//
+// Keyed on updated_at as well as the ID, and dropped while the job is active:
+// on the ID alone the memo outlived the job's own transitions — a job
+// resumed, set a recording aside and failed again kept showing the "none"
+// probed before the resume, while A S (which probes afresh) offered the
+// recovery the panel said was not there.
 func (a *App) asidesFor(job *database.Job) AsideSummary {
-	if job == nil || a.JobAsides == nil || JobIsActive(job.Status) {
+	if job == nil || a.JobAsides == nil {
 		return AsideSummary{}
 	}
-	if a.asidesJobID == job.ID {
+	if JobIsActive(job.Status) {
+		a.invalidateAsides(job.ID)
+		return AsideSummary{}
+	}
+	if a.asidesJobID == job.ID && a.asidesUpdatedAt == job.UpdatedAt {
 		return a.asidesCache
 	}
 	a.asidesJobID = job.ID
+	a.asidesUpdatedAt = job.UpdatedAt
 	a.asidesCache = a.JobAsides(job.ID)
 	return a.asidesCache
 }
@@ -763,8 +836,17 @@ func (a *App) asidesFor(job *database.Job) AsideSummary {
 func (a *App) invalidateAsides(jobID string) {
 	if a.asidesJobID == jobID {
 		a.asidesJobID = ""
+		a.asidesUpdatedAt = ""
 		a.asidesCache = AsideSummary{}
 	}
+}
+
+// jobCount spells a job count for a feedback line: "1 job", "3 jobs".
+func jobCount(n int) string {
+	if n == 1 {
+		return "1 job"
+	}
+	return fmt.Sprintf("%d jobs", n)
 }
 
 // buildMenuItems builds context-sensitive action menu items.
@@ -798,15 +880,20 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A M", Label: "Mux Job", HintLabel: "Mux", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no muxable jobs",
 			JobFilter: func(j *database.Job) bool {
-				canMux := j.Status == database.StatusCancelled || j.Status == database.StatusError
-				if canMux && a.HasSegmentFiles != nil {
-					return a.HasSegmentFiles(j.ID)
+				switch j.Status {
+				case database.StatusCancelled, database.StatusError:
+					return a.HasSegmentFiles != nil && a.HasSegmentFiles(j.ID)
+				case database.StatusFinished:
+					// A part its finalize could not mux is still in staging —
+					// the recovery the staging cleanup names when it keeps
+					// the dir (the same rule as POST /api/jobs/{id}/mux).
+					return a.HasUnmuxedParts != nil && a.HasUnmuxedParts(j.ID)
 				}
 				return false
 			},
 			// Status-only twin of the filter above — see A R (CORE-9).
 			StatusFilter: func(j *database.Job) bool {
-				return j.Status == database.StatusCancelled || j.Status == database.StatusError
+				return j.Status == database.StatusCancelled || j.Status == database.StatusError || j.Status == database.StatusFinished
 			}},
 		{Chord: "A S", Label: "Recover Set-aside Recordings", HintLabel: "Recover", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no jobs with set-aside recordings",
@@ -898,6 +985,17 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL (best effort)", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
+	)
+	// O L: the job's own log — the dashboard job dialog's "Job Logs"
+	// section. Every job has a buffer to read, empty or not (the dashboard
+	// shows the section for every job too), so there is no filter; gated on
+	// the callback like the E chords, since without it there is nothing to
+	// read.
+	if a.OnGetJobLogs != nil {
+		items = append(items, ActionMenuItem{Chord: "O L", Label: "Open Job Log", HintLabel: "Log", Category: "Open", NeedsJob: true,
+			DisabledReason: "no jobs"})
+	}
+	items = append(items,
 		ActionMenuItem{Chord: "O G", Label: "Open GitHub Page", HintLabel: "GitHub", Category: "Open"},
 	)
 
@@ -933,9 +1031,18 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras"})
 	}
 
-	// Filter + Other
+	// Filter + Other. F does what handleFilter does for the focused panel,
+	// so the entry says that — "Cycle Filter" from Details toggled the
+	// description, and from Logs cycled the level.
+	filterLabel := "Cycle Status Filter"
+	switch a.focusedPanel {
+	case PanelDetails:
+		filterLabel = "Toggle Description"
+	case PanelLogs:
+		filterLabel = "Cycle Log Level"
+	}
 	items = append(items,
-		ActionMenuItem{Chord: "F", Label: "Cycle Filter", HintLabel: "Filter", Category: "Filter"},
+		ActionMenuItem{Chord: "F", Label: filterLabel, HintLabel: "Filter", Category: "Filter"},
 		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other"},
 		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other"},
 		ActionMenuItem{Chord: "Q Q", Label: "Quit", HintLabel: "Quit", Category: "Other"},

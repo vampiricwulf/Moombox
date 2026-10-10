@@ -40,6 +40,10 @@ func reachabilityProbe(ctx context.Context, targets []string) bool {
 
 	resultCh := make(chan bool, len(targets)) // buffered: late senders never block
 	var d net.Dialer
+	// Read once, here: the probe returns on the first winner and leaves the
+	// losing dials running, so a dial goroutine reading the variable itself
+	// could do so after a test had already swapped it for the next case.
+	dial := probeDial
 	for _, t := range targets {
 		go func(addr string) {
 			// Inline recovery (project rule). A panic before the send would
@@ -52,7 +56,7 @@ func reachabilityProbe(ctx context.Context, targets []string) bool {
 					resultCh <- false
 				}
 			}()
-			conn, err := probeDial(ctx, &d, addr)
+			conn, err := dial(ctx, &d, addr)
 			if err != nil {
 				resultCh <- false
 				return

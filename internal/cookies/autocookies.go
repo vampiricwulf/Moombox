@@ -276,10 +276,11 @@ type AutoCookieService struct {
 	//     field. Callers: FinishSetup's empty-profile, read-failure, merge-abort,
 	//     mkdir, write and jar-load exits; the refresh's import failure, merge
 	//     abort, mkdir, write, jar-load, credential-loss and verification-failure
-	//     exits. Each of those is a conclusion the pass reached. (The refresh's
-	//     mkdir, write and jar-load exits were the last three silent ones; they
-	//     are the sweep's T1-8 and are pinned by
-	//     autocookies_refresh_lasterror_test.go.)
+	//     exits; and both Chromium launchers' ErrProfileInUse refusals — the
+	//     refresh's declined pass and the setup's refused start. Each of those is
+	//     a conclusion the pass reached. (The refresh's mkdir, write and jar-load
+	//     exits were the last three silent ones; they are the sweep's T1-8 and
+	//     are pinned by autocookies_refresh_lasterror_test.go.)
 	//
 	//     THE LAST THREE OF FINISHSETUP'S WERE MISSING until Arc 8 Task 12a fix
 	//     round 1, and the shape of the miss is worth keeping written down
@@ -314,7 +315,11 @@ type AutoCookieService struct {
 	//   - StartSetup, at the slot claim — CLEARS. Correct, and the one clear
 	//     that is about intent rather than evidence: a new setup attempt is
 	//     starting, the recorded message belongs to an attempt that is over, and
-	//     leaving it would make the wizard open under a stale red line.
+	//     leaving it would make the wizard open under a stale red line. The one
+	//     message that is NOT over by then is a held profile, and the clear runs
+	//     before the Chromium launcher has judged the lock — so that launcher's
+	//     refusal sets the line again, or a refused sign-in would erase "in use
+	//     by <host>" while every later refresh still skips for it.
 	//   - the "nothing to verify" branch of the same switch as the loss branch —
 	//     CLEARS. Reachability: no route to it has been found (it needs
 	//     fetchedRows == 0 with neither platform having had a credential, and
@@ -412,9 +417,14 @@ type AutoCookieService struct {
 	// path as a fallback when the CDP refresh launch fails. Off by
 	// default — the fallback reads the user's REAL Chromium-family
 	// browser profile, which is a privacy surface the user has to
-	// opt into. When true, RefreshCookies tries DPAPI as a backstop
-	// once the primary CDP launch returns an error. DECISIONS #6.
-	DpapiFallback bool
+	// opt into. When it answers true, RefreshCookies tries DPAPI as a
+	// backstop once the primary CDP launch returns an error. DECISIONS #6.
+	//
+	// The injected form of cookies.dpapi_fallback, read LIVE like
+	// AcquisitionMode and DpapiProfileDir: it was a bool mirrored once at
+	// boot, which made the setting restart-required with nothing in either
+	// UI saying so. nil reads as off (see dpapiFallbackOn).
+	DpapiFallback func() bool
 
 	// BrowserLaunchAllowed reports whether a REFRESH PASS may execute a
 	// headless browser. It is the injected form of cookies.auto_enabled, which
@@ -719,6 +729,25 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 	}
 }
 
+// ClearManualRelogin lowers a platform's re-login flag and reports whether it
+// was raised. For the recovery the flag's own clearers (a browser refresh,
+// setup, an import) never see: authentication coming back through the
+// background re-check — a cookies.txt the operator replaced by hand, as the
+// failure notification suggests, or a transient signed-out reading that
+// healed. The flag stayed up, and both dashboards rank it above
+// "Authenticated", so they showed "Re-login required" until a restart.
+func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch platform {
+	case "youtube", "twitch":
+		was := s.needsRelogin[platform]
+		s.needsRelogin[platform] = false
+		return was
+	}
+	return false
+}
+
 // Stop stops the auto-cookie service, permanently for this service's
 // lifetime. After it, StartSetup returns ErrServiceStopped and
 // RefreshCookies/RefreshCookiesDetailed decline.
@@ -741,4 +770,10 @@ func (s *AutoCookieService) Stop() {
 	s.killSetupProcess()
 	s.killRefreshProcess()
 	s.cleanup()
+}
+
+// dpapiFallbackOn reports cookies.dpapi_fallback through the DpapiFallback
+// callback; an unwired service has the fallback off.
+func (s *AutoCookieService) dpapiFallbackOn() bool {
+	return s.DpapiFallback != nil && s.DpapiFallback()
 }

@@ -3,13 +3,14 @@ package tui
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ImportDialogModel wraps bubbles/filepicker for browsing and selecting .zip
@@ -45,17 +46,53 @@ type ImportDialogModel struct {
 // NewImportDialogModel creates a new model with initialized filepicker and
 // textinput.
 func NewImportDialogModel() *ImportDialogModel {
-	fp := filepicker.New()
-	fp.AllowedTypes = []string{".zip"}
-	fp.ShowSize = true
-	fp.ShowPermissions = false
-	fp.AutoHeight = false
-
 	return &ImportDialogModel{
-		picker:    fp,
+		picker:    newImportPicker(),
 		textInput: newTextInput(),
 		spinner:   newSpinner(),
 	}
+}
+
+// newImportPicker builds the .zip file picker. Open builds a fresh one every
+// time rather than re-pointing the last: the picker's cursor index and its
+// directory stack are private and survive a Close, and bubbles indexes its
+// file list with that cursor on Enter/→ guarded only by an empty list — so a
+// second A Z in a directory with fewer entries than the last cursor position
+// panicked, and runTUI turns a TUI panic into a shutdown of the whole process.
+func newImportPicker() filepicker.Model {
+	fp := filepicker.New()
+	fp.AllowedTypes = zipExtVariants
+	fp.ShowSize = true
+	fp.ShowPermissions = false
+	fp.AutoHeight = false
+	// bubbles' own empty-folder text is "Bummer. No Files Found." — which
+	// also reads as a failure when the folder simply holds no .zip.
+	fp.Styles.EmptyDirectory = fp.Styles.EmptyDirectory.SetString("No .zip archives here (← goes up a folder)")
+	return fp
+}
+
+// zipExtVariants is ".zip" in every letter case. bubbles' filepicker tests
+// AllowedTypes with a case-sensitive suffix match, both where it dims a file
+// that cannot be picked and where Enter selects one — so ".zip" alone drew
+// "STREAM.ZIP" (what older Windows zippers write) dimmed and Enter on it did
+// nothing, while the dashboard and the server both take it.
+var zipExtVariants = caseVariants(".zip")
+
+// caseVariants returns s in every combination of upper and lower case.
+func caseVariants(s string) []string {
+	out := []string{""}
+	for _, r := range s {
+		lower, upper := string(unicode.ToLower(r)), string(unicode.ToUpper(r))
+		next := make([]string, 0, 2*len(out))
+		for _, prefix := range out {
+			next = append(next, prefix+lower)
+			if upper != lower {
+				next = append(next, prefix+upper)
+			}
+		}
+		out = next
+	}
+	return out
 }
 
 // Open opens the dialog at the given starting directory.
@@ -67,6 +104,7 @@ func (m *ImportDialogModel) Open(startDir string) tea.Cmd {
 	m.channel = ""
 	m.metaFocus = 0
 	m.errorMsg = ""
+	m.picker = newImportPicker()
 	m.picker.CurrentDirectory = startDir
 	m.picker.SetHeight(max(1, m.height-8))
 	return m.picker.Init()
@@ -198,6 +236,17 @@ func (m *ImportDialogModel) GetImportChannel() string {
 	return m.channel
 }
 
+// importPickerHint is the picker step's key line at the box's content width:
+// the full wording is 68 columns and the box is 54 wide at the 60-column
+// floor, where it wrapped and left "Esc: Cancel" alone on a second row.
+func importPickerHint(contentW int) string {
+	full := "↑↓: Navigate  ←/Backspace: Back  →/Enter: Open/Select  Esc: Cancel"
+	if ansi.StringWidth(full) <= contentW {
+		return full
+	}
+	return "↑↓  ←: Back  →/Enter: Open/Select  Esc: Cancel"
+}
+
 // View renders the dialog as a centered overlay.
 func (m *ImportDialogModel) View() string {
 	if !m.visible {
@@ -214,11 +263,13 @@ func (m *ImportDialogModel) View() string {
 	case 0:
 		content.WriteString(TitleStyle.Render("Import Archive"))
 		content.WriteString("\n")
-		content.WriteString(DimStyle.Render("Select a .zip archive to import"))
+		// The import's rule in one line that fits the 60-column floor: one
+		// recording per zip, its chat paired only by name.
+		content.WriteString(DimStyle.Render("Select a .zip: one recording + its <name>.chat.json"))
 		content.WriteString("\n\n")
 		content.WriteString(m.picker.View())
 		content.WriteString("\n")
-		content.WriteString(DimStyle.Render("↑↓: Navigate  ←/Backspace: Back  →/Enter: Open/Select  Esc: Cancel"))
+		content.WriteString(DimStyle.Render(importPickerHint(contentW)))
 
 	case 1:
 		content.WriteString(TitleStyle.Render("Import Archive — Metadata"))
@@ -239,7 +290,7 @@ func (m *ImportDialogModel) View() string {
 		} else {
 			content.WriteString("  ")
 			content.WriteString(DimStyle.Render(titleLabel))
-			content.WriteString(renderInactiveInput(m.title, contentW-runewidth.StringWidth(titleLabel)-2, ColorGray))
+			content.WriteString(renderInactiveInput(m.title, contentW-ansi.StringWidth(titleLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 
@@ -251,7 +302,7 @@ func (m *ImportDialogModel) View() string {
 		} else {
 			content.WriteString("  ")
 			content.WriteString(DimStyle.Render(channelLabel))
-			content.WriteString(renderInactiveInput(m.channel, contentW-runewidth.StringWidth(channelLabel)-2, ColorGray))
+			content.WriteString(renderInactiveInput(m.channel, contentW-ansi.StringWidth(channelLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 

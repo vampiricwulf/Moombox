@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -33,7 +34,8 @@ func hlsStallServer() *httptest.Server {
 // force-finalized once the no-segment gap exceeds MaxTimeout even though
 // CheckStreamStatus keeps reporting the stream live — and it does so WITHOUT
 // consulting CheckStreamStatus (the backstop is the authority here), so the
-// call count stays zero.
+// call count stays zero. "Finalized" means the loop returns; it is not a
+// confirmed end, so the resume sidecar stays for the worker's re-verify.
 func TestHlsLoop_EnforceMaxTimeoutForcesFinalize(t *testing.T) {
 	srv := hlsStallServer()
 	defer srv.Close()
@@ -64,8 +66,15 @@ func TestHlsLoop_EnforceMaxTimeoutForcesFinalize(t *testing.T) {
 	if err := d.Start(ctx); err != nil {
 		t.Fatalf("Start() = %v, want nil (backstop finalizes cleanly)", err)
 	}
-	if !d.streamEnded.Load() {
-		t.Error("streamEnded not set — backstop should mark a clean end")
+	// Not a confirmed end: the resume sidecar must survive, because the
+	// worker's still-live refresh resumes from it. Clearing it (a streamEnded
+	// latch here) made that refresh refuse to start over the staged media.
+	// Mutant: the backstop setting streamEnded — the sidecar is gone.
+	if d.streamEnded.Load() {
+		t.Error("streamEnded set — the backstop is not a confirmed end and must keep the resume sidecar")
+	}
+	if _, err := os.Stat(d.opts.OutputFile + resumeFileSuffix); err != nil {
+		t.Errorf("resume sidecar gone after the backstop (%v) — the still-live refresh cannot resume", err)
 	}
 	if got := statusChecks.Load(); got != 0 {
 		t.Errorf("CheckStreamStatus called %d times, want 0 (backstop finalizes without a status check)", got)

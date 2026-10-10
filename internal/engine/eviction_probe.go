@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -120,7 +121,7 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq in
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
-		return false, nil, err
+		return false, nil, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
@@ -128,8 +129,9 @@ func (d *SegmentDownloader) ProbeSegmentAvailable(parent context.Context, seq in
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		// A transport error embeds the request URL, which carries the
-		// PO token; the orchestrator logs this error at Warn.
-		return false, nil, redactPoToken(err)
+		// PO token, the client's IP and the URL's signature; the
+		// orchestrator logs this error at Warn.
+		return false, nil, redact.MediaError(err)
 	}
 	reportSuccess("engine/fetch")
 	defer resp.Body.Close()

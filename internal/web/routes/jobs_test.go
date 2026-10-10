@@ -865,6 +865,66 @@ func TestJobMuxRejectsActiveState(t *testing.T) {
 	}
 }
 
+// TestJobMuxOffersAFinishedJobsUnmuxedPart: a split job whose finalize could
+// not mux one part still lands Finished, and cleanupStagingAfterMux keeps its
+// staging naming "the Mux action" as the way back — which this route refused
+// for every Finished row, so the footage had no verb and the dir was held until
+// the job was deleted. A Finished row is muxable exactly while a part is still
+// unmuxed, and GET /api/jobs/{id} says so for the details dialog.
+//
+// Mutants: dropping the Finished case — the first request is refused; dropping
+// its HasUnmuxedParts term — the fully-recorded job is accepted.
+func TestJobMuxOffersAFinishedJobsUnmuxedPart(t *testing.T) {
+	f := newJobsFixture(t)
+	stage := func(jobID, sub string) {
+		t.Helper()
+		dir := filepath.Join(f.stagingDir, jobID, sub)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "video.ts"), []byte("staged"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := func(jobID string, idx int) {
+		t.Helper()
+		if err := f.db.AddSegment(&database.Segment{JobID: jobID, SegmentIndex: idx, Quality: "1080p", Filename: "x.mp4"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Part 0 (the root) muxed; part 1 (seg_1) did not.
+	f.addJob(t, "yt_unmuxed", nil)
+	stage("yt_unmuxed", "")
+	stage("yt_unmuxed", "seg_1")
+	record("yt_unmuxed", 0)
+	// Both parts muxed — the staging was kept for some other reason.
+	f.addJob(t, "yt_allmuxed", nil)
+	stage("yt_allmuxed", "")
+	stage("yt_allmuxed", "seg_1")
+	record("yt_allmuxed", 0)
+	record("yt_allmuxed", 1)
+
+	if rec := doRequest(t, f.router, "POST", "/api/jobs/yt_unmuxed/mux", nil); rec.Code != http.StatusOK {
+		t.Errorf("mux a Finished job with an unmuxed part: want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(t, f.router, "POST", "/api/jobs/yt_allmuxed/mux", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("mux a Finished job with nothing unmuxed: want 400, got %d", rec.Code)
+	}
+
+	for id, want := range map[string]bool{"yt_unmuxed": true, "yt_allmuxed": false} {
+		rec := doRequest(t, f.router, "GET", "/api/jobs/"+id, nil)
+		var got struct {
+			UnmuxedParts *bool `json:"unmuxedParts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.UnmuxedParts == nil {
+			t.Fatalf("GET %s: no unmuxedParts in %s (%v)", id, rec.Body.String(), err)
+		}
+		if *got.UnmuxedParts != want {
+			t.Errorf("GET %s: unmuxedParts = %v, want %v", id, *got.UnmuxedParts, want)
+		}
+	}
+}
+
 func TestJobMux404(t *testing.T) {
 	f := newJobsFixture(t)
 	rec := doRequest(t, f.router, "POST", "/api/jobs/no-such/mux", nil)
@@ -987,6 +1047,27 @@ func TestJobCreateRejectsEndBeforeStart(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("end < start: want 400, got %d", rec.Code)
+	}
+}
+
+// The trim route's rule for the same fields: a negative start and an end at
+// or before 0 select nothing. POST /api/jobs checked only end <= start, so
+// {startTime:-5, endTime:10} was stored as a job's range.
+//
+// Mutant: dropping either new check.
+func TestJobCreateRejectsANegativeStartOrNonPositiveEnd(t *testing.T) {
+	f := newJobsFixture(t)
+	for _, body := range []map[string]any{
+		{"videoId": "abcd1234567", "startTime": -5.0, "endTime": 10.0},
+		{"videoId": "abcd1234568", "endTime": 0.0},
+		{"videoId": "abcd1234569", "endTime": -1.0},
+	} {
+		if rec := doRequest(t, f.router, "POST", "/api/jobs", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("%v: want 400, got %d (%s)", body, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"videoId": "abcd123456a", "startTime": 0.0, "endTime": 10.0}); rec.Code >= 400 {
+		t.Errorf("a range from 0: %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1602,3 +1683,84 @@ type discardResponseWriter struct{ h http.Header }
 func (w *discardResponseWriter) Header() http.Header         { return w.h }
 func (w *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (w *discardResponseWriter) WriteHeader(int)             {}
+
+// TestJobLookupFailureIsNot404: a failed job lookup answers 500, a missing job
+// 404. Every job route used to fold GetJob's error into "job not found", and
+// the dashboard's 404 branch means the job is gone — so a locked or failing
+// database told it every job had vanished.
+func TestJobLookupFailureIsNot404(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "present", nil)
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/absent", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("missing job: want 404, got %d", rec.Code)
+	}
+
+	// Closing the database makes every read fail without touching the row.
+	f.db.Close()
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/present", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("failed lookup: want 500, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestJobCreateRejectsMalformedIDs: a raw videoId is the job's primary key
+// and its staging directory name, so it gets the shape check the URL branch
+// implies. It used to be taken verbatim — a typo became a job that could never
+// download, and "/" or ".." named a staging path outside the staging dir.
+func TestJobCreateRejectsMalformedIDs(t *testing.T) {
+	f := newJobsFixture(t)
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"short YouTube ID", map[string]any{"videoId": "abc"}},
+		{"YouTube ID with a slash", map[string]any{"videoId": "../../etc/x"}},
+		{"Twitch login with a slash", map[string]any{"platform": "twitch", "videoId": "../evil"}},
+		{"Twitch login too long", map[string]any{"platform": "twitch", "videoId": strings.Repeat("a", 26)}},
+		{"unknown platform", map[string]any{"platform": "kick", "videoId": "abcd1234567"}},
+	} {
+		rec := doRequest(t, f.router, "POST", "/api/jobs", tc.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d (body: %s)", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	jobs, err := f.db.GetAllJobs()
+	if err != nil {
+		t.Fatalf("GetAllJobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("%d job(s) created from malformed input", len(jobs))
+	}
+
+	// The shapes the dashboard sends still pass.
+	if rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{"videoId": "abcd1234567"}); rec.Code != http.StatusCreated {
+		t.Errorf("valid YouTube ID: want 201, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestJobCreateStoresTheCanonicalYouTubeURL: a url sent beside a videoId was
+// stored verbatim, unparsed, and both UIs offer the job URL as a link — a LAN
+// client could plant a file:// or phishing URL on a real job.
+//
+// Mutant: restore `url := body.URL` for the YouTube branch.
+func TestJobCreateStoresTheCanonicalYouTubeURL(t *testing.T) {
+	f := newJobsFixture(t)
+	rec := doRequest(t, f.router, "POST", "/api/jobs", map[string]any{
+		"videoId": "dQw4w9WgXcQ",
+		"url":     "file:///C:/Windows/System32/cmd.exe",
+	})
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	got, _ := f.db.GetJob("dQw4w9WgXcQ")
+	if got == nil {
+		t.Fatal("job not created")
+	}
+	if got.URL != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" {
+		t.Errorf("stored URL = %q, want the canonical watch URL", got.URL)
+	}
+}

@@ -259,8 +259,9 @@ func JobCancelled(f JobFacts) (string, string, NotificationType, []Field, SendOp
 // count — is now carried by BOTH: the multi-part builder dropped them for no
 // reason anyone recorded (audit C1).
 //
-// The colour is the OUTCOME, not the code path. A job whose recording is
-// knowingly short is Warning, because a green "Successfully archived" over a
+// The colour and the description are the OUTCOME, not the code path. A job
+// whose recording is knowingly short is Warning, and says it was archived
+// with its end missing, because a green "Successfully archived" over a
 // truncated archive says the opposite of the truth (audit A5).
 //
 // With an EMPTY parts slice no File/Parts/Qualities/size/Resolution field is
@@ -351,8 +352,14 @@ func DownloadFinished(f JobFacts, parts []Part) (string, string, NotificationTyp
 		opts.Image = f.ThumbnailURL
 	}
 
+	// And the words, with it: the Warning colour over "Successfully
+	// archived" still said the archive was whole.
+	desc := "Successfully archived: "
+	if f.IncompleteTail {
+		desc = "Archived with its end missing: "
+	}
 	return "Download Finished",
-		"Successfully archived: " + EscapeMarkdown(displayName(f)),
+		desc + EscapeMarkdown(displayName(f)),
 		ntype,
 		fb.Build(),
 		opts

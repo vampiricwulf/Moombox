@@ -105,6 +105,39 @@ func TestWebSocketUpgradeSharesTheOriginDecision(t *testing.T) {
 	})
 }
 
+// TestWebSocketUpgradeHoldsALoopbackOriginToItsPort pins D-S7 on the socket:
+// on lan (and localhost) a loopback or private origin is held to the port the
+// upgrade was addressed to, so a page another local service serves cannot
+// open the live stream.
+//
+// THE MUTANTS: drop `&& originPortServed(...)` from isAllowedOrigin's lan arm —
+// the first row answers 101; apply samePort's two-portless leniency whatever
+// browserSchemeUnknown says — the portless row answers 101 (a page another
+// local service serves on https:443 opening the socket of a dashboard
+// addressed on plain 80; loopback is exempt from mixed-content blocking).
+func TestWebSocketUpgradeHoldsALoopbackOriginToItsPort(t *testing.T) {
+	srv := wsOriginFixture(t, "lan", nil)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	_, port, _ := strings.Cut(host, ":")
+
+	other := "1"
+	if port == other {
+		other = "2"
+	}
+	if got := upgradeStatus(t, srv, "", "http://127.0.0.1:"+other, nil); got != http.StatusForbidden {
+		t.Fatalf("status %d, want 403 — a loopback page on another port is another program", got)
+	}
+	if got := upgradeStatus(t, srv, "", "http://localhost:"+port, nil); got != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101 — the dashboard's own port, by either loopback spelling", got)
+	}
+	if got := upgradeStatus(t, srv, "127.0.0.1", "https://127.0.0.1", nil); got != http.StatusForbidden {
+		t.Fatalf("status %d, want 403 — a portless Host over plain HTTP is port 80, and an https page is 443", got)
+	}
+	if got := upgradeStatus(t, srv, "127.0.0.1", "http://localhost", nil); got != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101 — a portless Host over plain HTTP is port 80, as is an http page", got)
+	}
+}
+
 // THE MUTANT: leave OriginCheck nil in NewServer — every test above still
 // passes (they wire the hook themselves) while the real server refuses every
 // browser upgrade.
@@ -204,8 +237,63 @@ func TestWebSocketUpgradeRefusalLogsTheEffectiveHost(t *testing.T) {
 // originAllowed — and this row starts refusing the literal certificate name.
 func TestWebSocketUpgradeReachesTheCertificateSANWidening(t *testing.T) {
 	useIdentityCert(t, certWatcherFor(t, "dash.lan", []string{"dash.lan"}, nil))
-	srv := wsOriginFixture(t, "lan", nil)
-	if got := upgradeStatus(t, srv, "", "https://dash.lan", nil); got != http.StatusSwitchingProtocols {
+	// The test client is the listed proxy: a TLS-terminating one on :443
+	// forwards the name portless while the hop to Moombox is plain HTTP
+	// (browserSchemeUnknown), so the port rule holds and the name alone
+	// decides.
+	srv := wsOriginFixture(t, "lan", []string{"127.0.0.1"})
+	if got := upgradeStatus(t, srv, "dash.lan", "https://dash.lan", nil); got != http.StatusSwitchingProtocols {
 		t.Fatalf("status %d, want 101 — a literal certificate-attested SAN must widen the lan upgrade too", got)
+	}
+}
+
+// The upgrade bypasses the router's middleware chain, so interceptUpgrades
+// re-applies the two gates that chain would: the IP gate, and on
+// external/public the host rule that keeps a rebinding page from getting,
+// through the socket, the live stream its GETs are refused. Nothing ran that
+// code under test while it sat inline in Server.Start: deleting either check
+// survived the package's whole suite.
+//
+// Mutants: delete the externalHostRefused check — the rebinding row reaches
+// the socket; delete the ipAllowedByNetworkAccess check — the public peer on
+// lan does; compare the Upgrade header case-sensitively — the "WebSocket" row
+// goes to the router.
+func TestUpgradeInterceptionReappliesTheChainGates(t *testing.T) {
+	for _, tc := range []struct {
+		name, access, peer, host, upgrade string
+		want                              string // "socket", "router" or "403"
+	}{
+		{"a rebinding page's socket on external", "external", "192.168.1.20:50000", "attacker.example:774", "websocket", "403"},
+		{"a rebinding page's socket on public", "public", "127.0.0.1:50000", "attacker.example", "websocket", "403"},
+		{"a LAN socket by IP on external", "external", "192.168.1.20:50000", "192.168.1.10:774", "websocket", "socket"},
+		{"a public peer's socket by name on external", "external", "203.0.113.5:50000", "moombox.example.com", "websocket", "socket"},
+		{"a public peer's socket on lan", "lan", "203.0.113.5:50000", "192.168.1.10:774", "websocket", "403"},
+		{"a LAN socket on lan", "lan", "192.168.1.20:50000", "192.168.1.10:774", "WebSocket", "socket"},
+		{"a plain request is the chain's to judge", "external", "192.168.1.20:50000", "attacker.example:774", "", "router"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.Network.NetworkAccess = tc.access
+			var reached string
+			h := interceptUpgrades(config.NewStore(cfg, ""),
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = "router" }),
+				func(w http.ResponseWriter, r *http.Request) { reached = "socket" })
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.peer
+			req.Host = tc.host
+			if tc.upgrade != "" {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", tc.upgrade)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			got := reached
+			if got == "" && rec.Code == http.StatusForbidden {
+				got = "403"
+			}
+			if got != tc.want {
+				t.Errorf("reached %q (status %d), want %q", got, rec.Code, tc.want)
+			}
+		})
 	}
 }

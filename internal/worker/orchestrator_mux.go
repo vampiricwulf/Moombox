@@ -135,21 +135,29 @@ func muxedOutputIsShort(inputSec, outputSec float64) bool {
 // numbers in its message and staging untouched (both cleanup paths only run
 // after a mux that returned nil), so the Mux action can re-run the copy once
 // the input is repaired. Both call sites discard the rejected output first
-// (discardShortMuxOutput) — the footage is in the INPUT, and leaving a short
+// (discardRejectedMuxOutput) — the footage is in the INPUT, and leaving a short
 // file under the archive's name is what the re-mux has to write over.
 //
 // The flag path is deliberately NOT used here: incomplete_tail means "the
 // DOWNLOAD is missing segments" and steers Retry into re-downloading, which
 // fixes nothing when the bytes are already on disk and it is the copy that
 // stopped early.
+//
+// An input is measured by its SPAN (ffprobeData.spanSec), not its probed
+// duration: a fragmented MP4 that begins past the start of the broadcast —
+// every later part of a split, a recording resumed or started at sq>0 —
+// probes with its start time folded into its duration, and the copy, which
+// starts at zero, read as exactly that many seconds short. The check rejected
+// such a part at every attempt, finalize and Mux action alike, and left it in
+// staging with nothing wrong with it.
 func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID string, outputSec float64, inputs ...string) error {
 	var longest float64
 	for _, in := range inputs {
 		if in == "" {
 			continue
 		}
-		if probe := o.runFFprobe(ctx, in); probe != nil && probe.DurationSec > longest {
-			longest = probe.DurationSec
+		if span := o.runFFprobe(ctx, in).spanSec(); span > longest {
+			longest = span
 		}
 	}
 	if !muxedOutputIsShort(longest, outputSec) {
@@ -161,7 +169,9 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 		outputSec, longest, longest-outputSec)
 }
 
-// discardShortMuxOutput deletes the output a shortfall verdict just rejected.
+// discardRejectedMuxOutput deletes a muxed output the finalize just rejected —
+// one a shortfall verdict found short, or a part whose chat could not be
+// copied beside it.
 //
 // The alternative is what shipped with ENGINE-9: the truncated .mp4 stayed in
 // the output directory wearing the archive's own name while the row went to
@@ -171,17 +181,15 @@ func (o *DownloadOrchestrator) verifyMuxedDuration(ctx context.Context, jobID st
 // the INPUT is what holds it, and staging is preserved for exactly that
 // reason. Best-effort: a removal that fails leaves the old situation, which
 // the error message already describes.
-func (o *DownloadOrchestrator) discardShortMuxOutput(jobID, outputFile string) {
+func (o *DownloadOrchestrator) discardRejectedMuxOutput(jobID, outputFile string) {
 	if err := os.Remove(outputFile); err != nil && !os.IsNotExist(err) {
-		o.logger.Warn("could not remove the short muxed output; it stays under the archive's name",
+		o.logger.Warn("could not remove the rejected muxed output; it stays under the archive's name",
 			"output", outputFile, "err", err, "jobID", jobID)
 	}
 }
 
-// stagedRecordingParts returns the recordings inside ONE staging dir in
-// RECORDING ORDER: first every <file>.restart-<ts> the engine set aside when
-// a restart could not resume (oldest timestamp first — that is the order they
-// were captured in), then the dir's live recording.
+// stagedRestartAsides returns the set-aside recordings in ONE dir, oldest
+// stamp first (the order they were captured in).
 //
 // The engine preserves rather than truncates a headed recording it cannot
 // resume (engine.StagedRestartSuffix), and until this list existed nothing in
@@ -190,26 +198,10 @@ func (o *DownloadOrchestrator) discardShortMuxOutput(jobID, outputFile string) {
 // every cleanup — which meant a fresh capture finishing cleanly deleted them.
 // The sidecar twin (<file>.restart-<ts>.resume.json) is excluded by
 // engine.IsStagedRestartPath: muxing a JSON file is not a recovery.
-func stagedRecordingParts(dir string) []string {
-	parts := stagedRestartAsides(dir)
-	if media := discoverStagingMedia(dir); media != nil {
-		live := media.VideoPath
-		if live == "" {
-			live = media.AudioPath
-		}
-		if live != "" {
-			parts = append(parts, live)
-		}
-	}
-	return parts
-}
-
-// stagedRestartAsides returns the set-aside recordings in ONE dir, oldest
-// stamp first — stagedRecordingParts without the live recording, and so
-// without discoverStagingMedia's Stat of every candidate media name.
 //
-// Split out because the orphan sweep asks for asides and nothing else, for
-// every job, on every pass (jobNeedsStaging and scanStagingOrphans in
+// Asides only, never the live recording, and no Stat of candidate media
+// names: the orphan sweep asks for asides and nothing else, for every job,
+// on every pass (jobNeedsStaging and scanStagingOrphans in
 // internal/worker/orphans.go, via stagedAsideRecordings): one ReadDir per dir
 // is the whole cost, and a result that never contains the live recording is
 // also the correct ANSWER there — an ordinary staging file is not
@@ -224,7 +216,11 @@ func stagedRestartAsides(dir string) []string {
 		if e.IsDir() || !engine.IsStagedRestartPath(e.Name()) {
 			continue
 		}
-		asides = append(asides, filepath.Join(dir, e.Name()))
+		p := filepath.Join(dir, e.Name())
+		if fileExists(p + asideRecoveredMarker) {
+			continue // already muxed; only its removal failed
+		}
+		asides = append(asides, p)
 	}
 	sort.SliceStable(asides, func(i, j int) bool {
 		return stagedRestartStamp(asides[i]) < stagedRestartStamp(asides[j])
@@ -255,7 +251,11 @@ func stagedRestartStamp(path string) int64 {
 func stagedAsideRecordings(stagingDir string) []string {
 	var out []string
 	dirs := []string{stagingDir}
-	for _, sd := range stagedSegDirs(stagingDir) {
+	// Every seg_N dir, tombstoned ones included. A tombstone marks a part's
+	// MEDIA as folded into a merge; a recording set aside in that dir is not
+	// merged content, and a scan that skipped the dir made it invisible to
+	// both the aside recovery and every shield that keeps staging for it.
+	for _, sd := range segDirsOf(stagingDir, true) {
 		dirs = append(dirs, sd.dir)
 	}
 	for _, dir := range dirs {
@@ -276,12 +276,28 @@ type asideGroup struct {
 }
 
 // groupStagedAsides folds a flat list of asides into one group per (staging
-// dir, timestamp), classifying each file by the stem the engine stamped —
-// the same names discoverStagingMedia recognises. Input order is preserved,
-// so groups come back oldest recording first.
+// dir, timestamp, recording), classifying each file by the stem the engine
+// stamped — the same names discoverStagingMedia recognises. Input order is
+// preserved, so groups come back oldest recording first.
+//
+// A shared stamp does not make one recording. setAsideStagedMedia sets every
+// live-shape capture in a dir aside under ONE stamp, so an HLS video.ts an
+// earlier session left beside a DASH capture shares the DASH pair's stamp.
+// Grouped by the stamp alone it joined the pair's group with no slot of its
+// own: muxStagedAsides muxed the pair, verified the copy against the pair,
+// and then removed every file in the group — the video.ts unmuxed. The
+// recording a stem belongs to (asideRecordingOf) is part of the key, so the
+// video.ts is a group, and a sibling, of its own.
+//
+// The two halves of one DASH restart are stamped by two SegmentDownloaders,
+// each reading the clock itself, so a restart that straddles a second
+// boundary stamps them a second apart. Grouping by the exact stamp alone made
+// that one recording two single-stream siblings; pairStraddledHalves rejoins
+// them.
 func groupStagedAsides(asides []string) []asideGroup {
 	var order []string
 	byKey := map[string]*asideGroup{}
+	bucketOf := map[string]string{}
 	for _, p := range asides {
 		base := filepath.Base(p)
 		i := strings.LastIndex(base, engine.StagedRestartSuffix)
@@ -289,11 +305,13 @@ func groupStagedAsides(asides []string) []asideGroup {
 			continue // engine.IsStagedRestartPath already vouched for the name
 		}
 		stem, stamp := base[:i], base[i+len(engine.StagedRestartSuffix):]
-		key := filepath.Dir(p) + "\x00" + stamp
+		bucket := filepath.Dir(p) + "\x00" + asideRecordingOf(stem)
+		key := bucket + "\x00" + stamp
 		g := byKey[key]
 		if g == nil {
 			g = &asideGroup{stamp: stamp}
 			byKey[key] = g
+			bucketOf[key] = bucket
 			order = append(order, key)
 		}
 		g.files = append(g.files, p)
@@ -304,8 +322,66 @@ func groupStagedAsides(asides []string) []asideGroup {
 		}
 	}
 	out := make([]asideGroup, 0, len(order))
+	buckets := make([]string, 0, len(order))
 	for _, k := range order {
 		out = append(out, *byKey[k])
+		buckets = append(buckets, bucketOf[k])
+	}
+	return pairStraddledHalves(out, buckets)
+}
+
+// asideRecordingOf names the recording an aside's stem belongs to: the two
+// halves of one DASH capture (video_stream, audio_stream) are one recording,
+// and so are the two halves of one whole-file download (video.mp4,
+// audio.m4a). Every other stem — video.ts, the HLS strategy's single muxed
+// stream — is a recording of its own, which no audio half ever joins.
+func asideRecordingOf(stem string) string {
+	switch stem {
+	case "audio_stream":
+		return "video_stream"
+	case "audio.m4a":
+		return "video.mp4"
+	}
+	return stem
+}
+
+// pairStraddledHalves merges a video-only group into the audio-only group of
+// the same staging dir and recording stamped one second either side of it —
+// one DASH restart whose two downloaders read the clock on either side of a
+// second boundary. Two separate restarts are never a second apart (each is a
+// full downloader restart), so the pairing cannot join two recordings; nor
+// can it join a video.ts to an audio_stream, which are never one recording
+// however close their stamps. The merged group keeps the video half's stamp
+// and position. buckets[i] is groups[i]'s (dir, recording).
+func pairStraddledHalves(groups []asideGroup, buckets []string) []asideGroup {
+	used := make([]bool, len(groups))
+	for i := range groups {
+		if used[i] || groups[i].video == "" || groups[i].audio != "" {
+			continue
+		}
+		vs, err := strconv.ParseInt(groups[i].stamp, 10, 64)
+		if err != nil {
+			continue
+		}
+		for j := range groups {
+			if j == i || used[j] || buckets[j] != buckets[i] || groups[j].audio == "" || groups[j].video != "" {
+				continue
+			}
+			as, err := strconv.ParseInt(groups[j].stamp, 10, 64)
+			if err != nil || (as-vs != 1 && vs-as != 1) {
+				continue
+			}
+			groups[i].audio = groups[j].audio
+			groups[i].files = append(groups[i].files, groups[j].files...)
+			used[j] = true
+			break
+		}
+	}
+	out := groups[:0]
+	for i, g := range groups {
+		if !used[i] {
+			out = append(out, g)
+		}
 	}
 	return out
 }
@@ -451,8 +527,10 @@ const asideOutputCollisionLimit = 100
 
 // asideOutputPath is where one group's recovered file lands: the archive's own
 // name with the aside's suffix on it, so the two sort together in the output
-// directory. Two groups can only collide when a root and a seg_N restart share
-// a second; the counter keeps both files rather than overwriting one. Reports
+// directory. Two groups collide when a root and a seg_N restart share a
+// second, or when two recordings in one dir were set aside under one stamp
+// (setAsideStagedMedia's video.ts beside a DASH pair); the counter keeps both
+// files rather than overwriting one. Reports
 // false when every name within the bound is taken — the caller must then leave
 // the aside in staging rather than write over somebody's archive.
 func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool) (string, bool) {
@@ -495,6 +573,7 @@ func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool
 // chat capture a preserved staging dir is still holding has to land beside
 // something.
 func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase string) []string {
+	o.removeRecoveredAsides(jobCtx)
 	groups := groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir))
 	if len(groups) == 0 {
 		return nil
@@ -524,19 +603,129 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 			continue
 		}
+		// ENGINE-9, aside edition — and the one copy whose source is deleted
+		// right after it: `-c copy` exits 0 after the first fragment it cannot
+		// demux, and an aside is exactly a recording the engine could not
+		// resume, its tail the likeliest to hold one. The main and part muxes
+		// check the copy's length against their inputs; this one deleted the
+		// only copy of the footage behind a sibling holding a fraction of it.
+		if probe := o.runFFprobe(ctx, out); probe != nil {
+			if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probe.DurationSec, g.video, g.audio); err != nil {
+				os.Remove(out)
+				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
+					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
+				continue
+			}
+		}
 		o.logger.Warn("a set-aside recording was muxed to its own file beside the archive; it overlaps the start of the main recording, so it is NOT one of the job's parts",
 			"output", out, "aside", strings.Join(g.files, " | "), "jobID", jobCtx.Job.ID)
 		recovered = append(recovered, out)
 		for _, p := range g.files {
-			if err := os.Remove(p); err != nil {
-				o.logger.Warn("could not remove a recovered set-aside recording", "aside", p, "err", err, "jobID", jobCtx.Job.ID)
+			// Marked BEFORE the removal: an aside left as it was — its
+			// removal failed (a Windows handle), or the process died between
+			// the verified copy and the removal — was found again by the next
+			// finalize or recovery and muxed a second time, to "-2". The
+			// marker takes it out of every aside scan, and
+			// removeRecoveredAsides finishes the removal on a later pass.
+			if mErr := os.WriteFile(p+asideRecoveredMarker, []byte(out), 0o644); mErr != nil {
+				o.logger.Warn("could not mark a recovered set-aside recording before removing it",
+					"aside", p, "err", mErr, "jobID", jobCtx.Job.ID)
+			}
+			if err := removeAsideFile(p); err != nil {
+				o.logger.Warn("could not remove a recovered set-aside recording; its marker keeps it from being recovered again",
+					"aside", p, "err", err, "jobID", jobCtx.Job.ID)
+				continue
 			}
 			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
 				o.logger.Warn("could not remove a recovered aside's resume sidecar", "sidecar", engine.StagedRestartSidecar(p), "err", err, "jobID", jobCtx.Job.ID)
 			}
+			if err := os.Remove(p + asideRecoveredMarker); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("could not remove a recovered aside's marker", "marker", p+asideRecoveredMarker, "err", err, "jobID", jobCtx.Job.ID)
+			}
 		}
 	}
 	return recovered
+}
+
+// asideRecoveredMarker, appended to an aside's path, names the file written
+// beside an aside once its recovery is verified, just before the aside is
+// removed; it outlives the aside only when the removal fails (a Windows
+// handle on it) or the process dies in between. It holds the sibling the
+// aside was recovered to.
+const asideRecoveredMarker = ".recovered"
+
+// removeAsideFile is os.Remove, a variable so a test can make an aside's
+// removal fail the way a Windows handle does.
+var removeAsideFile = os.Remove
+
+// removeRecoveredAsides retries the removal of every aside a previous pass
+// recovered but could not delete, taking its resume twin and marker with it.
+func (o *DownloadOrchestrator) removeRecoveredAsides(jobCtx *JobContext) {
+	dirs := []string{jobCtx.StagingDir}
+	for _, sd := range segDirsOf(jobCtx.StagingDir, true) {
+		dirs = append(dirs, sd.dir)
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name, ok := strings.CutSuffix(e.Name(), asideRecoveredMarker)
+			if !ok || e.IsDir() || !engine.IsStagedRestartPath(name) {
+				continue
+			}
+			p := filepath.Join(dir, name)
+			if err := removeAsideFile(p); err != nil && !os.IsNotExist(err) {
+				continue // still held; the marker keeps it out of the scans
+			}
+			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("could not remove a recovered aside's resume sidecar", "sidecar", engine.StagedRestartSidecar(p), "err", err, "jobID", jobCtx.Job.ID)
+			}
+			os.Remove(p + asideRecoveredMarker)
+		}
+	}
+}
+
+// pinnedPartLocation returns where a recorded part says its recording lives:
+// the part file's directory, the base its "<base> - partN.mp4" name carries,
+// and that base relative to outputRoot (the shape the job's filename column
+// takes). ok is false when the part has no path, its name is not a part
+// name, or it lies outside outputRoot (the output directory moved mid-job),
+// in which case the caller keeps the fresh template.
+func pinnedPartLocation(outputRoot string, seg database.Segment) (dir, base, rel string, ok bool) {
+	if seg.FilePath == "" {
+		return "", "", "", false
+	}
+	m := partBaseRe.FindStringSubmatch(seg.Filename)
+	if m == nil {
+		return "", "", "", false
+	}
+	dir = filepath.Dir(seg.FilePath)
+	absRoot, rootErr := filepath.Abs(outputRoot)
+	absDir, dirErr := filepath.Abs(dir)
+	if rootErr != nil || dirErr != nil {
+		return "", "", "", false
+	}
+	r, err := filepath.Rel(absRoot, absDir)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", "", "", false
+	}
+	return dir, m[1], filepath.Join(r, m[1]), true
+}
+
+// recordedArchiveLocation splits a job's recorded output_file into its
+// directory and the stem the job's assets share. A part's " - partN" comes
+// off, as pinnedPartLocation takes it off for the finalize.
+func recordedArchiveLocation(outputFile string) (dir, base string, ok bool) {
+	if outputFile == "" {
+		return "", "", false
+	}
+	name := filepath.Base(outputFile)
+	if m := partBaseRe.FindStringSubmatch(name); m != nil {
+		return filepath.Dir(outputFile), m[1], true
+	}
+	return filepath.Dir(outputFile), strings.TrimSuffix(name, filepath.Ext(name)), true
 }
 
 // copyKeptChatSidecar puts the chat capture a preserved staging dir is still
@@ -601,10 +790,24 @@ func (o *DownloadOrchestrator) recoverAsides(ctx context.Context, jobCtx *JobCon
 	// carry a subdirectory ("${channel}/...") into a directory and a base.
 	filenameBase := jobCtx.Filename
 	outputDir := filepath.Dir(filepath.Join(jobCtx.OutputDir, filenameBase+".mp4"))
+	filenameBase = filepath.Base(filenameBase)
+	// A job that already has an archive gets its siblings beside it, under
+	// its stem: where its finalize put the ones it recovered, and the stem the
+	// output sweep folds them under. The fresh name is for a job with no
+	// archive yet (Cancelled, Error). A title or template edited after the
+	// finalize used to send them to a name no archive has, and the sweep then
+	// offered them as deletable strays.
+	if dir, base, ok := recordedArchiveLocation(jobCtx.Job.OutputFile); ok {
+		outputDir, filenameBase = dir, base
+	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
-	filenameBase = filepath.Base(filenameBase)
+	// The siblings and the copied chat capture share the archive's stem and
+	// reach no column of the row, so for the sweep they are strays while
+	// FFmpeg writes them — and for a Cancelled or Error job no known stem
+	// folds them in either. Claimed like a finalize's output.
+	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase))()
 
 	before := len(groupStagedAsides(stagedAsideRecordings(jobCtx.StagingDir)))
 	if before == 0 {
@@ -702,8 +905,15 @@ func (o *DownloadOrchestrator) sendMuxingStarting(jobCtx *JobContext) {
 	// the dashboard deep link, which needs JobID and Author both, would not
 	// apply.
 	f := NotifyFacts(job)
+	// The operator's Mux of a failed or cancelled job muxes what was
+	// captured, which may stop short of the end: "Download complete" was
+	// wrong there.
+	desc := "Download complete, muxing: %s"
+	if jobCtx.CapturedMux {
+		desc = "Muxing the captured media: %s"
+	}
 	o.notifier.Send("Muxing Starting",
-		fmt.Sprintf("Download complete, muxing: %s", job.Title),
+		fmt.Sprintf(desc, notifications.EscapeMarkdown(job.Title)),
 		notifications.TypeMuxing,
 		fb.Build(),
 		notifications.SendOptions{
@@ -726,6 +936,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		// Update local job reference for notifications below
 		jobCtx.Job = freshJob
 	}
+	// Until the Finished write below names them, the files this writes are
+	// on no row: keep the orphan sweep and its deletes off them.
+	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))()
 
 	// Recover parts whose mux never persisted a segment row — a daemon
 	// restart killed the background FFmpeg before AddSegment, or an
@@ -741,6 +954,18 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// returns into finalizeMultiSegmentJob, which never reached the inline
 	// send this replaces.
 	o.sendMuxingStarting(jobCtx)
+
+	// A split job whose from-the-start download completed: that recording
+	// is the archive, and the parts — every one recorded now, by the
+	// recovery above — move aside beside it rather than finalize over it.
+	// The multi-segment path below never looks at root media once part 0 is
+	// recorded, so without this the complete download was ignored and then
+	// deleted with staging.
+	if vodRootState(jobCtx.StagingDir) == vodRootComplete {
+		if err := o.supersedePartsWithVod(jobCtx); err != nil {
+			return fmt.Errorf("supersede the parts with the complete download: %w", err)
+		}
+	}
 
 	// Multi-segment path: if the job has segments (from part splitting),
 	// the individual part .mp4 files are already muxed. We just need to
@@ -811,7 +1036,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// the archive.
 	if probeData != nil {
 		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
-			o.discardShortMuxOutput(jobCtx.Job.ID, outputFile)
+			o.discardRejectedMuxOutput(jobCtx.Job.ID, outputFile)
 			return err
 		}
 	}
@@ -912,6 +1137,21 @@ func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates 
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.
 // Individual segment .mp4 files are already muxed; this method copies assets and updates the job.
 func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobCtx *JobContext, segments []database.Segment) error {
+	// The plain-name rename, the merge temporaries and the assets are on no
+	// row until the writes below land (see outputClaims): claim the job's
+	// template stem and every part's base for the whole finalize.
+	releases := []func(){claimOutputStem(jobCtx.Job.ID, filepath.Join(jobCtx.OutputDir, jobCtx.Filename))}
+	for _, seg := range segments {
+		if seg.FilePath != "" {
+			releases = append(releases, claimOutputStem(jobCtx.Job.ID, filepath.Join(filepath.Dir(seg.FilePath), mergeBaseName(seg.Filename))))
+		}
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	})
@@ -944,11 +1184,23 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 
 	filenameBase := jobCtx.Filename
 	outputDir := filepath.Join(jobCtx.OutputDir, filepath.Dir(filenameBase))
+	filenameBase = filepath.Base(filenameBase)
+	relBase := jobCtx.Filename
+	// Parts that stay parts sit where muxSegment pinned them — the first
+	// part's directory and base — so the job's own assets and columns follow
+	// them there. Resolved from the fresh template instead, a mid-job channel
+	// rename put the chat, thumbnail and description in a different folder
+	// from the parts, and chat_filename named a file that was never written.
+	// A single part keeps the fresh template: renameSinglePartToPlain moves
+	// it there on purpose.
+	if len(segments) > 1 {
+		if dir, base, rel, ok := pinnedPartLocation(jobCtx.OutputDir, segments[0]); ok {
+			outputDir, filenameBase, relBase = dir, base, rel
+		}
+	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
-	filenameBase = filepath.Base(filenameBase)
-	relBase := jobCtx.Filename
 
 	// The multi-segment half of the aside recovery (see muxStagedAsides).
 	// muxAndFinalize returns into this function before its own call, so a job
@@ -1007,9 +1259,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// Per-part chat: when parts carry their own chat files, the staging
 	// chat.json belongs to part 1 (already enriched + copied at its mux) —
 	// the legacy whole-job copy in copyAssets would duplicate it under the
-	// plain name. The job-level chat fields follow the FIRST part only, so
-	// the dashboard player (which plays output_file = first part) replays
-	// the matching chat; later parts' chat is reachable via segment rows.
+	// plain name. The job-level chat fields follow the FIRST part only; the
+	// dashboard player stitches every part and fetches each part's chat
+	// through its segment row, merging them onto the global timeline.
 	anyPartChat := false
 	for _, seg := range segments {
 		if seg.ChatFile != "" {
@@ -1140,7 +1392,16 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
 		if err := copyFile(chatSrc, chatDst); err != nil {
-			o.logger.Warn("failed to copy chat file", "err", err)
+			// The archive has no chat, and the capture in staging is the
+			// only copy: "incomplete" is what keeps it. With no chat_status
+			// written the row read as it was, the staging cleanup saw no
+			// reason to keep anything, and hours of chat went with one Warn
+			// (a full output volume right after a multi-GB mux, an AV lock
+			// outlasting the copy's retries). cleanupStagingAfterMux now
+			// prunes staging down to the capture instead of deleting it.
+			updates["chat_status"] = chatStatusIncomplete
+			o.logger.Error("could not copy the chat capture beside the archive; it is kept in staging",
+				"err", err, "chat", chatSrc, "jobID", jobCtx.Job.ID)
 		} else {
 			updates["chat_file"] = chatDst
 			updates["chat_filename"] = relBase + ".chat.json"
@@ -1378,6 +1639,8 @@ func (o *DownloadOrchestrator) muxSegment(
 	}
 	partBase := fmt.Sprintf("%s - part%d", filepath.Base(filenameBase), segIdx+1)
 	segFilename := partBase + ".mp4"
+	// The part is on no row until AddSegment below (see outputClaims).
+	defer claimOutputStem(jobCtx.Job.ID, filepath.Join(outputDir, partBase))()
 
 	outputPath := filepath.Join(outputDir, segFilename)
 
@@ -1400,6 +1663,24 @@ func (o *DownloadOrchestrator) muxSegment(
 		return nil, fmt.Errorf("no media files to mux for segment %d", segIdx)
 	}
 
+	// The part's chat is checked before the mux, not after it: a chat file
+	// that cannot be read fails the part (see the copy below), and finding
+	// that out once ffmpeg had run threw the whole part's mux away — again on
+	// the finalize's retry while the file stayed locked. A directory in the
+	// file's place is no chat at all, as muxUnrecordedSegments' fileExists
+	// reads it; the part used to fail here and then be recorded without chat
+	// by that retry anyway, one wasted mux later.
+	chatPath := result.ChatPath
+	if chatPath != "" {
+		if !fileExists(chatPath) {
+			chatPath = ""
+		} else if f, err := os.Open(chatPath); err != nil {
+			return nil, fmt.Errorf("read part %d's chat: %w", segIdx, err)
+		} else {
+			f.Close()
+		}
+	}
+
 	// MuxCopy (no re-encoding)
 	if err := o.mux().MuxCopy(ctx, videoPath, audioPath, outputPath); err != nil {
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
@@ -1416,7 +1697,7 @@ func (o *DownloadOrchestrator) muxSegment(
 	// than beside an unreferenced truncated twin of it.
 	if probeData != nil {
 		if err := o.verifyMuxedDuration(ctx, jobCtx.Job.ID, probeData.DurationSec, videoPath, audioPath); err != nil {
-			o.discardShortMuxOutput(jobCtx.Job.ID, outputPath)
+			o.discardRejectedMuxOutput(jobCtx.Job.ID, outputPath)
 			return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 		}
 	}
@@ -1469,14 +1750,21 @@ func (o *DownloadOrchestrator) muxSegment(
 
 	// Per-part chat (Twitch): the rolled chat file for this capture span is
 	// copied beside the part video and recorded on the segment row.
-	if result.ChatPath != "" {
-		if _, statErr := os.Stat(result.ChatPath); statErr == nil {
+	if chatPath != "" {
+		if _, statErr := os.Stat(chatPath); statErr == nil {
 			chatDst := filepath.Join(outputDir, partBase+".chat.json")
-			if copyErr := copyFile(result.ChatPath, chatDst); copyErr != nil {
-				o.logger.Warn("failed to copy part chat file", "err", copyErr, "segment", segIdx)
-			} else {
-				seg.ChatFile = chatDst
+			if copyErr := copyFile(chatPath, chatDst); copyErr != nil {
+				// Fail the part rather than record it without its chat: a
+				// recorded part's seg_N dir is swept with the rest of staging,
+				// and it held the only copy of this span's chat. Unrecorded,
+				// the part stays unmuxed — shielded, and re-muxed (chat
+				// included) by the finalize's muxUnrecordedSegments or the
+				// Mux action — and the part file goes with it, as a short
+				// part's does, so the retry writes it fresh.
+				o.discardRejectedMuxOutput(jobCtx.Job.ID, outputPath)
+				return nil, fmt.Errorf("copy part %d's chat: %w", segIdx, copyErr)
 			}
+			seg.ChatFile = chatDst
 		}
 	}
 
@@ -1577,6 +1865,11 @@ type stagedSeg struct {
 // or discoverResumeSegment could capture a live resume INTO a dir whose
 // content the merge has already superseded. The marker file's own content
 // is diagnostic only (a timestamp) — its mere presence is what matters.
+//
+// The merge is not its only writer: supersedePartsWithVod (vod_supersede.go)
+// tombstones every recorded part's dir when a complete from-the-start
+// download replaces the parts, for the same reason — the part rows are gone
+// once it commits, and an untombstoned dir would read as an unmuxed part.
 const mergeTombstoneFile = ".merged-tombstone"
 
 // isMergeTombstoned reports whether dir carries mergeTombstoneFile.
@@ -1591,8 +1884,9 @@ func isMergeTombstoned(dir string) bool {
 // (muxUnrecordedSegments, hasUnmuxedPartsForJob) all build on it; if they
 // ever disagreed, a resumed job could append into a dir that recovery
 // attributes to an already-muxed part. The staging ROOT is part index 0
-// unless seg_0 exists (a short-skipped root span); that rule lives at the
-// call sites.
+// unless seg_0 exists (a short-skipped root span, or the dir a VOD run
+// claimed the root from); that rule is rootIsPartZero's, which the call
+// sites ask — never this list, which can leave a seg_0 out.
 //
 // A tombstoned dir (isMergeTombstoned) is skipped entirely — it never
 // appears in the returned slice at all, for any of the three consumers
@@ -1600,6 +1894,31 @@ func isMergeTombstoned(dir string) bool {
 // the dir is pending (or has already failed) removal, so treating it as
 // live staging would resurrect superseded content.
 func stagedSegDirs(stagingDir string) []stagedSeg {
+	return segDirsOf(stagingDir, false)
+}
+
+// rootIsPartZero reports whether a split job's staging ROOT is part index 0:
+// it is unless a seg_0 dir exists. Asked of the dir itself, because
+// stagedSegDirs skips a tombstoned seg_0 — and supersedePartsWithVod
+// tombstones it (part 0 is a recorded part) at exactly the moment the root
+// comes to hold the complete from-the-start download that
+// claimStagingRootForVod created seg_0 to keep from ever being read as part
+// 0. Read through the filtered list, any untombstoned part dir left beside it
+// (an empty seg_N a split created before its first segment, or one whose
+// media FFmpeg cannot read) made that download an unmuxed part 0 again: the
+// staging was kept, the Mux action offered, and each Mux wrote the whole VOD
+// as a part that the supersede then moved beside the archive as one more
+// full-length sibling. A merge never tombstones seg_0: it folds a run's LATER
+// parts into its first.
+func rootIsPartZero(stagingDir string) bool {
+	info, err := os.Stat(filepath.Join(stagingDir, "seg_0"))
+	return err != nil || !info.IsDir()
+}
+
+// segDirsOf lists stagingDir's seg_N dirs by index; includeTombstoned also
+// returns the ones a merge has tombstoned (for scans that are not about the
+// parts' media — see stagedAsideRecordings).
+func segDirsOf(stagingDir string, includeTombstoned bool) []stagedSeg {
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
 		return nil
@@ -1614,7 +1933,7 @@ func stagedSegDirs(stagingDir string) []stagedSeg {
 			continue
 		}
 		dir := filepath.Join(stagingDir, e.Name())
-		if isMergeTombstoned(dir) {
+		if !includeTombstoned && isMergeTombstoned(dir) {
 			continue
 		}
 		segDirs = append(segDirs, stagedSeg{idx: n, dir: dir})
@@ -1647,8 +1966,9 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 	}
 
 	// Root staging files are segment 0 — unless seg_0 exists, in which case
-	// the root data was a short segment the pipeline deliberately skipped.
-	if segDirs[0].idx != 0 && !recorded[0] && discoverStagingMedia(jobCtx.StagingDir) != nil {
+	// the root data was a short segment the pipeline deliberately skipped, or
+	// the from-the-start download a VOD run claimed the root for.
+	if rootIsPartZero(jobCtx.StagingDir) && !recorded[0] && discoverStagingMedia(jobCtx.StagingDir) != nil {
 		segDirs = append([]stagedSeg{{idx: 0, dir: jobCtx.StagingDir}}, segDirs...)
 	}
 

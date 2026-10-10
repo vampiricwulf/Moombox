@@ -31,7 +31,7 @@ A missed stream or a corrupted file is an unrecoverable failure. The content tha
 
 What this means in practice:
 - Segment downloads are verified before being committed to the output pipeline.
-- FFmpeg muxing runs in `context.Background()` goroutines so that muxing completes even when the parent context is cancelled. A cancellation should not produce a half-muxed, corrupted output file.
+- Segment muxes run on the orchestrator's mux root (`muxRootCtx`, `internal/worker/orchestrator.go`) rather than on the job's own context, so a finished part is still muxed when its job is cancelled. The root is not `context.Background()`: `Stop` cuts it once the shutdown wait runs out, and a mux cut that way leaves its row `Muxing` with staging intact for the next start. A cancellation should not produce a half-muxed, corrupted output file.
 - The verification loop after download completion probes the YouTube API up to 6 times to confirm a stream actually ended before marking the job as finished. This prevents premature termination when streams experience temporary interruptions.
 - Quality changes mid-stream trigger a segment split rather than attempting to merge incompatible formats, which would produce a corrupted file.
 - Resume state is persisted to `.resume.json` sidecar files so that interrupted downloads can be continued without re-downloading segments or losing progress.
@@ -47,7 +47,7 @@ What this means in practice:
 - The launcher/supervisor pattern (parent process respawns child on exit code 42) provides process-level recovery. Even if the application crashes entirely, the launcher brings it back.
 - Authentication uses a multi-client fallback chain. If one Innertube client fails, the system tries the next. If cookies expire, the system degrades to unauthenticated access rather than stopping entirely.
 - Network errors trigger retries with exponential backoff rather than immediate failure.
-- The shutdown sequence uses a 10-second force-exit timer. If graceful shutdown stalls, the process terminates anyway rather than hanging indefinitely.
+- The shutdown sequence uses a 15-second force-exit timer. If graceful shutdown stalls, the process terminates anyway rather than hanging indefinitely.
 
 ### 3. Resource Efficiency
 
@@ -56,10 +56,10 @@ What this means in practice:
 Moombox runs 24/7 on the user's personal machine, not a server farm. It shares resources with games, browsers, creative tools, and everything else the user runs. Constant overhead — even small amounts — accumulates into a meaningful impact on the user's system over time.
 
 What this means in practice:
-- **Signal-driven concurrency over polling.** The database batch update system sleeps until signaled — it performs zero IO when nothing is changing. This is preferred everywhere: don't poll on a timer when you can wait for a signal.
-- **Goja VMs auto-evict when idle.** Cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. Cipher VMs use a 10-VM LRU cache, so at most ten player.js runtimes exist simultaneously. The fallback BotGuard goja-VM (when the sidecar is unavailable) evicts itself via `time.AfterFunc` when its TTL expires.
+- **Signal-driven concurrency over polling.** The database has no background writer at all — `UpdateJobFields` runs synchronously when a caller has something to write, and nothing in the package ticks — so it performs zero IO when nothing is changing. This is preferred everywhere: don't poll on a timer when you can wait for a signal.
+- **Goja VMs auto-evict when idle.** Cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. Cipher VMs use a 10-VM LRU cache, so at most ten player.js runtimes exist simultaneously. The BotGuard goja-VM (when the sidecar is turned off) evicts itself via `time.AfterFunc` when its TTL expires.
 - **BotGuard sidecar is one long-running subprocess, not per-request.** The Node + JSDOM sidecar starts once at Moombox launch and serves every PO-token request from the same V8 instance. Per-request subprocess spawning would cost 200-500ms cold-start per token; the long-running model amortises that to a one-time startup cost. The subprocess is pinned to a Windows Job Object so it dies with Moombox even on hard parent crashes.
-- **Database batch coalescing.** Updates within a 100ms window are flushed in a single transaction rather than individually. This reduces disk IO by orders of magnitude during active downloads (when many progress updates fire per second) while adding negligible latency.
+- **Progress writes are gated at the source, not coalesced in the database.** `ProgressTracker` (`internal/worker/progress.go`) writes one job row per report and reports at most once per job per configured progress interval (`downloader.progress_interval_ms`, 16 ms by default), flushing gap rows at most once a second; every other `UpdateJobFields` caller is event-driven. That upstream bound is what keeps disk IO proportional to real progress during active downloads — there is no coalescing window in the database and no added latency.
 - **WebSocket broadcasts rely on upstream rate-limiting.** Job update broadcasts are not throttled in the hub — the only high-frequency caller (`OnJobChange` via `ProgressTracker.maybeUpdate`) is already capped to one report per job per configured progress interval — 16 ms by default, so ~60 Hz — by the gate in `internal/worker/progress.go`, and the other callers are event-driven. An earlier per-job throttle in the hub raced against `BroadcastJobDeleted` (which is not throttled) and could resurrect deleted rows.
 - **TUI non-blocking sends.** Channel sends to the TUI use non-blocking operations with drop counters. If the TUI's event loop is busy, updates are dropped rather than blocking the sender. The drop counter tracks how many were missed so the next successful send can trigger a full refresh.
 - **Log ring buffer.** The in-memory log buffer is bounded at 200 lines. Old entries are evicted as new ones arrive. This prevents unbounded memory growth in long-running sessions.
@@ -88,7 +88,7 @@ Beyond basic usability (covered by priority 4), the UIs should feel polished and
 
 What this means in practice:
 - Status bars in both UIs show connection state, disk space, monitor status, cookie validity, and update availability.
-- Progress strings show segment counts for video, audio, and chat (e.g., `V:1234 A:1234 C:5678`).
+- Progress strings show segment counts for video, audio, and chat (e.g., `(V: 1234/1300 A: 1234/1300 C: 5678)`).
 - Error messages include context about what went wrong and, where possible, what the user can do about it.
 - The TUI uses Charmbracelet's styling ecosystem (lipgloss) for consistent, attractive terminal rendering.
 - The Web UI uses Shoelace components for a consistent, modern look without a heavy framework.
@@ -101,7 +101,7 @@ What this means in practice:
 Every step of the archive pipeline should be handled: monitoring channels for new streams, detecting when they go live, downloading video/audio/chat, muxing into final output, organizing files, and playing them back. The user should not need external tools (beyond FFmpeg) to complete any part of the workflow.
 
 What this means in practice:
-- Monitors detect streams via RSS feeds (YouTube), DECAPI (Twitch), and Twitch's native API.
+- Monitors detect streams via RSS feeds and DECAPI latest-video lookups (both YouTube), and Twitch's GQL API.
 - Downloads handle DASH (YouTube), HLS (Twitch), and VOD (both) formats.
 - Chat is downloaded alongside video for both platforms.
 - FFmpeg muxing produces standard container files.
@@ -118,7 +118,7 @@ Optimize hot paths — segment downloads, manifest parsing, database queries. Bu
 
 What this means in practice:
 - Catch-up downloading uses a configurable pool of parallel segment fetches (`segment_workers`, 12 by default) when falling behind, but only when needed.
-- Cipher solving caches compiled VMs to avoid recompilation, but caps the cache at 3 entries to limit memory.
+- Cipher solving caches compiled VMs to avoid recompilation, but caps the cache at 10 entries (`solverCacheSize`) to limit memory.
 - Database queries use prepared statements and indexes, but the single-connection model is retained for simplicity and correctness.
 - The TUI reduces its progress tick interval from 8ms (active — one tick per frame at its 120 fps renderer) to 500ms (idle) to avoid unnecessary rendering work.
 
@@ -179,7 +179,7 @@ Moombox supports Windows x64, Linux x64, and Linux arm64. macOS is not supported
 - **Process creation** — `CREATE_NO_WINDOW` (`0x08000000`) for detached child processes on Windows (`launcher_windows.go`); standard exec on Linux (`launcher_unix.go`).
 - **Single-instance locking** — `CreateMutex` on Windows; `flock` on Linux.
 - **Self-update cleanup** — the `.exe~` ping-based deferred delete is Windows-only (`launcher_windows.go`); Linux has no equivalent constraint since running binaries can be replaced in-place.
-- **Connectivity monitor** — ICMP-free TCP dial on Linux (`monitor_unix.go`); similar approach on Windows.
+- **Connectivity monitor** — no platform split at all: `internal/connectivity` dials TCP through a plain `net.Dialer` (`probe.go`), which behaves the same on Windows and Linux, so the package has no build-tagged files.
 
 The core download pipeline, web dashboard, TUI, BotGuard sidecar, and all business logic are identical across platforms. Windows-specific features degrade gracefully on Linux with clear UI messaging rather than silently failing.
 
@@ -220,7 +220,7 @@ Because Moombox runs continuously on the user's personal machine, resource effic
 
 Polling loops are a last resort. Where possible, subsystems sleep until explicitly signaled:
 
-- The **database batch update system** uses a signal channel. When an update is queued, a signal is sent. The flush goroutine wakes, waits 100ms for more updates to accumulate, then flushes everything in a single transaction. If no updates are queued, the goroutine sleeps indefinitely — zero CPU, zero IO.
+- The **database** has no writer goroutine: `UpdateJobFields` executes synchronously on the caller's goroutine, and the package's only goroutine is the `OnJobsChange` fan-out that the two bulk writers start. When nothing is being written, nothing runs — zero CPU, zero IO.
 - The **WebSocket broadcast system** is also signal-driven: a broadcast only happens when `OnJobChange` fires. The hub does no throttling of its own — `ProgressTracker.maybeUpdate` already caps progress writes at one per configured progress interval per job upstream (~60 Hz at the 16 ms default), and every other UpdateJobFields caller is event-driven. During idle periods both layers do nothing.
 
 Some subsystems necessarily poll because the external API provides no push mechanism:
@@ -234,7 +234,7 @@ In these cases, the polling interval is tuned to balance responsiveness against 
 
 JavaScript runtimes are the most expensive objects in the application. Two subsystems run JS:
 
-- **BotGuard** runs primarily under an embedded Node.js + JSDOM sidecar (real V8) — one long-running subprocess for the lifetime of Moombox. The sidecar's V8 heap is the largest single JS allocation in the system but it sits in a separate process so it does not compete with Go's GC for the main heap. PotProvider keeps a triple-layer in-process cache (session tokens 6h TTL, single goja-fallback minter VM with proactive refresh + auto-eviction, inflight dedup) on top of the sidecar's own internal minter cache. When the sidecar is disabled or unhealthy, the goja-VM fallback path keeps token generation working at reduced fidelity (websafe-fallback only).
+- **BotGuard** runs primarily under an embedded Node.js + JSDOM sidecar (real V8) — one long-running subprocess for the lifetime of Moombox. The sidecar's V8 heap is the largest single JS allocation in the system but it sits in a separate process so it does not compete with Go's GC for the main heap. PotProvider keeps a triple-layer in-process cache (session tokens 6h TTL, single goja-fallback minter VM with proactive refresh + auto-eviction, inflight dedup) on top of the sidecar's own internal minter cache. When the sidecar is disabled the goja-VM path runs, but BotGuard's timing check rejects it and the websafe fallback it returns is not accepted as a PO token; while an enabled sidecar is unhealthy a mint fails at once rather than falling through to it. Either way no tokens are minted until the sidecar is back.
 - **Cipher** uses a 10-VM Goja LRU cache keyed by player.js URL. When an eleventh unique player.js is encountered, the least-recently-used VM is evicted. Compilation of new VMs is mutex-serialized to prevent thundering herd (multiple goroutines all trying to compile the same player.js simultaneously).
 
 ### Bounded Buffers
@@ -257,7 +257,7 @@ However, each UI leans into its platform's strengths rather than trying to be id
 ### TUI Advantages
 
 - **Real-time monitoring.** Terminal rendering is inherently lower-latency than browser rendering. The TUI feels more immediate for watching download progress and log output.
-- **Keyboard-driven workflows.** The chord system (e.g., `AA` to add a video, `RC` to cancel, `QQ` to quit) enables fast, fluid interaction without reaching for the mouse. Power users can manage their entire archive workflow without leaving the keyboard.
+- **Keyboard-driven workflows.** The chord system (e.g., `AA` to add a video, `AC` to cancel, `QQ` to quit) enables fast, fluid interaction without reaching for the mouse. Power users can manage their entire archive workflow without leaving the keyboard.
 - **Immediate feedback.** Status updates, error notifications, and progress changes appear with minimal delay.
 - **Cleaner experience.** No browser chrome, no tab management, no notifications competing for attention. The TUI occupies a terminal window and that is its entire world.
 
@@ -302,7 +302,7 @@ When something fails, the system finds the best available fallback rather than s
 - **Expired cookies:** The application continues with unauthenticated access. Membership-only or age-restricted content becomes unavailable, but public content still works. The status bar shows the cookie state so the user knows.
 - **Authentication failure on one client:** The multi-client fallback chain tries the next Innertube client. Only if all clients fail does the job enter an error state.
 - **Network interruption:** Downloads pause and retry. Monitors continue their polling cycle. The application does not assume that a temporary network failure is permanent.
-- **Disk full:** Downloads pause and the status bar shows a disk warning. They do not crash or corrupt partially-written files.
+- **Disk filling up:** The status bar shows a disk warning past `disk_warn_percent` and a critical one past `disk_critical_percent`, and each crossing sends a notification (`disk_warning`, `disk_critical`). One thing holds on its own: from `disk_critical_percent` until usage is 2 points below it, the backlog scheduler admits no backlog VOD — archiving the past can wait for space, and every one admitted would be one more download filling the disk. Live, upcoming and manually added jobs, and backlog already downloading, carry on — the alerts exist so the operator can free space before their writes start failing.
 
 ### Always Inform the User
 
@@ -360,5 +360,5 @@ The upstream projects are references, not authorities. Moombox follows its own d
 - **Source: `cmd/moombox/main.go`** — The launcher/supervisor pattern, service initialization order, and top-level wiring that embodies these principles.
 - **Source: `internal/worker/`** — Download orchestration, where correctness-over-performance tradeoffs are most visible (background mux, verification loops, quality splitting).
 - **Source: `internal/bgutils/`** and **`internal/cipher/`** — Examples of justified complexity contained behind clean interfaces.
-- **Source: `internal/database/`** — Signal-driven batch coalescing, the primary example of resource-efficient design.
+- **Source: `internal/worker/progress.go`** — `ProgressTracker`'s per-job write gate, the primary example of resource-efficient design; `internal/database/` behind it writes synchronously and runs nothing in the background.
 - **Source: `internal/tui/`** — Charm ecosystem usage and the chord system implementation.

@@ -7,8 +7,28 @@ import {
   cookieSetupAcceptedToast,
   cookieSetupProbe,
   cookieSetupRejectedMessage,
+  needsChannelResolve,
+  NOT_A_CHANNEL_URL,
   serverErrorMessage,
 } from "./utils.js";
+
+// The two full-page screens: the first-run wizard and "FFmpeg Not Found".
+const FULL_PAGE_OVERLAYS = ["setup-overlay", "ffmpeg-overlay"];
+
+/**
+ * Show or hide one of the full-page overlays. They cover the dashboard but
+ * did not take it out of reach: Tab walked on past the overlay's last control
+ * into the hidden tabs, job list and status bar. While either is up, the
+ * dashboard's own regions are inert. The sl-dialogs a wizard step opens live
+ * outside those regions, so they still work.
+ */
+export function setOverlayShown(id, shown) {
+  document.getElementById(id).style.display = shown ? "flex" : "none";
+  const anyShown = FULL_PAGE_OVERLAYS.some((o) => document.getElementById(o)?.style.display === "flex");
+  for (const el of document.querySelectorAll("main.app-main, #status-bar, #batch-action-bar")) {
+    el.toggleAttribute("inert", anyShown);
+  }
+}
 
 export class SetupController {
   constructor(app) {
@@ -30,7 +50,7 @@ export class SetupController {
   }
 
   show() {
-    document.getElementById("setup-overlay").style.display = "flex";
+    setOverlayShown("setup-overlay", true);
     this.showPage("setup-mode-select");
     this._redirectUrl = null;
     this.setupListeners();
@@ -54,7 +74,7 @@ export class SetupController {
   }
 
   hide() {
-    document.getElementById("setup-overlay").style.display = "none";
+    setOverlayShown("setup-overlay", false);
   }
 
   showPage(id) {
@@ -65,7 +85,24 @@ export class SetupController {
     const advSteps = document.getElementById("setup-adv-steps");
     if (advSteps) advSteps.style.display = "none";
     const el = document.getElementById(id);
-    if (el) el.style.display = "";
+    if (el) {
+      el.style.display = "";
+      this._focusPage(el);
+    }
+  }
+
+  /**
+   * Move focus into a page that just appeared. The Next/Back button that got
+   * the user here was on the page just hidden, so focus otherwise falls to
+   * the body: a keyboard user has to Tab in from the top and a screen reader
+   * announces nothing. The mode page's first card is a real control; every
+   * other page leads with its heading, focused programmatically.
+   */
+  _focusPage(page) {
+    const target = page.querySelector(".setup-mode-card") || page.querySelector(":scope > h2");
+    if (!target) return;
+    if (target.tagName === "H2") target.setAttribute("tabindex", "-1");
+    target.focus();
   }
 
   setupListeners() {
@@ -195,10 +232,10 @@ export class SetupController {
     const setupChId = document.getElementById("setup-ch-id");
     if (setupChId) {
       setupChId.addEventListener("sl-input", () => {
-        const val = (setupChId.value || "").trim();
+        const val = (setupChId.value || "").trim().toLowerCase();
         const platformSel = document.getElementById("setup-ch-platform");
         if (!platformSel) return;
-        if (val.includes("youtube.com") || val.includes("youtu.be")) {
+        if (val.startsWith("@") || val.includes("youtube.com") || val.includes("youtu.be")) {
           if (platformSel.value !== "youtube") platformSel.value = "youtube";
         } else if (val.includes("twitch.tv")) {
           if (platformSel.value !== "twitch") platformSel.value = "twitch";
@@ -278,9 +315,12 @@ export class SetupController {
       this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
     });
     document.getElementById("ffmpeg-skip-btn")?.addEventListener("click", () => {
-      document.getElementById("ffmpeg-overlay").style.display = "none";
+      setOverlayShown("ffmpeg-overlay", false);
       this.initializeApp();
     });
+    // Closes the tab only; Moombox keeps running. It was labelled "Quit
+    // Moombox" after the TUI's twin, which does exit — a web page has no way
+    // to, and should not, stop the server.
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
       // window.close() only works if the page was opened by script.
@@ -382,7 +422,7 @@ export class SetupController {
       if (countdownEl) {
         countdownEl.textContent = `${remaining}s remaining`;
         if (remaining <= 10) {
-          countdownEl.style.color = "var(--sl-color-warning-600)";
+          countdownEl.style.color = "var(--text-warning)";
         }
       }
       if (remaining <= 0) clearInterval(countdownInterval);
@@ -453,7 +493,7 @@ export class SetupController {
           resultEl.textContent = cookieSetupRejectedMessage(
             platform === "twitch" ? data.twitchVerification : data.youtubeVerification,
           );
-          resultEl.style.color = "var(--sl-color-danger-600)";
+          resultEl.style.color = "var(--text-danger)";
         }
       }
     } catch (e) {
@@ -506,7 +546,7 @@ export class SetupController {
       }
       if (resultEl) {
         resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
+        resultEl.style.color = "var(--text-danger)";
       }
     } finally {
       clearInterval(countdownInterval);
@@ -545,7 +585,7 @@ export class SetupController {
     if (!container) return;
     container.innerHTML = "";
     if (this.channels.length === 0) {
-      container.innerHTML = '<p style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">No channels added yet.</p>';
+      container.innerHTML = '<p style="color: var(--sl-color-neutral-600); font-size: var(--sl-font-size-small);">No channels added yet.</p>';
       return;
     }
     for (let i = 0; i < this.channels.length; i++) {
@@ -560,7 +600,7 @@ export class SetupController {
         <div style="display: flex; align-items: center; gap: 0.5em; flex: 1; min-width: 0;">
           <sl-icon name="${platformIcon}" style="color: ${platformColor};"></sl-icon>
           <strong style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayName}</strong>
-          <span style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayId}</span>
+          <span style="color: var(--sl-color-neutral-600); font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayId}</span>
         </div>
         <div style="display: flex; gap: 0.25em;">
           <sl-icon-button name="pencil" data-index="${i}" class="setup-ch-edit" label="Edit"></sl-icon-button>
@@ -647,8 +687,8 @@ export class SetupController {
     let name = (document.getElementById("setup-ch-name")?.value || "").trim();
     let platform = document.getElementById("setup-ch-platform")?.value || "youtube";
 
-    // Resolve channel URL if it looks like a URL
-    if (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv")) {
+    // Resolve a channel URL or a bare @handle
+    if (needsChannelResolve(id)) {
       const saveBtn = document.getElementById("setup-ch-save");
       if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
@@ -659,6 +699,12 @@ export class SetupController {
         });
         if (resp.ok) {
           const resolved = await resp.json();
+          // Echoed back unrecognised: no channel, and the wizard's Finish
+          // would be refused over it.
+          if (resolved.resolved === false) {
+            this.app.showToast(NOT_A_CHANNEL_URL, "danger");
+            return;
+          }
           if (resolved.id) id = resolved.id;
           if (resolved.name && !name) name = resolved.name;
           if (resolved.platform) platform = resolved.platform;
@@ -719,9 +765,13 @@ export class SetupController {
     document.querySelectorAll("#setup-adv-steps .setup-step").forEach((s) => {
       const sn = parseInt(s.dataset.step);
       s.classList.remove("active", "completed");
-      if (sn === step) s.classList.add("active");
-      else if (sn < step) s.classList.add("completed");
+      s.removeAttribute("aria-current");
+      if (sn === step) {
+        s.classList.add("active");
+        s.setAttribute("aria-current", "step");
+      } else if (sn < step) s.classList.add("completed");
     });
+    if (el) this._focusPage(el);
 
     // Render channel list when entering channels step
     if (step === 7) {
@@ -868,7 +918,9 @@ export class SetupController {
         // Show specific field validation errors if available
         let msg = data.error || "Failed to save configuration";
         if (data.details && typeof data.details === "object") {
-          const fieldErrors = Object.values(data.details);
+          // Field names too, as the Settings save does: five path inputs can
+          // each fail with the same "cannot contain a .. segment".
+          const fieldErrors = Object.entries(data.details).map(([field, err]) => `${field}: ${err}`);
           if (fieldErrors.length > 0) msg = fieldErrors.join("; ");
         }
         this.app.showToast(msg, "danger");
@@ -891,8 +943,7 @@ export class SetupController {
     if (this._polling) return; // Prevent duplicate polling chains
     this._polling = true;
 
-    const overlay = document.getElementById("setup-overlay");
-    if (overlay) overlay.style.display = "none";
+    setOverlayShown("setup-overlay", false);
 
     // If port or HTTPS changed, the old URL is dead after restart.
     // Cross-origin restrictions prevent polling the new URL, so redirect directly.
@@ -912,7 +963,7 @@ export class SetupController {
       urlText.style.cssText = "margin-top: 0.25em; font-family: monospace; color: var(--sl-color-neutral-600); word-break: break-all;";
       urlText.textContent = this._redirectUrl;
       const note = document.createElement("p");
-      note.style.cssText = "margin-top: 0.5em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+      note.style.cssText = "margin-top: 0.5em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-600);";
       note.textContent = "Redirecting in a few seconds...";
       const btn = document.createElement("sl-button");
       btn.variant = "primary";
@@ -945,11 +996,11 @@ export class SetupController {
 
     const startTime = Date.now();
     const phaseEl = document.createElement("p");
-    phaseEl.style.cssText = "margin-top: 0.75em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+    phaseEl.style.cssText = "margin-top: 0.75em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-600);";
     phaseEl.textContent = "Saving configuration...";
 
     const elapsedEl = document.createElement("p");
-    elapsedEl.style.cssText = "font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-400); margin-top: 0.25em;";
+    elapsedEl.style.cssText = "font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-600); margin-top: 0.25em;";
 
     const elapsedInterval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -1044,7 +1095,7 @@ export class SetupController {
     // setupListeners wasn't called — e.g. non-first-run with missing FFmpeg)
     this.setupFFmpegListeners();
 
-    document.getElementById("ffmpeg-overlay").style.display = "flex";
+    setOverlayShown("ffmpeg-overlay", true);
     document.getElementById("ffmpeg-main-view").style.display = "";
     document.getElementById("ffmpeg-install-view").style.display = "none";
     document.getElementById("ffmpeg-script-review").style.display = "none";
@@ -1059,7 +1110,7 @@ export class SetupController {
     const quitBtn = document.getElementById("ffmpeg-quit-btn");
     if (quitBtn) {
       quitBtn.disabled = false;
-      quitBtn.textContent = "Quit Moombox";
+      quitBtn.textContent = "Close this tab";
     }
   }
 
@@ -1092,6 +1143,7 @@ export class SetupController {
 
         const cmdInput = document.createElement("sl-input");
         cmdInput.id = "ffmpeg-install-cmd";
+        cmdInput.label = "Install command";
         cmdInput.setAttribute("readonly", "");
         cmdInput.value = sug.suggestion;
         cmdInput.style.cssText = "width: 100%; font-family: monospace;";
@@ -1120,7 +1172,7 @@ export class SetupController {
           try {
             const check = await fetch("/api/ffmpeg/check").then((r) => r.json());
             if (check.valid) {
-              document.getElementById("ffmpeg-overlay").style.display = "none";
+              setOverlayShown("ffmpeg-overlay", false);
               this.initializeApp();
             } else {
               cmdInput.setAttribute("help-text", "FFmpeg still not detected — check installation and PATH");
@@ -1263,12 +1315,12 @@ export class SetupController {
     }
     if (data.warning) {
       document.getElementById("ffmpeg-success-continue")?.addEventListener("click", () => {
-        document.getElementById("ffmpeg-overlay").style.display = "none";
+        setOverlayShown("ffmpeg-overlay", false);
         this.initializeApp();
       });
     } else {
       setTimeout(() => {
-        document.getElementById("ffmpeg-overlay").style.display = "none";
+        setOverlayShown("ffmpeg-overlay", false);
         this.initializeApp();
       }, 1500);
     }
@@ -1421,11 +1473,19 @@ export class SetupController {
         body: JSON.stringify({ path }),
         signal: controller.signal,
       });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      // A 400 carries the reason (an empty path, a ".." segment); say it.
+      if (!resp.ok) throw new Error(await serverErrorMessage(resp));
       const data = await resp.json();
 
       if (data.valid) {
-        // POST /api/ffmpeg/check already saves the path to config on the server side
+        // POST /api/ffmpeg/check already saves the path to config on the
+        // server side. The Settings form and the cached config have to hold
+        // it too: the form is loaded once, so its next Save — of anything —
+        // sent the old (usually empty) path back and undid this check.
+        if (data.path) {
+          this.app.setInputValue("cfg-ffmpeg-path", data.path);
+          if (this.app.config?.paths) this.app.config.paths.ffmpeg_path = data.path;
+        }
 
         let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
         if (data.warning) {
@@ -1435,12 +1495,12 @@ export class SetupController {
         if (resultEl) resultEl.innerHTML = html;
         if (data.warning) {
           document.getElementById("ffmpeg-path-continue")?.addEventListener("click", () => {
-            document.getElementById("ffmpeg-overlay").style.display = "none";
+            setOverlayShown("ffmpeg-overlay", false);
             this.initializeApp();
           });
         } else {
           setTimeout(() => {
-            document.getElementById("ffmpeg-overlay").style.display = "none";
+            setOverlayShown("ffmpeg-overlay", false);
             this.initializeApp();
           }, 1500);
         }

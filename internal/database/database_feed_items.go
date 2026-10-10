@@ -70,8 +70,10 @@ WHERE channel_id = ? AND video_id = ?`, precisionRankCaseSQL("date_precision"))
 }
 
 // GetFeedItem returns the feed_items row for (channelID, videoID), or nil (no
-// error) if no such row exists. A small exported read path alongside the
-// upsert/probe writers — used by tests and (Plan 5) the history API.
+// error) if no such row exists. The tests read the store through it; no
+// production path has needed one row since a backlog job's feed_items partner
+// stopped deciding where a cookie repair resumes it (worker.CookieResumeStatus,
+// W25-09).
 func (db *Database) GetFeedItem(channelID, videoID string) (*FeedItem, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -108,8 +110,9 @@ func feedScopeQ1SQL(includeMembership bool) string {
 }
 
 func feedScopeQ2SQL(includeMembership bool) string {
-	// Fetch three statuses via the index; the unresolved-arm precision filter is
-	// applied in Go (spec §7: post-filter unknown rows to assumed-only).
+	// Fetch three statuses via the index; the unresolved-arm filter is applied
+	// in Go (spec §7: post-filter unknown rows to assumed precision, or to RSS
+	// rows first seen inside the window — see FeedScope).
 	q := `SELECT video_id, title, published, date_precision, catalog_pos, source, status, first_seen
   FROM feed_items WHERE channel_id = ? AND status IN ('upcoming','live','unknown')`
 	if !includeMembership {
@@ -154,8 +157,17 @@ func (db *Database) FeedScope(channelID, cutoff string, includeMembership bool) 
 		seen[it.VideoID] = true
 	}
 	for _, it := range q2 {
-		// unresolved arm: unknown rows qualify only at 'assumed' precision (§7).
-		if it.Status == "unknown" && it.DatePrecision != "assumed" {
+		// unresolved arm (§7): an unknown row qualifies at 'assumed' precision —
+		// its published is a sighting instant, not a date — or when RSS first
+		// listed it inside the window. An RSS <published> is the ANNOUNCEMENT
+		// time, so a stream scheduled further ahead than the window is already
+		// older than the cutoff when first seen (a channel added, or Moombox
+		// down, while it waits): it sat in neither arm, never probed and never
+		// jobbed, even once live. first_seen bounds it — a row whose probe keeps
+		// failing gets the window's worth of attempts, like an in-window row,
+		// and rows from before this arm existed do not all re-probe at once.
+		if it.Status == "unknown" && it.DatePrecision != "assumed" &&
+			(it.Source != "rss" || it.FirstSeen < cutoff) {
 			continue
 		}
 		if !seen[it.VideoID] {
@@ -189,23 +201,6 @@ VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET last_rss_ok_at = excluded.la
 	return err
 }
 
-// GetChannelRSSOK returns channel_state.last_rss_ok_at for channelID, or "" if
-// unset or the channel_state row doesn't exist yet — mirrors SetChannelRSSOK.
-func (db *Database) GetChannelRSSOK(channelID string) (string, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	var ts sql.NullString
-	err := db.db.QueryRowContext(db.getCtx(),
-		`SELECT last_rss_ok_at FROM channel_state WHERE channel_id = ?`, channelID).Scan(&ts)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return ts.String, nil
-}
-
 // SaveBackfillCursor upserts channel_state.backfill_state — the backfill's
 // per-tab resume cursor JSON (spec §11), saved by the scanner after every
 // good page. Mirrors SetChannelRSSOK's upsert shape (§6: neither
@@ -221,7 +216,7 @@ VALUES (?, ?) ON CONFLICT(channel_id) DO UPDATE SET backfill_state = excluded.ba
 
 // LoadBackfillCursor returns channel_state.backfill_state for channelID, or
 // "" when unset or the channel_state row doesn't exist yet — either way a
-// fresh scan starts from page 1 of every tab. Mirrors GetChannelRSSOK.
+// fresh scan starts from page 1 of every tab.
 func (db *Database) LoadBackfillCursor(channelID string) (string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()

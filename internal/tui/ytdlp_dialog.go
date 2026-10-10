@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
@@ -145,11 +146,11 @@ func (m *YtdlpDialogModel) View() string {
 		b.WriteString(ErrorStyle.Render("  " + m.errorMsg))
 		b.WriteString("\n")
 	default:
-		b.WriteString(m.statusRows())
+		b.WriteString(m.statusRows(boxW - 2))
 	}
 
 	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("I: Install / reinstall   R: Refresh   Esc: Close"))
+	b.WriteString(DimStyle.Render("I: Install / reinstall   R: Refresh   Esc/Q: Close"))
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -164,7 +165,7 @@ func (m *YtdlpDialogModel) View() string {
 // statusRows is the loaded body: the three facts that are always on screen
 // (Installed, Plugin dir, Moombox port) and the four that only exist in some
 // states (Plugin points, Plugin state, Port mismatch, Plugin path).
-func (m *YtdlpDialogModel) statusRows() string {
+func (m *YtdlpDialogModel) statusRows(contentW int) string {
 	installed := "not installed"
 	if m.info.Installed {
 		installed = "yes"
@@ -175,15 +176,25 @@ func (m *YtdlpDialogModel) statusRows() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(ytdlpRow("Installed:", installed))
-	b.WriteString(ytdlpRow("Plugin dir:", ytdlpValueOrDash(m.info.PluginDir)))
-	b.WriteString(ytdlpRow("Moombox port:", fmt.Sprintf("%d (https: %s)", m.info.CurrentPort, https)))
+	b.WriteString(ytdlpRow("Installed:", installed, contentW))
+	b.WriteString(ytdlpRow("Plugin dir:", ytdlpValueOrDash(m.info.PluginDir), contentW))
+	b.WriteString(ytdlpRow("Moombox port:", fmt.Sprintf("%d (https: %s)", m.info.CurrentPort, https), contentW))
 	// Gated on the PORT, not on Installed: InstalledPort is non-nil only when
 	// a plugin file actually parsed, and it is the number the mismatch row is
 	// about — a mismatch whose other half is not on screen is not an
 	// explanation. The nil case is also the wire's "installedPort": null.
 	if m.info.InstalledPort != nil {
-		b.WriteString(ytdlpRow("Plugin points:", fmt.Sprintf("%d", *m.info.InstalledPort)))
+		// With the scheme: a mismatch in the scheme alone (https toggled, the
+		// port unchanged) otherwise showed two equal port numbers.
+		points := fmt.Sprintf("%d", *m.info.InstalledPort)
+		if m.info.InstalledScheme != "" {
+			pluginHTTPS := "off"
+			if m.info.InstalledScheme == "https" {
+				pluginHTTPS = "on"
+			}
+			points = fmt.Sprintf("%d (https: %s)", *m.info.InstalledPort, pluginHTTPS)
+		}
+		b.WriteString(ytdlpRow("Plugin points:", points, contentW))
 	}
 	if m.info.Unparseable {
 		// Same shape as the mismatch row below — YellowStyle, label column, one
@@ -203,19 +214,42 @@ func (m *YtdlpDialogModel) statusRows() string {
 		// Short on purpose: the label column plus this value has to fit the
 		// 66-column content box, or the sentence wraps with a dangling second
 		// line at every width up to ~88.
-		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Port mismatch:", fmt.Sprintf("yes — I rewrites it for port %d", m.info.CurrentPort))))
+		// Not "Port mismatch": PortMismatch also covers the scheme, and the
+		// two rows above now show both halves of each.
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Mismatch:", "yes — I rewrites it to match")))
 		b.WriteString("\n")
 	}
 	if m.info.ExtractedPath != "" {
 		// "path", not "file": ExtractedPath is the plugin DIRECTORY the manual
 		// --plugin-dirs invocation takes, not the .py the rows above are about.
-		b.WriteString(ytdlpRow("Plugin path:", m.info.ExtractedPath))
+		b.WriteString(ytdlpRow("Plugin path:", m.info.ExtractedPath, contentW))
 	}
 	return b.String()
 }
 
-func ytdlpRow(label, value string) string {
-	return fmt.Sprintf("  %-15s %s\n", label, value)
+// ytdlpRowIndent is where a row's value starts: the two-space margin, the
+// 15-column label and its separating space.
+const ytdlpRowIndent = 2 + 15 + 1
+
+// ytdlpRow is one "label  value" line. The value wraps at the content width —
+// at a path separator where it can — with every continuation line indented
+// under the value column: the plugin paths are long, and at the 60-column
+// floor the box is 54 wide, where they used to wrap back to column 0 under
+// the labels.
+//
+// contentW <= 0 is a box that has not been sized yet: nothing to wrap to.
+func ytdlpRow(label, value string, contentW int) string {
+	lines := []string{value}
+	if contentW > 0 {
+		valueW := max(contentW-ytdlpRowIndent, 10)
+		lines = strings.Split(ansi.Wrap(value, valueW, "/\\"), "\n")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %-15s %s\n", label, lines[0])
+	for _, l := range lines[1:] {
+		b.WriteString(strings.Repeat(" ", ytdlpRowIndent) + l + "\n")
+	}
+	return b.String()
 }
 
 // ytdlpValueOrDash keeps the dir row present when the platform has no

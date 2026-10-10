@@ -7,12 +7,10 @@ export class StatsController {
   constructor(app) {
     this.app = app;
     this._refreshInterval = null;
-    this._active = false;
   }
 
   /** Called when the Stats tab becomes visible. */
   activate() {
-    this._active = true;
     this.loadStats();
     // Clear any existing interval to prevent leaks on double-activate
     if (this._refreshInterval) clearInterval(this._refreshInterval);
@@ -22,7 +20,6 @@ export class StatsController {
 
   /** Called when the Stats tab is hidden. */
   deactivate() {
-    this._active = false;
     if (this._refreshInterval) {
       clearInterval(this._refreshInterval);
       this._refreshInterval = null;
@@ -49,6 +46,14 @@ export class StatsController {
   renderDisk(disk) {
     const el = document.getElementById("stats-disk");
     if (!el) return;
+
+    // No reading (the server sends zeros before its first successful disk
+    // check, and for as long as the output directory's disk cannot be read):
+    // say so rather than "0B used of 0B".
+    if (!(disk.total > 0)) {
+      el.textContent = "No disk reading available";
+      return;
+    }
 
     const usedPct = isFinite(disk.usedPct) ? disk.usedPct : 0;
     const pct = usedPct.toFixed(1);
@@ -97,6 +102,9 @@ export class StatsController {
     el.appendChild(this._createCard("Twitch Storage", formatBytes(byPlat.twitch || 0)));
     el.appendChild(this._createCard("Finished", formatBytes(byStat.finished || 0), "stat-finished"));
     el.appendChild(this._createCard("Error", formatBytes(byStat.error || 0), "stat-error"));
+    // Total Recorded counts cancelled jobs' files too; without this card the
+    // breakdown did not add up to it.
+    el.appendChild(this._createCard("Cancelled", formatBytes(byStat.cancelled || 0)));
   }
 
   renderActivity(activity) {

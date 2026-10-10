@@ -32,7 +32,6 @@ const (
 type VideoProbeResult struct {
 	StreamStatus       string // "live", "upcoming", "vod", "post_live", "not_a_stream"
 	Title              string // metadata title (may be better than feed title)
-	ChannelName        string // metadata channel name
 	PublishedAt        string // probe's authoritative publish date (RFC3339, may be empty)
 	PublishedPrecision string // "started" or "day", empty when PublishedAt is empty
 	PlayabilityError   string // playability status from YouTube API (may be empty for OK videos)
@@ -157,6 +156,16 @@ func (cd *ProbeCooldown) ShouldProbe(videoID string) bool {
 	return time.Since(last) >= cd.duration
 }
 
+// enabled reports whether the cooldown window is active (non-nil, > 0).
+func (cd *ProbeCooldown) enabled() bool {
+	if cd == nil {
+		return false
+	}
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return cd.duration > 0
+}
+
 // Record marks videoID as just-probed with the current window. Called after a
 // SUCCESSFUL probe classification, and after giving up on a persistently
 // failing video (so it isn't re-probed every cycle). A no-op when the cooldown
@@ -197,16 +206,19 @@ func (cd *ProbeCooldown) evictExcess() {
 
 // ProcessYouTubeVideoParams holds the dependencies for ProcessYouTubeVideo.
 type ProcessYouTubeVideoParams struct {
-	Ctx          context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
-	VideoID      string
-	Title        string
-	Channel      *config.ChannelConfig
-	ProbeVideo   VideoProbeFunc
-	AddToHistory func(videoID string) error
-	Tracker      *MetadataFailureTracker
-	Cooldown     *ProbeCooldown // optional: skips re-probes within the cooldown window
-	IsReprobe    bool           // true if re-checking a previously processed video (logs demoted to Debug)
-	Logger       interface {
+	Ctx        context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
+	VideoID    string
+	Title      string
+	Channel    *config.ChannelConfig
+	ProbeVideo VideoProbeFunc
+	Tracker    *MetadataFailureTracker
+	Cooldown   *ProbeCooldown // optional: skips re-probes within the cooldown window
+	IsReprobe  bool           // true if re-checking a previously processed video (logs demoted to Debug)
+	// Repeat marks a video the caller classified last time as well: the
+	// classification logs are demoted to Debug, as for IsReprobe, but nothing
+	// is skipped as already processed — the video was never jobbed.
+	Repeat bool
+	Logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -218,7 +230,6 @@ type ProcessYouTubeVideoParams struct {
 type ProcessYouTubeVideoResult struct {
 	ShouldProcess bool   // true if the video should be queued as a job
 	Title         string // possibly updated title from metadata
-	ChannelName   string // possibly updated channel name from metadata
 	// StreamStatus is the probe's classification ("live", "upcoming", "vod",
 	// "post_live", "not_a_stream"). It is populated whenever a probe COMPLETED
 	// — including the two arms that then decline to process the video — and is
@@ -313,9 +324,8 @@ const (
 
 // ProbeClassifyParams holds the dependencies for probeAndClassify — the
 // probe+classify core that ProcessYouTubeVideo recomposes. Deliberately a
-// subset of ProcessYouTubeVideoParams: no AddToHistory (probeAndClassify has
-// no history side effects — see ProbeClassifyResult.GaveUp) and no IsReprobe
-// (log-level demotion is a composed-function concern).
+// subset of ProcessYouTubeVideoParams: no IsReprobe (log-level demotion is a
+// composed-function concern).
 type ProbeClassifyParams struct {
 	Ctx        context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
 	VideoID    string
@@ -335,23 +345,15 @@ type ProbeClassifyParams struct {
 type ProbeClassifyResult struct {
 	Outcome ProbeOutcome
 
-	// StreamStatus, Title, ChannelName, PublishedAt, and PublishedPrecision
+	// StreamStatus, Title, PublishedAt, and PublishedPrecision
 	// are populated on OutcomeProbed and OutcomeDenied (a successful probe);
 	// zero-valued otherwise. PlayabilityError is always carried on those two
 	// outcomes — the escalation reads it even when Outcome == OutcomeDenied.
 	StreamStatus       string
 	Title              string
-	ChannelName        string
 	PublishedAt        string
 	PublishedPrecision string
 	PlayabilityError   string
-
-	// GaveUp is meaningful IFF Outcome == OutcomeErrored: true when the
-	// failure tracker just gave up on this video (maxMetadataFailures
-	// reached this call). probeAndClassify takes no AddToHistory parameter
-	// by design (the compiler enforces it) — the composed ProcessYouTubeVideo
-	// uses GaveUp as its cue to run the give-up AddToHistory side effect.
-	GaveUp bool
 }
 
 // probeAndClassify runs one probe of a YouTube video and classifies it into
@@ -391,18 +393,25 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 	if err != nil {
 		count, giveUp := p.Tracker.RecordFailure(p.VideoID)
 		if giveUp {
-			// Give up on this video. AddToHistory (run by the composed
-			// caller when GaveUp is true) does NOT actually stop re-probing —
-			// HasProcessed only flips the reprobe/log-level flag; feed/DECAPI
-			// still call ProcessYouTubeVideo — so the cooldown is the only
-			// rate limiter. Record the window (giveUp also resets the
-			// tracker's escalation to 0), otherwise a broken-but-still-
-			// matching video re-probes every cycle. When the cooldown is
-			// disabled the operator has accepted that per-cycle re-probe
-			// (Record is a no-op) — the poll interval is the throttle.
+			// Give up on this video. Nothing stops re-probing it — DECAPI
+			// still calls ProcessYouTubeVideo and the feed walk still calls
+			// probeAndClassify — so the cooldown is the only rate limiter.
+			// (DECAPI used to write a history row here as well. History is
+			// what the feed's archive gates VODs on, so three transient
+			// failures on a channel's newest VOD kept it from ever being
+			// archived.) Record the window (giveUp also resets the tracker's escalation
+			// to 0), otherwise a broken-but-still-matching video re-probes
+			// every cycle. When the cooldown is disabled the operator has
+			// accepted that per-cycle re-probe (Record is a no-op) — the
+			// poll interval is the throttle, and the log says so rather than
+			// claiming a back-off that does not happen.
 			p.Cooldown.Record(p.VideoID)
-			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, backing off: %v",
-				p.VideoID, count, err))
+			next := "retrying next cycle"
+			if p.Cooldown.enabled() {
+				next = "backing off"
+			}
+			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, %s: %v",
+				p.VideoID, count, next, err))
 		} else {
 			// Transient failure: leave the cooldown UNRECORDED so the next
 			// cycle re-probes promptly — a freshly-live video must not be
@@ -411,7 +420,7 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
 				p.VideoID, count, maxMetadataFailures, err))
 		}
-		return ProbeClassifyResult{Outcome: OutcomeErrored, GaveUp: giveUp}
+		return ProbeClassifyResult{Outcome: OutcomeErrored}
 	}
 
 	// Successful probe: record the (configured) cooldown to limit total
@@ -423,7 +432,6 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 		Outcome:            OutcomeProbed,
 		StreamStatus:       meta.StreamStatus,
 		Title:              meta.Title,
-		ChannelName:        meta.ChannelName,
 		PublishedAt:        meta.PublishedAt,
 		PublishedPrecision: meta.PublishedPrecision,
 		PlayabilityError:   meta.PlayabilityError,
@@ -442,10 +450,15 @@ func probeAndClassify(p ProbeClassifyParams) ProbeClassifyResult {
 // or false if it was skipped (non-stream, ended stream, or probe failure).
 //
 // Recomposed on top of probeAndClassify: this function owns the passthrough
-// (no ProbeVideo configured), the AddToHistory side effects, and the
-// IsReprobe log-level demotion — probeAndClassify owns none of those. Its
-// observable behavior for the DECAPI caller (decapi.go) is unchanged by the
-// split; see utils_test.go for the pinning tests.
+// (no ProbeVideo configured) and the IsReprobe log-level demotion —
+// probeAndClassify owns neither. See utils_test.go for the pinning tests.
+//
+// It writes NO history. History means "a job was created" (the host writes
+// it at creation, monitor_callbacks.go), and both monitors' archive steps
+// gate VODs on it, so a row for a video we only skipped or failed to probe
+// kept that VOD from ever being archived — by the feed after three
+// transient probe failures here, and by both monitors after a skip while
+// include_non_live_content was off, even once it was turned on.
 func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult {
 	includeNonLive := p.Channel.IncludeNonLiveContent
 
@@ -469,9 +482,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 
 	case OutcomeErrored:
-		if cr.GaveUp && p.AddToHistory != nil {
-			p.AddToHistory(p.VideoID)
-		}
 		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 
 	case OutcomeDenied:
@@ -481,11 +491,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		// launders the 2.7.2 misfire into a broadcast job — an Upcoming row,
 		// a "Stream Found" notification, and then a COOKIES? park the config
 		// never asked for.
-		//
-		// NO AddToHistory. A refusal is not "we dealt with this video": the
-		// members-only escalation lives on the FEED path, which owns the
-		// authenticated answer, and a history row here would make its later
-		// sighting read as a re-probe.
 		//
 		// The cost of routing login_required away is that a channel under
 		// sustained anti-bot pushback gets its upcoming streams from the feed
@@ -497,7 +502,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		// newest video changes, PruneHealth drops the channel, or the process
 		// restarts — never because the refusal ended.
 		deniedLog := p.Logger.Info
-		if p.IsReprobe {
+		if p.IsReprobe || p.Repeat {
 			deniedLog = p.Logger.Debug
 		}
 		deniedLog(fmt.Sprintf("[Monitor] YouTube refused this video (%s); not creating a job: %s (%s)",
@@ -516,7 +521,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 
 	// Classify stream status (demote to Debug for re-probes of finished videos)
 	logInfo := p.Logger.Info
-	if p.IsReprobe {
+	if p.IsReprobe || p.Repeat {
 		logInfo = p.Logger.Debug
 	}
 
@@ -524,9 +529,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	case "not_a_stream":
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping non-stream content (%s): %s (%s)", reason, p.Title, p.VideoID))
-			if p.AddToHistory != nil {
-				p.AddToHistory(p.VideoID)
-			}
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including non-stream content (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
@@ -541,9 +543,6 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	case "post_live", "vod":
 		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
 			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s, %s): %s (%s)", cr.StreamStatus, reason, p.Title, p.VideoID))
-			if p.AddToHistory != nil {
-				p.AddToHistory(p.VideoID)
-			}
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title, StreamStatus: cr.StreamStatus}
 		}
 		logInfo(fmt.Sprintf("[Monitor] Including ended stream (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
@@ -551,21 +550,16 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 
 	p.Logger.Debug(fmt.Sprintf("[Monitor] Video %s classified as: %s", p.VideoID, cr.StreamStatus))
 
-	// Use metadata title/channel if available, but don't let API fallback
+	// Use the metadata title if available, but don't let API fallback
 	// placeholders ("Unknown Title") overwrite the real feed title.
 	title := p.Title
 	if cr.Title != "" && cr.Title != "Unknown Title" {
 		title = cr.Title
 	}
-	channelName := ""
-	if cr.ChannelName != "" {
-		channelName = cr.ChannelName
-	}
 
 	return ProcessYouTubeVideoResult{
 		ShouldProcess: true,
 		Title:         title,
-		ChannelName:   channelName,
 		StreamStatus:  cr.StreamStatus,
 		PublishedAt:   cr.PublishedAt,
 	}
@@ -622,14 +616,9 @@ func getCachedRegex(pattern string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-// matchTerm checks if text matches a single term pattern.
-// All patterns are treated as regex (matching TypeScript behavior).
-// Supports /pattern/flags syntax and (?i) prefix for case-insensitive.
-func matchTerm(text, pattern string) bool {
-	return matchTermNormalized(normalizeText(text), text, pattern)
-}
-
-// matchTermNormalized is like matchTerm but takes pre-normalized text to avoid redundant work.
+// matchTermNormalized checks whether text matches a single term pattern,
+// taking pre-normalized text to avoid redundant work. All patterns are
+// treated as regex; /pattern/flags syntax and a (?i) prefix are supported.
 //
 // The pattern must be transformed to correspond to the normalized text it
 // runs against: normText is diacritic-stripped AND lowercased, so patterns
@@ -642,12 +631,16 @@ func matchTermNormalized(normText, rawText, pattern string) bool {
 	// Check for /pattern/flags syntax
 	if isRegexPattern(pattern) {
 		inner, flags := parseRegexPattern(pattern)
+		flags = goRegexFlags(flags)
 		if !strings.Contains(flags, "i") {
 			flags += "i"
 		}
 		re, err := getCachedRegex("(?" + flags + ")" + normalizePattern(inner))
 		if err != nil {
-			return fuzzyMatch(rawText, pattern)
+			// Substring-match the BODY of the term, not the raw "/.../flags"
+			// text: the delimiters and flags are syntax, not characters a
+			// title could contain, so the raw term could never match.
+			return fuzzyMatch(rawText, inner)
 		}
 		return re.MatchString(normText)
 	}
@@ -661,6 +654,25 @@ func matchTermNormalized(normText, rawText, pattern string) bool {
 		return fuzzyMatch(rawText, pattern)
 	}
 	return re.MatchString(normText)
+}
+
+// goRegexFlags maps a /pattern/flags suffix onto what Go's (?flags) group
+// accepts. The terms syntax is JavaScript's (inherited from the TypeScript
+// archiver), and four of its flags have no Go spelling but also no bearing on
+// a boolean "does the text match": g (every match) and y (sticky) only shape
+// iteration, d only adds match indices, and u (Unicode) is the only mode a Go
+// regexp has. Left in, "(?gi)karaoke" failed to compile and the term silently
+// never matched anything. Everything else — Go's own i/m/s, or a letter
+// neither engine knows — passes through, so a flag Go rejects still fails the
+// compile and takes the substring fallback rather than being reinterpreted.
+func goRegexFlags(flags string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case 'g', 'y', 'u', 'd':
+			return -1
+		}
+		return r
+	}, flags)
 }
 
 // isRegexPattern checks if a string looks like a regex pattern (/pattern/ or /pattern/flags).

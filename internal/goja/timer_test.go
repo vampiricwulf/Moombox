@@ -375,35 +375,6 @@ func TestActiveCountTracking(t *testing.T) {
 	}
 }
 
-// --- HasPendingCallbacks tests ---
-
-func TestHasPendingCallbacks(t *testing.T) {
-	vm := gojalib.New()
-	tm := NewTimerManager(vm)
-	defer tm.CancelAll()
-
-	if tm.HasPendingCallbacks() {
-		t.Error("expected no pending callbacks initially")
-	}
-
-	fn := func(call gojalib.FunctionCall) gojalib.Value {
-		return gojalib.Undefined()
-	}
-	callable, _ := gojalib.AssertFunction(vm.ToValue(fn))
-
-	tm.SetTimeout(callable, 5)
-	time.Sleep(50 * time.Millisecond)
-
-	if !tm.HasPendingCallbacks() {
-		t.Error("expected pending callbacks after timer fires")
-	}
-
-	tm.DrainCallbacks()
-	if tm.HasPendingCallbacks() {
-		t.Error("expected no pending callbacks after drain")
-	}
-}
-
 // --- DrainCallbacks error handling ---
 
 func TestDrainCallbacksReportsErrors(t *testing.T) {

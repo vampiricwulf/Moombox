@@ -2,12 +2,17 @@ package routes
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -40,7 +45,7 @@ func newTrimFixture(t *testing.T) *trimFixture {
 	trimSvc := worker.NewTrimService(db, "ffmpeg-not-used-in-tests", silentLogger{})
 
 	r := chi.NewRouter()
-	TrimRoutes(r, db, trimSvc)
+	TrimRoutes(r, db, trimSvc, nil)
 	return &trimFixture{router: r, db: db, trimSvc: trimSvc}
 }
 
@@ -200,5 +205,162 @@ func TestTrimValidationGuardsCoverInfNaN(t *testing.T) {
 		if !(math.IsNaN(v) || math.IsInf(v, 0)) {
 			t.Errorf("expected %v to be rejected by IsNaN/IsInf guards", v)
 		}
+	}
+}
+
+// TestTrimServiceAnswersCarryTheirReason: every TrimService failure used to be
+// a 400 "Failed to create trim" / "failed to delete trim". The dashboard toasts
+// the response's message, so an end time past the video, a duplicate range or
+// an unfinished job all read the same, a missing trim was a 400 rather than a
+// 404, and an ffmpeg or database fault was reported as the request's fault.
+// Refusals the user can act on now carry their reason (400, or 409 for a clash
+// with current state); a missing trim is a 404.
+func TestTrimServiceAnswersCarryTheirReason(t *testing.T) {
+	f := newTrimFixture(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(out, []byte("not really a video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	length := 60
+	if _, err := f.db.AddJob(&database.Job{
+		ID: "fin", VideoID: "fin", URL: "u", Status: database.StatusFinished,
+		OutputFile: out, LengthSeconds: &length,
+	}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if _, err := f.db.AddJob(&database.Job{ID: "live", VideoID: "live", URL: "u", Status: database.StatusLive}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if err := f.db.AddTrim(&database.TrimRecord{ID: "t1", JobID: "fin", StartTime: 10, EndTime: 20, Filename: "x.mp4"}); err != nil {
+		t.Fatalf("AddTrim: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		jobID    string
+		start    float64
+		end      float64
+		wantCode int
+		wantMsg  string
+	}{
+		{"unfinished job", "live", 0, 10, http.StatusBadRequest, "job must be finished to trim"},
+		{"end past the video", "fin", 0, 120, http.StatusBadRequest, "exceeds video duration"},
+		{"duplicate range", "fin", 10, 20, http.StatusConflict, "trim already exists"},
+	} {
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, trimRequest(t, tc.jobID, map[string]float64{"startTime": tc.start, "endTime": tc.end}))
+		if rec.Code != tc.wantCode {
+			t.Errorf("%s: want %d, got %d (body: %s)", tc.name, tc.wantCode, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), tc.wantMsg) {
+			t.Errorf("%s: body %s does not carry %q", tc.name, rec.Body.String(), tc.wantMsg)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/fin/trims/no-such", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("delete unknown trim: want 404, got %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/no-such-job/trims/t1", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("delete trim of unknown job: want 404, got %d", rec.Code)
+	}
+}
+
+// TestTrimCreateOutlivesThePageThatAskedForIt: a dashboard trim used to run
+// its whole encode under req.Context(), so a reload, a closed tab or a
+// dropped connection killed FFmpeg mid-encode — and left the partial output
+// in trim/ under the finished trim's name, with no row, no trim_error and no
+// page left to toast. The route now starts the trim as the trim service's
+// own task and answers 202 at once with its id; the trim finishes after the
+// page is gone.
+//
+// Mutant: run the encode in the handler (`trimSvc.CreateTrim(req.Context(),
+// …)`) — the answer waits for the gated encode, the page gives up, and the
+// trim dies with its request.
+func TestTrimCreateOutlivesThePageThatAskedForIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stand-in for FFmpeg")
+	}
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	out := filepath.Join(dir, "out", "Title [page12345].mp4")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("src"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	length := 600
+	if _, err := db.AddJob(&database.Job{ID: "page12345", VideoID: "page12345", URL: "u",
+		Status: database.StatusFinished, OutputFile: out, Filename: "Title [page12345].mp4", LengthSeconds: &length}); err != nil {
+		t.Fatal(err)
+	}
+	// A stand-in FFmpeg that opens its output, then waits for the gate (30 s
+	// at most, so nothing it is left running outlives the test).
+	gate := filepath.Join(dir, "gate")
+	ff := filepath.Join(dir, "ffmpeg")
+	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\nprintf partial > \"$out\"\n" +
+		"i=0; while [ ! -e '" + gate + "' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n" +
+		"printf whole > \"$out\"\n"
+	if err := os.WriteFile(ff, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc := worker.NewTrimService(db, ff, silentLogger{})
+	t.Cleanup(svc.Stop)
+	r := chi.NewRouter()
+	TrimRoutes(r, db, svc, nil)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	// The page: it waits two seconds for its answer, then is gone.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]float64{"startTime": 60, "endTime": 300})
+	req, _ := http.NewRequestWithContext(ctx, "POST", srv.URL+"/api/jobs/page12345/trims", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if werr := os.WriteFile(gate, nil, 0o644); werr != nil {
+			t.Error(werr)
+		}
+		t.Fatalf("the trim request got no answer while the encode ran: %v", err)
+	}
+	var answer struct {
+		Trim worker.TrimTask `json:"trim"`
+	}
+	decodeErr := json.NewDecoder(resp.Body).Decode(&answer)
+	resp.Body.Close()
+	cancel() // the tab is closed
+	if resp.StatusCode != http.StatusAccepted || decodeErr != nil || answer.Trim.ID == "" {
+		t.Fatalf("answer: %d %+v (decode: %v), want 202 with the trim's id", resp.StatusCode, answer, decodeErr)
+	}
+
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trimFile := filepath.Join(dir, "out", "trim", "page12345 [60s-300s].mp4")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rows, _ := db.GetTrimsForJob("page12345")
+		if len(rows) == 1 {
+			if rows[0].ID != answer.Trim.ID {
+				t.Errorf("the stored trim is %q, the route answered %q", rows[0].ID, answer.Trim.ID)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the trim never finished once its page was gone")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b, _ := os.ReadFile(trimFile); string(b) != "whole" {
+		t.Errorf("%s holds %q, want the whole encode", filepath.Base(trimFile), b)
 	}
 }

@@ -18,18 +18,6 @@ func NewOrderedDedup[K comparable]() *OrderedDedup[K] {
 	return &OrderedDedup[K]{seen: make(map[K]struct{})}
 }
 
-// NewOrderedDedupWithCapacity returns a new dedup pre-sized for approximately
-// the given number of entries — useful when restoring from a resume snapshot.
-func NewOrderedDedupWithCapacity[K comparable](capacity int) *OrderedDedup[K] {
-	if capacity < 0 {
-		capacity = 0
-	}
-	return &OrderedDedup[K]{
-		seen:  make(map[K]struct{}, capacity),
-		order: make([]K, 0, capacity),
-	}
-}
-
 // Add inserts k. Returns true if the key was newly inserted, false if it was
 // already present (caller typically uses false as the "skip this message"
 // signal in a dedup loop).

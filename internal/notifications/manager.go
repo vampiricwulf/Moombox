@@ -4,13 +4,14 @@ package notifications
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 )
 
 // discordWebhookRe validates standard Discord webhook URLs (HTTPS only).
@@ -27,30 +28,11 @@ import (
 // a browser's address bar hands back, and an optional query is the forum-
 // thread form "?thread_id=…" that Discord documents and that execWaitURL and
 // messageURL are both written around. A fragment is not admitted — it never
-// reaches the server, and both builders drop it.
-var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#]*)?$`)
-
-// redactURLForLog reduces an arbitrary notification URL to scheme://host for
-// log lines. Webhook URLs routinely embed secrets in their path or query
-// (Discord tokens, Slack /services/ paths, ntfy tokens) — a rejection log
-// that copies one verbatim ends up in every store that tails the log file.
-func redactURLForLog(raw string) string {
-	scheme, rest, ok := strings.Cut(raw, "://")
-	if !ok {
-		// No scheme — show only a short prefix, cut on a rune boundary so a
-		// multi-byte character at the edge doesn't log invalid UTF-8.
-		if len(raw) > 16 {
-			cut := 16
-			for cut > 0 && !utf8.RuneStart(raw[cut]) {
-				cut--
-			}
-			return raw[:cut] + "…<redacted>"
-		}
-		return raw
-	}
-	host, _, _ := strings.Cut(rest, "/")
-	return scheme + "://" + host + "/…<redacted>"
-}
+// reaches the server, and both builders drop it. Nor is whitespace or a
+// control character in the query: net/url refuses to build a request from
+// one, and its parse error quotes the whole URL, token and all — every send
+// logged it, and the test route answered it, while validation had passed.
+var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]+/?(?:\?[^#\s\x00-\x1f\x7f]*)?$`)
 
 // NotificationType represents the visual style of a notification.
 type NotificationType int
@@ -154,9 +136,10 @@ type Sender interface {
 	Send(title, description string, ntype NotificationType, fields []Field, opts SendOptions)
 }
 
-// Notifier is the OWNER surface: a Sender plus the three lifecycle calls only
-// cmd/moombox makes — the cost gate before building an embed (HasTargets), the
-// config hot-apply (Reload), and the shutdown pair (BeginShutdown then Wait).
+// Notifier is the OWNER surface: a Sender plus the calls only cmd/moombox
+// makes — the cost gate before building an embed (HasTargets), the config
+// hot-apply (Reload), the shutdown pair (BeginShutdown then Wait), and the
+// deleted-job hooks (ForgetJob, RetainJobs).
 //
 // Separate from Sender on purpose. A producer that could call Reload could
 // reload the targets from a download goroutine; a producer that could call
@@ -168,6 +151,8 @@ type Notifier interface {
 	Reload(cfg *config.MoomboxConfig)
 	BeginShutdown()
 	Wait()
+	ForgetJob(jobID string)
+	RetainJobs(live map[string]struct{})
 }
 
 // Author is the embed's author line: the channel that produced the job,
@@ -248,6 +233,14 @@ type SendOptions struct {
 	// Tier ranks this send for the queue's overflow policy. Leave it
 	// TierUnset to derive it from Event.
 	Tier Tier
+	// EditOnly marks a terminal send whose report is deliberately suppressed
+	// — a failure there is nothing to do about — but whose job may have a
+	// lifecycle message open. On an edit-mode target holding one it closes
+	// that message (dispatchOne) and posts nothing; everywhere else — a
+	// separate-mode target, no open message, a transport that cannot edit —
+	// it sends nothing at all. Suppressing the send outright left the message
+	// reading "Found" or "Downloading" for good.
+	EditOnly bool
 
 	// There is deliberately NO mention here. A ping is per TARGET and per
 	// MESSAGE, never per producer and never per embed: Manager.Send resolves
@@ -273,6 +266,11 @@ type Manager struct {
 	// byKey indexes targets by resolved webhook URL so Reload can tell a
 	// surviving target from a new one.
 	byKey map[string]*targetQueue
+	// retiring holds, by key, the queues applyTargets retired whose goroutine
+	// may still be finishing an in-flight delivery (a retired queue exits
+	// after its current item). Guarded by targetsMu. A target re-added under
+	// the same key waits on it — see applyTargets.
+	retiring map[string]*targetQueue
 	// publicURL is network.public_url: the dashboard base every job embed's
 	// title links into. Guarded by targetsMu like the targets themselves, and
 	// written BEFORE applyTargets by both NewManager and Reload, so a Send
@@ -329,12 +327,17 @@ type notificationTarget struct {
 	// handing the raw webhook URL — the credential — to the hot path the
 	// hashing exists to keep it out of.
 	msgKey string
+	// legacyMsgKeys are the keys 2.8.9 and 2.8.10 stored this target's
+	// message ids under, for every configured spelling of it whose old
+	// resolution differs from today's (legacyResolvedURL). Read only on a
+	// miss, so a job opened before the upgrade keeps editing its message.
+	legacyMsgKeys []string
 }
 
 // sender is one delivery destination.
 //
 // Send runs the full retry ladder; SendOnce makes exactly one attempt — used
-// during shutdown (the 10s force-exit cannot accommodate a 2s+5s ladder) and by
+// during shutdown (the 15s force-exit cannot accommodate a 2s+5s ladder) and by
 // SendTest, where an interactive caller wants the immediate outcome.
 // Both take a whole Message — one POST, one to ten embeds — because Discord's
 // content, allowed_mentions and 6000-character total are all per MESSAGE.
@@ -352,27 +355,43 @@ type sender interface {
 // Audit reports/small-packages.md.
 //
 // Error messages never echo the URL (webhook paths are secrets) — callers
-// that log attach a redacted form themselves.
+// that log attach redact.URLOrigin's form themselves.
 func parseTarget(url string) (sender, error) {
 	switch {
 	case strings.HasPrefix(url, "discord://"):
 		// discord://ID/TOKEN -> https://discord.com/api/webhooks/ID/TOKEN
 		raw := strings.TrimPrefix(url, "discord://")
+		// The query is cut off before the path is split, and goes back on
+		// after. Split with it, "discord://ID/TOKEN/?thread_id=9" — the slash
+		// the https spelling accepts there too — made "?thread_id=9" a third
+		// segment, which the split drops: every post went to the channel
+		// rather than the thread, and listed beside its https spelling the
+		// webhook built two targets that posted every embed twice.
+		raw, query, hasQuery := strings.Cut(raw, "?")
 		// Only use the first two path segments (ID/TOKEN), matching TS behavior
 		segments := strings.SplitN(raw, "/", 3)
 		if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
 			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN")
 		}
-		parts := strings.Join(segments[:2], "/")
-		return &DiscordWebhook{URL: "https://discord.com/api/webhooks/" + parts}, nil
+		resolved := "https://discord.com/api/webhooks/" + strings.Join(segments[:2], "/")
+		if hasQuery {
+			resolved += "?" + query
+		}
+		// The resolved URL passes the same anchored check as the https
+		// spelling. Without it this form took anything — a ")" from a
+		// Markdown link, a trailing space or newline from a paste, a
+		// non-numeric ID — so ValidateURL accepted a broken paste at save
+		// time and every send then failed (a 404 Unknown Webhook, dropped as
+		// permanent after one attempt, or a request http.NewRequest refused).
+		if !discordWebhookRe.MatchString(resolved) {
+			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN with a numeric ID")
+		}
+		// Through the same canonical form as the https spelling: a bare "?"
+		// is no query here either.
+		return &DiscordWebhook{URL: canonicalDiscordURL(resolved)}, nil
 
 	case discordWebhookRe.MatchString(url):
-		// Canonicalise the legacy host. Two reasons, both load-bearing:
-		// buildTargets dedupes on the RESOLVED URL, so the two spellings of
-		// one webhook would otherwise build two targets and post every embed
-		// twice; and Go's http.Client turns a 301/302 on a POST into a GET,
-		// so following discordapp.com's redirect would drop the body.
-		return &DiscordWebhook{URL: strings.Replace(url, "discordapp.com", "discord.com", 1)}, nil
+		return &DiscordWebhook{URL: canonicalDiscordURL(url)}, nil
 
 	case strings.Contains(url, "discord.com/api/webhooks"), strings.Contains(url, "discordapp.com/api/webhooks"):
 		return nil, fmt.Errorf("invalid Discord webhook URL: must be HTTPS with a numeric ID and token")
@@ -380,6 +399,59 @@ func parseTarget(url string) (sender, error) {
 	default:
 		return nil, fmt.Errorf("unsupported notification URL scheme (Discord webhooks only)")
 	}
+}
+
+// canonicalDiscordURL is the one spelling of an https webhook URL that
+// discordWebhookRe has accepted: host discord.com, whatever subdomain or
+// legacy discordapp.com it was given as, no trailing slash on the path, and
+// the query in its own one spelling (canonicalWebhookQuery, discord_edit.go):
+// its parameters sorted, with no empty pair and no wait — and none at all,
+// "?" included, when that leaves no parameter. Load-bearing twice over.
+// buildTargets dedupes on the RESOLVED URL and targetMsgKey hashes it, so
+// "…/TOKEN", "…/TOKEN/", "…/TOKEN?" and "ptb.discord.com/…/TOKEN" built four
+// targets that posted every embed four times, and "…?thread_id=9&" or
+// "…?wait=true&thread_id=9" one more each beside "…?thread_id=9" — and a
+// slash added in edit mode opened new messages for every job in progress.
+// And Go's http.Client turns a 301/302 on a POST into a GET, so following
+// discordapp.com's redirect would drop the body.
+func canonicalDiscordURL(raw string) string {
+	rest := strings.TrimPrefix(raw, "https://")
+	path := rest[strings.Index(rest, "/"):] // the pattern guarantees a path
+	query := ""
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path, query = path[:i], canonicalWebhookQuery(path[i+1:])
+	}
+	return "https://discord.com" + strings.TrimSuffix(path, "/") + query
+}
+
+// legacyResolvedURL is the URL 2.8.9 and 2.8.10 — the releases that shipped
+// edit mode — resolved a configured webhook to, and therefore the string
+// whose targetMsgKey their rows store message ids under. Those releases only
+// rewrote the legacy discordapp.com host and kept everything else as typed,
+// so a ptb./canary. host, a trailing slash, a bare "?", and a query's order,
+// stray '&' or wait each gave the webhook a key of its own;
+// canonicalDiscordURL now folds them all into one.
+// Without the old key a job open across the upgrade lost its message: its
+// next event opened a second one, and its error or cancel — which never
+// opens one — left the first reading "Downloading" for good.
+//
+// Kept for as long as a row can hold such a key: a finished job's row
+// outlives any number of upgrades, and a Retry of it edits its message.
+// Only ever called on a URL parseTarget accepted.
+//
+// Their discord:// arm split the query with the path, so a slash before it
+// ("discord://ID/TOKEN/?thread_id=9") resolved to the bare channel webhook:
+// this returns that, as they did, and buildTargets reads an old key only
+// where canonicalDiscordURL of it is the target's own URL.
+func legacyResolvedURL(url string) string {
+	if raw, ok := strings.CutPrefix(url, "discord://"); ok {
+		segments := strings.SplitN(raw, "/", 3)
+		if len(segments) < 2 {
+			return ""
+		}
+		return "https://discord.com/api/webhooks/" + strings.Join(segments[:2], "/")
+	}
+	return strings.Replace(url, "discordapp.com", "discord.com", 1)
 }
 
 // ValidateURL reports whether a notification URL would be accepted by the
@@ -443,7 +515,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		// Before parseTarget and before the dedupe, so a disabled entry can
 		// neither shadow its enabled twin nor warn about a URL nobody uses.
 		if !nc.IsEnabled() {
-			logger.Info("notification target disabled — skipping", "url", redactURLForLog(url))
+			logger.Info("notification target disabled — skipping", "url", redact.URLOrigin(url))
 			continue
 		}
 
@@ -451,8 +523,12 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		if err != nil {
 			// Redacted: even a near-valid URL carries a real secret; a
 			// rejection log that copies it verbatim ends up in every
-			// log-collection store that tails the file.
-			logger.Warn("rejected notification URL: "+err.Error(), "url", redactURLForLog(url))
+			// log-collection store that tails the file. Nothing validated
+			// this entry before here (config.Validate does not check
+			// notification URLs), so its secret can sit anywhere — the
+			// userinfo of an https URL, the authority of a tgram:// one —
+			// which is why URLOrigin keeps the scheme and host alone.
+			logger.Warn("rejected notification URL: "+err.Error(), "url", redact.URLOrigin(url))
 			continue
 		}
 
@@ -468,14 +544,14 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// than falling back to "all events".
 				if e == "" {
 					logger.Warn("notification target filters on empty event name — ignored",
-						"url", redactURLForLog(url))
+						"url", redact.URLOrigin(url))
 					continue
 				}
 				// A typo'd event name would otherwise be silently filtered
 				// forever — the allowlist never matches, no error anywhere.
 				if !KnownEvents[e] {
 					logger.Warn("notification target filters on unknown event — it will never match",
-						"event", e, "url", redactURLForLog(url))
+						"event", e, "url", redact.URLOrigin(url))
 				}
 				events[e] = true
 			}
@@ -515,7 +591,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			for _, e := range resolved {
 				if e == "" {
 					logger.Warn("notification target mentions on an empty event name — ignored",
-						"url", redactURLForLog(url))
+						"url", redact.URLOrigin(url))
 					continue
 				}
 				// Only an OPERATOR-written list is vocabulary-checked. The
@@ -523,7 +599,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 				// about our own defaults at every startup.
 				if nc.MentionEvents != nil && !KnownEvents[e] {
 					logger.Warn("notification target mentions on an unknown event — it will never match",
-						"event", e, "url", redactURLForLog(url))
+						"event", e, "url", redact.URLOrigin(url))
 				}
 				mentionEvents[e] = true
 			}
@@ -537,9 +613,33 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 		if d, ok := s.(*DiscordWebhook); ok {
 			key = d.URL
 		}
+		msgKey := targetMsgKey(key)
+		// The key this spelling's ids were stored under before the upgrade,
+		// when it differs from the one they are stored under now — and only
+		// when the old resolution named this same webhook. One that named
+		// another stored the ids of that destination's messages:
+		// "discord://ID/TOKEN/?thread_id=9" resolved to the bare channel
+		// webhook, so its old key is the channel's. Read as this target's,
+		// the thread target took the ids of messages its edit route cannot
+		// reach, and when the channel is configured too, the channel
+		// target's own: that one's next event, finding its id adopted away,
+		// opened a second message.
+		legacyKey := ""
+		if key != "" {
+			if old := legacyResolvedURL(url); canonicalDiscordURL(old) == key {
+				if lk := targetMsgKey(old); lk != msgKey {
+					legacyKey = lk
+				}
+			}
+		}
 		if key != "" {
 			if idx, dup := seen[key]; dup {
 				collapsed++
+				// Every spelling that collapsed here had a key of its own
+				// before the upgrade, so each one's stored ids stay readable.
+				if legacyKey != "" && !slices.Contains(targets[idx].legacyMsgKeys, legacyKey) {
+					targets[idx].legacyMsgKeys = append(targets[idx].legacyMsgKeys, legacyKey)
+				}
 				// UNION the one per-target option, with a nil filter winning
 				// outright. nil means "every event", so a webhook listed once
 				// unfiltered and once filtered keeps the wider subscription the
@@ -567,6 +667,10 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			seen[key] = len(targets)
 		}
 
+		var legacyMsgKeys []string
+		if legacyKey != "" {
+			legacyMsgKeys = []string{legacyKey}
+		}
 		targets = append(targets, notificationTarget{
 			sender:         s,
 			events:         events,
@@ -575,7 +679,8 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			mentionAllowed: mentionAllowed,
 			mentionEvents:  mentionEvents,
 			mode:           normalizeTargetMode(nc.Mode),
-			msgKey:         targetMsgKey(key),
+			msgKey:         msgKey,
+			legacyMsgKeys:  legacyMsgKeys,
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
@@ -640,8 +745,10 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			// save, silently resetting its bucket state.
 			bound := tgt
 			bound.sender = q.sender
-			q.setDispatch(func(msg Message, once bool) error {
+			q.setDispatch(bound, func(msg Message, once bool) error {
 				return m.dispatchOne(bound, msg, once)
+			}, func(msg Message) func() {
+				return m.pinLifecycle(bound, msg)
 			})
 			modes = append(modes, struct {
 				q    *targetQueue
@@ -661,17 +768,56 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			delete(previous, t.key)
 			continue
 		}
+		// A webhook retired by an earlier reload — muted then unmuted, removed
+		// then pasted back — may still be finishing the delivery in flight when
+		// it was retired (the retry ladder makes that window up to ~75 s). Two
+		// goroutines would then deliver for one webhook at once: a job's PATCH
+		// could overtake the POST that creates its message and open a second
+		// one, and the two senders would learn separate rate buckets. The new
+		// queue takes the old one's sender, and with it the bucket, and starts
+		// draining only once the old goroutine has exited.
+		var predecessor *targetQueue
+		if old := m.retiring[t.key]; old != nil && t.key != "" {
+			predecessor = old
+			t.sender = old.sender
+			delete(m.retiring, t.key)
+		}
 		q := newTargetQueue(t, m.logger, &m.shuttingDown, m.clock)
 		bind(q)
 		next = append(next, q)
 		if t.key != "" {
 			byKey[t.key] = q
 		}
-		go q.run()
+		if predecessor == nil {
+			go q.run()
+		} else {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Error("panic waiting for a retired notification target", "panic", fmt.Sprint(r))
+					}
+				}()
+				<-predecessor.done
+				q.run()
+			}()
+		}
 	}
 	retired := make([]*targetQueue, 0, len(previous))
-	for _, q := range previous {
+	if m.retiring == nil {
+		m.retiring = map[string]*targetQueue{}
+	}
+	for key, q := range m.retiring {
+		select {
+		case <-q.done:
+			delete(m.retiring, key) // finished: nothing left to wait for
+		default:
+		}
+	}
+	for key, q := range previous {
 		retired = append(retired, q)
+		if key != "" {
+			m.retiring[key] = q
+		}
 	}
 	m.targets = next
 	m.byKey = byKey
@@ -796,6 +942,7 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	// allocation per send buys the guarantee that what is delivered is what
 	// was asked for.
 	msg := One(title, description, ntype.Color(), append([]Field(nil), fields...), opts)
+	msg.Embeds[0].At = time.Now() // when it happened, whenever a target delivers it
 	for _, q := range targets {
 		if !q.allows(opts.Event) {
 			continue
@@ -822,7 +969,7 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 
 // BeginShutdown puts every target into single-attempt mode.
 //
-// Owner ruling: the 10s force-exit (cmd/moombox/shutdown.go) stays, and a
+// Owner ruling: the 15s force-exit (cmd/moombox/shutdown.go) stays, and a
 // worker stop ahead of it can legitimately spend the whole window, so a
 // three-attempt ladder with a 2s+5s backoff simply does not fit. One attempt
 // per embed is what can be delivered, and operations.md says so rather than
@@ -834,7 +981,7 @@ func (m *Manager) BeginShutdown() {
 	// The flag goes FIRST. A flushed batch is enqueued like any other item and
 	// the drain goroutine can pop it the instant it lands; storing the flag
 	// afterwards leaves a window in which that pop reads false and spends the
-	// 2 s + 5 s retry ladder inside the process's 10 s force-exit.
+	// 2 s + 5 s retry ladder inside the process's 15 s force-exit.
 	m.shuttingDown.Store(true)
 
 	// A window open when shutdown begins is delivered, not evaporated. Flushed
@@ -873,7 +1020,7 @@ func (m *Manager) effectiveWaitTimeout() time.Duration {
 // **Single-call**: after Wait returns, every queue is closed and later Sends
 // are dropped with a Warn. The graceful-shutdown sequence in cmd/moombox stops
 // the worker — the dominant Send caller — before invoking Wait, so this is the
-// correct ordering. In practice the process's own 10 s force-exit, not this
+// correct ordering. In practice the process's own 15 s force-exit, not this
 // timeout, is what bounds the drain; BeginShutdown is what makes the attempts
 // fit inside it.
 func (m *Manager) Wait() {

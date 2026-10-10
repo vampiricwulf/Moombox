@@ -21,7 +21,8 @@ import (
 // completion record (backfilled_at). The every-cycle Sweep decides WHO
 // scans (the four condition arms + in-flight widen detection), ONE serial
 // consumer goroutine runs the scans, and CancelAndPrune removes departed
-// channels' data (cancel → wait observed → prune last).
+// channels' feed history (cancel → wait observed → prune last) — never their
+// jobs.
 
 // backfillPageInterval is the global page throttle: one page per second,
 // globally — a constant, not config (spec §11 operational rules). Scans run
@@ -69,11 +70,20 @@ type TabPageFetchFunc func(ctx context.Context, channelID, tab, continuation str
 // failure needs to resume without refetching completed work. Lifecycle
 // (spec §11): cleared by completeScan's completion write and by runScan on
 // any cancel — resume applies ONLY to interrupted scans, never cancelled ones.
+// A pause (the channel disabled mid-scan) counts as an interruption, not a
+// cancel: the cursor stays, and re-enabling the channel resumes from it.
 //
-//	{"tabs":{"videos":{"continuation":"TOK","next_pos":60},
+//	{"window_days":3,
+//	 "tabs":{"videos":{"continuation":"TOK","next_pos":60},
 //	         "streams":{"done":true}}}
 type backfillCursor struct {
-	Tabs map[string]*backfillTabCursor `json:"tabs"`
+	// WindowDays is the archive window the tabs' Done flags were judged
+	// against: an arm-(a) stop is clean only for that window, so a cursor
+	// from a narrower one is discarded (scanChannel). Absent from cursors
+	// saved before it existed, which therefore read as narrower than any
+	// window.
+	WindowDays int                           `json:"window_days,omitempty"`
+	Tabs       map[string]*backfillTabCursor `json:"tabs"`
 }
 
 // backfillTabCursor is one tab's resume state.
@@ -140,6 +150,13 @@ type inFlight struct {
 	windowDays     int
 	withMembership bool
 	done           chan struct{}
+	// paused (guarded by bw.mu) marks a RUNNING scan cancelled because its
+	// channel was disabled (Sweep's pause arm). Disabling is a pause, not a
+	// widen or a removal: runScan's cleanup leaves the cursor alone, so the
+	// scan resumes where it stopped once the channel is enabled again, and
+	// Sweep treats the unwinding entry as gone rather than as a scan already
+	// doing the work.
+	paused bool
 }
 
 // scanItem is one queue entry: the ref to scan, its cancellable context,
@@ -176,11 +193,13 @@ type BackfillWorker struct {
 	// completed page (state "scanning", pages = pages fetched for that tab
 	// THIS session) and one per scan-state change — "done" (clean completion,
 	// backfilled_at written), "error" (incomplete — arm (b), a continuation
-	// loop, or a fetch/DB failure; the sweep retries), "idle" (scan cancelled
-	// or channel pruned — no scan in flight). State-change calls carry tab ""
-	// and pages 0: they describe the whole scan, not a tab. Nil-safe; set
-	// before Start, like FetchTabPage. Scanning/done/error fire on the serial
-	// consumer goroutine; idle can also fire on CancelAndPrune's caller.
+	// loop, or a fetch/DB failure; the sweep retries), "idle" (scan
+	// cancelled, paused, or channel pruned — no scan in flight). State-change
+	// calls carry tab "" and pages 0: they describe the whole scan, not a
+	// tab. Nil-safe; set before Start, like FetchTabPage.
+	// Scanning/done/error fire on the serial consumer goroutine; idle can
+	// also fire on Sweep's caller (a queued scan dropped by a pause) and on
+	// CancelAndPrune's.
 	OnProgress func(chID, tab string, pages int, state string)
 
 	// mu guards inflight, queue and baseCtx. Sweep holds it across each
@@ -211,6 +230,15 @@ type BackfillWorker struct {
 	// lastPageAt is when the last page fetch was released, for waitPage.
 	// Unguarded by design: scans are strictly serial on one goroutine.
 	lastPageAt time.Time
+
+	// ChannelEnabled, when set, reports whether chID is still configured
+	// AND enabled in the LIVE config. runScan asks it before starting a
+	// queued scan: the queued ref is the copy the sweep that queued it took,
+	// and the sweep that would see the channel disabled runs only at the
+	// start of the next monitor cycle — so a scan queued behind another
+	// channel's ran after its channel was disabled. Nil treats every queued
+	// channel as enabled. Set before Start, like FetchTabPage.
+	ChannelEnabled func(chID string) bool
 
 	// now returns the current time. scanChannel reads it exactly ONCE per
 	// scan, so every date the scan computes — coarse now-Age, assumed now,
@@ -295,13 +323,15 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		if r := recover(); r != nil {
 			bw.logger.Error("backfill scan panic", "channel", chID, "panic", r)
 		}
-		if item.ctx.Err() != nil && bw.baseCtx.Err() == nil {
+		if item.ctx.Err() != nil && bw.baseCtx.Err() == nil && !bw.isPaused(item.fl) {
 			// Cancelled — a widen-restart or a prune, NOT a shutdown (a
 			// shutdown is an interruption, and "resumable via cursor"
 			// applies only to interrupted scans): clear the cursor. A
 			// deeper rescan resuming the shallow cursor would skip exactly
 			// the pages it was restarted to fetch; for a prune the whole
-			// row is deleted right after anyway (the prune runs last).
+			// row is deleted right after anyway (the prune runs last). A
+			// pause (the channel was disabled) is an interruption too, and
+			// keeps its cursor as a shutdown does.
 			if err := bw.db.SaveBackfillCursor(chID, ""); err != nil {
 				bw.logger.Warn("backfill cursor reset failed", "channel", chID, "err", err)
 			}
@@ -323,12 +353,24 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		bw.emitProgress(chID, "", 0, "idle")
 		return
 	}
+	if bw.ChannelEnabled != nil && !bw.ChannelEnabled(chID) {
+		// Disabled (or removed) since the sweep that queued it: not
+		// scanned, and — the context never cancelled — the cleanup above
+		// keeps the cursor, so re-enabling resumes rather than restarts.
+		// The next sweep pauses or prunes the channel for good.
+		bw.logger.Info("backfill scan skipped: channel disabled or removed since it was queued", "channel", chID)
+		bw.emitProgress(chID, "", 0, "idle")
+		return
+	}
 	err := bw.scan(item.ctx, item.ref.Ch, chID, item.ref.WindowDays, item.ref.WithMembership)
 	switch {
 	case err == nil:
 		// Completed — completeScan wrote backfilled_at; the sweep's first
 		// arm goes quiet for this channel.
 		bw.emitProgress(chID, "", 0, "done")
+	case item.ctx.Err() != nil && bw.isPaused(item.fl):
+		bw.logger.Info("backfill scan paused: channel disabled", "channel", chID)
+		bw.emitProgress(chID, "", 0, "idle")
 	case item.ctx.Err() != nil:
 		bw.logger.Info("backfill scan cancelled", "channel", chID)
 		bw.emitProgress(chID, "", 0, "idle")
@@ -338,6 +380,13 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		bw.logger.Warn("backfill scan incomplete; sweep will retry", "channel", chID, "err", err)
 		bw.emitProgress(chID, "", 0, "error")
 	}
+}
+
+// isPaused reports whether fl was cancelled by Sweep's pause arm.
+func (bw *BackfillWorker) isPaused(fl *inFlight) bool {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	return fl.paused
 }
 
 // emitProgress invokes OnProgress when wired — see the field doc for the
@@ -373,18 +422,31 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 		return // not started, or shutting down — nothing would drain the queue
 	}
 	active := make(map[string]struct{}, len(channels))
+	var pausedIDs []string
 	for _, ref := range channels {
 		active[ref.ChID] = struct{}{}
 		// YouTube-only ALLOW-list (§11 operational rules), the same gate as
 		// scanChannel's defense-in-depth: a non-YouTube channel enqueued
 		// here would 404 every tab, never set backfilled_at, and retry
-		// forever. Disabled channels are not scanned either — but they STAY
-		// in `active`: disabling is a pause, not a removal, and must not
-		// prune the channel's history or pending jobs.
-		if ref.Ch.GetPlatform() != "youtube" || !ref.Ch.IsEnabled() {
+		// forever.
+		if ref.Ch.GetPlatform() != "youtube" {
 			continue
 		}
-		if fl, ok := bw.inflight[ref.ChID]; ok {
+		// Disabled channels are not scanned either — but they STAY in
+		// `active`: disabling is a pause, not a removal, and must not prune
+		// the channel's feed history. A scan already queued or running when
+		// the channel was disabled is paused here; left alone, it held the
+		// one serial consumer for a channel the operator had just turned
+		// off.
+		if !ref.Ch.IsEnabled() {
+			if bw.pauseLocked(ref.ChID) {
+				pausedIDs = append(pausedIDs, ref.ChID)
+			}
+			continue
+		}
+		// A paused entry is a scan on its way out, not one doing the work:
+		// the channel is judged as if it had none.
+		if fl, ok := bw.inflight[ref.ChID]; ok && !fl.paused {
 			// Already queued/scanning: skip UNLESS the running scan is
 			// narrower than the config now asks (widen) or membership
 			// became eligible mid-scan — the recorded in-flight values are
@@ -425,6 +487,11 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 		}
 	}
 	bw.mu.Unlock()
+	// A spliced scan never reaches runScan, so its idle is sent here —
+	// outside bw.mu, as CancelAndPrune sends its own.
+	for _, id := range pausedIDs {
+		bw.emitProgress(id, "", 0, "idle")
+	}
 
 	// Half 2: channels with feed-history rows not in the config (§11
 	// channel removal — "the same sweep prunes departing channels").
@@ -465,6 +532,44 @@ func needsBackfill(cb database.ChannelBackfill, windowDays int, membershipEligib
 		(cb.WithMembership != nil && !*cb.WithMembership && membershipEligible)
 }
 
+// pauseLocked (bw.mu held) stops chID's in-flight scan because its channel
+// was disabled, reporting whether it spliced a QUEUED one out (the caller
+// then owes the idle emission no runScan will send). A queued scan is
+// settled on the spot, as CancelAndPrune settles one; a running scan is
+// cancelled and marked paused, and its own cleanup removes the entry. In
+// neither case is the cursor cleared: unlike a widen-cancel, a pause must
+// stay resumable.
+func (bw *BackfillWorker) pauseLocked(chID string) bool {
+	fl := bw.inflight[chID]
+	if fl == nil || fl.paused {
+		return false
+	}
+	if bw.spliceLocked(fl) {
+		delete(bw.inflight, chID)
+		fl.cancel()
+		close(fl.done)
+		bw.logger.Info("backfill scan dropped from the queue: channel disabled", "channel", chID)
+		return true
+	}
+	fl.paused = true
+	fl.cancel()
+	return false
+}
+
+// spliceLocked (bw.mu held) removes fl's item from the queue, reporting
+// whether it was still there. The consumer pops under the same lock, so an
+// item is either fully the caller's (it never runs, and the caller settles
+// it) or fully the consumer's (runScan closes done).
+func (bw *BackfillWorker) spliceLocked(fl *inFlight) bool {
+	for i := range bw.queue {
+		if bw.queue[i].fl == fl {
+			bw.queue = append(bw.queue[:i], bw.queue[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // enqueueLocked (bw.mu held) records the scan in the in-flight set —
 // REPLACING any previous entry, which is the widen-restart path — appends
 // it to the serial queue, and nudges the consumer.
@@ -484,13 +589,28 @@ func (bw *BackfillWorker) enqueueLocked(ref ChannelRef) {
 
 // CancelAndPrune removes a departed channel's feed-history footprint (§11
 // channel removal): cancel any in-flight scan, WAIT until it has observed
-// the cancellation and fully left the channel, then prune — the channel's
-// never-started jobs (Queued, Upcoming, COOKIES? — together with their
-// history rows: an orphaned history row would make HasProcessed lie forever
-// and block the rename-and-re-add path) and its feed data (feed_items +
-// channel_state). Both deletes run AFTER the wait, so a stale page written
-// in the cancel window is cleaned up too. Live/Downloading/Muxing jobs keep
-// running; terminal rows stay.
+// the cancellation and fully left the channel, then prune its feed data
+// (feed_items + channel_state). The delete runs AFTER the wait, so a stale
+// page written in the cancel window is cleaned up too, and a channel added
+// back later rescans from page 1 instead of reading as backfilled.
+//
+// It deletes NO jobs (W25-09, owner decision). It used to delete the
+// channel's Queued, Upcoming and COOKIES? rows with their history, on every
+// departure however it came about — including a COOKIES? row that was a live
+// capture parked mid-stream with its segments staged, whose footage was left
+// with no job to resume or mux it from. Removing a channel now asks instead,
+// and only the operator's "delete its pending jobs" deletes any
+// (worker.DeletePendingChannelJobs, run by the removal itself); a channel
+// that leaves the config any other way keeps its jobs. The harms the job
+// delete was there for no longer arise from keeping them: a kept Upcoming
+// job re-enqueued every heartbeat is a broadcast still recorded when it goes
+// live, which is what keeping it means; a history row blocks a re-add only
+// once its job is gone, and the delete-pending choice deletes the two
+// together; and a kept Queued row whose feed_items partner this prune
+// deletes is still admitted (NextQueuedJobs LEFT-JOINs feed_items), under
+// the global archive_slots. Re-adding the channel neither duplicates a kept
+// job — AddJob keys on the video ID and the history row stays — nor loses
+// one: nothing here touches the jobs table.
 //
 // A QUEUED-but-not-running scan is settled directly — spliced out of the
 // queue, entry removed, done closed — rather than waited on: its done only
@@ -508,18 +628,13 @@ func (bw *BackfillWorker) CancelAndPrune(chID string) {
 			bw.mu.Unlock()
 			break
 		}
-		spliced := false
-		for i := range bw.queue {
-			if bw.queue[i].fl == fl {
-				// Still queued: the splice-vs-pop race is settled by bw.mu —
-				// the consumer pops under the same lock, so the item is
-				// either fully ours (never runs, we close done) or fully the
-				// consumer's (runScan closes done; we wait below).
-				bw.queue = append(bw.queue[:i], bw.queue[i+1:]...)
-				delete(bw.inflight, chID) // fl was read under this same lock
-				spliced = true
-				break
-			}
+		// Still queued: the splice-vs-pop race is settled by bw.mu (see
+		// spliceLocked) — the item is either fully ours (never runs, we
+		// close done) or fully the consumer's (runScan closes done; we wait
+		// below).
+		spliced := bw.spliceLocked(fl)
+		if spliced {
+			delete(bw.inflight, chID) // fl was read under this same lock
 		}
 		base := bw.baseCtx
 		bw.mu.Unlock()
@@ -538,28 +653,11 @@ func (bw *BackfillWorker) CancelAndPrune(chID string) {
 		}
 		// Loop: a concurrent widen may have replaced the entry.
 	}
-	// Delete order (controller-adjudicated, deviating from the brief's
-	// listing order): jobs+history FIRST, feed data SECOND. The spec lists
-	// the two deletes as unordered bullets, and feed-data-first manufactures
-	// the one UN-RETRYABLE orphan class on partial failure: the feed-data
-	// delete removes the channel from ListFeedChannelIDs' census, so a
-	// failed jobs delete would never be retried — Upcoming jobs re-enqueue
-	// every 60s against a deleted channel and history rows block
-	// rename-and-re-add forever (the exact §11 harms). Jobs-first is
-	// self-healing: the jobs delete is idempotent on retry, and a failed
-	// feed-data delete leaves the channel in the census so the next sweep
-	// re-runs the whole prune.
-	n, err := bw.db.DeleteJobsAndHistoryForChannel(chID,
-		[]database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies})
-	if err != nil {
-		bw.logger.Error("backfill prune: delete jobs failed", "channel", chID, "err", err)
-		return // channel still in the census — the next sweep retries the whole prune
-	}
 	if err := bw.db.DeleteChannelFeedData(chID); err != nil {
 		bw.logger.Error("backfill prune: delete feed data failed", "channel", chID, "err", err)
-		return // ditto — census entry survives, next sweep re-prunes
+		return // the census entry survives, so the next sweep re-prunes
 	}
-	bw.logger.Info("backfill pruned departed channel", "channel", chID, "jobsDeleted", n)
+	bw.logger.Info("backfill pruned departed channel's feed history; its jobs are kept", "channel", chID)
 	// The channel is gone: clear any progress state the UIs still hold for
 	// it. Covers the spliced-queued prune and the no-in-flight boot prune,
 	// where no runScan exit ever fires — for a cancelled RUNNING scan this
@@ -600,6 +698,22 @@ func (bw *BackfillWorker) scanChannel(ctx context.Context, ch *config.ChannelCon
 	}
 
 	cur := bw.loadCursor(chID)
+	if cur.WindowDays < windowDays && len(cur.Tabs) > 0 {
+		// The interrupted scan ran at a narrower window — the config was
+		// widened between it and this retry, or while the process was down.
+		// Its done tabs stopped at THAT window's edge, and resuming them
+		// would record the channel backfilled to this one with the gap
+		// between the two never fetched. The in-flight widen restart clears
+		// the cursor for the same reason (runScan); this is the case it
+		// cannot see. Restarting is always safe: the upserts are idempotent.
+		bw.logger.Info("backfill cursor is from a narrower window; scanning from page 1",
+			"channel", chID, "cursorWindowDays", cur.WindowDays, "windowDays", windowDays)
+		cur = &backfillCursor{Tabs: map[string]*backfillTabCursor{}}
+	}
+	// A cursor from a wider window stays: its done tabs cover this one. It is
+	// re-stamped with this scan's window because any tab finished from here
+	// on is judged against it.
+	cur.WindowDays = windowDays
 	results := make([]tabResult, 0, len(tabs))
 	for _, tab := range tabs {
 		tc := cur.tab(tab)

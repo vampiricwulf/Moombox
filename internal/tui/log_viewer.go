@@ -16,6 +16,12 @@ import (
 
 const maxLogLines = 1000
 
+// minHeaderTitleWidth is as narrow as a viewer's own title (the O L
+// overlay's "Job Log — <job title>") is cut to make room for the header's
+// suffixes: "Job Log — " and the first few cells of the job's name. Past
+// that the suffixes give way instead, from the last.
+const minHeaderTitleWidth = 16
+
 // LogLevel represents a log filter level.
 type LogLevel int
 
@@ -53,12 +59,12 @@ type LogViewerModel struct {
 	// exactly once — when the line arrives — instead of once per visible line
 	// per frame in styleLogLine (the viewport's StyleLineFunc, which runs for
 	// every visible row on every render) and once per line per rebuild in the
-	// level filter. appendLine/capLines are the only writers of lines+levels,
-	// so the two cannot fall out of step.
+	// level filter. appendLine/dropOldest are the only writers of
+	// lines+levels, so the two cannot fall out of step.
 	levels         []string
 	filteredLevels []string
 	// wrapped[i] is lines[i] cut to wrapWidth, nil until it is first needed.
-	// Parallel to lines and levels (appendLine, capLines and Clear are its
+	// Parallel to lines and levels (appendLine, dropOldest and Clear are its
 	// only writers), so a source line is cut EXACTLY ONCE in its life instead
 	// of once per rebuild. At the 1,000-line cap capLines trims on every
 	// insertion, so a 24/7 process re-cut every wrapping line ~10 times a
@@ -82,6 +88,12 @@ type LogViewerModel struct {
 	focused    bool
 	level      LogLevel
 
+	// title heads the panel ("Logs" when empty) and emptyText is what an
+	// empty buffer says ("No logs yet." when empty). The O L overlay is the
+	// one viewer that sets them: it shows ONE job's log, and says so.
+	title     string
+	emptyText string
+
 	// renderCache / cacheKey memoise View(). bubbletea calls View() after
 	// EVERY message (~180/s with one active download at the defaults: 60
 	// progress updates plus the 120 Hz tick), and the vast majority of those
@@ -101,6 +113,14 @@ type LogViewerModel struct {
 	searchQuery string          // current active search query (empty = no highlights)
 	searchRegex *regexp.Regexp  // compiled search pattern (cached, recompiled only on query change)
 	matchCount  int             // number of matches for the current query
+	// matches is the byte ranges applySearchHighlights last handed the
+	// viewport, and matchRows[i] the display row matches[i] starts on — the
+	// row bubbles files it under (one per "\n" before it). searchStep needs
+	// both: the viewport keeps its selected match private, so whether any
+	// match is on screen has to be worked out here, and re-anchoring the
+	// selection on the view means handing the same ranges back.
+	matches   [][]int
+	matchRows []int
 }
 
 // NewLogViewerModel creates a new log viewer model.
@@ -158,32 +178,57 @@ func (m *LogViewerModel) appendLine(line string) {
 	m.wrapped = append(m.wrapped, nil)
 }
 
-// capLines trims all three slices to maxLogLines, identically.
-func (m *LogViewerModel) capLines() {
-	if len(m.lines) <= maxLogLines {
-		return
+// capLines trims all three slices to maxLogLines, identically, and returns
+// how many display rows left the top of the view with them (see dropOldest).
+func (m *LogViewerModel) capLines() int {
+	return m.dropOldest(len(m.lines) - maxLogLines)
+}
+
+// dropOldest removes the n oldest lines from all three slices, identically,
+// and returns how many DISPLAY rows they took with them — the rows the
+// viewport was showing above everything that survives. redisplay needs that
+// count to keep a paused view where it is.
+//
+// A dropped line counts only if it is on screen: it passes the level filter
+// (a hidden line keeps the rows it was cut into before F hid it), and it has
+// been cut — wrapped[i] is still nil for a line that arrived in the same
+// batch and never reached the display, and contributes nothing. Its rows are
+// counted the way the viewport counts them: SetContentLines splits a row at
+// an embedded "\n", and wrapLogLine passes a line that already fits through
+// uncut, so a multi-line entry (an ffmpeg stderr tail) moves the offset by
+// every row it occupied, not by one.
+func (m *LogViewerModel) dropOldest(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	n = min(n, len(m.lines))
+	rows := 0
+	for i := range min(n, len(m.wrapped)) {
+		if m.level != LogLevelAll && !m.matchLevel(m.levels[i]) {
+			continue
+		}
+		for _, r := range m.wrapped[i] {
+			rows += 1 + strings.Count(r, "\n")
+		}
 	}
 	// slices.Clone prevents the re-slice from aliasing the old backing
 	// array, which would otherwise retain MBs of string headers over the
 	// 24/7 runtime target.
-	m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
-	m.levels = slices.Clone(m.levels[len(m.levels)-maxLogLines:])
+	m.lines = slices.Clone(m.lines[n:])
+	m.levels = slices.Clone(m.levels[n:])
 	// The surviving lines keep the rows they were already cut into — that
 	// is the whole point of the cache, since this runs on every insertion
 	// once the buffer is full.
-	if len(m.wrapped) > maxLogLines {
-		m.wrapped = slices.Clone(m.wrapped[len(m.wrapped)-maxLogLines:])
+	if len(m.wrapped) >= n {
+		m.wrapped = slices.Clone(m.wrapped[n:])
 	}
+	return rows
 }
 
 // AddLine appends a single log line.
 func (m *LogViewerModel) AddLine(line string) {
 	m.appendLine(line)
-	m.capLines()
-	m.rebuildFiltered()
-	if m.autoScroll {
-		m.viewport.GotoBottom()
-	}
+	m.redisplay(m.capLines())
 }
 
 // AddLines appends a batch of log lines efficiently (single rebuildFiltered call).
@@ -192,7 +237,67 @@ func (m *LogViewerModel) AddLines(batch []string) {
 	for _, line := range batch {
 		m.appendLine(line)
 	}
-	m.capLines()
+	m.redisplay(m.capLines())
+}
+
+// SyncLines brings the buffer in line with snapshot, a fresh read of a ring
+// this viewer mirrors rather than owns — the O L overlay's per-job log
+// (db.GetJobLogs). It applies only the difference, as the ring itself moved:
+// the lines evicted from the front go through dropOldest and the new ones are
+// appended, so a paused view stays on its lines across a read exactly as the
+// log panel's does across an insertion (W24-12). Reports whether anything
+// changed; an identical read leaves the display, and its render cache, alone.
+func (m *LogViewerModel) SyncLines(snapshot []string) bool {
+	drop, tail := ringDelta(m.lines, snapshot)
+	if drop == 0 && len(tail) == 0 {
+		return false
+	}
+	trimmed := m.dropOldest(drop)
+	for _, line := range tail {
+		m.appendLine(line)
+	}
+	m.redisplay(trimmed + m.capLines())
+	return true
+}
+
+// ringDelta works out how a ring buffer moved between two reads of it: drop
+// lines left the front of prev, and tail was appended after what survived.
+// The per-job log buffer only ever appends and trims its front (capLogLines,
+// internal/database), so cur is prev[drop:] followed by tail for the smallest
+// drop that lines up. Taking the SMALLEST is what keeps a run of identical
+// lines (one message repeated within the same second) from reading as an
+// eviction. A cur that matches no suffix of prev — the buffer was cleared,
+// or replaced outright — comes back as every line of prev dropped and every
+// line of cur new, which is a full replace.
+func ringDelta(prev, cur []string) (drop int, tail []string) {
+	for drop = 0; drop < len(prev); drop++ {
+		kept := prev[drop:]
+		if len(kept) <= len(cur) && slices.Equal(kept, cur[:len(kept)]) {
+			return drop, cur[len(kept):]
+		}
+	}
+	return len(prev), cur
+}
+
+// redisplay rebuilds the display after lines were added and trimmedRows
+// display rows were dropped off the front of the buffer. Following, the view
+// sticks to the bottom. Paused, it stays on the lines it is showing: the
+// viewport keeps its YOffset across SetContentLines (it only clamps), so
+// once the buffer is full and every insertion trims the oldest line, the same
+// offset over the shortened buffer pointed at later lines — the "Auto-scroll
+// paused" view crept up a row per new line (more for wrapped ones), and at
+// DEBUG or with several jobs running it could not be read (W24-12). The
+// offset moves up by exactly the rows that left above it, clamped at the top
+// once the lines on screen are themselves the ones evicted.
+//
+// Moved BEFORE the rebuild, on the old content: the rebuild re-applies an
+// active search's highlights, and SetHighlights picks the selected match from
+// the offset it finds. The new offset is never past the new bottom — the
+// buffer lost trimmedRows rows and gained at least none.
+func (m *LogViewerModel) redisplay(trimmedRows int) {
+	if !m.autoScroll && trimmedRows > 0 {
+		m.viewport.SetYOffset(m.viewport.YOffset() - trimmedRows)
+	}
 	m.rebuildFiltered()
 	if m.autoScroll {
 		m.viewport.GotoBottom()
@@ -210,8 +315,7 @@ func (m *LogViewerModel) Clear() {
 	m.searchInput.SetValue("")
 	m.searchQuery = ""
 	m.searchRegex = nil
-	m.matchCount = 0
-	m.viewport.ClearHighlights()
+	m.clearSearchMatches()
 	m.rebuildFiltered()
 	// setAutoScroll (not a direct field assignment) so the viewport height
 	// is recalculated when this un-pauses — it owns the pause-hint row (see
@@ -309,25 +413,21 @@ func (m *LogViewerModel) CycleLevel() {
 	m.viewport.GotoBottom()
 }
 
-// wrapLogLine hard-wraps one plain-text log line to width columns, using the
-// same character-wrap rule the viewport's own softWrap applies
-// (ansi.Cut(line, idx, idx+width)) so nothing about the rendered result
-// changes — only WHEN the work is done. Lines that already fit are returned
-// as a one-element slice sharing the original string, and a width of 0 (the
-// panel has not been sized yet) wraps nothing.
+// wrapLogLine wraps one plain-text log line to width columns at its spaces,
+// breaking only a word longer than a whole row. It used to cut at exact
+// columns — the viewport's own softWrap rule — which split the very tokens a
+// log line is read for: "addr=127.0.0." on one row and "1:7743" on the next,
+// a URL or a video ID across two. Lines that already fit are returned as a
+// one-element slice sharing the original string, and a width of 0 (the panel
+// has not been sized yet) wraps nothing.
 func wrapLogLine(line string, width int) []string {
 	if width <= 0 {
 		return []string{line}
 	}
-	total := ansi.StringWidth(line)
-	if total <= width {
+	if ansi.StringWidth(line) <= width {
 		return []string{line}
 	}
-	out := make([]string, 0, (total+width-1)/width)
-	for idx := 0; idx < total; idx += width {
-		out = append(out, ansi.Cut(line, idx, idx+width))
-	}
-	return out
+	return strings.Split(ansi.Wrap(line, width, ""), "\n")
 }
 
 // rebuildFiltered rebuilds the DISPLAY buffer: level-filter the raw lines,
@@ -387,7 +487,21 @@ func (m *LogViewerModel) updateViewportContent() {
 	// One funnel for every content change — the render cache keys on this.
 	m.contentSeq++
 	if len(m.filtered) == 0 {
-		m.viewport.SetContent("No logs yet.")
+		// A placeholder is not searched: an active query matches nothing in
+		// it, and the ranges found in the content it replaced would point
+		// past its end (searchStep hands them back to the viewport).
+		m.clearSearchMatches()
+		// Lines exist but the level filter hides them all: say so, rather
+		// than "No logs yet." under a header reading "Logs (0) [WARN+]".
+		if len(m.lines) > 0 && m.level != LogLevelAll {
+			m.viewport.SetContent("No " + m.level.String() + "+ lines. F cycles the level.")
+			return
+		}
+		empty := m.emptyText
+		if empty == "" {
+			empty = "No logs yet."
+		}
+		m.viewport.SetContent(empty)
 		return
 	}
 
@@ -399,8 +513,18 @@ func (m *LogViewerModel) updateViewportContent() {
 	m.viewport.SetContentLines(slices.Clone(m.filtered))
 
 	// Re-apply search highlights if a query is active (SetContent clears them).
+	// SetHighlights also SCROLLS: it selects the first match at or below the
+	// top row and, when that match is off screen, moves the view to it. That
+	// is the jump Enter wants (it calls applySearchHighlights directly), but
+	// here the content merely changed, and a reader paused above the latest
+	// lines was carried down to the next match on every new line. The offset
+	// is the reader's, so it is put back — which leaves the viewport's
+	// selection on that unseen match below, and searchStep is what keeps n
+	// from stepping past it.
 	if m.searchQuery != "" {
+		top := m.viewport.YOffset()
 		m.applySearchHighlights()
+		m.viewport.SetYOffset(top)
 	}
 }
 
@@ -492,17 +616,30 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 				// Empty query — clear search
 				m.searchQuery = ""
 				m.searchRegex = nil
-				m.matchCount = 0
-				m.viewport.ClearHighlights()
+				m.clearSearchMatches()
 				m.resizeViewport()
 				return nil, true
 			}
 			m.searchQuery = query
 			m.searchRegex, _ = regexp.Compile("(?i)" + regexp.QuoteMeta(query))
-			m.applySearchHighlights()
+			// The search bar's row back first: SetHighlights brings the match
+			// it selects on screen, and measured against the viewport the bar
+			// had shortened, a match on the bottom row the reader saw before
+			// pressing / read as off screen — the view jumped to make it the
+			// top row. SetHeight leaves the offset alone, so top is the
+			// reader's either way.
 			m.resizeViewport()
-			// Jump to first match
-			m.viewport.HighlightNext()
+			top := m.viewport.YOffset()
+			m.applySearchHighlights()
+			// Land on the first match at or below the top of the view — the
+			// rule n and N follow (searchStep). SetHighlights has selected that
+			// one already and brought it on screen; stepping on from it, as
+			// Enter did, skipped a match the reader was looking at. With none
+			// at or below the top it selected none, and the step reaches the
+			// first match of all, as n wraps.
+			if below, _ := slices.BinarySearch(m.matchRows, top); below == len(m.matchRows) {
+				m.viewport.HighlightNext()
+			}
 			m.invalidate() // the selected-highlight index is bubbles-private
 			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
@@ -529,16 +666,15 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		case keyEsc:
 			m.searchQuery = ""
 			m.searchRegex = nil
-			m.matchCount = 0
-			m.viewport.ClearHighlights()
+			m.clearSearchMatches()
 			return nil, true
 		case "n":
-			m.viewport.HighlightNext()
+			m.searchStep(true)
 			m.invalidate() // the selected-highlight index is bubbles-private
 			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
 		case "N":
-			m.viewport.HighlightPrevious()
+			m.searchStep(false)
 			m.invalidate() // the selected-highlight index is bubbles-private
 			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
@@ -560,7 +696,7 @@ func (m *LogViewerModel) StartSearch() tea.Cmd {
 // and sets highlight ranges.
 func (m *LogViewerModel) applySearchHighlights() {
 	if m.searchRegex == nil {
-		m.matchCount = 0
+		m.clearSearchMatches()
 		return
 	}
 	// The content is the buffer AFTER hard-wrapping, so a match that straddles
@@ -570,12 +706,86 @@ func (m *LogViewerModel) applySearchHighlights() {
 	// only affects a query long enough to span the panel's own width.
 	content := m.viewport.GetContent()
 	matches := m.searchRegex.FindAllStringIndex(content, -1)
-	m.matchCount = len(matches)
-	if len(matches) > 0 {
-		m.viewport.SetHighlights(matches)
-	} else {
-		m.viewport.ClearHighlights()
+	if len(matches) == 0 {
+		m.clearSearchMatches()
+		return
 	}
+	m.matchCount = len(matches)
+	m.matches = matches
+	m.matchRows = m.matchRows[:0]
+	row, from := 0, 0
+	for _, mt := range matches {
+		row += strings.Count(content[from:mt[0]], "\n")
+		from = mt[0]
+		m.matchRows = append(m.matchRows, row)
+	}
+	m.viewport.SetHighlights(matches)
+}
+
+// clearSearchMatches forgets the matches of a search that no longer applies
+// (Esc, an empty Enter, Clear) or of content that cannot be searched (the
+// empty and filtered-empty placeholders).
+func (m *LogViewerModel) clearSearchMatches() {
+	m.matchCount = 0
+	m.matches = nil
+	m.matchRows = m.matchRows[:0]
+	m.viewport.ClearHighlights()
+}
+
+// searchStep is n (forward) and N: select the next or previous match and
+// bring it on screen.
+//
+// The viewport's own HighlightNext/HighlightPrevious step from the match it
+// has selected, and it re-selects on every scroll and every SetHighlights:
+// the first match at or below the top row, ON SCREEN OR NOT. A reader who
+// scrolled to a stretch with no match on screen — with ↓/PgDn, or simply
+// paused there while a new line re-applied the highlights (the rebuild puts
+// the reader's offset back, W24-12) — therefore had the first match BELOW
+// the view selected without ever seeing it, and n stepped past it: from
+// line 20 with matches at 10, 50, 60 and 90, n went to 60, and with only 10
+// and 50 it wrapped up to 10, skipping the one match below. N, with nothing
+// below the view, stepped from "none selected" to the second-to-last match
+// and skipped the last one above.
+//
+// So the selection is used only while a match is on screen — the one bubbles
+// highlights as selected is then one the reader can see. With none on screen
+// n goes to the first match below the view (wrapping to the first of all)
+// and N to the last match above it (wrapping to the last of all), whatever
+// the viewport had selected.
+func (m *LogViewerModel) searchStep(forward bool) {
+	if len(m.matchRows) == 0 {
+		return
+	}
+	top := m.viewport.YOffset()
+	// below is the index of the first match at or below the top row — the
+	// one SetHighlights selects at this offset — or len when there is none.
+	below, _ := slices.BinarySearch(m.matchRows, top)
+	onScreen := below < len(m.matchRows) && m.matchRows[below] < top+m.viewport.Height()
+	if onScreen {
+		if forward {
+			m.viewport.HighlightNext()
+		} else {
+			m.viewport.HighlightPrevious()
+		}
+		return
+	}
+	// Re-anchor: SetHighlights selects the first match below the view and
+	// scrolls to it, which is n's answer outright. With nothing below it
+	// selects none, and stepping from none reaches the first match (n's wrap)
+	// and, back from there, the last (N's).
+	m.viewport.SetHighlights(m.matches)
+	if forward {
+		if below == len(m.matchRows) {
+			m.viewport.HighlightNext()
+		}
+		return
+	}
+	m.viewport.SetYOffset(top) // N scrolls from the reader's place, not the match below it
+	if below == len(m.matchRows) {
+		m.viewport.HighlightNext()
+		m.viewport.SetYOffset(top)
+	}
+	m.viewport.HighlightPrevious()
 }
 
 // resizeViewport recalculates viewport height accounting for the search bar
@@ -686,38 +896,54 @@ func (m *LogViewerModel) View() string {
 	// header wrapping (which adds an extra line and causes vertical shifting).
 	// rawCount, not len(m.filtered): filtered holds wrapped DISPLAY lines, so
 	// one long line would otherwise be counted as several.
-	header := titleStyle.Render(fmt.Sprintf("Logs (%d)", m.rawCount))
+	count := fmt.Sprintf(" (%d)", m.rawCount)
+	// suffixes, in the order they are dropped from the end when they do not
+	// all fit; reserve is the width the title leaves them.
+	var suffixes []string
+	reserve := 0
 	// Search query indicator (when search is active but not typing).
 	// truncateString is rune/width-aware — byte-slicing would split
 	// multi-byte runes in the user's query.
 	if !m.searching && m.searchQuery != "" {
 		queryDisplay := truncateString(m.searchQuery, 20)
 		matchSuffix := fmt.Sprintf(" [/%s] (%d matches)", queryDisplay, m.matchCount)
-		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render(matchSuffix)
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
-		}
+		suffixes = append(suffixes, " "+lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render(matchSuffix))
 	}
 	// Level filter suffix (L3)
 	if m.level != LogLevelAll {
-		suffix := " " + YellowStyle.Render("["+m.level.String()+"+]")
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
-		}
+		suffixes = append(suffixes, " "+YellowStyle.Render("["+m.level.String()+"+]"))
 	}
 	// PAUSED indicator when not auto-scrolling and focused (L4)
 	if !m.autoScroll && m.focused {
-		suffix := " " + YellowStyle.Render("[PAUSED]")
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
-		}
+		suffixes = append(suffixes, " "+YellowStyle.Render("[PAUSED]"))
 	}
-	// Scroll percentage with brackets (L1 - match TS format [XX%])
+	for _, sfx := range suffixes {
+		reserve += lipgloss.Width(sfx)
+	}
+	// Scroll percentage with brackets (L1 - match TS format [XX%]). Its
+	// reserve is the widest it gets, so the title does not shift a cell as
+	// the reader scrolls past 10% and 100%.
 	if len(m.filtered) > m.viewport.Height() {
 		pct := int(m.viewport.ScrollPercent() * 100)
-		suffix := " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
-		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
-			header += suffix
+		suffixes = append(suffixes, " "+DimStyle.Render(fmt.Sprintf("[%d%%]", pct)))
+		reserve += lipgloss.Width(" [100%]")
+	}
+
+	// The title is cut, never the count, when the two do not fit: the O L
+	// overlay's names a job, and a long one would wrap the header. It is cut
+	// to leave the suffixes their room too, down to minHeaderTitleWidth — cut
+	// to the count alone, an ordinary stream title filled the row, and every
+	// suffix was dropped for want of room: a search there said nothing, not
+	// even "(0 matches)", and a reader who had scrolled up saw no [PAUSED].
+	title := "Logs"
+	if m.title != "" {
+		room := contentW - lipgloss.Width(count) - reserve
+		title = truncateString(m.title, max(room, min(minHeaderTitleWidth, contentW-lipgloss.Width(count)), 1))
+	}
+	header := titleStyle.Render(title + count)
+	for _, sfx := range suffixes {
+		if lipgloss.Width(header)+lipgloss.Width(sfx) <= contentW {
+			header += sfx
 		}
 	}
 

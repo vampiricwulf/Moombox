@@ -242,7 +242,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		writeSeq := int(d.currentSeq.Load())
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
-			return fmt.Errorf("write segment %d: %w", writeSeq, writeErr)
+			return fmt.Errorf("%w: write segment %d: %w", ErrLocalWrite, writeSeq, writeErr)
 		}
 		d.bytesWritten.Add(int64(n))
 		d.lastSegTime.StoreNow()
@@ -343,6 +343,24 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 
 	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
 	*consecutiveGoneErrors = 0
+	if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+		// Same shape as the HTTP siblings above (handleGoneError,
+		// handleHTTPError): a transport error during an outage used to sit
+		// here sleeping genericRetry with nothing on the progress line, so a
+		// DASH job rode out a network outage showing a frozen counter while
+		// the HLS loop said "Connection lost - reconnecting...".
+		d.emitActivity(ActivityReconnecting)
+		d.logger.Warn("segment fetch failed — device offline, waiting for connectivity")
+		if err := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); err != nil {
+			return err
+		}
+		// Offline pauses the clock, as in the siblings: the outage must not
+		// count toward MaxTimeout or the interruption ceiling.
+		d.lastSegTime.StoreNow()
+		d.noteOfflineRecovery()
+		return nil
+	}
+	d.emitActivity(ActivityRetrying)
 	utils.Sleep(ctx, d.delays.genericRetry)
 	return nil
 }
@@ -465,7 +483,10 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, statusCode int,
 		// OnCipherFailure has already had its shot at swapping in a fresh URL
 		// (it fires at postBytes403CipherThreshold, below the gone threshold).
 		if d.behindHeadTailPending() {
-			d.emitActivity(ActivityWaitingForSegment)
+			// Retrying, not waiting: the segment is below head, so it exists
+			// and the fetch is what keeps failing ("Waiting for next segment"
+			// read as a healthy live edge for up to MaxTimeout).
+			d.emitActivity(ActivityRetrying)
 			utils.Sleep(ctx, d.delays.singleGoneRetry)
 			return nil // Continue loop
 		}
@@ -629,8 +650,9 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	if behindHead && !stuckOnSegment {
 		// Transient failure while behind head -- retry with small delay. Surface
-		// the wait (2s grace suppresses it for a stream that recovers quickly).
-		d.emitActivity(ActivityWaitingForSegment)
+		// the retry (2s grace suppresses it for a stream that recovers quickly);
+		// the segment exists, so this is not a wait for the next one.
+		d.emitActivity(ActivityRetrying)
 		utils.Sleep(ctx, d.delays.transientFailureRetry)
 		return nil // Continue loop
 	}

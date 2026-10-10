@@ -1,10 +1,9 @@
 package database
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -59,9 +58,13 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 		{"f3", "twitch", StatusFinished, 50},
 		{"e1", "youtube", StatusError, 10},
 		{"c1", "youtube", StatusCancelled, 5},
-		{"a1", "youtube", StatusDownloading, 0},
+		// A Finished incomplete-tail job being Resumed keeps its file_size
+		// while it is Downloading again.
+		{"a1", "youtube", StatusDownloading, 1000},
 		{"a2", "twitch", StatusLive, 0},
 		{"m1", "youtube", StatusMuxing, 0},
+		{"u1", "youtube", StatusUpcoming, 0},
+		{"q1", "youtube", StatusQueued, 0},
 	}
 	for _, s := range seeds {
 		if _, err := db.AddJob(&Job{
@@ -102,8 +105,11 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 	if stats.MuxingCount != 1 {
 		t.Errorf("MuxingCount: want 1, got %d", stats.MuxingCount)
 	}
-	if stats.YouTubeCount != 6 {
-		t.Errorf("YouTubeCount: want 6, got %d", stats.YouTubeCount)
+	if stats.YouTubeCount != 8 {
+		t.Errorf("YouTubeCount: want 8, got %d", stats.YouTubeCount)
+	}
+	if stats.TotalCount != 10 { // every row, upcoming and queued included
+		t.Errorf("TotalCount: want 10, got %d", stats.TotalCount)
 	}
 	if stats.TwitchCount != 2 {
 		t.Errorf("TwitchCount: want 2, got %d", stats.TwitchCount)
@@ -116,6 +122,84 @@ func TestGetJobStatsAggregatesByStatusAndPlatform(t *testing.T) {
 	}
 	if stats.CancelledSize != 5 {
 		t.Errorf("CancelledSize: want 5, got %d", stats.CancelledSize)
+	}
+	// The platform sizes count the same settled statuses, so the Stats tab's
+	// two cards add up to its Total Recorded — the resuming a1 is in neither.
+	if stats.YouTubeSize != 315 || stats.TwitchSize != 50 {
+		t.Errorf("platform sizes: want youtube 315 and twitch 50, got %d and %d", stats.YouTubeSize, stats.TwitchSize)
+	}
+	if settled := stats.FinishedSize + stats.ErrorSize + stats.CancelledSize; stats.YouTubeSize+stats.TwitchSize != settled {
+		t.Errorf("platform sizes sum to %d, the settled total is %d", stats.YouTubeSize+stats.TwitchSize, settled)
+	}
+}
+
+// Total Recording Time and Chat Messages — both dashboards' Activity figures
+// — sum length_seconds and total_chat_messages over Finished rows only, and a
+// row with an empty platform counts as YouTube in both the count and the
+// size. The aggregate test above seeds neither column and no empty platform,
+// so zeroing either sum, summing them over every status, or dropping the
+// empty platform from the YouTube clauses survived every suite.
+//
+// Mutants: `THEN length_seconds` or `THEN total_chat_messages` → `THEN 0`;
+// either sum widened to Error/Downloading rows; the YouTube count's or size's
+// platform clause narrowed to `platform = 'youtube'`.
+func TestGetJobStatsSumsFinishedDurationChatAndLegacyPlatform(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	type seed struct {
+		id       string
+		plat     string
+		status   JobStatus
+		size     int64
+		length   int
+		messages int
+	}
+	seeds := []seed{
+		{"f1", "youtube", StatusFinished, 100, 3600, 1200},
+		{"f2", "twitch", StatusFinished, 50, 600, 34},
+		{"legacy", "youtube", StatusFinished, 7, 60, 5}, // platform blanked below
+		// Not Finished: their length and chat must not count.
+		{"e1", "youtube", StatusError, 10, 9000, 9000},
+		{"a1", "youtube", StatusDownloading, 0, 7000, 7000},
+	}
+	for _, s := range seeds {
+		if _, err := db.AddJob(&Job{ID: s.id, VideoID: s.id, URL: "u", Platform: s.plat, Status: s.status}); err != nil {
+			t.Fatalf("AddJob %s: %v", s.id, err)
+		}
+		if got := db.UpdateJobFields(s.id, map[string]any{
+			"file_size": s.size, "length_seconds": s.length, "total_chat_messages": s.messages,
+		}); got == nil {
+			t.Fatalf("UpdateJobFields %s: nil", s.id)
+		}
+	}
+	// A row whose platform is empty — the stats query counts it as YouTube.
+	if _, err := db.db.Exec(`UPDATE jobs SET platform = '' WHERE id = 'legacy'`); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := db.GetJobStats()
+	if err != nil {
+		t.Fatalf("GetJobStats: %v", err)
+	}
+	if stats.TotalDuration != 3600+600+60 {
+		t.Errorf("TotalDuration = %d, want %d (Finished rows only)", stats.TotalDuration, 3600+600+60)
+	}
+	if stats.TotalChatMessages != 1200+34+5 {
+		t.Errorf("TotalChatMessages = %d, want %d (Finished rows only)", stats.TotalChatMessages, 1200+34+5)
+	}
+	if stats.YouTubeCount != 4 || stats.TwitchCount != 1 {
+		t.Errorf("platform counts = youtube %d, twitch %d; want 4 and 1 — the empty platform is YouTube",
+			stats.YouTubeCount, stats.TwitchCount)
+	}
+	if stats.YouTubeSize != 100+7+10 || stats.TwitchSize != 50 {
+		t.Errorf("platform sizes = youtube %d, twitch %d; want %d and 50 — the empty platform is YouTube",
+			stats.YouTubeSize, stats.TwitchSize, 100+7+10)
 	}
 }
 
@@ -197,6 +281,43 @@ func TestGetJobStatsCachesResultsBriefly(t *testing.T) {
 	}
 }
 
+// The cache is never invalidated on writes, so expiry is the only way the
+// Stats tab and the E T overlay ever see a new figure. Nothing pinned it: a
+// cache that never expired showed the first snapshot for the life of the
+// process with every suite green.
+//
+// Mutants: the TTL check → `true` (never expires), or a TTL far longer than
+// jobStatsCacheTTL — the row added after the first read never shows.
+func TestGetJobStatsCacheExpires(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	first, err := db.GetJobStats()
+	if err != nil || first.FinishedCount != 0 {
+		t.Fatalf("first read on an empty DB = %+v, %v", first, err)
+	}
+	if _, err := db.AddJob(&Job{ID: "late", VideoID: "x", URL: "u", Platform: "youtube", Status: StatusFinished}); err != nil {
+		t.Fatal(err)
+	}
+	// Age the cached snapshot just past its TTL rather than sleeping 5 s.
+	db.statsMu.Lock()
+	db.statsCachedAt = time.Now().Add(-jobStatsCacheTTL - time.Second)
+	db.statsMu.Unlock()
+
+	fresh, err := db.GetJobStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == first || fresh.FinishedCount != 1 {
+		t.Errorf("a read past the TTL served the stale snapshot: FinishedCount %d, want 1", fresh.FinishedCount)
+	}
+}
+
 func TestGetJobStatsConcurrent(t *testing.T) {
 	t.Parallel()
 	// Race-detector smoke: the cache hot path uses statsMu, fresh
@@ -228,6 +349,37 @@ func TestGetJobStatsConcurrent(t *testing.T) {
 }
 
 // --- attachTrimsAndGaps coverage ---
+
+// TestGetAllJobsFailsWhenAChildLoadFails: a child query that fails must fail
+// GetAllJobs rather than hand back jobs stripped of their segments. The orphan
+// scanner reads segment chat files through this loader, so "no segments" there
+// reads as "these chat files belong to nothing" and makes them deletable.
+//
+// Mutant: the pre-fix loader logged the query error and returned the jobs.
+func TestGetAllJobsFailsWhenAChildLoadFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{ID: "j1", VideoID: "j1", URL: "u", Status: StatusFinished}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if _, err := db.db.Exec(`DROP TABLE segments`); err != nil {
+		t.Fatalf("drop segments: %v", err)
+	}
+
+	jobs, err := db.GetAllJobs()
+	if err == nil {
+		t.Fatalf("GetAllJobs returned %d job(s) and no error with the segments load failing", len(jobs))
+	}
+	if !strings.Contains(err.Error(), "segments") {
+		t.Errorf("err = %v, want it to name the failed segments load", err)
+	}
+}
 
 func TestAttachTrimsAndGapsLoadsForMultipleJobs(t *testing.T) {
 	t.Parallel()
@@ -314,98 +466,68 @@ func TestAddToHistoryDeduplicates(t *testing.T) {
 	}
 }
 
-// --- ImportFromJSON ---
-
-func TestImportFromJSONLoadsJobsAndHistory(t *testing.T) {
+// TestHistoryCapEvictsTheOldestRows fills history to the cap with rows dated
+// in the past, one minute apart, then records three more. The cap must drop
+// the three oldest and keep everything else: the rows just recorded are the
+// archive pass's only guard against re-creating the jobs they were recorded
+// for, so a prune that took them would answer HasProcessed=false for videos
+// that were just jobbed.
+//
+// MUTANTS: ORDER BY added_at DESC in pruneHistory (the new rows go, the oldest
+// stay); an off-by-one cap (historyCap+1 or -1 in the LIMIT: the count is
+// wrong); dropping the pruneHistory call from AddToHistory (the count grows).
+func TestHistoryCapEvictsTheOldestRows(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "test.db"))
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	importPath := filepath.Join(dir, "import.json")
-	importJSON := map[string]any{
-		"jobs": []map[string]any{
-			{
-				"id":       "imp_a",
-				"videoId":  "imp_a",
-				"url":      "https://example.com/a",
-				"platform": "youtube",
-				"status":   "Finished",
-			},
-			{
-				"id":      "imp_b",
-				"videoId": "imp_b",
-				"url":     "https://example.com/b",
-				// platform omitted — should default to "youtube"
-				"status": "Finished",
-			},
-		},
-		"history":    []string{"hist_v1", "hist_v2"},
-		"lastVideos": map[string]string{"chan_a": "vid_a"},
-	}
-	data, _ := json.Marshal(importJSON)
-	if err := os.WriteFile(importPath, data, 0o644); err != nil {
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	seed := func(i int) string { return fmt.Sprintf("seed%05d", i) }
+	tx, err := db.db.Begin()
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	if err := db.ImportFromJSON(importPath); err != nil {
-		t.Fatalf("ImportFromJSON: %v", err)
-	}
-
-	// Both jobs persisted
-	a, _ := db.GetJob("imp_a")
-	if a == nil {
-		t.Error("job imp_a should exist after import")
-	}
-	b, _ := db.GetJob("imp_b")
-	if b == nil {
-		t.Fatal("job imp_b should exist after import")
-	}
-	if b.Platform != "youtube" {
-		t.Errorf("missing-platform default: want youtube, got %q", b.Platform)
-	}
-
-	// History entries
-	for _, vid := range []string{"hist_v1", "hist_v2"} {
-		if proc, _ := db.HasProcessed(vid); !proc {
-			t.Errorf("history %s: not present after import", vid)
+	for i := range historyCap {
+		if _, err := tx.Exec(`INSERT INTO history (video_id, added_at) VALUES (?, ?)`,
+			seed(i), base.Add(time.Duration(i)*time.Minute).Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
 		}
 	}
-}
-
-func TestImportFromJSONHandlesMissingFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if err := db.ImportFromJSON(filepath.Join(dir, "no-such-file.json")); err == nil {
-		t.Error("missing file: want error, got nil")
-	}
-}
-
-func TestImportFromJSONRejectsInvalidJSON(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	importPath := filepath.Join(dir, "bad.json")
-	if err := os.WriteFile(importPath, []byte("not-json{"), 0o644); err != nil {
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := db.ImportFromJSON(importPath); err == nil {
-		t.Error("invalid JSON: want error, got nil")
+	fresh := []string{"fresh-a", "fresh-b", "fresh-c"}
+	for _, id := range fresh {
+		if err := db.AddToHistory(id); err != nil {
+			t.Fatalf("AddToHistory(%s): %v", id, err)
+		}
+	}
+
+	var n int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM history`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != historyCap {
+		t.Errorf("history holds %d rows, want the cap %d", n, historyCap)
+	}
+	for _, id := range fresh {
+		if ok, err := db.HasProcessed(id); err != nil || !ok {
+			t.Errorf("HasProcessed(%s) = %v, %v: the row just recorded was evicted by the cap", id, ok, err)
+		}
+	}
+	for i := range len(fresh) {
+		if ok, _ := db.HasProcessed(seed(i)); ok {
+			t.Errorf("%s, among the %d oldest rows, survived the cap", seed(i), len(fresh))
+		}
+	}
+	for _, i := range []int{len(fresh), historyCap - 1} {
+		if ok, _ := db.HasProcessed(seed(i)); !ok {
+			t.Errorf("%s was evicted, but only the %d oldest rows should go", seed(i), len(fresh))
+		}
 	}
 }
 

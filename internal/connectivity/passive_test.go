@@ -45,7 +45,7 @@ func TestPassiveTracker_SuccessClearsTrigger(t *testing.T) {
 	if pt.ShouldTriggerOffline() {
 		t.Fatal("should not trigger after success")
 	}
-	if pt.IsTriggered() {
+	if pt.isTriggered() {
 		t.Fatal("triggered flag should clear on success")
 	}
 }
@@ -72,7 +72,7 @@ func TestPassiveTracker_SuccessPerTag(t *testing.T) {
 	if !pt.ReportSuccessAndCleared("engine/fetch") {
 		t.Error("expected the success to report clearing the latch (survivors dropped below minTags)")
 	}
-	if pt.IsTriggered() {
+	if pt.isTriggered() {
 		t.Error("triggered flag should clear after per-tag success drops us below minTags")
 	}
 	pt.mu.Lock()
@@ -127,9 +127,9 @@ func TestPassiveTracker_WindowExpiry(t *testing.T) {
 
 // TestPassiveTracker_LatchClearsOnIdlePrune locks in the F19 fix:
 // after a brief failure burst trips the latch, an idle Moombox (no
-// further failures, no ReportSuccess) must see IsTriggered()=false
+// further failures, no ReportSuccess) must see isTriggered()=false
 // once the failure window has aged out. Pre-fix, pruneOld trimmed
-// the slice but never cleared `triggered`, so IsTriggered() reported
+// the slice but never cleared `triggered`, so isTriggered() reported
 // true forever until the next HTTP success fired ReportSuccess.
 func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 	pt := &PassiveTracker{
@@ -144,7 +144,7 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 	if !pt.ShouldTriggerOffline() {
 		t.Fatal("expected initial failure burst to trigger offline")
 	}
-	if !pt.IsTriggered() {
+	if !pt.isTriggered() {
 		t.Fatal("expected latch to be set after ShouldTriggerOffline returned true")
 	}
 
@@ -158,7 +158,7 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 	if pt.ShouldTriggerOffline() {
 		t.Error("expected no trigger after window expiry (failures all aged out)")
 	}
-	if pt.IsTriggered() {
+	if pt.isTriggered() {
 		t.Error("expected latch cleared by pruneOld once failures fell below threshold; got still-triggered")
 	}
 }
@@ -167,7 +167,7 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 // offline-recovery fix: pruneOld must clear the latch when the surviving
 // failures drop below minTags, not only below minFails. Pre-fix, pruneOld
 // checked minFails alone, so a set that aged down to a single tag (still
-// >= minFails) kept IsTriggered()=true even though ShouldTriggerOffline would
+// >= minFails) kept isTriggered()=true even though ShouldTriggerOffline would
 // no longer trigger.
 func TestPassiveTracker_LatchClearsViaPruneOnMinTagsDrop(t *testing.T) {
 	pt := &PassiveTracker{window: 120 * time.Millisecond, minFails: 3, minTags: 2}
@@ -191,7 +191,7 @@ func TestPassiveTracker_LatchClearsViaPruneOnMinTagsDrop(t *testing.T) {
 	if pt.IsTriggeredPruned() {
 		t.Error("latch should clear once survivors drop below minTags, even with len >= minFails")
 	}
-	if pt.IsTriggered() {
+	if pt.isTriggered() {
 		t.Error("latch should remain cleared after pruning")
 	}
 

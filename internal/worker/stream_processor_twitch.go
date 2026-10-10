@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -22,6 +23,27 @@ import (
 // Keep these two sites aligned — a regression test in internal/monitor checks
 // the predicate accepts exactly this string.
 const TwitchOfflineErrMsg = "twitch channel is offline"
+
+// twitchEndedOfflineErrMsg is the error a Twitch job interrupted mid-capture
+// takes when its broadcast is over by the time Moombox is back: the staged
+// footage is complete as far as it will ever get (Twitch has no DVR to fetch
+// the gap from), and the Mux action turns it into the archive.
+const twitchEndedOfflineErrMsg = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
+
+// twitchOfflineError picks the error a non-manual Twitch job takes when its
+// channel is offline. A Downloading row re-enqueued at boot whose staging
+// holds footage was interrupted mid-broadcast, and "twitch channel is
+// offline" told its operator nothing about the hours of capture sitting in
+// staging — the auto-recovery never takes it (LastVideoSeq is set), so the
+// only way forward is the Mux action, which the message now names, as the
+// changed-broadcast branch in processTwitchLive already does. Every other
+// offline job keeps TwitchOfflineErrMsg, the exact string that recovery keys on.
+func twitchOfflineError(job *database.Job, stagingBase string) string {
+	if job.Status == database.StatusDownloading && HasSegmentFiles(stagingBase, job.ID) {
+		return twitchEndedOfflineErrMsg
+	}
+	return TwitchOfflineErrMsg
+}
 
 // sameBroadcastStart is THE broadcast-identity rule for Twitch jobs:
 // stream_start_time is written once per job and compared against the
@@ -43,6 +65,49 @@ func sameBroadcastStart(knownStartISO, currentStartISO string) bool {
 	}
 	diff := newStart.Sub(oldStart)
 	return diff <= time.Minute && diff >= -time.Minute
+}
+
+// selectTwitchVariant is the selection a Twitch capture starts on, live and
+// VOD alike: the job's quality_preference — never twitch_quality, which names
+// the variant an earlier run recorded (D-T9) — under the downloader's
+// max_video_resolution and prefer_60fps, both read fresh from the config. The
+// re-selections that follow during the capture (the quality probe, every
+// downloader restart) make the same call through TwitchVariantInfo.selectFrom,
+// with the same three inputs — processJob copies them across in
+// newTwitchVariantInfo.
+//
+// prefer_60fps was read by every YouTube selector and by no Twitch one, so a
+// channel whose source is 60 fps was archived at 60 fps whatever the setting
+// said (D-Y2).
+func (sp *StreamProcessor) selectTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job) *twitch.TwitchHLSVariant {
+	var maxRes int
+	var prefer60fps bool
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		maxRes = c.Downloader.MaxVideoResolution
+		prefer60fps = c.Downloader.Prefer60fps
+	})
+	return twitch.SelectBestVariant(variants, job.QualityPreference, maxRes, prefer60fps)
+}
+
+// startTwitchVariant selects the variant a capture starts on and records it:
+// twitch_quality is written with the pick's playlist name in the same write
+// as the caller's extra fields (the live start's Live status). Returns nil,
+// writing nothing, when no variant fits.
+//
+// twitch_quality is the variant being recorded and nothing else (D-T9): the
+// selection never reads it back, and every split that moves the capture to
+// another variant writes it again (ExecuteTwitch's recordVariant). A VOD start
+// used to write nothing, so its row went on showing the preference it was
+// created with as its "Quality".
+func (sp *StreamProcessor) startTwitchVariant(variants []twitch.TwitchHLSVariant, job *database.Job, extra map[string]any) *twitch.TwitchHLSVariant {
+	variant := sp.selectTwitchVariant(variants, job)
+	if variant == nil {
+		return nil
+	}
+	fields := map[string]any{"twitch_quality": variant.Name}
+	maps.Copy(fields, extra)
+	sp.db.UpdateJobFields(job.ID, fields)
+	return variant
 }
 
 // twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
@@ -355,8 +420,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		}, nil
 	}
 
+	// No status, as for a YouTube VOD (vodStatusUpdates): the download-slot
+	// wait is still ahead, and a Twitch VOD queueing behind a busy pool read
+	// Downloading through all of it. ExecuteTwitch writes Downloading once
+	// the slot is held; until then the row keeps the status it came in with
+	// and processJob's progress line says what it is waiting for.
 	vodUpdates := map[string]any{
-		"status":         database.StatusDownloading,
 		"is_vod":         true,
 		"title":          vodInfo.ChannelDisplayName + " — " + vodInfo.Title,
 		"channel_name":   vodInfo.ChannelDisplayName,
@@ -367,6 +436,7 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		vodUpdates["twitch_category"] = vodInfo.GameCategory
 	}
 	sp.db.UpdateJobFields(job.ID, vodUpdates)
+	syncTwitchJobMetadata(job, vodUpdates)
 
 	variants, err := sp.tw.GetVodHLSPlaylist(ctx, vodID)
 	if err != nil {
@@ -378,16 +448,14 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		}, nil
 	}
 
-	var vodMaxRes int
 	var vodDownloadChat bool
 	var vodStagingDir string
 	sp.readConfig(func(c *config.MoomboxConfig) {
-		vodMaxRes = c.Downloader.MaxVideoResolution
 		vodDownloadChat = c.Downloader.DownloadChat
 		vodStagingDir = c.Paths.StagingDirectory
 	})
 
-	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, vodMaxRes)
+	variant := sp.startTwitchVariant(variants, job, nil)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "no suitable HLS quality found for VOD"}, nil
 	}
@@ -438,8 +506,11 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 			}, sp.logger)
 			result.TwitchVodChatDl = vodChatDl
 
+			// "pending" until ExecuteTwitch starts it (startChat writes
+			// "downloading"): a VOD still has the download-slot wait ahead of
+			// it, and the chat was shown downloading through all of it.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "downloading",
+				"chat_status": "pending",
 			})
 		}
 	} else {
@@ -494,28 +565,42 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				return nil, err
 			}
 			if waitInfo == nil {
-				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+				return cancelledResult(), nil
 			}
 			streamInfo = waitInfo
 			// Fall through to existing live handling below
 		} else {
-			sp.logger.Info(TwitchOfflineErrMsg, "channel", login)
-			return &StreamProcessResult{ShouldDownload: false, Error: TwitchOfflineErrMsg}, nil
+			var stagingBase string
+			sp.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+			msg := twitchOfflineError(job, stagingBase)
+			sp.logger.Info(msg, "channel", login, "jobID", job.ID)
+			return &StreamProcessResult{ShouldDownload: false, Error: msg}, nil
 		}
 	}
 
-	// A Downloading job resumed after a restart belongs to a specific
-	// broadcast. If the channel is now live with a DIFFERENT broadcast (the
-	// old one ended while Moombox was down), do not attach: the engine
-	// would discard the old broadcast's resume state and truncate its
-	// staging data, and the new broadcast would record under the old job's
-	// metadata. stream_start_time is the stable cross-restart identity —
-	// it is written once per job (guarded by `job.StreamStartTime == ""`
-	// below) for monitor-created and manually-added jobs alike. The minute
-	// of tolerance absorbs any API formatting jitter; distinct broadcasts
-	// differ by far more. The captured data stays recoverable via the Mux
-	// action, and the monitor picks the new broadcast up as its own job.
-	if job.Status == database.StatusDownloading && !sameBroadcastStart(job.StreamStartTime, streamInfo.StartedAt) {
+	// A job that already holds a capture belongs to a specific broadcast. If
+	// the channel is now live with a DIFFERENT broadcast (the old one ended
+	// while Moombox was down), do not attach: the engine would discard the
+	// old broadcast's resume state and truncate its staging data, and the new
+	// broadcast would record under the old job's metadata. stream_start_time
+	// is the stable cross-restart identity — it is written once per job
+	// (guarded by `job.StreamStartTime == ""` below) for monitor-created and
+	// manually-added jobs alike. The minute of tolerance absorbs any API
+	// formatting jitter; distinct broadcasts differ by far more. The captured
+	// data stays recoverable via the Mux action, and the monitor picks the new
+	// broadcast up as its own job.
+	//
+	// "Holds a capture" is not the same as Downloading. A manually-added job
+	// interrupted mid-broadcast and restarted while the channel was offline
+	// waits as Upcoming (waitForTwitchLive), and a monitor-created row reads
+	// Live until ExecuteTwitch starts — a second restart in either state
+	// skipped a Downloading-only guard and appended the next broadcast to the
+	// old one's footage, under the old stream_start_time.
+	var guardStaging string
+	sp.readConfig(func(c *config.MoomboxConfig) { guardStaging = c.Paths.EffectiveStagingDir() })
+	holdsCapture := job.Status == database.StatusDownloading || job.LastVideoSeq != nil ||
+		len(job.Segments) > 0 || HasSegmentFiles(guardStaging, job.ID)
+	if holdsCapture && !sameBroadcastStart(job.StreamStartTime, streamInfo.StartedAt) {
 		sp.logger.Warn("twitch broadcast changed while job was interrupted; not attaching to the new broadcast",
 			"jobID", job.ID, "channel", login,
 			"oldStart", job.StreamStartTime, "newStart", streamInfo.StartedAt)
@@ -547,6 +632,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 	if len(updates) > 0 {
 		sp.db.UpdateJobFields(job.ID, updates)
+		syncTwitchJobMetadata(job, updates)
 	}
 
 	// Get HLS variants
@@ -559,16 +645,17 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		return nil, fmt.Errorf("twitch HLS: %w", err)
 	}
 
-	var liveMaxRes int
 	var liveDownloadChat bool
 	var liveStagingBase string
 	sp.readConfig(func(c *config.MoomboxConfig) {
-		liveMaxRes = c.Downloader.MaxVideoResolution
 		liveDownloadChat = c.Downloader.DownloadChat
 		liveStagingBase = c.Paths.StagingDirectory
 	})
 
-	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, liveMaxRes)
+	variant := sp.startTwitchVariant(variants, job, map[string]any{
+		"status": database.StatusLive,
+		"is_vod": false,
+	})
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
 	}
@@ -576,12 +663,6 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	sp.logger.Info("twitch live stream ready",
 		"channel", login, "quality", variant.Name,
 		"resolution", fmt.Sprintf("%dx%d", variant.Width, variant.Height))
-
-	sp.db.UpdateJobFields(job.ID, map[string]any{
-		"status":         database.StatusLive,
-		"is_vod":         false,
-		"twitch_quality": variant.Name,
-	})
 
 	// Start Twitch IRC chat downloader if chat recording is enabled
 	var twitchChatDl *twitch.ChatDownloader
@@ -618,8 +699,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				EmoteResolver: sp.tw.Emotes,
 			}, sp.logger)
 
+			// "pending" until ExecuteTwitch starts it — see the VOD twin.
 			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"chat_status": "downloading",
+				"chat_status": "pending",
 			})
 		}
 	}
@@ -662,6 +744,37 @@ func takeLiveHint(c *twitchHintCache, lg logger, login string) *twitch.TwitchStr
 	return info
 }
 
+// syncTwitchJobMetadata copies the metadata a Twitch path just wrote back onto
+// the in-memory job, the way the YouTube path syncs its own. processJob hands
+// this struct to buildJobContext, and every embed of the capture (Download
+// Starting, Quality Split, Gap Split, Finalizing, ...) reads it — so without
+// the sync a channel added manually while offline announced itself
+// throughout as its placeholder, "<login> — Manual Add", while the dashboard
+// already showed the real title.
+func syncTwitchJobMetadata(job *database.Job, updates map[string]any) {
+	if v, ok := updates["title"].(string); ok {
+		job.Title = v
+	}
+	if v, ok := updates["channel_name"].(string); ok {
+		job.ChannelName = v
+	}
+	if v, ok := updates["thumbnail_url"].(string); ok {
+		job.ThumbnailURL = v
+	}
+	if v, ok := updates["channel_avatar_url"].(string); ok {
+		job.ChannelAvatarURL = v
+	}
+	if v, ok := updates["stream_start_time"].(string); ok {
+		job.StreamStartTime = v
+	}
+	if v, ok := updates["twitch_category"].(string); ok {
+		job.TwitchCategory = v
+	}
+	if v, ok := updates["length_seconds"].(int); ok {
+		job.LengthSeconds = &v
+	}
+}
+
 // waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
 // Returns (streamInfo, nil) when live, (nil, nil) when cancelled, (nil, err) on fatal error.
 func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.Job, login string) (*twitch.TwitchStreamInfo, error) {
@@ -670,6 +783,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		"progress":        "Waiting for stream...",
 		"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 	})
+	// Every exit clears the line, not only going live: a cancel or a give-up
+	// left "Waiting for stream..." on the Cancelled row until a Retry.
+	defer sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
 
 	consecutiveErrors := 0
 	var lastOfflineProbe time.Time
@@ -681,9 +797,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		default:
 		}
 
-		// Check if job was cancelled by user
+		// Check if job was cancelled by user — or deleted (see waitForLive).
 		currentJob, err := sp.db.GetJob(job.ID)
-		if err == nil && currentJob.Status == database.StatusCancelled {
+		if err == nil && (currentJob == nil || currentJob.Status == database.StatusCancelled) {
 			return nil, nil
 		}
 
@@ -695,7 +811,6 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		// pay the GQL round trip anyway on the iteration that finally looks.
 		if hint := takeLiveHint(sp.twitchHints, sp.logger, login); hint != nil {
 			sp.logger.Info("twitch channel is now live (monitor hint)", "channel", login)
-			sp.db.UpdateJobFields(job.ID, map[string]any{"progress": ""})
 			return hint, nil
 		}
 
@@ -757,9 +872,6 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 
 		if streamInfo != nil && streamInfo.IsLive {
 			sp.logger.Info("twitch channel is now live", "channel", login)
-			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"progress": "",
-			})
 			return streamInfo, nil
 		}
 	}

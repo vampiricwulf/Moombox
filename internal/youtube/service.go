@@ -19,19 +19,6 @@ var (
 	homepageApiKeyRe = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
 )
 
-// initRetryInterval bounds how often Init re-fetches the homepage AFTER
-// a successful fetch. 1h matches typical visitor-data rotation cadence
-// on YouTube and avoids hammering the homepage on every job. Audit
-// reports/youtube.md I4.
-const initRetryInterval = 1 * time.Hour
-
-// initFastRetryInterval is the shorter floor used after a FAILED fetch.
-// Without a separate failure interval, a startup network blip would set
-// lastInitAt eagerly and lock the process out for the full 1h with
-// empty VisitorData. 60s lets the next pulled job recover quickly while
-// still rate-limiting a sustained outage.
-const initFastRetryInterval = 60 * time.Second
-
 // visitorDataTTL caps how long a single cached visitor data is reused. The
 // sticky-write semantics in SetVisitorData prevent per-call rotation from
 // thrashing the POT cache, but a 24/7 archiver session can outlive whatever
@@ -52,14 +39,7 @@ type Service struct {
 	// state — loop-detection token sets and per-page visitorData (browse.go).
 	// Zero value usable.
 	browse browseState
-	// initMu serialises Init runs; lastInitAt is read+written under this lock.
-	// The previous initOnce one-shot meant a transient startup network failure
-	// would leave the process with empty VisitorData forever — bad for a 24/7
-	// archiver. Audit reports/youtube.md I4.
-	initMu        sync.Mutex
-	lastInitAt    time.Time
-	initSucceeded bool // true after the most recent Init fetched the homepage cleanly
-	logger        interface {
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -92,46 +72,12 @@ func NewService(jar *cookies.CookieJar, logger interface {
 	return svc
 }
 
-// Init fetches the YouTube homepage to extract visitor data + API key. Safe
-// to call repeatedly: a debounce window (initRetryInterval) suppresses
-// rapid re-runs, and a successful fetch backfills only the fields that are
-// still empty. Callers can call this defensively from any code path that
-// needs fresh VisitorData; the watch-page OnVisitorData callback continues
-// to backfill from normal traffic regardless.
-//
-// Audit reports/youtube.md I4 — was sync.Once which meant any startup-blip
-// failure left VisitorData empty for the lifetime of a 24/7 process.
+// Init fetches the YouTube homepage once, at startup, to seed visitor data
+// and the API key. It is not retried, and needs no retry: a failed fetch
+// leaves the built-in API key in place, and visitor data is backfilled by
+// every watch-page fetch through the OnVisitorData callback — the first job
+// or probe after a startup blip recovers it.
 func (s *Service) Init(ctx context.Context) {
-	s.initMu.Lock()
-	if !s.lastInitAt.IsZero() {
-		// initSucceeded gates which interval applies: a successful
-		// fetch debounces for 1h, a failed fetch debounces for 60s.
-		interval := initRetryInterval
-		if !s.initSucceeded {
-			interval = initFastRetryInterval
-		}
-		if time.Since(s.lastInitAt) < interval {
-			s.initMu.Unlock()
-			return
-		}
-	}
-	// Skip work entirely if both fields are already populated. The lock
-	// covers the read-then-set, which is enough — concurrent successful
-	// OnVisitorData callbacks could land while we're fetching, in which
-	// case we'd waste one homepage fetch but stay correct.
-	s.vdMu.RLock()
-	haveVD := s.visitorData != ""
-	s.vdMu.RUnlock()
-	currentKey := s.PlayerAPI.APIKey()
-	haveKey := currentKey != "" && currentKey != constants.DefaultAPIKey
-	if haveVD && haveKey {
-		s.lastInitAt = time.Now()
-		s.initSucceeded = true
-		s.initMu.Unlock()
-		return
-	}
-	s.initMu.Unlock()
-
 	// Load/sync cookies
 	if err := s.Auth.SyncCookies(); err != nil {
 		s.logger.Warn("[YouTube] SyncCookies failed during init", "error", err)
@@ -147,10 +93,6 @@ func (s *Service) Init(ctx context.Context) {
 	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
 	if err != nil {
 		s.logger.Warn("[YouTube] Failed to fetch homepage", "error", err)
-		s.initMu.Lock()
-		s.lastInitAt = time.Now()
-		s.initSucceeded = false
-		s.initMu.Unlock()
 		return
 	}
 	html := string(body)
@@ -175,19 +117,6 @@ func (s *Service) Init(ctx context.Context) {
 		s.PlayerAPI.SetAPIKey(m[1])
 		s.logger.Debug("[YouTube] API key extracted", "key", m[1])
 	}
-
-	// Mark this Init successful. Set lastInitAt here (not at function
-	// entry) so a failed fetch is debounced by the shorter
-	// initFastRetryInterval rather than the 1h success interval.
-	s.initMu.Lock()
-	s.lastInitAt = time.Now()
-	s.initSucceeded = true
-	s.initMu.Unlock()
-}
-
-// GetApiKey returns the current Innertube API key.
-func (s *Service) GetApiKey() string {
-	return s.PlayerAPI.APIKey()
 }
 
 // GetVideoInfo fetches video info, using authentication if cookies are available.
@@ -229,6 +158,12 @@ func (s *Service) CookielessFormats(ctx context.Context, videoID string) ([]Form
 // two-phase probe (spec §9): the ANDROID_VR/TV status probes carry no
 // microformat and therefore no dates.
 func (s *Service) ProbeVideoDate(ctx context.Context, videoID string) (publishedAt, precision string, err error) {
+	// Credentialed like ProbeVideoStatusAuthenticated, so it syncs the jar
+	// the same way: a cookies.txt replaced by hand must reach this probe
+	// too, not only the paths that happen to sync first.
+	if err := s.Auth.SyncCookies(); err != nil {
+		s.logger.Warn("[YouTube] SyncCookies failed before date probe", "error", err)
+	}
 	s.vdMu.RLock()
 	vd := s.visitorData
 	s.vdMu.RUnlock()
@@ -290,22 +225,6 @@ func (s *Service) ProbeVideoStatusAuthenticated(ctx context.Context, videoID str
 	return s.PlayerAPI.ProbeVideoStatusAuthenticated(ctx, videoID, vd)
 }
 
-// DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
-func (s *Service) DecryptDashManifestUrl(ctx context.Context, dashURL, playerURL string) string {
-	return s.PlayerAPI.DecryptDashManifestUrl(ctx, dashURL, playerURL)
-}
-
-// DecryptNParamInUrl decrypts the n-parameter in any URL.
-// Handles both query string (?n=...) and path-based (/n/{value}/) formats.
-func (s *Service) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL string) string {
-	return s.PlayerAPI.DecryptNParamInUrl(ctx, rawURL, playerURL)
-}
-
-// ReloadCookies forces a reload of cookies from the cookie file.
-func (s *Service) ReloadCookies() error {
-	return s.Auth.SyncCookies()
-}
-
 // HasAuthCookies returns true if valid authentication cookies are present.
 func (s *Service) HasAuthCookies() bool {
 	return s.Auth.HasAuthCookies()
@@ -333,14 +252,6 @@ func (s *Service) GetVisitorData() string {
 // GetCookieHeader returns the Cookie header string for authenticated requests.
 func (s *Service) GetCookieHeader() string {
 	return s.Auth.GetCookieHeader()
-}
-
-// GetAuthState returns the current authentication state for status display.
-func (s *Service) GetAuthState() map[string]bool {
-	return map[string]bool{
-		"isLoggedIn": s.Auth.HasAuthCookies(),
-		"hasCookies": s.Auth.GetCookieHeader() != "",
-	}
 }
 
 // GetFormats fetches available formats and returns them with best-selection info.

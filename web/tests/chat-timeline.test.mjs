@@ -71,13 +71,14 @@ test("formatChatHeader: a region with no messages contributes no clause", () => 
   assert.equal(formatChatHeader(120, 8, 0), "120 messages · 8 pre-show");
   assert.equal(formatChatHeader(120, 0, 3), "120 messages · 3 after end");
   assert.equal(formatChatHeader(120, 8, 3), "120 messages · 8 pre-show · 3 after end");
+  assert.equal(formatChatHeader(1, 0, 0), "1 message");
 });
 
 test("dividerLabelFor: one label per region boundary, null everywhere else", () => {
   const p = partitionChatByVideo(msgs(-90000, -5000, 0, 1000, 61000), 60000);
   assert.deepEqual(p, { preCount: 2, firstLiveIndex: 2, postCount: 1, firstPostIndex: 4 });
   assert.equal(dividerLabelFor(p, 2), "Waiting room — 2 messages before the stream");
-  assert.equal(dividerLabelFor(p, 4), "Recording ended — 1 messages after it");
+  assert.equal(dividerLabelFor(p, 4), "Recording ended — 1 message after it");
   assert.equal(dividerLabelFor(p, 0), null);   // inside the pre-show region
   assert.equal(dividerLabelFor(p, 3), null);   // inside the video
   assert.equal(dividerLabelFor(null, 2), null);
@@ -97,7 +98,7 @@ test("dividerLabelFor: waiting-room wins when both regions start on one row", ()
   const p = partitionChatByVideo(msgs(-5000, 61000, 62000), 60000);
   assert.equal(p.firstLiveIndex, 1);
   assert.equal(p.firstPostIndex, 1);
-  assert.equal(dividerLabelFor(p, 1), "Waiting room — 1 messages before the stream");
+  assert.equal(dividerLabelFor(p, 1), "Waiting room — 1 message before the stream");
 });
 
 test("indexAfter: first index whose offset is strictly greater", () => {

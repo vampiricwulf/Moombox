@@ -9,9 +9,9 @@ This document covers building, testing, releasing, updating, and running Moombox
 - Build requires **Go 1.27**; `go.mod` carries `toolchain go1.27.1`, the floor local builds and CI auto-download; the Docker stage takes its patch from the floating `golang:1.27-bookworm` tag (`GOTOOLCHAIN=local` inside the image). Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI publishes on tag push only** (tags matching `v*`), and only after the test suite has passed on the tagged commit. The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
-- **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
+- **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected, and so are releases without a valid signed manifest (`moombox-manifest.json`) naming that release, a newer version and the binary's SHA-256. Only a release before `FirstManifestVersion` (2.8.11), which never had a manifest, is one to install by hand; from it on, a release without its signed manifest is refused as a failure, and a binary installed by hand would fail Verify Signature for the same missing assets.
 - **Exit code 42** is the restart signal. The launcher process respawns the child when it exits with this code. Code 0 and a user-intent code (130/143, or a launcher-forwarded stop) propagate and terminate. Any other non-zero code is either an automatic rollback (first boot after an update), a fail-fast propagation (a fresh launch that died inside the 60 s healthy window), or a supervised crash respawn with backoff — see §Launcher/Supervisor Pattern.
-- **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. On a fresh launch it fails fast and propagates like any other startup-time code; what makes it its own code is that the post-update window never rolls back on it — the environment failed, not the new binary.
+- **Exit code 3** (`exitCodeStartupError`) is a DETERMINISTIC startup failure — an unreadable config, a logger that cannot open its file, a refused database migration, or (headless only) a web bind the host will not give. It always propagates, never crash-respawns, and the post-update rule never rolls back on it — the environment failed, not the new binary. Its timing decides nothing: the child waits for a keypress before exiting 3, so how long it "ran" measures the operator, not the binary (`classifyChildExit`, `cmd/moombox/launcher.go`).
 - **Version is set in `cmd/moombox/main.go`** as `var version = "x.y.z"`. CI overrides this via `-ldflags -X main.version=...` at build time.
 - **Windows resource embedding** uses `go-winres` to generate `.syso` files at build time. These files are not committed to the repository.
 - **CGO_ENABLED=0** — the build uses no C dependencies. This is enforced in CI and expected locally.
@@ -58,7 +58,7 @@ The two embed sources are independent:
 - `tools/fetch-node/main.go` is a Go tool that downloads the pinned Node release from `nodejs.org/dist/` for all three platforms (Windows x64, Linux x64, Linux arm64), SHA-256 verifies each against hardcoded constants in the source, gzips them to `internal/bgutils/embed/node-windows-amd64.gz`, `node-linux-amd64.gz`, and `node-linux-arm64.gz`, and updates `internal/bgutils/embed/version.txt` (committed file used as the cache-invalidation key for first-launch extraction). 5-minute HTTP timeout + 200 MB body cap per file.
 - `bgutil-sidecar/build.mjs` is a Node.js script that `tar -czf` packages the production-only `node_modules/` + `src/server.js` + `package*.json` into `dist/sidecar.tar.gz` and copies the result to `internal/bgutils/embed/sidecar.tar.gz`. Build-time `tar` is required (system binary; available on Windows 10+, all Linux distros, and macOS) but the runtime extraction inside Moombox uses pure Go (`archive/tar` + `compress/gzip` from stdlib) — end users do NOT need a system tar.
 
-To skip the sidecar entirely (smaller binary, but PO tokens fall back to websafe-only), set `[bgutils] use_sidecar = false` in `config.toml`. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
+To run without the sidecar, set `[bgutils] use_sidecar = false` in `config.toml`; Moombox then mints no PO tokens and cannot solve signature ciphers, so formats that need either become unavailable. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
 
 ### Windows Resource Embedding
 
@@ -194,7 +194,7 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 - **`release`** — the binaries; steps below.
 - **`docker`** — calls `.github/workflows/docker-publish.yml` with `push` true only for a tag push. It `needs` both `test` and `release`, so a failed build or signature check cannot leave a pushed `latest` image for a version that has no release.
 
-**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the six assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with six assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
+**Dry run.** "Run workflow" on any ref runs all three jobs exactly as a tag would. What publishes is the tag *push* — every gate tests `github.event_name == 'push'` — so a manual run started on a tag ref is still a dry run and cannot overwrite that release's assets. In a dry run the image is built for both architectures but not pushed, and the release step uploads the eight assets to a *draft* release named `dryrun-<run id>-<attempt>` — never public, and it creates no git tag — which the following step checks (a draft with eight assets) and deletes. The upload therefore runs with the same action, token and file list a tag uses. Signing runs, self-check included, so a wrong `SIGNING_KEY` is caught before a tag exists — and so does the manifest step, which writes and signs a manifest for the dry run's `-dryrun` version and draft tag, so the manifest pipeline is exercised too. The dry run's version is the one `cmd/moombox/main.go` declares plus `-dryrun`. It exists because this workflow otherwise runs on tags alone and a tag is never replaced: a break in it was found by the release it broke.
 
 #### Release job steps
 
@@ -212,9 +212,10 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 12. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`, verified against the updater's embedded public key before the step succeeds (see Signing Tool)
 13. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
 14. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
-15. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
-16. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 15 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`, with `fail_on_unmatched_files` so a missing asset fails the step instead of publishing without it. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases. One step for both modes: a tag push publishes under its tag; a dry run uploads to the draft described above.
-17. **Check and delete the draft** (dry run only) — requires a draft with six assets, and deletes it first so a failed check leaves nothing behind.
+15. **Write and sign the release manifest** — `go run ./cmd/sign -manifest -version "$VERSION" -tag "$RELEASE_TAG"` → `moombox-manifest.json` (the version, the tag, and each platform's asset name and SHA-256) and `moombox-manifest.json.sig`, self-checked like the binaries' (see Signing Tool, and [security.md](security.md) § Release Manifest for why the binaries' own signatures are not enough).
+16. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
+17. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 16 and 8 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`, `moombox-manifest.json` + `.sig`, with `fail_on_unmatched_files` so a missing asset fails the step instead of publishing without it. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases. One step for both modes: a tag push publishes under its tag; a dry run uploads to the draft described above.
+18. **Check and delete the draft** (dry run only) — requires a draft with eight assets, and deletes it first so a failed check leaves nothing behind. `TestReleaseWorkflowPublishesTheSignedManifest` (`cmd/sign/main_test.go`) holds that count to the upload list.
 
 Steps 5 and 6 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. The job used to cache them, and that cache never hit — a cache saved by one tag's run is not readable from another tag's (v2.8.3 through v2.8.10 all missed) — while its key left out `bgutil-sidecar/src` and the vendored ejs, so a hit would have shipped the previous sidecar JS under a new version number.
 
@@ -227,7 +228,7 @@ The three builds (steps 8, 9 and 11) are sequential (not parallel). On a 4-vCPU 
 **Runners:** `ubuntu-latest` and `windows-latest` (matrix, `fail-fast: false`) — the Windows-only code paths (DPAPI cookie reading, Job Objects, cookie profile paths) have tests that skip everywhere else
 **Permissions:** `contents: read`; one run per calling workflow and ref (`concurrency` with cancel-in-progress — the group carries `github.workflow`, the caller's name under `workflow_call`, so a release dry run from `main` and a push to `main` do not cancel each other); 45-minute job timeout
 
-Steps, on both runners: checkout → a cache for the three pinned Node binaries (keyed by `runner.os` + the hash of `version.txt` and `tools/fetch-node/main.go`) → `setup-go` from `go.mod` → `setup-node` 24 → the sidecar payload build, on every run (the tarball is never cached, so the Go tests embed the sidecar JS of the commit under test) → `go run ./tools/fetch-node` on a cache miss → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go mod tidy -diff` → `go vet ./...` → the `modernc.org/libc` pin check (the version `modernc.org/sqlite`'s own `go.mod` names must be the one this module pins) → the Dockerfile Go-version check (its `golang:<major.minor>` build stage must match `go.mod`'s `go` line; the image's Go does not download a newer toolchain, and nothing else builds the image before a release) → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally runs `go test -race -count=1` on `internal/logger/...`, `internal/database/...` and `internal/web/...` (owner ruling O-P), cross-builds `linux/arm64`, runs `bgutil-sidecar`'s `npm test` (against the `node_modules` and `vendor/ejs.bundle.js` the sidecar payload build left in place), and runs the frontend suite (`npm ci` in `web/tests`, `node --test ./*.test.mjs` — jsdom is that package's devDependency, so the DOM suites execute rather than skip).
+Steps, on both runners: checkout → a cache for the three pinned Node binaries (keyed by `runner.os` + the hash of `version.txt` and `tools/fetch-node/main.go`) → `setup-go` from `go.mod` → `setup-node` 24 → the sidecar payload build, on every run (the tarball is never cached, so the Go tests embed the sidecar JS of the commit under test) → `go run ./tools/fetch-node` on a cache miss → FFmpeg (`apt-get` on ubuntu, `choco` on windows) so `muxer_concatcopy_test.go` and `probe_params_test.go` run instead of skipping → `gofmt -l` must print nothing → `go mod tidy -diff` → `go vet ./...` → the `modernc.org/libc` pin check (the version `modernc.org/sqlite`'s own `go.mod` names must be the one this module pins) → the Dockerfile Go-version check (its `golang:<major.minor>` build stage must match `go.mod`'s `go` line; the image's Go does not download a newer toolchain, and nothing else builds the image before a release) → `staticcheck ./...` → `go build ./...` → `go test -count=1 ./...`. ubuntu additionally runs `go test -count=1 -race ./...` over the whole module (owner ruling O-P began it on `internal/logger`, `internal/database` and `internal/web`; it widened to every package on 2026-10-09, with a 20-minute step timeout of its own — a test that budgets allocations or fits a probe inside one wall-clock second widens its gate or skips under the race build through its package's `raceEnabled` constant, and the plain `go test` step still runs it), cross-builds `linux/arm64`, runs `bgutil-sidecar`'s `npm test` (against the `node_modules` and `vendor/ejs.bundle.js` the sidecar payload build left in place), and runs the frontend suite (`npm ci` in `web/tests`, `node --test ./*.test.mjs` — jsdom is that package's devDependency, so the DOM suites execute rather than skip).
 
 `staticcheck ./...` is a hard gate, installed at a pinned release (`2026.2.1` in `.github/workflows/ci.yml`) because staticcheck lags Go releases and `@latest` can refuse a new toolchain. The live gates (`MOOMBOX_LIVE_*`) never run in CI: they need YouTube and Twitch.
 
@@ -285,35 +286,35 @@ The `commit` variable is resolved at build time via ldflags, or at runtime from 
 
 ## Self-Update Flow
 
-The self-updater lives in `internal/updater/`. It checks GitHub Releases, downloads the new binary, verifies its signature, and replaces the running executable.
+The self-updater lives in `internal/updater/`. It checks GitHub Releases, verifies the release's signed manifest, downloads the new binary, verifies its signature and its SHA-256 against the manifest, and replaces the running executable.
 
 ### Step-by-Step
 
-1. **Check** (`updater.go: CheckForUpdate`) — Queries `https://api.github.com/repos/vampiricwulf/Moombox/releases/latest`. Compares the remote version against the current version using semver comparison. Returns `nil` if already up-to-date, or a `ReleaseInfo` struct if a newer version exists. HTTP timeout: 10 seconds.
+1. **Check** (`updater.go: CheckForUpdate`) — Queries `https://api.github.com/repos/vampiricwulf/Moombox/releases/latest`. Compares the remote version against the current version using semver comparison. Returns `nil` if already up-to-date, or a `ReleaseInfo` struct if a newer version exists. HTTP timeout: 10 seconds. An up-to-date answer from any check — the periodic one, the Web's "Check for updates", the TUI's `R V` — withdraws a release still pending (`routes.ClearPendingUpdate`): it was pulled from GitHub, and its download no longer exists. Only the release pending when the check STARTED is withdrawn — another check can find one during this one's GitHub round trip. Both UIs drop the badge (`update_cleared`, and the TUI's tagged clear).
 
-2. **Download binary** (`updater.go: ApplyUpdate`) — Downloads `Moombox.exe` from the release assets to `<exe-path>.new`. HTTP timeout: 5 minutes (separate client from the 10-second API client, since binaries are 10-30 MB).
+2. **Verify the manifest** (`manifest.go: verifiedManifestEntry`) — Before anything else is downloaded, fetches the release's `moombox-manifest.json` and `moombox-manifest.json.sig` (recorded by the check) to a temp directory, refuses one over 64 KiB, verifies its signature with the embedded public key, and refuses unless its version and tag are exactly the release being applied, that version is newer than the running one, and it has an entry for the running GOOS/GOARCH naming the asset step 3 downloads. A release that publishes no manifest, or publishes it without its `.sig`, is still reported by the check, but its apply is refused, and how depends on the release. Every release from `FirstManifestVersion` (2.8.11) on — which covers every release a binary carrying this check can be offered — is published with the signed manifest, so for one of those its absence is a failure, the missing asset named and no manual install advised ("release vX publishes no manifest (moombox-manifest.json), though every release from 2.8.11 on is published with a signed one — refused: … so it must not be installed by hand either"): a binary installed by hand would fail `VerifyCurrentSignature` for the same assets (§ Signature Verification of Current Binary). A release before it never had a manifest, and the refusal points at its release page: "release vX publishes no signed manifest … update manually: download it from <release page> and replace the binary". See [security.md](security.md) § Release Manifest.
 
-3. **Download signature** — Downloads `Moombox.exe.sig` to `<exe-path>.new.sig`.
+3. **Download binary** (`updater.go: ApplyUpdate`) — Downloads the running platform's binary asset from the release — `Moombox.exe`, `moombox-linux-amd64` or `moombox-linux-arm64`, chosen by GOOS/GOARCH through `releaseAssetMap` — to `<exe-path>.new`. A separate client from the 10-second API client, since binaries are 78-87 MB: what ends a download is a STALL — no byte for `downloadStallTimeout` (60 s), response headers included — reported as "download stalled: no data for 1m0s". A total deadline only backstops it (`downloadMaxDuration`, 2 hours, about 12 KB/s for the largest binary). The Web's apply runs detached from its request (`context.WithoutCancel`): a browser stops waiting for the response long before a slow download ends (Firefox after 300 s), and the abort used to cancel the download with it; the dashboard now reads a lost response as "the update may still be downloading", and the restart follows when it lands. The 5-minute total deadline this used to carry killed every download slower than about 2.3 Mbit/s however steadily it was arriving.
 
-4. **Verify** (`signing.go: VerifySignature`) — Reads the `.new` binary and `.new.sig` file. Verifies using the **embedded Ed25519 public key** (`71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb`). Signature must be exactly 64 bytes. On failure: `.new` and `.new.sig` files are deleted, error is returned to the caller.
+4. **Download signature** — Downloads that asset's `.sig` (`Moombox.exe.sig`, `moombox-linux-amd64.sig`, …) to `<exe-path>.new.sig`.
 
-5. **Replace** (3-step rename dance):
-   - Remove stale `.old` file if it exists
-   - `current.exe` -> `current.exe.old` (rename running binary out of the way)
-   - `current.exe.new` -> `current.exe` (place new binary)
-   - If the second rename fails: attempts rollback by renaming `.old` back to the current path. If rollback also fails, logs an error (binary may be in an inconsistent state).
+5. **Verify** (`signing.go: VerifySignature`, then `manifest.go: verifyFileSHA256`) — Reads the `.new` binary and `.new.sig` file. Verifies using the **embedded Ed25519 public key** (`71ce2f926296a552950faa1fd7d3e89574e14ec353aa253f2577f6883fdf51eb`). Signature must be exactly 64 bytes. Then hashes `.new` and compares it with the manifest's SHA-256 for this platform — a validly signed binary that is not the one this release published for this platform fails here. On failure: `.new` and `.new.sig` files are deleted, error is returned to the caller.
 
-6. **Breadcrumb** — After a successful swap, `ApplyUpdate` writes `<exe-path>.update-pending` containing the target release tag. The next boot resolves it: a boot running that version deletes it (update landed); a boot running a *different* version alongside a failed-update marker (the launcher auto-rolled back — see below) records the tag as `updates.skipped_version` so automatic checks stop offering the broken release (a manual "Check for updates" still retries it deliberately), then deletes it. Binaries that predate the breadcrumb ignore it; stale copies are inert until the next aware boot cleans them up.
+6. **Replace** — remove a stale `.old` file if one exists, then keep the running binary at `.old` and place `.new` at the plain name:
+   - **Linux**: `.old` is a hard link to the running binary (`keepBackupByLink`), and `current.new` -> `current` is one rename over it, so the plain name always holds the old binary or the new one — a kill or power loss mid-swap cannot leave it empty. If the rename fails, the link and `.new` are removed and the running binary is untouched. (A filesystem without hard links falls back to the Windows sequence.)
+   - **Windows**, which cannot rename over a running image: `current.exe` -> `current.exe.old` (rename running binary out of the way), then `current.exe.new` -> `current.exe` (place new binary). For those milliseconds the plain name is empty. If the second rename fails: attempts rollback by renaming `.old` back to the current path. If rollback also fails, logs an error and writes `<exe>.update-broken` (binary may be in an inconsistent state; `.new` is kept).
 
-7. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary.
+7. **Breadcrumb** — After a successful swap, `ApplyUpdate` writes `<exe-path>.update-pending` containing the target release tag. The next boot resolves it: a boot running that version deletes it (update landed) — and first deletes an `.update-failed` marker OLDER than the breadcrumb, logging its path: a later update has applied successfully, so that marker's rollback instructions are stale (`clearSupersededFailureMarker`, `cmd/moombox/helpers.go`; a marker newer than the breadcrumb is this very update's own failed first launch and stays, and `.update-broken` is never touched); a boot running a *different* version alongside a failed-update marker (the launcher auto-rolled back — see below) records the tag as `updates.skipped_version` so automatic checks stop offering the broken release (a manual "Check for updates" still retries it deliberately), then deletes it. Binaries that predate the breadcrumb ignore it; stale copies are inert until the next aware boot cleans them up.
 
-8. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, `.new.sig` and `.failed` files left by previous updates, interrupted downloads or an automatic rollback; on Windows it also sweeps an orphaned `~`. `<exe>.sig` is deliberately spared — Moombox never writes it, and it is the published signature asset a manual verifier leaves beside the binary.
+8. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary. Until it does, the process is restart-pending: a placed update latches the Updater's `applied` flag and every later `ApplyUpdate` in that process is refused ("an update is already applied — restart pending"). A second apply — `R U` pressed again inside the restart's grace window, or a TUI apply after a Web one — would otherwise make `.old` the binary the first apply had just placed, so the running binary, the only rollback artifact, would be gone from disk. A failed apply changed nothing and does not latch. The TUI drops its update badge and `R U` once an apply succeeds.
+
+9. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, `.new.sig` and `.failed` files left by previous updates, interrupted downloads or an automatic rollback; on Windows it also sweeps an orphaned `~`. `<exe>.sig` is deliberately spared — Moombox never writes it, and it is the published signature asset a manual verifier leaves beside the binary.
 
 ### Automatic Rollback
 
-If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is KEPT as `<exe>.failed` and named in the `.update-failed` marker — the restored (older) binary may refuse a database the new version already migrated, and its refusal message points the operator at exactly that file, named from the RUNNING binary's own filename — a Linux install reads `moombox.failed` and `moombox.update-failed`, not the Windows spelling the message used to hard-code, and it no longer mentions a `.old` artifact, because an automatic rollback renames the rollback artifact back to the plain name and leaves none. The two suffixes are mirrored by `RollbackArtifactSuffixes` (`internal/database/migrations.go`) — package main is unimportable and `internal/database` imports nothing internal, so `TestDowngradeRefusalNamesTheLauncherArtifacts` (`cmd/moombox/rollback_artifact_names_test.go`) is what keeps the two sides from drifting — the preserved rollback artifact is renamed back to the plain name (`rollbackArtifactPath` in
-`cmd/moombox/launcher_windows.go` prefers `<exe>.old` when it is still on disk and falls back to
-`<exe>~`; on Linux, `cmd/moombox/launcher_unix.go`, it is always `.old`), the marker documents the rollback and names the kept `.failed` path, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. When the artifact is already gone (the boot survived to the milestone sweep before dying) or the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`).
+If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) while its rollback artifact is still on disk — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is KEPT as `<exe>.failed` and named in the `.update-failed` marker — the restored (older) binary may refuse a database the new version already migrated, and its refusal message points the operator at exactly that file, named from the RUNNING binary's own filename — a Linux install reads `moombox.failed` and `moombox.update-failed`, not the Windows spelling the message used to hard-code, and it no longer mentions a `.old` artifact, because an automatic rollback renames the rollback artifact back to the plain name and leaves none. The two suffixes are mirrored by `RollbackArtifactSuffixes` (`internal/database/migrations.go`) — package main is unimportable and `internal/database` imports nothing internal, so `TestDowngradeRefusalNamesTheLauncherArtifacts` (`cmd/moombox/rollback_artifact_names_test.go`) is what keeps the two sides from drifting — the preserved rollback artifact is renamed back to the plain name (the file `handleUpdateRestart` named at the restart that armed the boot, recorded then in `postUpdateBoot` rather than looked up at the exit: on Windows, `cmd/moombox/launcher_windows.go`, `<exe>~` when it renamed `.old` there — every first update of a launcher lifetime — and `<exe>.old` when it could not; on Linux, `cmd/moombox/launcher_unix.go`, always `.old`), the marker documents the rollback and names the kept `.failed` path, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. On Linux the broken binary is kept at `.failed` by a hard link (`keepAsideByLink`, `cmd/moombox/launcher_unix.go`) and the artifact is renamed over the plain name in one step, so the plain name is never empty and a failed restore leaves the broken binary there (its link removed); Windows moves it aside first, with retries, because only that step can be retried around a scanner still holding the fresh download. When the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`). A boot whose artifact is already gone (it survived to the milestone sweep before dying) never takes this path; it is the supervised crash of the next paragraph.
+
+A boot whose artifact is already gone has nothing to roll back to (`postUpdatePastRollback`, `cmd/moombox/launcher.go`): on Linux it reached the first-successful-boot milestone, whose sweep removed `.old`, and its exit is an ordinary crash — supervised, so it is respawned however soon it comes rather than taking the fail-fast arm. Such an exit used to end the launcher on preserve-with-instructions, with nothing to preserve, where any other boot's crash is respawned. Windows keeps the launcher's `~` image past that sweep, so where `~` is the artifact a release that crashes soon after starting is still rolled back while the window lasts. Where it is not — a later update in the same launcher lifetime, whose `.old` could not be renamed over that image — the boot is judged by its `.old`: once its milestone sweeps it, the boot is past rollback as on Linux. The `~` file is then two versions back, and restoring it used to roll the install back past the release in between, which the milestone had just deleted.
 
 A deterministic startup failure (exit code 3, `exitCodeStartupError`) is never treated as a broken update: `classifyPostUpdateExit` sends it down the preserve path instead, the rollback is skipped, the artifact is preserved with written instructions, and — because the next boot runs the same version the `.update-pending` breadcrumb names — the release is not marked skipped. The environment failed, not the binary.
 
@@ -321,19 +322,26 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 
 ### Signature Verification of Current Binary
 
-`VerifyCurrentSignature` allows verifying the running binary against its published signature. It fetches the `.sig` file for the current version's tag from GitHub, downloads it to a temp file, and verifies against the running executable. This is used for integrity checks (e.g., verifying the binary hasn't been tampered with post-install). Returns an error for local/dev builds that have no corresponding GitHub release.
+`VerifyCurrentSignature` allows verifying the running binary against its published release. It fetches the `.sig` file for the current version's tag from GitHub, downloads it to a temp file, and verifies against the running executable; then it verifies the release's signed manifest (`moombox-manifest.json` and its `.sig`) and checks that it names the running release and that the running platform's entry hashes to the running executable — the `.sig` alone would also pass a validly signed binary of another release or platform. From `FirstManifestVersion` (2.8.11, the first release cut by the manifest pipeline) on, a release that publishes no manifest, or an unsigned one, fails the verify with the missing asset named. A release before it publishes none and is verified by its `.sig` alone, and the Web (`manifest: false` from `POST /api/update/verify`) and the TUI (`R S`) say so in the warning colour instead of calling it the full check ([security.md](security.md) § Release Manifest). This is used for integrity checks (e.g., verifying the binary hasn't been tampered with post-install). Returns an error for local/dev builds that have no corresponding GitHub release.
 
 ### Error Handling
 
 | Scenario | Behavior |
 |----------|----------|
 | GitHub API unreachable | Error returned, no update attempted |
-| No `Moombox.exe` asset in release | Error returned ("no Moombox.exe asset found") |
+| Running on a platform `releaseAssetMap` does not list | Error returned ("auto-update unsupported on <os>/<arch>") |
+| No binary asset for this platform in the release | Error returned ("no <asset> asset found in release <tag>", e.g. "no moombox-linux-arm64 asset found in release v2.8.10") |
 | No `.sig` asset in release | Error returned ("no signature file found") |
+| No `moombox-manifest.json` (or its `.sig`) in a release from `FirstManifestVersion` (2.8.11) on | Offered by the check (a Warn line says it will be refused and must not be installed by hand); the apply fails before any download, naming the missing asset, with no manual install advised ("… publishes no manifest … though every release from 2.8.11 on is published with a signed one — refused") — installed by hand, it would fail Verify Signature too |
+| No `moombox-manifest.json` (or its `.sig`) in a release before 2.8.11 | Offered by the check (a Warn line says it must be installed manually); the apply is refused before any download ("… publishes no signed manifest … update manually") |
+| Manifest signature invalid, over 64 KiB, malformed, for another version or tag, not newer than the running version, or without this platform's entry | Refused before the binary is downloaded; error names the cause |
+| Binary's SHA-256 differs from the manifest's | `.new` cleaned up, error returned ("manifest check failed: … does not match the signed manifest's …") |
 | Download fails | `.new` file cleaned up, error returned |
 | Signature verification fails | `.new` and `.new.sig` cleaned up, error returned |
 | Rename of current binary fails | `.new` cleaned up, error returned |
 | Rename of `.new` to current fails | Rollback attempted (`.old` -> current), error returned |
+| An update was already applied in this process | Refused before downloading ("an update is already applied — restart pending") |
+| An earlier swap failed both ways (`.update-broken` present), or nothing is at the exe path | Refused before downloading ("… recover by hand before updating"): that state's only binary is `.old`, and a retry overwrote the kept `.new` and removed `.old` before its rename failed for want of an exe (`swapLeftBroken`) |
 
 ---
 
@@ -349,20 +357,29 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 
 - **Parent process** (no `_MOOMBOX_CHILD` in environment): Runs `launchAndSupervise()`. Spawns itself as a child process with `_MOOMBOX_CHILD=1` and waits.
 - **Child process** (`_MOOMBOX_CHILD=1`): Runs the full application service stack.
+- **Stop forwarding** (`forwardStop`, `cmd/moombox/launcher.go`): the single-instance lock lives in the launcher, so a SIGTERM to the launcher's PID is passed on to the child (killed only if it cannot be signalled) instead of leaving it running unlocked. On Windows the launcher records the stop and sends nothing: Go raises SIGTERM there only for the console close, logoff and shutdown events, which reach every process on the console, so the child already has its own and is shutting down gracefully inside Windows' grace period. Signalling cannot deliver SIGTERM on Windows, and the `Kill` fallback the launcher used to take was `TerminateProcess` milliseconds into that shutdown.
 
 **Parent behavior on child exit** (the `switch` in `launchAndSupervise`, `cmd/moombox/launcher.go`, in this order):
 - Exit code 42 (`exitCodeRestart`): Respawn the child (loop continues). If `<exe>.old` exists (from an
   update), rename it to `<exe>~` to free the `.old` name for future updates. A rename that fails — the
   `~` name is still held by this launcher's own mapped image, which happens on the second update of one
   launcher lifetime — is reported on stderr and leaves `.old` in place as the rollback artifact.
+  A restart that found `.old` arms the next child as that update's first boot and records its
+  rollback artifact (`postUpdateBoot`, `cmd/moombox/launcher.go`, which judges that boot's exit and
+  rolls it back); a config restart inside a still-unproven first boot's `postUpdateFailureWindow`
+  carries both forward, and any other exit of that boot ends the one-shot.
 - Normal exit (code 0): Terminate.
 - A launcher-forwarded stop (SIGTERM): propagate the child's code without respawning, and without
   writing an update-failed marker — stopping the service right after an update must not leave a scary
   "update failed" marker behind.
-- A non-zero exit from the FIRST boot after an update, inside `postUpdateFailureWindow` (2 minutes):
-  automatic rollback (above), unless the code is `exitCodeStartupError`, which is preserved-with-
-  instructions instead.
+- A non-zero exit from the FIRST boot after an update, inside `postUpdateFailureWindow` (2 minutes)
+  and with its rollback artifact still on disk: automatic rollback (above), unless the code is
+  `exitCodeStartupError`, which is preserved-with-instructions instead — whenever it arrives, since
+  its timing is the operator's keypress. With the artifact gone the exit is an ordinary crash, and a
+  supervised one (below) however soon it comes.
 - Exit code 130 or 143 (128+SIGINT / 128+SIGTERM): propagate — user intent.
+- Exit code 3 (`exitCodeStartupError`) otherwise: propagate, whatever the timing and whether or not
+  the child was a respawn — a respawn hits the same wall.
 - Any other non-zero exit within `launcherHealthyWindow` (60 s) on a FRESH launch: propagate and
   terminate — a deterministic startup failure must fail fast and visibly, not crash-loop against the
   same wall.
@@ -375,19 +392,24 @@ The launcher enables graceful restarts without process chain buildup. When Moomb
 - The parent ignores `os.Interrupt` (Ctrl+C) — the child handles signals.
 - The `createNoWindow` flag (`0x08000000`) is used when spawning cleanup processes, not the child itself. The child inherits the parent's console (stdin/stdout/stderr are piped through).
 
-**Old binary cleanup:** After an update, the old binary is at `<exe>.old` but is locked because the launcher (parent) is still running from the old binary. The launcher renames `.old` -> `<exe>~`. On exit, the launcher spawns a detached `cmd /C ping 127.0.0.1 -n 5 >nul & del /f /q <exe>~` process to delete the stale file after the launcher fully exits — 5 pings at the 1 s default interval is about 4 s of wall-clock delay, enough for the launcher to release the file lock. `ping` is used rather than `timeout` because it has no stdin dependency in a detached process.
+**Old binary cleanup:** After an update, the old binary is at `<exe>.old` but is locked because the launcher (parent) is still running from the old binary. The launcher renames `.old` -> `<exe>~`. On exit, the launcher spawns a detached `cmd /C ping 127.0.0.1 -n 5 >nul & del /f /q "%MOOMBOX_OLD_LAUNCHER%" >nul 2>nul` process to delete the stale file after the launcher fully exits — 5 pings at the 1 s default interval is about 4 s of wall-clock delay, enough for the launcher to release the file lock. `ping` is used rather than `timeout` because it has no stdin dependency in a detached process. The path reaches `del` through that environment variable, never as text on the command line (`deferDeleteCommand`, `cmd/moombox/launcher_windows.go`): as a bare argument, an install directory like `D:\Tools&Apps` split the line at its `&` and `del /f /q D:\Tools` silently emptied the sibling directory, and a `%NAME%` in the path was expanded.
 
 When that rename cannot happen, the surviving `.old` is the freshest previous binary and the `~` file is
-one version older still; the rollback path prefers `.old` for exactly that reason, and the `~` file is
-swept by the next launcher start once the `.update-failed` marker is gone.
+one version older still; `handleUpdateRestart` names `.old` as the update's artifact for exactly that
+reason, and the `~` file never stands in for it, even after the boot's milestone has swept it. The `~` file is
+swept by the next launcher start once neither failed-update marker (`.update-failed`, `.update-broken`)
+remains (`cleanupOrphans`, `cmd/moombox/launcher_windows.go`) — or by a healthy boot's `CleanupOldBinary`,
+whenever no running launcher still holds it. An `.update-failed` marker does not stand forever: once a
+LATER update has landed, its boot deletes the marker (`clearSupersededFailureMarker`, step 6 above), and
+the launcher's `~` cleanup — the deferred delete on exit and the startup sweep — resumes.
 
 ### Restart Triggers
 
-All restart triggers call `triggerRestart(source)`, which:
+All restart triggers call `triggerRestart(source)` (`cmd/moombox/services.go`), which:
 1. Logs `"Restart requested"` with the source string
 2. Sets `restartRequested.Store(true)` (atomic bool)
-3. Calls `cancel()` to cancel the root context (propagates to all services)
-4. Calls `quitTUI()` if the TUI is running
+3. Starts the web server's drain (`StartDrain`), so no new request is taken
+4. After a 5-second grace — time for the response that asked for the restart to reach its client — calls `cancel()` to cancel the root context (propagates to all services) and `quitTUI()` if the TUI is running
 
 | Source | Trigger |
 |--------|---------|
@@ -407,13 +429,14 @@ Shutdown is triggered by context cancellation (from signal handler, restart trig
 ### Order
 
 1. **Stop monitors** — TwitchMonitor, DecapiMonitor, FeedMonitor (prevents new job creation)
-2. **Stop download worker** — Waits for active downloads to save state (resume files)
-3. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 10-second force-exit, not `Wait`'s 30-second timeout: step 2 can legitimately spend the whole window draining a segment mux, so the drain gets 0–10 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
-4. **Stop cookie services** — CookieRefresh, AutoCookies
-5. **Cleanup PO token provider** — Releases Goja VMs
-6. **Stop web server** — Closes HTTP listener and WebSocket connections
-7. **Unsubscribe event listeners** — Log forwarder, WebSocket job update subscribers
-8. **Close database** — Flushes pending writes, closes SQLite connection
+2. **Stop the trim service** — `TrimService.Stop` cancels every trim it runs (a dashboard's detached one, a TUI's in-process one, a finished job's post-download one), waits up to 2 seconds for each to remove its `.partial.mp4`, and refuses any trim asked for after it. A stopped trim sends no `trim_error`: nothing failed, and a UI that asked has its answer. The exception is the post-download trim, which nobody asked for from a dialog: it sends `trim_error` itself (`postDownloadTrim`)
+3. **Stop download worker** — Waits for active downloads to save state (resume files)
+4. **Flush notifications** — `notifyMgr.BeginShutdown()` ran before step 1, so every embed emitted during the stop is a SINGLE attempt; `notifyMgr.Wait()` then closes each target's queue and drains what is already in it. The real bound is the process's own 15-second force-exit, not `Wait`'s 30-second timeout: step 2 can spend up to 2 of those seconds (`worker.TrimStopWait`) on a trim whose FFmpeg will not die, and step 3 can legitimately spend 12 (`worker.StopBudget`) waiting out in-flight jobs and their muxes, so the drain gets whatever is left — as little as 1 s. An embed emitted during a shutdown with a slow Discord is lost, by design (owner ruling) — extending the force-exit would trade a hung shutdown for one embed.
+5. **Stop cookie services** — CookieRefresh, AutoCookies
+6. **Cleanup PO token provider** — Releases Goja VMs
+7. **Stop web server** — Closes HTTP listener and WebSocket connections
+8. **Unsubscribe event listeners** — Log forwarder, WebSocket job update subscribers
+9. **Close database** — Flushes pending writes, closes SQLite connection
 
 Each service stop is wrapped in `stopService(name, fn)` which provides:
 - Panic recovery (one failing service cannot block shutdown of others)
@@ -421,10 +444,10 @@ Each service stop is wrapped in `stopService(name, fn)` which provides:
 
 ### Force-Exit Timer
 
-A 10-second `time.AfterFunc` timer starts at shutdown entry. If graceful shutdown has not completed within 10 seconds, the timer fires:
+A `time.AfterFunc` timer (`forceExitAfter`, 15 seconds) starts at shutdown entry. It is the download worker's whole stop budget (`worker.StopBudget`: a 10-second wait for in-flight jobs, then mux cancellation and a 2-second grace) plus a 3-second margin — it must outlast that budget and the trim service's stop ahead of it (up to 2 seconds, `worker.TrimStopWait`) together, because its clock starts first and a shorter backstop would exit before the worker cancelled its muxes, leaving FFmpeg writing into staging the restarted child re-muxes with `-y`. What the trim stop and the worker leave of the margin is the notification flush's; the timer is not widened for the trim stop, since the owner's ruling caps a graceful shutdown at 15 s. If graceful shutdown has not completed in time, the timer fires:
 1. Logs `"Graceful shutdown timed out, forcing exit"`
-2. Calls `log.Close()` to flush buffered logs
-3. Calls `os.Exit(1)`
+2. Closes the rate limiters, the database (final WAL checkpoint) and the log (flushing buffered lines)
+3. Exits with code 42 when a restart was requested, else 0 — never 1, which the launcher would treat as a crash and respawn a daemon the user just quit
 
 After graceful shutdown completes, if `restartRequested` is true, the child process exits with code 42 (triggering launcher respawn). Otherwise, it exits with code 0.
 
@@ -434,7 +457,7 @@ After graceful shutdown completes, if `restartRequested` is true, the child proc
 
 **Location:** `cmd/sign/main.go`
 
-A standalone CLI tool used exclusively by CI to sign release binaries.
+A standalone CLI tool used exclusively by CI to sign release binaries and the release manifest.
 
 ### Usage
 
@@ -442,6 +465,11 @@ A standalone CLI tool used exclusively by CI to sign release binaries.
 # Sign a binary (reads SIGNING_KEY from environment)
 go run ./cmd/sign Moombox.exe
 # Output: Moombox.exe.sig (raw 64-byte Ed25519 signature)
+
+# Write the release manifest for the binaries in -dir (default .), sign it,
+# and verify both (reads SIGNING_KEY from environment)
+go run ./cmd/sign -manifest -version 2.9.0 -tag v2.9.0
+# Output: moombox-manifest.json + moombox-manifest.json.sig
 
 # Generate a new key pair (one-time setup)
 go run ./cmd/sign -genkey
@@ -454,6 +482,7 @@ go run ./cmd/sign -genkey
 - **Private key source:** `SIGNING_KEY` environment variable (hex-encoded, 128 hex chars / 64 bytes)
 - **Output:** `<input-path>.sig` containing the raw 64-byte signature
 - **Self-check:** after writing the `.sig`, the tool runs `VerifySignature` on it — the same call an installed Moombox makes, against the public key in the source tree being released. Ed25519 signs with any well-formed key, so a wrong or rotated `SIGNING_KEY` would otherwise produce a green release whose update every existing install refuses. On a mismatch the `.sig` is deleted and the tool exits non-zero, which fails the release before the publish step.
+- **Manifest (`-manifest`):** `updater.BuildManifest` hashes every platform binary `releaseAssetMap` lists (a missing one fails the step), the JSON is written to `moombox-manifest.json` and read back through `updater.ParseManifest` — the parser installs run — then signed and self-checked like a binary. On any failure neither file is left for the publish step.
 - **Public key location:** Embedded in `internal/updater/signing.go` as `updatePublicKeyHex`
 - **Key management:** Private key stored as a GitHub Actions secret. Never committed, never logged. The `-genkey` subcommand generates a fresh key pair for initial setup or rotation.
 
@@ -470,18 +499,20 @@ Notifications are configured in the TOML config as an array of notification targ
 | Format | Example | Behavior |
 |--------|---------|----------|
 | Full HTTPS | `https://discord.com/api/webhooks/123/abc` | Used directly |
-| Shorthand | `discord://123/abc` | Expanded to `https://discord.com/api/webhooks/123/abc` |
+| Shorthand | `discord://123/abc` | Expanded to `https://discord.com/api/webhooks/123/abc`, keeping a query (`?thread_id=…`) whether or not a slash comes before it; any path past the token is dropped |
 
 URL validation rejects non-HTTPS Discord webhook URLs and URLs with invalid ID/token structure. Unsupported URL schemes are logged as warnings and skipped.
+
+Every log line and error that names a notification URL carries `redact.URLOrigin`'s form of it (`internal/redact/url.go`), never the URL: an `http`/`https` URL is reduced to its scheme and host name (`https://discord.com/…<redacted>` — no userinfo, port, path, query or fragment), any other scheme to the scheme alone (`tgram://…<redacted>`), and a string with no `scheme://` to `…<redacted>`. An `http`/`https` URL with an `@` past the first `/`, `?` or `#` after its `://` keeps its scheme alone too: net/url ends the authority at that delimiter, so a credential holding one (`https://tk_SECRET/half@host`) would be read with its first half as the host. The rule has to be that strict because nothing validates an entry before `buildTargets` logs it — `config.Validate` does not check notification URLs and a disabled entry is never parsed — so a hand-edited URL can carry its credential anywhere: in the userinfo (`https://user:password@host`, `ntfys://token@host`), in the authority (`tgram://<bot token>/<chat>`), in a query with no path before it, or in Discord's own webhook path. The same form replaces the URL in a Discord request's construction and transport errors (`DiscordWebhook.do`, `internal/notifications/discord.go`), which reach the queue's failure log and the test route's response.
 
 ### Target Options
 
 Each entry in the `[[notifications]]` array is a `NotificationConfig` (`internal/config/types.go`) and carries four options besides its URL and event filter:
 
 - **`enabled`** — a mute switch. `false` keeps the target, its filter and its mention in the config but delivers nothing; absent means enabled (`IsEnabled`, `internal/config/notifications.go`). `buildTargets` (`internal/notifications/manager.go`), called by both `NewManager` and `Reload`, skips a disabled target before it is ever given a queue and logs the skip at Info with the URL redacted. `HasTargets` (`internal/notifications/manager.go`) reports false once every configured target is muted (same as no targets at all), which correctly short-circuits the three producer guards that check it before building an embed nobody would see: the update-available check in `cmd/moombox/helpers.go` and both Stream Found call sites in `cmd/moombox/monitor_callbacks.go`. The disk alerts (`cmd/moombox/disk_alerts.go`) build unconditionally; with every target muted, `Send` has no queue to hand them to.
-- **`mention` + `mention_events`** — `mention` is a Discord ping: a role (`<@&ROLE_ID>`), a user (`<@USER_ID>`, also accepting the legacy `<@!USER_ID>` nickname spelling), `@everyone`, or `@here`. `ParseMention` (`internal/config/notifications.go`) validates and canonicalises it; `MentionParse` (`internal/notifications/discord.go`) turns the canonical text into the `allowed_mentions` object Discord requires beside a ping in `content` — a role or user ping produces an empty `parse` list plus the id under `roles`/`users`, `@everyone`/`@here` produce `parse: ["everyone"]`. `mention_events` picks which events carry the ping and is alias-aware the same way an event filter is (`mentionFor`, `internal/notifications/queue.go`): a target that mentions on a legacy event name is still pinged for the event it split into. Three states, not two: the key absent means the default six (`DefaultMentionEvents`, `internal/config/notifications.go` — `error`, `auth`, `disk_critical`, `update_failed`, `crash_recovered`, `sidecar_down`); `mention_events = []` means never; a written list means exactly those events (`ResolveMentionEvents`, `internal/config/notifications.go`). A config save that touches only `mention` or `mention_events` on a surviving target is picked up by the same reload as an event-filter change, through `setMention` (`internal/notifications/queue.go`), the mention twin of `setEvents`.
+- **`mention` + `mention_events`** — `mention` is a Discord ping: a role (`<@&ROLE_ID>`), a user (`<@USER_ID>`, also accepting the legacy `<@!USER_ID>` nickname spelling), `@everyone`, or `@here`. `ParseMention` (`internal/config/notifications.go`) validates and canonicalises it; `MentionParse` (`internal/notifications/discord.go`) turns the canonical text into the `allowed_mentions` object Discord requires beside a ping in `content` — a role or user ping produces an empty `parse` list plus the id under `roles`/`users`, `@everyone`/`@here` produce `parse: ["everyone"]`. `mention_events` picks which events carry the ping and is alias-aware the same way an event filter is (`mentionFor`, `internal/notifications/queue.go`): a target that mentions on a legacy event name is still pinged for the event it split into. A close (`disk_ok`, `channel_healthy`, `sidecar_restored`, `auth_recovered` — `closeEvents`, `internal/notifications/events.go`) is delivered through its alert's filter but never pinged through its alert's mention: an all-clear asks nothing of anyone, and following the alias pinged the role for "BotGuard Sidecar Restored" under the default six, which hold `sidecar_down`, and for every "Authentication Recovered", since they hold `auth` too. A target that wants a close pinged lists it in `mention_events` itself. Three states, not two: the key absent means the default six (`DefaultMentionEvents`, `internal/config/notifications.go` — `error`, `auth`, `disk_critical`, `update_failed`, `crash_recovered`, `sidecar_down`); `mention_events = []` means never; a written list means exactly those events (`ResolveMentionEvents`, `internal/config/notifications.go`). A config save that touches only `mention` or `mention_events` on a surviving target is picked up by the same reload as an event-filter change, through `setMention` (`internal/notifications/queue.go`), the mention twin of `setEvents`.
 - **`mode`** — `"separate"` (default) or `"edit"`. See **Delivery Modes** below.
-- **`network.public_url`** — not a per-target key, but the config field (`PublicURL`, `internal/config/types.go`) every target's deep link depends on. When set, a job embed's title links to `{public_url}/#job=<id>` (`JobDeepLink`, `internal/notifications/mentions.go`) instead of the platform page, which moves to the embed's author line instead; a send with no `Author` gets no rewrite, since there is nowhere for the platform link to move to. Three families have none now. The whole System family (a disk alert names no channel); the platform-level credential sends, which carry only their event (`cmd/moombox/monitor_callbacks.go`, three `auth` sites) — the per-job "Authentication Required" alert is not one of them and does carry both; and `connectivity_restored`, the global-outage alert, for the same reason (`cmd/moombox/monitor_callbacks.go`). Separately, a job whose channel is unknown has an `Author` of nil even though it carries a `JobID` — that is what `moombox add` produces (`cliAddedFacts`, `cmd/moombox/job_notifications.go`, sets no `Channel` for a YouTube add or a Twitch VOD add), so that embed keeps the platform link in its title. The eight mid-lifecycle sends that used to be in the same boat — `downloading`, `muxing`, `scheduled`/`rescheduled`, the `gap_split`/`quality_split` pair, and the two `connectivity_*` events — carry all three now: Arc N3 routed every one of them through the same `NotifyFacts`/`notifyAuthor` pair (`internal/worker/notify_facts.go`) the rest of the package uses, so their embeds deep-link and carry the channel author line too. The two trim sends went the same way in the same arc — `sendTrimFailed` (`internal/worker/orchestrator.go`) and the `trim_deleted` half of `DeleteTrim` (`internal/worker/trim.go`) — so no job send in the program builds its options by hand any more. `network.public_url` is validated and canonicalised by `ValidatePublicURL` (`internal/config/notifications.go`) — an absolute http(s) URL, no query, no fragment, no userinfo, trailing slash trimmed. It is read at send time (`Manager.Send`, `internal/notifications/manager.go`) from the same field `Reload` writes under the same lock, so a save from either editor applies without a restart.
+- **`network.public_url`** — not a per-target key, but the config field (`PublicURL`, `internal/config/types.go`) every target's deep link depends on. Notifications are not its only consumer: the web server trusts it as the dashboard's own address, its port on `localhost`/`lan` and its host on `external`/`public` ([security.md](security.md) § 3. HostGateMiddleware, § 4. CORSMiddleware), so setting it for clickable embeds widens what the dashboard admits. When set, a job embed's title links to `{public_url}/#job=<id>` (`JobDeepLink`, `internal/notifications/mentions.go`) instead of the platform page, which moves to the embed's author line instead; a send with no `Author` gets no rewrite, since there is nowhere for the platform link to move to. Three families have none now. The whole System family (a disk alert names no channel); the platform-level credential sends, which carry only their event (`cmd/moombox/monitor_callbacks.go`, three `auth` sites) — the per-job "Authentication Required" alert is not one of them and does carry both; and `connectivity_restored`, the global-outage alert, for the same reason (`cmd/moombox/monitor_callbacks.go`). Separately, a job whose channel is unknown has an `Author` of nil even though it carries a `JobID` — that is what `moombox add` produces (`cliAddedFacts`, `cmd/moombox/job_notifications.go`, sets no `Channel` for a YouTube add or a Twitch VOD add), so that embed keeps the platform link in its title. The eight mid-lifecycle sends that used to be in the same boat — `downloading`, `muxing`, `scheduled`/`rescheduled`, the `gap_split`/`quality_split` pair, and the two `connectivity_*` events — carry all three now: Arc N3 routed every one of them through the same `NotifyFacts`/`notifyAuthor` pair (`internal/worker/notify_facts.go`) the rest of the package uses, so their embeds deep-link and carry the channel author line too. The two trim sends went the same way in the same arc — `sendTrimFailed` (`internal/worker/orchestrator.go`) and the `trim_deleted` half of `DeleteTrim` (`internal/worker/trim.go`) — so no job send in the program builds its options by hand any more. `network.public_url` is validated and canonicalised by `ValidatePublicURL` (`internal/config/notifications.go`) — an absolute http(s) URL, no query, no fragment, no userinfo, trailing slash trimmed. It is read at send time (`Manager.Send`, `internal/notifications/manager.go`) from the same field `Reload` writes under the same lock, so a save from either editor applies without a restart.
 
 ### Event Types
 
@@ -494,30 +525,33 @@ These are the event strings used for filtering. A target with no event filter re
 | `scheduled` | An UPCOMING stream's scheduled start time was confirmed (`IsUpcoming && !IsLive`). A stream first observed already live does not fire it — "Download Starting" carries the same time in its own "Scheduled For" field |
 | `rescheduled` | Stream scheduled start time changed |
 | `downloading` | Download begins or resumes |
-| `muxing` | FFmpeg mux step begins — for every mux, including a manual one (`A M` / `POST /api/jobs/{id}/mux`), and for both finalize shapes, single-file and multi-part (quality/gap-split). The multi-part path used to return before the send and silently skip it |
-| `finished` | Job completed successfully. Warning-coloured rather than Success when the row carries `incomplete_tail` — the recording is knowingly short and Resume appends the rest — and the embed also reports an incomplete chat capture and any set-aside recordings still waiting in staging |
+| `muxing` | FFmpeg mux step begins — for every mux, including a manual one (`A M` / `POST /api/jobs/{id}/mux`), and for both finalize shapes, single-file and multi-part (quality/gap-split). The multi-part path used to return before the send and silently skip it. A manual mux of a row that was not already Muxing (an Error, Cancelled or parked job) reads "Muxing the captured media" rather than "Download complete, muxing" (`JobContext.CapturedMux`, set by `MuxJob`): what is staged may stop short of the end. A boot re-mux of an interrupted Muxing row keeps "Download complete" |
+| `finished` | Job completed successfully. Warning-coloured rather than Success when the row carries `incomplete_tail` — the recording is knowingly short and Resume appends the rest; the description then reads "Archived with its end missing" instead of "Successfully archived" — and the embed also reports an incomplete chat capture and any set-aside recordings still waiting in staging |
 | `error` | Job failed. The embed names the stage (`mux` or `download`, read off the error prefixes the orchestrator writes — `mux…`, `no media files to mux`, `create output dir`) and whether staging survived, which is the Retry-versus-Resume distinction: Retry deletes staging, Resume preserves it |
 | `cancelled` | Job cancelled by user |
-| `auth` | Any credential problem or recovery — cookies expired, member-only content, refresh failure, COOKIES? jobs resumed, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
+| `auth` | Any credential problem — cookies expired, member-only content, refresh failure, Twitch chat downgraded to anonymous. See **Credential Notifications** below for the full set |
+| `auth_recovered` | Credentials work again ("Authentication Recovered"), or parked jobs were re-evaluated against re-observed credentials ("Parked Jobs Re-evaluated"). The close of `auth`, aliased to it — a target filtering `auth` also receives it — but never pinged through `auth`'s mention: they used to carry `auth` itself, and `auth` is in the default mention six, so every recovery pinged the role like the failure did |
 | `quality_split` | Stream quality changed mid-download; previous part closed |
 | `gap_split` | Twitch live segments expired unrecoverably; part closed, new part at live edge |
 | `connectivity_resume` | Connectivity restored; the same Twitch job resumed. Carries the pause instant as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, for one release |
-| `connectivity_split` | Broadcast/VOD lost during the outage; captured data finalized |
+| `connectivity_split` | Broadcast ended or changed during the outage; captured data finalized. Not sent for a VOD: an outage mid-VOD does not interrupt it — the download waits for connectivity and carries on where it stopped |
 | `connectivity_restored` | Global connectivity restored — fires the "Outage Alert": start/end as Discord dynamic timestamps plus the duration. Deliberately the ONLY global-outage event: a lost-connectivity webhook has no connectivity to deliver over, so there is no `connectivity_lost` (removed in v2.8; stale filter entries warn at startup and strip on the next UI save) |
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |
-| `trim_error` | Trim operation failed |
-| `disk_warning` | Disk usage exceeds warning threshold (also fired for monitoring-read failures) |
-| `disk_critical` | Disk usage exceeds critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
+| `trim_error` | A trim failed: a Trim Video from either UI that broke (FFmpeg, the disk or the database failed — not a refusal, which the requester is told, nor one a stop cut short), or a post-download trim that did not produce its file for any reason — it broke, it was stopped, or it could not run at all: a start at or past the end of the recording when no end was given, a recording whose length is unknown with no end given, a range or a row the trim service refuses (the job no longer Finished, a trim of the job already running), or a job row that could not be read (`postDownloadTrim`, `internal/worker/orchestrator.go`). The one exception is a job deleted before its trim ran or while it ran: whoever deleted it wants none of it |
+| `disk_warning` | Disk usage reached the warning threshold (also fired for monitoring-read failures) |
+| `disk_critical` | Disk usage reached the critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
 | `disk_ok` | Disk usage fell back under the warning threshold after a warning or critical alert was sent ("Disk Space Recovered"), or disk monitoring recovered after a read-failure alert ("Disk Monitoring Recovered"). Success-coloured; the close of the `disk_warning`/`disk_critical` family. Targets filtering on `disk_warning` also receive it, via the manager's event alias, so an incident that was reported always gets an end. A reading that closes both incidents at once sends both embeds — two alerts, two closes |
 | `update_available` | New version detected |
 | `update_applied` | Moombox restarted on a different version than the previous run (embed reports whether the web dashboard came back) |
 | `update_failed` | A failed-update marker (`.update-broken` / `.update-failed`) was found at boot — manual attention needed |
 | `crash_recovered` | The launcher respawned Moombox after an abnormal exit |
 | `channel_unhealthy` | A monitored channel failed a sustained streak of checks on EVERY monitor covering it (renamed/banned/misconfigured) — its streams are being missed. Cross-monitor confirmed: a YouTube channel still reachable via DECAPI while its RSS feed 404s during peak hours does NOT fire (avoids the false positive). |
-| `channel_healthy` | A channel that fired `channel_unhealthy` answered a check again. Fires only when the alert was actually SENT — a streak suppressed by the cross-monitor confirmation has no alert to close. Aliased to `channel_unhealthy` |
-| `sidecar_down` | The BotGuard sidecar has been unhealthy for a continuous 60 seconds. Error-coloured and mention-eligible. The supervisor's restart ladder handles everything shorter, so this is the failure it could not fix: PO tokens fall back to the slower in-process goja solver until it returns. Carries the reason the child died and how many successful restarts this process has made |
+| `channel_healthy` | A channel that fired `channel_unhealthy` answered a check again. Fires only when the alert was actually SENT — a streak suppressed by the cross-monitor confirmation has no alert to close. The two YouTube monitors share one incident per channel (`channelIncidents`, `cmd/moombox/monitor_callbacks.go`): an outage both observe sends one alert, and the first monitor to reach the channel again closes it — a set per monitor sent two identical alerts and left one open when only DECAPI recovered. Aliased to `channel_unhealthy` |
+| `sidecar_down` | The BotGuard sidecar has been unhealthy for a continuous 60 seconds. Error-coloured and mention-eligible. The supervisor's restart ladder handles everything shorter, so this is the failure it could not fix: no PO token is minted and signature-ciphered formats are unavailable until it returns. Carries the reason the child died and how many successful restarts this process has made |
 | `sidecar_restored` | The sidecar is healthy again after a `sidecar_down` was sent. Success-coloured. Aliased to `sidecar_down`, so a target that filters the outage also receives its close |
+
+**Open alerts survive a restart.** Each close above fires only when its alert was SENT, and which alerts are open used to live only in the memory of the process that sent them — so an alert open across a restart (an update, a settings change, a crash) never got its close. The open set is now persisted in `open-alerts.json` beside the database (same directory as `paths.database_path`; `openAlerts`, `cmd/moombox/open_alerts.go`), written atomically (`utils.WriteFileAtomic`) on every open and every close: the disk family (an open warning or critical with the time it was sent, which the 30-minute repeat cooldown runs from, and an open "Disk Monitoring Failed"), an open `sidecar_down`, each platform's channels with an open `channel_unhealthy`, and each platform whose `auth` failure was announced (with its time, the auth cooldown's stamp). The backlog scheduler's full-disk hold is kept there too (`diskGateHeld`, below), though it is not an alert. `run()` loads it before any alerter is wired or any observer starts, drops what nothing in the current configuration can close — a channel removed or disabled, and the sidecar's outage while `use_sidecar` is off, each logged — and seeds every alerter from it, so the first healthy observation after the restart sends the matching close (`disk_ok`, `sidecar_restored`, `channel_healthy`, `auth_recovered`) exactly as it would have without the restart. An observation that is still unhealthy sends nothing the restart alone would add for disk, the sidecar and channels: the disk family's 30-minute repeat runs on from the restored send time, and a restored `sidecar_down` or `channel_unhealthy` is not announced again. Auth is the exception. The cookie refresh fires its recovery on the first conclusive check of every start (`shouldFireRecovery`, `internal/cookies/refresh_pass.go`), and the failure that recovery reports reaches the auth cooldown, so a platform still dead after the restart is announced again unless the restored stamp is still inside its 30 minutes (`withPersistedAuthFailureCooldown`, `cmd/moombox/monitor_callbacks.go`) — the once-per-start announcement every start made before the stamp was persisted, now held back only within the cooldown. Two healthy paths needed help to see a restored entry at all: the monitors' health trackers fire their healthy callback only after a streak they saw cross the threshold, so every monitor covering the platform is told which channels are open (`FeedMonitor.RestoreUnhealthy`, `internal/monitor/feed.go`, and its DECAPI and Twitch twins), and the cookie refresh fires its recovered transition only on a not-authenticated → authenticated change it witnessed, so it is told which platforms are open (`SetUnrecoveredPlatforms`, `internal/cookies/refresh.go`) and closes each on its first conclusive authenticated check. A missing or corrupt file means nothing is open, with one Warn, and is replaced by an empty one.
 
 The canonical event vocabulary is `notifications.EventGroups`
 (internal/notifications/events.go). The TUI filter editor derives from it
@@ -550,7 +584,10 @@ lifecycle event rewrites it in place with
 carries the new event's own title, description and fields plus two more: a
 **Status** field naming the current state, and a **History** field of
 `<t:unix:R> State` lines, one per state that reached this target, clamped to the
-field budget by dropping the OLDEST lines.
+field budget by dropping the OLDEST lines. Each line — and every embed's own
+timestamp, in either mode — is dated when the event happened (`Embed.At`,
+stamped by `Manager.Send`), not when the target delivered it: after a Discord
+backlog every line used to read the delivery time.
 
 The lifecycle set is `found`, `added`, `scheduled`, `rescheduled`,
 `downloading`, `quality_split`, `gap_split`, `connectivity_resume`,
@@ -574,7 +611,11 @@ target sees the mention in the message and gets a notification only when
 terminal look, and the separate embed is still posted, when a lifecycle
 message is already open; a terminal event never creates one, so a target
 whose first word about a job is "failed" simply posts it. Two messages on
-failure, by design — the separate one is what pings.
+failure, by design — the separate one is what pings. A failure whose report is
+suppressed (`worker.ErrNonActionable`: age-restricted, probe budget exhausted)
+still closes the open message, and only that: its `error` send is marked
+`EditOnly`, so the edit carries no mention, no separate embed follows, and a
+target with no open message — or in `separate` mode — gets nothing.
 
 There are no progress edits. A cadence-driven PATCH would spend the bucket for
 nothing.
@@ -588,24 +629,126 @@ through `UpdateNotificationMsgs`: a silent single-column write that bumps no
 message. The History does not persist — the message keeps being edited, but its
 History begins again at the first state after the restart.
 
-Ids are keyed on the resolved URL, so the two spellings of one webhook share one
-message; a target the operator removed leaves an orphaned entry that nothing
+Ids are keyed on the resolved URL, so every spelling of one webhook shares one
+message — `discord://ID/TOKEN`, the legacy `discordapp.com`, a `ptb.`/`canary.`
+host, a trailing slash and an empty query (a bare `?`) all resolve to the one
+`https://discord.com/…` form
+(`canonicalDiscordURL`), which is also what target dedupe keys on (a slash or a
+`ptb.` host used to build a second target that posted every embed again, and in
+edit mode opened new messages for every job in progress). The query is folded
+too (`canonicalWebhookQuery`, `internal/notifications/discord_edit.go`): its
+parameters sorted by name, as the sender already encodes them on the wire,
+with every nameless pair (a stray `&`) and every `wait` dropped — the sender
+adds `wait=true` itself to the one request that reads the created message and
+strips it from the edit route, so a configured one changed only the key.
+`thread_id` and every other named parameter stay, even with an empty value,
+and a query `net/url` refuses to parse (a `;` separator, a bad escape) is kept
+as typed. `…?thread_id=9`, `…?thread_id=9&` and `…?wait=true&thread_id=9`
+are one target; `…?thread_id=9` and the bare URL are two. The shorthand keeps
+its query too, with or without a slash before it: `discord://ID/TOKEN/?thread_id=9`
+used to lose it with the path past the token, and posted to the channel —
+beside its https spelling, as a second target. The releases that
+shipped edit mode, 2.8.9 and 2.8.10, rewrote only `discordapp.com` and kept the
+rest as typed, so a row they wrote under one of the other spellings holds the
+id under that spelling's own key. A target remembers the old key of every
+spelling folded into it (`legacyResolvedURL`, `internal/notifications/manager.go`)
+whose old resolution named the same webhook — not the shorthand's with a slash
+before its query, which resolved to the bare channel webhook: the ids under
+that key are channel messages, the thread's edit route cannot reach them, and
+when the channel is configured too they are the channel target's own — and
+reads it when the current key misses: the id is adopted under the current
+key in memory and the old key leaves the map (`messageID`,
+`internal/notifications/lifecycle.go`), so a job open across the upgrade keeps
+editing its message — and its error or cancel still closes it — and the old key
+leaves the row at the job's next write, with no write of its own. Those releases
+built one target per spelling, so a webhook configured in two spellings (say
+with and without the trailing slash) posted a message per spelling for every
+job, and a job open across the upgrade holds a different id under each key.
+The second is not dropped: it stays under its old key and every edit rewrites
+it with the same body, the terminal edit included, which closes it beside the
+first (`extraMsg`, `patchExtra`, `internal/notifications/lifecycle.go`); one
+Discord no longer has is forgotten, with nothing posted in its place. A target the operator removed leaves an orphaned entry that nothing
 reads; a target the operator adds starts a new message at its next allowed
 event; and deleting the job drops the row and the ids with it (no DELETE is ever
-sent to Discord).
+sent to Discord) — and the running process's copy too: `onJobDeleted` calls
+`ForgetJob`, and the jobs-list subscriber (`onJobsChange`) calls `RetainJobs` for
+the bulk delete of a removed channel's pending jobs, which fires no per-job event
+(`cmd/moombox/monitor_callbacks.go`).
+A YouTube job's id is its video id, so the same id comes back on a re-add or a
+re-detection, and a process still holding the deleted job's id PATCHed its old
+message — far up the channel, where an edit notifies nobody — instead of opening
+a new one. Both drop in each target's delivery order, not at once
+(`forgetInOrder`, `internal/notifications/lifecycle.go`): a step goes onto the
+FIFO of every target that can hold edit-mode state, behind what it already
+holds, and drops only that target's id and History — under its current key and
+under every old-spelling key it carries, since a job open across the upgrade can
+still hold the id under one, loaded by another target's send and not yet
+adopted, and that id is what the target's queued cancel closes. A separate-mode target gets
+none — it never records an id — unless it was flipped out of edit mode while an
+edit was still in flight, which keeps it getting steps until a delivery starts
+under the new mode (`editKeys`, `internal/notifications/queue.go`). A step is
+never shed and never counts toward the queue cap, so a batch delete behind a
+slow delivery cannot make the queue shed an alert. Deleting an active job cancels it first, so its `cancelled` is already
+queued; dropped at once, a busy target dispatched that cancel with no id left
+and posted it plain, and the message read "Downloading" for good — and a POST
+in flight when the delete landed came back and remembered its id afresh, so a
+re-add PATCHed the deleted job's message after all. Until a target's step runs,
+any id it holds for the job under that key is the deleted job's, and it is kept
+out of every row write (`markDropping`): a quicker target may already have
+posted for a job re-added under the same id, and that POST writes the new row —
+with the slow target's old id in it, the re-added job would edit the deleted
+job's message on that target. The mark is set for every key a step is queued
+for, before the step, whether or not the target holds anything yet — its
+deleted-job send can still be queued or in flight, and the id that POST brings
+back is the deleted job's too — and it is counted per step, so a job deleted
+twice before a slow target drains stays marked until both drops have run. It
+lives beside the per-job entry, not in it, so a release or an eviction of the
+entry cannot take it.
+`RetainJobs` marks nothing, because its list is a snapshot taken at the bulk
+write and a job added since is missing from it without being deleted. Such a
+job loses only its in-process History: a tracker entry that loses a target's
+key is re-read from the row on its next touch (`dropKeysLocked`), so the job's
+next event on that target still edits the message the row names rather than
+opening a second one. A
+removed target's queue
+still runs its steps after its in-flight delivery (the rest of its queue is
+discarded); a target whose queue has already exited — after shutdown — drops
+at once.
 
 The in-memory half — the message ids a running process is holding, and the
 History lines — is released when a job reaches its terminal edit, and capped at
 `maxTrackedJobs` for jobs that never do. That is a cache eviction, not a close:
 the persisted id is what survives, so a Retry after a release re-reads the row
-once and keeps editing the same message.
+once and keeps editing the same message. The row can be gone by the time a
+queued send is dispatched, though — deleting an active job queues its cancel
+first — so every send an edit-mode target will create, edit or close a message
+with pins its job's entry from the moment it is queued, loading it while the
+row is still there, until it leaves the queue by any route: delivered, shed,
+refused or discarded (`hold`, `internal/notifications/lifecycle.go`). The cap
+passes a pinned entry over, and may sit past `maxTrackedJobs` by as many jobs
+as the queues hold sends for. Without the pin an entry evicted — by a
+backfill's `found`s on any edit-mode target — before the cancel was queued, or
+while it waited behind a busy target, left the cancel with neither the id nor
+the row, and it posted plain beside a message that read "Downloading" for good.
+A release waits for the pin too: a terminal edit delivered while later sends
+of the job are queued behind it closes its target's story but keeps the entry,
+and the last pin to let go drops it if the story is still closed
+(`dropIfClosedLocked`). Released at once, an `error` delivered ahead of a
+Retry's `downloading` and the delete's `cancelled` left them the row alone,
+which the delete had taken: the `downloading` opened a second message, or the
+cancel posted plain, and the job's message read "Failed" for good. A managed
+send's lookup opens the story it writes again (`messageID`), so a Retry that
+edits the closed message is mid-story to every later release, not closed.
 
 **During shutdown** every request on this path is single-attempt, like every
-other send: the owner's ruling caps a graceful shutdown at 10 s, and one
+other send: the owner's ruling caps a graceful shutdown at 15 s, and one
 lifecycle edit's retry ladder could spend all of it.
 
 **When the message is gone.** A PATCH answered `404` with `Unknown Message`
-(code 10008) makes the notifier post a new message and overwrite the stored id.
+(code 10008) makes the notifier post a new message and overwrite the stored id
+— except for a terminal event (`error`, `cancelled`), which never creates a
+lifecycle message: the stored id is forgotten and the event's separate embed,
+posted next as always, is the whole report.
 A `404` naming `Unknown Webhook` (10015) is not that — the webhook itself was
 revoked, and it stays a permanent failure.
 
@@ -639,12 +782,13 @@ instead of arming a window on an edit-mode target.
 
 ### Credential Notifications
 
-Every notification below carries `Event: "auth"`, so one filter entry covers the family. An empty `Event` would bypass every target's allowlist — the filter applies only when `Event != ""` — which is why none of them omits it.
+Every notification below carries `Event: "auth"` — or `"auth_recovered"`, the family's close, which the `auth` filter entry delivers through its alias — so one filter entry covers the family. An empty `Event` would bypass every target's allowlist — the filter applies only when `Event != ""` — which is why none of them omits it.
 
 | Title | Type | Fires from | What it asserts |
 |-------|------|-----------|-----------------|
 | Cookie Re-Authentication Required | Error | `handleRecoveryNeeded` (`cmd/moombox/monitor_callbacks.go`), `auto_enabled` off | A platform answered a conclusive not-authenticated and nothing automatic will attempt to restore it. Claims nothing about a refresh, because none ran, and does NOT claim cookies are present — the file may have been deleted outright |
-| Cookie Auto-Refresh Failed | Error | `runCookieRecovery`, the pass returned an error **or** came back with a conclusive `RefreshFailed` verdict and no error | The automatic refresh ran and failed |
+| Cookie Auto-Refresh Failed | Error | `runCookieRecovery`, the pass returned an error other than the two below **or** came back with a conclusive `RefreshFailed` verdict and no error | The automatic refresh ran and failed |
+| Cookie Auto-Refresh Skipped | Error | `runCookieRecovery`, `ErrProfileInUse` | The platform is not authenticated and the refresh that would restore it was SKIPPED: a browser the profile's `SingletonLock` names may still be running on it, so nothing was launched. Carries that sentence — the host to close the browser on, and the lock to delete if no browser there is using the profile — and names cookie replacement as the other way out. It went out as "Cookie Auto-Refresh Failed", which named replacement as the only one. Error, as Cookie Re-Authentication Required is, because nothing will restore the session on its own; the log line is a Warn skip, and the re-login flag is still raised |
 | Cookie File Unreadable | Error | `runCookieRecovery`, `ErrCookieFileUnreadable` | The existing `cookies.txt` could not be READ, so nothing was written to it. Its own copy rather than the generic one, because the generic text would tell the operator to overwrite the one file Moombox deliberately did not touch — it may hold a working credential for another platform. The remedy named is the filesystem or mount, and Moombox retries on its own |
 | Cookie Auto-Refresh Ineffective | Warning | `runCookieRecovery`, verdict neither OK nor a conclusive failure | The refresh ran, did not restore auth, and could not establish why. Asserts no cause |
 | Authentication Required | Warning | `internal/worker/worker.go`, a job parked in `COOKIES?` | This job needs credentials it does not have |
@@ -652,7 +796,7 @@ Every notification below carries `Event: "auth"`, so one filter entry covers the
 | Parked Jobs Re-evaluated | Info | `OnCredentialsChanged` | N parked jobs were resumed after the platform's saved credentials were re-observed. States no cause on purpose: this fires on the first authenticated observation of EVERY process, not only on a real change, so "a different account was supplied" would often be false. It also fires for Twitch, whose credential is a bearer token and a login name rather than an account — which is why the wording says "saved credentials" |
 | Twitch chat is anonymous for {channel} | Warning | `sendTwitchChatDowngrade` (`internal/worker/stream_processor_twitch.go`) | A job that HAD Twitch credentials is capturing chat anonymously. Warning rather than Error because nothing failed — this capture is fine and the NEXT one starts anonymous. Fields: Channel, Job, Reason (one of the four chat-handshake `AuthDowngrade*` tokens, never a credential — the fifth, playback-token route, never reaches this notice). The SAME report also marks the platform (`NoteTwitchAuthLoss`), which is what fires "Cookie Re-Authentication Required" or the one automatic recovery attempt above — so an operator with `auto_enabled` off can receive both, one naming the job and one naming the platform. See [platform-services.md](platform-services.md) § IRC Chat (Live) |
 
-`withAuthFailureCooldown` (`cmd/moombox/monitor_callbacks.go`) bounds the first four to one per platform per 30 minutes; it does not withhold the first. The two Info recoveries send inline with no cooldown. The Twitch chat notice is latched once per downloader instead, and is deliberately NOT deduped across jobs — a later job with the same dead cookies must notify again. That latch is reset by `Reauthenticate()`, so a repaired credential that fails AGAIN on the same job notifies again too; the platform mark it fires beside is deduped separately, by `shouldFireRecovery`, and so raises one alarm per loss however many jobs report it.
+`withAuthFailureCooldown` (`cmd/moombox/monitor_callbacks.go`) bounds the first five to one per platform per 30 minutes; it does not withhold the first. The two Info recoveries send inline with no cooldown. The Twitch chat notice is latched once per downloader instead, and is deliberately NOT deduped across jobs — a later job with the same dead cookies must notify again. That latch is reset by `Reauthenticate()`, so a repaired credential that fails AGAIN on the same job notifies again too; the platform mark it fires beside is deduped separately, by `shouldFireRecovery`, and so raises one alarm per loss however many jobs report it.
 
 **The two-tier cookie liveness pilot is ARMED, and its notifications fire.** `const livenessRecoveryArmed = true` (`internal/cookies/refresh_liveness.go`) gates tier 2 and has been true since 2026-09-03 (owner ruling; the five-day pre-arming soak was skipped by that ruling). There are therefore TWO producers of everything in the table above. The first is `shouldFireRecovery`'s conclusive not-authenticated — reached from `refresh`'s own validate pass and from `RefreshService.NoteTwitchAuthLoss`, which passes a chat downgrade or an anonymous playback token as `(nowAuth=false, checkErr=nil)`, so the check reads conclusive for both and both share the same once-per-loss dedupe (`noteRecoveryDecided`). The second is a tier-2 liveness verdict: signed out and past the per-platform back-off, it logs `a liveness observation reports this platform is signed out, triggering recovery` at Warn and calls `OnRecoveryNeeded`. The back-off (`recordLiveness`) re-alarms 30 minutes after the first alarm, doubles per alarm to a 24-hour cap, and resets to the base only on a conclusive signed-in verdict; a tier-1 fire's `noteRecoveryDecided` stamp keeps tier 2 from raising a second alarm for a loss tier 1 already raised. The constant is source, not config — a wrong verdict in the field is reversed by setting it back to `false` and rebuilding.
 
@@ -662,7 +806,7 @@ Every notification below carries `Event: "auth"`, so one filter entry covers the
 
 At the window's close — or at shutdown, or when the target is retired — its embeds are chopped into one or more `Message`s (`internal/notifications/message.go`) that each satisfy BOTH of Discord's per-message caps: at most ten embeds (`maxEmbedsPerMessage`, `internal/notifications/batch.go`) and at most `limitTotal` characters summed across them (`internal/notifications/limits.go` — Discord's 6000, measured over the CLAMPED embeds, so what the splitter counts is what the payload carries). `splitMessages` (`internal/notifications/batch.go`) enforces both, preserving arrival order and rolling overflow forward into the next message — nothing is dropped by the split itself.
 
-A `Message` is one queue item, so the per-target FIFO's drop policy and the ordering between messages (see Dispatch Behavior below) are unchanged by batching — with one exception: a non-batchable send (an `error`, a `cancelled`) arriving while a window is open is delivered immediately, ahead of the embeds still coalescing, because a five-second wait is exactly wrong for an alert. A batch is low-tier, for the drop policy's purposes, only when every embed in it is (`batchIsLowTier`, `internal/notifications/batch.go`) — one normal-tier embed riding in an otherwise-`found` sweep protects the whole message from the drop policy the same way a lone alert always has. Discord applies `content` and `allowed_mentions` per message, never per embed, so a batch pings once per message, not once per window: the first non-empty mention handed into the window rides every message that window splits into, never withheld from the second or third.
+A `Message` is one queue item, so the per-target FIFO's drop policy and the ordering between messages (see Dispatch Behavior below) are unchanged by batching — with one exception: a non-batchable send (an `error`, a `cancelled`) arriving while a window is open is delivered immediately, ahead of the embeds still coalescing, because a five-second wait is exactly wrong for an alert. Ahead of OTHER jobs' embeds only: when the window holds one this send follows — the same job's `found`, or a per-job "Authentication Required" that an `auth_recovered` closes — the window is flushed first (`holdsPredecessor`), so a job's "Download Starting" no longer lands above its own "Stream Found", nor a quick recovery above the alarm it ends. A batch is low-tier, for the drop policy's purposes, only when every embed in it is (`batchIsLowTier`, `internal/notifications/batch.go`) — one normal-tier embed riding in an otherwise-`found` sweep protects the whole message from the drop policy the same way a lone alert always has. Discord applies `content` and `allowed_mentions` per message, never per embed, so a batch pings once per message, not once per window: the first non-empty mention handed into the window rides every message that window splits into, never withheld from the second or third.
 
 A retired target's open window is flushed into its queue before that queue starts discarding: `applyTargets` (`internal/notifications/manager.go`) stops the batcher before it retires the queue, so a webhook removed mid-window does not take its coalesced embeds with it. The flush is about ACCOUNTING, not about delivery — once in the queue the flushed message is treated exactly like anything else already queued for a removed target, which means it either wins the race with `stopDiscard` and goes out, or meets the same "target removed — discarding its queued notifications" Warn an ordinary queued item would. Without the flush it would simply vanish with the batcher, counted nowhere. `BeginShutdown` and `Wait` (`internal/notifications/manager.go`) flush every open window immediately, AFTER switching targets to single-attempt delivery — so the rescued batch is itself single-attempt rather than spending the shutdown budget on a 2s/5s ladder — and before closing the drain, since `enqueue` drops with a Warn once the queue is closing. A window open at shutdown is delivered, never held open to wait out its own 5 seconds.
 
@@ -671,19 +815,19 @@ The window is separate-mode only: an edit-mode target's `found` embed IS the job
 ### Dispatch Behavior
 
 - **Per-target FIFO queues.** One bounded queue (256 entries, `notificationQueueCap`) and one draining goroutine per target, created by `applyTargets` (`internal/notifications/manager.go`). `Send` snapshots the target list under an RWMutex, applies each filter, and appends — it never blocks the caller and never spawns. Because one goroutine drains a target, a job's embeds can never reorder, and a burst can never put several concurrent POSTs into one webhook's rate bucket.
-- **One queue item is one message.** Since batching landed, a target's FIFO holds a `Message` (`internal/notifications/message.go`) — one to ten embeds delivered as a single Discord POST — never a single embed; a producer that still sends one item at a time gets a one-embed `Message` (`One`, `internal/notifications/message.go`), so the SHAPE of an ordinary send is unchanged, byte for byte. What batching changes is WHEN a batchable send reaches this queue: not at `Send`, but when its window closes. The 6000-character total under Embed limits below is a per-MESSAGE budget, not a per-embed allowance repeated for each — see Batching above. The queue cap above (256, `notificationQueueCap`), the drop-oldest-low-tier counters below, and the "queue drained — totals" Warn all count messages this way too: each one is worth up to ten notifications, not one.
+- **One queue item is one message.** Since batching landed, a target's FIFO holds a `Message` (`internal/notifications/message.go`) — one to ten embeds delivered as a single Discord POST — never a single embed; a producer that still sends one item at a time gets a one-embed `Message` (`One`, `internal/notifications/message.go`), so the SHAPE of an ordinary send is unchanged, byte for byte. What batching changes is WHEN a batchable send reaches this queue: not at `Send`, but when its window closes. The 6000-character total under Embed limits below is a per-MESSAGE budget, not a per-embed allowance repeated for each — see Batching above. The queue cap above (256, `notificationQueueCap`), the drop-oldest-low-tier counters below, and the "queue drained — totals" Warn all count messages this way too: each one is worth up to ten notifications, not one. The steps a job delete queues on an edit-mode target (see Delivery Modes) are not messages and are not counted.
 - **Batching window.** `found`, `added`, and per-job `auth` sends are coalesced by a per-target, non-sliding 5-second window (`batchWindow`, `internal/notifications/batch.go`) before they ever reach the FIFO above — see Batching above for the split, the single per-message mention, and the ordering exception for a non-batchable send that arrives mid-window.
 - **Drop policy.** On a full queue the OLDEST low-tier entry goes — a message whose embeds are ALL `found`, `added`, `scheduled`, or `rescheduled` (`Tier`, `internal/notifications/manager.go`; `batchIsLowTier`, `internal/notifications/batch.go`, which runs for every message, one embed or ten) — with a Warn naming the event and title of its first embed. With nothing low-tier queued, the ARRIVAL is dropped instead, so an older alert is never displaced by a newer one. Alerts (`error`, `auth`, everything in System) are never the victim — one normal-tier embed anywhere in a batch protects the whole message. The Warn is **coalesced**: a queue may speak at most once every 5 seconds (`dropWarnInterval`) and each line carries the count of messages shed since the last, with a final total when the queue empties — a backfill re-scan against a dead Discord sheds on nearly every send, and a line per victim buries the incident in its own symptom.
 - **Panic recovery:** each queue's goroutine carries a top-level `recover`, and each delivery carries its own — a panic in one send cannot strand every later notification for that target.
 - **Event filtering:** if a target has an event filter list, only matching events are sent. Targets with no filter receive everything. An event that split from a broader legacy name also matches targets allowlisting the old name (`eventAliases`, `internal/notifications/events.go`).
 - **Timeout:** Discord webhook HTTP requests have a 15-second timeout per attempt.
 - **Retry:** bounded delivery loop, max 3 attempts total — transport errors and Discord 5xx back off 2s/5s; 429 honors a validated `Retry-After` (≤30s); other 4xx are permanent. Cumulative *inter-attempt* sleep is capped at 30s, bounding one notification's hold on its target's queue at ~75s — plus any pre-emptive rate-bucket waits, which are deliberately outside that budget (charging them to it would let one legitimate window wait forfeit the retries a following 5xx needs).
-- **Rate bucket:** `X-RateLimit-Remaining` and `X-RateLimit-Reset-After` are read from every non-429 response. A remaining count of 0 arms a pre-emptive sleep (capped at 30s, plus a 50ms `bucketSkewPad` covering the header's millisecond rounding) on that webhook's sender, so the next embed waits out the window instead of spending one of its three attempts on a 429 Discord has already promised. Per Discord's rate-limit docs the bucket is discoverable only from these headers — there is no published numeric cap.
-- **Embed limits:** every embed is clamped on rune boundaries inside `buildPayload` before it is sent — title 256, description 4096, field name 256, field value 1024, footer 2048, author name 256, at most 25 fields and 6000 characters in total, with a `…` marker. Over any one of them is a permanent 400, so an unclamped embed was a silently dropped alert. Producers use `ClampRunes` (`internal/notifications/limits.go`) for their own excerpts and `EscapeMarkdown` (same file) for job-supplied text.
-- **Hot-reload:** notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. The diff is on the resolved webhook URL: a target that is still configured keeps its goroutine, its queued backlog and its learned rate bucket; a removed one finishes its in-flight delivery and exits, discarding the rest with one Warn naming the count. No restart required.
+- **Rate bucket:** `X-RateLimit-Remaining` and `X-RateLimit-Reset-After` are read from every non-429 response. A remaining count of 0 arms a pre-emptive sleep (capped at 30s, plus a 50ms `bucketSkewPad` covering the header's millisecond rounding) on that webhook's sender, so the next embed waits out the window instead of spending one of its three attempts on a 429 Discord has already promised. Per Discord's rate-limit docs the bucket is discoverable only from these headers — there is no published numeric cap. A 429 the delivery ENDS on — its `Retry-After` past the 30s cap or missing, or the ladder's last attempt — arms the same sleep from its `Retry-After`, else `X-RateLimit-Reset-After`, else the cap (`noteRateLimitGiveUp`): with nothing recorded, the queue's next embed POSTed straight into the same limit, and the one after it, so a 45s `Retry-After` (Discord's per-channel webhook limit commonly asks 30-60s) dropped every queued alert within milliseconds.
+- **Embed limits:** every embed is clamped on rune boundaries inside `buildPayload` before it is sent — title 256, description 4096, field name 256, field value 1024, footer 2048, author name 256, at most 25 fields and 6000 characters in total, with a `…` marker. Over any one of them is a permanent 400, so an unclamped embed was a silently dropped alert. A field whose name or value is empty is a permanent 400 too, and is dropped at the same clamp rather than losing the message. Producers use `ClampRunes` (`internal/notifications/limits.go`) for their own excerpts and `EscapeMarkdown` (same file) for job-supplied text — titles, channel names, categories, error text — which neutralises Discord's markdown, `<…>` forms and `[text](url)` masked links.
+- **Hot-reload:** notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. The diff is on the resolved webhook URL: a target that is still configured keeps its goroutine, its queued backlog and its learned rate bucket; a removed one finishes its in-flight delivery and exits, discarding the rest with one Warn naming the count. A webhook re-added under the same URL while that delivery is still running takes over the retired queue's sender — its lifecycle message ids and rate bucket — and starts draining only once the retired goroutine exits, so a mute-then-unmute mid-POST cannot open a second lifecycle message for the same job. No restart required.
 - **Delivery mode:** per target, `separate` (default) or `edit` — see **Delivery Modes** above. Hot-reloads with the rest of the notifications array; no restart.
 - **Save-time validation:** webhook URLs are validated at save (web `validateConfigUpdates` + TUI editor) via `notifications.ValidateURL`; `POST /api/notifications/test {url}` sends a single-attempt test embed (used by the web Test buttons and the TUI `T` action, including for unsaved URLs). Both `discord.com` and the legacy `discordapp.com` host are accepted; the latter is canonicalised, so the two spellings of one webhook collapse to one target.
-- **Graceful shutdown:** `BeginShutdown` switches every target to single-attempt delivery, then `Wait` drains the queues — see the Shutdown Sequence above for the 10-second cap that actually bounds it. That single attempt's own rate-bucket wait is capped at 2s (`shutdownBucketWaitCap`), not the Rate bucket bullet's normal 30s: a wait that long could outrun the force-exit on its own, or starve every item still behind it in that target's queue.
+- **Graceful shutdown:** `BeginShutdown` switches every target to single-attempt delivery, then `Wait` drains the queues — see the Shutdown Sequence above for the force-exit cap that actually bounds it. That single attempt's own rate-bucket wait is capped at 2s (`shutdownBucketWaitCap`), not the Rate bucket bullet's normal 30s: a wait that long could outrun the force-exit on its own, or starve every item still behind it in that target's queue.
 - **Embed format:** Discord rich embeds with title, description, color (by notification type), optional fields, an author line (channel name, avatar, channel page), thumbnail, image, footer (`Moombox · {platform} · {job id}`, or just `Moombox`), and an ISO 8601 timestamp. A mention, when a target is configured for one, rides the message `content` with a matching `allowed_mentions` — embeds never mention on their own.
 
 ### Notification Type Colors
@@ -704,9 +848,9 @@ The window is separate-mode only: an edit-mode target's `found` embed IS the job
 
 ### Implementation
 
-**File:** `internal/disk/disk_windows.go`
+**Files:** `internal/disk/disk_windows.go`, `internal/disk/disk_unix.go`
 
-Uses Windows kernel32 `GetDiskFreeSpaceExW` via `syscall` FFI (no CGo). Queries the volume containing a given path and returns:
+On Windows, kernel32 `GetDiskFreeSpaceExW` via `syscall` FFI (no CGo); on Linux, `statfs(2)`, with block counts multiplied by `f_frsize` (`blockUnit`, `internal/disk/blockunit_linux.go`) — the unit they are counted in, which `f_bsize` (the preferred I/O size, 1 MiB on a CIFS mount) is not. Both query the volume containing a given path (a path that does not exist yet answers for the nearest existing ancestor) and return:
 
 ```go
 type DiskSpace struct {
@@ -716,7 +860,7 @@ type DiskSpace struct {
 }
 ```
 
-The path is resolved to an absolute path, then the volume root is extracted (`filepath.VolumeName(abs) + "\"`).
+On Windows the path is resolved to an absolute path and the deepest existing directory on it is queried (`queryNearestDirectory`, walking up to the drive root only while a level fails): `GetDiskFreeSpaceExW` answers for the volume a directory is on, so a recordings disk mounted into a folder such as `C:\Recordings` reports its own space. Querying the drive root, as it used to, reported `C:`'s, and the low-space alert never fired for the disk actually filling up.
 
 ### Thresholds
 
@@ -725,7 +869,7 @@ Configured in the `[disk]` section of the TOML config:
 | Setting | Default | Range | Purpose |
 |---------|---------|-------|---------|
 | `disk_warn_percent` | 90 | 1-99 | Warning level — surfaces in status bar and notifications |
-| `disk_critical_percent` | 95 | 1-99 | Critical level — more urgent warnings |
+| `disk_critical_percent` | 95 | 1-99 | Critical level — more urgent warnings, and backlog admission holds from it until usage is 2 points below it (see below) |
 
 Validation rules:
 - Both values must be between 1 and 99 (invalid values reset to defaults)
@@ -733,7 +877,13 @@ Validation rules:
 
 ### Status Reporting
 
-Disk space information is included in the `GET /api/status` response and displayed in both the Web UI status bar and TUI status bar. When usage exceeds thresholds, a `disk_warning` notification is dispatched.
+Disk space information is included in the `GET /api/status` response and displayed in both the Web UI status bar and TUI status bar. It is read at boot, then every third stats tick (~6 minutes), and at once after a save from either UI that changes `disk_warn_percent`, `disk_critical_percent` or `output_directory` (`OnDiskSettingsChange` / the TUI save, both through `requestDiskRecheck`, `cmd/moombox`), and each reading goes through `diskAlerts` (`cmd/moombox/disk_alerts.go`), the boot reading included — the ticker's first check is six minutes in, and a volume already full at boot went unannounced for that long. A level is reached when usage is AT OR ABOVE its threshold (`ComputeWarnLevel`). Reaching warn sends `disk_warning`, reaching critical `disk_critical`; the same level repeats at most every 30 minutes, and a change of level is sent at once. An open alert holds until usage falls 2 points below its threshold (`DiskRecoveryMargin`, `internal/config/types.go`; `DiskConfig.ClearOfCritical` and `DiskConfig.ClearOfWarn`): only then does a critical step down to a warning or a warning close with `disk_ok`, so a volume sitting on a line no longer alerts and recovers on every check. Disk reads that fail twice in a row send `disk_warning` ("Disk Monitoring Failed") and the next good reading `disk_ok`.
+
+### Backlog Admission on a Full Disk
+
+The critical level is also the one thing that holds on its own. From the moment the output directory's volume reaches `disk_critical_percent`, the backlog scheduler admits no backlog VOD — they wait in `Queued` (`Scheduler.diskGateClosed`, `internal/worker/scheduler.go`) — until usage is 2 points below it. It reads the same volume against the same rules as the alerts (`DownloadWorker.readOutputDisk`, `internal/worker/disk_gate.go`; `DiskConfig.AtCritical` and `DiskConfig.ClearOfCritical`, `internal/config/types.go`), so admission stops on the reading that sends `disk_critical` and resumes on the one that steps it down, but fresh on every sweep that has a backlog to admit — and on every sweep while admission is held, backlog or none, so a hold does not outlive the incident that set it — rather than on the six-minute cadence above: the first sweep that reads usage 2 points below the threshold — at most one 60 s heartbeat after that much space is freed — admits again. A reading in between leaves admission as it was, so a volume sitting on the line does not admit a backlog VOD every time it dips under it. The log says once when admission stops and once when it resumes. A restart does not reopen it: the hold is recorded in `open-alerts.json` (above) on every stop and resume (`diskGateHeld`; `Scheduler.RecordDiskHold`), and that hold, or a `disk_critical` alert still open when the process stopped, starts the next process's admission held (`restoreDiskGate`, `cmd/moombox/disk_alerts.go`; `Scheduler.RestoreDiskHold`), so the restored alert and the hold end on the same reading — a new process used to admit at 94% against 95 while the alert it restored stayed critical. The alert alone did not cover a hold that began between two of its six-minute readings, which the next process started without. Live, upcoming and manually added jobs are never held, nor is a backlog VOD already admitted. A reading that fails leaves admission as the last good reading left it.
+
+A backlog VOD admitted below the threshold can still fill what is left. One whose download or mux fails for want of space (`isDiskFull`, `internal/worker/disk_full.go`) goes back to `Queued` rather than to Error — held for 5, then 10, then 20 minutes, and after that for as long as the gate above stays closed — and ends in Error, saying it gave up, only on its fourth run in a row to end that way (`requeueBacklogAfterDiskFull`, `internal/worker/backlog_retry.go`). Its staging is kept. A broadcast or a manually added video that runs out of space still ends in Error.
 
 ---
 
@@ -794,6 +944,7 @@ The script pulls each repository, displays new commits since the last pull, and 
 | `cmd/sign/main.go` | Signing tool |
 | `internal/updater/updater.go` | Update checker, binary downloader, apply logic |
 | `internal/updater/signing.go` | Ed25519 verification, embedded public key |
+| `internal/updater/manifest.go` | Signed release manifest: format, builder, parser, the checks `ApplyUpdate` makes |
 | `internal/notifications/manager.go` | Notification dispatch, event filtering, target management |
 | `internal/notifications/discord.go` | Discord webhook sender |
 | `internal/notifications/lifecycle.go` | Edit-in-place lifecycle messages: the event set, the per-(job, target) message-id store, the POST-or-PATCH decision, the Status/History rewrite |

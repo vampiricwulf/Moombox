@@ -2,7 +2,7 @@ package updater
 
 import "testing"
 
-func TestParseVersion(t *testing.T) {
+func TestParseVersionFullCore(t *testing.T) {
 	tests := []struct {
 		input               string
 		major, minor, patch int
@@ -19,14 +19,14 @@ func TestParseVersion(t *testing.T) {
 		{"v1.x.0", 0, 0, 0, true},
 	}
 	for _, tt := range tests {
-		maj, min, pat, err := ParseVersion(tt.input)
+		v, err := ParseVersionFull(tt.input)
 		if (err != nil) != tt.wantErr {
-			t.Errorf("ParseVersion(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			t.Errorf("ParseVersionFull(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			continue
 		}
-		if err == nil && (maj != tt.major || min != tt.minor || pat != tt.patch) {
-			t.Errorf("ParseVersion(%q) = %d.%d.%d, want %d.%d.%d",
-				tt.input, maj, min, pat, tt.major, tt.minor, tt.patch)
+		if err == nil && (v.Major != tt.major || v.Minor != tt.minor || v.Patch != tt.patch) {
+			t.Errorf("ParseVersionFull(%q) = %d.%d.%d, want %d.%d.%d",
+				tt.input, v.Major, v.Minor, v.Patch, tt.major, tt.minor, tt.patch)
 		}
 	}
 }

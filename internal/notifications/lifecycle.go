@@ -146,7 +146,8 @@ func normalizeTargetMode(mode string) string {
 // and a write per event, which the cadence ruling does not allow.
 // The map is bounded: entries are released when a job's story ends (see
 // release) and, for jobs that never reach a terminal event, evicted
-// least-recently-touched first past maxTrackedJobs.
+// least-recently-touched first past maxTrackedJobs — either way, never while
+// a send the entry is read for is still queued (hold).
 type lifecycleTracker struct {
 	// writeMu serialises the whole read-modify-write of a job's stored map
 	// against the store. UpdateNotificationMsgs replaces the WHOLE map, so
@@ -162,7 +163,26 @@ type lifecycleTracker struct {
 	jobs    map[string]*lifecycleJob
 	touched map[string]uint64 // job id -> last-touch sequence, for eviction
 	seq     uint64
-	log     interface {
+	// dropping counts, per deleted job and key, the ForgetJob steps queued
+	// for that key that have not run yet (markDropping). While a key has one,
+	// whatever id it holds for the job is the deleted job's — even one its
+	// own POST records after the delete — and it is never written to a row.
+	//
+	// Beside jobs, not inside an entry: release, eviction and another
+	// target's drop delete entries, and a mark lost with one let the deleted
+	// job's id land on a re-added job's row after all.
+	dropping map[string]map[string]int
+	// held counts, per job, the managed sends queued for it on an edit-mode
+	// target and not yet gone from their queue (hold). evictLocked passes a
+	// held job over, and release keeps a held job's entry until the last pin
+	// lets go: its row can be deleted before the send is dispatched —
+	// deleting an active job queues its cancel first — and an entry evicted
+	// or released meanwhile had nothing left to be rebuilt from.
+	//
+	// Beside jobs, like dropping: the drops still delete an entry a queued
+	// send holds once nothing is left in it, and the count must outlive it.
+	held map[string]int
+	log  interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -180,14 +200,17 @@ type lifecycleJob struct {
 // maxTrackedJobs is the backstop for a job that never reaches a terminal
 // event. Past it the tracker drops its least-recently-touched entries; each
 // one costs a single store read to rebuild, and the message it was editing is
-// unaffected because the id is on the row.
+// unaffected because the id is on the row — while the row is there, which is
+// why a job with a managed send still queued is passed over (hold).
 const maxTrackedJobs = 512
 
 func newLifecycleTracker(store MessageStore) *lifecycleTracker {
 	return &lifecycleTracker{
-		store:   store,
-		jobs:    map[string]*lifecycleJob{},
-		touched: map[string]uint64{},
+		store:    store,
+		jobs:     map[string]*lifecycleJob{},
+		touched:  map[string]uint64{},
+		dropping: map[string]map[string]int{},
+		held:     map[string]int{},
 	}
 }
 
@@ -208,7 +231,7 @@ func (l *lifecycleTracker) jobLocked(jobID string) *lifecycleJob {
 	if j == nil {
 		j = &lifecycleJob{msgs: map[string]string{}, history: map[string][]string{}}
 		l.jobs[jobID] = j
-		l.evictLocked()
+		l.evictLocked(jobID)
 	}
 	if !j.loaded {
 		j.loaded = true
@@ -223,12 +246,64 @@ func (l *lifecycleTracker) jobLocked(jobID string) *lifecycleJob {
 	return j
 }
 
-// messageID returns the message this target edits for this job.
-func (l *lifecycleTracker) messageID(jobID, key string) (string, bool) {
+// extraMsg is a second message one target holds for a job: one an old
+// spelling of its webhook opened (messageID), kept under that spelling's key.
+type extraMsg struct {
+	key, id string
+}
+
+// messageID returns the message this target edits for this job — "" when it
+// has none yet — and any other message of the job's this target rewrites
+// with it.
+//
+// legacy are the keys an older release stored this target's ids under
+// (legacyResolvedURL, manager.go). A job whose row still holds one was opened
+// before its webhook's spelling was canonicalised, and its next event must
+// edit that message, not open a second one beside it. The id is ADOPTED: it
+// moves to key in memory and the legacy key leaves the map, so the job's next
+// row write (remember) stores it under the current key and drops the old one
+// — no write of its own, so the one-write-per-(job, target) budget stands.
+// Until then a restart reads the old key again and adopts it again. A legacy
+// key holding nothing, or the id key already holds, leaves the map too:
+// release closes the entry only once every key in the map is closed.
+//
+// A legacy key holding a DIFFERENT id is a second message: 2.8.9 and 2.8.10
+// built one target per spelling, so a webhook configured as "…/TOKEN" and
+// "…/TOKEN/" posted, and kept editing, one message per spelling for every
+// job. Dropping it orphaned it, reading "Downloading" for good. It stays under
+// its old key and is returned in extra: every edit rewrites it too, and the
+// terminal edit closes it (release) like the job's own message.
+//
+// The lookup is a managed send's, about to write these messages, so it opens
+// their story again: a release recorded for them — a terminal event before a
+// Retry, or a message-less one before the target's first message — no longer
+// counts, and only this send's own delivered terminal edit closes them once
+// more. release reads closed against the ids in msgs, so a stale mark made a
+// target mid-story look closed: another target's release took the entry, and
+// this target's History with it, and an entry a release kept for a queued
+// send (held) went when that send's pin let go, so a Retry's next event began
+// its History again. Kept or rebuilt from the row, the entry now reads alike.
+func (l *lifecycleTracker) messageID(jobID, key string, legacy ...string) (id string, extra []extraMsg) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	id := l.jobLocked(jobID).msgs[key]
-	return id, id != ""
+	j := l.jobLocked(jobID)
+	for _, lk := range legacy {
+		if lk == "" || lk == key {
+			continue
+		}
+		switch old := j.msgs[lk]; {
+		case old == "" || old == j.msgs[key]:
+			delete(j.msgs, lk)
+		case j.msgs[key] == "":
+			j.msgs[key] = old
+			delete(j.msgs, lk)
+		default:
+			extra = append(extra, extraMsg{key: lk, id: old})
+			delete(j.closed, lk)
+		}
+	}
+	delete(j.closed, key)
+	return j.msgs[key], extra
 }
 
 // remember records a newly created message and persists the job's whole map.
@@ -257,13 +332,16 @@ func (l *lifecycleTracker) remember(jobID, key, messageID string) {
 		return
 	}
 	j.msgs[key] = messageID
-	// A new message reopens this target's story, so a release recorded for an
-	// earlier one (a terminal event before a Retry) must not count this id as
-	// already closed — release reads closed against the ids in msgs.
-	delete(j.closed, key)
+	// No closed mark to clear: the send that created this message looked it
+	// up first (messageID), and the lookup opened the target's story again.
 	snapshot := make(map[string]string, len(j.msgs))
 	for k, v := range j.msgs {
-		snapshot[k] = v
+		// A deleted job's id waiting on its target's drop stays out of the
+		// row: the row now is the re-added job's, and the id would outlive
+		// the drop there — a restart would edit the deleted job's message.
+		if l.dropping[jobID][k] == 0 {
+			snapshot[k] = v
+		}
 	}
 	store := l.store
 	log := l.log
@@ -314,18 +392,44 @@ func (l *lifecycleTracker) forget(jobID, key string) {
 // History per target, for the life of a 24/7 process. A target that filters
 // `finished` out keeps the entry alive until evictLocked, which is the same
 // bound a job that never reaches a terminal event already has.
-func (l *lifecycleTracker) release(jobID, key string) {
+//
+// A held job's entry stays until the last pin lets go (hold), closed: a
+// queued send still reads it, and the row it would be rebuilt from can be
+// gone by then. The terminal edit releasing it is no exception, and neither
+// is the send's own pin, which lets go only once the dispatch that called
+// this returns. Released and dropped at once, an "error" delivered while the
+// job's later sends were queued behind it — a Retry's "downloading", the
+// delete's "cancelled" — left them the row alone, and the delete had taken
+// that: the cancel posted plain, or the "downloading" opened a second message,
+// and the job's message read "Failed" for good.
+//
+// keys are the target's key and the old-spelling keys of the second messages
+// its terminal edit closed (extraMsg).
+func (l *lifecycleTracker) release(jobID string, keys ...string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	j := l.jobs[jobID]
 	if j == nil {
 		return
 	}
-	delete(j.history, key)
 	if j.closed == nil {
 		j.closed = map[string]bool{}
 	}
-	j.closed[key] = true
+	for _, key := range keys {
+		delete(j.history, key)
+		j.closed[key] = true
+	}
+	l.dropIfClosedLocked(jobID, j)
+}
+
+// dropIfClosedLocked deletes a job's entry once its story is over — some
+// target's release closed it and no target that holds a message is still open
+// — and no queued send holds it. release asks first, and the last pin to let
+// go asks again (hold). Caller holds l.mu.
+func (l *lifecycleTracker) dropIfClosedLocked(jobID string, j *lifecycleJob) {
+	if len(j.closed) == 0 || l.held[jobID] > 0 {
+		return
+	}
 	for k := range j.msgs {
 		if !j.closed[k] {
 			return
@@ -333,6 +437,186 @@ func (l *lifecycleTracker) release(jobID, key string) {
 	}
 	delete(l.jobs, jobID)
 	delete(l.touched, jobID)
+}
+
+// dropTarget removes what ONE target holds for a job that no longer exists,
+// and the job's entry once nothing is left in it, and clears one of the
+// key's marks (markDropping). Unlike release it leaves nothing to re-read:
+// the row and the ids it stored are gone. A YouTube job's id is its video
+// id, so the same id comes back on a re-add — or when a channel removed and
+// re-added re-detects it — and an entry kept from the deleted job used to
+// PATCH that job's old message, far up the channel where an edit notifies
+// nobody, with the old History carried over.
+//
+// Per target, and run on that target's sender goroutine behind everything it
+// had queued (ForgetJob): see Manager.forgetInOrder for why.
+func (l *lifecycleTracker) dropTarget(jobID, key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if marks := l.dropping[jobID]; marks[key] > 0 {
+		if marks[key]--; marks[key] == 0 {
+			delete(marks, key)
+		}
+		if len(marks) == 0 {
+			delete(l.dropping, jobID)
+		}
+	}
+	if j := l.jobs[jobID]; j != nil {
+		l.dropKeysLocked(jobID, j, func(k string) bool { return k == key })
+	}
+}
+
+// retainTarget drops what ONE target holds, as dropTarget does but marking
+// nothing off, for every job not in live: the bulk counterpart, for the
+// deletes that fire no per-job event (a departed channel's prune). A job
+// added after the list was taken can lose its entry, or this target's part
+// of it, too; that costs only the in-process History, as a release does —
+// its stored ids are re-read on the next touch (dropKeysLocked).
+func (l *lifecycleTracker) retainTarget(live map[string]struct{}, key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, j := range l.jobs {
+		if _, ok := live[id]; !ok {
+			l.dropKeysLocked(id, j, func(k string) bool { return k == key })
+		}
+	}
+}
+
+// markDropping marks key for a deleted job (see lifecycleTracker.dropping)
+// BEFORE ForgetJob queues the drop that clears the mark — a step that ran
+// first would leave a mark nothing clears.
+//
+// Every key a drop is queued for, not only the keys holding state when the
+// delete lands: a target can still have the deleted job's POST queued, or in
+// flight, with no id yet. Two edit-mode targets drain at their own pace, so
+// the same video id can be re-added, and the quick target post the new job's
+// first message, while the slow one still holds — or is yet to record — the
+// deleted job's id. That POST writes the job's whole map to the NEW row, and
+// without the mark the deleted job's id went with it: the slow target's drop
+// clears only memory, so the re-added job edited the deleted job's message
+// on that target.
+func (l *lifecycleTracker) markDropping(jobID, key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	marks := l.dropping[jobID]
+	if marks == nil {
+		marks = map[string]int{}
+		l.dropping[jobID] = marks
+	}
+	marks[key]++
+}
+
+// drop removes, at once, a deleted job's state under every key no queue
+// drops in order — the keys not in covered: a target no longer configured,
+// whose queue has gone, or one in separate mode.
+func (l *lifecycleTracker) drop(jobID string, covered map[string]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if j := l.jobs[jobID]; j != nil {
+		l.dropKeysLocked(jobID, j, func(k string) bool { return !covered[k] })
+	}
+}
+
+// retain is drop for every job not in live: the at-once half of RetainJobs.
+func (l *lifecycleTracker) retain(live map[string]struct{}, covered map[string]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, j := range l.jobs {
+		if _, ok := live[id]; !ok {
+			l.dropKeysLocked(id, j, func(k string) bool { return !covered[k] })
+		}
+	}
+}
+
+// dropKeysLocked removes a job's message id, History and closed mark for
+// every key gone admits, then the job's entry once it holds no id and no
+// History for anyone. The ForgetJob marks are not the entry's and stay.
+// Caller holds l.mu.
+//
+// An entry that survives with a key dropped is re-read from the row on its
+// next touch, like a new one. RetainJobs' list is a snapshot, so the job can
+// be live: one target's step dropped its id while a slower target still held
+// the entry, nothing re-read the row, and the job's next event on the first
+// target opened a second message beside the one the row still names. For a
+// deleted job the row is gone, or is a re-added job's, which holds none of
+// what the entry still keeps for the deleted one (markDropping).
+func (l *lifecycleTracker) dropKeysLocked(jobID string, j *lifecycleJob, gone func(key string) bool) {
+	dropped := false
+	for k := range j.msgs {
+		if gone(k) {
+			delete(j.msgs, k)
+			dropped = true
+		}
+	}
+	for k := range j.history {
+		if gone(k) {
+			delete(j.history, k)
+			dropped = true
+		}
+	}
+	for k := range j.closed {
+		if gone(k) {
+			delete(j.closed, k)
+		}
+	}
+	if len(j.msgs) == 0 && len(j.history) == 0 {
+		delete(l.jobs, jobID)
+		delete(l.touched, jobID)
+		return
+	}
+	if dropped {
+		j.loaded = false
+	}
+}
+
+// hold pins a job's entry for one managed send queued for it (Manager.
+// pinLifecycle) until the returned func lets it go, which the queue calls
+// once the send has left it — delivered, shed, refused or discarded
+// (queued.letGo). Safe to call more than once.
+//
+// It loads the entry too when it is not in memory: the row still exists when
+// the send is queued, and may not when it is dispatched. Deleting an active
+// job is cancel, wait, delete, so its "cancelled" is queued when the row
+// goes; with its entry evicted — past maxTrackedJobs, by a backfill's
+// `found`s on any edit-mode target, before the cancel was queued or while it
+// waited behind a busy FIFO — the cancel found neither the id nor the row and
+// posted plain, and the message read "Downloading" for good. A ForgetJob step
+// cannot keep the entry instead: it is queued once the row has gone, and the
+// entry can be gone before that.
+//
+// The load is a store read on the Send caller's goroutine — a worker, a
+// monitor, an HTTP handler — and never a wait on Discord. The send's own
+// dispatch would have read the row anyway; this reads it first.
+//
+// The last pin to let go finishes what a release deferred for it: an entry
+// whose story is still closed goes then (dropIfClosedLocked). A job whose
+// sends were all delivered leaves no entry behind, as before the pin.
+func (l *lifecycleTracker) hold(jobID string) (letGo func()) {
+	l.mu.Lock()
+	l.held[jobID]++
+	l.jobLocked(jobID)
+	l.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			if l.held[jobID]--; l.held[jobID] <= 0 {
+				delete(l.held, jobID)
+				if j := l.jobs[jobID]; j != nil {
+					l.dropIfClosedLocked(jobID, j)
+				}
+			}
+		})
+	}
+}
+
+// heldJobs is how many jobs have a managed send queued. Test-only reader, as
+// trackedJobs is: a pin no queue lets go keeps its job's entry for good.
+func (l *lifecycleTracker) heldJobs() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.held)
 }
 
 // trackedJobs is how many jobs the cache is holding. Test-only reader for the
@@ -347,10 +631,19 @@ func (l *lifecycleTracker) trackedJobs() int {
 // cancelled outside the notifier, deleted, or filtered down to mid-lifecycle
 // keys only. Drops the least-recently-touched entries; each costs one store
 // read to rebuild. Caller holds l.mu.
-func (l *lifecycleTracker) evictLocked() {
+//
+// Never keep, the entry the caller is creating, and never a held job's
+// (hold): the map can then sit past the cap by the jobs with a send queued,
+// which the queues' own cap bounds. keep is the touch's own job — evicting
+// it would hand the caller an entry the map no longer holds, and whatever it
+// recorded there would be lost.
+func (l *lifecycleTracker) evictLocked(keep string) {
 	for len(l.jobs) > maxTrackedJobs {
 		oldestID, oldest := "", uint64(0)
 		for id, seq := range l.touched {
+			if id == keep || l.held[id] > 0 {
+				continue
+			}
 			if oldestID == "" || seq < oldest {
 				oldestID, oldest = id, seq
 			}
@@ -408,38 +701,67 @@ type lifecyclePlan struct {
 	Manage bool
 	// MessageID is the message to PATCH. Empty means "create it".
 	MessageID string
+	// Extra are the job's other messages on this target, which every edit
+	// rewrites with the same body (messageID).
+	Extra []extraMsg
 	// AlsoSeparate marks a terminal event: edit the lifecycle message, then
 	// post the separate embed too (it carries the mention).
 	AlsoSeparate bool
 }
 
+// managesLifecycle reports whether a send of opts on t is one an edit-mode
+// target creates, edits or closes a job's lifecycle message with — the cheap
+// half of planLifecycle and pinLifecycle, which no tracker call precedes.
+func managesLifecycle(t notificationTarget, opts SendOptions) bool {
+	if t.mode != ModeEdit || t.msgKey == "" || opts.JobID == "" || opts.Event == "" {
+		return false
+	}
+	return lifecycleEvents[opts.Event] || terminalLifecycleEvents[opts.Event]
+}
+
+// pinLifecycle pins the job's tracker entry (lifecycleTracker.hold) for one
+// message queued on t that dispatchOne will manage — a job's single-embed
+// lifecycle or terminal event, on an edit-mode target whose transport can
+// edit — and returns what lets it go. nil for any other message: dispatchOne
+// never reads the entry for one.
+func (m *Manager) pinLifecycle(t notificationTarget, msg Message) (letGo func()) {
+	if len(msg.Embeds) != 1 {
+		return nil
+	}
+	if _, editable := t.sender.(editableSender); !editable {
+		return nil
+	}
+	if opts := msg.Embeds[0].Opts; managesLifecycle(t, opts) {
+		return m.tracker().hold(opts.JobID)
+	}
+	return nil
+}
+
 // planLifecycle answers the POST-or-PATCH question for one queued send.
 func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecyclePlan {
-	if t.mode != ModeEdit || t.msgKey == "" || opts.JobID == "" || opts.Event == "" {
-		return lifecyclePlan{}
-	}
-	// The two cheap map lookups come BEFORE any tracker call: messageID creates
-	// the job's entry and does its one store read, so asking it about an event
-	// that can never manage a message would spend a SELECT and a tracker slot
-	// on nothing.
-	if !lifecycleEvents[opts.Event] && !terminalLifecycleEvents[opts.Event] {
+	// The cheap checks — two map lookups among them — come BEFORE any tracker
+	// call: messageID creates the job's entry and does its one store read, so
+	// asking it about an event that can never manage a message would spend a
+	// SELECT and a tracker slot on nothing.
+	if !managesLifecycle(t, opts) {
 		return lifecyclePlan{}
 	}
 	if terminalLifecycleEvents[opts.Event] {
 		// Close an OPEN message; never open one. A job whose first word to
 		// this target is "failed" has no story to rewrite.
-		if id, ok := m.tracker().messageID(opts.JobID, t.msgKey); ok {
-			return lifecyclePlan{Manage: true, MessageID: id, AlsoSeparate: true}
+		if id, extra := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...); id != "" {
+			return lifecyclePlan{Manage: true, MessageID: id, Extra: extra, AlsoSeparate: true}
 		}
 		// The lookup just created the entry, and this event is the end of the
 		// story: release it again rather than leave a slot (and the store read
 		// behind it) held for a message that was never opened. On a target
-		// filtered to ["error","finished"] that is every failing job.
+		// filtered to ["error","finished"] that is every failing job. Queued,
+		// the send holds the entry, so it goes when the pin lets go (hold).
 		m.tracker().release(opts.JobID, t.msgKey)
 		return lifecyclePlan{}
 	}
-	id, _ := m.tracker().messageID(opts.JobID, t.msgKey)
-	return lifecyclePlan{Manage: true, MessageID: id}
+	id, extra := m.tracker().messageID(opts.JobID, t.msgKey, t.legacyMsgKeys...)
+	return lifecyclePlan{Manage: true, MessageID: id, Extra: extra}
 }
 
 // dispatchOne is the single decision point between the per-target FIFO sender
@@ -452,7 +774,7 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 // It runs ON the per-target sender goroutine, so a job's states can never
 // reorder and a PATCH can never overtake the POST that created its message.
 // once is the queue's shutting-down flag: when set, every request on this path
-// is single-attempt, because the owner's 10 s force-exit cap must not be spent
+// is single-attempt, because the owner's 15 s force-exit cap must not be spent
 // on one lifecycle edit's retry ladder.
 func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) error {
 	// A batched message is several jobs' embeds in one POST and by ruling
@@ -468,40 +790,81 @@ func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) erro
 	// job for messages this transport can never rewrite.
 	edit, editable := t.sender.(editableSender)
 	if !editable {
+		if opts.EditOnly {
+			return nil // nothing to close here, and the report is suppressed
+		}
 		return sendPlain(t.sender, msg, once)
 	}
 	plan := m.planLifecycle(t, opts)
+	if opts.EditOnly && plan.MessageID == "" {
+		// No open message to close (a terminal event never opens one), or
+		// not an edit-mode target at all.
+		return nil
+	}
 	if !plan.Manage {
 		return sendPlain(t.sender, msg, once)
 	}
 
 	tr := m.tracker()
 	e := msg.Embeds[0]
-	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, time.Now())
+	e.Fields = tr.rewriteFields(e.Opts.JobID, t.msgKey, e.Opts.Event, e.Fields, e.eventTime())
 	// The ping is per MESSAGE (content + allowed_mentions), so it is carried
-	// over from the queued Message, not rebuilt from the embed.
-	body, err := buildPayload(Message{Embeds: []Embed{e}, Mention: msg.Mention, MentionAllowed: msg.MentionAllowed})
+	// over from the queued Message, not rebuilt from the embed. An EditOnly
+	// close carries none: its report is suppressed, and the role text would
+	// still show in the edited message.
+	mention, allowed := msg.Mention, msg.MentionAllowed
+	if opts.EditOnly {
+		mention, allowed = "", nil
+	}
+	body, err := buildPayload(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
 	if err != nil {
 		return err
 	}
 
 	lifecycleErr := m.postOrPatch(edit, tr, opts.JobID, t.msgKey, opts.Event, plan, body, once)
+	closedExtra, extraErr := m.patchExtra(edit, tr, opts.JobID, plan.Extra, body, once)
 
-	if plan.AlsoSeparate {
+	if plan.AlsoSeparate && !opts.EditOnly {
 		// The separate embed carries the mention and must go out even if the
 		// closing edit failed (owner ruling: two messages on failure).
 		if sepErr := sendPlain(t.sender, msg, once); sepErr != nil {
-			return errors.Join(lifecycleErr, sepErr)
+			return errors.Join(lifecycleErr, extraErr, sepErr)
 		}
 	}
 	// A delivered terminal edit ends this job's story for THIS target: drop its
 	// history (and the job's entry once every target holding a message is
-	// closed). The PERSISTED id stays, so a Retry reloads it once and keeps
-	// editing the same message.
+	// closed and no queued send holds it). The PERSISTED id stays, so a Retry
+	// reloads it once and keeps editing the same message.
 	if lifecycleErr == nil && (plan.AlsoSeparate || opts.Event == "finished") {
-		tr.release(opts.JobID, t.msgKey)
+		tr.release(opts.JobID, append([]string{t.msgKey}, closedExtra...)...)
 	}
-	return lifecycleErr
+	return errors.Join(lifecycleErr, extraErr)
+}
+
+// patchExtra rewrites the job's other messages on this target (lifecyclePlan.
+// Extra) with the body its own message got, and returns the keys of those it
+// delivered. One that Discord answers "Unknown Message" is forgotten — there
+// is nothing left of it to close — and nothing is posted in its place: the
+// job's own message carries the story.
+func (m *Manager) patchExtra(edit editableSender, tr *lifecycleTracker, jobID string, extra []extraMsg, body []byte, once bool) (delivered []string, err error) {
+	for _, x := range extra {
+		var perr error
+		if once {
+			perr = edit.patchMessageOnce(x.id, body)
+		} else {
+			perr = edit.patchMessage(x.id, body)
+		}
+		switch {
+		case perr == nil:
+			delivered = append(delivered, x.key)
+		case errors.Is(perr, ErrUnknownMessage):
+			tr.forget(jobID, x.key)
+			m.logger.Info("an old spelling's lifecycle message is gone — no longer editing it", "jobID", jobID)
+		default:
+			err = errors.Join(err, perr)
+		}
+	}
+	return delivered, err
 }
 
 // sendPlain posts a message unchanged, honouring the queue's shutting-down
@@ -530,9 +893,19 @@ func (m *Manager) postOrPatch(edit editableSender, tr *lifecycleTracker, jobID, 
 		if !errors.Is(err, ErrUnknownMessage) {
 			return err
 		}
+		tr.forget(jobID, msgKey)
+		if plan.AlsoSeparate {
+			// A terminal event never CREATES a lifecycle message
+			// (terminalLifecycleEvents): its separate embed, which dispatchOne
+			// posts next, is the whole report. Re-posting here sent two
+			// messages for one failure and stored a terminal-look message as
+			// the one a later Retry would go on editing.
+			m.logger.Info("lifecycle message is gone — the terminal event's own post stands in for it",
+				"jobID", jobID, "event", event)
+			return nil
+		}
 		m.logger.Info("lifecycle message is gone — posting a new one",
 			"jobID", jobID, "event", event)
-		tr.forget(jobID, msgKey)
 		// fall through to the create path
 	}
 	var (
@@ -579,4 +952,80 @@ func (m *Manager) tracker() *lifecycleTracker {
 // it edit mode still works within a process; only restart survival is lost.
 func (m *Manager) SetMessageStore(s MessageStore) {
 	m.tracker().setStore(s)
+}
+
+// ForgetJob drops the edit-mode state held for a deleted job (see dropTarget).
+// cmd/moombox calls it from its OnJobDeleted subscriber.
+func (m *Manager) ForgetJob(jobID string) {
+	if m == nil || jobID == "" {
+		return
+	}
+	tr := m.tracker()
+	covered := m.forgetInOrder(
+		func(key string) { tr.markDropping(jobID, key) },
+		func(key string) { tr.dropTarget(jobID, key) })
+	tr.drop(jobID, covered)
+}
+
+// RetainJobs drops the edit-mode state of every job not in live (see
+// retainTarget). cmd/moombox calls it from its OnJobsChange subscriber, which
+// is the only event a bulk delete fires.
+//
+// No markDropping here. live is a list taken at the bulk write, so a job added
+// since is missing from it without being deleted, and marking it would keep
+// its first message id out of its own row — its next event after the drop
+// would open a second message.
+func (m *Manager) RetainJobs(live map[string]struct{}) {
+	if m == nil {
+		return
+	}
+	// Copied: the steps read it later, on every target's sender goroutine.
+	kept := make(map[string]struct{}, len(live))
+	for id := range live {
+		kept[id] = struct{}{}
+	}
+	tr := m.tracker()
+	covered := m.forgetInOrder(nil, func(key string) { tr.retainTarget(kept, key) })
+	tr.retain(kept, covered)
+}
+
+// forgetInOrder queues step(key) on the FIFO of every target that can hold
+// edit-mode state (editKeys) — the live ones and any retired one still
+// finishing its delivery in flight — and returns the keys it covered. mark,
+// when set, runs for each key just before its step is queued. A queue whose
+// goroutine has returned runs nothing again, so its step runs at once. The
+// caller drops every other key at once.
+//
+// In order, not at once, because a deleted job can still have deliveries on
+// its way. Deleting an active job cancels it first, so its "cancelled" is
+// already queued when the delete lands; if the target was busy — another
+// job's request in flight, a rate-limit wait — that send was dispatched after
+// the drop, found neither the in-memory id nor the row, and posted plain: the
+// lifecycle message read "Downloading" for good. And a POST in flight when the
+// drop landed came back and remembered its id afresh, so a re-add of the same
+// video id PATCHed the deleted job's message — the very thing the drop is
+// for. Behind everything queued, the drop runs after both, and before any
+// send of a job re-added under the same id.
+func (m *Manager) forgetInOrder(mark, step func(key string)) map[string]bool {
+	m.targetsMu.RLock()
+	queues := make([]*targetQueue, 0, len(m.targets)+len(m.retiring))
+	queues = append(queues, m.targets...)
+	for _, q := range m.retiring {
+		queues = append(queues, q)
+	}
+	m.targetsMu.RUnlock()
+
+	covered := make(map[string]bool, len(queues))
+	for _, q := range queues {
+		for _, key := range q.editKeys() {
+			if mark != nil {
+				mark(key)
+			}
+			if !q.enqueueControl(func() { step(key) }) {
+				step(key)
+			}
+			covered[key] = true
+		}
+	}
+	return covered
 }

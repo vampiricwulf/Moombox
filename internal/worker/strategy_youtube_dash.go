@@ -195,7 +195,6 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		streamInfos = append(streamInfos, DashStreamInfo{
 			Itag:           s.Itag,
 			MimeType:       s.MimeType,
-			Codecs:         s.Codecs,
 			Width:          s.Width,
 			Height:         s.Height,
 			FPS:            s.FPS,
@@ -224,11 +223,12 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// -1 means user explicitly chose "no video/audio"
 	var videoStream, audioStream *DashStreamInfo
 	if videoItag != -1 {
-		videoStream = SelectBestDashStream(streamInfos, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference)
+		videoStream = SelectBestDashStream(streamInfos, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, job.Config.Prefer60fps)
 	}
 	if audioItag != -1 {
-		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "")
+		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "", false)
 	}
+	warnUnhonouredPins(job, videoItag, videoStream, audioItag, audioStream)
 
 	// DASH requires both video and audio streams (matching TS), unless user explicitly excluded one
 	if videoStream == nil && videoItag != -1 {
@@ -256,6 +256,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.VideoWidth = videoStream.Width
 		result.VideoHeight = videoStream.Height
 		result.VideoFps = videoStream.FPS
+		result.VideoItag = videoStream.Itag
 	}
 
 	// Get cookie header for authenticated downloads. Method value, not a
@@ -319,6 +320,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 
 	if audioStream != nil {
 		result.HasAudio = true
+		result.AudioItag = audioStream.Itag
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:             audioStream.BaseURL,

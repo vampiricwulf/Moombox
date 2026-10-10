@@ -222,6 +222,19 @@ func (m *SettingsModel) handleRemovePassword() {
 		m.OnSecurityChanged()
 	}
 	if networkReset {
+		// The reset is on disk now, so it is the field's saved value, not an
+		// unsaved edit: left out of originalValues it showed "Unsaved
+		// changes" and a "*" on Network access, and Esc offered to save what
+		// was already saved. The form's own dirty state is what it was.
+		m.originalValues["network_access"] = "localhost"
+		m.structDirty = prevStructDirty
+		m.recheckDirty()
+		// network_access is restart-required (the listener's bind address
+		// is read at boot): say so the way a save of it does.
+		if m.OnRestartRequired != nil {
+			m.OnRestartRequired()
+		}
+		m.showRestartOverlay = true
 		m.secMessage = "Password removed, network access reset to localhost"
 	} else {
 		m.secMessage = "Password removed"

@@ -11,11 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
-	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 
 	tea "charm.land/bubbletea/v2"
@@ -26,10 +27,21 @@ import (
 // safeCmd wraps a tea.Cmd closure with panic recovery. If the closure panics,
 // the recovery converts it into a panicRecoveryMsg that displays feedback.
 func safeCmd(fn func() tea.Msg) tea.Cmd {
+	return safeCmdOr(fn, func(text string) tea.Msg { return panicRecoveryMsg{Text: text} })
+}
+
+// safeCmdOr is safeCmd for a command a dialog is waiting on: a recovered panic
+// is answered with onPanic's message — the command's own error result —
+// rather than a generic panicRecoveryMsg. The generic one says nothing about
+// WHICH command died, so the dialog that asked never heard back: the import
+// overlay spun on step 2 with no key to leave it, trimInProgress stayed set
+// for the session, and the install and add spinners ran forever, each with
+// its explanation on a feedback line the overlay covers.
+func safeCmdOr(fn func() tea.Msg, onPanic func(text string) tea.Msg) tea.Cmd {
 	return func() (msg tea.Msg) {
 		defer func() {
 			if r := recover(); r != nil {
-				msg = panicRecoveryMsg{Text: fmt.Sprintf("unexpected error: %v", r)}
+				msg = onPanic(fmt.Sprintf("unexpected error: %v", r))
 			}
 		}()
 		return fn()
@@ -39,18 +51,10 @@ func safeCmd(fn func() tea.Msg) tea.Cmd {
 // apiBaseURL returns the correct scheme + host for local API calls.
 func (a *App) apiBaseURL() string {
 	scheme := "http"
-	port := 774
-	if a.configStore != nil {
-		a.configStore.Read(func(c *config.MoomboxConfig) {
-			if c.Network.HTTPSEnabled {
-				scheme = "https"
-			}
-			if c.Network.Port > 0 {
-				port = c.Network.Port
-			}
-		})
+	if a.httpsActive() {
+		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
+	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
 }
 
 // internalTokenTransport injects the X-Internal-Token header on every request
@@ -72,12 +76,7 @@ func (t *internalTokenTransport) RoundTrip(req *http.Request) (*http.Response, e
 // verification is skipped since the server uses a self-signed certificate.
 // The client is cached and rebuilt on HTTPS toggle (audit tui.md Finding 3).
 func (a *App) apiClient() *http.Client {
-	httpsEnabled := false
-	if a.configStore != nil {
-		a.configStore.Read(func(c *config.MoomboxConfig) {
-			httpsEnabled = c.Network.HTTPSEnabled
-		})
-	}
+	httpsEnabled := a.httpsActive()
 	if a.cachedClient != nil && a.cachedClientHTTPS == httpsEnabled {
 		return a.cachedClient
 	}
@@ -109,8 +108,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 	platform := a.addVideo.GetPlatform()
 	videoItag := a.addVideo.GetSelectedVideoItag()
 	audioItag := a.addVideo.GetSelectedAudioItag()
-	startTime := a.addVideo.GetStartTime()
-	endTime := a.addVideo.GetEndTime()
+	startTime, endTime := a.addVideo.TimeRange()
 	baseURL := a.apiBaseURL()
 	client := a.apiClient()
 
@@ -119,7 +117,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		a.OnAddVideo(input)
 	}
 
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		body := map[string]any{
 			"videoId": input,
 		}
@@ -139,36 +137,36 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		if audioItag != nil {
 			body["selectedAudioItag"] = *audioItag
 		}
-		if startTime != "" {
-			body["startTime"] = startTime
+		if startTime != nil {
+			body["startTime"] = *startTime
 		}
-		if endTime != "" {
-			body["endTime"] = endTime
+		if endTime != nil {
+			body["endTime"] = *endTime
 		}
 
 		jsonBody, _ := json.Marshal(body)
 		url := fmt.Sprintf("%s/api/jobs", baseURL)
 		resp, err := client.Post(url, "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			return addVideoResultMsg{Feedback: "Failed to connect to server"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Failed to connect to server"}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 409 {
-			return addVideoResultMsg{Feedback: "Job already exists"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Job already exists"}
 		}
 		if resp.StatusCode >= 400 {
 			var errResp struct {
 				Error string `json:"error"`
 			}
 			if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr != nil {
-				return addVideoResultMsg{Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
+				return addVideoResultMsg{VideoID: input, Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
 			}
 			msg := errResp.Error
 			if msg == "" {
 				msg = fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)
 			}
-			return addVideoResultMsg{Feedback: msg}
+			return addVideoResultMsg{VideoID: input, Feedback: msg}
 		}
 
 		label := "Added to queue"
@@ -179,8 +177,8 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 				label = "Added Twitch channel to queue"
 			}
 		}
-		return addVideoResultMsg{Feedback: label}
-	})
+		return addVideoResultMsg{VideoID: input, Feedback: label}
+	}, func(text string) tea.Msg { return addVideoResultMsg{VideoID: input, Feedback: text} })
 }
 
 // fetchFormatsCmd fetches format options from the local API for advanced mode.
@@ -191,33 +189,48 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 	// If a callback is provided, use it directly (avoids HTTP round-trip)
 	if a.OnFetchFormats != nil {
 		cb := a.OnFetchFormats
-		return safeCmd(func() tea.Msg {
+		return safeCmdOr(func() tea.Msg {
 			data, err := cb(videoID)
 			if err != nil {
-				return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
+				return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 			}
-			return fetchFormatsResultMsg{Formats: data}
-		})
+			return fetchFormatsResultMsg{VideoID: videoID, Formats: data}
+		}, func(text string) tea.Msg { return fetchFormatsResultMsg{VideoID: videoID, Err: text} })
 	}
 
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		url := fmt.Sprintf("%s/api/formats/%s", baseURL, videoID)
 		resp, err := client.Get(url)
 		if err != nil {
-			return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
+			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
-			return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
+			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to fetch formats. Proceeding with auto selection."}
 		}
 
 		var data FormatsData
 		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			return fetchFormatsResultMsg{Err: "Failed to parse format data. Proceeding with auto selection."}
+			return fetchFormatsResultMsg{VideoID: videoID, Err: "Failed to parse format data. Proceeding with auto selection."}
 		}
-		return fetchFormatsResultMsg{Formats: &data}
-	})
+		return fetchFormatsResultMsg{VideoID: videoID, Formats: &data}
+	}, func(text string) tea.Msg { return fetchFormatsResultMsg{VideoID: videoID, Err: text} })
+}
+
+// importTimeout bounds the whole import exchange. The shared API client's
+// 30 s covers a loopback call that only answers; an import UPLOADS up to
+// 500 MB and the server then extracts up to 2 GB before it responds, so on a
+// slow disk a good import outlived 30 s, was reported "Import failed: context
+// deadline exceeded" while the server finished it, and a retry then hit 409.
+const importTimeout = 30 * time.Minute
+
+// importClient is the API client with importTimeout in place of its own: the
+// same transport (and so the same internal token and TLS handling).
+func importClient(api *http.Client) *http.Client {
+	c := *api
+	c.Timeout = importTimeout
+	return &c
 }
 
 // importFileCmd reads a ZIP file and uploads it to the import API.
@@ -230,16 +243,16 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	// If a callback is provided, use it directly
 	if a.OnImportFile != nil {
 		cb := a.OnImportFile
-		return safeCmd(func() tea.Msg {
+		return safeCmdOr(func() tea.Msg {
 			importedTitle, err := cb(path, title, channel)
 			if err != nil {
 				return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 			}
 			return importResultMsg{Title: importedTitle}
-		})
+		}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 	}
 
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		f, err := os.Open(path)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
@@ -251,7 +264,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}
 
-		resp, err := client.Do(req)
+		resp, err := importClient(client).Do(req)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}
@@ -272,8 +285,18 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			return importResultMsg{Err: msg}
 		}
 
+		// "import" is what became of a name already taken in imports/
+		// (importOutcome, internal/web/routes/import_routes.go): a
+		// byte-identical file re-adopted, or a different one left alone
+		// while this archive took " (2)" — and any chat left out for
+		// matching no video's name.
 		var result struct {
-			Title string `json:"title"`
+			Title  string `json:"title"`
+			Import struct {
+				Renamed       []json.RawMessage `json:"renamed"`
+				UnpairedChats []string          `json:"unpairedChats"`
+				Note          string            `json:"note"`
+			} `json:"import"`
 		}
 		if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
 			// Non-fatal: we got a 2xx, just can't parse the title
@@ -286,8 +309,12 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		if importedTitle == "" {
 			importedTitle = "archive"
 		}
-		return importResultMsg{Title: importedTitle}
-	})
+		return importResultMsg{
+			Title: importedTitle,
+			Note:  result.Import.Note,
+			Warn:  len(result.Import.Renamed) > 0 || len(result.Import.UnpairedChats) > 0,
+		}
+	}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 }
 
 // importCookieFileCmd runs OnImportCookieFile off the UI goroutine.
@@ -303,7 +330,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 // even be authenticated to.
 func (a *App) importCookieFileCmd(path string) tea.Cmd {
 	fn := a.OnImportCookieFile
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if fn == nil {
 			// Unreachable from the keyboard — with no callback the chord is
 			// not registered — but a nil call here would panic the command
@@ -312,14 +339,14 @@ func (a *App) importCookieFileCmd(path string) tea.Cmd {
 		}
 		res, err := fn(path)
 		return cookieImportResultMsg{Result: res, Err: err}
-	})
+	}, func(text string) tea.Msg { return cookieImportResultMsg{Err: errors.New(text)} })
 }
 
 func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 	createFn := a.OnCreateTrim
 	progressMu := &a.trimProgressMu
 	progressPct := &a.trimProgressPct
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if createFn == nil {
 			return createTrimResultMsg{Err: "Create trim not available"}
 		}
@@ -333,7 +360,7 @@ func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 			return createTrimResultMsg{Err: errMsg}
 		}
 		return createTrimResultMsg{Filename: filename}
-	})
+	}, func(text string) tea.Msg { return createTrimResultMsg{Err: text} })
 }
 
 func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
@@ -346,15 +373,15 @@ func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
 			break
 		}
 	}
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if deleteFn == nil {
-			return deleteTrimResultMsg{Err: "Delete trim not available"}
+			return deleteTrimResultMsg{JobID: jobID, Err: "Delete trim not available"}
 		}
 		if err := deleteFn(jobID, trimID); err != nil {
-			return deleteTrimResultMsg{Err: err.Error()}
+			return deleteTrimResultMsg{JobID: jobID, Err: err.Error()}
 		}
-		return deleteTrimResultMsg{TrimID: trimID, Filename: filename}
-	})
+		return deleteTrimResultMsg{JobID: jobID, TrimID: trimID, Filename: filename}
+	}, func(text string) tea.Msg { return deleteTrimResultMsg{JobID: jobID, Err: text} })
 }
 
 func (a *App) fetchOrphansCmd() tea.Cmd {
@@ -420,12 +447,12 @@ func (a *App) ytdlpStatusCmd() tea.Cmd {
 // for a direct caller.
 func (a *App) ytdlpInstallCmd() tea.Cmd {
 	installFn := a.OnInstallYtdlpPlugin
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if installFn == nil {
 			return ytdlpInstallResultMsg{Err: errors.New("yt-dlp plugin install is not available in this process")}
 		}
 		return ytdlpInstallResultMsg{Err: installFn()}
-	})
+	}, func(text string) tea.Msg { return ytdlpInstallResultMsg{Err: errors.New(text)} })
 }
 
 // fetchStatsCmd runs OnGetStats off the UI goroutine, tagging the result with
@@ -448,6 +475,24 @@ const statsRefreshInterval = 60 * time.Second
 // chain. A fetch result never does — that is what multiplied the chains.
 func statsRefreshTick(epoch int) tea.Cmd {
 	return tea.Tick(statsRefreshInterval, func(time.Time) tea.Msg { return statsRefreshTickMsg{Epoch: epoch} })
+}
+
+// fetchJobLogCmd reads one job's log buffer through OnGetJobLogs off the UI
+// goroutine, tagging the lines with the O L session (App.jobLogEpoch) that
+// asked for them. The ID and the callback are captured here, on the update
+// goroutine; the closure touches no App field.
+func (a *App) fetchJobLogCmd(epoch int, jobID string) tea.Cmd {
+	fn := a.OnGetJobLogs
+	return safeCmd(func() tea.Msg {
+		return jobLogLinesMsg{Epoch: epoch, Lines: fn(jobID)}
+	})
+}
+
+// jobLogRefreshTick schedules the O L overlay's next read for one session.
+// As with statsRefreshTick only the open and the tick arm call it, so a
+// session has one chain however many reads land.
+func jobLogRefreshTick(epoch int) tea.Cmd {
+	return tea.Tick(jobLogRefreshInterval, func(time.Time) tea.Msg { return jobLogRefreshTickMsg{Epoch: epoch} })
 }
 
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
@@ -546,7 +591,7 @@ func (a *App) deleteAllHistoryCmd(ids []string) tea.Cmd {
 // ffmpegCheckCmd runs FFmpeg path validation asynchronously via tea.Cmd.
 func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 	checkFn := a.OnCheckFFmpeg
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if checkFn == nil {
 			return ffmpegCheckResultMsg{Valid: false, Path: path}
 		}
@@ -555,14 +600,14 @@ func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 		}
 		valid, ver, warn := checkFn(path)
 		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Warning: warn, Path: path}
-	})
+	}, func(text string) tea.Msg { return ffmpegCheckResultMsg{Valid: false, Path: path} })
 }
 
 // ffmpegPrepareCmd checks elevation and either installs directly or returns
 // a script for review.
 func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
 	prepareFn := a.OnPrepareInstall
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if prepareFn == nil {
 			return ffmpegPrepareResultMsg{Err: "install not available"}
 		}
@@ -575,13 +620,13 @@ func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
 			Script:         script,
 			Token:          token,
 		}
-	})
+	}, func(text string) tea.Msg { return ffmpegPrepareResultMsg{Err: text} })
 }
 
 // ffmpegConfirmCmd executes a reviewed elevated install.
 func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 	confirmFn := a.OnConfirmInstall
-	return safeCmd(func() tea.Msg {
+	return safeCmdOr(func() tea.Msg {
 		if confirmFn == nil {
 			return ffmpegConfirmResultMsg{Err: "confirm not available"}
 		}
@@ -589,7 +634,7 @@ func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 			return ffmpegConfirmResultMsg{Err: err.Error()}
 		}
 		return ffmpegConfirmResultMsg{}
-	})
+	}, func(text string) tea.Msg { return ffmpegConfirmResultMsg{Err: text} })
 }
 
 // testNotificationCmd delivers a test embed to url via the local API
@@ -621,23 +666,31 @@ func (a *App) testNotificationCmd(url string) tea.Cmd {
 	})
 }
 
-// resolveChannelCmd resolves a channel URL asynchronously via tea.Cmd.
+// normalizeChannelID is utils.NormalizeChannelID behind a variable, so the
+// TUI tests can answer a handle's lookup without reaching youtube.com.
+var normalizeChannelID = utils.NormalizeChannelID
+
+// resolveChannelCmd runs a channel editor's ID — a URL or a bare @handle —
+// through utils.NormalizeChannelID, the normaliser every channel writer
+// shares, off the update loop: a handle is a page fetch with retries. Both
+// editors (Settings and the setup wizard) receive the answer and the one
+// waiting takes it. An input that names no channel comes back as
+// ErrNotChannelURL; it used to come back as its own ID, and was saved — a
+// watch URL stored as a channel the monitors polled forever. A panic answers
+// the editor too, so it is not left resolving.
 func (a *App) resolveChannelCmd(input string) tea.Cmd {
-	return safeCmd(func() tea.Msg {
-		resolved, err := utils.ResolveChannelInput(context.Background(), input)
+	return safeCmdOr(func() tea.Msg {
+		resolved, err := normalizeChannelID(context.Background(), input)
 		if err != nil {
-			return channelResolvedMsg{Err: err}
-		}
-		if resolved == nil {
-			// Not a recognized URL — return input as-is
-			return channelResolvedMsg{ID: input}
+			return channelResolvedMsg{Input: input, Err: err}
 		}
 		return channelResolvedMsg{
+			Input:    input,
 			ID:       resolved.ID,
 			Name:     resolved.Name,
 			Platform: resolved.Platform,
 		}
-	})
+	}, func(text string) tea.Msg { return channelResolvedMsg{Input: input, Err: errors.New(text)} })
 }
 
 // openBrowser launches the default browser for the given URL using the
@@ -647,7 +700,45 @@ func openBrowser(url string) {
 	// Windows needs explorer.exe with a forced-quoted command line so the
 	// browser escapes the launcher's Job Object AND query-string URLs
 	// survive explorer's legacy argument parser.
-	_ = openBrowserCmd(url).Start()
+	cmd := openBrowserCmd(url)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	releaseOpener(runtime.GOOS, openerProcess{cmd})
+}
+
+// opener is the half of a started opener command releaseOpener uses: an
+// interface so both arms can be tested without opening a browser.
+type opener interface {
+	Wait() error
+	Release() error
+}
+
+// openerProcess adapts *exec.Cmd to opener.
+type openerProcess struct{ cmd *exec.Cmd }
+
+func (p openerProcess) Wait() error    { return p.cmd.Wait() }
+func (p openerProcess) Release() error { return p.cmd.Process.Release() }
+
+// releaseOpener hands a started opener back to the OS — the rule
+// web.StartDetached applies to the dashboard's opens, which the import fence
+// keeps this package from calling. On Windows it releases the process handle:
+// there is nothing to reap, and each O S / O W / O G press leaked one for the
+// life of the process. Elsewhere it reaps the child in a goroutine, since an
+// unwaited child stays a zombie until Moombox exits.
+func releaseOpener(goos string, p opener) {
+	if goos == "windows" {
+		_ = p.Release()
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				_ = r // nothing to report to: a backstop, as in web.detachStarted
+			}
+		}()
+		_ = p.Wait()
+	}()
 }
 
 // newImportRequest builds the archive-import POST. The metadata headers are
@@ -679,6 +770,11 @@ func Run(app *App) error {
 	p := tea.NewProgram(app, tea.WithFPS(tuiTargetFPS))
 	app.program.Store(p)
 	_, err := p.Run()
+	// A SIGINT delivered from outside (kill -INT) surfaces as ErrInterrupted;
+	// it is a request to quit like any other, not a TUI failure.
+	if errors.Is(err, tea.ErrInterrupted) {
+		return nil
+	}
 	return err
 }
 

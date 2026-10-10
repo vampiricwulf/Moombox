@@ -126,7 +126,14 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		// AFTER the IP-block branch on purpose: a positive substitution
 		// signal is a better diagnosis than plain exhaustion, so Task 3's
 		// verdict keeps its precedence.
-		p.logger.Warn("[PlayerApi] no Innertube client produced a player response",
+		// A cancelled job or a shutdown fails every client with
+		// context.Canceled; that is the operator's own stop, not an
+		// extraction failure worth a warning.
+		logExhausted := p.logger.Warn
+		if errors.Is(tally.lastErr, context.Canceled) {
+			logExhausted = p.logger.Debug
+		}
+		logExhausted("[PlayerApi] no Innertube client produced a player response",
 			"videoID", videoID, "clients", tally.attempts, "lastError", errText(tally.lastErr))
 		if tally.lastErr != nil {
 			// Wrapped, not replaced: probe_classify.go keys on the
@@ -648,7 +655,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	return p.finishExtraction(ctx, finalizeVideoInfo(ctx, result, wpParsed, formatPool), wp, videoID, tally, wpParsed)
 }
 
-// GetVideoInfoPublic fetches video info without authentication.
+// GetVideoInfoPublic fetches video info for a jar with no complete logged-in
+// session. Only the watch page is fetched without cookies: the Innertube
+// calls build their headers through Auth.GenerateAPIHeaders, which attaches
+// whatever YouTube cookies the jar still holds (a half-cleared jar keeps
+// SAPISID), and only the cookieless chain is credential-free.
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state — see GetVideoInfoAuthenticated.
 	ctx = withExtractionState(ctx)
@@ -938,7 +949,10 @@ func (p *PlayerAPI) fetchWithClientOpts(ctx context.Context, videoID string, cli
 		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
 
-	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "Innertube", videoID)
+	// The client's own name, not a generic label: this error is what lands in
+	// the job's error column, and "Innertube API error: HTTP 403" could not
+	// say which of the cascade's clients was refused.
+	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, client.ClientName, videoID)
 }
 
 // fetchWithCookielessClient performs a bare player request for the cookieless
@@ -1345,7 +1359,8 @@ var playerRetryBackoffBase = time.Second
 // guard reserves a full playerRetryBackoffBase beyond the sleep itself for
 // that attempt's HTTP round trip — a bare "does the sleep fit" check would
 // still let the *request* race the deadline in the narrow window right after
-// a sleep that just barely fit.
+// a sleep that just barely fit. The one window the guard cannot see — the
+// deadline lapsing during the attempt itself — is covered by retryExitErr.
 //
 // videoID is the video that was ASKED for; parsePlayerResponse rejects a
 // response about any other one (yt-dlp's _invalid_player_response).
@@ -1357,8 +1372,8 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 
 	var lastErr error
 	for attempt := range 4 {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, retryExitErr(err, lastErr)
 		}
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
@@ -1373,7 +1388,7 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 				return nil, lastErr
 			}
 			if err := utils.Sleep(ctx, delay); err != nil {
-				return nil, err
+				return nil, retryExitErr(err, lastErr)
 			}
 		}
 
@@ -1428,6 +1443,23 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg, videoID)
 	}
 	return nil, lastErr
+}
+
+// retryExitErr is what doRetryRequest reports when ctx ends between attempts.
+// A lapsed DEADLINE keeps the last attempt's own error: the "HTTP <code>"
+// text worker/probe_classify.go keys on is the actual reason the caller is
+// being told no, and the budget merely ran out while it was being retried —
+// the same rule the deadline guard applies, here for a deadline that lapsed
+// during the attempt itself. CANCELLATION still wins over any HTTP error: a
+// cancelled context is the user's or the shutdown's verdict (engine's
+// cancelErr reports it as context.Canceled, probe_classify's classCancelled
+// abandons on it), and a stale 503 must not turn that abort into a counted
+// failure. With no attempt made yet there is nothing to prefer.
+func retryExitErr(ctxErr, lastErr error) error {
+	if lastErr != nil && !errors.Is(ctxErr, context.Canceled) {
+		return lastErr
+	}
+	return ctxErr
 }
 
 func hasAdequateFormats(info *VideoInfo) bool {

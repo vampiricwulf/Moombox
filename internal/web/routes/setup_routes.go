@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
 	"time"
@@ -26,7 +27,10 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 	mu := store.RWMutex()
 	cfg := store.Config()
 
-	r.Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
+	// Refused cross-site like GET /api/ffmpeg/check: it runs the same
+	// CheckFFmpegCached on the configured path, which spawns that binary
+	// whenever the cache is cold. The wizard and app.js fetch it same-origin.
+	r.With(web.RefuseCrossSite).Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
 		// isFirstRun matches TypeScript: !configManager.hasConfig()
 		var configLoaded bool
 		var ffmpegPath string
@@ -89,8 +93,21 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		installYtdlp, _ := updates["install_ytdlp_plugin"].(bool)
 		delete(updates, "install_ytdlp_plugin")
 
-		// Validate with Zod-equivalent schema constraints (match TS updateConfigSchema)
-		if validationErrs := validateConfigUpdates(updates); len(validationErrs) > 0 {
+		// Channel IDs through the shared normaliser first, as PUT /api/config
+		// does: the web wizard resolves URLs itself, but whatever reaches
+		// here is stored. No rate limit — this route is loopback-only and
+		// runs once.
+		channelErrs := normalizeChannelUpdates(req.Context(), updates)
+
+		// Validate the field constraints before anything is applied.
+		validationErrs := validateConfigUpdates(updates)
+		maps.Copy(validationErrs, channelErrs)
+		var storedFFmpeg string
+		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
+		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
+			validationErrs["paths.ffmpeg_path"] = msg
+		}
+		if len(validationErrs) > 0 {
 			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(rw).Encode(map[string]any{

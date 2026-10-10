@@ -227,6 +227,11 @@ func TestDiscordWebhookRegex(t *testing.T) {
 		{"non-numeric ID", "https://discord.com/api/webhooks/abc/token", false},
 		{"completely unrelated URL", "https://example.com/webhook", false},
 		{"empty string", "", false},
+		// net/url refuses to build a request from these, and its error quoted
+		// the whole URL, token and all. Mutant: the query class back to [^#].
+		{"tab in the query", "https://discord.com/api/webhooks/123/token?thread_id=42\t", false},
+		{"control character in the query", "https://discord.com/api/webhooks/123/token?thread_id=4\x012", false},
+		{"space in the query", "https://discord.com/api/webhooks/123/token?thread_id=4 2", false},
 	}
 
 	for _, tt := range tests {
@@ -546,6 +551,24 @@ func TestBuildTargetsDedupesByResolvedURL(t *testing.T) {
 			1, map[string]bool{"found": true},
 		},
 		{
+			// Mutant: canonicalDiscordURL keeping the host or the slash — 4.
+			"every spelling of one webhook",
+			[]config.NotificationConfig{
+				{URL: full}, {URL: full + "/"},
+				{URL: "https://ptb.discord.com/api/webhooks/" + id + "/" + tok},
+				{URL: "https://canary.discordapp.com/api/webhooks/" + id + "/" + tok + "/"},
+			},
+			1, map[string]bool{"found": true},
+		},
+		{
+			// Mutant: canonicalDiscordURL keeping a bare "?" — 2.
+			"an empty query is no query",
+			[]config.NotificationConfig{
+				{URL: full}, {URL: full + "?"}, {URL: full + "/?"}, {URL: short + "?"},
+			},
+			1, map[string]bool{"found": true},
+		},
+		{
 			"a nil filter wins over a narrow one, in either order",
 			[]config.NotificationConfig{
 				{URL: full, Events: []string{"found"}},
@@ -619,4 +642,21 @@ func TestBuildTargetsLogsTheCollapsedCountOnce(t *testing.T) {
 			t.Errorf("a config with no duplicates logged %q", lg.infos)
 		}
 	})
+}
+
+// A URL net/url cannot build a request from fails in http.NewRequest, whose
+// parse error is a *url.Error quoting the whole URL. It reached the queue's
+// failure log and the test route's response, token included; it is redacted
+// like a transport error now.
+//
+// Mutant: the construction error returned unredacted — the token is in it.
+func TestARequestConstructionErrorCarriesNoToken(t *testing.T) {
+	d := &DiscordWebhook{URL: "https://discord.com/api/webhooks/123/SECRETtoken?thread_id=4\x012"}
+	_, err := d.do("POST", d.URL, []byte("{}"), false)
+	if err == nil {
+		t.Fatal("a URL with a control character built a request")
+	}
+	if strings.Contains(err.Error(), "SECRETtoken") {
+		t.Errorf("error carries the webhook token: %v", err)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -69,5 +70,112 @@ func TestTwitch_StaggerRunsAfterAWholeBatchFailure(t *testing.T) {
 	}
 	if gap := calls[1].Sub(calls[0]); gap < 40*time.Millisecond {
 		t.Fatalf("inter-chunk gap = %v, want >= 40ms — a failed batch must still stagger before the next chunk", gap)
+	}
+}
+
+// recordingHandler is a slog.Handler that keeps every record's level and
+// message.
+type recordingHandler struct {
+	records *[]slog.Record
+}
+
+func (h recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.records = append(*h.records, r)
+	return nil
+}
+func (h recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestTwitch_AWholeBatchFailureStreakIsWarnedOnce: a whole-batch GQL failure
+// (Twitch refusing the client, transport down) is kept off every channel's
+// health streak by design, and it was logged only at Debug — so a persistent
+// one left no Twitch channel checked and nothing above Debug saying so. The
+// first failure of a streak now Warns, repeats stay at Debug, and the recovery
+// is logged once.
+//
+// Mutant: log every failure at Debug again — no Warn.
+func TestTwitch_AWholeBatchFailureStreakIsWarnedOnce(t *testing.T) {
+	failing := true
+	tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+		if failing {
+			return nil, nil, fmt.Errorf("gql auth failure (401)")
+		}
+		return make([]*twitch.TwitchStreamInfo, len(logins)), make([]error, len(logins)), nil
+	}, twitchChans(2)...)
+	var records []slog.Record
+	tm.logger = slog.New(recordingHandler{records: &records})
+
+	chunk := twitchChans(2)
+	for range 3 {
+		tm.checkChunk(context.Background(), chunk)
+	}
+	failing = false
+	tm.checkChunk(context.Background(), chunk)
+
+	var warns, infos int
+	for _, r := range records {
+		switch {
+		case r.Level == slog.LevelWarn && r.Message != "":
+			warns++
+		case r.Level == slog.LevelInfo && r.Message == "Twitch batch checks recovered":
+			infos++
+		}
+	}
+	if warns != 1 {
+		t.Errorf("%d Warn lines for a three-failure streak, want exactly 1", warns)
+	}
+	if infos != 1 {
+		t.Errorf("%d recovery lines, want 1", infos)
+	}
+}
+
+// A manual add for an offline channel parks a `tw_manual_<login>_<ns>` job in
+// waitForTwitchLive. It has no stream ID, so the monitor's dedupe never
+// matched it: when the channel went live the monitor created a second job and
+// both recorded the broadcast. The monitor stands aside for a manual job that
+// is waiting, or recording this same broadcast — and only those: one parked
+// in COOKIES? or muxing an earlier broadcast blocked every later one. Waiting
+// includes Live: processTwitchLive writes it, and the row keeps it until
+// ExecuteTwitch flips it to Downloading — a window that takes in the wait for
+// a lifecycle slot.
+//
+// Mutants: manualJobClaims claiming for every status (the parked and muxing
+// rows find nothing), never claiming (the waiting row is duplicated), and
+// never claiming for Live (the row on its way to downloading is duplicated).
+func TestTwitch_AManualJobClaimsOnlyTheBroadcastItWaitsFor(t *testing.T) {
+	const started = "2026-10-05T12:00:00Z"
+	for _, tc := range []struct {
+		name      string
+		status    database.JobStatus
+		start     string
+		wantFound bool
+	}{
+		{"waiting", database.StatusUpcoming, "", false},
+		{"live, on its way to downloading", database.StatusLive, started, false},
+		{"recording this broadcast", database.StatusDownloading, started, false},
+		{"recording an earlier broadcast", database.StatusDownloading, "2026-10-04T12:00:00Z", true},
+		{"parked", database.StatusCookies, "", true},
+		{"muxing an earlier broadcast", database.StatusMuxing, "2026-10-04T12:00:00Z", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := config.ChannelConfig{ID: "streamerx", Name: "streamerx", Platform: "twitch"}
+			tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+				return []*twitch.TwitchStreamInfo{{StreamID: "4242", ChannelLogin: "streamerx", ChannelDisplayName: "StreamerX",
+					Title: "hi", IsLive: true, StartedAt: started}}, []error{nil}, nil
+			}, ch)
+			const manualID = "tw_manual_streamerx_1700000000000000001"
+			if _, err := tm.db.AddJob(&database.Job{ID: manualID, VideoID: manualID, URL: "https://www.twitch.tv/streamerx",
+				Platform: "twitch", Status: tc.status, ManuallyAdded: true, StreamStartTime: tc.start}); err != nil {
+				t.Fatal(err)
+			}
+			var found []string
+			tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) { found = append(found, info.StreamID) }
+
+			tm.doCheck(context.Background())
+			if got := len(found) == 1; got != tc.wantFound {
+				t.Errorf("OnStreamFound = %v, want a job: %v", found, tc.wantFound)
+			}
+		})
 	}
 }

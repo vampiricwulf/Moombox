@@ -1,9 +1,11 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -16,14 +18,27 @@ type ChatFileLogger interface {
 	Warn(msg string, args ...any)
 }
 
-// ErrChatFilePartialWrite is returned by AppendChatMessages when the file was
-// successfully truncated at the closing-bracket position but the subsequent
-// WriteAt failed. The file is now in a broken state on disk, but the caller
-// should advance its in-memory state rather than falling back to a full
-// rewrite — a full rewrite would read the partial file (which no longer
-// parses), recover no prior messages, and overwrite history with just the
-// current batch.
+// ErrChatFilePartialWrite is returned by AppendChatMessages when the write of
+// the batch failed (a full disk, an IO error). The append then puts the file's
+// "]\n}" back, so in the ordinary case the file is byte-identical to before
+// and holds none of the batch: the caller keeps the batch and retries it on
+// its next flush. If putting the end back failed as well, the file ends in
+// whatever part of the batch was written; the next append then sees
+// ErrChatFileDamaged, and the caller's salvage keeps every intact message.
+//
+// It used to mean "the file is broken, advance past the batch": the write
+// came after a truncate, so a failure left no closing bracket at all. The
+// write now comes first, and dropping the batch while still counting it made
+// the header over-count the array for good.
 var ErrChatFilePartialWrite = errors.New("chat file truncated but subsequent write failed")
+
+// ErrChatFileDamaged is returned by AppendChatMessages when the file's end is
+// not the end of its messages array: no ']' in the tail at all (a crash left
+// the tail zero-filled), or a last ']' followed by anything but the object's
+// closing '}' (the file was cut mid-record, so that ']' belongs to a
+// message's own array). Nothing is written. Splicing there reported success
+// over a file that no longer parsed, and every later append did the same.
+var ErrChatFileDamaged = errors.New("chat file does not end with its messages array")
 
 // WriteChatFileAtomic writes data as JSON to path through WriteFileAtomic: a
 // uniquely named temp file in the same directory, fsync, chmod 0644 and
@@ -70,9 +85,10 @@ func WriteChatFileAtomic[T any](path string, data T) error {
 // left by PadMessageCountJSON.
 //
 // Per-message json.Marshal failures are skipped after a logger.Warn (if logger
-// is non-nil). A truncate-then-write-failure returns ErrChatFilePartialWrite
-// so the chat-side caller can avoid the history-dropping fallback path; see
-// the sentinel's doc.
+// is non-nil); a batch in which none marshal leaves the file untouched. A
+// failed write of the batch returns ErrChatFilePartialWrite, and a file whose
+// end is not its messages array's returns ErrChatFileDamaged; see the
+// sentinels' docs for what the caller does with each.
 //
 // count is the new total message count; the header's messageCount/downloadedAt
 // are updated in-place within this same open handle (folded in so a flush is
@@ -90,7 +106,7 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		return fmt.Errorf("stat: %w", err)
 	}
 	if info.Size() < 10 {
-		return fmt.Errorf("file too small (%d bytes)", info.Size())
+		return fmt.Errorf("%w: file too small (%d bytes)", ErrChatFileDamaged, info.Size())
 	}
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
@@ -115,14 +131,21 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		}
 	}
 	if bracketOffset == -1 {
-		return fmt.Errorf("no closing bracket found")
+		return fmt.Errorf("%w: no closing bracket in the last %d bytes", ErrChatFileDamaged, tailSize)
+	}
+	if !closesChatDocument(tailBuf[:bracketOffset], tailBuf[bracketOffset+1:]) {
+		return fmt.Errorf("%w: the last ']' does not close the messages array", ErrChatFileDamaged)
 	}
 
 	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
 
+	// Does the array already hold a message? Look back past the whitespace
+	// before ']' for a '}'. Any amount of it: the window used to be 5 bytes,
+	// and a layout with more ("}\n  \n  ]") read as empty, so the next append
+	// left out its comma and the file stopped being JSON.
 	hasExisting := false
-	if bracketBytePos > 5 {
-		checkSize := min(int64(5), bracketBytePos)
+	if bracketBytePos > 0 {
+		checkSize := min(int64(256), bracketBytePos)
 		checkBuf := make([]byte, checkSize)
 		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
 			return fmt.Errorf("check existing: %w", err)
@@ -137,10 +160,11 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		}
 	}
 
-	var sb strings.Builder
-	if hasExisting {
-		sb.WriteString(",\n")
-	}
+	// Marshal first, then join only what marshalled. The separator used to
+	// follow every index but the batch's last, so a skipped final message
+	// left "},\n\n  ]" — a trailing comma that made the whole file invalid
+	// JSON, durably, since the next append's bracket scan still succeeded.
+	encoded := make([][]byte, 0, len(msgs))
 	for i, msg := range msgs {
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
@@ -149,11 +173,19 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 			}
 			continue
 		}
-		sb.WriteString("    ")
-		sb.Write(msgBytes)
-		if i < len(msgs)-1 {
+		encoded = append(encoded, msgBytes)
+	}
+	if len(encoded) == 0 {
+		return nil // nothing to add; leave the file and its header as they are
+	}
+
+	var sb strings.Builder
+	for i, msgBytes := range encoded {
+		if i > 0 || hasExisting {
 			sb.WriteString(",\n")
 		}
+		sb.WriteString("    ")
+		sb.Write(msgBytes)
 	}
 	sb.WriteString("\n  ]\n}")
 	appendStr := sb.String()
@@ -168,10 +200,12 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 	// theoretical shorter-old-tail remainder.
 	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
 		// Partial/failed write: restore a valid closing bracket so the file
-		// stays parseable (dropping only this batch), then signal the sentinel
-		// so the caller advances instead of doing a history-dropping rewrite.
-		if _, rerr := f.WriteAt([]byte("\n  ]\n}"), bracketBytePos); rerr == nil {
-			f.Truncate(bracketBytePos + int64(len("\n  ]\n}")))
+		// stays parseable and holds none of this batch, then signal the
+		// sentinel so the caller keeps the batch for its next flush.
+		// The bytes before bracketBytePos are the old tail's "\n  ", so only
+		// "]\n}" goes back: the file is then byte-identical to before.
+		if _, rerr := f.WriteAt([]byte("]\n}"), bracketBytePos); rerr == nil {
+			f.Truncate(bracketBytePos + int64(len("]\n}")))
 			f.Sync()
 		}
 		return fmt.Errorf("%w: %v", ErrChatFilePartialWrite, err)
@@ -196,6 +230,70 @@ func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFile
 		return fmt.Errorf("fsync: %w", err)
 	}
 	return nil
+}
+
+// closesChatDocument reports whether a ']' is the messages array's own,
+// closing the document: before is everything ahead of it, rest everything
+// after.
+//
+// rest must be the object's closing '}' and nothing else but whitespace. That
+// alone is not enough: most messages END with their own "message" array, so a
+// file cut right after a message's closing brace ends "...]}" (an appended,
+// compact message) or "\n      ]\n    }" (an indented one) — a ']' and a '}'
+// all the same, and an append there wrote the batch into that message. So the
+// ']' must also sit where the writers put the messages array's: on its own
+// line at the top level's two-space indent ("\n  ]", what MarshalIndent and
+// AppendChatMessages both write), or straight after its '[' when the array is
+// empty ("[]"). A message's own arrays close deeper ("\n      ]") or compact
+// ("}]").
+func closesChatDocument(before, rest []byte) bool {
+	if !bytes.HasSuffix(before, []byte("\n  ")) && !bytes.HasSuffix(before, []byte("[")) {
+		return false
+	}
+	closed := false
+	for _, b := range rest {
+		switch b {
+		case ' ', '\n', '\r', '\t':
+		case '}':
+			if closed {
+				return false
+			}
+			closed = true
+		default:
+			return false
+		}
+	}
+	return closed
+}
+
+// ChatFileEndIntact reports whether the chat file at path still ends the way
+// AppendChatMessages needs: its messages array's ']' followed by the closing
+// '}'. It reads only the tail. A missing file is an error the caller can test
+// with os.IsNotExist.
+func ChatFileEndIntact(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if info.Size() < 10 {
+		return false, nil
+	}
+	tailSize := min(int64(256), info.Size())
+	tail := make([]byte, tailSize)
+	if _, err := f.ReadAt(tail, info.Size()-tailSize); err != nil {
+		return false, err
+	}
+	for i, b := range slices.Backward(tail) {
+		if b == ']' {
+			return closesChatDocument(tail[:i], tail[i+1:]), nil
+		}
+	}
+	return false, nil
 }
 
 // UpdateChatFileHeaderFields updates messageCount and downloadedAt in the JSON
@@ -230,6 +328,21 @@ func UpdateChatFileHeaderFields(path string, count int) error {
 	defer f.Close()
 
 	return writeHeaderFieldsToOpenFile(f, info.Size(), count)
+}
+
+// ReadChatFileMessageCount returns the messageCount in a chat file's JSON
+// header, reading only the first 1 KB — the header AppendChatMessages refreshes
+// (and fsyncs) on every append, so it is never behind the file it heads.
+// ok is false when the file cannot be read or carries no count.
+func ReadChatFileMessageCount(path string) (count int, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	buf := make([]byte, 1024)
+	n, _ := io.ReadFull(f, buf)
+	return parseMessageCount(string(buf[:n]))
 }
 
 // writeHeaderFieldsToOpenFile rewrites messageCount + downloadedAt in the JSON
@@ -283,4 +396,95 @@ func writeHeaderFieldsToOpenFile(f *os.File, size int64, count int) error {
 		}
 	}
 	return nil
+}
+
+// SalvageChatMessages reads the chat file at path and returns every
+// message it holds intact. damaged reports that the file stops parsing
+// somewhere — a zero-filled tail a crash left, a cut mid-record — and the
+// messages returned are the ones before that point. err is for a file that
+// could not be read at all (os.IsNotExist for a missing one).
+//
+// Read whole: this is a rewrite's input, and the rewrite holds every message
+// in memory anyway. Shared by the YouTube and Twitch chat writers, whose
+// files keep their messages array last (AppendChatMessages relies on it).
+func SalvageChatMessages[T any](path string) (msgs []T, damaged bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, terr := dec.Token(); terr != nil || tok != json.Delim('{') {
+		return nil, true, nil
+	}
+	for {
+		keyTok, kerr := dec.Token()
+		if kerr != nil {
+			return msgs, true, nil
+		}
+		if keyTok == json.Delim('}') {
+			break
+		}
+		key, isKey := keyTok.(string)
+		if !isKey {
+			return msgs, true, nil
+		}
+		if key != "messages" {
+			if serr := SkipJSONValue(dec); serr != nil {
+				return msgs, true, nil
+			}
+			continue
+		}
+		opening, oerr := dec.Token()
+		if oerr != nil {
+			return msgs, true, nil
+		}
+		if opening == nil { // "messages": null
+			continue
+		}
+		if opening != json.Delim('[') {
+			return msgs, true, nil
+		}
+		for dec.More() {
+			var m T
+			if derr := dec.Decode(&m); derr != nil {
+				return msgs, true, nil
+			}
+			msgs = append(msgs, m)
+		}
+		if _, cerr := dec.Token(); cerr != nil { // the array's ']'
+			return msgs, true, nil
+		}
+	}
+	if _, eerr := dec.Token(); !errors.Is(eerr, io.EOF) {
+		return msgs, true, nil
+	}
+	return msgs, false, nil
+}
+
+// PreserveFileCopy keeps the bytes at path under dst before a rewrite
+// replaces them: a hard link where the filesystem allows one (the atomic
+// rewrite swaps a new file in under path, so the link keeps the old one at no
+// cost), else a copy. A dst left by an earlier preservation is replaced, as
+// adoption's rename to the same name replaces it.
+func PreserveFileCopy(path, dst string) error {
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Link(path, dst); err == nil {
+		return nil
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

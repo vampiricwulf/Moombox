@@ -4,32 +4,49 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
+
+// forceExitAfter is the shutdown backstop. It must outlast the worker's whole
+// Stop (worker.StopBudget: the in-flight wait, then mux cancellation and its
+// grace) plus the stops ahead of it — the monitors, and the trim service's
+// wait for the trims it cancels (up to worker.TrimStopWait). Its clock starts
+// first, so a backstop equal to the worker's own wait fired before Stop
+// reached CancelMuxes, and FFmpeg outlived the process writing into staging
+// the restarted child re-muxes with -y — the very thing owner decision O-E
+// cancels muxes to prevent. The margin covers the steps ahead of the worker
+// and lets the ones after it start: what the trim wait and the worker leave
+// of it is the notification drain's, as little as 1 s. It is not widened for
+// the trim wait: the owner's ruling caps a graceful shutdown at 15 s.
+const forceExitAfter = worker.StopBudget + 3*time.Second
 
 // shutdown runs the orderly stop sequence after run()'s main event loop
 // exits (either via Ctrl-C / SIGTERM, TUI quit, or triggerRestart). Order
 // is consumers-first so producers keep firing into live consumers until the
-// consumers drain: monitors → worker → notifications → cookie refresh →
+// consumers drain: monitors → trims → worker → notifications → cookie refresh →
 // PO-token provider → web server → log/DB unsubscribe → database. A
-// 10-second force-exit timer closes rate limiters + the logger and calls
-// os.Exit(1) as a backstop — every individual stop is isolated with panic
-// recovery so one failing service does not block the others.
+// force-exit timer (forceExitAfter) closes rate limiters, the database and
+// the logger and exits as a backstop — with exitCodeRestart when a restart is
+// pending, else 0 (see the timer for why never 1). Every individual stop is
+// isolated with panic recovery so one failing service does not block the
+// others.
 //
 // Returns true when a restart was requested via s.triggerRestart, so the
 // caller (main) can re-invoke run() with the same configPath.
 func (s *runState) shutdown() bool {
 	s.log.Info("Shutdown signal received, shutting down gracefully...")
 
-	// 10-second force-exit timer. closeLimiters / closeDB / closeLog must run
-	// here too because os.Exit skips remaining defers; all are sync.Once-
-	// guarded so the concurrently-running deferred cleanup doesn't
+	// Force-exit timer (forceExitAfter). closeLimiters / closeDB / closeLog
+	// must run here too because os.Exit skips remaining defers; all are
+	// sync.Once-guarded so the concurrently-running deferred cleanup doesn't
 	// double-close. The exit CODE must honor restartRequested: this backstop
-	// fires routinely (worker stop alone can legitimately take its full 10s
-	// while a background segment mux drains), and exiting 1 during an
+	// fires routinely (worker stop alone can legitimately take its whole
+	// budget while a background segment mux drains), and exiting 1 during an
 	// update/config restart makes the launcher terminate instead of
 	// respawning — turning a self-update into a daemon outage with the new
 	// binary already swapped on disk but never started.
-	forceExit := time.AfterFunc(10*time.Second, func() {
+	forceExit := time.AfterFunc(forceExitAfter, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "force-exit handler panic: %v\n", r)
@@ -43,7 +60,7 @@ func (s *runState) shutdown() bool {
 			os.Exit(exitCodeRestart)
 		}
 		// Exit 0, not 1: this backstop fires routinely on slow-but-USER-
-		// INTENDED shutdowns (worker stop legitimately eats its full 10s
+		// INTENDED shutdowns (worker stop legitimately eats its whole budget
 		// draining a segment mux). The launcher's crash supervision treats
 		// abnormal codes from a long-lived child as crashes and respawns —
 		// exiting 1 here would resurrect a daemon the user just quit.
@@ -64,8 +81,8 @@ func (s *runState) shutdown() bool {
 	}
 
 	// Single-attempt notifications from here on. The force-exit above fires
-	// 10 s from now and routinely does (a worker stop can legitimately spend
-	// the whole window draining a segment mux), so the three-attempt ladder
+	// forceExitAfter from now and routinely does (a worker stop can
+	// legitimately spend most of the window draining a segment mux), so the three-attempt ladder
 	// with its 2 s + 5 s backoff cannot finish — an embed emitted during the
 	// stop would be retried into a process that is already gone. One attempt
 	// is what fits; operations.md documents the cap rather than promising a
@@ -81,6 +98,19 @@ func (s *runState) shutdown() bool {
 	stopService("TwitchMonitor", s.twitchMon.Stop)
 	stopService("DecapiMonitor", s.decapiMon.Stop)
 	stopService("FeedMonitor", s.feedMon.Stop)
+
+	// 1b. Stop the trim service: cancels the trims it runs — a dashboard's
+	// detached one, a TUI's in-process one, a finished job's post-download
+	// one — and waits (briefly: a killed FFmpeg exits at once) for each to
+	// remove its partial file. The wait, up to worker.TrimStopWait for an
+	// FFmpeg that will not die, starts the worker's budget that much later,
+	// so it comes out of the force-exit margin the notification flush
+	// (step 3) drains in. A stopped trim sends nothing, it did not fail;
+	// a stopped post-download trim sends Trim Failed, since nobody asked
+	// for it from a dialog.
+	if s.trimSvc != nil {
+		stopService("TrimService", s.trimSvc.Stop)
+	}
 
 	// 2. Stop worker (waits for active downloads to save state)
 	stopService("DownloadWorker", s.dlWorker.Stop)
@@ -111,7 +141,14 @@ func (s *runState) shutdown() bool {
 	// main loop, so in theory they're always populated at this point. Guard
 	// anyway so an early-exit shutdown path does not NPE).
 	if s.logSub != nil {
-		s.log.Unsubscribe(s.logSub)
+		// The per-job line router goes with the forwarder it was wired beside
+		// (wireLogForwarding): lines logged after this reach the file, the
+		// ring and the TUI, not a database that is about to close.
+		s.log.SetLineRouter(nil)
+		s.log.UnsubscribeLines(s.logSub)
+		if s.logSubDone != nil {
+			close(s.logSubDone)
+		}
 	}
 	if s.unsubWSJobUpdate != nil {
 		s.unsubWSJobUpdate()

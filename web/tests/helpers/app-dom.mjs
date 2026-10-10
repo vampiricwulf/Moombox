@@ -150,7 +150,10 @@ function makeHttp() {
       const pathname = url.startsWith("http") ? new URL(url).pathname : url.split("?")[0];
       let body;
       if (typeof init.body === "string") { try { body = JSON.parse(init.body); } catch { body = init.body; } }
-      calls.push({ method, url: pathname, body, headers: init.headers });
+      // search keeps the query a call carried ("" for none): url is the
+      // pathname alone, which every route matches on.
+      const search = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+      calls.push({ method, url: pathname, search, body, headers: init.headers });
       const hit = matchRoute(routes, method, pathname);
       if (!hit) return Promise.resolve(toResponse(response({ status: 404 })));
       return Promise.resolve(hit.handler({ params: hit.params, method, url: pathname, body }))
@@ -246,6 +249,11 @@ function defineShoelaceStubs(window) {
   class SlTabGroup extends HTMLElement {
     show(name) { (this._shown ??= []).push(name); }
   }
+  // sl-tab.panel is the reflected `panel` attribute; the unsaved-settings
+  // guard reads it off each nav tab to exempt the Settings tab itself.
+  class SlTab extends HTMLElement {
+    get panel() { return this.getAttribute("panel") ?? ""; }
+  }
   class Passive extends HTMLElement {}
 
   // customElements.define refuses a constructor it has already seen, so every
@@ -258,10 +266,10 @@ function defineShoelaceStubs(window) {
     "sl-button": SlDisableable, "sl-icon-button": SlDisableable,
     "sl-dialog": SlOverlay, "sl-drawer": SlOverlay, "sl-dropdown": SlOverlay,
     "sl-tooltip": SlOverlay, "sl-details": SlOverlay, "sl-alert": SlAlert,
-    "sl-tab-group": SlTabGroup,
+    "sl-tab-group": SlTabGroup, "sl-tab": SlTab,
     "sl-tag": Passive, "sl-badge": Passive, "sl-icon": Passive, "sl-spinner": Passive,
     "sl-progress-bar": Passive, "sl-progress-ring": Passive, "sl-divider": Passive,
-    "sl-menu": Passive, "sl-tab": Passive, "sl-tab-panel": Passive, "sl-card": Passive,
+    "sl-menu": Passive, "sl-tab-panel": Passive, "sl-card": Passive,
     "sl-format-bytes": Passive, "sl-relative-time": Passive, "sl-button-group": Passive,
     "sl-menu-label": Passive, "sl-avatar": Passive, "sl-animation": Passive,
     "sl-visually-hidden": Passive, "sl-copy-button": Passive, "sl-tree": Passive,

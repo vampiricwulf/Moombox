@@ -45,6 +45,11 @@ type sidecarSolver struct {
 
 	mu   sync.Mutex
 	sent map[string]struct{} // playerIDs already sent in this sidecar lifetime
+	// sending gates the first send of a player's JS: one one-slot channel per
+	// playerID. Concurrent first solves used to each ship the ~3 MB player
+	// and each make the sidecar load it — a synchronous pass on its event
+	// loop that stalls every PO-token request queued behind it. Guarded by mu.
+	sending map[string]chan struct{}
 }
 
 // NewSidecarSolver constructs a sidecarSolver. The client must already
@@ -56,9 +61,28 @@ func NewSidecarSolver(s sidecarClient, src PlayerSource) Solver {
 
 func newSidecarSolverWith(s sidecarClient, src PlayerSource) *sidecarSolver {
 	return &sidecarSolver{
-		client: s,
-		src:    src,
-		sent:   make(map[string]struct{}),
+		client:  s,
+		src:     src,
+		sent:    make(map[string]struct{}),
+		sending: make(map[string]chan struct{}),
+	}
+}
+
+// claimFirstSend takes the first-send gate for playerID, or gives up when ctx
+// ends first. The returned func releases it.
+func (s *sidecarSolver) claimFirstSend(ctx context.Context, playerID string) (func(), error) {
+	s.mu.Lock()
+	gate, ok := s.sending[playerID]
+	if !ok {
+		gate = make(chan struct{}, 1)
+		s.sending[playerID] = gate
+	}
+	s.mu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -103,6 +127,16 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 // not infinite-loop tolerance for genuinely-broken cipher state.
 func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
 	includeJS := !s.playerSent(playerID)
+	if includeJS {
+		// One first send per player; the solves that waited on it find the
+		// player sent and go without the JS.
+		release, err := s.claimFirstSend(ctx, playerID)
+		if err != nil {
+			return sidecar.SolveCipherResult{}, err
+		}
+		defer release()
+		includeJS = !s.playerSent(playerID)
+	}
 	result, err := s.callOnce(ctx, playerID, includeJS, false, sigs, ns)
 
 	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {

@@ -37,7 +37,7 @@ var quickKeys = helpSection{
 		{"M", "Action menu"},
 		{"Q Q", "Quit program"},
 		{"Ctrl+C", "Quit immediately"},
-		{"Tab", "Cycle panel focus"},
+		{"Tab/Shift+Tab", "Cycle panel focus (forward / back)"},
 		{"`", "Open settings"},
 		{"?", "Toggle help"},
 	},
@@ -47,17 +47,17 @@ var navigationKeys = helpSection{
 	title: "Navigation",
 	keys: []helpKey{
 		{"↑/↓", "Select / Scroll"},
-		{"PgUp/PgDn", "Page scroll (Tasks · Details · Logs)"},
-		{"Ctrl+U/Ctrl+D", "Half-page scroll (Details · Logs)"},
+		{"PgUp/PgDn", "Page scroll (Tasks · Details · Logs · Job Log)"},
+		{"Ctrl+U/Ctrl+D", "Half-page scroll (Details · Logs · Job Log)"},
 		{"Home/End", "Jump to first / last task (Tasks)"},
-		{"End", "Resume auto-scroll (Logs)"},
+		{"End", "Resume auto-scroll (Logs · Job Log)"},
 		{"Enter", "Expand/collapse archives"},
 		{"Space", "Select task for batch actions (Tasks)"},
-		{"Esc", "Clear batch selection · filter · armed chord"},
-		{"/", "Filter query (Tasks) · Find text (Logs)"},
+		{"Esc", "Clear batch selection · filter · armed chord · close Job Log"},
+		{"/", "Filter query (Tasks) · Find text (Logs · Job Log)"},
 		{"", "Filter: status:live channel:\"name\" platform:youtube"},
 		{"", "        -negate  a|b (either)  \"quoted phrase\""},
-		{"n / N", "Next / previous search match (Logs)"},
+		{"n / N", "Next / previous search match (Logs · Job Log)"},
 		{"c", "Clear the log view (Logs)"},
 	},
 }
@@ -66,7 +66,7 @@ var mouseKeys = helpSection{
 	title: "Mouse",
 	keys: []helpKey{
 		{"Click", "Select task / focus panel"},
-		{"Scroll", "Scroll focused panel"},
+		{"Scroll", "Scroll the panel under the cursor"},
 	},
 }
 

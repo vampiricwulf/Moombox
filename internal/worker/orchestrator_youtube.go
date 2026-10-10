@@ -97,13 +97,13 @@ func stagingPreservedRefusal(err error) bool {
 // refresh failures — not from an engine-side budget expiry), so
 // FinalizedDuringInterruption would otherwise stay false even though the
 // job deliberately waited for (or, config permitting, evidenced) a
-// resume. The wait branch's own giving-up is bounded by waitEpisode (I3
-// fix) — its ceiling is jobCtx.Config.InterruptionTimeout, NOT
-// maxConsecutiveLiveChecks: that counter belongs to a different branch
-// (the "normal download stop" still-live re-verification loop, reached
-// only once a refresh-failure retry falls through to a genuinely-idle
-// downloader rather than repeatedly re-entering the wait branch), and
-// never bounds this one. waitedForResume latches true when
+// resume. The wait is bounded by waitEpisode (I3 fix) — its ceiling is
+// jobCtx.Config.InterruptionTimeout, NOT maxConsecutiveLiveChecks. The
+// quality-loss branch waits once; the downloaders it cancelled bring every
+// later look to the "normal download stop" still-live re-verification
+// branch, which asks the same episode and, while it may keep waiting,
+// refunds the live check it spent — that counter bounds only the verify
+// branch's own retries outside a wait. waitedForResume latches true when
 // noteRefreshFailure's evidence check fires and is CLEARED again at every
 // later successful refresh (`result = refreshResult`) — a broadcast that
 // resumed, or a transient failure that self-healed, must not permanently
@@ -135,6 +135,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// alongside every waitedForResume.resolved() call so a later,
 	// independent stall episode gets its own fresh budget.
 	var waitEpisode waitDeadline
+	// verifyWalled is whether the stream-end verify's last refresh failed on
+	// a credential wall. The second one in a row parks the job (see
+	// refreshWhileLiveWith for why one is not believed).
+	var verifyWalled bool
 
 	// Quality monitoring state
 	segmentIndex := startSegmentIndex
@@ -224,6 +228,125 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// into part 1's already-muxed staging files.
 	curCtx := curStart
 
+	// splitPart closes the current part where the stream changed quality and
+	// opens the next in a fresh seg_N directory, continuing from the old
+	// downloaders' next sequences (oldVideoSeq/oldAudioSeq). It is the one
+	// split both paths that can discover a new quality take: a quality change
+	// (monitor or ErrQualityLost) and a still-live stall refresh. exit reports
+	// that the loop must return result with err; otherwise the new part's
+	// downloaders are in result and the loop continues.
+	splitPart := func(newQuality QualityInfo, freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int, shortSegment bool, segmentEndTime int64) (exit bool, err error) {
+		o.logger.Info("quality split",
+			"from", currentQuality.Label, "to", newQuality.Label,
+			"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
+
+		o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
+
+		// Mux the old segment in the background (unless too short).
+		// No preMux: YouTube chat stays a single whole-job file.
+		if !shortSegment {
+			// A resumed part's true start pre-dates this session — pass
+			// the sentinel so muxSegment derives it from the muxed
+			// duration instead of stamping it with the restart time.
+			muxStart := segmentStartTime
+			if partResumed {
+				muxStart = 0
+			}
+			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+				muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
+			segmentIndex++
+		} else {
+			o.logger.Debug("skipping short segment mux",
+				"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
+				"jobID", jobCtx.Job.ID)
+		}
+
+		// Create downloaders in the NEW staging dir. The caller's refresh points
+		// at the old staging dir and was used only to check quality — it is
+		// discarded unrun.
+		segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
+		if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+			return true, fmt.Errorf("create segment staging dir: %w", err)
+		}
+		if shortSegment && segStagingDir == curCtx.StagingDir {
+			// Short-span discard reusing the same index/dir: physically
+			// remove the span's media and resume sidecars, or the engine
+			// would resume-append the NEW quality onto the discarded
+			// old-quality data — a mixed-codec file under a stale init
+			// segment. Mirrors the Twitch discard in advanceToNewPart.
+			// video.ts is the YouTube HLS strategy's staging name;
+			// video_stream/audio_stream are the DASH family's.
+			for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
+				p := filepath.Join(segStagingDir, name)
+				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+					o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
+				}
+				if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
+					o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
+				}
+			}
+		}
+
+		segJobCtx := *jobCtx
+		segJobCtx.StagingDir = segStagingDir
+		segJobCtx.VideoStartSeq = oldVideoSeq
+		segJobCtx.AudioStartSeq = oldAudioSeq
+
+		refreshResult, refreshErr := o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
+		if refreshErr != nil {
+			// The same retry the quality-loss refresh gets: the part was
+			// already closed, and ending the job here finalized a stream
+			// YouTube still calls live.
+			refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker,
+				func(info *youtube.VideoInfo) (*DownloadResult, error) {
+					return o.refreshDownload(ctx, &segJobCtx, info, result.IsHls)
+				})
+		}
+
+		if cookiesStatusError(refreshErr) {
+			o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
+				"err", refreshErr, "jobID", jobCtx.Job.ID)
+			return true, refreshErr
+		}
+		if refreshErr != nil {
+			o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+			// Return nil to exit the live loop; muxAndFinalize will process
+			// whatever video/audio data was captured in the current staging dir.
+			return true, nil
+		}
+
+		// The new segment's staging dir is now the current one for all
+		// future refreshes. Clear the seqs — they were only for this
+		// downloader creation, and a later still-live refresh must not
+		// inherit them as a forced start position.
+		segJobCtx.VideoStartSeq = 0
+		segJobCtx.AudioStartSeq = 0
+		curCtx = &segJobCtx
+
+		currentQuality = newQuality
+		result = refreshResult
+		// See the identical clear + comment at the loop's same-quality
+		// success path — a successful refresh resolves any earlier
+		// wait-for-resume.
+		waitedForResume.resolved()
+		waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+		// A healthy read: the verify branch's next wall is the first again.
+		verifyWalled = false
+		segmentStartTime = time.Now().Unix()
+		partResumed = false // the next span is watched from birth
+
+		if monitor != nil {
+			select {
+			case <-qualityChangeCh:
+			default:
+			}
+			monitor.UpdateBaseline(currentQuality)
+		}
+
+		attachProgress(result)
+		return false, nil
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return result, waitedForResume.value(), ctx.Err()
@@ -270,6 +393,16 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"err", downloadErr, "jobID", jobCtx.Job.ID)
 			return result, waitedForResume.value(), downloadErr
 		}
+		// Nor can one that cannot write its staging (a full disk, a
+		// permission): every refresh would fail on its first write. Read as a
+		// possible stream end, it was re-verified for up to an hour, logged
+		// nowhere, and then finished as if the stream had ended — footage of
+		// a live broadcast lost behind a Finished row.
+		if errors.Is(downloadErr, engine.ErrLocalWrite) {
+			o.logger.Error("the capture cannot be written to staging — stopping with staging and resume state kept",
+				"err", downloadErr, "jobID", jobCtx.Job.ID)
+			return result, waitedForResume.value(), downloadErr
+		}
 
 		// Check for reactive quality loss (download loop returned ErrQualityLost)
 		isQualityLost := errors.Is(downloadErr, engine.ErrQualityLost)
@@ -282,7 +415,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// Re-fetch manifest FIRST to determine if quality actually changed.
 			// This must happen before muxing so we can skip the split for same-quality.
-			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+			freshInfo, err := qualityChangeInfo(ctx,
+				func(c context.Context) (*youtube.VideoInfo, error) {
+					return jobCtx.YT.GetVideoInfo(c, jobCtx.Job.VideoID)
+				},
+				func() time.Duration {
+					return qualityChangeQuiet(waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout),
+						time.Since(lastSegTime.Load()))
+				},
+				func(c context.Context, err error) {
+					o.logger.Warn("failed to refresh video info after quality change, retrying",
+						"err", err, "retryIn", streamEndVerifyInterval, "jobID", jobCtx.Job.ID)
+					tracker.SetWaitActivity(engine.ActivityRetrying)
+					utils.Sleep(c, streamEndVerifyInterval)
+				},
+			)
+			if ctx.Err() != nil {
+				return result, waitedForResume.value(), ctx.Err()
+			}
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
 				return result, waitedForResume.value(), fmt.Errorf("refresh after quality change: %w", err)
@@ -384,15 +534,34 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// normal bounded exit below, exactly like a permission-
 				// denied call: log and return, letting muxAndFinalize
 				// process whatever was captured.
-				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				// Return nil to exit the live loop; muxAndFinalize will process
-				// whatever video/audio data was captured before the refresh failed.
-				return result, waitedForResume.value(), nil
+				// No resume evidence — but YouTube answered this very refresh
+				// with "live", and finalizing a stream it still calls live
+				// marked the job Finished mid-broadcast over what is often a
+				// transient manifest or cipher fetch. Retry on the still-live
+				// verify branch's cadence and budget first, from the same
+				// forced position.
+				curCtx.VideoStartSeq, curCtx.AudioStartSeq = oldVideoSeq, oldAudioSeq
+				refreshResult, refreshErr = o.refreshWhileLive(ctx, jobCtx, freshInfo, refreshErr, &consecutiveLiveChecks, tracker,
+					func(info *youtube.VideoInfo) (*DownloadResult, error) {
+						return o.refreshDownload(ctx, curCtx, info, result.IsHls)
+					})
+				curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
+				if cookiesStatusError(refreshErr) {
+					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
+						"err", refreshErr, "jobID", jobCtx.Job.ID)
+					return result, waitedForResume.value(), refreshErr
+				}
+				if refreshErr != nil {
+					o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+					// Return nil to exit the live loop; muxAndFinalize will process
+					// whatever video/audio data was captured before the refresh failed.
+					return result, waitedForResume.value(), nil
+				}
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
 
-			if !newQuality.Changed(currentQuality) {
+			if !newQuality.Changed(currentQuality) && !streamIdentityChanged(result, refreshResult) {
 				// Same quality — transient error, not a real quality change.
 				// Continue in the same staging directory with fresh downloaders.
 				o.logger.Info("quality unchanged after re-fetch, continuing download",
@@ -409,13 +578,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// stall finalize, so clearing this here doesn't affect that.
 				waitedForResume.resolved()
 				waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+				// A healthy read: the verify branch's next wall is the first again.
+				verifyWalled = false
 
 				if monitor != nil {
 					select {
 					case <-qualityChangeCh:
 					default:
 					}
-					monitor.UpdateBaseline(currentQuality)
+					monitor.ReconcileSameQuality(currentQuality)
 				}
 
 				attachProgress(result)
@@ -423,97 +594,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			// Quality actually changed — split into a new segment.
-			o.logger.Info("quality split",
-				"from", currentQuality.Label, "to", newQuality.Label,
-				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
-
-			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
-
-			// Mux the old segment in the background (unless too short).
-			// No preMux: YouTube chat stays a single whole-job file.
-			if !shortSegment {
-				// A resumed part's true start pre-dates this session — pass
-				// the sentinel so muxSegment derives it from the muxed
-				// duration instead of stamping it with the restart time.
-				muxStart := segmentStartTime
-				if partResumed {
-					muxStart = 0
-				}
-				o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
-					muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
-				segmentIndex++
-			} else {
-				o.logger.Debug("skipping short segment mux",
-					"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
-					"jobID", jobCtx.Job.ID)
+			if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, segmentEndTime); exit {
+				return result, waitedForResume.value(), err
 			}
-
-			// Create downloaders in the NEW staging dir. The refreshResult created above points
-			// to the old staging dir and was used only to check quality — discard it.
-			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
-			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
-				return result, waitedForResume.value(), fmt.Errorf("create segment staging dir: %w", err)
-			}
-			if shortSegment && segStagingDir == curCtx.StagingDir {
-				// Short-span discard reusing the same index/dir: physically
-				// remove the span's media and resume sidecars, or the engine
-				// would resume-append the NEW quality onto the discarded
-				// old-quality data — a mixed-codec file under a stale init
-				// segment. Mirrors the Twitch discard in advanceToNewPart.
-				// video.ts is the YouTube HLS strategy's staging name;
-				// video_stream/audio_stream are the DASH family's.
-				for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
-					p := filepath.Join(segStagingDir, name)
-					if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-						o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
-					}
-					if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
-						o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
-					}
-				}
-			}
-
-			segJobCtx := *jobCtx
-			segJobCtx.StagingDir = segStagingDir
-			segJobCtx.VideoStartSeq = oldVideoSeq
-			segJobCtx.AudioStartSeq = oldAudioSeq
-
-			refreshResult, refreshErr = o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
-
-			if refreshErr != nil {
-				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				// Return nil to exit the live loop; muxAndFinalize will process
-				// whatever video/audio data was captured in the current staging dir.
-				return result, waitedForResume.value(), nil
-			}
-
-			// The new segment's staging dir is now the current one for all
-			// future refreshes. Clear the seqs — they were only for this
-			// downloader creation, and a later still-live refresh must not
-			// inherit them as a forced start position.
-			segJobCtx.VideoStartSeq = 0
-			segJobCtx.AudioStartSeq = 0
-			curCtx = &segJobCtx
-
-			currentQuality = newQuality
-			result = refreshResult
-			// See the identical clear + comment at the same-quality
-			// success path above — a successful refresh resolves any
-			// earlier wait-for-resume.
-			waitedForResume.resolved()
-			waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
-			segmentStartTime = time.Now().Unix()
-			partResumed = false // the next span is watched from birth
-
-			if monitor != nil {
-				select {
-				case <-qualityChangeCh:
-				default:
-				}
-				monitor.UpdateBaseline(currentQuality)
-			}
-
-			attachProgress(result)
 			continue
 		}
 
@@ -521,6 +604,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		timeSinceLastSeg := time.Since(lastSegTime.Load())
 		o.logger.Info("segment downloaders stopped",
 			"timeSinceLastSeg", timeSinceLastSeg.Round(time.Second),
+			"err", downloadErr, // nil for a clean stop; otherwise logged nowhere else
 			"jobID", jobCtx.Job.ID)
 
 		// Verify stream status with YouTube API
@@ -528,8 +612,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if err != nil {
 			o.logger.Warn("failed to verify stream status", "err", err, "jobID", jobCtx.Job.ID)
 
-			if timeSinceLastSeg >= streamSegmentTimeout {
-				o.logger.Info("no segments for too long and API failed, assuming ended", "jobID", jobCtx.Job.ID)
+			// A failed look is not a verdict, so it spends the same budget a
+			// still-live answer does rather than ending the job. The old
+			// shortcut — give up once timeSinceLastSeg reached
+			// streamSegmentTimeout — always held after the engine's own
+			// maximum_timeout finalize (both default to ten minutes), so one
+			// bot-wall, 429 or 5xx there finished the job, staging deleted.
+			// Inside a resume wait an unreadable look is one more wait tick,
+			// not a spent check: the downloaders are cancelled, so quiet time
+			// always reads "too long" here, and six flaky fetches would end a
+			// wait interruption_timeout still allows.
+			if waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout) {
+				tracker.SetWaitActivity(engine.ActivityWaitingResume)
+				utils.Sleep(ctx, streamEndVerifyInterval)
+				continue
+			}
+			if checks := consecutiveLiveChecks.Add(1); unreadableStatusEndsCapture(checks, timeSinceLastSeg) {
+				o.logger.Info("no segments for too long and the stream status stayed unreadable, assuming ended",
+					"checks", checks, "jobID", jobCtx.Job.ID)
 				break
 			}
 
@@ -568,8 +668,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.logger.Info("stream still live, refreshing manifests",
 				"check", checks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
 
-			// Through the tracker — see the verify-retry branch above.
-			tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
+			// Through the tracker — see the verify-retry branch above. Inside
+			// a wait for an interrupted broadcast this sleep IS the wait, and
+			// says so.
+			if waitEpisode.active(time.Now(), jobCtx.Config.InterruptionTimeout) {
+				tracker.SetWaitActivity(engine.ActivityWaitingResume)
+			} else {
+				tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
+			}
 
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
@@ -585,14 +691,78 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				result.AudioDownloader.Cancel()
 			}
 
-			// B4: Refresh manifests and create new downloaders
+			// B4: Refresh manifests and create new downloaders — from the
+			// position the stopped ones reached, as the quality-loss refresh
+			// does. Without a forced start they resumed through the sidecar,
+			// and a sidecar the engine had already cleared (one cookieless
+			// probe read "ended" that YouTube's full check then contradicted)
+			// left them to the job's start-of-run DB seq: on a fresh job
+			// seq 0, refused over the staged media (Error); on a restarted
+			// one a stale position, re-fetching and appending footage the
+			// file already held. A usable sidecar still wins over the forced
+			// position in the engine.
+			if result.VideoDownloader != nil {
+				curCtx.VideoStartSeq = result.VideoDownloader.CurrentSeq()
+			}
+			if result.AudioDownloader != nil {
+				curCtx.AudioStartSeq = result.AudioDownloader.CurrentSeq()
+			}
 			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
+			curCtx.VideoStartSeq, curCtx.AudioStartSeq = 0, 0
 
 			if refreshErr != nil {
+				credErr := liveCredentialFailure(freshInfo)
+				if credErr != nil && verifyWalled {
+					o.logger.Error("the capture's credentials stopped working — stopping with staging kept",
+						"err", credErr, "jobID", jobCtx.Job.ID)
+					return result, waitedForResume.value(), credErr
+				}
+				verifyWalled = credErr != nil
+				if verifyWalled {
+					o.logger.Warn("YouTube refused this capture's credentials — reading once more before parking the job",
+						"err", credErr, "jobID", jobCtx.Job.ID)
+				}
+				// The quality-loss branch's wait, continued here. That branch
+				// waits once: the downloaders it cancelled bring every later
+				// look to this branch, which spent a live check on each, so an
+				// interruption's wait ended after maxConsecutiveLiveChecks
+				// (about half an hour) instead of the interruption_timeout its
+				// waitEpisode is bounded by. A wait the episode allows spends
+				// no live check; its cadence is the sleep above.
+				if noteRefreshFailure(&waitedForResume, &waitEpisode, refreshErr, jobCtx.Interruption.fresh(), mayResume, jobCtx.Config.InterruptionTimeout, time.Now()) {
+					consecutiveLiveChecks.Add(-1)
+					o.logger.Warn("refresh failed but the broadcast may resume — still waiting",
+						"err", refreshErr, "jobID", jobCtx.Job.ID)
+					continue
+				}
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
 				// Through the tracker — see the verify-retry branch above.
 				tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
 				utils.Sleep(ctx, streamEndVerifyInterval)
+				continue
+			}
+
+			// The stream may have come back at a different quality — an
+			// encoder restart during the stall is the usual cause. The
+			// refreshed downloaders continue the current part (through its
+			// sidecar, or from the forced position above): run as-is they
+			// would APPEND the new rendition's fragments under the old init
+			// segment, and
+			// the mixed tail would be muxed into this part before the
+			// monitor's next tick noticed. Split exactly as a quality change
+			// does instead; the refresh above was only the look.
+			if newQuality := o.extractQualityFromResult(refreshResult); newQuality.Changed(currentQuality) || streamIdentityChanged(result, refreshResult) {
+				var oldVideoSeq, oldAudioSeq int
+				if result.VideoDownloader != nil {
+					oldVideoSeq = result.VideoDownloader.CurrentSeq()
+				}
+				if result.AudioDownloader != nil {
+					oldAudioSeq = result.AudioDownloader.CurrentSeq()
+				}
+				shortSegment := !partResumed && time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
+				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, time.Now().Unix()); exit {
+					return result, waitedForResume.value(), err
+				}
 				continue
 			}
 
@@ -606,6 +776,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// resolves any earlier wait-for-resume.
 			waitedForResume.resolved()
 			waitEpisode.reset() // this stall episode is over; a later one gets a fresh budget
+			verifyWalled = false
 
 			attachProgress(result)
 
@@ -657,6 +828,162 @@ streamEnded:
 	}
 
 	return result, waitedForResume.value(), nil
+}
+
+// unreadableStatusEndsCapture reports whether the live loop's stream-end
+// verification gives up on a stream whose status it cannot read: only once
+// the failed looks have spent the still-live budget (checks, counted with the
+// still-live answers) AND no segment has arrived for streamSegmentTimeout.
+func unreadableStatusEndsCapture(checks int32, quietFor time.Duration) bool {
+	return checks >= maxConsecutiveLiveChecks && quietFor >= streamSegmentTimeout
+}
+
+// credentialVerdict reports whether a playability verdict is a credential
+// failure (sentinel ErrCookiesRequired or ErrNotAMember) on a player response
+// that also has nothing to download — the shape that parks a job at COOKIES?
+// rather than one a refresh could get past.
+func credentialVerdict(info *youtube.VideoInfo, sentinel error) bool {
+	return probeFormatCount(info) == 0 &&
+		(errors.Is(sentinel, ErrCookiesRequired) || errors.Is(sentinel, ErrNotAMember))
+}
+
+// liveCredentialFailure returns the COOKIES?-routing error for a mid-capture
+// player response whose cookies died (or whose membership wall went up), or
+// nil. Without it a failed refresh on that response was retried and then
+// finished like an ended stream, never reaching COOKIES? or its alert.
+func liveCredentialFailure(info *youtube.VideoInfo) error {
+	if info == nil {
+		return nil
+	}
+	if msg, sentinel := playabilityVerdict(info); msg != "" && credentialVerdict(info, sentinel) {
+		return fmt.Errorf("%s: %w", msg, sentinel)
+	}
+	return nil
+}
+
+// liveRefreshProber is the slice of the YouTube service refreshWhileLive needs.
+type liveRefreshProber interface {
+	GetVideoInfo(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
+}
+
+// refreshWhileLive retries a live capture's failed refresh for as long as
+// YouTube keeps reporting the stream live: it waits streamEndVerifyInterval,
+// re-reads the player response, and refreshes again, spending the still-live
+// verify branch's budget (checks against maxConsecutiveLiveChecks). It returns
+// the first refresh that succeeds, or the last refresh error once the stream
+// is no longer reported live, the budget is spent, or ctx ends. A failed
+// re-read is not a verdict: it costs one check and the loop goes on.
+//
+// The live loop's refresh sites without resume evidence used to finalize on a
+// single failed refresh — a transient manifest or cipher fetch — and so marked
+// a stream YouTube had just called live Finished mid-broadcast.
+func (o *DownloadOrchestrator) refreshWhileLive(ctx context.Context, jobCtx *JobContext, info *youtube.VideoInfo, err error,
+	checks *atomic.Int32, tracker *ProgressTracker, refresh func(*youtube.VideoInfo) (*DownloadResult, error)) (*DownloadResult, error) {
+	var prober liveRefreshProber
+	if jobCtx.YT != nil {
+		prober = jobCtx.YT
+	}
+	return refreshWhileLiveWith(ctx, prober, jobCtx.Job.VideoID, info, err, checks,
+		func() {
+			if tracker != nil {
+				tracker.SetWaitActivity(engine.ActivityRetrying)
+			}
+		}, liveRefreshRetryWait, refresh, o.logger, jobCtx.Job.ID)
+}
+
+// liveRefreshRetryWait is refreshWhileLive's pause between attempts; a
+// variable so tests need not sleep it out.
+var liveRefreshRetryWait = streamEndVerifyInterval
+
+// refreshWhileLiveWith is refreshWhileLive with its collaborators passed in.
+func refreshWhileLiveWith(ctx context.Context, prober liveRefreshProber, videoID string, info *youtube.VideoInfo, err error,
+	checks *atomic.Int32, waiting func(), wait time.Duration, refresh func(*youtube.VideoInfo) (*DownloadResult, error),
+	lg logger, jobID string) (*DownloadResult, error) {
+	// walled is whether the last player read was a credential wall. One wall
+	// is re-read before it is believed: a single walled answer to a healthy
+	// session parked a live capture for good — a membership park waits for
+	// an account change nothing will make. Two reads in a row are dead
+	// credentials, and no retry gets past those.
+	walled := liveCredentialFailure(info) != nil
+	for prober != nil && info != nil && info.StreamStatus == youtube.StreamLive {
+		if checks.Add(1) >= maxConsecutiveLiveChecks {
+			return nil, err
+		}
+		lg.Warn("refresh failed while YouTube reports the stream live — retrying instead of ending the recording",
+			"err", err, "retryIn", wait, "jobID", jobID)
+		waiting()
+		if sleepErr := utils.Sleep(ctx, wait); sleepErr != nil {
+			return nil, sleepErr
+		}
+		fresh, getErr := prober.GetVideoInfo(ctx, videoID)
+		if getErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lg.Warn("re-reading the stream status for the refresh retry failed", "err", getErr, "jobID", jobID)
+			continue
+		}
+		info = fresh
+		if info.StreamStatus != youtube.StreamLive {
+			return nil, err
+		}
+		if credErr := liveCredentialFailure(info); credErr != nil {
+			if walled {
+				return nil, credErr
+			}
+			walled = true
+			lg.Warn("YouTube refused this capture's credentials — reading once more before parking the job",
+				"err", credErr, "jobID", jobID)
+			continue
+		}
+		walled = false
+		r, refreshErr := refresh(info)
+		if refreshErr == nil {
+			return r, nil
+		}
+		err = refreshErr
+	}
+	return nil, err
+}
+
+// qualityChangeInfo fetches the player response a quality change is judged
+// against, retrying a failed fetch on the verify branch's cadence. Both
+// downloaders are already stopped when it runs, so a single failure used to end
+// a still-live job in Error over what is usually a transient API fault — while
+// the verify branch's own failed status fetch, a few lines further down the
+// loop, waits and asks again. It gives up on the same clock that branch does:
+// once segments have been quiet for streamSegmentTimeout the error is returned
+// (staging intact, so the job can be resumed). quietFor reads that clock;
+// pause logs and waits before the next attempt.
+func qualityChangeInfo(
+	ctx context.Context,
+	fetch func(context.Context) (*youtube.VideoInfo, error),
+	quietFor func() time.Duration,
+	pause func(context.Context, error),
+) (*youtube.VideoInfo, error) {
+	for {
+		info, err := fetch(ctx)
+		if err == nil || ctx.Err() != nil || quietFor() >= streamSegmentTimeout {
+			return info, err
+		}
+		pause(ctx, err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// qualityChangeQuiet is the quiet time qualityChangeInfo gives up on. Inside a
+// resume wait the downloaders are cancelled, so the time since the last
+// segment always reads "too long" there, and the first failed fetch ended a
+// wait interruption_timeout still allowed, the job in Error. The wait's own
+// deadline bounds the retries instead (waiting is waitEpisode.active), as it
+// bounds the verify branch's unreadable looks.
+func qualityChangeQuiet(waiting bool, sinceLastSeg time.Duration) time.Duration {
+	if waiting {
+		return 0
+	}
+	return sinceLastSeg
 }
 
 // refreshDownload re-creates downloaders for an in-progress live stream from
@@ -898,6 +1225,10 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 	maxRes := jobCtx.Config.MaxVideoResolution
 	videoItag := jobCtx.Config.VideoItag
 	qualityPref := jobCtx.Job.QualityPreference
+	// The download's own selection inputs, prefer_60fps included: a probe
+	// that ranked frame rates differently from the downloader would see a
+	// "quality change" on every tick and split the recording every 30 s.
+	prefer60fps := jobCtx.Config.Prefer60fps
 	probeLog := newScopedLogger(o.logger, "jobID", jobCtx.Job.ID)
 
 	return func(ctx context.Context) (*QualityInfo, error) {
@@ -922,7 +1253,7 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			// disk-runaway class); an unguarded probe pool here would
 			// mis-report quality and churn refresh cycles every probe tick.
 			videoPool, _ := partitionManifestlessFormats(info.Formats)
-			best := SelectBestDashStream(videoPool, videoItag, maxRes, true, qualityPref)
+			best := SelectBestDashStream(videoPool, videoItag, maxRes, true, qualityPref, prefer60fps)
 			if best == nil {
 				return nil, fmt.Errorf("manifestless DASH probe: no video stream selected")
 			}
@@ -962,7 +1293,7 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 		}
 
 		// Select best video stream using same criteria as the download
-		best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref)
+		best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref, prefer60fps)
 		if best == nil {
 			return nil, fmt.Errorf("no video stream found")
 		}

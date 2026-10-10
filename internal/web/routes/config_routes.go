@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"math"
 	net2 "net" // aliased: "net" is shadowed by the network update map in this file
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // flexDurationValue extracts the numeric value of a FlexDuration update for
@@ -60,6 +64,27 @@ type ConfigRoutesCallbacks struct {
 	// OnChannelChange is called when channels are added, updated, or removed,
 	// so monitors can re-evaluate their channel lists immediately.
 	OnChannelChange func()
+	// OnMonitorIntervalChange is called when a monitor check interval
+	// (feed_check_interval, decapi_check_interval, twitch_check_interval)
+	// changes. Each monitor reads its interval only when it arms the next
+	// cycle, so without it the timer already armed kept the old delay — up
+	// to a day for the feed — while the TUI's save, which kicks the
+	// monitors, applied the same change at once. Not called when the save
+	// also carried channels: OnChannelChange kicks them already.
+	OnMonitorIntervalChange func()
+	// OnActivePlatformsChange is called when the platforms whose cookie
+	// indicators show (config.GetActivePlatforms) change, so the TUI's
+	// status bar follows a dashboard save — it otherwise re-read them only
+	// on an auth transition.
+	OnActivePlatformsChange func()
+	// OnDiskSettingsChange is called when disk.disk_warn_percent,
+	// disk.disk_critical_percent or paths.output_directory changes, so the
+	// disk gauge and alerts take a reading against the new settings now
+	// rather than at the next ~6-minute check.
+	OnDiskSettingsChange func()
+	// OnSegmentWorkersChange is called with the new downloader.segment_workers
+	// when it changes, for the high-value warning boot logs.
+	OnSegmentWorkersChange func(n int)
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -79,6 +104,39 @@ type ConfigRoutesCallbacks struct {
 	// whole saved DownloaderConfig because the two keys are reconciled
 	// against each other (see config.DownloaderConfig.ReorderLimitBytes).
 	OnReorderBudgetChange func(d config.DownloaderConfig)
+	// ResolveRateLimit bounds a PUT whose channels[] carries an ID that has
+	// to be resolved — a URL or a bare @handle, each a youtube.com fetch
+	// with retries — as POST /api/config/channels is bounded for the same
+	// fetch. nil leaves it unbounded.
+	ResolveRateLimit *web.RateLimiter
+}
+
+// diskSettings is the comparable form of what the disk gauge reads.
+type diskSettings struct {
+	warn, critical int
+	outputDir      string
+}
+
+func diskSettingsOf(cfg *config.MoomboxConfig) diskSettings {
+	return diskSettings{warn: cfg.Disk.WarnPercent, critical: cfg.Disk.CriticalPercent, outputDir: cfg.Paths.OutputDirectory}
+}
+
+// monitorIntervals is the comparable form of the three monitor check
+// intervals; an unset override reads as -1.
+type monitorIntervals struct {
+	feed           float64
+	decapi, twitch int
+}
+
+func monitorIntervalsOf(cfg *config.MoomboxConfig) monitorIntervals {
+	iv := monitorIntervals{feed: cfg.Monitors.FeedCheckInterval.Value, decapi: -1, twitch: -1}
+	if p := cfg.Monitors.DecapiCheckInterval; p != nil {
+		iv.decapi = *p
+	}
+	if p := cfg.Monitors.TwitchCheckInterval; p != nil {
+		iv.twitch = *p
+	}
+	return iv
 }
 
 // pathFieldError returns the per-field error for a user-supplied path value,
@@ -111,6 +169,42 @@ func pathFieldError(p string, required bool) string {
 	return ""
 }
 
+// ffmpegPathError refuses an FFmpeg path whose executable is not named
+// ffmpeg (or ffmpeg.exe). Moombox runs whatever this names — `-version` on
+// the check route, every mux after it is stored — and a LAN client could
+// point it at bytes it planted: POST /api/import writes an uploaded file
+// under the output directory, and Windows runs a PE whatever its extension.
+// An imported file is always named "<title> [<id>].<ext>", so it can never
+// carry this name. Empty means "ffmpeg from PATH" and passes.
+func ffmpegPathError(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	base := strings.ToLower(filepath.Base(strings.ReplaceAll(p, `\`, "/")))
+	if base != "ffmpeg" && base != "ffmpeg.exe" {
+		return "the executable must be named ffmpeg (or ffmpeg.exe)"
+	}
+	return ""
+}
+
+// newFFmpegPathError applies ffmpegPathError to a paths.ffmpeg_path update
+// only when it CHANGES the stored value: the dashboard's full-form save
+// sends the stored path back on every save, and a path stored before this
+// rule (or hand-edited into config.toml) must not make every unrelated save
+// fail on a field the operator never touched.
+func newFFmpegPathError(updates map[string]any, stored string) string {
+	paths, ok := updates["paths"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	v, ok := paths["ffmpeg_path"].(string)
+	if !ok || strings.TrimSpace(v) == strings.TrimSpace(stored) {
+		return ""
+	}
+	return ffmpegPathError(v)
+}
+
 // pathField names one path-shaped config field and whether config.Validate
 // refuses to persist it empty.
 type pathField struct {
@@ -118,9 +212,10 @@ type pathField struct {
 	required bool
 }
 
-// validateConfigUpdates validates the config update map against TypeScript Zod
-// schema constraints. Returns a map of field->error messages (empty if valid).
-// Matches TypeScript updateConfigSchema constraints exactly.
+// validateConfigUpdates validates the config update map against the field
+// constraints config.Validate enforces, so a bad value is a 400 naming the
+// field rather than a save the store refuses. Returns a map of field->error
+// messages (empty if valid).
 func validateConfigUpdates(updates map[string]any) map[string]string {
 	errs := make(map[string]string)
 
@@ -274,8 +369,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	// Downloader sub-fields
 	if dl, ok := updates["downloader"].(map[string]any); ok {
 		if v, ok := dl["output_template"].(string); ok {
-			if len(v) > 500 {
-				errs["downloader.output_template"] = "output_template must be at most 500 characters"
+			if len(v) > config.OutputTemplateMaxLen {
+				errs["downloader.output_template"] = fmt.Sprintf("output_template must be at most %d characters", config.OutputTemplateMaxLen)
 			}
 		}
 		if v, ok := dl["num_parallel_downloads"].(float64); ok {
@@ -426,9 +521,12 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			}
 		}
 		// browser_type alone (without browser_path) is allowed but unused — no validation needed
-		if v, ok := ck["refresh_interval"].(float64); ok {
-			// 10..10080 mirrors config.validateOrNormalize (CORE-21).
-			if v < 10 || v > 10080 {
+		if raw, exists := ck["refresh_interval"]; exists {
+			// 10..10080 mirrors config.validateOrNormalize (CORE-21). The
+			// string form ("12h") is checked too: applyConfigUpdates parses
+			// it, and an out-of-range string that reached the store failed
+			// Validate there and came back as a 500.
+			if v, ok := flexDurationValue(raw, "minutes"); ok && (v < 10 || v > 10080) {
 				errs["cookies.refresh_interval"] = "refresh_interval must be between 10 and 10080"
 			}
 		}
@@ -445,19 +543,31 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
-	// Channels — audit R-4: PUT /config accepts a channels[] replace, but
-	// the per-element validation is otherwise only enforced by
-	// POST /api/config/channels. Validate each entry here so a bulk replace
-	// can't smuggle in empty IDs, duplicates, or unknown platforms.
+	// Channels — audit R-4: PUT /config accepts a channels[] replace, and
+	// POST /api/config/channels is the other writer. Validate each entry here
+	// so a bulk replace can't smuggle in empty IDs, duplicates, or unknown
+	// platforms (the platform rule is validChannelPlatform, shared with POST).
 	if chs, ok := updates["channels"].([]any); ok {
 		// The decode gate, ahead of the per-field rules. applyConfigUpdates
 		// decodes this array through the same helper and assigns nothing when
 		// the decode fails, so without a 400 here one type-mismatched field
 		// in one entry silently drops the whole channels update behind a 200
 		// (the stored list stays as it was; the operator's edit vanishes).
-		if _, decErrs := decodeConfigEntries[config.ChannelConfig]("channels", chs); decErrs != nil {
+		if entries, decErrs := decodeConfigEntries[config.ChannelConfig]("channels", chs); decErrs != nil {
 			maps.Copy(errs, decErrs)
+		} else {
+			// Every entry decoded, so entries[i] is chs[i]. The overrides
+			// Save's Validate would refuse — a 500 with the field's name
+			// lost, had they got that far.
+			for i, ch := range entries {
+				for field, msg := range config.ChannelOverrideErrors(ch) {
+					errs[fmt.Sprintf("channels[%d].%s", i, field)] = msg
+				}
+			}
 		}
+		// Duplicates compare case-insensitively, as config.Validate does: a
+		// pair differing only in case passed here and then failed Save, a
+		// bare 500 with the field's name lost.
 		seen := make(map[string]bool, len(chs))
 		for i, raw := range chs {
 			obj, ok := raw.(map[string]any)
@@ -466,7 +576,7 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				continue
 			}
 			id, _ := obj["id"].(string)
-			id = strings.TrimSpace(id)
+			id = strings.ToLower(strings.TrimSpace(id))
 			if id == "" {
 				errs[fmt.Sprintf("channels[%d].id", i)] = "channel ID required"
 				continue
@@ -476,12 +586,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				continue
 			}
 			seen[id] = true
-			if v, ok := obj["platform"].(string); ok && v != "" {
-				switch v {
-				case "youtube", "twitch":
-				default:
-					errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
-				}
+			if v, ok := obj["platform"].(string); ok && !validChannelPlatform(v) {
+				errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
 			}
 		}
 	}
@@ -523,6 +629,61 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
+	return errs
+}
+
+// channelUpdatesNeedResolve reports whether a PUT's channels[] carries an
+// ID normalizeChannelUpdates has to resolve (utils.NeedsChannelResolve).
+func channelUpdatesNeedResolve(updates map[string]any) bool {
+	chs, _ := updates["channels"].([]any)
+	for _, raw := range chs {
+		if obj, ok := raw.(map[string]any); ok {
+			if id, ok := obj["id"].(string); ok && utils.NeedsChannelResolve(id) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeChannelUpdates runs each channels[] entry's ID through
+// utils.NormalizeChannelID — the normaliser POST /api/config/channels and
+// both TUI channel editors use — and writes the result back into updates,
+// so validateConfigUpdates' empty and duplicate checks and
+// applyConfigUpdates see the ID that is stored. This path used to trim the
+// ID for its checks only and store it as sent, padding and URLs included:
+// the monitors then polled channel_id=https://… or a padded ID forever.
+// A resolved name fills an empty one and a resolved platform replaces the
+// sent one, as POST does. An ID that names no channel, or whose lookup
+// fails, is a field error keyed like validateConfigUpdates' own; an
+// entry that is not an object, or whose id is no string, is left to its
+// checks. Shared by PUT /api/config and /api/setup/complete.
+func normalizeChannelUpdates(ctx context.Context, updates map[string]any) map[string]string {
+	chs, _ := updates["channels"].([]any)
+	errs := map[string]string{}
+	for i, raw := range chs {
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, ok := obj["id"].(string)
+		if !ok {
+			continue
+		}
+		resolved, err := normalizeChannelID(ctx, id)
+		if err != nil {
+			msg, _ := channelIDRefusal(err)
+			errs[fmt.Sprintf("channels[%d].id", i)] = msg
+			continue
+		}
+		obj["id"] = resolved.ID
+		if name, _ := obj["name"].(string); strings.TrimSpace(name) == "" && resolved.Name != "" {
+			obj["name"] = resolved.Name
+		}
+		if resolved.Platform != "" {
+			obj["platform"] = resolved.Platform
+		}
+	}
 	return errs
 }
 
@@ -605,7 +766,6 @@ func jsonTypeName(t reflect.Type) string {
 
 // applyConfigUpdates applies allowlisted config fields from a snake_case map
 // to the config struct. Used by both PUT /config and POST /setup/complete.
-// Matches TypeScript updateConfigSchema field names exactly.
 func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	// Network sub-fields
 	if net, ok := updates["network"].(map[string]any); ok {
@@ -766,12 +926,6 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		} else if vs, ok := dl["incomplete_staging_expiry_days"].(string); ok {
 			cfg.Downloader.IncompleteStagingExpiryDays = config.ParseFlexDuration(vs, "days", cfg.Downloader.IncompleteStagingExpiryDays.Value)
 		}
-		if v, ok := dl["po_token"].(string); ok {
-			cfg.Downloader.PoToken = v
-		}
-		if v, ok := dl["visitor_data"].(string); ok {
-			cfg.Downloader.VisitorData = v
-		}
 	}
 
 	// Cookies
@@ -801,7 +955,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			cfg.Cookies.Platforms = platforms
 		}
 		if v, ok := ck["active_platforms"].([]any); ok {
-			var activePlatforms []string
+			// Non-nil even when empty: [] is the explicit "both off"
+			// override, distinct from no override at all.
+			activePlatforms := []string{}
 			for _, p := range v {
 				if s, ok := p.(string); ok {
 					activePlatforms = append(activePlatforms, s)
@@ -815,8 +971,10 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			} else if vs, ok := val.(string); ok {
 				cfg.Cookies.RefreshInterval = config.ParseFlexDuration(vs, "minutes", cfg.Cookies.RefreshInterval.Value)
 			} else {
-				// null — reset to zero; RefreshService defaults to 30min at runtime
-				cfg.Cookies.RefreshInterval = config.FlexDuration{}
+				// null resets to the default. Zero is not a usable "unset":
+				// Validate refuses anything under 10 minutes, so storing it
+				// failed the save with a 500.
+				cfg.Cookies.RefreshInterval = config.Defaults().Cookies.RefreshInterval
 			}
 		}
 		if v, ok := ck["dpapi_fallback"].(bool); ok {
@@ -1003,16 +1161,22 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		rw.Write(body)
 	})
 
-	// PUT /api/config
-	r.Put("/api/config", func(rw http.ResponseWriter, req *http.Request) {
-		var updates map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
-			jsonError(rw, "invalid request body", http.StatusBadRequest)
-			return
-		}
+	// handlePut is PUT /api/config once its body is decoded (registered
+	// below, where a save that has channel IDs to resolve is rate limited).
+	handlePut := func(rw http.ResponseWriter, req *http.Request, updates map[string]any) {
+		// Channel IDs first, through the normaliser every channel writer
+		// shares, so the checks below and applyConfigUpdates see the IDs
+		// that will be stored.
+		channelErrs := normalizeChannelUpdates(req.Context(), updates)
 
-		// Validate with Zod-equivalent schema constraints (match TS updateConfigSchema)
+		// Validate the field constraints before anything is applied.
 		validationErrs := validateConfigUpdates(updates)
+		maps.Copy(validationErrs, channelErrs)
+		var storedFFmpeg string
+		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
+		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
+			validationErrs["paths.ffmpeg_path"] = msg
+		}
 
 		// Notification webhook URLs must parse at save time — previously a
 		// bad paste was accepted with a success toast, then silently
@@ -1061,7 +1225,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			if v, ok := net["network_access"].(string); ok && v == "external" {
 				if cfg.Network.PasswordHash == "" {
 					mu.Unlock()
-					jsonError(rw, "A password must be set before enabling external access. Go to Settings \u2192 Security.", http.StatusBadRequest)
+					jsonError(rw, "A password must be set before enabling external access. Set one in Settings \u2192 Network \u2192 Password.", http.StatusBadRequest)
 					return
 				}
 			}
@@ -1077,6 +1241,10 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldReorderPerJob := cfg.Downloader.ReorderBufferMB
 		oldReorderBudget := cfg.Downloader.ReorderBudgetMB
 		oldPublicURL := cfg.Network.PublicURL
+		oldIntervals := monitorIntervalsOf(cfg)
+		oldYTActive, oldTWActive := config.GetActivePlatforms(cfg)
+		oldDisk := diskSettingsOf(cfg)
+		oldSegWorkers := cfg.Downloader.SegmentWorkers
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1104,6 +1272,10 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newReorderPerJob := cfg.Downloader.ReorderBufferMB
 		newReorderBudget := cfg.Downloader.ReorderBudgetMB
 		newPublicURL := cfg.Network.PublicURL
+		newIntervals := monitorIntervalsOf(cfg)
+		newYTActive, newTWActive := config.GetActivePlatforms(cfg)
+		newDisk := diskSettingsOf(cfg)
+		newSegWorkers := cfg.Downloader.SegmentWorkers
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1122,8 +1294,21 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			if newHideAge != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
 				callbacks.OnHideFinishedAgeChanged()
 			}
-			if _, hasChannels := updates["channels"]; hasChannels && callbacks.OnChannelChange != nil {
+			_, hasChannels := updates["channels"]
+			if hasChannels && callbacks.OnChannelChange != nil {
 				callbacks.OnChannelChange()
+			}
+			if !hasChannels && newIntervals != oldIntervals && callbacks.OnMonitorIntervalChange != nil {
+				callbacks.OnMonitorIntervalChange()
+			}
+			if (newYTActive != oldYTActive || newTWActive != oldTWActive) && callbacks.OnActivePlatformsChange != nil {
+				callbacks.OnActivePlatformsChange()
+			}
+			if newDisk != oldDisk && callbacks.OnDiskSettingsChange != nil {
+				callbacks.OnDiskSettingsChange()
+			}
+			if newSegWorkers != oldSegWorkers && callbacks.OnSegmentWorkersChange != nil {
+				callbacks.OnSegmentWorkersChange(newSegWorkers)
 			}
 			// public_url lives in [network], not [notifications], but the
 			// notification manager is its only consumer — it reads the base
@@ -1153,5 +1338,29 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
+	}
+
+	var resolveRL *web.RateLimiter
+	if callbacks != nil {
+		resolveRL = callbacks.ResolveRateLimit
+	}
+	// PUT /api/config
+	r.Put("/api/config", func(rw http.ResponseWriter, req *http.Request) {
+		var updates map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		// A channel ID that has to be resolved is a youtube.com fetch with
+		// retries, so such a save rides the limiter POST
+		// /api/config/channels resolves under; every other save — the
+		// dashboard's full-form save sends no channels at all — does not.
+		if channelUpdatesNeedResolve(updates) {
+			limitedBy(resolveRL)(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				handlePut(rw, req, updates)
+			})).ServeHTTP(rw, req)
+			return
+		}
+		handlePut(rw, req, updates)
 	})
 }

@@ -97,7 +97,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 				"script-src 'self' https://cdn.jsdelivr.net; "+
 				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"font-src 'self' https://cdn.jsdelivr.net; "+
-				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com; "+
+				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net; "+
 				"connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:; "+
 				"frame-src https://www.youtube-nocookie.com https://player.twitch.tv; "+
 				"object-src 'none'; "+
@@ -120,9 +120,13 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // of browser context.
 //
 // Legitimate browser fetches always set Origin on cross-origin OR
-// same-origin mutating requests (Fetch spec). Non-browser local CLIs
-// (e.g. `moombox add`) should set Origin to the server's base URL or use
-// the InternalToken.
+// same-origin mutating requests (Fetch spec). A non-browser client that
+// mutates must set Origin to the server's base URL or use the
+// InternalToken. `moombox add` is not one: it writes the database directly
+// and never calls this server's API, so there is no request here for it to
+// put an Origin on — its only HTTP traffic is the "Job Added" notification
+// to the configured webhooks. The yt-dlp plugin's loopback POT routes are
+// exempted below.
 func CSRFMiddleware(store *config.Store, internalToken string, logger interface {
 	Warn(msg string, args ...any)
 }) func(http.Handler) http.Handler {
@@ -134,12 +138,19 @@ func CSRFMiddleware(store *config.Store, internalToken string, logger interface 
 				return
 			}
 
-			// Exempt loopback-only POT provider endpoints from CSRF.
-			// These are called by yt-dlp (Python scripts) which don't send
-			// Origin/Referer headers. The routes themselves enforce LoopbackOnly,
-			// so CSRF protection is redundant.
+			// Exempt the loopback-only POT provider endpoints from CSRF — for
+			// a caller that names no origin at all. They are called by yt-dlp
+			// (Python scripts), which send neither Origin nor Referer, and the
+			// routes themselves enforce LoopbackOnly. A browser always sends
+			// Origin on a POST (Fetch spec, no-cors included), so a request
+			// that carries one comes from a page and takes the origin check
+			// below like any other: exempt by path alone, a page open in the
+			// operator's browser could POST to 127.0.0.1 cross-site — drop the
+			// PO-token caches at will (both invalidate routes are unthrottled)
+			// or spend the 10/min /get_pot budget the yt-dlp plugin shares.
 			p := r.URL.Path
-			if p == "/get_pot" || p == "/invalidate_caches" || p == "/invalidate_it" {
+			if (p == "/get_pot" || p == "/invalidate_caches" || p == "/invalidate_it") &&
+				r.Header.Get("Origin") == "" && r.Header.Get("Referer") == "" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -211,7 +222,7 @@ func ipAllowedByNetworkAccess(store *config.Store, r *http.Request) bool {
 	case "external", "public":
 		return true
 	case "lan":
-		return isLoopback(ip) || isPrivateIP(ip)
+		return isLocalIPFor(ip, networkAccess)
 	default: // "localhost" or unset
 		return isLoopback(ip)
 	}
@@ -230,6 +241,111 @@ func IPGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 	}
 }
 
+// HostGateMiddleware refuses a request on a localhost/lan install whose Host
+// is a name the origin policy would not admit — the DNS-rebinding read path.
+//
+// CSRF and the WebSocket already refuse a mutating request or upgrade whose
+// Origin is a DNS name on these modes, but a GET carries no check: a page on
+// attacker.example whose name was rebound to 127.0.0.1 (or a LAN address)
+// fetched /api/config, /api/jobs and /api/logs same-origin, and the server,
+// seeing a loopback or private peer, served them without auth — notification
+// webhook URLs included. The browser cannot hide the Host it was told to use,
+// so the Host is held to the same rule the Origin is (isAllowedOrigin: a
+// loopback or, on lan, private literal, `localhost`, or a literal
+// certificate SAN). That admits exactly the addresses these modes already
+// require for the dashboard's own POSTs and socket, so no working access path
+// is lost; one reached by a DNS name needs a certificate naming it, as the
+// spec already says.
+//
+// external/public are meant to be reached by DNS names, so there only the
+// peers AuthMiddleware and the WebSocket waive auth for are held to a host
+// rule (externalHostRefused): a rebinding page's request comes from the
+// browser it runs in, on the LAN or the machine itself, and a certificate's
+// attestation on Origin never engages for a GET. A request with no Host at
+// all (HTTP/1.0) passes — a browser always sends one.
+func HostGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var networkAccess string
+			store.Read(func(c *config.MoomboxConfig) {
+				networkAccess = c.Network.NetworkAccess
+			})
+			host := effectiveRequestHost(store, r)
+			if networkAccess != "external" && networkAccess != "public" && host != "" {
+				// The Host is compared with itself here, so the port rule in
+				// isAllowedOrigin always holds and public_url cannot matter.
+				scheme := effectiveRequestScheme(r)
+				if !isAllowedOrigin(scheme+"://"+host, networkAccess, host, scheme, "", false, identityHosts()) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte(`{"error":"Forbidden: unrecognized host — open the dashboard by IP address or localhost"}`))
+					return
+				}
+			}
+			if externalHostRefused(store, r) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden: unrecognized host — open the dashboard by IP address, localhost or network.public_url"}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// externalHostRefused reports whether a request on an external/public install
+// is the DNS-rebinding read: a loopback or private peer — the peers
+// AuthMiddleware and the WebSocket waive auth for — that addressed the server
+// by a DNS name no certificate SAN (a wildcard one included), `localhost` or
+// network.public_url names.
+//
+// A page on attacker.example rebound to the server's LAN address fetched
+// /api/config, /api/jobs and /api/logs same-origin from the browser it runs
+// in: the LAN peer skipped the password, a GET carries no Origin check, and a
+// certificate's attestation on Origin never engages for one. Notification
+// webhook tokens were in the reply. A rebinding attack always arrives under a
+// DNS name, so an IP-literal Host is admitted; so is the operator's
+// public_url host, which is what a LAN client of a proxied install types.
+// This is the rule lan already applies (HostGateMiddleware), for the same
+// peers — a LAN client that reaches the dashboard by another name needs a
+// certificate naming it, or the IP.
+func externalHostRefused(store *config.Store, r *http.Request) bool {
+	var networkAccess, publicURL string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+		publicURL = c.Network.PublicURL
+	})
+	if networkAccess != "external" && networkAccess != "public" {
+		return false
+	}
+	if ip := EffectiveClientIP(store, r); !isLocalIPFor(ip, networkAccess) {
+		return false
+	}
+	host := effectiveRequestHost(store, r)
+	if host == "" {
+		return false
+	}
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	name = strings.TrimSuffix(strings.Trim(name, "[]"), ".")
+	if strings.EqualFold(name, "localhost") || net.ParseIP(name) != nil {
+		return false
+	}
+	// A wildcard SAN counts, as it does for this mode's Origin check
+	// (isAllowedOrigin's external arm): a page the browser loaded by a name
+	// the certificate covers passes CSRF and opens the socket there, so
+	// refusing its GETs locked a LAN client out of a dashboard it may drive.
+	if hostInSANs(name, identityHosts(), true) {
+		return false
+	}
+	if u, err := url.Parse(publicURL); publicURL != "" && err == nil && strings.EqualFold(u.Hostname(), name) {
+		return false
+	}
+	return true
+}
+
 // LoopbackOnly is a middleware that restricts to loopback addresses only.
 func LoopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +354,31 @@ func LoopbackOnly(next http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"Forbidden: loopback only"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RefuseCrossSite refuses a request the browser marks as started by another
+// site (Sec-Fetch-Site: cross-site). CSRFMiddleware passes every GET, which is
+// right for a read — no CORS is granted, so another site's page cannot see the
+// answer — but a few GET handlers DO something: look a video's formats up on
+// YouTube with the operator's cookies, spawn the configured ffmpeg, fetch
+// release notes from GitHub. An <img> or no-cors fetch on any page open in the
+// operator's browser could fire those at a loopback dashboard and spend the
+// budget the dashboard's own format picker shares. Only the browser sets the
+// header, and only on a request another site's page started, so the
+// dashboard's own fetches (same-origin), a second local dashboard (same-site:
+// ports do not split a site) and every non-browser client pass untouched.
+// Wrap only the routes that act: a site linking or embedding a read (a
+// thumbnail, a recording) stays free to.
+func RefuseCrossSite(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"Forbidden: cross-site request"}`))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -255,12 +396,26 @@ func LoopbackOnly(next http.Handler) http.Handler {
 // Returns the authority the origin was compared against as well, so a refusal
 // can name the pair without recomputing it.
 func originAllowed(store *config.Store, r *http.Request, origin string) (bool, string) {
-	var networkAccess string
+	var networkAccess, publicURL string
 	store.Read(func(c *config.MoomboxConfig) {
 		networkAccess = c.Network.NetworkAccess
+		publicURL = c.Network.PublicURL
 	})
 	host := effectiveRequestHost(store, r)
-	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), identityHosts()), host
+	return isAllowedOrigin(origin, networkAccess, host, effectiveRequestScheme(r), publicURL,
+		browserSchemeUnknown(store, r), identityHosts()), host
+}
+
+// browserSchemeUnknown reports whether Moombox cannot know which scheme the
+// browser used: the direct peer is listed in network.trusted_proxies, the hop
+// to Moombox is plain HTTP, and trust_forwarded_proto is off. A listed proxy
+// terminating TLS on 443 and forwarding the browser's portless Host then
+// looks exactly like a plain one on 80, so originPortServed lets two portless
+// authorities match. Everywhere else the scheme is known — r.TLS, the
+// proxy's X-Forwarded-Proto, or a direct peer that connected over plain HTTP
+// — and a portless authority means that scheme's default port and no other.
+func browserSchemeUnknown(store *config.Store, r *http.Request) bool {
+	return r.TLS == nil && !trustForwardedProto.Load() && loadTrustedProxies(store).contains(ExtractIP(r))
 }
 
 // clipForLog bounds a header value the CLIENT chose before it reaches the log
@@ -293,10 +448,14 @@ func identityHosts() []string {
 // ("::1" == "0:0:0:0:0:0:0:1") and DNS SANs compare case-insensitively.
 //
 // allowWildcard gates the "*." expansion below (RFC 6125: exactly one
-// leftmost, non-empty, dot-free label). Only the external/public arm of
-// isAllowedOrigin passes true: there, sameSiteOrigin already pins hostname to
+// leftmost, non-empty, dot-free label). Only external/public pass true. The
+// isAllowedOrigin arm does: there, sameSiteOrigin already pins hostname to
 // the browser's address bar first, so the wildcard can only ever NARROW which
-// same-host requests still pass. The localhost/lan/default arms have no such
+// same-host requests still pass. So does externalHostRefused, those modes'
+// Host rule, so that the Host a page was loaded by and the Origin it then
+// sends are judged alike — a name the wildcard covers is one in the
+// operator's own zone, which that Origin arm already trusts. The
+// localhost/lan/default arms have no such
 // conjunction — hostInSANs alone decides — so a wildcard there would let ANY
 // sibling of an operator's wildcard certificate (e.g. a stale or
 // attacker-registered subdomain under *.example.com) become an allowed
@@ -334,14 +493,25 @@ func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 // Uses proper URL parsing instead of substring matching.
 //
 // effectiveHost / effectiveScheme describe the request the origin arrived on
-// (see effectiveRequestHost / effectiveRequestScheme). They are consulted ONLY
-// by the external/public arm: those two policies have no IP class left to test
+// (see effectiveRequestHost / effectiveRequestScheme). On external/public they
+// decide the whole question: those two policies have no IP class left to test
 // an origin against — every address is admissible — so the only meaningful
 // question is whether the page that issued the request was served by THIS
 // deployment. Answering "yes, always" (the pre-sweep behaviour) let any page a
 // LAN browser had open drive the dashboard cross-origin WITH credentials,
 // because AuthMiddleware waives loopback and private peers regardless of mode:
 // POST /api/restart, DELETE /api/jobs/{id}, PUT /api/config (sweep T1-6).
+//
+// On localhost/lan (and the unset default) they supply the PORT half of the
+// answer (originPortServed). The IP-class test names a machine, not a
+// program, so before it a page any other service on a trusted address served
+// — a dev server on 127.0.0.1:3000, a router or NAS admin page on the LAN —
+// passed CSRF, was echoed by CORS with credentials, and opened the socket. The
+// origin's port must now be the one this request was addressed to, or the
+// port of network.public_url (publicURL), which is what a LAN client of a
+// proxied or port-forwarded install types. schemeUnknown
+// (browserSchemeUnknown) is the one case where a portless request authority
+// does not name its own scheme's default port.
 //
 // identity is the certificate-attested host list (identityHosts). On
 // external/public it is an ADDITIONAL requirement, never a substitute:
@@ -357,8 +527,9 @@ func hostInSANs(hostname string, sans []string, allowWildcard bool) bool {
 // localhost and lan keep their IP-class rules and gain identity as a pure
 // WIDENING: both arms reject every DNS name, and the WebSocket upgrade now
 // routes through this function, so without it an install holding a real
-// certificate for "dash.lan" would lose the socket it has today.
-func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme string, identity []string) bool {
+// certificate for "dash.lan" would lose the socket it has today. The port rule
+// holds for that widening too.
+func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme, publicURL string, schemeUnknown bool, identity []string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -371,10 +542,12 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 
 	switch networkAccess {
 	case "localhost":
-		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
+		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
 	case "lan":
-		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname) ||
-			hostInSANs(hostname, identity, false)
+		return (isLoopback(hostname) || hostname == "localhost" || isPrivateIPFor(hostname, networkAccess) ||
+			hostInSANs(hostname, identity, false)) &&
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
 	case "external", "public":
 		if !sameSiteOrigin(origin, effectiveHost, effectiveScheme) {
 			return false
@@ -384,8 +557,47 @@ func isAllowedOrigin(origin, networkAccess, effectiveHost, effectiveScheme strin
 		}
 		return hostInSANs(hostname, identity, true)
 	default:
-		return isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)
+		return (isLoopback(hostname) || hostname == "localhost" || hostInSANs(hostname, identity, false)) &&
+			originPortServed(u, effectiveHost, effectiveScheme, publicURL, schemeUnknown)
 	}
+}
+
+// originPortServed reports whether an origin's port is one this deployment
+// answers on: the port the request was addressed to (effectiveHost, so a
+// trusted proxy's X-Forwarded-Host counts here exactly as it does on
+// external/public), or the port of network.public_url.
+//
+// Both sides are defaulted from their own scheme and compared exactly, so a
+// portless authority means 80 or 443 and never both: a router or NAS admin
+// page at http://192.168.1.1 is not the dashboard served on 443 at
+// https://192.168.1.5, nor is https://127.0.0.1 the one served on 80. Only
+// when schemeUnknown (browserSchemeUnknown) do two portless authorities match
+// by that alone — samePort's leniency, which sameSiteOrigin applies on every
+// request: a listed proxy terminating TLS on 443 forwards the browser's
+// portless Host while Moombox sees plain HTTP, and nothing on the request
+// says which default it meant. A proxy that is not listed, or a direct peer,
+// gets no such benefit of the doubt; trust_forwarded_proto or public_url
+// names the port for it. public_url is the operator's own statement of
+// scheme and port, so it is defaulted and compared with no leniency either:
+// "https://10.0.0.5" admits 443 and nothing else.
+func originPortServed(u *url.URL, effectiveHost, effectiveScheme, publicURL string, schemeUnknown bool) bool {
+	_, oPort := splitAuthority(u.Host)
+	_, rPort := splitAuthority(effectiveHost)
+	if schemeUnknown && samePort(oPort, u.Scheme, rPort, effectiveScheme) {
+		return true
+	}
+	if defaultedPort(oPort, u.Scheme) == defaultedPort(rPort, effectiveScheme) {
+		return true
+	}
+	if publicURL == "" {
+		return false
+	}
+	p, err := url.Parse(publicURL)
+	if err != nil || p.Host == "" {
+		return false
+	}
+	_, pPort := splitAuthority(p.Host)
+	return defaultedPort(oPort, u.Scheme) == defaultedPort(pPort, p.Scheme)
 }
 
 // effectiveRequestHost returns the authority this server answers as, for the
@@ -486,10 +698,18 @@ func sameSiteOrigin(origin, effectiveHost, effectiveScheme string) bool {
 	if oHost == "" || rHost == "" || oHost != rHost {
 		return false
 	}
+	return samePort(oPort, u.Scheme, rPort, effectiveScheme)
+}
+
+// samePort is sameSiteOrigin's port rule, which originPortServed applies only
+// when the browser's scheme is unknown: two portless authorities match, and
+// once either side writes a port both are defaulted from their OWN scheme and
+// compared exactly.
+func samePort(oPort, oScheme, rPort, rScheme string) bool {
 	if oPort == "" && rPort == "" {
 		return true
 	}
-	return defaultedPort(oPort, u.Scheme) == defaultedPort(rPort, effectiveScheme)
+	return defaultedPort(oPort, oScheme) == defaultedPort(rPort, rScheme)
 }
 
 // ExtractIP gets the client's real IP from the request.
@@ -717,9 +937,48 @@ func mustParseCIDR(s string) *net.IPNet {
 	return n
 }
 
-// isLocalIP returns true for loopback or private IP addresses.
-func isLocalIP(ipStr string) bool {
-	return isLoopback(ipStr) || isPrivateIP(ipStr)
+// sharedAddressSpace is 100.64.0.0/10 (RFC 6598), the carrier-grade-NAT range
+// Tailscale numbers its nodes from. Private on lan only — see isPrivateIPFor.
+// (Tailscale's IPv6 addresses, fd7a:115c:a1e0::/48, are inside fc00::/7 and
+// were private already.)
+var sharedAddressSpace = mustParseCIDR("100.64.0.0/10")
+
+// isPrivateIPFor is isPrivateIP as a network_access mode reads it: on lan the
+// shared address space counts as private too, so a tailnet client passes the
+// IP gate, the origin and host checks, and the auth waiver exactly as a LAN
+// client does.
+//
+// lan only, because the same range is what some ISPs hand their customers: on
+// a host behind such an ISP's NAT, its other customers can arrive from it. On
+// lan that is the operator's choice of boundary — the mode trusts whatever
+// network the host sits on. On external/public it would be a password waived
+// for strangers, so there a 100.64.0.0/10 peer is a public one and keeps the
+// password.
+func isPrivateIPFor(ipStr, networkAccess string) bool {
+	if isPrivateIP(ipStr) {
+		return true
+	}
+	if networkAccess != "lan" {
+		return false
+	}
+	ip := net.ParseIP(ipStr)
+	return ip != nil && sharedAddressSpace.Contains(ip)
+}
+
+// isLocalIPFor reports whether ipStr is a peer the network_access mode trusts
+// as local — loopback, or private as isPrivateIPFor reads it for that mode.
+// These are the peers every auth waiver skips the password for.
+func isLocalIPFor(ipStr, networkAccess string) bool {
+	return isLoopback(ipStr) || isPrivateIPFor(ipStr, networkAccess)
+}
+
+// isLocalPeer is isLocalIPFor under the stored network_access mode.
+func isLocalPeer(store *config.Store, ipStr string) bool {
+	var networkAccess string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+	})
+	return isLocalIPFor(ipStr, networkAccess)
 }
 
 // IsLoopbackRequest returns true if the request is from a loopback address.
@@ -729,10 +988,11 @@ func IsLoopbackRequest(r *http.Request) bool {
 
 // IsLocalOrPrivateRequest returns true if the request's effective client IP
 // (X-Forwarded-For-aware when the direct peer is a trusted proxy) is loopback
-// or private. Used by auth endpoints to match the server's AuthMiddleware
-// trust policy, which allows both loopback and private clients.
+// or private — 100.64.0.0/10 included on lan (isPrivateIPFor). Used by auth
+// endpoints to match the server's AuthMiddleware trust policy, which allows
+// both loopback and private clients.
 func IsLocalOrPrivateRequest(store *config.Store, r *http.Request) bool {
-	return isLocalIP(EffectiveClientIP(store, r))
+	return isLocalPeer(store, EffectiveClientIP(store, r))
 }
 
 // shouldSkipCompression returns true for paths where compression should be

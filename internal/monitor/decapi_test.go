@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -351,22 +352,32 @@ func TestDecapi_TerminalMemoDoesNotLatchOnUpcoming(t *testing.T) {
 // TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared pins the third conjunct.
 // Clearing an orphaned history row is the documented way to put a video back
 // in play (internal/database/database_extras.go:48-56), so the memo must be
-// gated on a LIVE HasProcessed read, never on a remembered one.
+// gated on a LIVE HasProcessed read, never on a remembered one. The row is
+// seeded the way history arises: a job was created for the video and has
+// since been deleted.
 //
 // Mutant: caching the processed flag alongside the memo makes the operator's
 // remedy silently do nothing.
 func TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared(t *testing.T) {
 	db := newTestDB(t)
 	probes := 0
+	pub := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	dm := newTestDecapiMonitor(t, db, func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
 		probes++
-		return &VideoProbeResult{StreamStatus: "vod", Title: "finished vod"}, nil
+		return &VideoProbeResult{StreamStatus: "vod", Title: "finished vod", PublishedAt: pub, PublishedPrecision: "day"}, nil
 	})
+	found := recordDecapiVideoFound(dm)
+	if err := db.AddToHistory("vidDecClr11"); err != nil {
+		t.Fatal(err)
+	}
 
-	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
 	body := decapiBody("vidDecClr11", "finished vod")
 	if err := dm.processResponse(context.Background(), body, ch); err != nil {
 		t.Fatalf("cycle 1: %v", err)
+	}
+	if len(*found) != 0 {
+		t.Fatalf("found = %v while the history row stands", *found)
 	}
 	if n, err := db.DeleteHistoryEntries([]string{"vidDecClr11"}); err != nil || n != 1 {
 		t.Fatalf("DeleteHistoryEntries = (%d, %v), want (1, nil)", n, err)
@@ -376,6 +387,9 @@ func TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared(t *testing.T) {
 	}
 	if probes != 2 {
 		t.Fatalf("probes = %d, want 2 — clearing the history row must re-open the video on the next cycle", probes)
+	}
+	if len(*found) != 1 {
+		t.Errorf("found = %v, want the re-opened VOD jobbed", *found)
 	}
 }
 
@@ -470,16 +484,16 @@ func TestDecapi_DeniedVerdictIsLatched(t *testing.T) {
 	dm := &DecapiMonitor{logger: silentLogger{}}
 
 	dm.recordTerminalMemo("UC_a", "vid_denied_11", "upcoming", true)
-	if !dm.terminalMemoHit("UC_a", "vid_denied_11", false, 30) {
+	if !dm.terminalMemoHit("UC_a", "vid_denied_11", false, 30, false) {
 		t.Error("a denied verdict did not latch — the same refusal is re-probed every 15 s forever")
 	}
-	if dm.terminalMemoHit("UC_a", "vid_other_111", false, 30) {
+	if dm.terminalMemoHit("UC_a", "vid_other_111", false, 30, false) {
 		t.Error("the latch fired for a DIFFERENT video — a newly published stream would never be probed")
 	}
 
 	// A non-denied "upcoming" is still not terminal: it becomes live.
 	dm.recordTerminalMemo("UC_b", "vid_upcoming1", "upcoming", false)
-	if dm.terminalMemoHit("UC_b", "vid_upcoming1", false, 30) {
+	if dm.terminalMemoHit("UC_b", "vid_upcoming1", false, 30, false) {
 		t.Error("an ordinary upcoming latched — the premiere would never be picked up when it goes live")
 	}
 }
@@ -681,6 +695,222 @@ func TestDecapi_OnlySettledRefusalsLatch(t *testing.T) {
 			}
 			if probes != tc.wantProbes {
 				t.Fatalf("%s: probes over two cycles = %d, want %d — %s", tc.playability, probes, tc.wantProbes, tc.why)
+			}
+		})
+	}
+}
+
+// History means "a job was created": the host writes it at creation, and both
+// archive steps gate VODs on it. DECAPI used to add a row when its failure
+// tracker gave up on a video, so three transient probe failures on a
+// channel's newest VOD (about 45 s at DECAPI's pace) kept either monitor from
+// ever archiving it.
+//
+// Mutant: an AddToHistory on DECAPI's errored path — the recovered sighting
+// reads as a re-probe and is skipped as already processed.
+func TestDecapi_AProbeGiveUpLeavesTheVODArchivable(t *testing.T) {
+	db := newTestDB(t)
+	pub := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	failing := true
+	dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+		if failing {
+			return nil, errors.New("player 503")
+		}
+		return &VideoProbeResult{StreamStatus: "vod", Title: "fresh vod", PublishedAt: pub, PublishedPrecision: "day"}, nil
+	})
+	found := recordDecapiVideoFound(dm)
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
+
+	for i := 0; i < maxMetadataFailures; i++ {
+		_ = dm.processResponse(context.Background(), decapiBody("vidFresh001", "fresh vod"), ch)
+	}
+	if hp, _ := db.HasProcessed("vidFresh001"); hp {
+		t.Fatal("a probe give-up wrote a history row: nothing was jobbed")
+	}
+
+	failing = false
+	_ = dm.processResponse(context.Background(), decapiBody("vidFresh001", "fresh vod"), ch)
+	if len(*found) != 1 || (*found)[0].videoID != "vidFresh001" || (*found)[0].d != DispositionNewVOD {
+		t.Errorf("found = %v, want vidFresh001 as a new VOD once the probe recovers", *found)
+	}
+}
+
+// A newest VOD skipped because the channel does not archive VODs used to get
+// a history row, which kept both monitors from archiving it after
+// include_non_live_content was turned on. The terminal memo now carries that
+// skip instead — so the dormant channel is still not re-probed every cycle —
+// and lets go of it when the setting changes.
+//
+// Mutants: the memo's include_non_live_content arm removed (the second
+// skipped cycle probes again), the arm ignoring the setting (turning it on
+// never re-probes), and an AddToHistory on the skip (the re-probe skips the
+// video as already processed).
+func TestDecapi_ASkippedVODIsArchivedOnceVODsAreTurnedOn(t *testing.T) {
+	db := newTestDB(t)
+	pub := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	probes := 0
+	dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+		probes++
+		return &VideoProbeResult{StreamStatus: "vod", Title: "newest", PublishedAt: pub, PublishedPrecision: "day"}, nil
+	})
+	found := recordDecapiVideoFound(dm)
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+
+	for i := 0; i < 2; i++ {
+		_ = dm.processResponse(context.Background(), decapiBody("vidNewest01", "newest"), ch)
+	}
+	if probes != 1 {
+		t.Errorf("probes = %d over two cycles with VODs off, want 1: the skip must be memoized", probes)
+	}
+	if len(*found) != 0 {
+		t.Fatalf("found = %v with VODs off", *found)
+	}
+	if hp, _ := db.HasProcessed("vidNewest01"); hp {
+		t.Fatal("a skip wrote a history row: nothing was jobbed")
+	}
+
+	ch.IncludeNonLiveContent = true
+	_ = dm.processResponse(context.Background(), decapiBody("vidNewest01", "newest"), ch)
+	if probes != 2 {
+		t.Errorf("probes = %d, want a re-probe once VODs are turned on", probes)
+	}
+	if len(*found) != 1 || (*found)[0].videoID != "vidNewest01" || (*found)[0].d != DispositionNewVOD {
+		t.Errorf("found = %v, want vidNewest01 as a new VOD once VODs are turned on", *found)
+	}
+}
+
+// DECAPI asks every 15 s. A newest video that is neither jobbed nor memoized
+// as terminal — post_live on a channel that does not archive VODs, or one
+// whose probes keep failing — logged its match and its skip at Info every
+// cycle once the skip stopped writing the history row that demoted them. The
+// first sighting still logs at Info; repeats of the same answer at Debug.
+//
+// Mutant: sameAsLastAnswer always false — 2 Info lines per later cycle.
+func TestDecapi_ARepeatedAnswerLogsAtDebug(t *testing.T) {
+	db := newTestDB(t)
+	dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "post_live", Title: "ended stream"}, nil
+	})
+	var records []slog.Record
+	dm.logger = slog.New(recordingHandler{records: &records})
+	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1"}
+	body := decapiBody("vidPostLiv1", "ended stream")
+
+	infos := func() int {
+		n := 0
+		for _, r := range records {
+			if r.Level == slog.LevelInfo {
+				n++
+			}
+		}
+		return n
+	}
+	_ = dm.processResponse(context.Background(), body, ch)
+	if infos() == 0 {
+		t.Fatal("the first sighting logged nothing at Info")
+	}
+	records = records[:0]
+	for range 4 {
+		_ = dm.processResponse(context.Background(), body, ch)
+	}
+	if n := infos(); n != 0 {
+		t.Errorf("%d Info lines over 4 repeats of the same answer, want 0", n)
+	}
+}
+
+// The §13 window skip is the last line of the two answers the terminal memo
+// never carries — a post_live newest video (not terminal) and a VOD whose
+// date fetch keeps failing (a dateless verdict is not memoized) — so they
+// reach it on every 15 s cycle. It ignored the repeat and logged at Info each
+// time, after the match and classification lines had been demoted. The first
+// sighting still logs it at Info; repeats at Debug. The failing date fetch's
+// own line, just before the skip, did the same at Warn: it now warns on the
+// first sighting and logs repeats at Debug, so no line of a repeat rises
+// above Debug.
+//
+// Mutants: the window skip logging at Info whatever repeat says — 4 Info
+// lines over the 4 repeats in both cases; the date-fetch failure logging at
+// Warn whatever repeat says — 4 Warn lines over the dateless case's repeats.
+func TestDecapi_ARepeatedWindowSkipLogsAtDebug(t *testing.T) {
+	const (
+		skipMsg  = "decapi: newest video is outside the archive window; skipping"
+		fetchMsg = "decapi: date fetch failed; window unverifiable this sighting"
+	)
+	cases := []struct {
+		name       string
+		status     string
+		probeDate  func(context.Context, string) (string, string, error)
+		fetchFails bool
+	}{
+		{"post_live dated outside the window", "post_live", func(context.Context, string) (string, string, error) {
+			return time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339), "exact", nil
+		}, false},
+		{"vod whose date fetch keeps failing", "vod", func(context.Context, string) (string, string, error) {
+			return "", "", errors.New("date fetch: transport error")
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			probes := 0
+			dm := newTestDecapiMonitor(t, db, func(context.Context, string) (*VideoProbeResult, error) {
+				probes++
+				// A production status probe carries no date (§9), so every
+				// sighting goes on to the date fetch.
+				return &VideoProbeResult{StreamStatus: tc.status, Title: "ended stream"}, nil
+			})
+			dm.ProbeDate = tc.probeDate
+			found := recordDecapiVideoFound(dm)
+			var records []slog.Record
+			dm.logger = slog.New(recordingHandler{records: &records})
+			ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
+			body := decapiBody("vidOutside1", "ended stream")
+
+			count := func(msg string, level slog.Level) int {
+				n := 0
+				for _, r := range records {
+					if r.Level == level && r.Message == msg {
+						n++
+					}
+				}
+				return n
+			}
+			wantFetchLines := 0
+			if tc.fetchFails {
+				wantFetchLines = 1
+			}
+			_ = dm.processResponse(context.Background(), body, ch)
+			if n := count(skipMsg, slog.LevelInfo); n != 1 {
+				t.Fatalf("the first sighting logged the window skip %d times at Info, want once", n)
+			}
+			if n := count(fetchMsg, slog.LevelWarn); n != wantFetchLines {
+				t.Errorf("the first sighting logged the date-fetch failure %d times at Warn, want %d", n, wantFetchLines)
+			}
+			records = records[:0]
+			for range 4 {
+				_ = dm.processResponse(context.Background(), body, ch)
+			}
+			if probes != 5 {
+				t.Fatalf("%d probes over 5 sightings, want 5 — a memoized answer never reaches the skip, so this "+
+					"test would say nothing about its level", probes)
+			}
+			var loud []string
+			for _, r := range records {
+				if r.Level > slog.LevelDebug {
+					loud = append(loud, r.Level.String()+" "+r.Message)
+				}
+			}
+			if len(loud) != 0 {
+				t.Errorf("%d lines above Debug over 4 repeats of the same answer, want 0: %q", len(loud), loud)
+			}
+			if n := count(skipMsg, slog.LevelDebug); n != 4 {
+				t.Errorf("the window skip logged %d times at Debug over 4 repeats, want 4", n)
+			}
+			if n := count(fetchMsg, slog.LevelDebug); n != 4*wantFetchLines {
+				t.Errorf("the date-fetch failure logged %d times at Debug over 4 repeats, want %d", n, 4*wantFetchLines)
+			}
+			if len(*found) != 0 {
+				t.Errorf("found = %v, want nothing jobbed outside the window", *found)
 			}
 		})
 	}

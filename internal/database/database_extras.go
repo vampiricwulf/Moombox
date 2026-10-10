@@ -37,11 +37,16 @@ func (db *Database) AddToHistory(videoID string) error {
 	return db.pruneHistory()
 }
 
+// historyCap is how many rows history keeps. pruneHistory evicts the oldest
+// (by added_at) beyond it, never the row just recorded: that row is what keeps
+// the archive pass from re-creating the job it was recorded for.
+const historyCap = 10000
+
 func (db *Database) pruneHistory() error {
 	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM history WHERE video_id IN (
 		SELECT video_id FROM history ORDER BY added_at ASC
-		LIMIT MAX(0, (SELECT COUNT(*) FROM history) - 10000)
-	)`)
+		LIMIT MAX(0, (SELECT COUNT(*) FROM history) - ?)
+	)`, historyCap)
 	return err
 }
 

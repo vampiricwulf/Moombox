@@ -88,7 +88,7 @@ export class FilesController {
       let pathInner = this.app.escapeHtml(file.relPath);
       if (Array.isArray(file.asides) && file.asides.length > 0) {
         const n = file.asides.length;
-        pathInner += `<br><span class="files-asides" style="color: var(--sl-color-warning-600); font-size: 0.85em;">`
+        pathInner += `<br><span class="files-asides" style="color: var(--text-warning); font-size: 0.85em;">`
           + `${n} set-aside recording${n === 1 ? "" : "s"}: ${this.app.escapeHtml(file.asides.join(", "))}</span>`;
       }
       const pathStr = `<span class="files-path" title="${this.app.escapeHtml(file.path)}">${pathInner}</span>`;
@@ -102,7 +102,9 @@ export class FilesController {
         jobStr = `<span class="files-job-info">—</span>`;
       }
 
-      const deleteBtn = `<sl-icon-button name="trash" label="Delete" class="files-delete-btn" data-path="${this.app.escapeHtml(file.path)}"></sl-icon-button>`;
+      // Named per row: a screen reader lists every one of these, and a column
+      // of plain "Delete" buttons cannot say which file each removes.
+      const deleteBtn = `<sl-icon-button name="trash" label="Delete ${this.app.escapeHtml(file.relPath)}" class="files-delete-btn" data-path="${this.app.escapeHtml(file.path)}"></sl-icon-button>`;
 
       row.innerHTML = typeBadge + pathStr + sizeStr + modStr + jobStr + deleteBtn;
       table.appendChild(row);
@@ -119,7 +121,13 @@ export class FilesController {
   }
 
   async deleteOrphanedFile(path) {
-    if (!await this.app.showConfirm(`Delete this file?\n\n${path}`, { okLabel: "Delete", okVariant: "danger" })) return;
+    // A staging dir holding set-aside recordings is captured footage (see the
+    // row note in renderOrphanedFiles); the question has to say so too.
+    const n = this._orphanedFiles?.find((f) => f.path === path)?.asides?.length ?? 0;
+    const asides = n > 0
+      ? `\n\nIt holds ${n} set-aside recording${n === 1 ? "" : "s"}: captured footage that is deleted too.`
+      : "";
+    if (!await this.app.showConfirm(`Delete this file?\n\n${path}${asides}`, { okLabel: "Delete", okVariant: "danger" })) return;
 
     try {
       const resp = await fetch("/api/files/orphaned", {
@@ -127,9 +135,14 @@ export class FilesController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths: [path] }),
       });
-      if (!resp.ok) throw new Error("Failed to delete");
+      // 409: the file is no longer an orphan — a job or trim names it now,
+      // so the list this click came from is stale. The server's message says
+      // so and to refresh the list; it is the toast, not "Failed to delete".
+      if (!resp.ok && resp.status !== 409) throw new Error("Failed to delete");
       const result = await resp.json();
-      if (result.deleted && result.deleted.length > 0) {
+      if (resp.status === 409) {
+        this.app.showToast(result.error || "No longer an orphan. Refresh the list.", "warning");
+      } else if (result.deleted && result.deleted.length > 0) {
         this.app.showToast("File deleted", "success");
       } else if (result.errors && result.errors.length > 0) {
         this.app.showToast(`Failed: ${result.errors[0].error}`, "danger");
@@ -143,7 +156,11 @@ export class FilesController {
   async deleteAllOrphanedFiles() {
     if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
     const fileCount = this._orphanedFiles.length;
-    if (!await this.app.showConfirm(`Delete ${fileCount === 1 ? "this" : `all ${fileCount}`} orphaned file${fileCount === 1 ? "" : "s"}?`, { okLabel: "Delete All", okVariant: "danger" })) return;
+    const withAsides = this._orphanedFiles.filter((f) => f.asides?.length > 0).length;
+    const asides = withAsides > 0
+      ? `\n\n${withAsides === fileCount ? (fileCount === 1 ? "It holds" : "All of them hold") : `${withAsides} of them hold${withAsides === 1 ? "s" : ""}`} set-aside recordings: captured footage that is deleted too.`
+      : "";
+    if (!await this.app.showConfirm(`Delete ${fileCount === 1 ? "this" : `all ${fileCount}`} orphaned file${fileCount === 1 ? "" : "s"}?${asides}`, { okLabel: "Delete All", okVariant: "danger" })) return;
 
     const deleteAllBtn = document.getElementById("files-delete-all-btn");
     if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
@@ -155,14 +172,23 @@ export class FilesController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths }),
       });
-      if (!resp.ok) throw new Error("Failed to delete");
+      // 409 as in deleteOrphanedFile: some of the list went stale. The rest
+      // were still decided one by one, so the count of what went comes first.
+      if (!resp.ok && resp.status !== 409) throw new Error("Failed to delete");
       const result = await resp.json();
       const count = result.deleted ? result.deleted.length : 0;
       const errCount = result.errors ? result.errors.length : 0;
-      if (errCount > 0) {
+      if (resp.status === 409) {
+        // errors holds the stale refusals and any that failed for another
+        // reason; the message speaks only for the first kind, so the others
+        // are counted after it (a 409 has at least one stale refusal).
+        const other = errCount - (Number.isInteger(result.stale) ? result.stale : 1);
+        const others = other > 0 ? ` ${other} other${other === 1 ? "" : "s"} failed.` : "";
+        this.app.showToast(`Deleted ${count}. ${result.error || "Some are no longer orphans. Refresh the list."}${others}`, "warning");
+      } else if (errCount > 0) {
         this.app.showToast(`Deleted ${count}, ${errCount} errors`, "warning");
       } else {
-        this.app.showToast(`Deleted ${count} files`, "success");
+        this.app.showToast(`Deleted ${count} file${count === 1 ? "" : "s"}`, "success");
       }
       await this.fetchOrphanedFiles();
     } catch (err) {
@@ -228,7 +254,7 @@ export class FilesController {
       const vid = this.app.escapeHtml(entry.videoId);
       const vidStr = `<a class="history-vid" href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener" title="${vid}">${vid}</a>`;
       const addedStr = `<span data-timestamp="${this.app.escapeHtml(entry.addedAt)}" title="${new Date(entry.addedAt).toLocaleString()}">${this.app.escapeHtml(formatRelativeTime(entry.addedAt))}</span>`;
-      const deleteBtn = `<sl-icon-button name="trash" label="Remove" class="history-delete-btn" data-video-id="${vid}"></sl-icon-button>`;
+      const deleteBtn = `<sl-icon-button name="trash" label="Remove ${vid}" class="history-delete-btn" data-video-id="${vid}"></sl-icon-button>`;
       row.innerHTML = vidStr + addedStr + deleteBtn;
       table.appendChild(row);
     }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -90,7 +91,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if now := time.Now(); now.Sub(a.lastArchiveSweep) >= time.Minute {
 			a.lastArchiveSweep = now
 			a.syncHideFinishedAge()
-			a.taskList.ResweepArchive()
+			if a.taskList.ResweepArchive() {
+				a.updateSelectedJob() // a swept row can take the cursor with it
+			}
 		}
 		// Backstop for the demand-driven marquee and progress loops: if a
 		// selection/width/status change slipped past its immediate restart
@@ -265,6 +268,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// A bulk delete (a departed channel's prune) arrives only as this
+		// snapshot, never as a JobDeletedMsg.
+		if a.jobLog.IsVisible() && !slices.ContainsFunc(msg.Jobs, func(j *database.Job) bool { return j.ID == a.jobLog.JobID() }) {
+			a.closeJobLogOfDeletedJob(a.jobLog.JobID())
+		}
 		a.updateTerminalTitle()
 		// Initial snapshot / full refresh — start the progress loop if any
 		// job is live (this is the primary startup path; Init no longer
@@ -350,6 +358,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.details.updateInfo = msg.Info
 			a.setFeedback(fmt.Sprintf("Update available: %s — R N for notes, R U to install", msg.Info.TagName))
 		} else {
+			// Nothing newer than the running version: a release this TUI
+			// still offers was pulled, and its download no longer exists.
+			a.updateAvailable = nil
+			a.details.updateInfo = nil
 			a.setFeedback("Already up to date")
 		}
 		return a, nil
@@ -357,13 +369,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateApplyResultMsg:
 		if msg.Err != "" {
 			a.setFeedback("Update failed: " + msg.Err)
+			return a, nil
 		}
-		// On success, the process is already exiting (QuitTUI was called)
+		// Placed: the restart's grace window is running. The release is no
+		// longer something to install — the updater refuses a second apply
+		// while the restart is pending — so R U and the badge go with it.
+		a.updateAvailable = nil
+		a.details.updateInfo = nil
+		a.setFeedback("Update applied — restarting")
 		return a, nil
 
 	case dismissUpdateResultMsg:
 		if msg.Err != nil {
-			a.setFeedback("Could not skip " + msg.Tag + ": " + msg.Err.Error())
+			// Stated: nothing in this wording reaches the scan's red
+			// substrings, and a refused skip rendered in the success green.
+			a.setFeedbackWithSeverity("Could not skip "+msg.Tag+": "+msg.Err.Error(), severityError)
 			return a, nil
 		}
 		if a.updateAvailable != nil && a.updateAvailable.TagName == msg.Tag {
@@ -379,19 +399,36 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case signatureVerifyResultMsg:
-		if msg.Err != "" {
+		switch {
+		case msg.Err != "":
 			a.setFeedback("Signature verification failed: " + msg.Err)
-		} else {
-			a.setFeedback("Signature verified — binary is authentic")
+		case msg.Manifest:
+			a.setFeedbackWithSeverity("Signature and release manifest verified — binary is authentic", severitySuccess)
+		default:
+			// The .sig alone says the key signed these bytes, not that they
+			// are this release's: say which check ran, and in yellow, since
+			// the stronger one could not.
+			a.setFeedbackWithSeverity("Signature verified; its release publishes no signed manifest, so only the signature was checked", severityWarning)
 		}
 		return a, nil
 
 	case releaseNotesFetchedMsg:
-		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+		// Only the viewer this fetch was for: if the overlay was closed and
+		// R N re-opened it on a pending update meanwhile, the late answer
+		// put the running version's notes and tag under a footer still
+		// offering U and S — both of which then refused on the tag guard.
+		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() && !a.releaseNotesPopup.pending {
+			// A failed fetch carries no tag (OnFetchReleaseNotes returns
+			// "", "", err), and reopening with it blanked the title to
+			// "Release Notes — ". Keep the tag R N opened the overlay with.
+			tag := msg.Tag
+			if tag == "" {
+				tag = a.releaseNotesPopup.tag
+			}
 			if msg.Err != "" {
-				a.releaseNotesPopup.open(msg.Tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
+				a.releaseNotesPopup.open(tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
 			} else {
-				a.releaseNotesPopup.open(msg.Tag, msg.Notes, a.width, a.height)
+				a.releaseNotesPopup.open(tag, msg.Notes, a.width, a.height)
 			}
 		}
 		return a, nil
@@ -410,7 +447,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dashboard's refresh button is the same gesture and had drifted to a
 		// different answer entirely. This side decides only WHICH platforms
 		// were checked; the sentence is shared.
-		a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))
+		a.setWrappedFeedback(a.cookieRecheckFeedback(msg))
 		return a, nil
 
 	case cookieForceRefreshResultMsg:
@@ -483,8 +520,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// difference asserted, by TestRungThreeSentencesDivergeByDesign.
 			a.setFeedback("No browser profile found, running R C instead...")
 			return a, noProfileFallback
+		case errors.Is(msg.Err, cookies.ErrProfileInUse):
+			// A SKIP, not a failure: a browser the profile's SingletonLock
+			// names may still be running on it, so the pass declined and
+			// launched nothing. It went through the arm below as
+			// "<mechanism> failed: …", red on the scan's "failed", while the
+			// dashboard toasts this sentence as it stands and draws it as its
+			// Last cookie error in the warning colour. Verbatim, then, and
+			// yellow, stated because the sentence carries no marker the scan
+			// reads. Wrapped: it ends in the lock to delete.
+			a.setWrappedFeedback(msg.Err.Error(), severityWarning)
 		case msg.Err != nil:
-			a.setFeedback(mechanismLabel + " failed: " + msg.Err.Error())
+			// Wrapped: the error is a sentence written elsewhere, whose tail
+			// one row cut at the width may never reach. Unstated, as before —
+			// the scan's "failed" sits in the lead and is never cut.
+			a.setWrappedFeedback(mechanismLabel+" failed: "+msg.Err.Error(), severityUnstated)
 		case !msg.Result.Ran:
 			// Causes from the shared constant, not restated: this line, the
 			// worker's log note and the Web toast are three renderings of one
@@ -507,31 +557,45 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case addVideoResultMsg:
-		a.addVideo.Close()
 		if msg.Feedback != "" {
 			a.setFeedback(msg.Feedback)
 		}
+		// Only the dialog that sent this closes on it: one Esc'd during the
+		// request and reopened for the next video must not vanish under the
+		// operator's typing.
+		if !a.addVideo.Submitting(msg.VideoID) {
+			return a, nil
+		}
+		a.addVideo.Close()
 		// Async close uncovers the task list — resume a paused marquee now
 		// rather than waiting for the 1s backstop.
 		return a, a.ensureMarqueeTicking()
 
 	case fetchFormatsResultMsg:
+		// A fetch the dialog has stopped waiting for (Esc, a different ID,
+		// closed) is dropped: its table and title would otherwise show
+		// beside another video's ID, and its itag be sent for that video.
+		if !a.addVideo.AwaitingFormats(msg.VideoID) {
+			return a, nil
+		}
 		if msg.Err != "" {
-			a.addVideo.SetError(msg.Err)
+			a.addVideo.SetFetchError(msg.Err)
 			// Auto-advance to confirmation after 2s on error (matching TS)
+			id := msg.VideoID
 			return a, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-				return fetchFormatsAutoAdvanceMsg{}
+				return fetchFormatsAutoAdvanceMsg{VideoID: id}
 			})
 		}
 		a.addVideo.SetFormats(msg.Formats)
 		return a, nil
 
 	case fetchFormatsAutoAdvanceMsg:
-		if a.addVideo.IsVisible() && a.addVideo.errorMsg != "" {
+		if a.addVideo.AutoAdvanceApplies(msg.VideoID) {
 			// Skip to confirmation with auto settings
 			a.addVideo.step = AddStepConfirm
 			a.addVideo.advancedMode = false
 			a.addVideo.loading = false
+			a.addVideo.fetchFailed = false
 		}
 		return a, nil
 
@@ -541,7 +605,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.importDlg.Close()
-		a.setFeedback("Imported: " + msg.Title)
+		if msg.Note != "" {
+			// The server's sentence about a taken name ends in the names
+			// themselves, so it is read whole rather than cut to a row; a
+			// rename or a left-out chat is a warning, a re-adoption a success.
+			sev := severitySuccess
+			if msg.Warn {
+				sev = severityWarning
+			}
+			a.setWrappedFeedback("Imported: "+msg.Title+" — "+msg.Note, sev)
+		} else {
+			a.setFeedback("Imported: " + msg.Title)
+		}
 		// Async close uncovers the task list — resume a paused marquee now.
 		return a, a.ensureMarqueeTicking()
 
@@ -587,6 +662,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.ensureMarqueeTicking()
 
 	case deleteTrimResultMsg:
+		// The dialog that asked may be gone — closed, or reopened on another
+		// job, whose list this trim is not in and whose dialog must not show
+		// this job's error. Then the answer goes to the feedback line.
+		if !a.trimDlg.IsVisible() || a.trimDlg.JobID() != msg.JobID {
+			if msg.Err != "" {
+				a.setFeedbackWithSeverity("Trim delete failed: "+msg.Err, severityError)
+			} else {
+				a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
+			}
+			return a, nil
+		}
 		a.trimDlg.SetLoading(false)
 		if msg.Err != "" {
 			a.trimDlg.SetError(msg.Err)
@@ -603,7 +689,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Title != "" {
 			a.setFeedback("Deleted: " + msg.Title)
 		} else {
-			a.setFeedback(fmt.Sprintf("Deleted %d jobs", msg.Count))
+			a.setFeedback("Deleted " + jobCount(msg.Count))
 		}
 		return a, nil
 
@@ -717,6 +803,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(a.fetchStatsCmd(msg.Epoch), statsRefreshTick(msg.Epoch))
 
+	case jobLogLinesMsg:
+		if !a.jobLog.IsVisible() || msg.Epoch != a.jobLogEpoch {
+			return a, nil // closed or re-opened on another job since this read started
+		}
+		a.jobLog.SetLines(msg.Lines)
+		return a, nil
+	case jobLogRefreshTickMsg:
+		// The statsRefreshTickMsg discipline: one chain per open, re-armed
+		// here only, dropped once its open is over. It keeps reading after
+		// the job turns terminal — an A S recovery runs on a job that is not
+		// active and reports through this very log.
+		if !a.jobLog.IsVisible() || msg.Epoch != a.jobLogEpoch || a.OnGetJobLogs == nil {
+			return a, nil
+		}
+		return a, tea.Batch(a.fetchJobLogCmd(msg.Epoch, a.jobLog.JobID()), jobLogRefreshTick(msg.Epoch))
+
 	case deleteClientTokenResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)
@@ -734,8 +836,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.ShowReview(msg.Script, msg.Token)
 		} else {
 			// Ran directly (already elevated) — verify
-			a.ffmpegCheck.installing = false
-			a.ffmpegCheck.installResult = "Verifying installation..."
+			a.ffmpegCheck.beginVerify()
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
@@ -745,8 +846,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
 		} else {
 			// Elevated install succeeded — verify FFmpeg is available
-			a.ffmpegCheck.installing = false
-			a.ffmpegCheck.installResult = "Verifying installation..."
+			a.ffmpegCheck.beginVerify()
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
@@ -846,7 +946,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case channelResolvedMsg:
-		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
+		// Both channel editors resolve through resolveChannelCmd; each
+		// discards an answer it is not waiting for.
+		a.settings.HandleChannelResolved(msg.Input, msg.ID, msg.Name, msg.Platform, msg.Err)
+		a.setupWiz.HandleChannelResolved(msg.Input, msg.ID, msg.Name, msg.Platform, msg.Err)
+		return a, nil
+
+	case channelRemovalSummaryMsg:
+		a.settings.HandleChannelRemovalSummary(msg.ID, msg.Info, msg.Err)
+		return a, nil
+
+	case channelJobsPrunedMsg:
+		a.setFeedbackWithSeverity(channelJobsPrunedFeedback(msg))
 		return a, nil
 
 	case testNotificationResultMsg:
@@ -1027,15 +1138,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // refresh is still renewing them. That combination is exactly the one an
 // operator has no other way to find out about from this key, so it is rendered
 // whenever it is set and never inferred from anything else on this message. It
-// goes LAST so the clamp below eats it before it eats the verdicts.
+// goes LAST so the row cap eats it before it eats the verdicts.
 //
-// AND THAT IS WHY THE SEVERITY IS RETURNED RATHER THAN LEFT TO THE COLORIZER.
-// The clamp runs here and feedbackColor runs on what survives it, so on a
-// narrow terminal the LastError clause — the whole reason the line is not
-// green — is truncated away before anything looks at it. Measured: at 40
-// columns the line rendered in the SUCCESS colour while announcing a recorded
-// failure. Every fact the colour depends on is in hand at this point and none
-// of it is in hand afterwards, so the answer is computed here and carried.
+// THE LINE WRAPS, it is not cut to one row. A held profile's LastError names
+// the lock to delete by its full path, and that path starts about 175 columns
+// in: cut to the width, as this line was until then (fitFeedback), it lost the
+// path at 80, 120, 160 and 200 columns alike, so the one fact the sentence was
+// written to carry never reached a TUI screen. The caller sets it with
+// setWrappedFeedback, and View lays it out with wrapFeedback — up to half the
+// terminal's rows (feedbackRowCap), the last one cut with an ellipsis.
+//
+// AND THE SEVERITY IS STILL RETURNED RATHER THAN LEFT TO THE COLORIZER. It was
+// first stated because the old clamp ran here and feedbackColor ran on what
+// survived it: at 40 columns the LastError clause — the whole reason the line
+// is not green — was truncated away and the line rendered in the SUCCESS
+// colour while announcing a recorded failure. Nothing cuts the line before the
+// colorizer now, but its scan still ranks by branch order over prose written
+// elsewhere (see feedbackSeverity), and every fact the colour depends on is in
+// hand here and nowhere after, so the answer is computed here and carried.
 func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbackSeverity) {
 	var checked []cookies.RecheckedPlatform
 	var reasons []string
@@ -1104,55 +1224,55 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 		line += " | Last cookie error: " + msg.LastError
 		// AT LEAST warning, whatever the verdicts said. A recorded failure is
 		// something to act on even beside two healthy platforms, and this is
-		// the fact the clamp destroys. Never more than warning: what was
+		// the fact the row cap cuts first. Never more than warning: what was
 		// recorded is a fact about a PREVIOUS pass, and the conclusive verdict
 		// of THIS one is the only thing that earns red.
 		stated = max(stated, severityWarning)
 	}
-	return a.fitFeedback(line), stated
-}
-
-// fitFeedback clamps a feedback line to the room the overlay actually has.
-//
-// addOverlayMessage renders the line as "  "+msg and pads it out to a.width; it
-// does NOT clip. A line wider than the terminal therefore wraps, and because it
-// is written into a fixed row of an already-composed frame, the wrap pushes
-// every row below it down — the whole dashboard shifts for three seconds.
-//
-// Every other string reaching setFeedback is composed here out of bounded
-// vocabulary, so nothing needed this before. The recheck reason is the first
-// one whose length is decided elsewhere (a resolver's DNS wording, a proxy's
-// host name), which is why the clamp lives at the composer rather than inside
-// setFeedback: putting it there would silently truncate messages whose exact
-// text other tests pin.
-//
-// truncateString is the task list's own ellipsis helper, so an over-long line
-// ends the same way an over-long title does. Below the first WindowSizeMsg
-// a.width is 0 and the line is returned whole: there is no frame to break yet,
-// and clamping to a width nobody has reported would cut every message to
-// nothing.
-func (a *App) fitFeedback(line string) string {
-	const overlayIndent = 2 // addOverlayMessage's leading "  "
-	if a.width <= overlayIndent {
-		return line
-	}
-	return truncateString(line, a.width-overlayIndent)
+	return line, stated
 }
 
 func (a *App) setFeedback(msg string) {
 	a.setFeedbackWithSeverity(msg, severityUnstated)
 }
 
+// feedbackRowHold is how long one row of the feedback line stays up: the 3 s
+// every line has always had. A wrapped line gets it once per row it takes.
+const feedbackRowHold = 3 * time.Second
+
 // setFeedbackWithSeverity is setFeedback for a composer that KNOWS how alarming
 // its line is, rather than leaving feedbackColor to infer it from the finished
 // prose. See feedbackSeverity for why the inference is not good enough on the
 // one line that carries it.
+func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
+	a.feedback = appFeedback{msg: msg, sev: stated, until: time.Now().Add(feedbackRowHold)}
+}
+
+// setWrappedFeedback is setFeedbackWithSeverity for a line that must be read
+// whole: View wraps it onto as many rows as it needs (wrapFeedback) rather
+// than cutting it to one, and it stays up feedbackRowHold per row, so a block
+// naming a path to delete is up long enough to be read and copied, where the
+// 3 s a one-row line gets is not.
+//
+// For a line carrying a sentence written elsewhere whose tail is the part to
+// act on: R C's line, whose LastError names a held profile's lock, R F's
+// held-profile arm, which is that sentence, and R F's error arm, which carries
+// whatever other sentence the pass failed with — and A Z's outcome line, the
+// import's note naming the files it re-adopted or renamed. Every other line
+// keeps the one ellipsized row — their prose is bounded, and tests pin it cut.
 //
 // It takes the pair in the order cookieRecheckFeedback returns it, so the call
-// site reads `a.setFeedbackWithSeverity(a.cookieRecheckFeedback(msg))` and the
+// site reads `a.setWrappedFeedback(a.cookieRecheckFeedback(msg))` and the
 // message and the fact about it cannot be assembled apart.
-func (a *App) setFeedbackWithSeverity(msg string, stated feedbackSeverity) {
-	a.feedback = appFeedback{msg: msg, sev: stated, until: time.Now().Add(3 * time.Second)}
+//
+// The rows are counted at the size the terminal has now. Below the first
+// WindowSizeMsg there is no size, and the line is held as one row.
+func (a *App) setWrappedFeedback(msg string, stated feedbackSeverity) {
+	rows := len(wrapFeedback(msg, a.width, feedbackRowCap(a.height)))
+	a.feedback = appFeedback{
+		msg: msg, sev: stated, wrap: true,
+		until: time.Now().Add(time.Duration(rows) * feedbackRowHold),
+	}
 }
 
 func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {
@@ -1174,46 +1294,34 @@ func (a *App) clearFeedback() {
 	a.feedback = appFeedback{}
 }
 
-// displayColumns is the set of database column names whose changes require
-// rebuilding the task-list row and (if selected) the detail panel.
-// Mirrors the previous 12-field compare in handleJobUpdate but driven by
-// JobChange.Changes from UpdateJobFields — the database tells us exactly
-// which columns were written, so we no longer need to fetch the previous
-// snapshot and compare field-by-field. Audit reports/tui.md F20.
-var displayColumns = map[string]struct{}{
-	"status":            {},
-	"title":             {},
-	"channel_name":      {},
-	"thumbnail_url":     {},
-	"description":       {},
-	"stream_start_time": {},
-	"stream_end_time":   {},
-	"error":             {},
-	"output_file":       {},
-	"filename":          {},
-	"is_vod":            {},
-	"chat_status":       {},
-}
-
-// hasDisplayChange reports whether any column in changes warrants a
-// task-list / detail-panel rebuild.
+// hasDisplayChange reports whether a change may move anything the task-list
+// row or the detail panel shows, so that the held row is replaced and both
+// are rebuilt: every change but a progress tick (database.IsProgressOnlyChange,
+// the predicate the dashboard's job_update / job_progress split reads).
+//
+// It was an allow-list of twelve columns, the field-by-field compare that
+// JobChange.Changes replaced (audit reports/tui.md F20), and a column the TUI
+// shows that the list left out kept the held row stale until the next full
+// snapshot. A single-job A W writes watched and resume_position: the row
+// kept Watched=false, so the dim dot never appeared, and the next A W
+// computed !job.Watched from it and marked the job watched again — one job
+// could never be unmarked. A quality split's twitch_quality and a VOD's
+// resolution, each written alone, went stale the same way.
+//
+// The tick is the one change kept off this path: it lands ~60 times a second
+// per download and flows through progressStore, and its Job is the slim row
+// the database reads back without gaps, trims and parts (database.JobChange)
+// — the held row, replaced with it, would lose them.
 func hasDisplayChange(changes []string) bool {
-	for _, col := range changes {
-		if _, ok := displayColumns[col]; ok {
-			return true
-		}
-	}
-	return false
+	return !database.IsProgressOnlyChange(changes)
 }
 
 // tallyColumns is the set of database column names the STATUS BAR's stored
 // tally derives from: tallyJobs reads Job.Status for the active counter, and
 // parkedCookieJobs reads Job.Status and Job.Platform for the B1 parked badge.
 //
-// NOT a subset of displayColumns, and not meant to be — platform is not a
-// display column. The gate below stays nested inside the hasDisplayChange
-// branch, which is what makes that safe: UpdateJobFields never writes platform
-// today, and if it ever did it would arrive alongside a display column.
+// The gate below stays nested inside the hasDisplayChange branch, which every
+// change but a progress tick reaches, and neither column is a progress one.
 //
 // Why a named set rather than the two keys spelled out at the call site, which
 // is what this replaces: the gate is coupled to what tallyJobs and
@@ -1254,35 +1362,101 @@ func isProgressTerminal(s database.JobStatus) bool {
 	return isCompletedStatus(s) || s == database.StatusError || s == database.StatusCookies
 }
 
+// appliedJobVersions is the newest database.Job.Version applied for one job,
+// held apart for its two stores. row is the write whose Job the task list
+// holds; progress is the write whose progress columns the progress store
+// holds, a tick's or a whole row's, so it is never below row.
+//
+// They are apart because a tick is applied to the progress store alone. One
+// number for both let a tick that overtook a write — the write's event
+// reaching the TUI after the next tick's, though the tick's row already held
+// it — mark the write stale: the tick does not replace the held row, the
+// write was dropped, and a quality split's twitch_quality or a rename stayed
+// off the row until a resync.
+type appliedJobVersions struct {
+	row      uint64
+	progress uint64
+}
+
+// staleJobUpdate reports whether job is an older write than one already
+// applied to the store it would update: for a progress tick, the progress
+// store, and for any other write, the held row. A newer tick says nothing
+// about the title, quality or anything else a tick does not write, so it
+// never makes a write stale. A row with no version (0: read rather than
+// written) makes no claim and is never stale.
+func (a *App) staleJobUpdate(job *database.Job, tick bool) bool {
+	if job.Version == 0 {
+		return false
+	}
+	applied := a.jobVersions[job.ID]
+	if tick {
+		return job.Version <= applied.progress
+	}
+	return job.Version <= applied.row
+}
+
+// noteJobVersion records job's version as applied: to the progress store
+// always, as every Job carries the progress columns, and to the row unless
+// it is a tick's. It reports whether the progress columns were the newest
+// yet, so an older write that still replaces the row leaves the progress
+// store with the newer tick's values.
+func (a *App) noteJobVersion(job *database.Job, tick bool) (progressFresh bool) {
+	if job.Version == 0 {
+		return true
+	}
+	applied := a.jobVersions[job.ID]
+	if !tick && job.Version > applied.row {
+		applied.row = job.Version
+	}
+	progressFresh = job.Version > applied.progress
+	if progressFresh {
+		applied.progress = job.Version
+	}
+	a.jobVersions[job.ID] = applied
+	return progressFresh
+}
+
 func (a *App) handleJobUpdate(ev *database.JobChange) {
 	job := ev.Job
+	tick := !hasDisplayChange(ev.Changes)
+	if a.staleJobUpdate(job, tick) {
+		return
+	}
+	progressFresh := a.noteJobVersion(job, tick)
 
 	// Progress store: terminal rows are DELETED rather than written, on every
 	// update and not only on the transition. The old code Set unconditionally
 	// and deleted only when the status changed, so any later write to an
 	// already-terminal row (A W's watched toggle, a filename fixup) resurrected
 	// the entry that the transition had just dropped.
-	if isProgressTerminal(job.Status) {
-		a.progressStore.Delete(job.ID)
-	} else {
-		a.progressStore.Set(job.ID, &ProgressData{
-			Progress:          job.Progress,
-			Percent:           job.Percent,
-			Speed:             job.Speed,
-			ETA:               job.ETA,
-			LastVideoSeq:      job.LastVideoSeq,
-			LastAudioSeq:      job.LastAudioSeq,
-			TotalVideoSeq:     job.TotalVideoSeq,
-			TotalAudioSeq:     job.TotalAudioSeq,
-			TotalChatMessages: job.TotalChatMessages,
-			ChatStatus:        job.ChatStatus,
-		})
+	//
+	// Left alone by a write older than a tick already applied: the tick's
+	// progress columns are the newer ones, and the write still replaces the
+	// row below.
+	if progressFresh {
+		if isProgressTerminal(job.Status) {
+			a.progressStore.Delete(job.ID)
+		} else {
+			a.progressStore.Set(job.ID, &ProgressData{
+				Progress:          job.Progress,
+				Percent:           job.Percent,
+				Speed:             job.Speed,
+				ETA:               job.ETA,
+				LastVideoSeq:      job.LastVideoSeq,
+				LastAudioSeq:      job.LastAudioSeq,
+				TotalVideoSeq:     job.TotalVideoSeq,
+				TotalAudioSeq:     job.TotalAudioSeq,
+				TotalChatMessages: job.TotalChatMessages,
+				ChatStatus:        job.ChatStatus,
+			})
+		}
 	}
 
-	// Rebuild task-list row + detail panel only when a display-relevant
-	// column was actually written. Progress-only updates (~10/sec during
-	// downloads) flow through progressStore and don't need list rebuilds.
-	if hasDisplayChange(ev.Changes) {
+	// Replace the held row and rebuild the task-list row + detail panel for
+	// every change but a progress tick. Ticks (~60/sec per download) flow
+	// through progressStore, need no list rebuild, and carry a row without
+	// its child rows (hasDisplayChange).
+	if !tick {
 		a.taskList.UpdateJob(job)
 		// Re-tally the status bar. UpdateJob replaces the element in the
 		// slice the bar's jobs ALIAS (TaskListModel.Jobs returns the live
@@ -1294,9 +1468,9 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 		//
 		// Gated on tallyColumns — exactly the columns tallyJobs and
 		// parkedCookieJobs derive from — so a real transition costs one walk
-		// and a progress tick costs none: progress is not a display column,
-		// so it never reaches this branch at all, and the gate keeps the
-		// other eleven that do (title, filename, …) off the tally too. The
+		// and a progress tick costs none: it never reaches this branch at
+		// all, and the gate keeps every other column that does (title,
+		// filename, watched, …) off the tally too. The
 		// set is a named home rather than two keys typed out here so the
 		// coupling to the derivation is checkable; status is the key that
 		// fires in practice.
@@ -1338,6 +1512,9 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 		return
 	}
 	job := ev.Job
+	// Never dropped, however old: the row has to exist. An update that
+	// overtook it found no row to apply to, so nothing newer is lost.
+	a.noteJobVersion(job, false)
 
 	// Existing app already has data → user has used the app before; the
 	// new-job arrival is enough to dismiss the newcomer hint (matches
@@ -1388,6 +1565,7 @@ func (a *App) handleJobDeleted(ev *database.JobDeleted) {
 	}
 	a.progressStore.Delete(ev.JobID)
 	delete(a.statusMap, ev.JobID)
+	delete(a.jobVersions, ev.JobID)
 	a.taskList.RemoveJob(ev.JobID)
 	a.statusBar.SetJobs(a.taskList.Jobs())
 	a.actionMenu.SetJobs(a.taskList.Jobs())
@@ -1396,6 +1574,22 @@ func (a *App) handleJobDeleted(ev *database.JobDeleted) {
 	// both cases.
 	a.updateSelectedJob()
 	a.updateTerminalTitle()
+	a.closeJobLogOfDeletedJob(ev.JobID)
+}
+
+// closeJobLogOfDeletedJob closes the O L overlay when the job it shows is
+// gone, as the dashboard closes its job dialog on job_deleted. The job's log
+// buffer goes with its row (ClearJobLogs, which the bulk channel prune runs
+// for each row it deletes), so the next read would blank the page the
+// operator was reading with nothing on screen to say why. Retiring the epoch
+// drops the session's refresh chain and any read still in flight.
+func (a *App) closeJobLogOfDeletedJob(jobID string) {
+	if !a.jobLog.IsVisible() || a.jobLog.JobID() != jobID {
+		return
+	}
+	a.jobLog.Close()
+	a.jobLogEpoch++
+	a.setFeedbackWithSeverity("Job log closed: the job was deleted", severityWarning)
 }
 
 // handleTrimsChanged applies a TrimsChanged lifecycle event from the
@@ -1489,11 +1683,17 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	if a.statsDlg.IsVisible() {
 		return a.statsDlg.UpdateComponents(msg)
 	}
+	if a.jobLog.IsVisible() {
+		return a.jobLog.UpdateComponents(msg)
+	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {
 	case PanelTasks:
 		if a.taskList.IsSearching() {
-			return a.taskList.UpdateSearchInput(msg)
+			// Live typing re-filters and moves the cursor to the first match.
+			cmd := a.taskList.UpdateSearchInput(msg)
+			a.updateSelectedJob()
+			return cmd
 		}
 	case PanelLogs:
 		if a.logs.IsSearching() {

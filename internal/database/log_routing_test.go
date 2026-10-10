@@ -48,8 +48,8 @@ func TestUntrackStopsRoutingButKeepsTheBuffer(t *testing.T) {
 	}
 }
 
-// SyncJobLogTracking is the policy both callers in cmd/moombox share: the
-// boot seed over every existing job and the OnJobsChange fan-out. A live job
+// SyncJobLogTracking is the policy of cmd/moombox's boot seed over every
+// existing job (the OnJobsChange fan-out called it too, once). A live job
 // is tracked — that is the whole point of the boot seed — and a terminal one
 // is not, which is what stops RouteLogToJobs scanning years of Finished rows
 // per log line (CORE-12).
@@ -99,20 +99,21 @@ func TestSyncJobLogTrackingFollowsLiveJobsOnly(t *testing.T) {
 	}
 }
 
-// ClearJobLogs and PruneJobLogs own BOTH maps: a routed ID left behind after
-// its buffer is gone is a job RouteLogToJobs keeps scanning for forever, which
-// is the leak CORE-12's set would otherwise introduce.
+// ClearJobLogs and clearJobLogsOf (its list form, which the bulk channel
+// prune drops its rows' logs through) own BOTH maps: a routed ID left behind
+// after its buffer is gone is a job RouteLogToJobs keeps scanning for forever,
+// which is the leak CORE-12's set would otherwise introduce.
 //
-// Mutant: deleting only from jobLogs in either — the routed job resurrects a
-// buffer on the next matching line.
-func TestClearAndPruneDropTheRoutedIDToo(t *testing.T) {
+// Mutant: clearJobLogsOf deleting only from jobLogs — the routed job
+// resurrects a buffer on the next matching line.
+func TestClearJobLogsDropsTheRoutedIDToo(t *testing.T) {
 	db := newLogRoutingDB()
 	db.TrackJobForLogs("cleared")
 	db.TrackJobForLogs("pruned")
 	db.TrackJobForLogs("kept")
 
 	db.ClearJobLogs("cleared")
-	db.PruneJobLogs(map[string]struct{}{"cleared": {}, "kept": {}})
+	db.clearJobLogsOf([]string{"pruned", "never-tracked"})
 
 	db.RouteLogToJobs("2026-09-17 12:00:00 INFO cleared line")
 	db.RouteLogToJobs("2026-09-17 12:00:00 INFO pruned line")

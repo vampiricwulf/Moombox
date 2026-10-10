@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 )
 
 const (
@@ -41,7 +42,7 @@ const (
 	discordMaxSleepTotal = 30 * time.Second
 	// shutdownBucketWaitCap bounds how long a SINGLE-attempt send (SendOnce —
 	// in practice the shutdown path) will wait out a known-empty rate bucket.
-	// The process force-exits 10s into shutdown, so honouring a window a full
+	// The process force-exits 15s into shutdown, so honouring a window a full
 	// discordRetryAfterCap away would lose the embed to os.Exit AND starve
 	// every item behind it in that target's FIFO queue. Past this cap SendOnce
 	// posts immediately and lets the 429 drop the item: the same outcome as
@@ -202,7 +203,7 @@ func toDiscordEmbed(e Embed) discordEmbed {
 		Description: e.Description,
 		Color:       e.Color,
 		Footer:      &discordFooter{Text: footerText(opts)},
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Timestamp:   e.eventTime().UTC().Format(time.RFC3339),
 	}
 
 	if opts.URL != "" {
@@ -276,7 +277,7 @@ func buildPayload(msg Message) ([]byte, error) {
 //
 // Two callers: SendTest, where an interactive settings flow wants the
 // immediate outcome (surfacing a 429 beats sleeping through its Retry-After),
-// and the per-target queue during shutdown, where the 10s force-exit leaves no
+// and the per-target queue during shutdown, where the 15s force-exit leaves no
 // room for the ladder.
 //
 // A known-empty rate bucket is therefore honoured only when it refills within
@@ -299,6 +300,7 @@ func (d *DiscordWebhook) SendOnce(msg Message) error {
 	case r.status < 400:
 		return nil
 	case r.status == http.StatusTooManyRequests:
+		d.noteRateLimitGiveUp(r)
 		return fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 	default:
 		return discordStatusErr(r.status, r.snippet)
@@ -326,15 +328,21 @@ func (d *DiscordWebhook) Send(msg Message) error {
 //
 // Alerts exist precisely for flaky moments; the previous single-shot behavior
 // dropped e.g. a "recording failed" embed on the first connection reset.
-func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) ([]byte, error) {
+func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody bool) (_ []byte, err error) {
 	var lastErr error
 	var slept time.Duration
+	var r discordResponse
+	defer func() {
+		if err != nil {
+			d.noteRateLimitGiveUp(r)
+		}
+	}()
 	for attempt := 1; ; attempt++ {
 		// Pre-emptive: if the last response said the bucket was empty, wait
 		// out its window instead of spending one of three attempts on the 429
 		// Discord has already promised.
 		d.waitForBucket()
-		r, err := d.do(method, endpoint, body, wantBody)
+		r, err = d.do(method, endpoint, body, wantBody)
 		d.noteBucket(r)
 
 		var delay time.Duration
@@ -457,12 +465,45 @@ func (d *DiscordWebhook) bucketWait() time.Duration {
 	return time.Until(until)
 }
 
+// noteRateLimitGiveUp arms the empty-bucket deadline from a 429 that ENDS a
+// delivery: the ladder gave up on it, or its Retry-After was missing,
+// malformed or past discordRetryAfterCap. noteBucket leaves every 429 to the
+// ladder, so with nothing recorded the queue's next item POSTed straight into
+// the same limit, and the one after it — a Retry-After of 45 s (Discord's
+// per-channel webhook limit commonly asks 30-60 s) dropped every queued alert
+// within milliseconds. The window is the Retry-After, else
+// X-RateLimit-Reset-After, else the cap, and never more than the cap, which
+// waitForBucket enforces anyway. A no-op for anything but a 429.
+func (d *DiscordWebhook) noteRateLimitGiveUp(r discordResponse) {
+	if r.status != http.StatusTooManyRequests {
+		return
+	}
+	wait := discordRetryAfterCap
+	for _, v := range []string{r.retryAfter, r.rateReset} {
+		// NaN fails secs > 0 and +Inf fails the cap test, so neither can
+		// produce a negative or unbounded Duration.
+		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
+			if secs < discordRetryAfterCap.Seconds() {
+				wait = time.Duration(secs * float64(time.Second))
+			}
+			break
+		}
+	}
+	until := time.Now().Add(wait + bucketSkewPad)
+	d.bucketMu.Lock()
+	if until.After(d.bucketRefillsAt) {
+		d.bucketRefillsAt = until
+	}
+	d.bucketMu.Unlock()
+}
+
 // noteBucket records (or clears) the empty-bucket deadline from one response.
 //
 // A 429 is deliberately EXCLUDED: Discord sets Remaining: 0 on one, and the
 // ladder already honours its Retry-After, so arming the pre-emptive sleep from
 // the same response would wait the window twice and spend the cumulative-sleep
-// budget on the duplicate.
+// budget on the duplicate. A 429 the delivery ends on is armed separately
+// (noteRateLimitGiveUp).
 func (d *DiscordWebhook) noteBucket(r discordResponse) {
 	if r.status == http.StatusTooManyRequests || r.rateRemain == "" {
 		return
@@ -522,6 +563,11 @@ func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool)
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
+		// url.Parse's error is a *url.Error quoting the whole URL — the
+		// webhook token — exactly like a transport error below.
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
+			return discordResponse{}, fmt.Errorf("create discord request: %s %s: %w", uerr.Op, redact.URLOrigin(uerr.URL), uerr.Err)
+		}
 		return discordResponse{}, fmt.Errorf("create discord request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -534,7 +580,7 @@ func (d *DiscordWebhook) do(method, endpoint string, body []byte, wantBody bool)
 		// log, SendTest's route response, retry-loop wrap all flow through
 		// here).
 		if uerr, ok := errors.AsType[*url.Error](err); ok {
-			return discordResponse{}, fmt.Errorf("%s %s: %w", uerr.Op, redactURLForLog(uerr.URL), uerr.Err)
+			return discordResponse{}, fmt.Errorf("%s %s: %w", uerr.Op, redact.URLOrigin(uerr.URL), uerr.Err)
 		}
 		return discordResponse{}, err
 	}

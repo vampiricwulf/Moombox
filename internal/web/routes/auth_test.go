@@ -594,8 +594,17 @@ func TestRedactIP(t *testing.T) {
 		{"10.0.0.1", "10.0.0.0"},
 		{"203.0.113.7", "203.0.113.0"},
 		{"2001:db8:1234:5678::1", "2001:db8:1234:5678::"},
-		{"::1", ""}, // too few segments — refuses to leak
+		// Compressed forms: the interface identifier never survives, whatever
+		// the number of ":"-separated fields the literal happens to have.
+		{"2001:db8::1", "2001:db8::"},
+		{"fe80::1234:5678:abcd:ef01", "fe80::"},
+		{"2001:db8:abcd::", "2001:db8:abcd::"},
+		{"fe80::1%eth0", "fe80::"},
+		{"::1", "::"},
+		{"::ffff:192.0.2.77", "192.0.2.0"}, // IPv4-mapped is IPv4
 		{"garbage", ""},
+		{"1.2.3", ""},
+		{"1.2.3.4:80", ""},
 	}
 	for _, tt := range tests {
 		got := redactIP(tt.in)

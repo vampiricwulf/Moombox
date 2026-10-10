@@ -92,3 +92,35 @@ test("a debounced body with no wait still renders a number", { skip }, async () 
   const result = await clickCheckNow(h);
   assert.equal(result.textContent, "Just checked — try again in 0s");
 });
+
+// A check that finds nothing newer than the running version means a release
+// this page still offers was pulled: its download no longer exists, and the
+// header badge must stop offering it.
+// MUTANT: leave _updateAvailable alone in the up-to-date branch — the badge
+// keeps the pulled release.
+test("an up-to-date answer withdraws a pending release", { skip }, async () => {
+  const h = await harness.makeApp({
+    routes: { "POST /api/update/check": () => ({ currentVersion: "2.8.8", available: false }) },
+  });
+  h.app._updateAvailable = { version: "2.9.0", tagName: "v2.9.0" };
+
+  const result = await clickCheckNow(h);
+  assert.equal(result.textContent, "Up to date");
+  assert.equal(h.app._updateAvailable, null);
+});
+
+// The server announces a withdrawn release — skipped elsewhere, or found to
+// be no newer than the running version — as update_cleared with its tag.
+// Only the release this page shows goes: a clear racing a newly-found release
+// names the older tag.
+// MUTANT: clear on every update_cleared — the newer release is hidden.
+test("update_cleared drops only the release it names", { skip }, async () => {
+  const h = await harness.makeApp({});
+  h.app._updateAvailable = { version: "2.9.1", tagName: "v2.9.1" };
+
+  h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v2.9.0" } });
+  assert.equal(h.app._updateAvailable?.tagName, "v2.9.1", "a clear for another tag must leave the badge");
+
+  h.app.handleMessage({ type: "update_cleared", payload: { tagName: "v2.9.1" } });
+  assert.equal(h.app._updateAvailable, null);
+});

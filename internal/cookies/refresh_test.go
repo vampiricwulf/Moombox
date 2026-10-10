@@ -45,7 +45,7 @@ func TestUpdateCookieFileReplacesDuplicateRows(t *testing.T) {
 	// resolveRowUpdate reaches the .google.com row through rule 3's
 	// within-one-platform refresh — but the parameter is required and stating
 	// the real caller's value keeps the test faithful to the production path.
-	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
+	if err := rs.updateCookieFile(updates, originYouTube, ""); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestUpdateCookieFileSubdomainFlag(t *testing.T) {
 	// DeclaredPlatform for that rule. The claim under test is unchanged: a domain
 	// with no leading dot still gets FALSE, and still would have failed against
 	// the hardcoded-TRUE behaviour this test was written for.
-	if err := rs.updateCookieFile(updates, originYouTube); err != nil {
+	if err := rs.updateCookieFile(updates, originYouTube, ""); err != nil {
 		t.Fatalf("updateCookieFile: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestUpdateCookieFileUnscopedInsertUsesTheDeclaredOrigin(t *testing.T) {
 				{Name: "SAPISID"}:    {Value: "s", Expiry: 1},
 				{Name: "LOGIN_INFO"}: {Value: "l", Expiry: 1},
 			}
-			if err := rs.updateCookieFile(updates, tc.origin); err != nil {
+			if err := rs.updateCookieFile(updates, tc.origin, ""); err != nil {
 				t.Fatalf("updateCookieFile: %v", err)
 			}
 

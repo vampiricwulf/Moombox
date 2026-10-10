@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/httpx"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -85,6 +84,11 @@ const (
 // already has a query string) to a segment URL. Returns the URL unchanged
 // if the token is empty. Centralized here so segment, head-probe, and
 // chunk fetch all inject the token identically.
+//
+// Every error a request built from the result can return goes through
+// redact.MediaError: a *url.Error — a transport failure, or a URL net/url
+// refused to parse — quotes the whole URL, token and all, and a googlevideo
+// URL carries the client's public IP and the URL's signature besides.
 func applyPoTokenQuery(rawURL, token string) string {
 	if token == "" {
 		return rawURL
@@ -95,86 +99,6 @@ func applyPoTokenQuery(rawURL, token string) string {
 	}
 	return rawURL + sep + "pot=" + token
 }
-
-// potValueRe matches a pot query value in a URL or an error string. It is the
-// fallback for a URL net/url cannot parse, and the scrub for a wrapper's
-// precomputed message.
-var potValueRe = regexp.MustCompile(`pot=[^&"\s]+`)
-
-// redactedPotValue replaces the PO token wherever an error would print it.
-const redactedPotValue = "pot=<redacted>"
-
-// redactPoToken keeps the GVS PO token out of an error's text. A transport
-// failure from http.Client.Do is a *url.Error whose Error() embeds the full
-// request URL, and applyPoTokenQuery put the token in that URL — so the
-// string would reach `job error` and the job's stored error.
-//
-// Contract: when a *url.Error anywhere in err's chain carries a pot value,
-// its URL field is rewritten IN PLACE to pot=<redacted> (Op and Err are
-// untouched, so errors.Is / errors.As on the cause still hold). When err is
-// that *url.Error itself it is returned as is; when it sits under a wrapper
-// whose message was precomputed (fmt.Errorf), the result is a thin wrapper
-// with the scrubbed message whose Unwrap is err. Every other error — nil,
-// no *url.Error, no pot value — is returned unchanged, and a second call is
-// a no-op.
-func redactPoToken(err error) error {
-	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
-	}
-	redacted := redactPotInURL(ue.URL)
-	if redacted == ue.URL {
-		return err
-	}
-	msg := err.Error()
-	ue.URL = redacted
-	if err == error(ue) {
-		return err
-	}
-	return &potRedactedError{msg: potValueRe.ReplaceAllString(msg, redactedPotValue), err: err}
-}
-
-// redactPotInURL rewrites every pot query value in rawURL to <redacted>,
-// leaving every other parameter and their order byte-identical. A URL
-// net/url cannot parse falls back to the regexp.
-func redactPotInURL(rawURL string) string {
-	if _, err := url.Parse(rawURL); err != nil {
-		return potValueRe.ReplaceAllString(rawURL, redactedPotValue)
-	}
-	// Splice the raw string rather than re-serialise through url.URL, so
-	// nothing but the pot value can change.
-	head, rest, hasQuery := strings.Cut(rawURL, "?")
-	if !hasQuery {
-		return rawURL
-	}
-	query, frag, hasFrag := strings.Cut(rest, "#")
-	parts := strings.Split(query, "&")
-	changed := false
-	for i, p := range parts {
-		if key, _, _ := strings.Cut(p, "="); key == "pot" && p != redactedPotValue {
-			parts[i] = redactedPotValue
-			changed = true
-		}
-	}
-	if !changed {
-		return rawURL
-	}
-	out := head + "?" + strings.Join(parts, "&")
-	if hasFrag {
-		out += "#" + frag
-	}
-	return out
-}
-
-// potRedactedError carries a wrapper's message with the PO token scrubbed;
-// Unwrap keeps the original chain for errors.Is / errors.As.
-type potRedactedError struct {
-	msg string
-	err error
-}
-
-func (e *potRedactedError) Error() string { return e.msg }
-func (e *potRedactedError) Unwrap() error { return e.err }
 
 // ConnectivityReporter is the interface the engine uses to notify the
 // connectivity monitor about HTTP successes and failures. It's stored in an
@@ -394,8 +318,9 @@ func withFetchDeadlines(parent context.Context, idle, ceiling time.Duration) (co
 
 // idleFetchError re-labels a context error that the read-progress deadline
 // caused, so callers and logs see a stall rather than a bare cancellation.
-// Any other error passes through with only its PO token redacted
-// (redactPoToken), so no caller can carry the token into a job error.
+// Any other error passes through with only its media URL's credentials — the
+// PO token, the client's IP, the signatures — redacted (redact.MediaError), so
+// no caller can carry them into a job error.
 // Shared with runDirectDownloadFallback, which has no ceiling.
 func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if err == nil {
@@ -404,13 +329,13 @@ func idleFetchError(ctx context.Context, idle time.Duration, err error) error {
 	if errors.Is(context.Cause(ctx), errFetchIdle) {
 		return fmt.Errorf("stalled: %w for %s", errFetchIdle, idle)
 	}
-	return redactPoToken(err)
+	return redact.MediaError(err)
 }
 
 // fetchDeadlineError re-labels a context error that EITHER per-fetch deadline
 // caused. The ceiling branch names the bound and how far the transfer got;
 // everything else — an idle stall, a caller cancel, a transport failure —
-// falls through to idleFetchError, which redacts any PO token in a transport
+// falls through to idleFetchError, which redacts the credentials in a transport
 // error's URL and otherwise passes it through. body is nil when the fetch died
 // before there was one, which is why received() tolerates a nil receiver.
 func fetchDeadlineError(ctx context.Context, idle, ceiling time.Duration, body *idleBody, err error) error {
@@ -434,7 +359,9 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
-		return nil, 0, err
+		// url.Parse's refusal quotes the whole URL, the token with it — and
+		// an HLS playlist URL carries one in its path as well as the query.
+		return nil, 0, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
@@ -512,7 +439,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 	// d.opts.MaxRetries (defaulted to MaxSegmentRetries in the constructor) —
 	// previously this loop used the constant directly, silently ignoring the
 	// documented DownloaderOptions.MaxRetries knob.
-	for attempt := range d.opts.MaxRetries {
+	for attempt := 0; attempt < d.opts.MaxRetries; attempt++ {
 		if d.isCancelled() {
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, cerr
@@ -585,6 +512,18 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 			utils.Sleep(ctx, d.delays.singleGoneRetry<<attempt)
 			continue
 		}
+		// A failure while the device is offline says nothing about the
+		// segment: wait the outage out and try again on the same attempt.
+		// Charged like any other failure, an outage longer than the backoff
+		// below (~50 s) made every in-flight segment of a VOD a gap.
+		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.emitActivity(ActivityReconnecting)
+			if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+				return nil, werr
+			}
+			attempt-- // not charged
+			continue
+		}
 		// Surface the backoff in the progress line — the tracker's grace
 		// window suppresses this while other segments are still landing, so
 		// only a real stall shows it.
@@ -596,6 +535,11 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		if attempt < d.opts.MaxRetries-1 {
 			utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
 		}
+	}
+	// A cancel that landed during the final attempt is still a cancel, not
+	// a segment that failed: the loop-top check above never runs again.
+	if err := d.cancelErr(ctx); err != nil {
+		return nil, err
 	}
 	return nil, ErrSegmentRetriesExhausted
 }
@@ -740,14 +684,14 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
-		return -1, err
+		return -1, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaWeb)
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return -1, err
+		return -1, redact.MediaError(err)
 	}
 	reportSuccess("engine/fetch")
 	// Bounded drain to allow keep-alive reuse. The expected response to this
@@ -804,15 +748,43 @@ func parseContentRangeStart(h http.Header) (int64, bool) {
 	return start, true
 }
 
+// parseContentRangeTotal extracts the complete length a Content-Range states
+// — the `<total>` of `bytes <start>-<end>/<total>`, and of the `bytes */<total>`
+// form a 416 may carry. A `*` total is unknown and returns ok=false, as do an
+// absent, non-`bytes` or unparsable header.
+//
+// The streaming fallback reads it because a failed size probe is how that path
+// is reached: the answer to its own resume Range is then the one statement of
+// the file's length it gets, and a resumed partial is held to it the way
+// runDirectDownload holds one to the probe (differentFileReason).
+func parseContentRangeTotal(h http.Header) (int64, bool) {
+	unit, spec, found := strings.Cut(strings.TrimSpace(h.Get("Content-Range")), " ")
+	if !found || !strings.EqualFold(unit, "bytes") {
+		return 0, false
+	}
+	_, totalStr, found := strings.Cut(strings.TrimSpace(spec), "/")
+	if !found {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(strings.TrimSpace(totalStr), 10, 64)
+	if err != nil || total < 0 {
+		return 0, false // "*" fails the parse: an unknown length
+	}
+	return total, true
+}
+
 // probeFileSize discovers the total file size using a Range: bytes=0-0 request.
-// Returns 0 if the server doesn't support Range requests or the size is unknown.
+// Returns 0 if the server doesn't support Range requests or the size is
+// unknown, with the status the probe was answered with — 0 when it got no
+// answer at all — so probeFileSizeWithRetry can tell a refused URL and a dead
+// link from a server that does not do Range.
 //
 // Status check happens before body drain: if the server ignores Range and
 // returns 200 OK with the full file, we close without reading. The legacy
 // behavior unconditionally io.Copy'd the body to io.Discard first, which on
 // a non-Range-supporting CDN meant pulling a multi-GB VOD just to throw it
 // away (audit reports/engine.md Finding 14).
-func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
+func (d *SegmentDownloader) probeFileSize(parent context.Context) (int64, int) {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
@@ -821,7 +793,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	// then 403s the first real chunk (VOD 403 fix, 2026-09-29).
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", "bytes=0-0")
@@ -829,7 +801,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
-		return 0
+		return 0, 0
 	}
 	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
@@ -838,7 +810,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 		// Server doesn't honor Range. Don't drain the body — it could be
 		// multiple GB and we have no use for it. The connection is sacrificed
 		// (no keep-alive reuse) but that's cheaper than the bandwidth.
-		return 0
+		return 0, resp.StatusCode
 	}
 
 	// 1-byte body; safe to drain so the connection can be reused for the
@@ -853,11 +825,11 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 		sizeStr := contentRange[idx+1:]
 		if sizeStr != "*" {
 			size, _ := strconv.ParseInt(sizeStr, 10, 64)
-			return size
+			return size, resp.StatusCode
 		}
 	}
 
-	return 0
+	return 0, resp.StatusCode
 }
 
 // probeFileSizeWithRetry re-asks for the file size before the caller gives up
@@ -871,28 +843,104 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) int64 {
 // once per download. It also triples the body sacrificed to a non-Range
 // origin — measured at ~1 MB across the three probes, against ~330 KB for
 // one — which is nothing beside the multi-GB VOD that follows.
-func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) int64 {
+//
+// Two answers are not charged against those attempts, as on the chunked loop
+// (fetchChunkWithRetry):
+//
+//   - a 403 or 410 asks OnCredentialRefresh for a fresh URL
+//     (refreshDirectURL) and probes again on it, at most
+//     directRefreshAttempts times. A URL that expired before the first
+//     request — a VOD whose extraction outlived its URLs on the way here —
+//     spent the three attempts on its 403 and fell through to the streaming
+//     fallback, which had no refresh of its own then;
+//   - no answer at all, or a 5xx, while IsOnline reports the device offline
+//     waits the outage out, and the last attempt of one with no answer first
+//     gives the monitor the time it needs to call one (awaitOutageVerdict).
+//     An outage as the download started sent it to the fallback, whose one
+//     request then failed the job — a gateway answering 5xx for an origin it
+//     could not reach as much as a dead link.
+//
+// The error ends the download as the chunked loop's would, sidecar kept: a
+// refresh the probe could not use (another stream, or nothing returned), a
+// URL still refused once the refreshes are spent, or a cancel. Without
+// OnCredentialRefresh a refusal is charged like any other answer, as before.
+func (d *SegmentDownloader) probeFileSizeWithRetry(ctx context.Context) (int64, error) {
 	const attempts = 3
-	for i := range attempts {
-		if size := d.probeFileSize(ctx); size > 0 {
-			return size
+	refreshes := 0
+	for i := 0; i < attempts; i++ {
+		size, status := d.probeFileSize(ctx)
+		if size > 0 {
+			return size, nil
 		}
-		if d.isCancelled() || ctx.Err() != nil {
-			return 0
+		if err := d.cancelErr(ctx); err != nil {
+			return 0, err
+		}
+		if (status == http.StatusForbidden || status == http.StatusGone) && d.opts.OnCredentialRefresh != nil {
+			if refreshes >= directRefreshAttempts {
+				return 0, fmt.Errorf("size probe refused: HTTP %d", status)
+			}
+			refreshes++
+			if err := d.refreshDirectURL(status); err != nil {
+				return 0, fmt.Errorf("size probe refused: HTTP %d; %w", status, err)
+			}
+			i-- // not charged: the next probe is on the fresh URL
+			continue
+		}
+		if (status == 0 || status >= 500) && d.opts.IsOnline != nil {
+			offline := !d.opts.IsOnline()
+			if !offline && status == 0 && i == attempts-1 {
+				offline = d.awaitOutageVerdict(ctx)
+			}
+			if offline {
+				d.emitActivity(ActivityReconnecting)
+				if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+					return 0, d.cancelErr(ctx)
+				}
+				i-- // not charged: the failure says nothing about Range support
+				continue
+			}
 		}
 		if i < attempts-1 {
-			d.logger.Debug("[Downloader] Range probe returned no size; retrying", "attempt", i+1)
+			d.logger.Debug("[Downloader] Range probe returned no size; retrying", "attempt", i+1, "status", status)
 			if err := utils.Sleep(ctx, d.delays.genericRetry<<i); err != nil {
-				return 0
+				return 0, d.cancelErr(ctx)
 			}
 		}
 	}
-	return 0
+	// A cancel that landed during the outage verdict is still a cancel.
+	return 0, d.cancelErr(ctx)
 }
 
 // fetchChunkWithRetry downloads a byte range with exponential backoff retry.
+// MaxChunkRetries counts ATTEMPTS, not retries after the first. Every failure
+// it reports carries the last fetch's own error and status: a direct VOD that
+// dies on a flaky link ends with "HTTP 503" or the idle-stall text in its row,
+// not a bare attempt count. A 416 and a cancellation are handed back as they
+// came — the caller classifies the first by status and the second by
+// errors.Is.
+//
+// Two kinds of failure are not charged against those attempts, as on the
+// segmented path (fetchSegmentWithRetry):
+//
+//   - a 403 or 410 asks OnCredentialRefresh for a fresh URL
+//     (refreshDirectURL) and retries the chunk on it, at most
+//     directRefreshAttempts times per chunk. A googlevideo URL lives about six
+//     hours, so a long transfer outlived it and the job used to end on a bare
+//     "HTTP 403" after one attempt;
+//   - a failure while IsOnline reports the device offline waits the outage
+//     out and retries. Before a failure with no complete answer is charged
+//     as the LAST attempt, the monitor is given the time it needs to call an
+//     outage (awaitOutageVerdict): a reset or refused connection or a DNS
+//     miss fails at once, so the ladder ran out in three seconds, well inside
+//     the two polls the monitor takes to notice — an outage longer than that
+//     failed the job.
 func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end int64) ([]byte, int, error) {
-	for attempt := range MaxChunkRetries {
+	var (
+		lastErr    error
+		lastStatus int
+		refreshes  int
+	)
+	for attempt := 0; attempt < MaxChunkRetries; attempt++ {
 		if d.isCancelled() || ctx.Err() != nil {
 			return nil, 0, d.cancelErr(ctx)
 		}
@@ -906,22 +954,87 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 			return nil, status, err
 		}
 
+		if status == http.StatusForbidden || status == http.StatusGone {
+			if d.opts.OnCredentialRefresh == nil || refreshes >= directRefreshAttempts {
+				return nil, status, fmt.Errorf("chunk download failed: %w", err)
+			}
+			refreshes++
+			if rerr := d.refreshDirectURL(status); rerr != nil {
+				return nil, status, fmt.Errorf("chunk download failed: %w; %w", err, rerr)
+			}
+			attempt-- // not charged: the next attempt is on the fresh URL
+			continue
+		}
+
+		// A failure below 300 got no complete answer: no response at all
+		// (status 0), or a 2xx whose body broke off mid-read — a reset, an
+		// unexpected EOF, the idle stall. That is the link failing, not the
+		// origin refusing, and it is retried like one; with its 206 it used to
+		// fall through to the immediate failure below, so one connection
+		// dropped mid-chunk ended the job. A 206 that starts at the wrong
+		// offset (fetchChunk) rides the same ladder, as fetchChunk intends.
+		incomplete := status < 300
+
 		// Retry on 5xx or network errors with exponential backoff (capped at
 		// 60s). Skip the backoff after the final attempt — no fetch follows,
 		// so it only delays the already-decided failure.
-		if status >= 500 || status == 0 {
+		if status >= 500 || incomplete {
+			lastErr, lastStatus = err, status
+			if d.opts.IsOnline != nil {
+				offline := !d.opts.IsOnline()
+				if !offline && incomplete && attempt == MaxChunkRetries-1 {
+					offline = d.awaitOutageVerdict(ctx)
+				}
+				if offline {
+					d.emitActivity(ActivityReconnecting)
+					if werr := waitForConnectivity(ctx, d.opts.IsOnline, d.delays.connectivityPoll); werr != nil {
+						return nil, 0, d.cancelErr(ctx)
+					}
+					attempt-- // not charged: the failure says nothing about the chunk
+					continue
+				}
+			}
 			if attempt < MaxChunkRetries-1 {
-				delay := time.Duration(1<<uint(attempt)) * time.Second
-				delay = min(delay, 60*time.Second)
+				delay := time.Duration(1<<uint(attempt)) * d.delays.atEdgeBackoffUnit
+				delay = min(delay, 60*d.delays.atEdgeBackoffUnit)
 				utils.Sleep(ctx, delay)
 			}
 			continue
 		}
 
-		return nil, status, err
+		return nil, status, fmt.Errorf("chunk download failed: %w", err)
 	}
 
-	return nil, 0, fmt.Errorf("chunk download failed after %d retries", MaxChunkRetries)
+	// A cancel that landed during the last attempt or the outage verdict is
+	// still a cancel, not a chunk that failed: the loop-top check never runs
+	// again, and the verdict wait can hold the loop for seconds.
+	if err := d.cancelErr(ctx); err != nil {
+		return nil, 0, err
+	}
+	return nil, lastStatus, fmt.Errorf("chunk download failed after %d attempts: %w", MaxChunkRetries, lastErr)
+}
+
+// awaitOutageVerdict gives the connectivity monitor the time it needs to call
+// an outage — three of its polls (connectivityPollInterval): it goes offline
+// on its second failed poll, and a poll on a dead network spends a few seconds
+// in its own probe — and reports whether it did. Only a chunk about to be
+// charged its last attempt for a failure with no complete answer asks, so a
+// link that is down is waited out instead of failing the job, while one the
+// monitor still calls up gives up as before, one window later. A cancel ends
+// the wait as "no verdict", and fetchChunkWithRetry returns the cancel.
+func (d *SegmentDownloader) awaitOutageVerdict(ctx context.Context) bool {
+	deadline := time.Now().Add(3 * d.delays.connectivityPoll)
+	for {
+		if !d.opts.IsOnline() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if utils.Sleep(ctx, d.delays.atEdgeBackoffUnit) != nil {
+			return false
+		}
+	}
 }
 
 // fetchChunk downloads a single byte range from the direct URL.
@@ -932,7 +1045,7 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, applyPoTokenQuery(d.getBaseURL(), d.getPoToken()), nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, redact.MediaError(err)
 	}
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))

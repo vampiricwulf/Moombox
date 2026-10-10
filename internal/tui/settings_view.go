@@ -3,10 +3,11 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -24,8 +25,7 @@ func (m *SettingsModel) View() string {
 		return m.renderRestartOverlay()
 	}
 
-	boxW := min(max(m.width-4, 40), m.width)
-	innerW := boxW - 4
+	innerW := m.settingsInnerWidth()
 	h := max(m.height-2, 10)
 
 	var content strings.Builder
@@ -93,9 +93,13 @@ func (m *SettingsModel) View() string {
 
 	// Hints
 	content.WriteString("\n")
-	hintLeft := DimStyle.Render("Esc: Close")
-	hintRight := m.renderHintText()
-	hintGap := innerW - runewidth.StringWidth("Esc: Close") - runewidth.StringWidth(hintRight)
+	escHint := "Esc: Close"
+	if m.channelRemovalPromptUp() {
+		escHint = "Esc: Cancel" // the prompt's Esc closes the prompt, not the overlay
+	}
+	hintLeft := DimStyle.Render(escHint)
+	hintRight := fitSettingsHint(m.renderHintText(), innerW-ansi.StringWidth(escHint)-1)
+	hintGap := innerW - ansi.StringWidth(escHint) - ansi.StringWidth(hintRight)
 	hintGap = max(hintGap, 1)
 	content.WriteString(hintLeft)
 	content.WriteString(strings.Repeat(" ", hintGap))
@@ -104,35 +108,137 @@ func (m *SettingsModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(boxW - 2).
+		Width(innerW + 2).
 		Height(h + 2).
 		Render(content.String())
 
 	return centerBox(box, m.width, m.height)
 }
 
+// Header layout, shared with handleMouseTabClick.
+const (
+	settingsHeaderPrefixW = 11 // "Settings" + " ─ "
+	settingsTabSepW       = 3  // " │ "
+	settingsTabMarkerW    = 2  // "‹ " before the window, " ›" after it
+)
+
+// renderHeader draws "Settings ─ <tabs>   N/M". All twelve section names
+// need about 140 cells, more than most terminals give, and the single
+// truncated line it used to be cut the later sections off — the active one
+// included — and the counter with them. The strip now shows the window of
+// tabs that fits, slid to keep the active one on screen, with ‹ / › where
+// tabs are hidden, and the counter is always drawn at the right edge.
 func (m *SettingsModel) renderHeader(w int) string {
 	left := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Settings") +
 		DimStyle.Render(" \u2500 ")
-
-	var tabParts []string
-	for i, sec := range sections {
-		if i > 0 {
-			tabParts = append(tabParts, DimStyle.Render(" \u2502 "))
-		}
-		if i == m.sectionIndex {
-			tabParts = append(tabParts, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(sec.name))
-		} else {
-			tabParts = append(tabParts, DimStyle.Render(sec.name))
-		}
-	}
-	tabs := strings.Join(tabParts, "")
-
 	right := DimStyle.Render(fmt.Sprintf("%d/%d", m.sectionIndex+1, len(sections)))
 
-	// Build full header, truncate to available width
-	header := left + tabs + " " + right
+	avail := w - settingsHeaderPrefixW - lipgloss.Width(right) - 1
+	start, end := settingsTabWindow(m.headerTabStart, m.sectionIndex, avail)
+	m.headerTabStart, m.headerTabEnd = start, end
+
+	var tabs strings.Builder
+	if start > 0 {
+		tabs.WriteString(DimStyle.Render("\u2039 "))
+	}
+	for i := start; i < end; i++ {
+		if i > start {
+			tabs.WriteString(DimStyle.Render(" \u2502 "))
+		}
+		if i == m.sectionIndex {
+			tabs.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(sections[i].name))
+		} else {
+			tabs.WriteString(DimStyle.Render(sections[i].name))
+		}
+	}
+	if end < len(sections) {
+		tabs.WriteString(DimStyle.Render(" \u203a"))
+	}
+
+	gap := max(w-lipgloss.Width(left)-lipgloss.Width(tabs.String())-lipgloss.Width(right), 1)
+	header := left + tabs.String() + strings.Repeat(" ", gap) + right
 	return lipgloss.NewStyle().MaxWidth(w).Render(header)
+}
+
+// settingsTabStripWidth is the cells sections[start:end] take in the header,
+// separators and ‹ / › markers included.
+func settingsTabStripWidth(start, end int) int {
+	n := 0
+	for i := start; i < end; i++ {
+		if i > start {
+			n += settingsTabSepW
+		}
+		n += ansi.StringWidth(sections[i].name)
+	}
+	if start > 0 {
+		n += settingsTabMarkerW
+	}
+	if end < len(sections) {
+		n += settingsTabMarkerW
+	}
+	return n
+}
+
+// settingsTabWindow picks the sections [start, end) the header shows in
+// avail cells: all of them when they fit, otherwise a window holding the
+// active section. The window starts where it last did (prevStart), so moving
+// one section slides it by one instead of re-centring it, and it is filled
+// from both sides as far as it fits. A window too narrow for even the active
+// tab still returns it; renderHeader's MaxWidth cuts the line.
+func settingsTabWindow(prevStart, active, avail int) (start, end int) {
+	n := len(sections)
+	if settingsTabStripWidth(0, n) <= avail {
+		return 0, n
+	}
+	start = min(max(prevStart, 0), active)
+	end = start + 1
+	for end < n && settingsTabStripWidth(start, end+1) <= avail {
+		end++
+	}
+	if active >= end {
+		// Moved past the right edge: the active tab becomes the last one.
+		start, end = active, active+1
+	}
+	for start > 0 && settingsTabStripWidth(start-1, end) <= avail {
+		start--
+	}
+	for end < n && settingsTabStripWidth(start, end+1) <= avail {
+		end++
+	}
+	return start, end
+}
+
+// settingsGenericHints are the hints every section shows; they go first when
+// the footer is too narrow, so the keys particular to the field or section
+// stay on screen.
+var settingsGenericHints = []string{
+	"Shift+\u2193: Buttons",
+	"Shift+\u2190/\u2192: Section",
+	"\u2191/\u2193: Navigate",
+	"\u2191/\u2193/Tab: Navigate",
+}
+
+// fitSettingsHint fits a footer hint ("key: action" entries two spaces
+// apart) into room cells. A hint too long used to wrap inside the box,
+// splitting an entry across two lines ("D:" / "Delete"). The generic
+// entries are dropped first, then whole entries from the end; an entry is
+// never cut.
+func fitSettingsHint(hint string, room int) string {
+	const sep = "  "
+	parts := strings.Split(hint, sep)
+	fits := func() bool { return ansi.StringWidth(strings.Join(parts, sep)) <= room }
+	for _, generic := range settingsGenericHints {
+		if fits() {
+			break
+		}
+		if i := slices.Index(parts, generic); i >= 0 && len(parts) > 1 {
+			parts = slices.Delete(parts, i, i+1)
+		}
+	}
+	for !fits() && len(parts) > 1 {
+		parts = parts[:len(parts)-1]
+	}
+	return strings.Join(parts, sep)
 }
 
 func (m *SettingsModel) renderHintText() string {
@@ -146,11 +252,16 @@ func (m *SettingsModel) renderHintText() string {
 			return "\u2190/\u2192: Switch button  \u2191: Back to fields  Enter: Activate"
 		}
 		field := sec.fields[m.fieldIndex]
-		hint := "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate"
+		// Shift+↓ is the only key that reaches [ Save & Return ] without
+		// leaving through Esc's prompt; unlisted, nobody found it.
+		hint := "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  Shift+\u2193: Buttons"
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			hint = "\u2190/\u2192: Toggle  " + hint
 		}
-		if sec.name == "Network" {
+		// ` and ~ reach a text or number field as typed characters (a
+		// cert path can hold a ~), so the password editor opens from the
+		// other rows only — and only those rows advertise it.
+		if sec.name == "Network" && field.ftype != fieldText && field.ftype != fieldNumber {
 			if m.hasPassword() {
 				hint += "  `: Change pw  ~: Remove pw"
 			} else {
@@ -158,9 +269,12 @@ func (m *SettingsModel) renderHintText() string {
 			}
 		}
 		if sec.name == "Paths" && field.key == "ffmpeg_path" {
-			hint += "  I: Install FFmpeg"
+			hint += "  Ctrl+O: Install FFmpeg"
 		}
 		return hint
+	}
+	if m.channelRemovalPromptUp() {
+		return m.channelRemovalHint()
 	}
 	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"
 }
@@ -264,7 +378,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		case fieldToggle:
 			value = renderToggle(m.values[fd.key])
 		case fieldCycle:
-			value = renderCycleOptions(fd.options, m.values[fd.key], selected)
+			value = renderCycleOptions(fd.options, m.values[fd.key], selected, max(w-len(prefix)-padWidth, 5))
 		default:
 			valueMaxW := max(w-len(prefix)-padWidth, 5)
 			if selected {
@@ -281,7 +395,9 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		if fd.previewFn != nil {
 			preview := fd.previewFn(m.values[fd.key])
 			if preview != "" {
-				lines = append(lines, "  "+DimStyle.Render(preview))
+				// One row, as settingsContentHeight budgets: the box would
+				// word-wrap a long preview into rows nothing reserved.
+				lines = append(lines, "  "+DimStyle.Render(truncateWidth(preview, max(w-2, 1), "…")))
 			}
 		}
 	}
@@ -293,7 +409,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		needsRestart := isChanged && restartRequiredKeys[fd.key]
 
 		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w-4)))
+		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w)))
 
 		var infoParts []string
 		if fd.help != "" {
@@ -306,34 +422,91 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		}
 
 		if len(infoParts) > 0 {
-			lines = append(lines, DimStyle.Render(strings.Join(infoParts, "  ")))
+			// Wrapped here rather than by the box, so the rows it takes are
+			// rows settingsContentHeight reserved (fieldInfoRows) and the
+			// button row's mouse offset counts them.
+			info := DimStyle.Render(strings.Join(infoParts, "  "))
+			lines = append(lines, strings.Split(ansi.Wrap(info, w, ""), "\n")...)
 		}
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-func renderToggle(value string) string {
-	if value == "Yes" {
-		return lipgloss.NewStyle().Foreground(ColorGreen).Render("Yes") + DimStyle.Render(" / No")
-	}
-	return DimStyle.Render("Yes / ") + lipgloss.NewStyle().Foreground(ColorRed).Render("No")
+// settingsInnerWidth is the content width View() lays the box out at.
+func (m *SettingsModel) settingsInnerWidth() int {
+	boxW := min(max(m.width-4, 40), m.width)
+	return boxW - 4
 }
 
-func renderCycleOptions(options []string, selected string, focused bool) string {
+// fieldInfoRows is how many rows the focused-field info line can take in this
+// section at width w: the longest help text in it, with the longer of its two
+// status tags, wrapped the way renderFields wraps it. The worst case over the
+// section rather than the focused field's own, so the field window does not
+// resize under the operator as the focus moves. At least one row — the one the
+// budget always held.
+func fieldInfoRows(sec settingsSection, w int) int {
+	rows := 1
+	for _, fd := range sec.fields {
+		tag := "[modified]"
+		if restartRequiredKeys[fd.key] {
+			tag = "[restart required]"
+		}
+		text := tag
+		if fd.help != "" {
+			text = fd.help + "  " + tag
+		}
+		rows = max(rows, strings.Count(ansi.Wrap(text, max(w, 1), ""), "\n")+1)
+	}
+	return rows
+}
+
+// renderToggle shows both choices with the selected one bracketed, as
+// renderCycleOptions does. Colour and the faint unselected half used to be the
+// whole signal, and neither survives a NO_COLOR terminal, a colour-blind
+// reader or a pasted screenshot: "Yes / No" read the same either way.
+// toggleYesWidth is the click geometry that follows from it.
+func renderToggle(value string) string {
+	if value == "Yes" {
+		return lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("[Yes]") + DimStyle.Render(" / No")
+	}
+	return DimStyle.Render("Yes / ") + lipgloss.NewStyle().Foreground(ColorRed).Bold(true).Render("[No]")
+}
+
+// toggleYesWidth is how many columns renderToggle(value) gives its "Yes" half.
+func toggleYesWidth(value string) int {
+	if value == "Yes" {
+		return len("[Yes]")
+	}
+	return len("Yes")
+}
+
+// renderCycleOptions shows every option, the selected one bracketed, when
+// that fits maxW columns; otherwise only the selected one, between dim ‹ › so
+// the row still reads as a choice. Every field is budgeted one row: the full
+// list wrapped — at the 60-column floor "[localhost] / lan / external" left
+// "external" alone on the next row, and a channel's fifteen-option quality
+// preference wrapped at any width.
+func renderCycleOptions(options []string, selected string, focused bool, maxW int) string {
+	selStyle := lipgloss.NewStyle().Foreground(ColorWhite).Bold(true)
+	if focused {
+		selStyle = selStyle.Foreground(ColorCyan)
+	}
 	var parts []string
+	sel := selected
 	for _, opt := range options {
 		if strings.EqualFold(opt, selected) {
-			color := ColorWhite
-			if focused {
-				color = ColorCyan
-			}
-			parts = append(parts, lipgloss.NewStyle().Foreground(color).Bold(true).Render("["+opt+"]"))
+			sel = opt
+			parts = append(parts, selStyle.Render("["+opt+"]"))
 		} else {
 			parts = append(parts, DimStyle.Render(opt))
 		}
 	}
-	return strings.Join(parts, DimStyle.Render(" / "))
+	full := strings.Join(parts, DimStyle.Render(" / "))
+	if ansi.StringWidth(full) <= maxW {
+		return full
+	}
+	return DimStyle.Render("‹ ") + selStyle.Render("["+truncateWidth(sel, max(maxW-6, 1), "…")+"]") + DimStyle.Render(" ›")
 }
 
 // listWindowStart returns the first rendered index for a list capped at
@@ -353,12 +526,16 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 
 	var lines []string
 
-	// Action bar
-	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
+	// Action bar. The removal prompt replaces the key list rather than
+	// trailing it — the two together are wider than a 60-column box — and
+	// takes its extra rows from the list's window.
 	if m.channelDeleteConf {
-		actionBar += YellowStyle.Render("Press D again to confirm delete")
+		prompt := m.channelRemovalPromptLines(w, maxH)
+		lines = append(lines, prompt...)
+		maxH = max(maxH-(len(prompt)-1), 1)
+	} else {
+		lines = append(lines, DimStyle.Render("A: Add  Enter: Edit  D: Delete"))
 	}
-	lines = append(lines, actionBar)
 
 	if len(m.channels) == 0 {
 		lines = append(lines, "")
@@ -403,22 +580,30 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 			nameStyle = nameStyle.Faint(true)
 		}
 
-		idStr := DimStyle.Render(truncateString(ch.ID, 24))
-
-		line := prefix + platStr + " " + nameStyle.Render(truncateString(name, 20)) + " " + idStr
+		// One row per channel, as listWindowStart and the mouse map assume:
+		// the ID gives way first so "(disabled)" stays readable, and the
+		// filter, last, is cut at the box edge.
+		nameStr := truncateString(name, 20)
+		disabledTag := ""
 		if !enabled {
-			line += YellowFaintStyle.Render(" (disabled)")
+			disabledTag = " (disabled)"
+		}
+		// The last -1 keeps the cell the cut's "…" takes when a filter follows.
+		idW := min(24, w-len(prefix)-len("[YT] ")-ansi.StringWidth(nameStr)-1-len(disabledTag)-1)
+
+		line := prefix + platStr + " " + nameStyle.Render(nameStr)
+		if idW >= 6 {
+			line += " " + DimStyle.Render(truncateString(ch.ID, idW))
+		}
+		if disabledTag != "" {
+			line += YellowFaintStyle.Render(disabledTag)
 		}
 		terms := ch.Terms.Simple
 		if terms != "" {
 			line += DimStyle.Render(" filter: " + truncateString(terms, 20))
 		}
 
-		if selected {
-			line = lipgloss.NewStyle().Render(line)
-		}
-
-		lines = append(lines, line)
+		lines = append(lines, truncateWidth(line, w, "…"))
 	}
 
 	return strings.Join(lines, "\n")
@@ -433,7 +618,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 	}
 	hint := " (Enter: save, Esc: cancel)"
 	if m.channelResolving {
-		hint = " (resolving URL...)"
+		hint = " (resolving channel...)"
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(title)+
 		DimStyle.Render(hint))
@@ -472,9 +657,9 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		case fieldToggle:
 			value = renderToggle(val)
 		case fieldCycle:
-			value = renderCycleOptions(field.options, val, isFocused)
+			value = renderCycleOptions(field.options, val, isFocused, max(w-ansi.StringWidth(prefix)-padW-2, 5))
 		default:
-			valueMaxW := max(w-runewidth.StringWidth(prefix)-padW-2, 5)
+			valueMaxW := max(w-ansi.StringWidth(prefix)-padW-2, 5)
 			if isFocused {
 				m.textInput.SetWidth(valueMaxW)
 				value = m.textInput.View()
@@ -500,9 +685,10 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 
 	var lines []string
 
-	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  T: Test  ")
+	// The delete prompt replaces the key list — see the Channels twin.
+	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  T: Test")
 	if m.notifDeleteConf {
-		actionBar += YellowStyle.Render("Press D again to confirm delete")
+		actionBar = YellowStyle.Render("Press D again to confirm delete")
 	}
 	lines = append(lines, actionBar)
 
@@ -524,8 +710,6 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			prefix = "> "
 		}
 
-		urlDisplay := truncateString(n.URL, 50)
-
 		nameStyle := lipgloss.NewStyle()
 		if selected {
 			nameStyle = lipgloss.NewStyle().Foreground(ColorCyan)
@@ -539,12 +723,20 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			filter = fmt.Sprintf(" (%d/%d events)", len(n.Events), len(allNotifEvents))
 		}
 
-		line := prefix + nameStyle.Render(urlDisplay) + DimStyle.Render(filter)
 		// The mute is invisible in a URL list otherwise, and a muted target
-		// looks identical to a broken one.
+		// looks identical to a broken one — so it goes straight after the
+		// URL, where the row's cut at the box edge never reaches it.
+		muted := ""
 		if !n.IsEnabled() {
-			line += YellowStyle.Render(" Muted")
+			muted = " Muted"
 		}
+		urlDisplay := truncateString(n.URL, min(50, max(w-len(prefix)-len(muted)-len(filter)-1, 12)))
+
+		line := prefix + nameStyle.Render(urlDisplay)
+		if muted != "" {
+			line += YellowStyle.Render(muted)
+		}
+		line += DimStyle.Render(filter)
 		if n.Mention != "" {
 			line += DimStyle.Render(" " + n.Mention)
 		}
@@ -554,7 +746,8 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			line += DimStyle.Render(" · one message per job")
 		}
 
-		lines = append(lines, line)
+		// One row per webhook, as listWindowStart and the mouse map assume.
+		lines = append(lines, truncateWidth(line, w, "…"))
 	}
 
 	return strings.Join(lines, "\n")
@@ -586,7 +779,7 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 			prefixColor = ColorCyan
 			labelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 		}
-		maxW := max(w-runewidth.StringWidth(prefix)-labelW-2, 10)
+		maxW := max(w-ansi.StringWidth(prefix)-labelW-2, 10)
 		var rendered string
 		if focused {
 			m.textInput.SetWidth(maxW)
@@ -735,49 +928,19 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderSecurity draws the open password sub-editor. View calls it only while
+// one is open; the status is renderSecurityCompact, under the Network fields.
 func (m *SettingsModel) renderSecurity(w int) string {
-	switch m.secMode {
-	case securitySet:
-		return m.renderSecuritySet(w)
-	case securityRemove:
+	if m.secMode == securityRemove {
 		return m.renderSecurityRemove(w)
-	default:
-		return m.renderSecurityStatus(w)
 	}
-}
-
-func (m *SettingsModel) renderSecurityStatus(_ int) string {
-	var lines []string
-
-	// Password status
-	lines = append(lines, "")
-	if m.hasPassword() {
-		lines = append(lines, "  Password: "+lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("Set"))
-	} else {
-		lines = append(lines, "  Password: "+DimStyle.Render("Not set"))
-	}
-
-	lines = append(lines, "")
-
-	// Actions
-	actionLine := DimStyle.Render("  `: Set password")
-	if m.hasPassword() {
-		actionLine = DimStyle.Render("  `: Change password  ~: Remove password")
-	}
-	lines = append(lines, actionLine)
-
-	if m.secMessage != "" {
-		lines = append(lines, "")
-		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.secMessageColor).Render(m.secMessage))
-	}
-
-	return strings.Join(lines, "\n")
+	return m.renderSecuritySet(w)
 }
 
 // renderSecurityCompact renders a compact password status below Network fields.
 func (m *SettingsModel) renderSecurityCompact(w int) string {
 	var lines []string
-	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w-4)))
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w)))
 
 	status := DimStyle.Render("Not set")
 	if m.hasPassword() {
@@ -785,9 +948,10 @@ func (m *SettingsModel) renderSecurityCompact(w int) string {
 	}
 	lines = append(lines, "  Password: "+status)
 
-	actionLine := DimStyle.Render("  `: Set password")
+	// From a toggle row: on a text or number row the keys type themselves.
+	actionLine := DimStyle.Render("  `: Set password (from a toggle row)")
 	if m.hasPassword() {
-		actionLine = DimStyle.Render("  `: Change  ~: Remove")
+		actionLine = DimStyle.Render("  `: Change  ~: Remove (from a toggle row)")
 	}
 	lines = append(lines, actionLine)
 

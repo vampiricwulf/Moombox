@@ -24,7 +24,8 @@ import (
 // non-negative number of days returns the ZERO time, which IsArchived reads
 // as "nothing is archived".
 //
-//   - A NEGATIVE threshold is the documented "never archive" knob. Scaling it
+//   - A NEGATIVE threshold means "never archive". No config produces one
+//     today (Normalize and both settings UIs reject it), but scaling it
 //     would put the cutoff in the FUTURE and archive every Finished job, so
 //     it returns the zero time here rather than relying on each caller to
 //     check first (every one of them does today; a fourth that forgot would
@@ -41,7 +42,9 @@ func ArchiveCutoff(now time.Time, hideAgeDays float64) time.Time {
 		return time.Time{}
 	}
 	ns := hideAgeDays * float64(24*time.Hour)
-	if math.IsNaN(ns) || ns > float64(math.MaxInt64) || ns < float64(math.MinInt64) {
+	// >=, not >: float64(math.MaxInt64) rounds UP to 2^63, which is itself
+	// out of int64 range, so a value exactly there must be refused too.
+	if math.IsNaN(ns) || ns >= float64(math.MaxInt64) || ns < float64(math.MinInt64) {
 		return time.Time{}
 	}
 	return now.Add(-time.Duration(ns))

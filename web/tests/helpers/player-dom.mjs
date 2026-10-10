@@ -503,14 +503,17 @@ export function makePlayer(opts = {}) {
       video.dispatchEvent(new window.Event("timeupdate"));
     },
     /**
-     * A seek: set currentTime (ms) and fire `seeked` then `timeupdate`. Moving
+     * A seek: set currentTime (ms) and fire `seeking`, `timeupdate`, then
+     * `seeked` — the HTML seek algorithm's order, which player.js relies on
+     * (its "seeking" listener documents the tick in between). Moving
      * BACKWARDS is only ever a seek in a real player — a bare timeupdate never
      * rewinds — so tests that go back in time must use this.
      */
     seek(ms) {
       video.currentTime = ms / 1000;
-      video.dispatchEvent(new window.Event("seeked"));
+      video.dispatchEvent(new window.Event("seeking"));
       video.dispatchEvent(new window.Event("timeupdate"));
+      video.dispatchEvent(new window.Event("seeked"));
     },
     /** Dispatch a keydown, on `target` (default: document) with a composed path. */
     key(k, { target = document, ...init } = {}) {

@@ -39,6 +39,16 @@ var (
 )
 
 func main() {
+	// run's return goes through os.Exit HERE, after its defers: once the
+	// sidecar is extracted, an os.Exit inside run skipped the RemoveAll and
+	// Stop and left ~100 MB of Node binary and payload in the temp dir per
+	// failing run.
+	os.Exit(run())
+}
+
+// run is the probe. Before the sidecar's cache dir exists a failure may exit
+// on the spot (fail); after it, failures return 1 so the defers run.
+func run() int {
 	wpPath := flag.String("wp", "", "watch-page HTML path")
 	playerJSOverride := flag.String("player-js", "", "use this local file as the player JS instead of fetching")
 	flag.Parse()
@@ -115,7 +125,10 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	cacheDir, _ := os.MkdirTemp("", "moombox-sig-probe-*")
+	cacheDir, err := os.MkdirTemp("", "moombox-sig-probe-*")
+	if err != nil {
+		fail("create sidecar cache dir: %v", err)
+	}
 	defer os.RemoveAll(cacheDir)
 	sc := sidecar.New(sidecar.Config{
 		CacheDir:       cacheDir,
@@ -125,12 +138,14 @@ func main() {
 		StartupTimeout: 60 * time.Second,
 	})
 	if err := sc.Start(ctx); err != nil {
-		fail("sidecar Start: %v", err)
+		fmt.Fprintf(os.Stderr, "FATAL: sidecar Start: %v\n", err)
+		return 1
 	}
 	defer sc.Stop()
 
 	if !sc.IsHealthy() {
-		fail("sidecar not healthy after Start")
+		fmt.Fprintln(os.Stderr, "FATAL: sidecar not healthy after Start")
+		return 1
 	}
 	fmt.Println("sidecar ready")
 
@@ -142,13 +157,13 @@ func main() {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n*** sidecar SolveCipher returned ERROR: %v ***\n", err)
-		os.Exit(1)
+		return 1
 	}
 	out, ok := res.SigResults[encS]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "\n*** sidecar returned no result for the input encrypted sig ***\n")
 		fmt.Fprintf(os.Stderr, "    SigResults keys: %v\n", mapKeys(res.SigResults))
-		os.Exit(1)
+		return 1
 	}
 	fmt.Printf("\n*** SUCCESS ***\n")
 	fmt.Printf("decrypted sig: %s\n", out)
@@ -156,17 +171,29 @@ func main() {
 	fmt.Printf("output length: %d\n", len(out))
 	fmt.Printf("input  prefix: %s\n", encS[:min(40, len(encS))])
 	fmt.Printf("output prefix: %s\n", out[:min(40, len(out))])
+	return 0
 }
 
 func fetchPlayerJS(playerURL string) string {
 	req, _ := http.NewRequest("GET", playerURL, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
-	resp, err := http.DefaultClient.Do(req)
+	// A timeout, unlike http.DefaultClient: a stalled CDN otherwise hangs
+	// the probe indefinitely.
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		fail("fetch player JS: %v", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	// A 404 or a consent/throttle page handed to the sidecar as "player JS"
+	// would read as the ejs/player-shape mismatch this probe exists to tell
+	// apart from sidecar trouble.
+	if resp.StatusCode != http.StatusOK {
+		fail("fetch player JS: HTTP %d from %s", resp.StatusCode, playerURL)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fail("read player JS: %v", err)
+	}
 	return string(body)
 }
 

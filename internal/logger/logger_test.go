@@ -887,3 +887,345 @@ func TestRotationFailureRemindsHourly(t *testing.T) {
 		t.Errorf("%d reminders after the rotation started succeeding, want the same %d", after, reminders)
 	}
 }
+
+// TestFailingStdoutNeverCostsTheFileALine is W24-10: once stdout stops taking
+// writes — a hung-up SSH tty after `moombox --headless & disown` (EIO), a
+// process started with fd 1 closed (EBADF), a console-less Windows child —
+// moombox.log must keep receiving every line. The stdout sink sat FIRST in an
+// io.MultiWriter, which returns at the first writer's error, and the
+// switchable writer passed os.Stdout's error on unchanged: the file stopped
+// getting lines for the rest of the run while the ring buffer looked normal.
+// A pipe whose reader went away is the Unix shape that kills the process
+// instead (brokenpipe_unix_test.go).
+//
+// New captures os.Stdout at construction, as production does, so the test
+// swaps it first. A closed *os.File fails every write with os.ErrClosed on
+// every platform. The first phase is the mid-run shape (stdout works, then
+// dies); the second a stdout that was dead from the start.
+//
+// Mutant: io.MultiWriter(l.stdout, l) in place of lineSinks again — both
+// phases lose their lines from the file. lineSinks guards it twice over (file
+// first, no early return), so each half has its own test below.
+func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
+	swapStdout := func(f *os.File) {
+		t.Helper()
+		orig := os.Stdout
+		os.Stdout = f
+		t.Cleanup(func() { os.Stdout = orig })
+	}
+	dir := t.TempDir()
+
+	t.Run("stdout dies mid-run", func(t *testing.T) {
+		stdout, err := os.Create(filepath.Join(dir, "stdout-mid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		swapStdout(stdout)
+		logPath := filepath.Join(dir, "mid.log")
+		l, err := New(logPath, "INFO", 1<<20, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Info("while stdout works")
+		stdout.Close() // the hang-up
+		l.Info("after stdout died", "n", 1)
+		l.Warn("after stdout died", "n", 2)
+		l.Close()
+
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"while stdout works", "n=1", "n=2"} {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("moombox.log is missing %q after stdout failed:\n%s", want, data)
+			}
+		}
+		// Control: stdout itself did take the line written while it worked.
+		echoed, err := os.ReadFile(stdout.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(echoed), "while stdout works") {
+			t.Errorf("stdout never took the line written while it worked: %q", echoed)
+		}
+	})
+
+	t.Run("stdout dead from the start", func(t *testing.T) {
+		stdout, err := os.Create(filepath.Join(dir, "stdout-dead"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout.Close()
+		swapStdout(stdout)
+		logPath := filepath.Join(dir, "dead.log")
+		l, err := New(logPath, "INFO", 1<<20, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Info("first line")
+		l.Error("last line")
+		l.Close()
+
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"first line", "last line"} {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("moombox.log is missing %q with stdout closed:\n%s", want, data)
+			}
+		}
+	})
+}
+
+// sinkProbe is an io.Writer standing in for a sink, for the lineSinks tests.
+type sinkProbe func(p []byte) (int, error)
+
+func (f sinkProbe) Write(p []byte) (int, error) { return f(p) }
+
+// TestTheFileHasTheLineBeforeStdoutIsTouched: lineSinks writes moombox.log
+// first, so a stdout write that never returns — a pipe whose reader stopped
+// reading, a console paused with Ctrl+S — or that takes the process down with
+// it cannot take the line it was handed along.
+//
+// Mutant: lineSinks.Write writing stdout ahead of the file — the probe finds
+// the line not yet on disk.
+func TestTheFileHasTheLineBeforeStdoutIsTouched(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "moombox.log")
+	l, err := New(logPath, "INFO", 1<<20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk []bool
+	l.stdout.w = sinkProbe(func(p []byte) (int, error) {
+		data, err := os.ReadFile(logPath)
+		onDisk = append(onDisk, err == nil && strings.Contains(string(data), string(p)))
+		return len(p), nil
+	})
+	l.Info("first line")
+	l.Warn("second line", "n", 2)
+	l.Close()
+
+	if len(onDisk) != 2 {
+		t.Fatalf("stdout was written %d times, want once per line (2)", len(onDisk))
+	}
+	for i, ok := range onDisk {
+		if !ok {
+			t.Errorf("line %d reached stdout before it was in moombox.log", i+1)
+		}
+	}
+}
+
+// TestAFailingFileWriteNeverCostsStdoutALine is the other half of lineSinks:
+// with the file written first, a failed write to it — a full disk, a handle
+// the OS took away — must not keep the line off the console, where it is the
+// one place the operator still sees it.
+//
+// Mutant: lineSinks.Write returning at the file's error — stdout gets nothing.
+func TestAFailingFileWriteNeverCostsStdoutALine(t *testing.T) {
+	l, err := New(filepath.Join(t.TempDir(), "moombox.log"), "INFO", 1<<20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var echoed strings.Builder
+	l.stdout.w = &echoed
+	l.fileMu.Lock()
+	l.file.Close() // every write to it now fails with os.ErrClosed
+	l.fileMu.Unlock()
+
+	l.Info("while the file fails", "n", 1)
+	l.Error("while the file fails", "n", 2)
+	l.Close()
+
+	for _, want := range []string{"n=1", "n=2"} {
+		if !strings.Contains(echoed.String(), want) {
+			t.Errorf("stdout is missing the line %q logged while moombox.log failed:\n%s", want, echoed.String())
+		}
+	}
+}
+
+// TestLineRouterRunsInsideTheLogCall pins SetLineRouter's contract, which
+// per-job log routing depends on (W24-11): the router has seen the line by the
+// time Info returns — no channel, no goroutine — so a status write the caller
+// makes next can never untrack the job ahead of its own line. It sees the
+// ring-buffer shape, the one db.RouteLogToJobs matches job IDs in.
+//
+// Mutants this kills:
+//   - the route call dropped from log(): the router never sees the line.
+//   - SetLineRouter(nil) storing a pointer to the nil func: every later line
+//     panics inside route and leaves a diagnostic.
+//   - the recover dropped from route: the panicking router crashes the test.
+func TestLineRouterRunsInsideTheLogCall(t *testing.T) {
+	l, err := New("", "INFO", 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	l.SuppressStdout() // what the TUI does — diagf then lands in the ring
+
+	var routed []string // appended on this goroutine only: that is the contract
+	l.SetLineRouter(func(line string) { routed = append(routed, line) })
+
+	l.Info("job error", "jobID", "vid0000001")
+	if len(routed) != 1 {
+		t.Fatalf("the router saw %d lines by the time Info returned, want 1", len(routed))
+	}
+	if ring := l.GetRecentLines(); routed[0] != ring[len(ring)-1] {
+		t.Errorf("the router saw %q, the ring holds %q — it must see the ring-buffer shape", routed[0], ring[len(ring)-1])
+	}
+	l.Debug("below the level")
+	if len(routed) != 1 {
+		t.Errorf("a line below the level reached the router: %q", routed[len(routed)-1])
+	}
+
+	l.SetLineRouter(nil)
+	l.Info("after the router was removed")
+	if len(routed) != 1 {
+		t.Errorf("a removed router still saw %q", routed[len(routed)-1])
+	}
+	for _, line := range l.GetRecentLines() {
+		if strings.Contains(line, "line router panicked") {
+			t.Fatalf("removing the router left one that panics: %q", line)
+		}
+	}
+
+	l.SetLineRouter(func(string) { panic("router exploded") })
+	l.Info("logged through a broken router")
+	ring := strings.Join(l.GetRecentLines(), "\n")
+	if !strings.Contains(ring, "logged through a broken router") {
+		t.Errorf("a panicking router cost the ring its line:\n%s", ring)
+	}
+	if !strings.Contains(ring, "line router panicked: router exploded") {
+		t.Errorf("a panicking router left no diagnostic:\n%s", ring)
+	}
+}
+
+// TestRingSequenceNumbersPairASnapshotWithItsFeed pins what lets a reader
+// that seeds from RecentLines and then follows SubscribeLines show each line
+// once (W24-14): the snapshot names the number of its newest line, every line
+// fed is numbered the way the ring numbered it, and a line emitted after the
+// snapshot always numbers above it. A reader subscribes FIRST, so a line
+// logged between the two reads is in both — and is the one the number lets
+// it skip.
+//
+// Mutants this kills:
+//   - addToRingBuffer not advancing ringSeq: the snapshot says 0 and every
+//     line is numbered 0, so nothing tells the replayed line from a new one.
+//   - broadcast handing SubscribeLines 0 instead of the ring's number: the fed
+//     numbers stop matching. (A number read again after the fact matches it
+//     whenever one goroutine logs; TestAFedLineKeepsTheNumberTheRingGaveIt
+//     interleaves two.)
+//   - RecentLines returning the line count instead of the newest number once
+//     the ring wraps: the snapshot claims fewer lines than it has seen.
+//   - Close leaving SubscribeLines channels open: the range below never ends.
+func TestRingSequenceNumbersPairASnapshotWithItsFeed(t *testing.T) {
+	l, err := New("", "INFO", 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SuppressStdout()
+
+	if lines, seq := l.RecentLines(); len(lines) != 0 || seq != 0 {
+		t.Fatalf("an empty ring reported %d lines up to %d, want none up to 0", len(lines), seq)
+	}
+
+	// Past the ring's size, so the numbers have to keep counting after the
+	// ring starts overwriting.
+	const before = defaultRingSize + 50
+	for i := range before {
+		l.Info("before the reader", "i", i)
+	}
+
+	// The reader's order: the feed first, then the snapshot.
+	sub := l.SubscribeLines()
+	l.Info("between the subscription and the snapshot")
+	lines, snapSeq := l.RecentLines()
+	l.Info("after the snapshot")
+	l.Close()
+
+	if snapSeq != before+1 {
+		t.Errorf("the snapshot's newest line is numbered %d, want %d — one per line the ring took", snapSeq, before+1)
+	}
+	if len(lines) != defaultRingSize || !strings.HasSuffix(lines[len(lines)-1], "between the subscription and the snapshot") {
+		t.Fatalf("the snapshot holds %d lines ending %q", len(lines), lines[len(lines)-1])
+	}
+
+	var fed []Line
+	for line := range sub {
+		fed = append(fed, line)
+	}
+	if len(fed) != 2 {
+		t.Fatalf("SubscribeLines delivered %d lines, want the 2 logged after it: %v", len(fed), fed)
+	}
+	if between := fed[0]; !strings.HasSuffix(between.Text, "between the subscription and the snapshot") || between.Seq != snapSeq {
+		t.Errorf("the line both reads carry was fed as %q #%d; it is the snapshot's newest, #%d, and a reader must be able to tell",
+			between.Text, between.Seq, snapSeq)
+	}
+	if after := fed[1]; !strings.HasSuffix(after.Text, "after the snapshot") || after.Seq != snapSeq+1 {
+		t.Errorf("the line logged after the snapshot was fed as %q #%d, want #%d — above the snapshot's", after.Text, after.Seq, snapSeq+1)
+	}
+}
+
+// TestAFedLineKeepsTheNumberTheRingGaveIt: SubscribeLines feeds each line
+// with the number addToRingBuffer handed back for THAT line, even when another
+// goroutine's line takes the next number before the first is fed. A reader
+// skips what its snapshot already holds by that number (W24-14), so a line
+// fed under a later line's number sits above the snapshot's newest and shows
+// twice, while the later line's own number no longer says where it is.
+//
+// Deterministic, not a race to win: log() hands the line to the router
+// between the ring append and the feed, holding no lock, so the router parks
+// the first goroutine there while this one logs a second line end to end.
+//
+// Mutant: broadcast ignoring its seq and reading l.ringSeq again under ringMu
+// — the parked line is fed under the second line's number.
+func TestAFedLineKeepsTheNumberTheRingGaveIt(t *testing.T) {
+	l, err := New("", "INFO", 1<<20, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SuppressStdout()
+	sub := l.SubscribeLines()
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	l.SetLineRouter(func(line string) {
+		if strings.HasSuffix(line, "parked between the ring and the feed") {
+			close(parked)
+			<-release
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("panic logging the parked line: %v", r)
+			}
+		}()
+		l.Info("parked between the ring and the feed")
+	}()
+	<-parked
+	l.Info("logged while the first waits")
+	close(release)
+	<-done
+
+	lines, newest := l.RecentLines()
+	l.Close()
+	ringNumber := map[string]uint64{}
+	for i, text := range lines {
+		ringNumber[text] = newest - uint64(len(lines)-1-i)
+	}
+	var fed []Line
+	for line := range sub {
+		fed = append(fed, line)
+	}
+	if len(fed) != 2 {
+		t.Fatalf("SubscribeLines delivered %d lines, want 2: %v", len(fed), fed)
+	}
+	for _, line := range fed {
+		if want, ok := ringNumber[line.Text]; !ok || line.Seq != want {
+			t.Errorf("%q was fed as #%d; the ring numbered it #%d", line.Text, line.Seq, want)
+		}
+	}
+}

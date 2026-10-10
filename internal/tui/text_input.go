@@ -11,7 +11,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // newSpinner creates a spinner with Moombox styling.
@@ -42,9 +42,23 @@ func newTextInput() textinput.Model {
 	return ti
 }
 
+// loadTextInput seats a text input on a field the operator is about to edit:
+// the value replaced and the cursor parked at its end.
+//
+// SetValue alone is not enough, because bubbles only moves the cursor when the
+// old offset no longer fits inside the new value. A port edited to "774" leaves
+// the cursor at offset 3; a move down to output_directory loads "./output",
+// offset 3 still fits, and the first keystroke lands mid-value ("./oxutput").
+// Every site that (re)loads a field for editing goes through here. Mid-edit
+// syncs do not, so a cursor the operator moved on purpose stays where it is.
+func loadTextInput(ti *textinput.Model, value string) {
+	ti.SetValue(value)
+	ti.CursorEnd()
+}
+
 // configureTextInput resets a text input for a new field context.
 func configureTextInput(ti *textinput.Model, value string, validate textinput.ValidateFunc, echoMode textinput.EchoMode) {
-	ti.SetValue(value)
+	loadTextInput(ti, value)
 	ti.Validate = validate
 	ti.EchoMode = echoMode
 	ti.Focus()
@@ -93,7 +107,7 @@ func validateDecimal(s string) error {
 // renderInactiveInput renders a text value styled but without a cursor.
 func renderInactiveInput(value string, w int, c color.Color) string {
 	display := value
-	if runewidth.StringWidth(display) > w {
+	if ansi.StringWidth(display) > w {
 		display = truncateString(display, w)
 	}
 	return lipgloss.NewStyle().Foreground(c).Render(display)

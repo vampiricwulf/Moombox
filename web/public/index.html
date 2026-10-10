@@ -45,16 +45,16 @@
         <link rel="stylesheet" href="/moombox.css" />
     </head>
     <body>
-        <div id="connectivity-banner" class="connectivity-banner">
+        <div id="connectivity-banner" class="connectivity-banner" role="status">
             <sl-icon name="wifi-off"></sl-icon>
             Internet connection lost
         </div>
-        <div id="security-banner" class="security-banner">
+        <div id="security-banner" class="security-banner" role="status">
             <sl-icon name="shield-exclamation"></sl-icon>
-            External access is enabled without a dashboard password — anyone who can reach this port has full control. Set a password in Settings &rarr; Security, or lower Network Access.
+            External access is enabled without a dashboard password — anyone who can reach this port has full control. Set a password in Settings &rarr; Network &rarr; Password, or lower Network Access.
         </div>
-        <h1 class="visually-hidden">Moombox Dashboard</h1>
         <main class="app-main">
+        <h1 class="visually-hidden">Moombox Dashboard</h1>
         <sl-tab-group>
             <sl-tab slot="nav" panel="tasks">Tasks</sl-tab>
             <sl-tab slot="nav" panel="archived">Archived</sl-tab>
@@ -71,7 +71,11 @@
                     <div id="tasks-filter" class="unified-filter">
                         <div class="unified-filter-chips"></div>
                         <input class="unified-filter-input" placeholder="Filter..." autocomplete="off" aria-label="Filter jobs">
-                        <sl-icon class="unified-filter-clear" name="x-circle-fill" style="display:none" title="Clear all filters"></sl-icon>
+                        <!-- A span around the icon, not role/tabindex on the sl-icon itself: sl-icon
+                             re-asserts aria-hidden="true" and strips any role on its own host at first
+                             render (it has no label), which would leave a Tab stop screen readers cannot
+                             see. Same shape as #status-warnings-icon. -->
+                        <span class="unified-filter-clear" role="button" tabindex="0" title="Clear all filters" aria-label="Clear all filters" style="display:none"><sl-icon name="x-circle-fill"></sl-icon></span>
                         <sl-dropdown class="unified-filter-dropdown" hoist>
                             <button slot="trigger" class="unified-filter-dropdown-trigger" aria-hidden="true" tabindex="-1"></button>
                             <div class="unified-filter-panel">
@@ -139,7 +143,7 @@
                                     autocomplete="off"
                                 ></sl-input>
                             </div>
-                            <small style="color: var(--sl-color-neutral-500); display: block; margin-top: 4px;">
+                            <small style="color: var(--sl-color-neutral-600); display: block; margin-top: 4px;">
                                 Time format: HH:MM:SS, MM:SS, or seconds. Invalid input downloads full video.
                             </small>
                             <div id="video-duration-display" style="display: none;"></div>
@@ -182,8 +186,8 @@
                         <div id="trim-existing-marks"></div>
                         <div id="trim-timeline-range"></div>
                         <div id="trim-playhead"></div>
-                        <div class="trim-handle" id="trim-handle-start"></div>
-                        <div class="trim-handle" id="trim-handle-end"></div>
+                        <div class="trim-handle" id="trim-handle-start" role="slider" tabindex="0" aria-label="Trim start" aria-valuemin="0"></div>
+                        <div class="trim-handle" id="trim-handle-end" role="slider" tabindex="0" aria-label="Trim end" aria-valuemin="0"></div>
                     </div>
 
                     <!-- Range label -->
@@ -258,7 +262,7 @@
                     <div id="archived-filter" class="unified-filter">
                         <div class="unified-filter-chips"></div>
                         <input class="unified-filter-input" placeholder="Filter..." autocomplete="off" aria-label="Filter archived jobs">
-                        <sl-icon class="unified-filter-clear" name="x-circle-fill" style="display:none" title="Clear all filters"></sl-icon>
+                        <span class="unified-filter-clear" role="button" tabindex="0" title="Clear all filters" aria-label="Clear all filters" style="display:none"><sl-icon name="x-circle-fill"></sl-icon></span>
                         <sl-dropdown class="unified-filter-dropdown" hoist>
                             <button slot="trigger" class="unified-filter-dropdown-trigger" aria-hidden="true" tabindex="-1"></button>
                             <div class="unified-filter-panel">
@@ -336,10 +340,10 @@
             <!-- Imports Panel -->
             <sl-tab-panel name="imports">
                 <div id="imports-container">
-                    <h3>Import Archive</h3>
-                    <p class="settings-help">Upload a .zip file containing a video (.mp4, .mkv, .webm, .ts) and optionally a chat JSON file.</p>
+                    <h2>Import Archive</h2>
+                    <p class="settings-help">Upload a .zip holding one recording: a video (.mp4, .mkv, .webm, .ts), or a split recording's &ldquo;&lt;name&gt; - part1&rdquo;, &ldquo;&lt;name&gt; - part2&rdquo;&hellip; parts &mdash; and optionally its chat, named after it (&ldquo;&lt;name&gt;.chat.json&rdquo;).</p>
 
-                    <div id="import-dropzone">
+                    <div id="import-dropzone" role="button" tabindex="0" aria-label="Choose a .zip archive to import">
                         <sl-icon name="cloud-arrow-up" style="font-size: 3rem; color: var(--sl-color-neutral-400)"></sl-icon>
                         <p>Drag & drop a .zip file here, or click to browse</p>
                         <input type="file" id="import-file-input" accept=".zip" hidden>
@@ -357,7 +361,7 @@
                     </div>
 
                     <div id="import-progress" style="display: none">
-                        <sl-progress-bar id="import-progress-bar" value="0"></sl-progress-bar>
+                        <sl-progress-bar id="import-progress-bar" value="0" label="Upload progress"></sl-progress-bar>
                         <p id="import-status-text">Uploading...</p>
                     </div>
 
@@ -372,7 +376,7 @@
             <sl-tab-panel name="files">
                 <div id="files-container">
                     <div class="files-header">
-                        <h3>Orphaned Files</h3>
+                        <h2>Orphaned Files</h2>
                         <div class="files-actions">
                             <sl-button size="small" id="files-refresh-btn">
                                 <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -386,7 +390,7 @@
                     </div>
                     <p class="settings-help">Staging directories and output files no longer associated with active jobs. These can be safely deleted to free disk space.</p>
                     <div id="files-empty" style="display: none">
-                        <p style="text-align: center; color: var(--sl-color-neutral-500); padding: 2rem 0;">No orphaned files found.</p>
+                        <p style="text-align: center; color: var(--sl-color-neutral-600); padding: 2rem 0;">No orphaned files found.</p>
                     </div>
                     <div id="files-table-wrapper" style="display: none">
                         <div class="files-table" id="files-table">
@@ -402,7 +406,7 @@
                     </div>
 
                     <div class="files-header history-section-header">
-                        <h3>Orphaned History Entries</h3>
+                        <h2>Orphaned History Entries</h2>
                         <div class="files-actions">
                             <sl-button size="small" id="history-refresh-btn">
                                 <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -416,7 +420,7 @@
                     </div>
                     <p class="settings-help">Videos the monitor recorded as already-processed but which no longer have a job — most often a job you deleted. While an entry remains the monitor won't re-discover that video; removing it lets the monitor pick it up again.</p>
                     <div id="history-empty" style="display: none">
-                        <p style="text-align: center; color: var(--sl-color-neutral-500); padding: 2rem 0;">No orphaned history entries found.</p>
+                        <p style="text-align: center; color: var(--sl-color-neutral-600); padding: 2rem 0;">No orphaned history entries found.</p>
                     </div>
                     <div id="history-table-wrapper" style="display: none">
                         <div class="history-table" id="history-table">
@@ -434,12 +438,12 @@
             <sl-tab-panel name="stats">
                 <div id="stats-content">
                     <div class="stats-section">
-                        <h3>Storage</h3>
+                        <h2>Storage</h2>
                         <div id="stats-disk"></div>
                         <div class="stats-grid" id="stats-storage"></div>
                     </div>
                     <div class="stats-section">
-                        <h3>Activity</h3>
+                        <h2>Activity</h2>
                         <div class="stats-grid" id="stats-activity"></div>
                     </div>
                 </div>
@@ -455,7 +459,7 @@
                         <sl-button size="small" class="log-filter" data-level="WARN">Warn</sl-button>
                         <sl-button size="small" class="log-filter" data-level="ERROR">Error</sl-button>
                     </div>
-                    <sl-input id="log-search" placeholder="Search logs..." clearable size="small" style="max-width:200px">
+                    <sl-input id="log-search" label="Search logs" placeholder="Search logs..." clearable size="small" style="max-width:200px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
                     <sl-button size="small" id="clear-logs-btn"
@@ -563,7 +567,7 @@
                         <!-- General Settings -->
                         <!-- Network Settings -->
                         <div id="settings-network" class="settings-section">
-                            <h3>Network</h3>
+                            <h2>Network</h2>
                             <sl-input
                                 id="cfg-port"
                                 type="number"
@@ -576,7 +580,7 @@
                             <sl-select
                                 id="cfg-network-access"
                                 label="Network Access"
-                                help-text="Controls who can access the dashboard. Requires restart."
+                                help-text="Controls who can access the dashboard. Applies when saved; moving off Localhost Only also needs a restart, since the server starts listening on the network only at boot."
                             >
                                 <sl-option value="localhost">Localhost Only — This machine only</sl-option>
                                 <sl-option value="lan">LAN — Local network devices</sl-option>
@@ -631,11 +635,11 @@
                                 id="cfg-public-url"
                                 label="Public Dashboard URL"
                                 placeholder="https://moombox.example.com"
-                                help-text="The address you reach this dashboard on from outside. Used only in webhook notifications: a job embed's title links here and opens that job. Leave empty to keep linking to YouTube/Twitch. Applies immediately."
+                                help-text="The address you type into the browser to reach this dashboard. Webhook notifications link a job embed's title here, opening that job; leave empty to keep linking to YouTube/Twitch. The dashboard also trusts it as its own address: on Localhost Only and LAN, a page on its port may drive the dashboard from any local or private address (set it for a reverse proxy or port forward on another port); on External, browsers on this machine or the LAN may open the dashboard by its host name. Applies immediately."
                             ></sl-input>
 
                             <sl-divider></sl-divider>
-                            <h4>Password</h4>
+                            <h3>Password</h3>
                             <p class="settings-help">
                                 A password is required to enable external network access. Loopback and LAN connections are never challenged.
                             </p>
@@ -684,7 +688,7 @@
                             </div>
 
                             <sl-divider></sl-divider>
-                            <h4>Connected Clients</h4>
+                            <h3>Connected Clients</h3>
                             <p class="settings-help">
                                 Persistent tokens that allow remote clients to stay logged in across restarts. Revoking a token forces that client to re-enter the password.
                             </p>
@@ -699,7 +703,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Paths</h3>
+                            <h2>Paths</h2>
                             <sl-input
                                 id="cfg-database"
                                 label="Database Path"
@@ -722,7 +726,7 @@
                                 id="cfg-staging-dir"
                                 label="Staging Directory"
                                 placeholder="./staging"
-                                help-text="Temporary directory for downloads in progress"
+                                help-text="Temporary directory for downloads in progress. Applies to jobs that start after the save; anything already staged under the old directory is no longer found by Mux, Resume or the cleanup scan — move those folders across, or change this when nothing is staged."
                             ></sl-input>
                             <div style="display: flex; gap: 0.5em; align-items: flex-start;">
                                 <sl-input
@@ -744,7 +748,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Logs</h3>
+                            <h2>Logs</h2>
                             <sl-select
                                 id="cfg-log-level"
                                 label="Log Level"
@@ -789,7 +793,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Monitors</h3>
+                            <h2>Monitors</h2>
                             <sl-input
                                 id="cfg-archive-window-days"
                                 type="number"
@@ -839,9 +843,10 @@
                                 id="cfg-hide-finished-days"
                                 type="number"
                                 min="0"
+                                max="365"
                                 label="Hide Finished Jobs After (days)"
                                 placeholder="30"
-                                help-text="Hide completed jobs older than this many days (default: 30, 0 = archive immediately)"
+                                help-text="Hide completed jobs older than this many days, 0-365 (default: 30, 0 = archive immediately)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-probe-cooldown"
@@ -872,7 +877,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Downloader</h3>
+                            <h2>Downloader</h2>
                             <sl-input
                                 id="cfg-output-template"
                                 label="Output Template"
@@ -909,8 +914,8 @@
                                 type="number"
                                 min="1"
                                 label="Parallel Downloads"
-                                placeholder="2"
-                                help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."
+                                placeholder="10"
+                                help-text="Peak concurrent VOD downloads across all channels (default: 10). Live streams always start immediately and never wait on this. Higher values use more CPU and network."
                             ></sl-input>
                             <sl-input
                                 id="cfg-segment-workers"
@@ -984,12 +989,12 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Cookies</h3>
+                            <h2>Cookies</h2>
                             <sl-input
                                 id="cfg-cookie-file"
                                 label="Cookie File"
                                 placeholder="./cookies.txt"
-                                help-text="Path to Netscape format cookies file for authentication"
+                                help-text="Path to Netscape format cookies file for authentication. Requires restart."
                             ></sl-input>
                             <sl-input
                                 id="cfg-cookie-refresh-interval"
@@ -998,11 +1003,11 @@
                                 max="10080"
                                 label="Refresh Interval"
                                 placeholder="360"
-                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours, range: 10–10080 = 7 days)"
+                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours, range: 10–10080 = 7 days). Requires restart."
                             ></sl-input>
 
                             <sl-divider></sl-divider>
-                            <h4>Active Platforms</h4>
+                            <h3>Active Platforms</h3>
                             <div style="display: flex; gap: 1.5em; margin-bottom: 0.75em;">
                                 <sl-switch id="cfg-active-youtube">YouTube cookies</sl-switch>
                                 <sl-switch id="cfg-active-twitch">Twitch cookies</sl-switch>
@@ -1012,7 +1017,7 @@
                             </p>
 
                             <sl-divider></sl-divider>
-                            <h4>Automatic Cookie Login</h4>
+                            <h3>Automatic Cookie Login</h3>
                             <sl-select
                                 id="cfg-cookies-acquisition"
                                 label="How refreshes get cookies"
@@ -1038,15 +1043,16 @@
                                     Moombox's in-process cookie refresh runs either way, and so does an
                                     immediate profile import from the "Refresh cookies from browser profile"
                                     button below (or shift+click the header's "Refresh cookies", or
-                                    <code>R F</code> in the TUI). Setup below works with this off. Takes
-                                    effect on restart.</span
+                                    <code>R F</code> in the TUI). Setup below works with this off. The
+                                    timer starts or stops on restart; the automatic attempt on an
+                                    authentication failure follows this switch as soon as you save.</span
                                 >
                             </sl-switch>
                             <sl-input
                                 id="cfg-auto-cookies-profile-dir"
                                 label="Browser Profile Directory"
                                 placeholder="./browser-profile"
-                                help-text="Directory for the isolated browser profile"
+                                help-text="Directory for the isolated browser profile. Requires restart."
                             ></sl-input>
                             <div id="auto-cookie-actions" style="display: none">
                                 <sl-button
@@ -1054,18 +1060,18 @@
                                     variant="primary"
                                     size="small"
                                 >
-                                    Setup YouTube
+                                    Set up YouTube
                                 </sl-button>
                                 <sl-button
                                     id="btn-auto-cookie-setup-tw"
                                     variant="primary"
                                     size="small"
                                 >
-                                    Setup Twitch
+                                    Set up Twitch
                                 </sl-button>
                                 <span
                                     id="auto-cookie-browser-info"
-                                    style="margin-left: 0.5em; color: var(--sl-color-neutral-500)"
+                                    style="margin-left: 0.5em; color: var(--sl-color-neutral-600)"
                                 ></span>
                             </div>
                             <!--
@@ -1120,7 +1126,7 @@
                                 </p>
                             </div>
                             <sl-divider></sl-divider>
-                            <h4>Paste or upload a cookies.txt</h4>
+                            <h3>Paste or upload a cookies.txt</h3>
                             <p class="settings-help" style="margin-top: 0;">
                                 Export cookies in Netscape format from a browser signed in to the
                                 account, then paste the text or choose the file. Moombox MERGES what
@@ -1134,6 +1140,7 @@
                             </p>
                             <sl-textarea
                                 id="cookie-import-text"
+                                label="cookies.txt contents"
                                 rows="4"
                                 resize="vertical"
                                 placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;…"
@@ -1143,6 +1150,7 @@
                                 type="file"
                                 id="cookie-import-file"
                                 accept=".txt,text/plain"
+                                aria-label="cookies.txt file"
                                 style="margin-top: 0.5em"
                             />
                             <div style="margin-top: 0.5em">
@@ -1175,7 +1183,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Disk</h3>
+                            <h2>Disk</h2>
                             <sl-input
                                 id="cfg-disk-warn-percent"
                                 type="number"
@@ -1192,7 +1200,7 @@
                                 max="99"
                                 label="Critical Threshold"
                                 placeholder="95"
-                                help-text="Pause new downloads when disk usage exceeds this percentage (default: 95%, must be higher than warning)"
+                                help-text="Raise a critical alert when disk usage reaches this percentage (default: 95%, must be higher than warning). From the moment usage reaches it, backlog VODs wait in Queued until usage is 2 points below it; live and running downloads are not paused — free space before the disk fills."
                             ></sl-input>
                         </div>
 
@@ -1202,7 +1210,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Updates</h3>
+                            <h2>Updates</h2>
                             <sl-switch id="cfg-auto-check-updates">
                                 Automatically check for updates
                                 <span slot="help-text"
@@ -1227,7 +1235,7 @@
                                 style="
                                     margin-left: 0.75em;
                                     font-size: 0.9em;
-                                    color: var(--sl-color-neutral-500);
+                                    color: var(--sl-color-neutral-600);
                                 "
                             ></span>
                             <div style="margin-top: 0.5em">
@@ -1258,7 +1266,7 @@
                                     style="
                                         margin-left: 0.75em;
                                         font-size: 0.9em;
-                                        color: var(--sl-color-neutral-500);
+                                        color: var(--sl-color-neutral-600);
                                     "
                                 ></span>
                             </div>
@@ -1270,7 +1278,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>System</h3>
+                            <h2>System</h2>
                             <p class="settings-help">
                                 Restart the Moombox process. The launcher
                                 relaunches it automatically; in-progress
@@ -1295,7 +1303,7 @@
                                 style="
                                     margin-left: 0.75em;
                                     font-size: 0.9em;
-                                    color: var(--sl-color-neutral-500);
+                                    color: var(--sl-color-neutral-600);
                                 "
                             ></span>
                         </div>
@@ -1306,16 +1314,18 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>BotGuard Sidecar</h3>
+                            <h2>BotGuard Sidecar</h2>
                             <p class="settings-help">
                                 The BotGuard sidecar is an embedded Node + JSDOM +
-                                bgutils-js subprocess that produces real PO tokens
-                                Google's BotGuard challenge accepts. When disabled,
-                                Moombox falls back to an in-process goja-only path
-                                that produces only websafe-fallback tokens — most
-                                YouTube content still works, but PO-token-gated
-                                formats (some live streams, age-restricted, etc.)
-                                become unavailable. Toggle requires restart.
+                                bgutils-js subprocess that produces the PO tokens
+                                Google's BotGuard challenge accepts and solves
+                                YouTube's signature ciphers. When disabled, only an
+                                in-process goja path remains, which BotGuard
+                                rejects: no PO tokens are minted and current
+                                players' signatures cannot be solved, so
+                                PO-token-gated and signature-ciphered formats
+                                become unavailable. Formats that need neither keep
+                                working. Toggle requires restart.
                             </p>
                             <sl-switch id="cfg-bgutils-use-sidecar">
                                 Enable sidecar
@@ -1329,7 +1339,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Memory</h3>
+                            <h2>Memory</h2>
                             <p class="settings-help">
                                 Soft caps on steady-state memory. Defaults sit
                                 above normal operating ranges so GC fires only
@@ -1372,7 +1382,7 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Monitored Channels</h3>
+                            <h2>Monitored Channels</h2>
                             <p class="settings-help">
                                 Add YouTube or Twitch channels to automatically
                                 monitor for new streams.
@@ -1391,9 +1401,9 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Integrations</h3>
+                            <h2>Integrations</h2>
 
-                            <h4>Notifications</h4>
+                            <h3>Notifications</h3>
                             <p class="settings-help">
                                 Configure webhook notifications for stream
                                 events.
@@ -1409,7 +1419,7 @@
 
                             <sl-divider></sl-divider>
 
-                            <h4>yt-dlp PO Token Plugin</h4>
+                            <h3>yt-dlp PO Token Plugin</h3>
                             <div class="integration-card" id="ytdlp-plugin-card">
                                 <div class="integration-header">
                                     <div>
@@ -1426,7 +1436,7 @@
                                         <span class="details-value" id="ytdlp-plugin-dir"></span>
                                     </div>
                                     <div class="details-row" id="ytdlp-plugin-port-row" style="display: none">
-                                        <span class="details-label">Installed port:</span>
+                                        <span class="details-label">Plugin points to:</span>
                                         <span class="details-value" id="ytdlp-plugin-port"></span>
                                     </div>
                                     <sl-alert id="ytdlp-port-mismatch-warning" variant="warning" open style="display: none; margin: 0.5em 0;">
@@ -1569,6 +1579,10 @@
 
         <!-- Add Channel Dialog -->
         <sl-dialog label="Add Channel" id="add-channel-dialog">
+            <sl-alert id="channel-existing-note" variant="primary" open style="display: none; margin-bottom: 1rem;">
+                <sl-icon slot="icon" name="info-circle"></sl-icon>
+                Already configured — editing it instead
+            </sl-alert>
             <sl-select
                 id="channel-platform-select"
                 label="Platform"
@@ -1595,7 +1609,7 @@
                 id="channel-terms-input"
                 label="Filter Pattern (regex)"
                 placeholder="(?i)(karaoke|singing|歌枠)"
-                help-text="Only download streams matching this pattern. Matches title (all monitors), description (RSS), or game category (Twitch). Leave empty for all."
+                help-text="Only download streams matching this pattern: the title (YouTube), or the title or game category (Twitch). Leave empty for all."
             ></sl-input>
             <sl-details summary="Pattern examples">
                 <div class="pattern-examples">
@@ -1606,12 +1620,11 @@
                     English singing streams<br />
                     <code>(?i)minecraft.*hardcore</code> - Match "Minecraft"
                     followed by "hardcore"<br />
-                    <code>^(?!.*\b(shorts|clip)\b)</code> - Exclude titles
-                    containing "shorts" or "clip"
+                    Patterns are RE2 regular expressions, which have no
+                    lookahead, so a pattern cannot exclude a word: one that
+                    does not compile is matched as plain text instead.
                 </div>
             </sl-details>
-            <sl-input id="channel-lookbehind-input" type="number" min="0" max="1000" label="Description lookbehind"
-                help-text="Compare descriptions with N older feed items. Blank = default."></sl-input>
             <sl-input id="channel-output-dir-input" label="Output directory"
                 help-text="Per-channel override. Blank = the global output directory."></sl-input>
             <sl-input id="channel-archive-window-input" type="number" min="1" max="3650" label="Archive window (days)"
@@ -1680,11 +1693,11 @@
         </sl-dialog>
 
         <!-- Setup Wizard (shown on first run) -->
-        <div id="setup-overlay" style="display: none">
+        <div id="setup-overlay" role="dialog" aria-modal="true" aria-labelledby="setup-title" style="display: none">
             <div class="setup-container">
                 <div class="setup-header">
                     <sl-icon name="box-seam" style="font-size: 3rem; color: var(--sl-color-primary-600);"></sl-icon>
-                    <h1>Welcome to Moombox</h1>
+                    <h1 id="setup-title">Welcome to Moombox</h1>
                     <p>Let's configure your live stream archiver</p>
                 </div>
 
@@ -1693,12 +1706,12 @@
                     <div class="setup-mode-cards">
                         <button class="setup-mode-card" id="setup-mode-quick" tabindex="0">
                             <sl-icon name="lightning-charge" style="font-size: 2rem; color: var(--sl-color-primary-600);"></sl-icon>
-                            <h3>Quick Setup <sl-badge variant="primary" pill>Recommended</sl-badge></h3>
+                            <h2>Quick Setup <sl-badge variant="primary" pill>Recommended</sl-badge></h2>
                             <p>Best for most users — takes ~2 minutes. Set up cookies and add channels.</p>
                         </button>
                         <button class="setup-mode-card" id="setup-mode-advanced" tabindex="0">
                             <sl-icon name="gear" style="font-size: 2rem; color: var(--sl-color-neutral-500);"></sl-icon>
-                            <h3>Advanced Setup</h3>
+                            <h2>Advanced Setup</h2>
                             <p>Full control over every setting — network, paths, downloads, and more.</p>
                         </button>
                     </div>
@@ -1709,7 +1722,7 @@
                 <!-- Simplified: Step 1 - Cookie Setup -->
                 <div class="setup-page" id="setup-simple-cookies" style="display: none">
                     <div class="setup-steps">
-                        <div class="setup-step active" data-step="1"><div class="step-number">1</div><div class="step-label">Cookies</div></div>
+                        <div class="setup-step active" data-step="1" aria-current="step"><div class="step-number">1</div><div class="step-label">Cookies</div></div>
                         <div class="setup-step" data-step="2"><div class="step-number">2</div><div class="step-label">Channels</div></div>
                     </div>
                     <h2>Cookie Setup</h2>
@@ -1746,7 +1759,7 @@
                 <div class="setup-page" id="setup-simple-channels" style="display: none">
                     <div class="setup-steps">
                         <div class="setup-step completed" data-step="1"><div class="step-number">1</div><div class="step-label">Cookies</div></div>
-                        <div class="setup-step active" data-step="2"><div class="step-number">2</div><div class="step-label">Channels</div></div>
+                        <div class="setup-step active" data-step="2" aria-current="step"><div class="step-number">2</div><div class="step-label">Channels</div></div>
                     </div>
                     <h2>Monitor Channels</h2>
                     <p class="setup-help">Add YouTube or Twitch channels to automatically monitor for live streams. You can add more later in Settings.</p>
@@ -1766,14 +1779,14 @@
 
                 <!-- Advanced step indicators (shared across all advanced steps) -->
                 <div class="setup-steps" id="setup-adv-steps" style="display: none">
-                    <div class="setup-step active" data-step="1"><div class="step-number">1</div><div class="step-label">Network</div></div>
+                    <div class="setup-step active" data-step="1" aria-current="step"><div class="step-number">1</div><div class="step-label">Network</div></div>
                     <div class="setup-step" data-step="2"><div class="step-number">2</div><div class="step-label">Paths</div></div>
                     <div class="setup-step" data-step="3"><div class="step-number">3</div><div class="step-label">Logs</div></div>
                     <div class="setup-step" data-step="4"><div class="step-number">4</div><div class="step-label">Monitors</div></div>
                     <div class="setup-step" data-step="5"><div class="step-number">5</div><div class="step-label">Download</div></div>
                     <div class="setup-step" data-step="6"><div class="step-number">6</div><div class="step-label">Cookies</div></div>
                     <div class="setup-step" data-step="7"><div class="step-number">7</div><div class="step-label">Channels</div></div>
-                    <div class="setup-step" data-step="8"><div class="step-number">8</div><div class="step-label">Extras</div></div>
+                    <div class="setup-step" data-step="8"><div class="step-number">8</div><div class="step-label">Integrations</div></div>
                 </div>
 
                 <!-- Advanced: Step 1 - Network -->
@@ -1837,7 +1850,7 @@
                 <div class="setup-page" id="setup-adv-step-4" style="display: none">
                     <h2>Monitors</h2>
                     <p class="setup-help">Leave fields empty to use defaults.</p>
-                    <sl-input id="setup-hide-age" type="number" label="Hide Finished After (days)" placeholder="30" min="0"></sl-input>
+                    <sl-input id="setup-hide-age" type="number" label="Hide Finished After (days)" placeholder="30" min="0" max="365" help-text="0-365; 0 = archive immediately"></sl-input>
                     <sl-input id="setup-archive-window-days" type="number" label="Archive Window (days)" placeholder="3" min="1" max="3650" help-text="Upcoming/live streams are always covered"></sl-input>
                     <sl-input id="setup-archive-slots" type="number" label="Archive Slots" placeholder="3" min="1" max="100" help-text="Backlog downloads per channel at once; new content never waits"></sl-input>
                     <sl-input id="setup-feed-check-interval" type="number" label="Feed Check Interval (minutes)" placeholder="10" min="1" max="1440"></sl-input>
@@ -1863,7 +1876,7 @@
                     </sl-select>
                     <sl-input id="setup-max-resolution" type="number" label="Custom Max Resolution" placeholder="2160" min="0" help-text="Shorter edge in pixels; 0 = unbounded." style="display: none"></sl-input>
                     <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
-                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1" help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."></sl-input>
+                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="10" min="1" help-text="Peak concurrent VOD downloads across all channels (default: 10). Live streams always start immediately and never wait on this. Higher values use more CPU and network."></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
                     <sl-details summary="Advanced retry settings">
                         <sl-input id="setup-maximum-timeout" type="number" label="YouTube Maximum Timeout (seconds)" placeholder="600" min="30" help-text="How long to keep retrying a stalled YouTube livestream before finalizing, even if YouTube still says live (min 30, no max). Very large values risk account consequences."></sl-input>
@@ -1935,11 +1948,11 @@
         </div>
 
         <!-- FFmpeg Check Overlay -->
-        <div id="ffmpeg-overlay" style="display: none">
+        <div id="ffmpeg-overlay" role="dialog" aria-modal="true" aria-labelledby="ffmpeg-title" style="display: none">
             <div class="setup-container">
                 <div class="setup-header">
                     <sl-icon name="exclamation-triangle" style="font-size: 3rem; color: var(--sl-color-warning-600);"></sl-icon>
-                    <h1>FFmpeg Not Found</h1>
+                    <h1 id="ffmpeg-title">FFmpeg Not Found</h1>
                     <p>FFmpeg is required for muxing video and audio streams.</p>
                 </div>
                 <div id="ffmpeg-main-view">
@@ -1954,7 +1967,7 @@
                     <div id="ffmpeg-check-result" style="margin-top: 0.5em;"></div>
                     <sl-divider></sl-divider>
                     <sl-button id="ffmpeg-skip-btn" variant="default" style="width: 100%; margin-bottom: 0.5em;">Skip for now</sl-button>
-                    <sl-button id="ffmpeg-quit-btn" variant="text" style="width: 100%;">Quit Moombox</sl-button>
+                    <sl-button id="ffmpeg-quit-btn" variant="text" style="width: 100%;">Close this tab</sl-button>
                 </div>
                 <div id="ffmpeg-install-view" style="display: none">
                     <div id="ffmpeg-install-options"></div>
@@ -2044,7 +2057,7 @@
 
         <!-- Keyboard Help Dialog -->
         <sl-dialog label="Keyboard Shortcuts" id="keyboard-help-dialog">
-            <h4 style="margin:0 0 var(--sl-spacing-small)">Global</h4>
+            <h3>Global</h3>
             <dl class="keyboard-shortcut-grid">
                 <dt><kbd>A</kbd></dt><dd>Add video</dd>
                 <dt><kbd>?</kbd></dt><dd>Show this help</dd>
@@ -2055,7 +2068,7 @@
                 <dt><kbd>Enter</kbd></dt><dd>Open selected job details</dd>
             </dl>
             <sl-divider></sl-divider>
-            <h4 style="margin:0 0 var(--sl-spacing-small)">Player Tab</h4>
+            <h3>Player Tab</h3>
             <dl class="keyboard-shortcut-grid">
                 <dt><kbd>Space</kbd></dt><dd>Play / Pause</dd>
                 <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Seek 5s (Shift: 30s)</dd>
@@ -2077,6 +2090,16 @@
             <p id="confirm-dialog-message" style="white-space: pre-line; word-break: break-word;"></p>
             <sl-button slot="footer" id="confirm-dialog-cancel" variant="default">Cancel</sl-button>
             <sl-button slot="footer" id="confirm-dialog-ok" variant="primary">OK</sl-button>
+        </sl-dialog>
+
+        <!-- Channel removal: keep the channel's jobs (default) or delete its pending ones (SettingsController.chooseChannelRemoval) -->
+        <sl-dialog id="channel-remove-dialog" label="Remove Channel" style="--width: 28rem">
+            <p id="channel-remove-message" style="white-space: pre-line; word-break: break-word;"></p>
+            <div class="channel-remove-choices">
+                <sl-button id="channel-remove-keep" variant="primary" autofocus>Remove channel, keep its jobs</sl-button>
+                <sl-button id="channel-remove-delete" variant="danger" outline>Remove channel and delete its pending jobs</sl-button>
+            </div>
+            <sl-button slot="footer" id="channel-remove-cancel" variant="default">Cancel</sl-button>
         </sl-dialog>
 
         <sl-dialog id="remove-password-dialog" label="Remove Password" style="--width: 24rem">
@@ -2115,7 +2138,7 @@
         </div>
 
         <!-- Status Bar -->
-        <div id="status-bar">
+        <footer id="status-bar">
             <div id="status-bar-left">
                 <span id="connection-status">
                     <sl-icon name="wifi-off"></sl-icon>
@@ -2144,7 +2167,7 @@
                 <sl-icon-button id="btn-logout" name="box-arrow-right" label="Log out" title="Log out" style="display:none"></sl-icon-button>
                 <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>
             </div>
-        </div>
+        </footer>
 
         <script type="module" src="/app.js"></script>
     </body>

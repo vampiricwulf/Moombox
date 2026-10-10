@@ -156,9 +156,10 @@ func (q *stubSchedQueue) Enqueue(jobID string, status database.JobStatus) {
 }
 
 // testSchedulerSetup builds a Scheduler against a real temp SQLite DB with a
-// stub queue, an updateJob spy that records then delegates to the real
-// UpdateJobFields (the M count must observe the durable write), and a
-// resolveSlots stub returning m for every channel.
+// stub queue, an updateJob spy that records then delegates to newScheduler's
+// own durable write (the M count must observe it, and the compare-and-set on
+// Queued is part of what every test here exercises), and a resolveSlots stub
+// returning m for every channel.
 func testSchedulerSetup(t *testing.T, m int) (*Scheduler, *database.Database, *schedOpLog) {
 	t.Helper()
 	dir := t.TempDir()
@@ -169,18 +170,14 @@ func testSchedulerSetup(t *testing.T, m int) (*Scheduler, *database.Database, *s
 	t.Cleanup(func() { db.Close() })
 
 	log := &schedOpLog{}
-	s := &Scheduler{
-		db:    db,
-		queue: &stubSchedQueue{log: log},
-		updateJob: func(jobID string, fields map[string]any) {
-			st, _ := fields["status"].(database.JobStatus)
-			log.add(schedOp{kind: "update", jobID: jobID, status: st})
-			db.UpdateJobFields(jobID, fields)
-		},
-		resolveSlots: func(string) int { return m },
-		wake:         make(chan struct{}, 1),
-		log:          discardLogger{},
+	s := newScheduler(db, &stubSchedQueue{log: log}, discardLogger{})
+	write := s.updateJob
+	s.updateJob = func(jobID string, fields map[string]any) bool {
+		st, _ := fields["status"].(database.JobStatus)
+		log.add(schedOp{kind: "update", jobID: jobID, status: st})
+		return write(jobID, fields)
 	}
+	s.resolveSlots = func(string) int { return m }
 	return s, db, log
 }
 

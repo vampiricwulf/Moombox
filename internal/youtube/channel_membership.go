@@ -282,8 +282,11 @@ func addVideo(id, title string, age time.Duration, seen map[string]struct{}, out
 // recognizable timestamp — returns 0 ("now"), so it ranks to the top and is
 // always probed. Keying on the ABSENCE of a past-time signal (rather than the
 // PRESENCE of a live badge) makes catching live/upcoming members streams robust
-// to YouTube's frequent badge DOM churn — a live/upcoming item can never sink
-// below dated VODs and be dropped from the cap. Scanning the serialized item is
+// to YouTube's frequent badge DOM churn. One live phrasing does carry an
+// "N <unit> ago" — "Started streaming 2 hours ago" — so that text counts as
+// live in its own right, beside the badges: without it a live item whose badge
+// markup had changed would rank by its elapsed time and could sink below dated
+// VODs and be dropped from the cap. Scanning the serialized item is
 // layout-agnostic (lockup and classic renderers both work).
 func itemAge(item map[string]any) time.Duration {
 	b, err := json.Marshal(item)
@@ -291,10 +294,13 @@ func itemAge(item map[string]any) time.Duration {
 		return 0
 	}
 	s := string(b)
-	// Currently live → "now", regardless of any "streaming for N" elapsed text.
+	// Currently live → "now", regardless of any elapsed-time text. "Started
+	// streaming" is the live item's own wording (a finished stream reads
+	// "Streamed N ago"), so it needs no badge to be recognised.
 	if strings.Contains(s, "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE") ||
 		strings.Contains(s, `"imageName":"LIVE"`) ||
-		strings.Contains(s, "BADGE_STYLE_TYPE_LIVE_NOW") {
+		strings.Contains(s, "BADGE_STYLE_TYPE_LIVE_NOW") ||
+		strings.Contains(s, "Started streaming") {
 		return 0
 	}
 	// A "Streamed N <unit> ago" text marks a PAST stream → rank by that age.

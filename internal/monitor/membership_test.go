@@ -50,7 +50,7 @@ func TestParseFeedCandidates(t *testing.T) {
 	if len(cands) != 2 {
 		t.Fatalf("got %d candidates", len(cands))
 	}
-	if cands[0].videoID != "vidRecent01" || cands[0].url != "https://youtu.be/vidRecent01" {
+	if cands[0].videoID != "vidRecent01" || cands[0].title != "recent" {
 		t.Errorf("entry 0 extraction wrong: %+v", cands[0])
 	}
 	if cands[0].published.IsZero() {
@@ -58,9 +58,6 @@ func TestParseFeedCandidates(t *testing.T) {
 	}
 	if !cands[1].published.IsZero() {
 		t.Error("entry 1 (no <published>) should parse to zero time")
-	}
-	if cands[0].source != "rss" {
-		t.Errorf("RSS candidates must be source=rss: %+v", cands[0])
 	}
 	if _, err := fm.parseFeedCandidates(ch, []byte("<not-xml")); err == nil {
 		t.Error("a malformed feed must return an error (health signal)")

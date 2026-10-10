@@ -1435,3 +1435,42 @@ func TestMaxVideoResolutionZeroIsUnbounded(t *testing.T) {
 			cfg.Downloader.MaxVideoResolution)
 	}
 }
+
+// TestEmptyActivePlatformsIsAnOverrideThatSurvivesSave: an empty
+// active_platforms is the operator turning both indicators off. It must win
+// over the fallbacks and must survive Save/Load — omitempty used to drop it,
+// so the reloaded config read "no override" and inferred both platforms back.
+//
+// MUTANT: restore omitempty on the toml tag — the reloaded list is nil.
+// MUTANT: test len() instead of nil in GetActivePlatforms — the fallback wins.
+func TestEmptyActivePlatformsIsAnOverrideThatSurvivesSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := Defaults()
+	cfg.Cookies.Platforms = []string{"youtube", "twitch"}
+	cfg.Cookies.ActivePlatforms = []string{}
+	if err := Save(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Cookies.ActivePlatforms == nil {
+		t.Fatal("an empty active_platforms override reloaded as nil (no override)")
+	}
+	if yt, tw := GetActivePlatforms(reloaded); yt || tw {
+		t.Errorf("GetActivePlatforms = %v/%v, want false/false — the empty override must win", yt, tw)
+	}
+
+	// And nil stays "no override": the fallback still answers.
+	cfg.Cookies.ActivePlatforms = nil
+	if err := Save(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded, err = Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if yt, tw := GetActivePlatforms(reloaded); !yt || !tw {
+		t.Errorf("GetActivePlatforms = %v/%v with no override, want the verified platforms true/true", yt, tw)
+	}
+}

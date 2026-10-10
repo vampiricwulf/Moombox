@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // OrphanedFileEntry represents an orphaned file for TUI display.
@@ -146,8 +147,8 @@ func (d fileDelegate) renderFile(w io.Writer, m list.Model, index int, f Orphane
 	}
 
 	// Truncate the variable-width path to fit (truncate plain text BEFORE
-	// assembling with styled type badge — truncateString uses runewidth
-	// which miscounts ANSI escape sequences).
+	// assembling with styled type badge, so the cut lands in the path and
+	// never in the badge).
 	fixedW := 2 + 9 + 1 + len(suffix) // prefix + typeTag + space + suffix (all ASCII)
 	pathW := max(m.Width()-fixedW, 5)
 	relPath := truncateString(f.RelPath, pathW)
@@ -241,6 +242,7 @@ func (m *FilesDialogModel) Open() {
 	m.loading = true
 	m.spinner = newSpinner()
 	m.list.SetItems(nil)
+	m.list.ResetSelected()
 	m.deleteConfirmID = ""
 	m.confirmTimer = time.Time{}
 	m.deleteAllArmed = false
@@ -328,7 +330,14 @@ func (m *FilesDialogModel) rebuildList() tea.Cmd {
 	for _, h := range m.history {
 		items = append(items, historyItem{entry: h})
 	}
-	return m.list.SetItems(items)
+	cmd := m.list.SetItems(items)
+	clampListCursor(&m.list)
+	// A deleted row's neighbours shift up under the cursor, and the one that
+	// lands there can be the divider: step back onto the row before it.
+	if _, isHeader := m.list.SelectedItem().(sectionHeaderItem); isHeader {
+		m.list.CursorUp()
+	}
+	return cmd
 }
 
 // SetFilesError records a failure to load the orphaned files. The two sources
@@ -495,6 +504,10 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 		return "close", nil
 	case "r", "R":
 		m.loading = true
+		// A confirm armed against the list being replaced is retracted with it.
+		m.deleteConfirmID, m.confirmTimer = "", time.Time{}
+		m.deleteAllArmed, m.deleteAllSection, m.deleteAllTimer = false, "", time.Time{}
+		m.feedbackMsg = ""
 		m.filesErr = ""
 		m.historyErr = ""
 		m.actionErr = ""
@@ -502,6 +515,11 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 		m.historyLoaded = false
 		return "refresh", nil
 	case "a", "A":
+		// While a scan runs the view shows only "Scanning…": the list D and A
+		// would act on is the stale one the operator cannot see.
+		if m.loading {
+			return "", nil
+		}
 		section, count := m.currentSection()
 		if count == 0 {
 			return "", nil
@@ -539,7 +557,7 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, any) {
 		m.feedbackMsg = fmt.Sprintf("Press A again to delete all %d %s", count, noun)
 		return "", nil
 	case "d", "D":
-		if len(m.list.Items()) == 0 {
+		if m.loading || len(m.list.Items()) == 0 {
 			return "", nil
 		}
 		m.actionErr = "" // starting a fresh delete clears any prior failure
@@ -634,6 +652,23 @@ func (m *FilesDialogModel) loadErrorText() string {
 	}
 }
 
+// footerHint is the key line, one row at the box's content width. Box height
+// budgets it a single row (filesBoxDims), but the full wording is 66 columns
+// and the box is 54 wide at the 60-column floor, so it wrapped and left
+// "| Esc: Close" alone on a second row. The shorter wording fits the floor;
+// with nothing listed only the keys that still do anything are named.
+func (m *FilesDialogModel) footerHint(contentW, total int) string {
+	if total == 0 && !m.loading {
+		return "R: Refresh | Esc: Close"
+	}
+	// The arm hint already names what "all" covers.
+	full := "↑↓: Navigate | D: Delete | A: Delete all | R: Refresh | Esc: Close"
+	if ansi.StringWidth(full) <= contentW {
+		return full
+	}
+	return "↑↓ | D: Delete | A: All | R: Refresh | Esc: Close"
+}
+
 // View renders the files dialog overlay.
 func (m *FilesDialogModel) View() string {
 	if !m.visible {
@@ -678,9 +713,7 @@ func (m *FilesDialogModel) View() string {
 	}
 
 	lines = append(lines, "")
-	// 62 columns: at 80 the content width is 74, and the longer wording wrapped
-	// onto a second row. The arm hint already names what "all" covers.
-	lines = append(lines, DimStyle.Render("↑↓: Navigate | D: Delete | A: Delete all | R: Refresh | Esc: Close"))
+	lines = append(lines, DimStyle.Render(m.footerHint(boxW-2, total)))
 
 	content := strings.Join(lines, "\n")
 

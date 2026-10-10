@@ -1,11 +1,13 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -284,5 +286,35 @@ func TestStreamProcessResultPropagatesTwitchAuth(t *testing.T) {
 		// twitch sentinel — so this branch validates that we *don't*
 		// require both. Document the limitation.
 		t.Log("twitch.ErrTwitchAuthExpired does not survive the percent-v formatting in r.Error; rely on ErrCookiesRequired classification")
+	}
+}
+
+// TestExecuteWithChatReportsAnAlreadyCancelledRow: ExecuteWithChat's
+// pre-flight check for a row cancelled between queuing and execution
+// returned nil, which processJob read as a finished download — it deleted
+// the staging of a job the operator had just cancelled and skipped
+// handleCancellation. It returns ErrCancelled now.
+//
+// Mutant: return nil from that branch again.
+func TestExecuteWithChatReportsAnAlreadyCancelledRow(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	job := &database.Job{ID: "j-precancel", VideoID: "j-precancel", URL: "u", Platform: "youtube",
+		Status: database.StatusCancelled}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+	err := w.orchestrator.ExecuteWithChat(context.Background(), w.buildJobContext(job), nil, false, nil)
+	if !errors.Is(err, ErrCancelled) {
+		t.Errorf("ExecuteWithChat on a Cancelled row = %v, want ErrCancelled", err)
+	}
+}
+
+// TestCancelledResultCarriesTheSentinel: processJob picks the cancelled
+// branch on ErrCancelled now, not on the "cancelled" display string, so
+// every wait's cancel must carry it.
+func TestCancelledResultCarriesTheSentinel(t *testing.T) {
+	r := cancelledResult()
+	if r.ShouldDownload || !errors.Is(r.ErrSentinel, ErrCancelled) || !errors.Is(r.AsError(), ErrCancelled) {
+		t.Errorf("cancelledResult() = %+v, want ShouldDownload=false carrying ErrCancelled", r)
 	}
 }

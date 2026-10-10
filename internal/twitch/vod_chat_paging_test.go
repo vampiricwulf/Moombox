@@ -455,3 +455,17 @@ func TestVodChatStopsOnZeroEdgesWithMorePagesClaimed(t *testing.T) {
 		t.Errorf("resume sidecar missing after a stalled zero-edges run: %v — want it preserved", err)
 	}
 }
+
+// TestVodChatStartReportsARecoveredPanic pins a panic as an outcome: Start
+// recovers it and used to return nil, so the worker recorded chat_status
+// "finished" over a VOD capture that died.
+func TestVodChatStartReportsARecoveredPanic(t *testing.T) {
+	vcd := NewVodChatDownloader(NewAPI(&testLogger{}), VodChatOptions{
+		VodID:      "v1",
+		OutputPath: filepath.Join(t.TempDir(), "vod.chat.json"),
+	}, &panicOnceLogger{}) // panics on Start's first Info line
+
+	if err := vcd.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("Start returned %v after a recovered panic, want an error naming the panic", err)
+	}
+}

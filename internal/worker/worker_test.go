@@ -2,8 +2,10 @@ package worker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -20,30 +22,6 @@ func (stubCipherSolver) Sig(_ context.Context, _, _ string) (string, error) { re
 func (stubCipherSolver) N(_ context.Context, _, _ string) (string, error)   { return "", nil }
 func (stubCipherSolver) Batch(_ context.Context, _ string, sigs, ns []string) (map[string]string, map[string]string, error) {
 	return map[string]string{}, map[string]string{}, nil
-}
-
-func TestIsTerminalStatus(t *testing.T) {
-	tests := []struct {
-		status   database.JobStatus
-		expected bool
-	}{
-		{database.StatusFinished, true},
-		{database.StatusError, true},
-		{database.StatusCancelled, true},
-		{database.StatusUpcoming, false},
-		{database.StatusLive, false},
-		{database.StatusDownloading, false},
-		{database.StatusMuxing, false},
-		{database.StatusCookies, false},
-		{database.StatusQueued, false},
-	}
-
-	for _, tt := range tests {
-		result := isTerminalStatus(tt.status)
-		if result != tt.expected {
-			t.Errorf("isTerminalStatus(%q) = %v, want %v", tt.status, result, tt.expected)
-		}
-	}
 }
 
 // testWorkerSetup creates a DownloadWorker against a temp SQLite DB with a
@@ -180,5 +158,81 @@ func TestNewDownloadWorker_AcceptsRoutedCipherSolver(t *testing.T) {
 	w := NewDownloadWorker(db, nil, cfg, &discardLogger{}, deps)
 	if w == nil {
 		t.Fatal("NewDownloadWorker returned nil")
+	}
+}
+
+// TestReinitializeDuringUnwindWaitsForTheRun: the cancel route writes
+// Cancelled before the run stops, so Retry/Reinitialize show at once, and one
+// clicked while the run unwound used to race it — staging deleted under the
+// live run, Enqueue dropped as a duplicate, and handleCancellation's
+// Cancelled written over the fresh Upcoming. The reset now waits for the run.
+//
+// Mutants: run ReinitializeJob's body immediately (staging is gone while the
+// run is still in flight); write handleCancellation's Cancelled after
+// Complete again (the row can end Cancelled instead of Upcoming).
+func TestReinitializeDuringUnwindWaitsForTheRun(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	const id = "j-unwind"
+	if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube",
+		Status: database.StatusDownloading}); err != nil {
+		t.Fatal(err)
+	}
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
+	stagingDir := filepath.Join(stagingBase, id)
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "chat.resume.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A run in flight, then the operator's Cancel.
+	w.queue.Enqueue(id, database.StatusDownloading)
+	if got, _, ok := w.queue.Dequeue(context.Background()); !ok || got != id {
+		t.Fatalf("Dequeue = %q, %v", got, ok)
+	}
+	w.CancelJob(id)
+
+	// Reinitialize, clicked while the run is still unwinding.
+	w.ReinitializeJob(id)
+	if _, err := os.Stat(stagingDir); err != nil {
+		t.Fatalf("Reinitialize removed staging while the run was still in flight: %v", err)
+	}
+
+	// The run finishes unwinding. Its Cancelled must land while it still
+	// holds its queue slot, i.e. before Complete closes the Done channel the
+	// deferred reset waits on — otherwise it can land on the reset's Upcoming.
+	var cancelledWhileProcessing []bool
+	unsub := db.OnJobUpdate(func(j *database.Job) {
+		if j.ID == id && j.Status == database.StatusCancelled {
+			cancelledWhileProcessing = append(cancelledWhileProcessing, w.queue.IsProcessing(id))
+		}
+	})
+	job, _ := db.GetJob(id)
+	w.handleCancellation(job)
+	unsub()
+	if len(cancelledWhileProcessing) != 1 || !cancelledWhileProcessing[0] {
+		t.Errorf("handleCancellation's Cancelled write saw processing=%v; want it written before Complete", cancelledWhileProcessing)
+	}
+	// handleCancellation gives back only the slots; the run ends where
+	// processJob's deferred Complete ends it.
+	if !w.queue.IsProcessing(id) {
+		t.Error("handleCancellation unregistered the run; only processJob's deferred Complete may")
+	}
+	w.queue.Complete(id)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		j, _ := db.GetJob(id)
+		_, statErr := os.Stat(stagingDir)
+		if j != nil && j.Status == database.StatusUpcoming && os.IsNotExist(statErr) && w.queue.PendingCount() == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the run exited: status=%v staging err=%v pending=%d; want Upcoming, staging gone, queued",
+				statusOf(j), statErr, w.queue.PendingCount())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

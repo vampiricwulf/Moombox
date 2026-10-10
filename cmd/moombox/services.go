@@ -29,6 +29,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
+	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -115,8 +116,8 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 		// rather than left behind: "it stopped before verifying" cannot happen
 		// on either path, because every refreshAborted() carries a non-nil
 		// error and BOTH callers return before this line on one
-		// (services.go's OnCookieRefreshNeeded above, runCookieRecovery's
-		// err != nil branch).
+		// (jobCookieRefreshOutcome below, runCookieRecovery's err != nil
+		// branch).
 		return cookieRefreshReport{
 			ok:  false,
 			msg: "automatic cookie refresh ran but could not establish whether these cookies work",
@@ -125,6 +126,89 @@ func cookieRefreshReportFor(platform string, result cookies.RefreshResult) cooki
 				"concluded about them",
 		}
 	}
+}
+
+// cookieRefreshErrorLine is the worker's log line for a job-triggered refresh
+// that returned an error: the message, and the attribute carrying the error.
+// Beside cookieRefreshReportFor, and extracted for the same reason — the
+// closure that logs it needs the whole construction graph.
+//
+// A profile another browser holds (cookies.ErrProfileInUse) is a SKIP, not an
+// error: the pass declined and launched nothing, and its sentence names the
+// host to close the browser on and the lock to delete. It was logged as "auto
+// cookie refresh error"; it says "skipped" now, with the sentence as the
+// reason, and the worker is told it was skipped
+// (worker.CookieRefreshSkipped), so it does not follow the skip with its
+// failed-refresh advice to replace the cookie file. Every other error keeps
+// its line and is not a restore.
+func cookieRefreshErrorLine(err error) (string, slog.Attr, worker.CookieRefreshOutcome) {
+	if errors.Is(err, cookies.ErrProfileInUse) {
+		return "automatic cookie refresh skipped — a browser holds the profile", slog.String("reason", err.Error()), worker.CookieRefreshSkipped
+	}
+	return "auto cookie refresh error", slog.String("error", err.Error()), worker.CookieRefreshNotRestored
+}
+
+// jobCookieRefreshOutcome is the tail of the OnCookieRefreshNeeded closure:
+// it logs what a job-triggered refresh concluded about platform and returns
+// the worker's answer. Extracted so the closure-to-worker contract can be
+// tested — the closure itself needs the whole construction graph, and the
+// outcome it returns decides what the worker logs next.
+func jobCookieRefreshOutcome(log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, platform string, result cookies.RefreshResult, err error) worker.CookieRefreshOutcome {
+	if err != nil {
+		msg, cause, outcome := cookieRefreshErrorLine(err)
+		log.Warn(msg, slog.String("platform", platform), cause)
+		return outcome
+	}
+	report := cookieRefreshReportFor(platform, result)
+	if report.msg != "" {
+		log.Warn(report.msg,
+			slog.String("platform", platform),
+			slog.String("note", report.note))
+	}
+	if report.ok {
+		return worker.CookieRefreshRestored
+	}
+	// A pass that RAN and could not tell concluded nothing about the
+	// cookies, and the line above says so. Answered as a failure, it was
+	// followed by the worker's advice to replace cookies nothing had judged.
+	// A pass that declined (Ran false: setup in progress, a refresh already
+	// in flight, nothing to refresh) is Unknown too, but it did not run, and
+	// the owner ruling of 2026-10-09 that split this line out names only the
+	// pass that ran: a declined pass keeps the failure line. One way to decline is a jar with no auth cookie for
+	// any platform, the dead state the pass that pruned it called a failure;
+	// answered as unconfirmed, the jobs parked after it read that same state
+	// as "R C / Recheck will tell" and lost the advice to replace the file.
+	if result.Ran && result.Verdict(platform) == cookies.RefreshUnknown {
+		return worker.CookieRefreshUnconfirmed
+	}
+	return worker.CookieRefreshNotRestored
+}
+
+// jobCookieRefreshDisabled is the OnCookieRefreshNeeded closure's answer when
+// cookies.auto_enabled is off: it says nothing was attempted and tells the
+// worker the refresh is off, which the worker then logs as the way out
+// (replace the file, or turn the refresh on) rather than as a failed refresh.
+// auto_enabled defaults to false, so this is the COMMON path, not an edge
+// case.
+func jobCookieRefreshDisabled(log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) worker.CookieRefreshOutcome {
+	// Previously a silent `return false`. That silence is why a field log
+	// read "attempting automatic cookie refresh..." immediately followed by
+	// "auto cookie refresh failed" — nothing had in fact been attempted, and
+	// no line said so.
+	log.Warn("automatic cookie refresh is disabled — nothing was attempted",
+		slog.String("setting", "cookies.auto_enabled = false"),
+		slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
+	return worker.CookieRefreshOff
 }
 
 // twitchAuthLossHook wraps the platform-mark call in the goroutine its caller
@@ -188,11 +272,12 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // a panic here costs ONE TICK and not the timer — cannot be driven from inside
 // initServices, and `go build` proves only that the join compiles.
 //
-// WHY ITS OWN RECOVER, when the caller is already a goroutine that has one. The
-// periodic goroutine's recover sits OUTSIDE its `for` loop
+// WHY ITS OWN RECOVER, when the caller already has one. The periodic
+// goroutine's own recover sits OUTSIDE its `for` loop
 // (AutoCookieService.StartPeriodicRefresh), so it does not resume the loop — it
-// ends it. Anything that panics on the way through this hook therefore stops
-// the 30-minute browser refresh for the life of the process. Before Arc 10 the
+// ends it. Each tick now runs under a per-tick recover too (runPeriodicTick),
+// but this one keeps the cost of a re-check panic to the re-check and keeps the
+// hook safe whoever calls it. Before Arc 10 the
 // only thing on that goroutine was refreshCookiesDetailed; this hook adds the
 // whole of RefreshService.refresh — jar.Reload, two HTTP round-trips,
 // updateCookieFile, and the OnAuthChange / OnRecoveryNeeded /
@@ -448,17 +533,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 1. Load config
 	// =========================================================================
-	cfg, err := config.Load(s.configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	s.cfg = cfg
 	// Save where we loaded. With no -config flag config.Load searches the cwd,
 	// ./config/ and ~/.config/moombox/, so the file it read is often NOT the
 	// path we asked for — and s.configPath is what the store below, the
 	// auto-persist a few lines down and the TUI's two config.Save calls
 	// (tui_wiring.go) all write to.
-	s.configPath = storePathFor(s.configPath, cfg)
+	cfg, storePath, err := loadConfig(s.configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	s.cfg = cfg
+	s.configPath = storePath
 	// configStore owns the synchronising mutex (no external cfgMu — every
 	// caller now goes through Store APIs per DECISIONS #8 wave 4-7).
 	s.configStore = config.NewStore(cfg, s.configPath)
@@ -472,17 +557,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// and every later UI save write the override to disk, so a single
 	// `-log-level=debug` run permanently changed the configured level, and
 	// the operator's only clue was a level that never went back (CORE-10).
-	// A later TUI settings save legitimately re-applies the CONFIGURED level
-	// via Logger.SetLevel and so drops the override — that is the operator
-	// having chosen a level explicitly. The Web PUT only does so when the
-	// level itself changed (config_routes.go gates OnLogLevelChange on
-	// newLogLevel != oldLogLevel), so an unrelated web save leaves the
-	// running logger on the override for the rest of the session.
+	// A later save from either UI re-applies the CONFIGURED level only when
+	// that level changed (applyConfiguredLogLevel) — the operator choosing a
+	// level explicitly, which drops the override; an unrelated save leaves
+	// the running logger on the override for the rest of the session. (The
+	// TUI save used to re-apply it on every save, so saving any setting from
+	// the terminal silently ended a -log-level=debug session.)
 	log, err := logger.New(cfg.Paths.LogFilePath, effectiveLogLevel(cfg.Logs.LogLevel, logLevelOverride), cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
 	if err != nil {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
 	s.log = log
+	s.configuredLogLevel = cfg.Logs.LogLevel
 	// Close the logger at most once — the deferred close at the bottom of
 	// run() AND the force-exit timer both need to flush buffered lines on
 	// exit, and logger.Close is not guaranteed idempotent at this layer.
@@ -491,14 +577,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
 	logConfigSource(log, cfg, s.configPath)
-
-	// segment_workers has no upper limit by design (DECISIONS: owner-mandated,
-	// no silent clamp — see config.SegmentWorkers doc). Past
-	// SegmentWorkersWarnThreshold, warn: a large simultaneous fan-out to
-	// YouTube is the kind of traffic shape that attracts bot detection.
-	if sw := cfg.Downloader.SegmentWorkers; sw > config.SegmentWorkersWarnThreshold {
-		log.Warn(fmt.Sprintf("downloader.segment_workers %d is high — a large simultaneous fan-out to YouTube raises bot-detection risk; reduce it if downloads start returning 403", sw))
+	for _, issue := range cfg.NormalizedOnLoad {
+		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))
 	}
+	for _, key := range cfg.IgnoredOnLoad {
+		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))
+	}
+
+	s.warnSegmentWorkers(cfg.Downloader.SegmentWorkers)
 
 	// Apply Go runtime soft memory limit. SetMemoryLimit is a SOFT cap:
 	// Go's GC runs more aggressively as the heap approaches the limit, but
@@ -636,12 +722,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 				}
 				detected, source := detectCookiePlatforms(meta, jar)
 				if len(detected) > 0 {
-					saveErr := s.configStore.Update(func(c *config.MoomboxConfig) {
+					// UpdateIfLoaded, not Update: on a first run this save
+					// would create config.toml and mark it loaded, and a
+					// cookies.txt already beside the binary then skipped
+					// both setup wizards. The wizard's own save records
+					// the platforms instead.
+					applied, saveErr := s.configStore.UpdateIfLoaded(func(c *config.MoomboxConfig) {
 						c.Cookies.Platforms = detected
 					})
-					if saveErr != nil {
+					switch {
+					case saveErr != nil:
 						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
-					} else {
+					case applied:
 						log.Info("Detected cookie platforms from cookie file",
 							slog.Any("platforms", detected), slog.String("source", source))
 					}
@@ -685,11 +777,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 7b. BotGuard sidecar (Node + JSDOM + bgutils-js subprocess)
 	// =========================================================================
 	// The sidecar produces real PO tokens that pass BotGuard's timing
-	// fingerprint (which the goja-only path can't, see
-	// docs/investigations/botguard-option-2-results.md). On any failure
-	// we log a warning and PotProvider falls through to its goja path
-	// which still produces websafe-fallback tokens -- downloads keep
-	// working, but PO-token-gated formats may be unavailable.
+	// fingerprint, which the goja-only path can't (see "Why a Sidecar" in
+	// docs/spec/platform-services.md). On any failure we log a warning and
+	// PotProvider falls through to its goja path, which cannot mint a PO
+	// token at all: BotGuard answers the in-process run with the websafe
+	// fallback only, and webpo_client rejects that as a token. Downloads
+	// that need no PO token keep working; PO-token-gated formats, and every
+	// signature-ciphered format (sig solving is sidecar-only), wait for the
+	// supervisor below to bring the sidecar back.
 	//
 	// First launch extracts ~36 MB of embedded blobs to
 	// %LOCALAPPDATA%/Moombox/sidecar (one-time, ~3-5s); subsequent
@@ -729,12 +824,18 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// handle is a no-op, and main.go's memory log already gates on
 		// IsHealthy().
 		s.bgSidecar = bgSidecar
+		// Attached before the first start, for the same reason: it is what
+		// puts PotProvider in sidecar mode, where a mint during an outage
+		// fails at once instead of running the in-process BotGuard pass that
+		// mints nothing — and a failed first start is an outage like any
+		// other.
+		potProvider.SetSidecar(bgSidecar)
 
 		sCtx, sCancel := context.WithTimeout(s.ctx, 60*time.Second)
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()
 		if startErr != nil {
-			log.Warn("BotGuard sidecar failed to start; using goja until the supervisor gets it up",
+			log.Warn("BotGuard sidecar failed to start; no PO tokens or signature solving until the supervisor gets it up",
 				slog.String("error", startErr.Error()))
 			sidecar.PublishHealth(sidecar.Health{Healthy: false, Reason: startErr.Error(), Since: time.Now()})
 			// A first start that never succeeded cannot reach markUnhealthy
@@ -743,12 +844,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 			// sig are unavailable until a child comes up.
 			sup.Notify("initial start failed: " + startErr.Error())
 		} else {
-			potProvider.SetSidecar(bgSidecar)
 			sidecar.PublishHealth(sidecar.Health{Healthy: true, Since: time.Now()})
 			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
 		}
 	} else {
-		log.Info("BotGuard sidecar disabled in config; using goja fallback only")
+		log.Warn("BotGuard sidecar disabled in config; no PO tokens will be minted and signature-ciphered formats are unavailable")
 	}
 
 	// =========================================================================
@@ -783,15 +883,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		sidecarCipher = cipher.NewSidecarSolver(s.bgSidecar, gojaSolver)
 	}
 	cipherSolver := cipher.NewCompositeSolver(sidecarCipher, gojaSolver)
-	s.cipherSolver = gojaSolver
-	s.routedCipher = cipherSolver
 
-	// Wire goja resolver for GetSts (signature timestamp lookup, not part of
-	// the cipher.Solver interface) and the composite Solver for sig/n decryption.
-	// Sig flows through the sidecar's V8 ejs; n falls back to goja if the sidecar
-	// is unavailable.
+	// Wire the goja resolver for GetSts (signature timestamp lookup). The
+	// composite Solver does sig/n decryption on the worker side
+	// (RoutedCipherSolver below): sig flows through the sidecar's V8 ejs, and
+	// n falls back to goja if the sidecar is unavailable.
 	ytService.PlayerAPI.SetCipherSolver(gojaSolver)
-	ytService.PlayerAPI.SetCipher(cipherSolver)
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)
@@ -831,29 +928,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.notifyMgr = notifyMgr
 
 	// =========================================================================
-	// 10. Download worker
-	// =========================================================================
-	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:       gojaSolver,
-		RoutedCipherSolver: cipherSolver,
-		PotProvider:        potProvider,
-		TwitchService:      twService,
-		Notifier:           notifyMgr,
-		Conn:               s.connMon,
-	})
-	s.dlWorker = dlWorker
-
-	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
-
-	// The engine's process-wide reorder ceilings (downloader.reorder_buffer_mb
-	// / reorder_budget_mb). Read ONCE here and re-applied from the same
-	// applier on every config save from either UI (hot_reload.go), which is
-	// why nothing downstream — not DownloaderOptions, not the strategies —
-	// carries the value. Warns here if the saved pair is incoherent.
-	s.applyReorderBudget(cfg.Downloader)
-
-	// =========================================================================
-	// 11. Trim service
+	// 10. Trim service — ahead of the worker, which runs every job's
+	// post-download trim through it: one service, so one trim slot per job
+	// whichever of the dashboard, the TUI or the finished download asks.
 	// =========================================================================
 	trimSvc := worker.NewTrimService(db, cfg.Paths.FfmpegPath, log)
 	trimSvc.SetNotifier(notifyMgr)
@@ -863,7 +940,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// `defer os.RemoveAll(tempDir)` inside the trim path covers the
 	// happy case; a hard process abort (panic in a sibling goroutine,
 	// OS kill, power loss) bypasses the defer and leaks the dir. 24h
-	// age threshold keeps concurrent trims' in-flight tempdirs safe.
+	// age threshold keeps concurrent trims' in-flight tempdirs safe. The
+	// import sweep also takes what an aborted import extracted into
+	// <output>/imports, so the output directory is read here, before the
+	// goroutine.
+	importOutputDir := cfg.Paths.OutputDirectory
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -875,7 +956,35 @@ func (s *runState) initServices(logLevelOverride string) error {
 		} else if removed > 0 {
 			log.Info("trim-tempdir cleanup", slog.Int("removed", removed))
 		}
+		if removed, err := routes.CleanupOldImportTemp(importOutputDir); err != nil {
+			log.Debug("import-temp cleanup", slog.String("error", err.Error()))
+		} else if removed > 0 {
+			log.Info("import-temp cleanup", slog.Int("removed", removed))
+		}
 	}()
+
+	// =========================================================================
+	// 11. Download worker
+	// =========================================================================
+	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
+		CipherSolver:       gojaSolver,
+		RoutedCipherSolver: cipherSolver,
+		PotProvider:        potProvider,
+		TwitchService:      twService,
+		Notifier:           notifyMgr,
+		Conn:               s.connMon,
+		TrimService:        trimSvc,
+	})
+	s.dlWorker = dlWorker
+
+	dlWorker.SetArchiveSlotsResolver(archiveSlotsResolver(s.configStore))
+
+	// The engine's process-wide reorder ceilings (downloader.reorder_buffer_mb
+	// / reorder_budget_mb). Read ONCE here and re-applied from the same
+	// applier on every config save from either UI (hot_reload.go), which is
+	// why nothing downstream — not DownloaderOptions, not the strategies —
+	// carries the value. Warns here if the saved pair is incoherent.
+	s.applyReorderBudget(cfg.Downloader)
 
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
@@ -914,6 +1023,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 		return &monitor.TabPage{Items: items, Continuation: page.Continuation}, nil
 	}
+	// The live-config read a queued scan is checked against just before it
+	// starts: a channel disabled or removed after the sweep that queued it
+	// is not scanned (W25-16).
+	backfill.ChannelEnabled = liveChannelEnabled(s.configStore)
 	s.backfillWorker = backfill
 
 	// The sweep trigger rides the feed-monitor cycle — startup and
@@ -1181,11 +1294,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// During first-run setup, the config file doesn't exist yet. Don't
 		// create it prematurely — the setup wizard's POST /api/setup/complete
 		// will save everything (including platforms) when the user finishes.
+		// UpdateIfLoaded: returning early from an Update closure still SAVES
+		// (Update saves whatever the closure did, nothing included), which
+		// created config.toml mid-setup and marked it loaded.
 		var platforms []string
-		err := s.configStore.Update(func(c *config.MoomboxConfig) {
-			if !c.ConfigLoaded {
-				return
-			}
+		_, err := s.configStore.UpdateIfLoaded(func(c *config.MoomboxConfig) {
 			existing := make(map[string]bool)
 			for _, p := range c.Cookies.Platforms {
 				existing[p] = true
@@ -1246,13 +1359,16 @@ func (s *runState) initServices(logLevelOverride string) error {
 		recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "an automatic cookie refresh")
 	}, log)
 
-	// Mirror the cookies.dpapi_fallback config flag onto the service.
-	// Read once at startup — toggling at runtime would require a
-	// restart, which is consistent with how other AutoCookieService
-	// fields work (set at construction, never re-read). DECISIONS #6.
-	s.configStore.Read(func(c *config.MoomboxConfig) {
-		autoCookieSvc.DpapiFallback = c.Cookies.DpapiFallback
-	})
+	// cookies.dpapi_fallback, read LIVE like AcquisitionMode and
+	// DpapiProfileDir above: a value mirrored once here made the setting
+	// restart-required with nothing in either UI saying so. DECISIONS #6.
+	autoCookieSvc.DpapiFallback = func() bool {
+		var on bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			on = c.Cookies.DpapiFallback
+		})
+		return on
+	}
 
 	// The other configured-directory verdict, and the ORDER is the whole point:
 	// it must come after the DpapiFallback mirror directly above, because one
@@ -1269,6 +1385,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// nothing will read) first surfaces at the next failed refresh. Silent
 	// unless the key is set AND something makes it inert.
 	autoCookieSvc.LogDpapiProfileDirVerdict()
+
+	// The cookie file the services actually use, for the worker's
+	// replace-it-by-hand advice (see CookieFileInUse).
+	dlWorker.CookieFileInUse = jar.GetFilePath
 
 	// Wire the account fingerprint the worker records on a membership park, so
 	// the credential sweep can later tell whether the account actually changed.
@@ -1299,21 +1419,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}, log))
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
-	dlWorker.OnCookieRefreshNeeded = func(platform string) bool {
+	dlWorker.OnCookieRefreshNeeded = func(platform string) worker.CookieRefreshOutcome {
 		var autoEnabled bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			autoEnabled = c.Cookies.AutoEnabled
 		})
 		if !autoEnabled {
-			// Previously a silent `return false`. That silence is why a field
-			// log read "attempting automatic cookie refresh..." immediately
-			// followed by "auto cookie refresh failed" — nothing had in fact
-			// been attempted, and no line said so. auto_enabled defaults to
-			// false, so this is the COMMON path, not an edge case.
-			log.Warn("automatic cookie refresh is disabled — nothing was attempted",
-				slog.String("setting", "cookies.auto_enabled = false"),
-				slog.String("note", "the background YouTube session refresh keeps running, but it only rotates a session that is still alive — it cannot revive dead cookies"))
-			return false
+			return jobCookieRefreshDisabled(log)
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -1353,18 +1465,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			}
 		}()
 
-		if err != nil {
-			log.Warn("auto cookie refresh error",
-				slog.String("platform", platform), slog.String("error", err.Error()))
-			return false
-		}
-		report := cookieRefreshReportFor(platform, result)
-		if report.msg != "" {
-			log.Warn(report.msg,
-				slog.String("platform", platform),
-				slog.String("note", report.note))
-		}
-		return report.ok
+		return jobCookieRefreshOutcome(log, platform, result, err)
 	}
 
 	// =========================================================================
@@ -1404,6 +1505,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	potRL.ClientIP = limiterClientIP
 	loginRL.ClientIP = limiterClientIP
 	passwordRL.ClientIP = limiterClientIP
+	// The limiters' cleanup goroutines recover their own panics and report
+	// them only to a logger set here; unset, a panic there left no trace.
+	for _, rl := range []*web.RateLimiter{apiRL, potRL, loginRL, passwordRL} {
+		rl.SetLogger(log)
+	}
 
 	s.apiRL = apiRL
 	s.potRL = potRL
@@ -1484,8 +1590,28 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// before wireMonitorCallbacks wires the backfill OnProgress producer.
 	s.tuiUpdateStatusCh = make(chan tui.UpdateStatusMsg, 2)
 	s.tuiDiskStatusCh = make(chan tui.DiskStatusMsg, 5)
+	s.diskRecheck = make(chan struct{}, 1)
 	s.tuiBackfillCh = make(chan tui.BackfillStatusMsg, 16)
 	s.backfillProgress = make(map[string]backfillProgressState)
 
 	return nil
+}
+
+// liveChannelEnabled is the backfill worker's ChannelEnabled read: whether
+// chID is configured AND enabled in the store's live config. A channel the
+// config no longer holds reads as not enabled — its queued scan is skipped,
+// and the next sweep prunes its feed history.
+func liveChannelEnabled(store *config.Store) func(chID string) bool {
+	return func(chID string) bool {
+		enabled := false
+		store.Read(func(c *config.MoomboxConfig) {
+			for i := range c.Channels {
+				if c.Channels[i].ID == chID {
+					enabled = c.Channels[i].IsEnabled()
+					return
+				}
+			}
+		})
+		return enabled
+	}
 }

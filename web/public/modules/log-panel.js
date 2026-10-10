@@ -13,6 +13,51 @@ export class LogPanelController {
     // flush them. See _flushPendingLines.
     this._pendingLines = [];
     this._pendingFrame = null;
+
+    // The server's number for the newest line of the last initial_state
+    // snapshot (payload.logSeq). See setSnapshot.
+    this._snapshotSeq = 0;
+
+    // The numbered `log` frames this connection has delivered since its last
+    // snapshot, oldest first, as { seq, line }: what a resync snapshot that
+    // reaches the tab after them must not wipe. See setSnapshot.
+    this._frames = [];
+  }
+
+  /**
+   * A new socket is about to open. The frames the last one delivered are no
+   * concern of its snapshot: a reconnect to a restarted server numbers its
+   * lines from 1 again, and a frame the old process sent is either in the new
+   * snapshot or gone with that process.
+   */
+  newConnection() {
+    this._frames = [];
+  }
+
+  /**
+   * Replace the buffer with an initial_state snapshot.
+   *
+   * The server registers a tab before it reads the log ring for the snapshot,
+   * so a line logged in between is in the snapshot AND arrives after it as a
+   * `log` frame. Each frame carries the line's number (`seq`); addLog skips a
+   * frame at or below the snapshot's newest, which it already holds. Without
+   * that, the hub's own "websocket connected" line showed twice on every
+   * connect at DEBUG. A server too old to send numbers sends neither, and
+   * nothing is skipped.
+   *
+   * The other way round on a resync — the snapshot the hub sends a lagging
+   * tab in place of a frame it dropped. It goes through the same queue as the
+   * frames, and one that a log line overtook while it was being built reaches
+   * the tab AFTER that line's frame: a frame numbered above the snapshot's
+   * newest, holding a line the snapshot does not. Replacing the buffer wiped
+   * it. The frames this connection delivered above the snapshot's number are
+   * kept, after its lines.
+   */
+  setSnapshot(lines, seq) {
+    const newer = typeof seq === "number" ? this._frames.filter((f) => f.seq > seq) : [];
+    this.logs = newer.length ? [...lines, ...newer.map((f) => f.line)].slice(-500) : lines;
+    this._frames = newer;
+    this._snapshotSeq = typeof seq === "number" ? seq : 0;
   }
 
   /** Wire up the log filter buttons, search input, scroll tracking, and clear button. */
@@ -80,7 +125,16 @@ export class LogPanelController {
     }
   }
 
-  addLog(log) {
+  /**
+   * Append one line. `seq` is the `log` frame's number, when it has one: a
+   * line the last snapshot already holds is skipped (see setSnapshot).
+   */
+  addLog(log, seq) {
+    if (typeof seq === "number") {
+      if (seq <= this._snapshotSeq) return;
+      this._frames.push({ seq, line: log });
+      if (this._frames.length > 500) this._frames.shift();
+    }
     this.logs.push(log);
     if (this.logs.length > 500) {
       this.logs = this.logs.slice(-500);

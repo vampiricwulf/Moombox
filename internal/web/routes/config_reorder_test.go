@@ -123,3 +123,17 @@ func putConfigWithReorderHook(t *testing.T, updates map[string]any, cb *ConfigRo
 	r.ServeHTTP(rec, req)
 	return store, rec
 }
+
+// TestApplyConfigUpdatesKeepsAnEmptyActivePlatforms: [] from the settings
+// form is the operator turning both platform indicators off, and must be
+// stored as an empty override, not as nil (which reads as "no override").
+//
+// MUTANT: start the list from a nil slice — the stored value is nil.
+func TestApplyConfigUpdatesKeepsAnEmptyActivePlatforms(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Cookies.ActivePlatforms = []string{"youtube"}
+	applyConfigUpdates(cfg, map[string]any{"cookies": map[string]any{"active_platforms": []any{}}})
+	if cfg.Cookies.ActivePlatforms == nil || len(cfg.Cookies.ActivePlatforms) != 0 {
+		t.Errorf("ActivePlatforms = %#v, want an empty, non-nil override", cfg.Cookies.ActivePlatforms)
+	}
+}

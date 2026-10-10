@@ -482,6 +482,12 @@ func classifyCookieDBError(err error) error {
 	if err == nil {
 		return nil
 	}
+	// Already classified (the snapshot names an unreadable -wal itself, with
+	// its own advice): wrapping it again called a permission problem a
+	// truncated or corrupt file.
+	if errors.Is(err, ErrCookieDBUnreadable) || errors.Is(err, ErrCookieDBLocked) || errors.Is(err, ErrCookieDBNotFound) {
+		return err
+	}
 	if isLockedDBError(err) {
 		return fmt.Errorf("%w — stop Firefox (or copy the profile while it is closed) and try again: %v",
 			ErrCookieDBLocked, err)

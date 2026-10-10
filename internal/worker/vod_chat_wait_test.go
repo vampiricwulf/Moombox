@@ -231,7 +231,7 @@ func TestVodChatWaitBoundReadsTheFreshRow(t *testing.T) {
 // loggedDuration finds the duration logged under key in the first captured
 // message with the given text.
 func loggedDuration(cl *captureLogger, msg, key string) (time.Duration, bool) {
-	for _, entry := range cl.msgs {
+	for _, entry := range cl.lines() {
 		if len(entry) == 0 || entry[0] != msg {
 			continue
 		}
@@ -467,7 +467,9 @@ func TestYouTubeVodChatWaitRoutesThroughResolveVodChatOutcome(t *testing.T) {
 			t.Fatalf("ReadFile %s: %v", file, err)
 		}
 		text := string(src)
-		if !strings.Contains(text, "o.resolveVodChatOutcome(ctx,") {
+		// orchestrator_twitch.go waits on its finalize session (finalCtx), the
+		// one an offline transition cannot cancel.
+		if !strings.Contains(text, "o.resolveVodChatOutcome(ctx,") && !strings.Contains(text, "o.resolveVodChatOutcome(finalCtx,") {
 			t.Errorf("%s's chat wait no longer routes a VOD through resolveVodChatOutcome — the "+
 				"slot is then held through the wait and a chat-heavy VOD is still cut at two "+
 				"minutes", file)
@@ -617,45 +619,55 @@ func TestStagingKeptForIncompleteChatKeepsOnlyTheChatCapture(t *testing.T) {
 }
 
 // TestWorkerFinishKeepsStagingForAnIncompleteChat pins the finalize half of
-// merge M5 by source inspection — the same technique
-// TestOrchestratorGoRoutesItsChatStatusWriteThroughRecordChatOutcome uses for
-// the YouTube chat write site, and for the same reason: the cleanup block
-// lives at the tail of processJob, which cannot be driven without a live
-// stream. jobNeedsStaging (above) covers the orphan scanner; this covers the
-// dir's first chance to be deleted, minutes earlier.
+// merge M5: a job that finished with its chat capture incomplete keeps its
+// staging dir, pruned down to the chat capture. jobNeedsStaging (above)
+// covers the orphan scanner; this covers the dir's first chance to be
+// deleted, minutes earlier, in cleanupStagingAfterMux — driven directly now
+// that its decision is decideStagingCleanup, where it used to be pinned by
+// reading worker.go's source.
 //
-// Mutant: dropping the preserveForChat branch — the job finishes, staging is
-// removed with the resume sidecar in it, and the chat truncation the row
-// reports becomes permanent. Second mutant: dropping the keepOnlyChatCapture
-// call from that branch — the keep silently goes back to costing the whole
-// dir for a week.
+// Mutant: dropping decideStagingCleanup's chat arm — the job finishes,
+// staging is removed with the resume sidecar in it, and the chat truncation
+// the row reports becomes permanent. Second mutant: dropping the
+// keepOnlyChatCapture call from cleanupStagingAfterMux's chat case — the keep
+// silently goes back to costing the whole dir for a week.
 func TestWorkerFinishKeepsStagingForAnIncompleteChat(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	staging, _ := muxFixtureJob(t, w, db, "j-chatkeep")
+	db.UpdateJobFields("j-chatkeep", map[string]any{
+		"status":      database.StatusFinished,
+		"chat_status": chatStatusIncomplete,
+	})
+	for name, body := range map[string]string{
+		"chat.json":             `{"messages":[]}`,
+		"chat.json.resume.json": `{"offset":12}`,
+		"video.mp4":             "muxed away",
+	} {
+		if err := os.WriteFile(filepath.Join(staging, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w.cleanupStagingAfterMux("j-chatkeep", staging)
+
+	for _, name := range []string{"chat.json", "chat.json.resume.json"} {
+		if !fileExists(filepath.Join(staging, name)) {
+			t.Errorf("%s was deleted with the staging dir — the chat capture ended incomplete, and "+
+				"its resume sidecar is what a re-run continues from", name)
+		}
+	}
+	if fileExists(filepath.Join(staging, "video.mp4")) {
+		t.Error("the muxed-away media survived the keep — only the chat capture is worth a week of disk")
+	}
+
+	// The operator-facing half: no route retries a Finished chat-incomplete
+	// job today (/retry refuses the state, /resume refuses non-YouTube and
+	// non-incomplete_tail Finished jobs), so the line must not name one.
 	src, err := os.ReadFile("worker.go")
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	text := string(src)
-	if !strings.Contains(text, "fresh.ChatStatus == chatStatusIncomplete") {
-		t.Error("worker.go's staging cleanup no longer tests the fresh row's chat_status — a job " +
-			"whose chat capture ended incomplete must keep the staging dir its resume sidecar " +
-			"lives in")
-	}
-	if !strings.Contains(text, "} else if preserveForChat {") {
-		t.Error("worker.go's staging cleanup no longer has a preserveForChat branch between the " +
-			"incomplete_tail branch and os.RemoveAll")
-	}
-	// The call moved with the block: Task 8 lifted processJob's cleanup into
-	// cleanupStagingAfterMux so the off-queue restart mux runs the same
-	// carve-outs, which renamed the argument from jobCtx.StagingDir to the
-	// function's own stagingDir parameter. Same branch, same call.
-	if !strings.Contains(text, "keepOnlyChatCapture(stagingDir)") {
-		t.Error("worker.go's preserveForChat branch no longer prunes the staging dir down to the " +
-			"chat capture — the muxed-away media would be shielded for a week too")
-	}
-	// The operator-facing half: no route retries a Finished chat-incomplete
-	// job today (/retry refuses the state, /resume refuses non-YouTube and
-	// non-incomplete_tail Finished jobs), so the line must not name one.
-	if strings.Contains(text, "the chat resume sidecar stays for a later Retry") {
+	if strings.Contains(string(src), "the chat resume sidecar stays for a later Retry") {
 		t.Error("worker.go's chat-keep Warn still promises a \"later Retry\" — no handler allows " +
 			"that for a Finished chat-incomplete job")
 	}

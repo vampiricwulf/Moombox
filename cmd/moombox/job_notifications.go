@@ -57,3 +57,28 @@ func notifyStreamFound(n notifications.Sender, job *database.Job, channelURL, ca
 	f.Category = category
 	n.Send(notifications.StreamFound(f))
 }
+
+// cancelJobFromTUI is the TUI's cancel. A cancel that flags an actively
+// processing run leaves "Job Cancelled" to that run's handleCancellation; a
+// job no run holds — parked in COOKIES?, Queued for an archive slot, waiting
+// to be picked up — or whose run has already settled its outcome (a failure
+// recorded, a requeue) has nobody to send it, and the TUI sent nothing where
+// the Web's cancel route (internal/web/routes/jobs.go) sends it itself. In
+// edit mode that also left the job's message short of its terminal state, and
+// the tracker holding it.
+//
+// It reports whether the job was cancelled. The TUI decides on the row its
+// list last showed, and a job that finished, failed or was cancelled since is
+// not (CancelJob does not write over an outcome): the TUI says so rather than
+// "Cancelled", and nobody announces a cancel that did not happen.
+func (s *runState) cancelJobFromTUI(jobID string) bool {
+	job, _ := s.db.GetJob(jobID)
+	cancelled, flagged := s.dlWorker.CancelJob(jobID)
+	if !cancelled || flagged || job == nil {
+		return cancelled
+	}
+	if s.notifyMgr != nil && s.notifyMgr.HasTargets() {
+		s.notifyMgr.Send(notifications.JobCancelled(worker.NotifyFacts(job)))
+	}
+	return true
+}

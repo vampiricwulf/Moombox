@@ -1,11 +1,15 @@
 package main
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TestCLIAddedFactsGainsAThumbnailAndChannel is audit row #23/#24: the CLI add
@@ -132,4 +136,97 @@ func TestNotifyStreamFoundIsOneEmbedForBothMonitors(t *testing.T) {
 			t.Error("the Twitch find has no channel-page link")
 		}
 	})
+}
+
+// A cancel that flags an actively processing run leaves "Job Cancelled" to
+// that run; a job no run holds — parked in COOKIES?, Queued for an archive
+// slot — has nobody to send it. The Web's cancel route sends it itself; the
+// TUI's sent nothing for the same cancel.
+//
+// Mutant: cancelJobFromTUI without the send — no cancelled notification.
+func TestATUICancelOfAJobNoRunHoldsIsAnnounced(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rec := notificationtest.New()
+	s := &runState{
+		db:        db,
+		notifyMgr: rec,
+		dlWorker:  worker.NewDownloadWorker(db, nil, config.Defaults(), sweepTestLogger{}, &worker.DownloadWorkerDeps{Notifier: rec}),
+	}
+	for _, st := range []database.JobStatus{database.StatusCookies, database.StatusQueued} {
+		id := "job-" + string(st)
+		if ok, err := db.AddJob(&database.Job{ID: id, VideoID: id, Title: "t", ChannelName: "Chan", Platform: "youtube", Status: st}); err != nil || !ok {
+			t.Fatalf("AddJob: %v", err)
+		}
+		if !s.cancelJobFromTUI(id) {
+			t.Errorf("%s: cancelJobFromTUI reported no cancel", st)
+		}
+		if j, _ := db.GetJob(id); j == nil || j.Status != database.StatusCancelled {
+			t.Errorf("%s: row = %+v, want Cancelled", st, j)
+		}
+	}
+	if got := len(rec.ByEvent("cancelled")); got != 2 {
+		t.Errorf("cancelled notifications = %d, want 2", got)
+	}
+}
+
+// The TUI cancels the row its list last showed, and the job may have
+// finished, failed or been cancelled since. That job keeps the outcome it
+// reached, the TUI is told nothing was cancelled so it can say so, and no
+// "Job Cancelled" goes out for it.
+//
+// Mutants: CancelJob writing with UpdateJobFields — each outcome becomes
+// Cancelled and is announced; cancelJobFromTUI answering true whatever
+// CancelJob said — the TUI reports a cancel.
+func TestATUICancelOfAnEndedJobIsNotACancel(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rec := notificationtest.New()
+	s := &runState{
+		db:        db,
+		notifyMgr: rec,
+		dlWorker:  worker.NewDownloadWorker(db, nil, config.Defaults(), sweepTestLogger{}, &worker.DownloadWorkerDeps{Notifier: rec}),
+	}
+	for _, st := range []database.JobStatus{database.StatusFinished, database.StatusError, database.StatusCancelled} {
+		id := "job-" + string(st)
+		if ok, err := db.AddJob(&database.Job{ID: id, VideoID: id, Title: "t", ChannelName: "Chan", Platform: "youtube", Status: st}); err != nil || !ok {
+			t.Fatalf("AddJob: %v", err)
+		}
+		if s.cancelJobFromTUI(id) {
+			t.Errorf("%s: cancelJobFromTUI reported a cancel", st)
+		}
+		if j, _ := db.GetJob(id); j == nil || j.Status != st {
+			t.Errorf("%s: row = %+v, want it left %s", st, j, st)
+		}
+	}
+	if got := len(rec.ByEvent("cancelled")); got != 0 {
+		t.Errorf("cancelled notifications = %d for jobs nothing cancelled, want 0", got)
+	}
+}
+
+// `moombox add` has no log of its own, so the notification manager's warnings
+// and errors go to the operator's terminal — it used nopLogger, and a webhook
+// that refused the embed failed without a trace. Its routine lines stay off
+// the terminal.
+//
+// Mutants: a logger at Info level — the routine line prints; the old
+// nopLogger — the failure does not.
+func TestCLINotifyLoggerShowsFailuresOnly(t *testing.T) {
+	var buf strings.Builder
+	log := cliNotifyLogger(&buf)
+	log.Info("notification delivered", "target", "discord")
+	log.Warn("notification delivery failed", "status", 401)
+	out := buf.String()
+	if !strings.Contains(out, "notification delivery failed") || !strings.Contains(out, "status=401") {
+		t.Errorf("the failure is not on the terminal: %q", out)
+	}
+	if strings.Contains(out, "notification delivered") {
+		t.Errorf("a routine line reached the terminal: %q", out)
+	}
 }

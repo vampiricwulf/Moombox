@@ -64,6 +64,10 @@ func ClampRunes(s string, limit int) string {
 // `<` and `>` are here because Discord's <t:…>, <@…>, <#…> and <:emoji:id>
 // forms all open with one; a stream title containing "<3" would otherwise
 // start something that swallows the rest of the line.
+//
+// `[` and `]` are here because Discord renders a masked link, [text](url), in
+// descriptions and field values: a stream title "[Claim prize](https://…)"
+// became a clickable link whose target the reader never sees.
 var markdownEscaper = strings.NewReplacer(
 	`\`, `\\`,
 	"*", `\*`,
@@ -73,6 +77,8 @@ var markdownEscaper = strings.NewReplacer(
 	"`", "\\`",
 	"<", `\<`,
 	">", `\>`,
+	"[", `\[`,
+	"]", `\]`,
 )
 
 // EscapeMarkdown neutralises Discord markdown in job-supplied text.
@@ -83,9 +89,10 @@ var markdownEscaper = strings.NewReplacer(
 // Starts At, Old/New Time and Outage Alert fields): escaping those turns a
 // live relative timestamp into literal text.
 //
-// This is formatting safety, not injection safety. An embed can never mention
-// anyone (see buildPayload's mention handling), so the worst an unescaped
-// title can do is render italic.
+// An embed can never mention anyone (see buildPayload's mention handling), so
+// what an unescaped title can do is limited to how it renders: italics, a
+// spoiler, a heading — or a masked link that hides where it points, which is
+// why the brackets are escaped too.
 func EscapeMarkdown(s string) string {
 	if s == "" {
 		return ""
@@ -138,6 +145,18 @@ func clampEmbed(e *discordEmbed) {
 	if e.Footer != nil {
 		e.Footer.Text = ClampRunes(e.Footer.Text, limitFooter)
 	}
+	// Discord answers a field with an empty name or value with a 400, which
+	// deliver treats as permanent: the whole embed is dropped. Several sends
+	// fill a field straight from the row (a channel name, a video ID, a
+	// title) that a manually-added or channel-less job leaves empty, so the
+	// field goes rather than the message.
+	kept := make([]discordField, 0, len(e.Fields))
+	for _, f := range e.Fields {
+		if strings.TrimSpace(f.Name) != "" && strings.TrimSpace(f.Value) != "" {
+			kept = append(kept, f)
+		}
+	}
+	e.Fields = kept
 	if len(e.Fields) > limitFields {
 		e.Fields = e.Fields[:limitFields]
 	}

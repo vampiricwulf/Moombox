@@ -1,10 +1,15 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // TestCookieRefreshReportFor pins the worker-facing wording for every verdict,
@@ -134,5 +139,163 @@ func TestCookieRefreshReportFor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCookieRefreshErrorLine: a job-triggered refresh that skipped a profile
+// another browser holds (cookies.ErrProfileInUse) was logged as "auto cookie
+// refresh error". The pass declined and launched nothing, and its sentence
+// names the host and the lock to delete, so the line says "skipped" and carries
+// the sentence as the reason, and the worker is told it was skipped. Any other
+// error keeps its line and is not a restore.
+//
+// Mutants (checked): the ErrProfileInUse arm removed — the held profile's line
+// is the error one again; that arm answering CookieRefreshNotRestored — the
+// worker follows the skip with its failed-refresh advice.
+func TestCookieRefreshErrorLine(t *testing.T) {
+	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
+	msg, attr, outcome := cookieRefreshErrorLine(held)
+	if msg != "automatic cookie refresh skipped — a browser holds the profile" {
+		t.Errorf("held profile: message %q, want the skip line", msg)
+	}
+	if attr.Key != "reason" || attr.Value.String() != held.Error() {
+		t.Errorf("held profile: attribute %s=%q, want reason=<the sentence>", attr.Key, attr.Value.String())
+	}
+	if outcome != worker.CookieRefreshSkipped {
+		t.Errorf("held profile: outcome %v, want CookieRefreshSkipped", outcome)
+	}
+
+	other := errors.New("start headless browser: exec: no such file")
+	msg, attr, outcome = cookieRefreshErrorLine(other)
+	if msg != "auto cookie refresh error" || attr.Key != "error" || attr.Value.String() != other.Error() {
+		t.Errorf("other error: %q %s=%q, want the error line unchanged", msg, attr.Key, attr.Value.String())
+	}
+	if outcome != worker.CookieRefreshNotRestored {
+		t.Errorf("other error: outcome %v, want CookieRefreshNotRestored", outcome)
+	}
+}
+
+// jobRefreshLogger records Warn lines with their attributes rendered, so a
+// test can assert on what the job-triggered refresh logged. The other three
+// levels are discarded.
+type jobRefreshLogger struct {
+	warns []string
+}
+
+func (l *jobRefreshLogger) Debug(string, ...any) {}
+func (l *jobRefreshLogger) Info(string, ...any)  {}
+func (l *jobRefreshLogger) Error(string, ...any) {}
+func (l *jobRefreshLogger) Warn(msg string, args ...any) {
+	var b strings.Builder
+	b.WriteString(msg)
+	for _, a := range args {
+		if attr, ok := a.(slog.Attr); ok {
+			b.WriteString(" " + attr.Key + "=" + attr.Value.String())
+		}
+	}
+	l.warns = append(l.warns, b.String())
+}
+
+// TestJobCookieRefreshOutcome pins the closure-to-worker contract of the
+// job-triggered refresh: what OnCookieRefreshNeeded logs and what it tells
+// the worker. The held profile is the row this exists for. The closure logged
+// its skip line and answered false, and the worker, which could not tell that
+// false from a failure, followed the skip with "auto cookie refresh failed —
+// the cookie file has to be replaced by hand". It answers
+// worker.CookieRefreshSkipped now, which the worker leaves parked without the
+// advice (TestHeldProfileSkipIsNotCalledAFailedRefresh in internal/worker).
+//
+// The RefreshUnknown row of a pass that ran is the same defect in another
+// shape: it could not tell, concluded nothing about the cookies, and the
+// worker still followed it with the advice to replace them. It answers
+// worker.CookieRefreshUnconfirmed now, which the worker logs as "could not
+// confirm — the job stays parked" (TestUnfailedRefreshOutcomesAreNotCalled
+// Failures in internal/worker). A pass that found no credentials at all is a
+// conclusive failure and keeps NotRestored, and so does a pass that declined
+// to run: the owner ruling of 2026-10-09 names the refresh that RAN, and one
+// way to decline is a jar left with no auth cookie at all, which the pass
+// that pruned it reported as a failure.
+//
+// Mutants (checked): the error arm answering CookieRefreshNotRestored instead
+// of cookieRefreshErrorLine's outcome — the held row fails; the report's ok
+// not mapped to CookieRefreshRestored — the verified row fails; the
+// RefreshUnknown mapping removed — the could-not-tell row fails; that mapping
+// made unconditional — the rejected and no-credentials rows fail; its Ran
+// condition dropped — the declined row fails.
+func TestJobCookieRefreshOutcome(t *testing.T) {
+	held := fmt.Errorf("%w by desktop-pc — close it there, or delete %q", cookies.ErrProfileInUse, "/profile/SingletonLock")
+	verified := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshOK, YouTubeStored: true}
+	rejected := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed, YouTubeStored: true}
+	noCredentials := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed}
+	couldNotTell := cookies.RefreshResult{Ran: true}
+	declined := cookies.RefreshResult{}
+
+	cases := []struct {
+		name     string
+		result   cookies.RefreshResult
+		err      error
+		want     worker.CookieRefreshOutcome
+		wantWarn string // "" for no line
+	}{
+		{"held profile is a skip", cookies.RefreshResult{Mechanism: cookies.RefreshMechanismBrowser}, held,
+			worker.CookieRefreshSkipped, "automatic cookie refresh skipped — a browser holds the profile platform=youtube reason=" + held.Error()},
+		{"another error is not a restore", cookies.RefreshResult{}, errors.New("start headless browser: exec: no such file"),
+			worker.CookieRefreshNotRestored, "auto cookie refresh error platform=youtube error=start headless browser: exec: no such file"},
+		{"a verified platform is restored", verified, nil, worker.CookieRefreshRestored, ""},
+		{"rejected credentials are not a restore", rejected, nil,
+			worker.CookieRefreshNotRestored, "automatic cookie refresh ran and the credentials are still rejected"},
+		{"no credentials at all is a failure", noCredentials, nil,
+			worker.CookieRefreshNotRestored, "automatic cookie refresh ran and cookies.txt now holds no credentials for this platform"},
+		{"a pass that could not tell is unconfirmed", couldNotTell, nil,
+			worker.CookieRefreshUnconfirmed, "automatic cookie refresh ran but could not establish whether these cookies work"},
+		{"a declined pass keeps the failure line", declined, nil,
+			worker.CookieRefreshNotRestored, "automatic cookie refresh declined to run, so nothing was learned about these cookies"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &jobRefreshLogger{}
+			if got := jobCookieRefreshOutcome(log, "youtube", tc.result, tc.err); got != tc.want {
+				t.Errorf("outcome %v, want %v", got, tc.want)
+			}
+			switch {
+			case tc.wantWarn == "" && len(log.warns) != 0:
+				t.Errorf("logged %q, want nothing", log.warns)
+			case tc.wantWarn != "" && (len(log.warns) != 1 || !strings.HasPrefix(log.warns[0], tc.wantWarn)):
+				t.Errorf("logged %q, want one line starting %q", log.warns, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestJobCookieRefreshDisabled: with cookies.auto_enabled off — the default —
+// the closure attempts nothing, says so, and answered the worker the way a
+// failed refresh does, so the worker's next line was "auto cookie refresh
+// failed — the cookie file has to be replaced by hand" for a refresh nobody
+// ran. It answers worker.CookieRefreshOff now, which the worker logs as
+// "automatic cookie refresh is off — replace the cookie file or turn it on
+// in Settings". The second half pins the call: the closure itself needs the
+// whole construction graph, so its off branch is read from the source, the
+// way the other wiring pins in this package read theirs.
+//
+// Mutants (checked): jobCookieRefreshDisabled answering CookieRefreshNotRestored
+// — the outcome check fails; the closure's off branch returning
+// CookieRefreshNotRestored itself again — the source pin fails.
+func TestJobCookieRefreshDisabled(t *testing.T) {
+	log := &jobRefreshLogger{}
+	if got := jobCookieRefreshDisabled(log); got != worker.CookieRefreshOff {
+		t.Errorf("outcome %v, want CookieRefreshOff", got)
+	}
+	const want = "automatic cookie refresh is disabled — nothing was attempted setting=cookies.auto_enabled = false"
+	if len(log.warns) != 1 || !strings.HasPrefix(log.warns[0], want) {
+		t.Errorf("logged %q, want one line starting %q", log.warns, want)
+	}
+
+	src, err := os.ReadFile("services.go")
+	if err != nil {
+		t.Fatalf("read services.go: %v", err)
+	}
+	const branch = "\t\tif !autoEnabled {\n\t\t\treturn jobCookieRefreshDisabled(log)\n\t\t}\n"
+	if !strings.Contains(string(src), branch) {
+		t.Errorf("the OnCookieRefreshNeeded closure's auto_enabled=false branch is not\n%s— the worker would not be told the refresh is off", branch)
 	}
 }

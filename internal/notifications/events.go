@@ -19,7 +19,7 @@ type EventGroup struct {
 // unregistered event is silently unfilterable AND stripped from
 // hand-edited configs on the next UI save.
 var EventGroups = []EventGroup{
-	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "muxing", "finished", "error", "cancelled", "auth"}},
+	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "muxing", "finished", "error", "cancelled", "auth", "auth_recovered"}},
 	// connectivity_restored fires the post-restore "Outage Alert" (start/
 	// end/duration). There is deliberately NO connectivity_lost event: a
 	// lost-connectivity webhook has no connectivity to deliver over, so the
@@ -96,6 +96,24 @@ var eventAliases = map[string]string{
 	"disk_ok":          "disk_warning",
 	"channel_healthy":  "channel_unhealthy",
 	"sidecar_restored": "sidecar_down",
+	// "Authentication Recovered" and "Parked Jobs Re-evaluated" sent the
+	// alert's own key, so wherever auth was mention-eligible — it is in the
+	// default six — the recovery pinged the role like the failure did.
+	"auth_recovered": "auth",
+}
+
+// closeEvents names the CLOSE entries of eventAliases. A close follows its
+// alert's DELIVERY filter but not its MENTION (mentionFor): a ping exists to
+// get someone to act, and an all-clear asks nothing of anyone. Following the
+// alias there pinged the role for "BotGuard Sidecar Restored" under the
+// default mention set, which holds sidecar_down, and for disk_ok /
+// channel_healthy wherever their alert was mention-eligible. A target that
+// wants a close pinged names it in mention_events itself.
+var closeEvents = map[string]bool{
+	"disk_ok":          true,
+	"channel_healthy":  true,
+	"sidecar_restored": true,
+	"auth_recovered":   true,
 }
 
 // AliasOf returns the older, broader event a newer key splits from, or "" when

@@ -4,18 +4,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -51,7 +55,6 @@ var (
 	dirTighteningAllowed = utils.DirTighteningAllowed
 )
 
-// Defaults returns a new MoomboxConfig with all default values applied.
 // boolPtr returns a pointer to b. Used for *bool config fields whose default is
 // a concrete value (a feature that is on unless explicitly disabled), where a
 // plain bool couldn't distinguish "absent" from "explicitly false".
@@ -118,6 +121,7 @@ func mbToBytes(mb int) int {
 	return mb << 20
 }
 
+// Defaults returns a new MoomboxConfig with all default values applied.
 func Defaults() *MoomboxConfig {
 	// The two arm64-conditional downloader defaults; see platformDefaults.
 	reorderPerJobMB, reorderBudgetMB := platformDefaults(runtime.GOARCH)
@@ -272,6 +276,7 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	if _, err := toml.Decode(string(data), &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse config %s for migration: %w", path, err)
 	}
+	resolveFlexDurationStrings(cfg, raw)
 	migrateOldFormat(cfg, raw)
 
 	// Auto-populate sections introduced after this config file was
@@ -292,10 +297,42 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 		cfg.NeedsAutoPersist = true
 	}
 
+	cfg.IgnoredOnLoad = retiredKeysIn(raw)
+
 	cfg.ConfigLoaded = true
 	cfg.LoadedFrom = path
+	for _, issue := range Validate(cfg) {
+		cfg.NormalizedOnLoad = append(cfg.NormalizedOnLoad, issue.Error())
+	}
 	Normalize(cfg)
 	return cfg, nil
+}
+
+// retiredKeys are keys an older config.toml may hold that nothing reads any
+// more, by section. downloader.po_token and downloader.visitor_data were
+// accepted and saved as a "manual PO token override" that no code path ever
+// consulted; PO tokens are minted per session by the BotGuard integration
+// ([bgutils]), and a pasted one would expire within hours anyway.
+var retiredKeys = map[string][]string{
+	"downloader": {"po_token", "visitor_data"},
+}
+
+// retiredKeysIn returns the retiredKeys present in raw as "section.key",
+// sorted by section then in retiredKeys order.
+func retiredKeysIn(raw map[string]any) []string {
+	var found []string
+	for _, section := range slices.Sorted(maps.Keys(retiredKeys)) {
+		table, ok := raw[section].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range retiredKeys[section] {
+			if _, ok := table[key]; ok {
+				found = append(found, section+"."+key)
+			}
+		}
+	}
+	return found
 }
 
 // migrateOldFormat handles migration from the old flat config format to the
@@ -582,7 +619,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	if cfg.Network.PublicURL != "" {
 		canonical, err := ValidatePublicURL(cfg.Network.PublicURL)
 		if err != nil {
-			fail("network.public_url %q is not usable: %v", cfg.Network.PublicURL, err)
+			// URLUserinfo: the value is quoted back, and a hand-edited
+			// https://user:password@host is refused for exactly the part
+			// that must not be — Load turns this into a Warn on every boot.
+			fail("network.public_url %q is not usable: %v", redact.URLUserinfo(cfg.Network.PublicURL), err)
 			if !reportOnly {
 				cfg.Network.PublicURL = ""
 			}
@@ -680,7 +720,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Monitors.DecapiCheckInterval = nil
 		}
 	}
-	// Aligned with the PUT /api/config Zod schema (config_routes.go:142)
+	// Aligned with PUT /api/config's validateConfigUpdates (config_routes.go)
 	// so a hand-edited TOML can't sneak in a value the web UI rejects.
 	// 1-second polling against Twitch's GQL endpoint floods their rate
 	// limiter; 5 seconds is the established minimum that matches the
@@ -692,7 +732,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Monitors.TwitchCheckInterval = nil
 		}
 	}
-	// Bounds match the PUT /api/config Zod schema (config_routes.go) so a
+	// Bounds match PUT /api/config's validateConfigUpdates (config_routes.go) so a
 	// hand-edited TOML can't get past Validate with a value the web UI
 	// would have rejected. 1KB lower bound prevents pathological log
 	// rotation; 1GB upper bound prevents accidental disk exhaustion.
@@ -773,6 +813,14 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	}
 	if d.OutputTemplate == "" {
 		fail("downloader.output_template must not be empty")
+		if !reportOnly {
+			d.OutputTemplate = defaults.Downloader.OutputTemplate
+		}
+	}
+	// One rule for every writer: the web PUT capped the template and the TUI
+	// and a hand-edited file did not.
+	if len(d.OutputTemplate) > OutputTemplateMaxLen {
+		fail("downloader.output_template must be at most %d characters", OutputTemplateMaxLen)
 		if !reportOnly {
 			d.OutputTemplate = defaults.Downloader.OutputTemplate
 		}
@@ -961,6 +1009,40 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	// channels[].id: every writer stores a trimmed ID and refuses one a
+	// channel already has (utils.NormalizeChannelID, and the duplicate checks
+	// of PUT /api/config, POST /api/config/channels and both TUI editors),
+	// comparing case-insensitively — a Twitch login is, and two spellings of
+	// one channel are one channel monitored twice, which the dashboard's
+	// Remove then left half-removed. A hand-edited file can still carry
+	// either. Normalize trims the ID and drops the later duplicate, the entry
+	// every lookup by ID already passed over; the slice is rebuilt rather
+	// than compacted in place, so a Store rollback's header and a Snapshot
+	// reader's array are never written through.
+	{
+		seen := make(map[string]int, len(cfg.Channels))
+		kept := make([]ChannelConfig, 0, len(cfg.Channels))
+		changed := false
+		for i, ch := range cfg.Channels {
+			if id := strings.TrimSpace(ch.ID); id != ch.ID {
+				fail("channels[%d].id %q has surrounding whitespace", i, ch.ID)
+				ch.ID = id
+				changed = true
+			}
+			key := strings.ToLower(ch.ID)
+			if first, dup := seen[key]; dup && ch.ID != "" {
+				fail("channels[%d].id %q duplicates channels[%d]", i, ch.ID, first)
+				changed = true
+				continue
+			}
+			seen[key] = i
+			kept = append(kept, ch)
+		}
+		if changed && !reportOnly {
+			cfg.Channels = kept
+		}
+	}
+
 	// Channel-level quality_preference (applies to both YouTube and Twitch)
 	// and archive_window_days/archive_slots overrides.
 	for i := range cfg.Channels {
@@ -971,13 +1053,13 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				ch.QualityPreference = ""
 			}
 		}
-		if ch.ArchiveWindowDays != nil && (*ch.ArchiveWindowDays < 1 || *ch.ArchiveWindowDays > 3650) {
+		if ch.ArchiveWindowDays != nil && !channelWindowInRange(*ch.ArchiveWindowDays) {
 			fail("channel %q archive_window_days %d out of range 1..3650", ch.Name, *ch.ArchiveWindowDays)
 			if !reportOnly {
 				ch.ArchiveWindowDays = nil // clear override → falls back to global
 			}
 		}
-		if ch.ArchiveSlots != nil && (*ch.ArchiveSlots < 1 || *ch.ArchiveSlots > 100) {
+		if ch.ArchiveSlots != nil && !channelSlotsInRange(*ch.ArchiveSlots) {
 			fail("channel %q archive_slots %d out of range 1..100", ch.Name, *ch.ArchiveSlots)
 			if !reportOnly {
 				ch.ArchiveSlots = nil
@@ -1038,6 +1120,41 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	return errs
+}
+
+// channelWindowInRange and channelSlotsInRange are the per-channel
+// archive_window_days / archive_slots bounds, shared by Validate and
+// ChannelOverrideErrors so the file loader and the web writers cannot drift.
+func channelWindowInRange(days int) bool { return days >= 1 && days <= 3650 }
+func channelSlotsInRange(slots int) bool { return slots >= 1 && slots <= 100 }
+
+// ChannelOverrideErrors returns, keyed by JSON field name, each per-channel
+// override Validate refuses: an unknown quality_preference, or an
+// archive_window_days / archive_slots outside 1..3650 / 1..100. nil when the
+// entry is sound.
+//
+// For the web writers — PUT /api/config's channels[] and POST
+// /api/config/channels — to answer 400 naming the field. Without it they
+// accepted the value, Save's Validate then refused the config, and the
+// cause was lost in a bare 500 "failed to save config".
+func ChannelOverrideErrors(ch ChannelConfig) map[string]string {
+	var errs map[string]string
+	add := func(field, msg string) {
+		if errs == nil {
+			errs = map[string]string{}
+		}
+		errs[field] = msg
+	}
+	if ch.QualityPreference != "" && !validQualityPreferences[ch.QualityPreference] {
+		add("quality_preference", fmt.Sprintf("unknown quality_preference %q", ch.QualityPreference))
+	}
+	if ch.ArchiveWindowDays != nil && !channelWindowInRange(*ch.ArchiveWindowDays) {
+		add("archive_window_days", "archive_window_days must be between 1 and 3650")
+	}
+	if ch.ArchiveSlots != nil && !channelSlotsInRange(*ch.ArchiveSlots) {
+		add("archive_slots", "archive_slots must be between 1 and 100")
+	}
 	return errs
 }
 
@@ -1168,11 +1285,12 @@ func Save(cfg *MoomboxConfig, path string) error {
 }
 
 // GetActivePlatforms determines which platforms are active for cookie status
-// display. If ActivePlatforms is explicitly set, it is used as-is. Otherwise,
-// the function infers active platforms from the enabled channels list.
+// display. If ActivePlatforms is explicitly set (non-nil — an empty list means
+// both off), it is used as-is. Otherwise it falls back to the verified
+// Platforms list, then infers active platforms from the enabled channels.
 func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
-	// 1. Explicit override (user set via settings)
-	if len(cfg.Cookies.ActivePlatforms) > 0 {
+	// 1. Explicit override (user set via settings), including "neither"
+	if cfg.Cookies.ActivePlatforms != nil {
 		for _, p := range cfg.Cookies.ActivePlatforms {
 			switch strings.ToLower(p) {
 			case "youtube":
@@ -1237,10 +1355,88 @@ func sanitizeTemplateStr(s string) string {
 	return strings.TrimSpace(invalidFSChars.ReplaceAllString(s, ""))
 }
 
+// Byte budgets for the two free-text variables. Linux filesystems cap a name
+// at 255 BYTES, and the CJK the sanitizer keeps is three bytes a character:
+// a 90-character Japanese title made "<title> [<id>].mp4" too long to create,
+// so the finalize failed with ENAMETOOLONG. With the default template a title
+// of templateTitleMaxBytes leaves room for the id and the longest suffix a
+// job writes beside its archive (" - partN", ".restart-<unix ts>-N",
+// ".chat.json"). No ASCII title reaches it — YouTube allows 100 characters,
+// Twitch 140. A channel is normally a directory of its own, so it only needs
+// to fit by itself.
+//
+// Those caps fit the default layout only. A template that puts both variables
+// in one component ("${channel} - ${title} [${id}]") could still resolve past
+// 255 bytes, so ResolveTemplate also fits every component it produces
+// (fitTemplateComponents): a directory to a whole name, the archive's own
+// name to templateStemMaxBytes.
+const (
+	templateTitleMaxBytes   = 180
+	templateChannelMaxBytes = 200
+
+	// templateNameMaxBytes is a filesystem name: a directory component.
+	templateNameMaxBytes = 255
+	// templateStemMaxBytes is the archive's own name, the last component. A
+	// job writes suffixes beside it, the longest being
+	// " - part999.restart-<unix ts>-99.chat.json" (42 bytes); this leaves
+	// room for it, and is what the default template comes to at the caps
+	// above with an 18-byte Twitch id.
+	templateStemMaxBytes = templateNameMaxBytes - 45
+	// templateFreeTextFloorBytes is as far as fitting a component shrinks a
+	// title or a channel; past it the component itself is cut.
+	templateFreeTextFloorBytes = 30
+)
+
+// TemplateTitleMaxBytes is templateTitleMaxBytes for a name built without a
+// template: the archive import cuts the title in its file names to the same
+// budget (importStem, internal/web/routes/import_routes.go).
+const TemplateTitleMaxBytes = templateTitleMaxBytes
+
+// truncateUTF8 cuts s to at most max bytes on a rune boundary.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(s[:cut])
+}
+
+// guardReservedComponents prefixes "_" to every path component of p that
+// names a Windows device (utils.IsWindowsReservedName) — a channel called
+// "CON" under the default "${channel}/..." layout made MkdirAll fail at every
+// finalize on Windows. Applied on every platform so an archive gets the same
+// name wherever it is written.
+func guardReservedComponents(p string) string {
+	var b strings.Builder
+	start := 0
+	for i := 0; i <= len(p); i++ {
+		if i < len(p) && p[i] != '/' && p[i] != '\\' {
+			continue
+		}
+		if c := p[start:i]; utils.IsWindowsReservedName(c) {
+			b.WriteByte('_')
+		}
+		b.WriteString(p[start:i])
+		if i < len(p) {
+			b.WriteByte(p[i])
+		}
+		start = i + 1
+	}
+	return b.String()
+}
+
+// OutputTemplateMaxLen is the longest downloader.output_template accepted, in
+// bytes — by config.Validate for every writer, and by the web PUT and the TUI
+// settings up front so the refusal names the field.
+const OutputTemplateMaxLen = 500
+
 // ResolveTemplate resolves an output template with the given variables.
 func ResolveTemplate(template string, vars TemplateVariables) string {
-	safeTitle := sanitizeTemplateStr(vars.Title)
-	safeChannel := sanitizeTemplateStr(vars.Channel)
+	safeTitle := truncateUTF8(sanitizeTemplateStr(vars.Title), templateTitleMaxBytes)
+	safeChannel := truncateUTF8(sanitizeTemplateStr(vars.Channel), templateChannelMaxBytes)
 
 	now := time.Now()
 	if vars.Date != nil {
@@ -1249,11 +1445,116 @@ func ResolveTemplate(template string, vars TemplateVariables) string {
 		}
 	}
 
-	return strings.NewReplacer(
-		"${title}", safeTitle,
-		"${id}", vars.ID,
-		"${channel}", safeChannel,
-		"${start_date}", now.Format("20060102"),
-		"${start_time}", now.Format("1504"),
-	).Replace(template)
+	resolve := func(title, channel string) string {
+		return strings.NewReplacer(
+			"${title}", title,
+			"${id}", vars.ID,
+			"${channel}", channel,
+			"${start_date}", now.Format("20060102"),
+			"${start_time}", now.Format("1504"),
+		).Replace(template)
+	}
+	return guardReservedComponents(fitTemplateComponents(template, safeTitle, safeChannel, resolve))
+}
+
+// splitTemplatePath splits a template, or a path resolved from one, into its
+// components. The sanitized values carry no separator, so a template and its
+// resolution split into the same number of components, in the same order.
+// Empty components ("a//b", a leading "/") are dropped, as is one whose
+// value resolved empty — the count check in fitTemplateComponents covers that.
+func splitTemplatePath(p string) []string {
+	return strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+}
+
+// fitTemplateComponents resolves the template and shrinks title and channel —
+// only where they appear, and the longer one first — until every component
+// fits (templateNameMaxBytes, templateStemMaxBytes for the last). The literal
+// text and the id are never shrunk, so a name keeps the id that tells two
+// archives apart. A component that still does not fit once both are at
+// templateFreeTextFloorBytes (a template of long literals) is cut on a rune
+// boundary as a last resort.
+func fitTemplateComponents(template, title, channel string, resolve func(title, channel string) string) string {
+	tmplParts := splitTemplatePath(template)
+	for {
+		parts := splitTemplatePath(resolve(title, channel))
+		if len(parts) != len(tmplParts) {
+			break // a component resolved empty; the cut below still applies
+		}
+		shrunk := false
+		for i, part := range parts {
+			over := len(part) - componentBudget(i, len(parts))
+			if over <= 0 {
+				continue
+			}
+			hasTitle := strings.Contains(tmplParts[i], "${title}")
+			hasChannel := strings.Contains(tmplParts[i], "${channel}")
+			shrinkTitle := hasTitle && len(title) > templateFreeTextFloorBytes
+			shrinkChannel := hasChannel && len(channel) > templateFreeTextFloorBytes
+			switch {
+			case shrinkTitle && shrinkChannel && len(title) >= len(channel):
+				title = shrinkFreeText(title, over, len(channel))
+			case shrinkTitle && shrinkChannel:
+				channel = shrinkFreeText(channel, over, len(title))
+			case shrinkTitle:
+				title = shrinkFreeText(title, over, 0)
+			case shrinkChannel:
+				channel = shrinkFreeText(channel, over, 0)
+			default:
+				continue // nothing here can shrink; the cut handles it
+			}
+			shrunk = true
+			break
+		}
+		if !shrunk {
+			break
+		}
+	}
+	return cutTemplateComponents(resolve(title, channel))
+}
+
+// shrinkFreeText cuts s by over bytes, but no shorter than other — the
+// free-text value sharing its component, so the two end up level instead of
+// one being cut away for the other — and never below
+// templateFreeTextFloorBytes. Once s is level with other, it gives up half the
+// overflow and the other value the rest on the next pass.
+func shrinkFreeText(s string, over, other int) string {
+	target := len(s) - over
+	if len(s) > other {
+		target = max(target, other)
+	} else {
+		target = len(s) - (over+1)/2
+	}
+	return truncateUTF8(s, max(templateFreeTextFloorBytes, target))
+}
+
+// componentBudget is the byte budget of component i of n.
+func componentBudget(i, n int) int {
+	if i == n-1 {
+		return templateStemMaxBytes
+	}
+	return templateNameMaxBytes
+}
+
+// cutTemplateComponents cuts any component of p still over its budget,
+// keeping the separators as written.
+func cutTemplateComponents(p string) string {
+	n := len(splitTemplatePath(p))
+	var b strings.Builder
+	start, idx := 0, 0
+	for i := 0; i <= len(p); i++ {
+		if i < len(p) && p[i] != '/' && p[i] != '\\' {
+			continue
+		}
+		c := p[start:i]
+		if c != "" {
+			c = truncateUTF8(c, componentBudget(idx, n))
+			idx++
+		}
+		b.WriteString(c)
+		if i < len(p) {
+			b.WriteByte(p[i])
+		}
+		start = i + 1
+	}
+	return b.String()
 }

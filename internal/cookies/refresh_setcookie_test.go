@@ -209,7 +209,7 @@ func TestProcessSetCookiesDeletesRowOnPastExpires(t *testing.T) {
 				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tYSC\tfixture-ysc\n"
 			rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-			rs.processYouTubeSetCookies(setCookieResponse(tc.header))
+			rs.processYouTubeSetCookies(setCookieResponse(tc.header), "")
 
 			rows := readCookieRows(t, path)
 			if got := rowsNamed(rows, "LOGIN_INFO"); len(got) != 0 {
@@ -236,7 +236,7 @@ func TestProcessSetCookiesDeletionOfEssentialLogsInfo(t *testing.T) {
 	rs, _, _ := newSetCookieFixture(t, log, initial)
 
 	rs.processYouTubeSetCookies(setCookieResponse(
-		"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"))
+		"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 	if n := log.infoContaining("deleted an essential cookie"); n != 1 {
 		t.Errorf("expected exactly 1 Info log naming the essential deletion, got %d (%v)", n, log.info)
@@ -261,7 +261,7 @@ func TestProcessSetCookiesPreservesTabbedValue(t *testing.T) {
 		t.Fatalf("fixture precondition failed: jar read PREF as %q", got)
 	}
 
-	rs.processYouTubeSetCookies(setCookieResponse("PREF=fresh-value; Domain=.youtube.com; Path=/"))
+	rs.processYouTubeSetCookies(setCookieResponse("PREF=fresh-value; Domain=.youtube.com; Path=/"), "")
 
 	row := rowFor(t, readCookieRows(t, path), "PREF", ".youtube.com")
 	if len(row.fields) != 7 {
@@ -288,7 +288,7 @@ func TestProcessSetCookiesDeletionIsDomainScoped(t *testing.T) {
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
 	rs.processYouTubeSetCookies(setCookieResponse(
-		"SAPISID=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"))
+		"SAPISID=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 	rows := readCookieRows(t, path)
 	for _, r := range rowsNamed(rows, "SAPISID") {
@@ -320,7 +320,7 @@ func TestProcessSetCookiesPerDomainValues(t *testing.T) {
 	rs.processYouTubeSetCookies(setCookieResponse(
 		"SAPISID=fresh-youtube; Domain=.youtube.com; Path=/",
 		"SAPISID=fresh-google; Domain=.google.com; Path=/",
-	))
+	), "")
 
 	rows := readCookieRows(t, path)
 	if got := rowFor(t, rows, "SAPISID", ".youtube.com").value; got != "fresh-youtube" {
@@ -342,7 +342,7 @@ func TestProcessSetCookiesHttpOnlyInsertion(t *testing.T) {
 	rs.processYouTubeSetCookies(setCookieResponse(
 		"__Secure-3PSID=fixture-3psid; Domain=.youtube.com; Path=/; Secure; HttpOnly",
 		"YSC=fixture-ysc; Domain=.youtube.com; Path=/",
-	))
+	), "")
 
 	rows := readCookieRows(t, path)
 	secure := rowFor(t, rows, "__Secure-3PSID", ".youtube.com")
@@ -381,7 +381,7 @@ func TestProcessSetCookiesDeletionClearsIdentity(t *testing.T) {
 	}
 
 	rs.processYouTubeSetCookies(setCookieResponse(
-		"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"))
+		"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 	if after := jar.YouTubeIdentity(); after != "" {
 		t.Errorf("identity after deleting LOGIN_INFO = %q, want empty", after)
@@ -401,7 +401,7 @@ func TestProcessSetCookiesFutureExpiryStillUpdates(t *testing.T) {
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
 	rs.processYouTubeSetCookies(setCookieResponse(
-		"LOGIN_INFO=fresh-login; Domain=.youtube.com; Expires=Sat, 01-Jan-2050 00:00:00 GMT; Path=/"))
+		"LOGIN_INFO=fresh-login; Domain=.youtube.com; Expires=Sat, 01-Jan-2050 00:00:00 GMT; Path=/"), "")
 
 	row := rowFor(t, readCookieRows(t, path), "LOGIN_INFO", ".youtube.com")
 	if row.value != "fresh-login" {
@@ -431,7 +431,7 @@ func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
 			".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfixture-login\n"
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-		rs.processYouTubeSetCookies(setCookieResponse("LOGIN_INFO=; Domain=.youtube.com; Path=/"))
+		rs.processYouTubeSetCookies(setCookieResponse("LOGIN_INFO=; Domain=.youtube.com; Path=/"), "")
 
 		row := rowFor(t, readCookieRows(t, path), "LOGIN_INFO", ".youtube.com")
 		if row.value != "fixture-login" {
@@ -453,7 +453,7 @@ func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
 	t.Run("no empty row is inserted", func(t *testing.T) {
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
 
-		rs.processYouTubeSetCookies(setCookieResponse("YSC=; Domain=.youtube.com; Path=/"))
+		rs.processYouTubeSetCookies(setCookieResponse("YSC=; Domain=.youtube.com; Path=/"), "")
 
 		if got := rowsNamed(readCookieRows(t, path), "YSC"); len(got) != 0 {
 			t.Errorf("an empty-valued Set-Cookie inserted a row: %q", got[0].raw)
@@ -468,7 +468,7 @@ func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
 		rs.processYouTubeSetCookies(setCookieResponse(
-			"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"))
+			"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 		if got := rowsNamed(readCookieRows(t, path), "LOGIN_INFO"); len(got) != 0 {
 			t.Errorf("the empty-value guard swallowed a real deletion: %q", got[0].raw)
@@ -490,7 +490,7 @@ func TestProcessSetCookiesDomainCaseNormalized(t *testing.T) {
 	t.Run("row domain is lowercased", func(t *testing.T) {
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
 
-		rs.processYouTubeSetCookies(setCookieResponse("LOGIN_INFO=fixture-login; Domain=.YouTube.com; Path=/"))
+		rs.processYouTubeSetCookies(setCookieResponse("LOGIN_INFO=fixture-login; Domain=.YouTube.com; Path=/"), "")
 
 		rowFor(t, readCookieRows(t, path), "LOGIN_INFO", ".youtube.com")
 	})
@@ -510,7 +510,7 @@ func TestProcessSetCookiesDomainCaseNormalized(t *testing.T) {
 			rs.processYouTubeSetCookies(setCookieResponse(
 				"SAPISID=; Domain=.YouTube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/",
 				"SAPISID=survivor; Domain=.youtube.com; Path=/",
-			))
+			), "")
 			var sb strings.Builder
 			for _, r := range readCookieRows(t, path) {
 				sb.WriteString(strings.Join([]string{
@@ -557,7 +557,7 @@ func TestProcessSetCookiesRefreshDoesNotCrossPlatforms(t *testing.T) {
 		".twitch.tv\tTRUE\t/\tTRUE\t2000000000\tlogin\tfixture-twitch-login\n"
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse("login=youtube-value; Domain=.youtube.com; Path=/"))
+	rs.processYouTubeSetCookies(setCookieResponse("login=youtube-value; Domain=.youtube.com; Path=/"), "")
 
 	rows := readCookieRows(t, path)
 	twitch := rowFor(t, rows, "login", ".twitch.tv")
@@ -582,7 +582,7 @@ func TestProcessSetCookiesUnparseableExpiresKeepsDefault(t *testing.T) {
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
 	rs.processYouTubeSetCookies(setCookieResponse(
-		"LOGIN_INFO=fresh-login; Domain=.youtube.com; Expires=not-a-date; Path=/"))
+		"LOGIN_INFO=fresh-login; Domain=.youtube.com; Expires=not-a-date; Path=/"), "")
 
 	rows := readCookieRows(t, path)
 	if got := rowsNamed(rows, "LOGIN_INFO"); len(got) != 1 {

@@ -19,8 +19,9 @@ type Health struct {
 	// Healthy is false from the moment the child dies until a supervisor
 	// restart succeeds.
 	Healthy bool
-	// Reason is why it last went down ("stdout EOF", "readPump panic", a
-	// failed initial start). Empty while healthy.
+	// Reason is why it last went down ("stdout EOF", "readPump panic",
+	// "stdin write stalled for 1m30s", a failed initial start). Empty while
+	// healthy.
 	Reason string
 	// Restarts counts SUCCESSFUL supervisor restarts this process.
 	Restarts uint64

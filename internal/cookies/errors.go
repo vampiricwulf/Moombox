@@ -98,6 +98,19 @@ var (
 	// first" guidance.
 	ErrProfileNotFound = errors.New("browser profile not found")
 
+	// ErrProfileInUse is returned by a Chromium launch — the headless refresh
+	// and the interactive setup alike — when the profile's SingletonLock names
+	// a browser that may still be running on it: one on ANOTHER machine (the
+	// host's browser seen from a container through a mounted profile), or one
+	// on this machine whose pid still answers. The lock is left where it is
+	// and nothing is launched, because a second browser on a live profile is
+	// the corruption the lock exists to prevent. Producers wrap it as "<this>
+	// by <host>", so the sentence both UIs render as the last cookie error
+	// names the machine to go and close the browser on — and the lock's full
+	// path, to delete if no browser there is using the profile. HTTP
+	// consumers map to 409: a state to change, like ErrCookieDBLocked.
+	ErrProfileInUse = errors.New("browser profile in use")
+
 	// --- browser-free profile import (Docker / headless hosts) ---
 	//
 	// These six describe the realistic ways reading a MOUNTED browser

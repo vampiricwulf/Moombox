@@ -13,8 +13,18 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
+
+// ErrLocalWrite marks a failure to write the staged recording itself —
+// opening the output file or appending to it (a full disk, a permission, a
+// staging directory that went away). It says nothing about the stream, and
+// retrying against the same staging cannot help until the operator frees
+// space or fixes the path, so callers must not read it as a possible stream
+// end: the YouTube live loop did, re-verifying a stream it could not write
+// for up to an hour and then finishing the job as if it had ended.
+var ErrLocalWrite = errors.New("writing the staged recording failed")
 
 // ErrQualityLost signals that the stream is still live but the selected
 // quality variant/format has become unavailable (e.g. transcode removed).
@@ -224,7 +234,10 @@ type DownloaderOptions struct {
 	// belongs to a different broadcast and is discarded. Essential for
 	// platforms whose media URLs carry no extractable identity (Twitch
 	// weaver URLs) — without it, a job resumed after the channel started a
-	// NEW broadcast would splice the new stream into the old recording.
+	// NEW broadcast would splice the new stream into the old recording. The
+	// YouTube whole-file VOD path sets one per stream (video, itag, clen):
+	// every rendition stages to the same file name, so a resume whose format
+	// selection moved would otherwise append one rendition to another.
 	StreamID string
 	// StopOnGap makes the HLS live loop return ErrGapDetected instead of
 	// skipping forward when the playlist has moved past the next needed
@@ -284,6 +297,17 @@ type DownloaderOptions struct {
 	InterruptionTimeout time.Duration
 	CheckStreamStatus   func(ctx context.Context) (bool, error) // Returns true if stream ended
 	IsOnline            func() bool                             // Returns false if device has no internet
+	// OnFirstSegment is called once, from the HLS live loop, when this
+	// downloader writes the first media segment into an output file it
+	// started EMPTY — never on a resume or an append, whose file already
+	// began at some earlier segment. It is handed that segment's
+	// #EXT-X-PROGRAM-DATE-TIME (HlsSegment.ProgramDateTime), or the zero time
+	// when the playlist carries none. That segment is the file's first frame,
+	// so its wall-clock time is the moment the file's timeline starts: Twitch
+	// pins each part's chat offsets to it (D-T8). Stitched-ad segments are
+	// skipped, not written, so the first CONTENT segment is the one reported.
+	// Optional; runs on the download goroutine, so it must not block.
+	OnFirstSegment func(programDateTime time.Time)
 	// OnCredentialRefresh is called when segments 403 while the downloader is
 	// still behind the live head — i.e. the segments demonstrably exist and
 	// our credentials, not the stream, are the problem. The callback should
@@ -295,6 +319,10 @@ type DownloaderOptions struct {
 	// git history, e.g. `git show aedc162^:docs/superpowers/plans/2026-08-15-live-403-credential-recovery.md`).
 	// Optional; nil disables recovery, restoring
 	// the previous behaviour exactly.
+	//
+	// The whole-file path (IsDirectURL) calls it too, on a chunk answered
+	// 403 or 410 — its URL expired mid-transfer — and accepts only a URL
+	// naming the same file (refreshDirectURL in downloader_direct.go).
 	OnCredentialRefresh func() (baseURL string, poToken string)
 	Logger              DownloaderLogger
 	// SegmentWorkers is how many segments this download fetches
@@ -354,11 +382,12 @@ type DownloadProgress struct {
 	CatchingUp bool
 }
 
-// DownloadGap represents a detected gap in segments.
+// DownloadGap represents a detected gap in segments. Which stream it is in
+// is the caller's to record: each downloader carries one stream, and the
+// worker's OnGap closure knows which (database.Gap.Stream).
 type DownloadGap struct {
-	From   int
-	To     int
-	Stream string
+	From int
+	To   int
 }
 
 // DownloaderLogger is the interface for downloader logging.
@@ -451,6 +480,33 @@ type SegmentDownloader struct {
 	hlsInitURI     string
 	hlsInitHash    string
 
+	// directTotalSize is the whole-file download's total as last probed —
+	// restored from the sidecar on a resume, then checked against and
+	// replaced by runDirectDownload's own probe — and persisted by
+	// saveResume (ResumeState.TotalSize). Download-loop goroutine only, like
+	// the fields above.
+	directTotalSize int64
+
+	// directCheckpoint is the staged length the whole-file download's last
+	// resume checkpoint describes — before one, the offset the download
+	// started from — so the directResumeInterval cadence (checkpointDirect)
+	// counts from it across every request the two whole-file paths make,
+	// not from wherever each request began. Set by runDirectDownload and
+	// zeroed by discardStagedMedia with the bytes it describes.
+	// Download-loop goroutine only, like the fields above.
+	directCheckpoint int64
+
+	// reportFirstSegment arms the one OnFirstSegment call: set by Start when
+	// it opens the output file fresh (not resuming), cleared by the first
+	// media write. Download-loop goroutine only, like the fields above.
+	reportFirstSegment bool
+
+	// hlsOutages counts the connectivity outages the HLS loop has waited out
+	// (waitOnline). A stuck segment's retry count is kept per outage, so
+	// failures an outage caused never add up to skipping a segment that was
+	// fine all along. Download-loop goroutine only, like the fields above.
+	hlsOutages int
+
 	// mediaSyncWarned latches the one Warn for a failed media fsync (owner
 	// decision O-G, saveResume) so a volume that has gone read-only mid-
 	// recording does not write a log line every cadence tick for hours.
@@ -540,8 +596,8 @@ type SegmentDownloader struct {
 	hlsVodBufferBytesOverride int
 
 	// directResumeIntervalOverride is the same seam again for the whole-file
-	// download's sidecar cadence (directResumeInterval, 50 MB — see both call
-	// sites in downloader_direct.go). Zero (the default) means "use
+	// download's sidecar cadence (directResumeInterval, 50 MB — see
+	// checkpointDirect in downloader_direct.go). Zero (the default) means "use
 	// directResumeInterval"; production code never sets this. A test that had
 	// to move 100 MB through an httptest server to observe two checkpoints
 	// would cost seconds and hundreds of megabytes of RAM to pin a rule that
@@ -848,6 +904,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 			d.hlsInitWritten = state.InitWritten
 			d.hlsInitURI = state.InitURI
 			d.hlsInitHash = state.InitHash
+			d.directTotalSize = state.TotalSize
 			resuming = true
 		}
 	}
@@ -970,10 +1027,14 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	} else {
 		flags |= os.O_TRUNC
 	}
+	// A file opened O_TRUNC starts at whatever segment is written first, and
+	// OnFirstSegment reports that segment's wall-clock time. A resumed or
+	// appended file started long before this downloader existed.
+	d.reportFirstSegment = !resuming
 
 	d.outputFile, err = os.OpenFile(d.opts.OutputFile, flags, 0o644)
 	if err != nil {
-		return fmt.Errorf("open output file: %w", err)
+		return fmt.Errorf("%w: open output file: %w", ErrLocalWrite, err)
 	}
 	// Closure (not `defer d.outputFile.Close()`): the direct-download
 	// discard (discardStagedMedia) reopens d.outputFile, and a method-value
@@ -1053,7 +1114,7 @@ func StagedRestartSidecar(aside string) string { return aside + resumeFileSuffix
 // which shares that timestamped stem as <file>.restart-<unix ts>.resume.json.
 //
 // Exported because resumeFileSuffix is not: package worker's staging scan
-// (internal/worker/orchestrator_mux.go, stagedRecordingParts) has to tell the
+// (internal/worker/orchestrator_mux.go, stagedRestartAsides) has to tell the
 // recording from its twin, and hardcoding either literal there is exactly the
 // drift StagedRestartSuffix's doc comment exists to prevent. The timestamp is
 // required to be digits so an ordinary file that merely contains ".restart-"
@@ -1428,8 +1489,12 @@ func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	return nil
 }
 
-// truncateURL returns the first maxLen characters of a URL for logging.
+// truncateURL returns a URL for a log line: its media credentials cut
+// (redact.MediaURL), then its first maxLen characters. Truncating alone hid
+// nothing that mattered: a googlevideo URL carries the client's public IP
+// (ip=) within its first 120 characters.
 func truncateURL(u string, maxLen int) string {
+	u = redact.MediaURL(u)
 	if len(u) <= maxLen {
 		return u
 	}

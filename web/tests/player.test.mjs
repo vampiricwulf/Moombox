@@ -5,7 +5,7 @@
 // skipped (not failed) when jsdom is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor, CHAT_SEEK_LEAD_MS, chatSeekTargetSeconds } from "../public/modules/player.js";
+import { relativeLuminance, readableInk, INK_CROSSOVER, SUPERCHAT_TIER_COLORS, MEMBER_CARD_COLORS, CHEER_SCALE, twitchNoticeLine, cheerColor, CHAT_SEEK_LEAD_MS, chatSeekTargetSeconds, focusPlayerSurface } from "../public/modules/player.js";
 
 let jsdomMissing = null;
 try {
@@ -305,6 +305,7 @@ test("the overlay fills its rows, defers the overflow, and only counts real drop
   // messages seed-window chat (they entered a second before the anchor): losing
   // them is not a drop and is not reported.
   h.seek(2000);
+  h.tick(2000); // the first tick after `seeked` — the seek's own ran before it, un-anchored
   assert.equal(overlay.children.length, 17, "the stage is rebuilt at the seek target");
   h.tick(3100);
   assert.equal(h.player.nico.dropped, 3, "seed-window losses are not counted");
@@ -389,7 +390,7 @@ test("pre-show and after-the-end chat is counted, labelled and promoted", { skip
 
   assert.equal(rows[2].dataset.divider, "Waiting room — 2 messages before the stream");
   assert.ok(rows[2].classList.contains("divider-before"));
-  assert.equal(rows[4].dataset.divider, "Recording ended — 1 messages after it");
+  assert.equal(rows[4].dataset.divider, "Recording ended — 1 message after it");
   assert.ok(rows[4].classList.contains("divider-before"));
   assert.equal(rows[0].dataset.divider, undefined, "no divider on an interior row");
   assert.ok(rows[4].classList.contains("future"), "the tail starts out dimmed");
@@ -1018,6 +1019,153 @@ test("Tab from outside the dialog is pulled into it", { skip }, async () => {
     "Tab from the page behind the dialog enters it at the first action");
 });
 
+// The resume dialog's Tab trap and Escape handler are bound on `document`,
+// and leaving the Player tab does not dismiss the dialog — so they used to run
+// app-wide: every Tab on the Tasks tab was swallowed, and Escape there started
+// the hidden video. Mutant: drop the playerShowing() guard from either handler.
+test("the resume dialog leaves the keyboard alone on other tabs", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: { resumePosition: 42 } });
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "the resume overlay is up");
+
+  h.document.querySelector('sl-tab-panel[name="player"]').removeAttribute("active");
+  h.player.detachKeyboardControls();
+  h.document.activeElement?.blur?.();
+
+  const tab = new h.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+  h.document.dispatchEvent(tab);
+  assert.equal(tab.defaultPrevented, false, "a Tab on another tab must not be trapped");
+
+  const plays = () => h.mediaCalls.filter((c) => c === "play").length;
+  const before = plays();
+  h.key("Escape");
+  assert.equal(plays(), before, "Escape on another tab must not start the hidden video");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"),
+    "the dialog is still waiting for the user's return");
+});
+
+// A chat that exists and fails to load used to look exactly like a job with no
+// chat: the sidebar hid and nothing said why. 404 stays silent (no chat file);
+// anything else names the server's reason. Mutants: drop the non-404 toast on
+// the job-level fetch, or the failedParts toast on the per-part merge.
+test("a chat that fails to load says why; a job with no chat stays quiet", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" }), finished("j2", { chatFilename: "chat.json" })],
+    watchState: {},
+  });
+  h.http.on("GET /api/jobs/j1/chat", () => harness.response({ status: 422, body: { error: "Chat file is corrupt or unreadable" } }));
+  h.http.on("GET /api/jobs/j2/chat", () => harness.response({ status: 404, body: { error: "no chat file" } }));
+  await h.selectJob("j1");
+  assert.ok(h.app.toasts.some((t) => /Failed to load chat replay: Chat file is corrupt or unreadable/.test(t.message)),
+    `toasts: ${JSON.stringify(h.app.toasts)}`);
+  const before = h.app.toasts.length;
+  await h.selectJob("j2");
+  assert.equal(h.app.toasts.length, before, "a 404 (no chat file) must not toast");
+});
+
+test("a multi-part job names the part whose chat failed", { skip }, async () => {
+  const seg = (i, chat) => ({ segmentIndex: i, durationSeconds: 100, quality: "720p", chatFile: chat });
+  const twitchMsg = (offsetMs, text) => ({ offsetMs, authorName: "u", message: text, messageType: "chat" });
+  const h = harness.makePlayer({
+    jobs: [finished("t1", { chatFilename: "p1.chat.json", segments: [seg(0, "/a"), seg(1, "/b")] })],
+    watchState: {},
+    segmentChatById: { "t1/0": { platform: "twitch", emoteOffsets: "utf16", messages: [twitchMsg(1000, "a")] } },
+  });
+  h.http.on("GET /api/jobs/t1/segments/1/chat", () => harness.response({ status: 500, body: { error: "boom" } }));
+  await h.selectJob("t1");
+  assert.equal(h.player.playerChatMessages.length, 1, "the part that loaded still plays");
+  assert.ok(h.app.toasts.some((t) => /part 2: boom/.test(t.message)), `toasts: ${JSON.stringify(h.app.toasts)}`);
+});
+
+// A paused backward seek left the sidebar scrolled at the pre-seek row. The
+// browser fires the seek's timeupdate BEFORE seeked; that tick only walks the
+// active index forward, so it scrolled to the old row, and seeked fixed the
+// classes but not the scroll — while paused, nothing ticked again.
+// Mutant: drop the syncSidebarToTime call from the "seeked" listener.
+test("a paused backward seek scrolls the sidebar to the target", { skip }, async () => {
+  const rows = Array.from({ length: 200 }, (_, i) => ({ offsetMs: i * 1000, authorName: "u", message: [{ text: `m${i}` }] }));
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: { messages: rows },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const list = h.sidebar();
+  h.video.paused = false;
+  h.tick(150_000);
+  h.flushRaf();
+  const atPlay = list.scrollTop;
+  h.video.paused = true;
+  h.seek(20_000);
+  h.flushRaf();
+  assert.equal(h.player.playerActiveChatIndex, 21);
+  assert.ok(list.scrollTop < atPlay, `scrollTop ${list.scrollTop} stayed at the pre-seek ${atPlay}`);
+});
+
+// On a multi-part job the element's `ended` is the PART's, and it already
+// reads true on each part's last tick, so the sidebar jumped to the
+// "Recording ended" divider at every part boundary.
+// Mutant: drop the last-part condition from syncSidebarToTime.
+test("a part boundary does not jump the sidebar to the recording-ended divider", { skip }, async () => {
+  const rows = Array.from({ length: 250 }, (_, i) => ({ offsetMs: i * 1000, authorName: "u", message: [{ text: `m${i}` }] }));
+  const part = (i) => ({ segmentIndex: i, durationSeconds: 100, quality: "720p" });
+  const h = harness.makePlayer({
+    jobs: [finished("t1", { chatFilename: "c.json", segments: [part(0), part(1)] })],
+    watchState: {},
+    chat: { messages: rows },
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("t1");
+  const list = h.sidebar();
+  h.video.paused = false;
+  h.tick(99_000);
+  h.flushRaf();
+  h.video.ended = true; // part 1's last tick
+  h.tick(100_000);
+  h.flushRaf();
+  const divider = list.children[h.player._chatParts.firstPostIndex];
+  assert.notEqual(list.scrollTop, Math.max(0, divider.offsetTop - 8),
+    "the sidebar jumped to the divider in the middle of the recording");
+});
+
+// Mutant: drop the toast from loadPlayerJobList's catch — an unreachable
+// server leaves the picker stale with nothing said.
+test("an unreachable server says the video list failed to load", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: {} });
+  h.http.on("GET /api/jobs", () => { throw new TypeError("Failed to fetch"); });
+  await h.player.loadPlayerJobList();
+  assert.ok(h.app.toasts.some((t) => /Failed to load the video list: Failed to fetch/.test(t.message)),
+    `toasts: ${JSON.stringify(h.app.toasts)}`);
+});
+
+// Marking a job watched clears its resume position on the server, but the
+// resume PUT and the watched POST ride separate connections, so a PUT sent in
+// the same breath could land second and leave a watched job offering "Resume
+// from" its end. Mutants: save before checking watched in the interval; drop
+// the ended guard from the pause save.
+test("marking a job watched sends no resume position alongside it", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j2", { lengthSeconds: 100 })], watchState: {} });
+  await h.selectJob("j2");
+  h.video.paused = false;
+  h.video.currentTime = 96;
+  h.advance(10_000); // the interval's tick crosses the watched threshold
+  const calls = h.fetchLog.filter((c) => c.url.includes("resume-position") || c.url.includes("/watched"))
+    .map((c) => `${c.method} ${c.url}`);
+  assert.deepEqual(calls, ["POST /api/jobs/j2/watched"]);
+});
+
+test("the end-of-media pause saves no resume position", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j3", { lengthSeconds: 100 })], watchState: {} });
+  await h.selectJob("j3");
+  h.player._startWatchTracking("j3");
+  h.video.currentTime = 100;
+  h.video.ended = true;
+  h.video.dispatchEvent(new h.window.Event("pause"));
+  assert.equal(h.fetchLog.filter((c) => c.url.includes("resume-position")).length, 0,
+    "the pause that precedes `ended` must not save a position the watched POST is about to clear");
+});
+
 // ── 19. Player review can-wait pins (Arc J, Task 12 / J15) ──────────────────
 // #23 (Space is inert under the resume dialog) is already covered by test 17
 // above ("player shortcuts are ignored while the resume overlay is up") and
@@ -1511,7 +1659,7 @@ test("a card is still a timeline row: future, active, divider, measured", { skip
   const rows = h.sidebar().children;
   assert.ok(rows[1].classList.contains("divider-before"),
     "the card is the first in-video row, so it carries the region divider");
-  assert.equal(rows[1].dataset.divider, "Waiting room — 1 messages before the stream");
+  assert.equal(rows[1].dataset.divider, "Waiting room — 1 message before the stream");
   assert.ok(rows[1].classList.contains("future"));
   h.tick(2000);
   assert.ok(rows[1].classList.contains("active"), "a card is promoted like any row");
@@ -2053,4 +2201,128 @@ test("the jump moves the video and never touches the play state", { skip }, asyn
   assert.equal(h.video.currentTime, 117, "a single-file job seeks the element directly");
   assert.equal(h.video.paused, true, "still paused");
   assert.deepEqual(h.mediaCalls.slice(before), [], "no play()/pause()/load() from a timestamp click");
+});
+
+// ── Modified keys belong to the browser ─────────────────────────────────────
+
+// The handler read e.key alone, so Ctrl+C copying selected chat toggled the
+// overlay and was preventDefault()ed (no copy), and Ctrl+F went fullscreen
+// instead of opening Find.
+//
+// Mutant: drop the ctrl/meta/alt guard — every row is swallowed.
+test("a Ctrl, Cmd or Alt combination is the browser's, not a player shortcut", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [segmented("j1")], watchState: {}, chat: chatOf([msg(0, "hi")]) });
+  await h.selectJob("j1");
+  const nicoToggle = h.el("player-nico-toggle");
+  const sidebarToggle = h.el("player-sidebar-toggle");
+  const state = () => [nicoToggle.checked, sidebarToggle.checked, h.video.muted, h.video.paused, h.fullscreenCalls.length];
+  const before = state();
+
+  for (const [key, mod] of [["c", "ctrlKey"], ["f", "ctrlKey"], ["s", "metaKey"], ["m", "metaKey"], [" ", "altKey"], ["ArrowLeft", "altKey"]]) {
+    const ev = new h.window.KeyboardEvent("keydown", { key, [mod]: true, bubbles: true, cancelable: true, composed: true });
+    h.document.dispatchEvent(ev);
+    assert.equal(ev.defaultPrevented, false, `${mod}+${JSON.stringify(key)} was swallowed`);
+  }
+  assert.deepEqual(state(), before, "a modified key changed the player");
+
+  // Shift is still the player's: Shift+C is the overlay toggle.
+  h.key("C", { shiftKey: true });
+  assert.equal(nicoToggle.checked, !before[0], "Shift+C no longer toggles the overlay");
+});
+
+// ── A list or job fetch that fails is not a deletion ────────────────────────
+
+// loadPlayerJobList substituted [] for a failed list and then treated the
+// playing recording as deleted, clearing the player; the toast fired only
+// when BOTH lists failed. A job_update can trigger that rebuild at any time.
+//
+// Mutant: clear on any absence again (drop the `complete` check) — the player
+// is cleared and the picker empties.
+test("a half-failed list rebuild keeps the playing recording", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: {} });
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  h.select().value = "j1";
+  const playing = h.video.src;
+  assert.ok(playing, "precondition: j1 is playing");
+
+  h.http.on("GET /api/jobs", () => harness.response({ status: 500, body: { error: "failed to get jobs" } }));
+  await h.player.loadPlayerJobList();
+  await h.flush();
+
+  assert.equal(h.player.playerJob?.id, "j1", "the player was cleared");
+  assert.equal(h.video.src, playing, "playback was stopped");
+  assert.equal(h.select().value, "j1", "the picker lost the playing recording");
+  assert.deepEqual([...h.select().querySelectorAll("sl-option")].map((o) => o.value), ["j1"],
+    "j1 is no longer pickable");
+  assert.match(h.app.toasts.map((t) => t.message).join(" | "), /Failed to load the video list: failed to get jobs/);
+
+  // Both lists answered and j1 is in neither: now it really is gone.
+  h.http.on("GET /api/jobs", () => []);
+  await h.player.loadPlayerJobList();
+  await h.flush();
+  assert.equal(h.player.playerJob, null, "a recording missing from a complete list is cleared");
+});
+
+// A pick whose GET /api/jobs/:id failed returned silently: the picker showed
+// the new job while the old one kept playing.
+//
+// Mutant: return without refuse() on a non-ok answer — no toast, and the
+// picker stays on j2.
+test("a pick that cannot be opened says why and keeps the picker on what plays", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], watchState: {} });
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  h.select().value = "j1";
+  h.http.on("GET /api/jobs/:id", ({ params }) => params.id === "j2"
+    ? harness.response({ status: 500, body: { error: "failed to get job" } })
+    : finished(params.id));
+
+  h.select().value = "j2";
+  await h.selectJob("j2");
+
+  assert.equal(h.player.playerJob?.id, "j1");
+  assert.equal(h.select().value, "j1", "the picker still shows the recording that failed to open");
+  assert.match(h.app.toasts.map((t) => t.message).join(" | "), /Could not open the recording: failed to get job/);
+});
+
+// ── The resume dialog hands the keyboard to the player ──────────────────────
+
+// The dialog captured document.activeElement when it opened and restored it on
+// dismiss. Opened from the picker, that is the picker: after Resume, Space
+// opened the listbox instead of pausing, the exact trap focusPlayerSurface
+// exists to avoid. (The harness's sl-select and sl-button stubs are not
+// focusable without a tabindex; the setAttribute calls are test-only.)
+//
+// Mutant: dismiss through _dismissResumeDialog alone again — focus returns to
+// the picker.
+test("answering the resume dialog leaves focus on the player, not the picker", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: { resumePosition: 42 } });
+  await h.player.loadPlayerJobList();
+  const select = h.select();
+  select.setAttribute("tabindex", "0");
+  select.focus();
+
+  await h.selectJob("j1");
+  assert.ok(h.el("player-video-wrapper").querySelector(".resume-overlay"), "precondition: the dialog is up");
+  h.el("resume-continue").click();
+
+  assert.equal(h.document.activeElement, h.el("player-video-wrapper"),
+    `focus went to ${h.document.activeElement?.id || h.document.activeElement?.tagName}`);
+});
+
+// The picker's sl-change handler calls focusPlayerSurface once
+// onPlayerJobSelect resolves — with a slow chat fetch, after the dialog had
+// focused its primary action — and moved focus out from under the dialog.
+//
+// Mutant: drop the resume-overlay branch in focusPlayerSurface.
+test("focusPlayerSurface leaves an open resume dialog its focus", { skip }, async () => {
+  const h = harness.makePlayer({ jobs: [finished("j1")], watchState: { resumePosition: 42 } });
+  await h.selectJob("j1");
+  const resume = h.el("resume-continue");
+  resume.setAttribute("tabindex", "-1");
+  resume.focus();
+
+  focusPlayerSurface();
+  assert.equal(h.document.activeElement, resume);
 });

@@ -96,6 +96,19 @@ func TestNewManagerRejectsDiscordSchemeEdgeCases(t *testing.T) {
 		{"three segments — ID/TOKEN kept, /more dropped", "discord://12345/abc/extra", true},
 		{"empty ID", "discord:///mytoken", false},
 		{"normal two-segment passes", "discord://12345/mytoken", true},
+		// The anchored check the https form gets (mutant: drop it — all
+		// five of these are accepted again).
+		{"token with a pasted ) rejected", "discord://12345/mytoken)", false},
+		{"token with a space rejected", "discord://12345/my token", false},
+		{"token with a trailing newline rejected", "discord://12345/mytoken\n", false},
+		{"non-numeric ID rejected", "discord://not-a-number/mytoken", false},
+		{"fragment rejected", "discord://12345/mytoken?wait=false#frag", false},
+		{"forum thread query still accepted", "discord://12345/mytoken?thread_id=9", true},
+		// A slash before the query no longer hides it from the check: split
+		// with the path, it was a third segment, dropped unread (mutant: the
+		// query split with the path — this one is accepted again).
+		{"fragment after a slash rejected", "discord://12345/mytoken/?thread_id=9#frag", false},
+		{"forum thread query after a slash accepted", "discord://12345/mytoken/?thread_id=9", true},
 	}
 
 	for _, tc := range tests {

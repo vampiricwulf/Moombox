@@ -11,6 +11,15 @@
     --status-queued: #7f8c8d;
     --status-cookies: #d946ef;
 
+    /* Coloured text (errors, warnings, success notes, links). The -600 steps
+       read well on the dark palette; the light theme's block swaps in the
+       darker steps that clear 4.5:1 there, where its -600s are pale (amber
+       and green near 3.2:1). JS-set colours use these too. */
+    --text-success: var(--sl-color-success-600);
+    --text-warning: var(--sl-color-warning-600);
+    --text-danger: var(--sl-color-danger-600);
+    --text-primary: var(--sl-color-primary-600);
+
     /* Bottom-bar geometry — status bar is fixed at the viewport bottom and the
        batch-action bar slides up above it. Body padding and the batch bar's
        bottom offset reference these vars so the stack stays consistent if the
@@ -63,7 +72,7 @@ body {
 }
 
 a {
-    color: var(--sl-color-primary-600);
+    color: var(--text-primary);
     text-decoration: none;
 }
 
@@ -132,6 +141,14 @@ sl-tab-group {
     flex: 1;
     display: flex;
     flex-direction: column;
+}
+
+/* Shoelace 2.16 sizes the tab strip's scroll buttons 28px wide but renders
+   their inner button at 32px, so once the tabs overflow (any phone) the end
+   button pokes 2px past the viewport and the whole page scrolls sideways.
+   Clipping the nav strip horizontally hides those 2px and nothing else. */
+sl-tab-group::part(nav) {
+    overflow-x: clip;
 }
 
 sl-tab-panel {
@@ -226,6 +243,14 @@ sl-tab::part(base) {
         flex-direction: column;
         background-color: var(--sl-color-neutral-50);
         padding: var(--sl-spacing-small);
+    }
+
+    /* Each column is centred (align-self below) and so sized to its
+       content; an error line is nowrap, so its content is the whole
+       message, and the progress column spilled out of both sides of the
+       card over its neighbours. Capped at the card, the ellipsis applies. */
+    .video-item > div {
+        max-width: 100%;
     }
 }
 
@@ -509,16 +534,20 @@ sl-badge.status.cookies::part(base) {
     }
 }
 
-#archived-table-header,
-.archived-table .video-item {
+/* Only the header needs these: an archived row is a .video-item, which the
+   #video-table rules above already lay out. Repeating ".archived-table
+   .video-item" here outranked every later ".video-item" rule — the 992px
+   flex column and the phone card grid — so archived rows kept the desktop
+   subgrid on small screens and collapsed into a single column, the
+   checkbox over the title and the menu button stretched across the card. */
+#archived-table-header {
     display: grid;
     grid-template-columns: subgrid;
     grid-column: 1 / 6;
 }
 
 @media only screen and (max-width: 992px) {
-    #archived-table-header,
-    .archived-table .video-item {
+    #archived-table-header {
         grid-column: initial;
     }
 }
@@ -536,7 +565,9 @@ sl-badge.status.cookies::part(base) {
     }
 }
 
-.archived-table .video-item {
+/* Archived rows read as settled by their dimmed thumbnail alone. Dimming
+   the whole row took its text under 4.5:1 (a Finished badge to 3.6:1). */
+.archived-table .video-item .thumb img {
     opacity: 0.85;
 }
 
@@ -550,7 +581,7 @@ sl-badge.status.cookies::part(base) {
     align-items: center;
     justify-content: center;
     padding: var(--sl-spacing-3x-large);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-align: center;
 }
 
@@ -562,8 +593,9 @@ sl-badge.status.cookies::part(base) {
     margin-bottom: var(--sl-spacing-small);
 }
 
-.files-header h3 {
+.files-header h2 {
     margin: 0;
+    font-size: 1.17em;
 }
 
 .files-actions {
@@ -738,7 +770,7 @@ sl-badge.status.cookies::part(base) {
     align-items: center;
     justify-content: center;
     padding: var(--sl-spacing-3x-large);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-align: center;
 }
 
@@ -755,6 +787,13 @@ sl-badge.status.cookies::part(base) {
     gap: var(--sl-spacing-medium);
 }
 
+/* An imported archive with no real video id has no embed to show (see
+   isImportPlaceholderId in modules/utils.js); the info column takes the
+   width the embed would have had instead of sitting beside a blank one. */
+.details-top.no-embed {
+    grid-template-columns: 1fr;
+}
+
 @media (max-width: 700px) {
     .details-top {
         grid-template-columns: 1fr;
@@ -765,6 +804,56 @@ sl-badge.status.cookies::part(base) {
     display: flex;
     flex-direction: column;
     gap: var(--sl-spacing-x-small);
+}
+
+/* The Trims section's wrapper exists only so a trim's result can redraw the
+   section in place (job-details.js _syncTrims): no box of its own, so an
+   empty one adds no gap to the dialog's column. */
+.details-trims {
+    display: contents;
+}
+
+/* A trim the server is encoding: its range, a bar taking the free width, and
+   the percentage (job-details.js _trimsSectionHtml / updateRunningTrim). */
+.trim-item-running {
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-small);
+    padding: 8px;
+    border-bottom: 1px solid var(--sl-color-neutral-200);
+}
+
+.trim-item-running .trim-running-range {
+    flex: 0 0 auto;
+}
+
+.trim-item-running .trim-progress {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 4rem;
+    --height: 6px;
+}
+
+.trim-item-running .trim-progress-text {
+    flex: 0 0 auto;
+    min-width: 4ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--sl-color-neutral-600);
+}
+
+@media (max-width: 768px) {
+    /* A phone gives the range its own line and the bar the full width
+       under it, beside its percentage. */
+    .trim-item-running {
+        flex-wrap: wrap;
+        row-gap: var(--sl-spacing-2x-small);
+    }
+
+    .trim-item-running .trim-running-range {
+        flex: 1 0 100%;
+        font-size: 0.85rem;
+    }
 }
 
 .details-row {
@@ -808,8 +897,12 @@ sl-badge.status.cookies::part(base) {
     flex-wrap: wrap;
 }
 
+/* Its own red fill, not the page, is the background here: the -600 red read
+   at 2.9:1 on the dark theme's -100. Shoelace's dark scale runs the other
+   way, so the -800 is pale there and deep in the light theme, and clears
+   4.5:1 in both. */
 .details-error {
-    color: var(--sl-color-danger-600);
+    color: var(--sl-color-danger-800);
     background-color: var(--sl-color-danger-100);
     padding: var(--sl-spacing-small);
     border-radius: var(--sl-border-radius-medium);
@@ -889,16 +982,18 @@ sl-badge.status.cookies::part(base) {
 }
 
 .log-error {
-    color: var(--sl-color-danger-600);
+    color: var(--text-danger);
     font-weight: 600;
 }
 
 .log-warn {
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
 }
 
+/* Dimmer than INFO, but the -500 grey read at 2.7:1 on the dark log
+   panel. The light theme's override is further down. */
 .log-debug {
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-700);
 }
 
 .log-info {
@@ -930,7 +1025,7 @@ sl-badge.status.cookies::part(base) {
     background: var(--sl-color-neutral-100);
     border-top: 1px solid var(--sl-color-neutral-200);
     font-size: 0.75rem;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-700);
     z-index: 100;
     user-select: none;
 }
@@ -969,7 +1064,7 @@ body.batch-bar-active {
 }
 
 #connection-status.connected {
-    color: var(--sl-color-success-600);
+    color: var(--text-success);
 }
 
 #connection-status.connected .status-label {
@@ -981,11 +1076,11 @@ body.batch-bar-active {
 }
 
 #connection-status.disconnected {
-    color: var(--sl-color-danger-600);
+    color: var(--text-danger);
 }
 
 #check-countdown {
-    color: var(--sl-color-neutral-400);
+    color: var(--sl-color-neutral-700);
     font-family: var(--sl-font-mono);
     font-size: 0.7rem;
     white-space: nowrap;
@@ -999,7 +1094,8 @@ body.batch-bar-active {
 }
 
 /* Keyboard focus ring for the status bar's and log panel's role="button"
-   controls, and for the chat sidebar's timestamp buttons. The first five are
+   controls, the filter bars' clear-all and exclude controls, the import
+   dropzone, and the chat sidebar's timestamp buttons. All but the last are
    spans and divs, so without this the ring is whatever the UA picks;
    .chat-msg-time is a real button, but its own rule strips the UA chrome, so
    without this it would have no visible focus at all. Either way this matches
@@ -1012,6 +1108,9 @@ body.batch-bar-active {
 #version-indicator:focus-visible,
 #log-autoscroll-pill:focus-visible,
 .status-warning:focus-visible,
+.unified-filter-clear:focus-visible,
+.filter-item-exclude:focus-visible,
+#import-dropzone:focus-visible,
 .chat-msg-time:focus-visible {
     outline: 2px solid var(--sl-color-primary-500);
     outline-offset: 2px;
@@ -1104,7 +1203,7 @@ sl-progress-bar {
 
 .template-preview {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     font-family: var(--sl-font-mono);
     padding: 0.25em 0;
     word-break: break-all;
@@ -1116,10 +1215,18 @@ sl-progress-bar {
     gap: var(--sl-spacing-medium);
 }
 
-.settings-section h3 {
+.settings-section h2 {
     margin: 0 0 var(--sl-spacing-small) 0;
     font-size: var(--sl-font-size-large);
     font-weight: var(--sl-font-weight-semibold);
+}
+
+/* A section's sub-headings (Password, Active Platforms, ...). They were h4s
+   under an h3 section title with no h2 above it; the levels now step one at
+   a time from the page's h1, and this keeps their old h4 look. */
+.settings-section h3 {
+    font-size: 1em;
+    margin: 1.33em 0;
 }
 
 .settings-help {
@@ -1170,6 +1277,13 @@ sl-progress-bar {
     margin-top: var(--sl-spacing-x-small);
 }
 
+/* The channel switch's label is screen-reader-only text (it names the
+   channel the switch monitors), so the label part's gap would only push the
+   icon buttons over. */
+.channel-card-actions sl-switch::part(label) {
+    margin-inline-start: 0;
+}
+
 .channel-card-actions {
     display: flex;
     gap: var(--sl-spacing-x-small);
@@ -1178,6 +1292,30 @@ sl-progress-bar {
 
 .channel-card--disabled {
     opacity: 0.5;
+}
+
+/* The removal prompt's two choices, stacked full width: their labels carry
+   the job counts and run long, so they wrap rather than overflow a phone. */
+.channel-remove-choices {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sl-spacing-small);
+    margin-top: var(--sl-spacing-medium);
+}
+
+.channel-remove-choices sl-button {
+    width: 100%;
+}
+
+.channel-remove-choices sl-button::part(base) {
+    height: auto;
+    min-height: var(--sl-input-height-medium);
+}
+
+.channel-remove-choices sl-button::part(label) {
+    white-space: normal;
+    line-height: var(--sl-line-height-dense);
+    padding-block: var(--sl-spacing-x-small);
 }
 
 /* Notification Card */
@@ -1216,7 +1354,7 @@ sl-progress-bar {
 
 .notification-events-label {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin-right: var(--sl-spacing-2x-small);
 }
 
@@ -1229,7 +1367,7 @@ sl-progress-bar {
 
 .notification-group-label {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 .notification-events sl-tag {
@@ -1243,6 +1381,15 @@ sl-progress-bar {
 
 .notification-events sl-tag:hover::part(base) {
     opacity: 0.75;
+}
+
+.notification-events sl-tag[role="button"]:focus-visible {
+    outline: none;
+}
+
+.notification-events sl-tag[role="button"]:focus-visible::part(base) {
+    outline: var(--sl-focus-ring);
+    outline-offset: var(--sl-focus-ring-offset);
 }
 
 /* Integration Card */
@@ -1276,7 +1423,7 @@ sl-progress-bar {
 .status-warning {
     cursor: pointer;
     font-size: 0.75rem;
-    color: var(--sl-color-danger-600);
+    color: var(--text-danger);
 }
 .status-warning:hover { text-decoration: underline; }
 
@@ -1289,10 +1436,14 @@ sl-progress-bar {
     transition: color 0.2s, background-color 0.2s;
 }
 
-.indicator-ok    { color: var(--sl-color-success-500); background: color-mix(in srgb, var(--sl-color-success-600) 18%, transparent); }
-.indicator-warn  { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
-.indicator-error { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 18%, transparent); }
-.indicator-off   { color: var(--sl-color-neutral-500); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
+/* Each pill's text takes the first step that clears 4.5:1 on its own tint
+   in the dark theme (the -500s read at 2.8-3.9:1). Red text on a red tint
+   needs both a brighter red and a lighter tint, so the error pill's is 10%.
+   The light theme's darker steps are in its own block further down. */
+.indicator-ok    { color: var(--sl-color-success-600); background: color-mix(in srgb, var(--sl-color-success-600) 18%, transparent); }
+.indicator-warn  { color: var(--sl-color-warning-600); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
+.indicator-error { color: var(--sl-color-danger-700); background: color-mix(in srgb, var(--sl-color-danger-600) 10%, transparent); }
+.indicator-off   { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
 
 #btn-refresh-cookies { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #btn-refresh-cookies::part(base) { padding: 0; min-height: auto; min-width: auto; }
@@ -1391,7 +1542,7 @@ sl-progress-bar {
     gap: var(--sl-spacing-medium);
 }
 
-#imports-container h3 {
+#imports-container h2 {
     margin: 0;
     font-size: var(--sl-font-size-large);
     font-weight: var(--sl-font-weight-semibold);
@@ -1412,7 +1563,7 @@ sl-progress-bar {
 
 #import-dropzone p {
     margin: 0;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 #import-dropzone:hover {
@@ -1479,13 +1630,17 @@ sl-progress-bar {
     max-width: 400px;
 }
 
-/* These sl-select/sl-input `label`s give the control an accessible name
-   (Shoelace wires aria-labelledby to the label slot); the placeholder alone
-   left the accessible name empty. Hidden visually — the placeholder text
-   already conveys the same thing sighted users need. Same technique as
+/* These sl-select/sl-input/sl-textarea `label`s give the control an
+   accessible name (Shoelace wires aria-labelledby to the label slot); the
+   placeholder alone left the accessible name empty. Hidden visually — the
+   placeholder, or the heading or sentence above the control, already
+   conveys the same thing sighted users need. Same technique as
    .visually-hidden, scoped to the label part instead of the whole control. */
 #player-job-select::part(form-control-label),
-#chat-search::part(form-control-label) {
+#chat-search::part(form-control-label),
+#log-search::part(form-control-label),
+#cookie-import-text::part(form-control-label),
+#ffmpeg-install-cmd::part(form-control-label) {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1751,7 +1906,7 @@ sl-progress-bar {
     font-size: var(--sl-font-size-x-small);
     vertical-align: baseline;
     cursor: pointer;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 .chat-msg-time:hover,
@@ -1765,15 +1920,15 @@ sl-progress-bar {
 }
 
 .chat-msg-author.owner {
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
 }
 
 .chat-msg-author.moderator {
-    color: var(--sl-color-primary-600);
+    color: var(--text-primary);
 }
 
 .chat-msg-author.member {
-    color: var(--sl-color-success-600);
+    color: var(--text-success);
 }
 
 .chat-msg.announcement {
@@ -1808,7 +1963,7 @@ sl-progress-bar {
 
 .chat-msg-superchat {
     font-weight: var(--sl-font-weight-bold);
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
     margin-right: var(--sl-spacing-2x-small);
 }
 
@@ -1957,7 +2112,7 @@ sl-progress-bar {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-align: center;
 }
 
@@ -2036,35 +2191,37 @@ sl-progress-bar {
     margin-bottom: var(--sl-spacing-x-large);
 }
 
+/* A step's state shows in its circle: hollow while upcoming, green once
+   completed, blue while active (whose label is also bold). The steps used
+   to fade instead (40% upcoming, 70% completed), which took their labels
+   to 1.9:1; nothing fades now, and all of it clears 4.5:1. */
 .setup-step {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: var(--sl-spacing-x-small);
-    opacity: 0.4;
-    transition: opacity 0.2s ease;
-}
-
-.setup-step.active {
-    opacity: 1;
-}
-
-.setup-step.completed {
-    opacity: 0.7;
 }
 
 .step-number {
     width: 2.5rem;
     height: 2.5rem;
     border-radius: 50%;
-    background-color: var(--sl-color-neutral-300);
-    color: var(--sl-color-neutral-0);
+    /* An inset ring rather than a border, so the circle keeps its size when
+       a fill replaces it. */
+    box-shadow: inset 0 0 0 2px var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: var(--sl-font-weight-bold);
     font-size: var(--sl-font-size-medium);
     transition: background-color 0.2s ease;
+}
+
+.setup-step.active .step-number,
+.setup-step.completed .step-number {
+    box-shadow: none;
+    color: var(--sl-color-neutral-0);
 }
 
 .setup-step.active .step-number {
@@ -2080,11 +2237,34 @@ sl-progress-bar {
     color: var(--sl-color-neutral-600);
 }
 
+.setup-step.active .step-label {
+    color: var(--sl-color-neutral-900);
+    font-weight: var(--sl-font-weight-semibold);
+}
+
+/* The advanced wizard's eight steps did not fit the setup card at the
+   default gap and label size: the strip overflowed both of the card's
+   edges by 30-35px, "Network" and "Integrations" drawn across its border.
+   Tighter spacing and x-small labels fit all eight inside it. */
+#setup-adv-steps {
+    gap: var(--sl-spacing-x-small);
+}
+
+#setup-adv-steps .step-label {
+    font-size: var(--sl-font-size-x-small);
+}
+
 /* Setup Pages */
 .setup-page {
     display: flex;
     flex-direction: column;
     gap: var(--sl-spacing-medium);
+}
+
+/* Focused programmatically when its page appears (SetupController._focusPage)
+   so the next Tab lands inside the page; it is not a control, so no ring. */
+.setup-page > h2:focus {
+    outline: none;
 }
 
 .setup-page h2 {
@@ -2139,7 +2319,7 @@ sl-progress-bar {
     outline: none;
 }
 
-.setup-mode-card h3 {
+.setup-mode-card h2 {
     margin: 0;
     font-size: var(--sl-font-size-large);
     font-weight: var(--sl-font-weight-semibold);
@@ -2336,6 +2516,11 @@ sl-progress-bar {
     filter: brightness(1.2);
 }
 
+.trim-handle:focus-visible {
+    outline: 2px solid var(--sl-color-primary-600);
+    outline-offset: 2px;
+}
+
 .trim-existing-mark {
     position: absolute;
     top: 0;
@@ -2395,15 +2580,16 @@ sl-progress-bar {
     }
 }
 
-/* Restart-required badge */
+/* Restart-required badge. Each is inserted after its field inside a
+   .settings-section, which is a flex column: without align-self the tag
+   stretched into a full-width orange bar under every restart-only field. */
 .restart-badge {
-    margin-left: var(--sl-spacing-x-small);
-    vertical-align: middle;
+    align-self: flex-start;
 }
 
 /* Unsaved settings warning */
 .unsaved-warning {
-    color: var(--sl-color-warning-600);
+    color: var(--text-warning);
     font-size: var(--sl-font-size-small);
     font-weight: var(--sl-font-weight-semibold);
 }
@@ -2425,7 +2611,7 @@ sl-progress-bar {
 /* Video duration display in add dialog */
 #video-duration-display {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin-top: var(--sl-spacing-x-small);
 }
 
@@ -2491,7 +2677,7 @@ sl-progress-bar {
 }
 
 .client-token-meta {
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     font-size: 0.75rem;
     white-space: nowrap;
 }
@@ -2524,7 +2710,7 @@ sl-progress-bar {
 
 .empty-state-subtext {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin: var(--sl-spacing-x-small) 0;
 }
 
@@ -2605,6 +2791,13 @@ sl-progress-bar {
 }
 
 /* Keyboard help dialog */
+/* Under the dialog's h2 title. They were h4s, skipping a level; this keeps
+   the h4 size they had. */
+#keyboard-help-dialog h3 {
+    margin: 0 0 var(--sl-spacing-small);
+    font-size: 1em;
+}
+
 .keyboard-shortcut-grid {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -2691,6 +2884,10 @@ sl-progress-bar {
 }
 
 .unified-filter-clear {
+    /* A span around the icon (see index.html); inline-flex keeps its box as
+       tight as the bare icon's was, with no line-height below the glyph. */
+    display: inline-flex;
+    align-items: center;
     font-size: 0.85rem;
     color: var(--sl-input-icon-color);
     cursor: pointer;
@@ -2722,7 +2919,7 @@ sl-progress-bar {
 .unified-filter-menu sl-menu-item[data-group-header] {
     font-weight: var(--sl-font-weight-semibold);
     font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     pointer-events: none;
@@ -2734,6 +2931,9 @@ sl-progress-bar {
 }
 
 .unified-filter-menu .filter-item-exclude {
+    /* A span around the icon, like .unified-filter-clear. */
+    display: inline-flex;
+    align-items: center;
     font-size: 0.7rem;
     color: var(--sl-color-neutral-400);
     cursor: pointer;
@@ -2751,20 +2951,80 @@ sl-progress-bar {
 
 #tasks-filter-count {
     font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
 }
 
 /* ===== Light Theme Overrides ===== */
 html.sl-theme-light {
+    /* The badges set white text on these; each clears 4.5:1 (Live, Finished
+       and Queued are the lightest shades of their hue that do). Muxing's
+       yellow cannot, so its badge takes dark text instead, below. */
     --status-upcoming: #7c3aed;
-    --status-live: #229954;
+    --status-live: #1e864a;
     --status-downloading: #2471a3;
     --status-muxing: #d4ac0d;
-    --status-finished: #16a085;
+    --status-finished: #12836d;
     --status-error: #c0392b;
     --status-cancelled: #6b7280;
-    --status-queued: #707b7c;
+    --status-queued: #6c7778;
     --status-cookies: #c026d3;
+
+    /* Named by palette step, not by role: the block below moves the role
+       steps. */
+    --text-success: var(--sl-color-green-800);
+    --text-warning: var(--sl-color-amber-800);
+    --text-danger: var(--sl-color-red-700);
+    --text-primary: var(--sl-color-sky-700);
+
+    /* Shoelace fills its primary, success and warning buttons (and colours
+       the active tab and outline buttons' text) with the -600 step, hovers
+       with the -500 and presses with the -700. The light palette's -600s
+       are pale: white on them read at 4.1:1 (sky), 3.3:1 (green) and 3.2:1
+       (amber). The -600 and -700 each move one palette step darker; the
+       -500, the hover, becomes the lightest shade of its hue that still
+       clears 4.5:1 under white, so a hover still lightens. The danger reds
+       already clear 4.5:1 and stay put. */
+    --sl-color-primary-500: #027cbb;
+    --sl-color-primary-600: var(--sl-color-sky-700);
+    --sl-color-primary-700: var(--sl-color-sky-800);
+    --sl-color-success-500: #12873d;
+    --sl-color-success-600: var(--sl-color-green-700);
+    --sl-color-success-700: var(--sl-color-green-800);
+    --sl-color-warning-500: #b16105;
+    --sl-color-warning-600: var(--sl-color-amber-700);
+    --sl-color-warning-700: var(--sl-color-amber-800);
+}
+
+html.sl-theme-light sl-badge.status.muxing::part(base) {
+    color: var(--sl-color-neutral-900);
+}
+
+/* Links rest on --text-primary, sky-700 here, so hover goes one darker. */
+html.sl-theme-light a:hover {
+    color: var(--sl-color-sky-800);
+}
+
+/* The dark theme's pill steps are bright there but pale in the light
+   palette: on its own tint the light theme's disk warning read at 1.7:1.
+   The -800 step clears 4.5:1, in the light theme only. */
+html.sl-theme-light .disk-indicator-warn,
+html.sl-theme-light .indicator-warn {
+    color: var(--sl-color-warning-800);
+}
+
+html.sl-theme-light .disk-indicator-critical,
+html.sl-theme-light .indicator-error {
+    color: var(--sl-color-danger-800);
+}
+
+html.sl-theme-light .indicator-ok {
+    color: var(--sl-color-success-800);
+}
+
+/* DEBUG's dark-theme -700 would sit too close to INFO on the light log
+   panel; the -600 clears 4.5:1 there and stays dim. */
+html.sl-theme-light .log-debug {
+    color: var(--sl-color-neutral-600);
 }
 
 /* ===== Mobile Touch Polish ===== */
@@ -2773,6 +3033,13 @@ html.sl-theme-light {
     sl-icon-button::part(base) {
         min-height: 44px;
         min-width: 44px;
+    }
+
+    /* The taller touch target stretches a small button's label box, but
+       its line-height stays sized for the small button, so the text sat
+       at the top with the icon below it. Centre the button's parts. */
+    sl-button::part(base) {
+        align-items: center;
     }
 
     .video-item {
@@ -2786,6 +3053,13 @@ html.sl-theme-light {
         left: 0;
         right: 0;
         top: auto;
+        /* A sheet spans the screen. Shoelace caps the panel at
+           calc(100% - 2x-large spacing) for its centred layout, and a
+           dialog's --width (24rem, 28rem) can be narrower than a phone;
+           pinned to the left edge, either left a strip of page showing
+           down the right side of the sheet. */
+        width: 100%;
+        max-width: 100%;
         max-height: 85vh;
         border-radius: var(--sl-border-radius-large) var(--sl-border-radius-large) 0 0;
         animation: slideUpSheet 0.2s ease-out;
@@ -2841,7 +3115,7 @@ html.sl-theme-light {
     margin-bottom: var(--sl-spacing-large);
 }
 
-.stats-section h3 {
+.stats-section h2 {
     margin: 0 0 var(--sl-spacing-small) 0;
     font-size: var(--sl-font-size-medium);
     font-weight: 600;
@@ -2871,14 +3145,14 @@ html.sl-theme-light {
 
 .stat-label {
     font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-700);
     margin-top: 2px;
 }
 
-.stat-active .stat-value { color: var(--sl-color-success-600); }
-.stat-muxing .stat-value { color: var(--sl-color-warning-600); }
-.stat-error .stat-value  { color: var(--sl-color-danger-600); }
-.stat-finished .stat-value { color: var(--sl-color-primary-600); }
+.stat-active .stat-value { color: var(--text-success); }
+.stat-muxing .stat-value { color: var(--text-warning); }
+.stat-error .stat-value  { color: var(--text-danger); }
+.stat-finished .stat-value { color: var(--text-primary); }
 
 /* Disk bar */
 .disk-bar-container {
@@ -2911,7 +3185,7 @@ html.sl-theme-light {
     display: flex;
     justify-content: space-between;
     font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-600);
     margin-top: 4px;
 }
 
@@ -2929,11 +3203,12 @@ html.sl-theme-light {
     letter-spacing: -0.01em;
 }
 
-.disk-indicator-warn     { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
-.disk-indicator-critical { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
+/* Same steps and the same lighter red tint as the YT/TW pills. */
+.disk-indicator-warn     { color: var(--sl-color-warning-600); background: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
+.disk-indicator-critical { color: var(--sl-color-danger-700); background: color-mix(in srgb, var(--sl-color-danger-600) 10%, transparent); }
 
 .active-indicator-on {
-    color: var(--sl-color-success-500);
+    color: var(--text-success);
 }
 
 /* Mobile responsive: stats single-column */
@@ -2951,8 +3226,8 @@ html.sl-theme-light {
 /* Version indicator. user-select: none — clicking the version opens the GitHub
    page (click to arm, click again to open), and a quick second click would
    otherwise text-select the "v2.7.0" label. */
-.version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-400); letter-spacing: -0.02em; user-select: none; }
-.version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
+.version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-700); letter-spacing: -0.02em; user-select: none; }
+.version-indicator.has-update { cursor: pointer; color: var(--text-success); }
 .version-indicator.has-update:hover { text-decoration: underline; }
 #theme-toggle, #btn-logout { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #theme-toggle::part(base), #btn-logout::part(base) { padding: 0; min-height: auto; min-width: auto; }
@@ -2961,11 +3236,11 @@ html.sl-theme-light {
 #update-release-notes h1, #update-release-notes h2, #update-release-notes h3 { margin: 1em 0 0.4em; font-weight: 600; }
 #update-release-notes h1 { font-size: 1.3em; }
 #update-release-notes h2 { font-size: 1.15em; }
-#update-release-notes h3 { font-size: 1em; color: var(--sl-color-primary-600); }
+#update-release-notes h3 { font-size: 1em; color: var(--text-primary); }
 #update-release-notes ul, #update-release-notes ol { margin: 0.4em 0 0.4em 1.5em; padding: 0; }
 #update-release-notes li { margin: 0.2em 0; }
 #update-release-notes code { background: var(--sl-color-neutral-100); padding: 0.1em 0.3em; border-radius: 3px; font-family: var(--sl-font-mono); font-size: 0.9em; }
-#update-release-notes a { color: var(--sl-color-primary-600); text-decoration: underline; }
+#update-release-notes a { color: var(--text-primary); text-decoration: underline; }
 #update-release-notes p { margin: 0.5em 0; }
 
 /* Respect reduced motion preferences */
@@ -3434,7 +3709,7 @@ html.sl-theme-light {
     .files-table .files-row > .files-job-info {
         order: 5;
         font-size: 0.65rem;
-        color: var(--sl-color-neutral-500);
+        color: var(--sl-color-neutral-600);
         white-space: nowrap;
     }
 
@@ -3474,7 +3749,7 @@ html.sl-theme-light {
         font-size: 0.65rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        color: var(--sl-color-neutral-500);
+        color: var(--sl-color-neutral-600);
         font-weight: 600;
     }
 
@@ -3526,7 +3801,8 @@ html.sl-theme-light {
        sheet rule (set elsewhere in the 768px block) takes over and
        full-widths the panel — but explicitly clear the desktop width
        so the panel doesn't fight the sheet layout. */
-    #details-dialog::part(panel) {
+    #details-dialog::part(panel),
+    #trim-dialog::part(panel) {
         width: 100%;
     }
 
@@ -3538,7 +3814,7 @@ html.sl-theme-light {
 
     #log-count {
         font-size: 0.7rem;
-        color: var(--sl-color-neutral-500);
+        color: var(--sl-color-neutral-600);
         order: 1;
     }
 
@@ -3616,16 +3892,16 @@ html.sl-theme-light {
         font-size: 0.75rem;
     }
 
-    /* Section headers (Files / Imports / Stats) are h3 — desktop
+    /* Section headers (Files / Imports / Stats) are h2 — desktop
        reads them as primary, on mobile they crowd the layout. */
-    .files-header h3,
-    #imports-container h3,
-    .stats-section h3 {
+    .files-header h2,
+    #imports-container h2,
+    .stats-section h2 {
         font-size: 0.95rem;
         margin-bottom: var(--sl-spacing-x-small);
     }
 
-    /* Files header (h3 + actions) tends to wrap awkwardly when the
+    /* Files header (h2 + actions) tends to wrap awkwardly when the
        action buttons can't fit on the same line. Allow wrapping and
        align everything left so the second-line buttons line up with
        the heading. */

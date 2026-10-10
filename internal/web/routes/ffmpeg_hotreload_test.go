@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -232,5 +234,96 @@ func TestFFmpegCheckRouteRefusesATraversalPathBeforeExecutingIt(t *testing.T) {
 	}
 	if notified != "" {
 		t.Errorf("OnFfmpegPathChange fired with %q for a refused path", notified)
+	}
+}
+
+// TestFFmpegPathMustNameFFmpeg: Moombox runs whatever paths.ffmpeg_path names
+// (`-version` on the check route, every mux once stored), and a LAN client
+// could point it at bytes it planted — POST /api/import writes an upload as
+// "<title> [<id>].mp4", and Windows runs a PE whatever its extension. The
+// executable must be named ffmpeg / ffmpeg.exe, which an import never is.
+//
+// Mutants: drop ffmpegPathError from the check route (the script below RUNS
+// and the marker appears); drop the newFFmpegPathError call from PUT
+// /api/config (the changed path is stored).
+func TestFFmpegPathMustNameFFmpeg(t *testing.T) {
+	for p, want := range map[string]bool{
+		"":                                 true,
+		"ffmpeg":                           true,
+		"/usr/bin/ffmpeg":                  true,
+		`C:\tools\ffmpeg\bin\FFMPEG.EXE`:   true,
+		"/data/out/imports/x [abc].mp4":    false,
+		`C:\Moombox\out\imports\x [a].mp4`: false,
+		"/usr/bin/python3":                 false,
+	} {
+		if got := ffmpegPathError(p) == ""; got != want {
+			t.Errorf("ffmpegPathError(%q) accepted = %v, want %v", p, got, want)
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		return // the planted script below is a shell script
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	script := filepath.Join(dir, "planted [abc].mp4")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := config.NewStore(config.Defaults(), filepath.Join(dir, "config.toml"))
+	r := chi.NewRouter()
+	FFmpegRoutes(r, &FFmpegDeps{Store: store, Logger: ffmpegTestLogger{}})
+	body, _ := json.Marshal(map[string]string{"path": script})
+	req := httptest.NewRequest("POST", "/api/ffmpeg/check", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("check route: status %d, want 400 for a path not named ffmpeg", rec.Code)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the check route EXECUTED a path not named ffmpeg")
+	}
+
+	// PUT /api/config: a changed path is refused, the stored one is not.
+	f := newConfigRoutesFixture(t)
+	raw, _ := json.Marshal(map[string]any{"paths": map[string]any{"ffmpeg_path": script}})
+	put := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(raw))
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, put)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "paths.ffmpeg_path") {
+		t.Errorf("PUT a planted ffmpeg_path: got %d %s, want a 400 naming paths.ffmpeg_path", rec.Code, rec.Body.String())
+	}
+	f.store.Update(func(c *config.MoomboxConfig) { c.Paths.FfmpegPath = "/opt/legacy/ffmpeg-7" })
+	putConfig(t, f, map[string]any{"paths": map[string]any{"ffmpeg_path": "/opt/legacy/ffmpeg-7"}})
+}
+
+// A path that answers -version but cannot be SAVED is not a 200 "valid": the
+// setup step writes the path into its cached config on that answer, because
+// the server saved it — and the live muxers never got it either — so the UI
+// and the disk disagreed with nothing on screen saying so.
+//
+// Mutant: logging the save failure and answering valid:true again.
+func TestFFmpegCheckRouteReportsAFailedSave(t *testing.T) {
+	real, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not on PATH — this route only saves a path that answers -version")
+	}
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := config.NewStore(config.Defaults(), filepath.Join(notADir, "config.toml"))
+	r := chi.NewRouter()
+	FFmpegRoutes(r, &FFmpegDeps{Store: store, Logger: ffmpegTestLogger{}})
+
+	body, _ := json.Marshal(map[string]string{"path": real})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/api/ffmpeg/check", bytes.NewReader(body)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("a valid path whose save failed: %d %s, want 500", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"valid":true`) {
+		t.Errorf("the failed save still answered valid: %s", rec.Body.String())
 	}
 }

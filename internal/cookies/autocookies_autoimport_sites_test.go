@@ -220,7 +220,7 @@ func TestRefreshCookiesDetailedCallersAreEnumerated(t *testing.T) {
 // at exactly two AUTOMATIC sites:
 //
 //	decideStartupSeed     the one-shot import at boot
-//	StartPeriodicRefresh  the timer's tick, when that tick would be browser-free
+//	periodicTick          the timer's tick (StartPeriodicRefresh), when that tick would be browser-free
 //
 // Two failure modes, both structural, both invisible to a behavioural test that
 // only exercises today's paths:
@@ -251,7 +251,7 @@ func TestRefreshCookiesDetailedCallersAreEnumerated(t *testing.T) {
 // caller with the rule hand-copied into it is invisible to it and lands here.
 // Neither half covers the other's blind spot.
 func TestAutomaticImportGuardHasExactlyItsTwoAutomaticCallers(t *testing.T) {
-	want := []string{"StartPeriodicRefresh", "decideStartupSeed"} // sorted
+	want := []string{"decideStartupSeed", "periodicTick"} // sorted
 	got := callersOf(t, "automaticImportGuard")
 
 	if len(got) == 0 {

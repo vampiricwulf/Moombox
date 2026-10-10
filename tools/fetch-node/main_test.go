@@ -107,3 +107,17 @@ func TestBlobsUpToDate(t *testing.T) {
 		}
 	})
 }
+
+// TestTrackedVersionTxtMatchesTheManifest: version.txt is tracked and is the
+// embedded sidecar's cache-invalidation key (embed.Version), and nothing else
+// pinned it to the manifest in this file — a pin bump that forgot it, or a
+// merge that took one side of each, shipped a stale key.
+func TestTrackedVersionTxtMatchesTheManifest(t *testing.T) {
+	got, err := os.ReadFile(filepath.Join("..", "..", "internal", "bgutils", "embed", "version.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := versionStamp() + "\n"; string(got) != want {
+		t.Errorf("version.txt = %q, want %q — run go run ./tools/fetch-node", got, want)
+	}
+}

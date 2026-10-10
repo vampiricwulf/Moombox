@@ -194,14 +194,14 @@ func TestWaitForTwitchLiveConsumesHint(t *testing.T) {
 	if got := takeLiveHint(c, logs, "chan2"); got != nil {
 		t.Error("takeLiveHint returned a non-live hint — the wait must keep polling")
 	}
-	if len(logs.msgs) != 1 {
-		t.Errorf("a non-live hint logged %d lines, want 1 — it is consumed either way, so silence loses the only record of it", len(logs.msgs))
+	if len(logs.lines()) != 1 {
+		t.Errorf("a non-live hint logged %d lines, want 1 — it is consumed either way, so silence loses the only record of it", len(logs.lines()))
 	}
 	// A plain miss stays silent: every poll cycle takes, and almost every take
 	// finds nothing.
-	logs.msgs = nil
-	if got := takeLiveHint(c, logs, "never-stashed"); got != nil || len(logs.msgs) != 0 {
-		t.Errorf("an ordinary miss returned %v and logged %d lines, want nil and 0", got, len(logs.msgs))
+	logs.reset()
+	if got := takeLiveHint(c, logs, "never-stashed"); got != nil || len(logs.lines()) != 0 {
+		t.Errorf("an ordinary miss returned %v and logged %d lines, want nil and 0", got, len(logs.lines()))
 	}
 
 	// The wait loop itself needs a live Twitch API and a 15-20 s sleep to
@@ -314,4 +314,123 @@ func funcCallPositions(n ast.Node, name string) []token.Pos {
 		return true
 	})
 	return out
+}
+
+// TestWaitForTwitchLiveReturnsWhenTheRowIsGone: a channel prune deletes
+// Upcoming rows in bulk without firing OnJobDeleted, and GetJob returns
+// (nil, nil) for a missing row, which the wait's cancel check dereferenced —
+// a panic that processJob's recover then turned into an Error write on a row
+// that no longer existed. A vanished row now ends the wait like a cancel.
+//
+// Mutant: drop the `currentJob == nil` arm — the goroutine panics.
+func TestWaitForTwitchLiveReturnsWhenTheRowIsGone(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	const login = "prunedstreamer"
+	job := &database.Job{ID: "tw_manual_" + login + "_1700000000", Platform: "twitch",
+		URL: "https://twitch.tv/" + login, Status: database.StatusUpcoming}
+	// Never added: the row is already gone when the wait looks.
+	sp := &StreamProcessor{db: db, logger: discardLogger{}, twitchHints: newTwitchHintCache()}
+
+	type outcome struct {
+		info  *twitch.TwitchStreamInfo
+		err   error
+		panic any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- outcome{panic: r}
+			}
+		}()
+		info, err := sp.waitForTwitchLive(context.Background(), job, login)
+		done <- outcome{info: info, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.panic != nil {
+			t.Fatalf("waitForTwitchLive panicked on a deleted row: %v", got.panic)
+		}
+		if got.info != nil || got.err != nil {
+			t.Errorf("waitForTwitchLive = (%v, %v), want (nil, nil) — a cancel", got.info, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForTwitchLive kept waiting on a row that no longer exists")
+	}
+}
+
+// TestWaitForTwitchLiveClearsItsProgressOnCancel: the wait writes "Waiting
+// for stream..." on entry and used to clear it only when the channel went
+// live, so a cancelled manual Twitch job kept reading "Waiting for
+// stream..." on its Cancelled row until a Retry reset it.
+//
+// Mutant: drop the deferred clear — progress still holds the waiting line.
+func TestWaitForTwitchLiveClearsItsProgressOnCancel(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	const login = "cancelledstreamer"
+	job := &database.Job{ID: "tw_manual_" + login + "_1700000000", VideoID: "tw_manual_" + login + "_1700000000",
+		Platform: "twitch", ManuallyAdded: true, URL: "https://twitch.tv/" + login, Status: database.StatusUpcoming}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	sp := &StreamProcessor{db: db, logger: discardLogger{}, twitchHints: newTwitchHintCache()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sp.waitForTwitchLive(ctx, job, login)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if j, _ := db.GetJob(job.ID); j != nil && j.Progress == "Waiting for stream..." {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the wait never wrote its progress line")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wait did not return on cancel")
+	}
+	j, err := db.GetJob(job.ID)
+	if err != nil || j == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if j.Progress != "" {
+		t.Errorf("progress after cancel = %q, want it cleared", j.Progress)
+	}
+}
+
+// TestSyncTwitchJobMetadataUpdatesTheInMemoryJob: processTwitchLive and
+// processTwitchVod wrote the stream's title, channel and art to the row only,
+// so the job processJob passes to buildJobContext — and every embed of the
+// capture — kept a manual add's "<login> — Manual Add" placeholder.
+//
+// Mutant: drop any one field's copy — that row of the comparison fails.
+func TestSyncTwitchJobMetadataUpdatesTheInMemoryJob(t *testing.T) {
+	job := &database.Job{Title: "shroud — Manual Add", ChannelName: "shroud"}
+	syncTwitchJobMetadata(job, map[string]any{
+		"title":              "shroud — Ranked grind",
+		"channel_name":       "Shroud",
+		"thumbnail_url":      "https://example.test/t.jpg",
+		"channel_avatar_url": "https://example.test/a.png",
+		"stream_start_time":  "2026-10-04T18:00:00Z",
+		"twitch_category":    "VALORANT",
+		"length_seconds":     3600,
+	})
+	got := []string{job.Title, job.ChannelName, job.ThumbnailURL, job.ChannelAvatarURL, job.StreamStartTime, job.TwitchCategory}
+	want := []string{"shroud — Ranked grind", "Shroud", "https://example.test/t.jpg", "https://example.test/a.png", "2026-10-04T18:00:00Z", "VALORANT"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("field %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if job.LengthSeconds == nil || *job.LengthSeconds != 3600 {
+		t.Errorf("LengthSeconds = %v, want 3600", job.LengthSeconds)
+	}
 }
