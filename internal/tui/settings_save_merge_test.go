@@ -613,11 +613,11 @@ func TestTUISaveRestartReflectsWhatChanged(t *testing.T) {
 		if !restart {
 			t.Error("a blank probe_targets kept a list other than the one Open showed and prompted nothing")
 		}
-		// The live list, not config.Load's: Load decodes into Defaults(),
-		// whose probe targets share config.DefaultProbeTargets' array, and a
-		// shorter list read from the file would be written into it.
-		if live := store.Snapshot(); !slices.Equal(live.Connectivity.ProbeTargets, []string{"1.0.0.1:443"}) {
-			t.Errorf("probe_targets = %v, want the stored list kept", live.Connectivity.ProbeTargets)
+		live, disk := liveAndDisk(t, store)
+		for name, c := range map[string]*config.MoomboxConfig{"live": live, "config.toml": disk} {
+			if !slices.Equal(c.Connectivity.ProbeTargets, []string{"1.0.0.1:443"}) {
+				t.Errorf("%s: probe_targets = %v, want the stored list kept", name, c.Connectivity.ProbeTargets)
+			}
 		}
 	})
 }
