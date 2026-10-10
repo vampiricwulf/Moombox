@@ -1023,6 +1023,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 		return &monitor.TabPage{Items: items, Continuation: page.Continuation}, nil
 	}
+	// The live-config read a queued scan is checked against just before it
+	// starts: a channel disabled or removed after the sweep that queued it
+	// is not scanned (W25-16).
+	backfill.ChannelEnabled = liveChannelEnabled(s.configStore)
 	s.backfillWorker = backfill
 
 	// The sweep trigger rides the feed-monitor cycle — startup and
@@ -1591,4 +1595,23 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.backfillProgress = make(map[string]backfillProgressState)
 
 	return nil
+}
+
+// liveChannelEnabled is the backfill worker's ChannelEnabled read: whether
+// chID is configured AND enabled in the store's live config. A channel the
+// config no longer holds reads as not enabled — its queued scan is skipped,
+// and the next sweep prunes its feed history.
+func liveChannelEnabled(store *config.Store) func(chID string) bool {
+	return func(chID string) bool {
+		enabled := false
+		store.Read(func(c *config.MoomboxConfig) {
+			for i := range c.Channels {
+				if c.Channels[i].ID == chID {
+					enabled = c.Channels[i].IsEnabled()
+					return
+				}
+			}
+		})
+		return enabled
+	}
 }
