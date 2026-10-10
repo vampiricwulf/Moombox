@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,15 +149,18 @@ func abandonArchive(t *testing.T) []byte {
 // while the server was extracting — was told "Upload cancelled", and the
 // server went on to create the job, so the retry met "job already exists".
 // The route checks for a client gone before the insert now: no job, and the
-// retry imports.
+// retry imports. The 499 reaches no one — there is no access log, and the
+// server's own ErrorLog is discarded — so the abandon is logged, or an import
+// that vanished would leave the operator nothing to find.
 //
 // Nothing is in place before the insert, so the abandoned import leaves no
 // temporary .partial behind either: the deferred cleanup takes those back.
 //
 // Mutant: `&& false` on the req.Context().Err() check (the job is created and
 // the retry meets 409); `false &&` (the route never asks, and every case here
-// says so); the deferred temp cleanup's os.Remove(f.tmp) dropped (a .partial
-// is left in imports/).
+// says so); dropping the logger.Warn under it (no line names the import);
+// the deferred temp cleanup's os.Remove(f.tmp) dropped (a .partial is left
+// in imports/).
 func TestImportAbandonedByItsClientCreatesNothing(t *testing.T) {
 	f := newImportFixture(t)
 	body := abandonArchive(t)
@@ -173,6 +177,9 @@ func TestImportAbandonedByItsClientCreatesNothing(t *testing.T) {
 	}
 	if len(left) != 0 {
 		t.Errorf("the abandoned import left its temporary files: %v", left)
+	}
+	if logged := f.log.all(); !strings.Contains(logged, "import: abandoned") || !strings.Contains(logged, "dQw4w9WgXcQ") {
+		t.Errorf("no log line names the abandoned import; the log holds %q", logged)
 	}
 
 	rec, job := importZip(t, f, body)
