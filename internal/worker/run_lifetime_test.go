@@ -132,11 +132,7 @@ func TestSlotReleaseFlipReachesTheRunsJob(t *testing.T) {
 	if woke != 1 {
 		t.Errorf("scheduler woken %d times, want 1 — the job held an archive slot", woke)
 	}
-	st, err := CookieResumeStatus(db, job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st != database.StatusUpcoming {
+	if st := CookieResumeStatus(job); st != database.StatusUpcoming {
 		t.Errorf("a flipped broadcast resumes as %q, want %q", st, database.StatusUpcoming)
 	}
 }

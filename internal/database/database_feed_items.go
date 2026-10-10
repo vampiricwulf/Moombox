@@ -70,9 +70,10 @@ WHERE channel_id = ? AND video_id = ?`, precisionRankCaseSQL("date_precision"))
 }
 
 // GetFeedItem returns the feed_items row for (channelID, videoID), or nil (no
-// error) if no such row exists. Read by worker.CookieResumeStatus, where a
-// backlog job's feed_items partner decides Queued or Upcoming on a cookie
-// repair.
+// error) if no such row exists. The tests read the store through it; no
+// production path has needed one row since a backlog job's feed_items partner
+// stopped deciding where a cookie repair resumes it (worker.CookieResumeStatus,
+// W25-09).
 func (db *Database) GetFeedItem(channelID, videoID string) (*FeedItem, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()

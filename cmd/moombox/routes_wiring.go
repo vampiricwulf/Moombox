@@ -113,6 +113,12 @@ func (s *runState) wireRoutes() func() {
 		}
 	}})
 	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors, s.apiRL)
+	routes.ChannelRemovalRoutes(s.r, &routes.ChannelRemovalRoutesDeps{
+		DB:              s.db,
+		Store:           s.configStore,
+		OnChannelChange: s.kickMonitors,
+		Logger:          s.log,
+	})
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,
 		Store:  s.configStore,

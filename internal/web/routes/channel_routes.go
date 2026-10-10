@@ -127,46 +127,8 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		saveChannel(rw, channel)
 	})
 
-	// DELETE /api/config/channels/:id
-	r.Delete("/api/config/channels/{id}", func(rw http.ResponseWriter, req *http.Request) {
-		channelID := pathParam(req, "id")
-
-		// Copy-on-write for the same reason as the upsert above: the old
-		// append-shift compacted elements inside the shared backing array,
-		// racing lock-free Snapshot readers.
-		mu.Lock()
-		oldChannels := cfg.Channels
-		idx := -1
-		for i, ch := range cfg.Channels {
-			if ch.ID == channelID {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			mu.Unlock()
-			jsonError(rw, "channel not found", http.StatusNotFound)
-			return
-		}
-		newChannels := slices.Clone(cfg.Channels)
-		newChannels = slices.Delete(newChannels, idx, idx+1)
-		cfg.Channels = newChannels
-
-		// Persist to disk; restore on save failure so in-memory and disk stay in sync.
-		if err := store.SaveLocked(); err != nil {
-			cfg.Channels = oldChannels
-			mu.Unlock()
-			jsonError(rw, "failed to save config", http.StatusInternalServerError)
-			return
-		}
-		mu.Unlock()
-
-		if onChannelChange != nil {
-			onChannelChange()
-		}
-
-		jsonResponse(rw, map[string]any{"success": true})
-	})
+	// DELETE /api/config/channels/{id} is ChannelRemovalRoutes': removing
+	// a channel asks what to do with its jobs.
 
 	// PUT /api/config/channels/reorder
 	r.Put("/api/config/channels/reorder", func(rw http.ResponseWriter, req *http.Request) {

@@ -960,9 +960,13 @@ func TestSweep_ForceDoesNotCancelRunningScan(t *testing.T) {
 // (d) Removal mid-scan: the sweep whose channel list no longer carries the
 // channel cancels the in-flight scan, WAITS for it to observe, then prunes —
 // LAST, so even a stale page written in the cancel window is cleaned. Feed
-// rows and channel_state gone (no resurrected rows), Queued + Upcoming +
-// COOKIES? jobs AND their history rows gone, the Downloading job (and its
-// history) untouched.
+// rows and channel_state gone (no resurrected rows), and EVERY job kept with
+// its history row (W25-09): the departure prune deletes no jobs — only a
+// removal's explicit "delete its pending jobs" does — so a COOKIES? capture
+// parked mid-stream keeps the row its staged footage resumes from.
+//
+// Mutant killed: the sweep deleting the channel's Queued/Upcoming/COOKIES?
+// rows again (DeleteJobsAndHistoryForChannel back in CancelAndPrune).
 func TestSweep_RemovalMidScanCancelsThenPrunes(t *testing.T) {
 	db := newTestDB(t)
 	ch := backfillTestCh()
@@ -980,9 +984,9 @@ func TestSweep_RemovalMidScanCancelsThenPrunes(t *testing.T) {
 			t.Fatalf("AddToHistory(%s): %v", id, err)
 		}
 	}
-	doomed := []string{"d-queued", "d-upcoming", "d-cookies"}
+	pending := []string{"k-queued", "k-upcoming", "k-cookies"}
 	for i, st := range []database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies} {
-		seed(doomed[i], st)
+		seed(pending[i], st)
 	}
 	seed("k-downloading", database.StatusDownloading)
 
@@ -1054,8 +1058,8 @@ func TestSweep_RemovalMidScanCancelsThenPrunes(t *testing.T) {
 			t.Errorf("%s: history exists = %v, want %v", id, has, wantHistory)
 		}
 	}
-	for _, id := range doomed {
-		assertJob(id, false, false) // job AND history gone — no orphan
+	for _, id := range pending {
+		assertJob(id, true, true) // kept, history and all
 	}
 	assertJob("k-downloading", true, true) // running download keeps going
 

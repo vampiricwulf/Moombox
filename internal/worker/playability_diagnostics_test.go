@@ -523,12 +523,14 @@ func TestSetJobErrorParkIdentityNilSlotIsSafe(t *testing.T) {
 // cookie refresh used to send every parked job back to Upcoming and straight
 // onto the queue, so a backlog VOD skipped the archive-slots pacing that the
 // cookie-parked sweep honours (and CountBacklogInFlight over-counted). Both
-// paths now share CookieResumeStatus: a backlog VOD with its feed_items row
-// goes to Queued and is left for the scheduler; anything else is Upcoming and
+// paths now share CookieResumeStatus: a backlog VOD goes to Queued and is left
+// for the scheduler — with or without its feed_items row, since a removed
+// channel's kept backlog has lost its row to the departure prune and the
+// scheduler admits it all the same (W25-09); anything else is Upcoming and
 // enqueued.
 //
-// Mutant: write Upcoming unconditionally again — the backlog row is Upcoming
-// and the queue holds it.
+// Mutant: write Upcoming unconditionally again — the backlog rows are
+// Upcoming and the queue holds them.
 func TestCookieRefreshResumesBacklogThroughTheScheduler(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -538,7 +540,7 @@ func TestCookieRefreshResumesBacklogThroughTheScheduler(t *testing.T) {
 		wantQueued bool
 	}{
 		{"backlog VOD with its feed row waits for the scheduler", 1, true, database.StatusQueued, false},
-		{"backlog VOD whose feed row is gone is not stranded", 1, false, database.StatusUpcoming, true},
+		{"backlog VOD of a removed channel, its feed row gone, waits for the scheduler too", 1, false, database.StatusQueued, false},
 		{"live/upcoming work is re-queued at once", 0, false, database.StatusUpcoming, true},
 	}
 	for i, tc := range cases {

@@ -74,11 +74,10 @@ func (w *DownloadWorker) requeueBacklogAfterDiskFull(job *database.Job, err erro
 //
 // Backlog only, and only where Queued can be left again: CookieResumeStatus —
 // the rule a cookie repair's re-queue follows — answers Queued for a
-// queue_priority 1 job whose feed_items partner exists, and nothing else. A
-// broadcast or a manually added video fails visibly, as before, rather than
-// waiting in a state the operator did not put it in; a backlog row with no
-// partner would never come out of Queued, since the scheduler admits through
-// that join.
+// queue_priority 1 job of a channel, and nothing else. A broadcast or a
+// manually added video fails visibly, as before, rather than waiting in a
+// state the operator did not put it in. A backlog row of a removed channel is
+// requeued like the rest: the scheduler admits it with no feed_items partner.
 //
 // The budget counts the job's runs that ended back in Queued, of either
 // kind, and only a run that ends some other way resets it
@@ -93,7 +92,7 @@ func (w *DownloadWorker) requeueBacklog(job *database.Job, err error, what strin
 	if w.scheduler == nil {
 		return false, err
 	}
-	if status, perr := CookieResumeStatus(w.db, job); perr != nil || status != database.StatusQueued {
+	if CookieResumeStatus(job) != database.StatusQueued {
 		return false, err
 	}
 	attempt := w.noteBacklogRetry(job.ID)

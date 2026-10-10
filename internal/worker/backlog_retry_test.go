@@ -174,15 +174,32 @@ func TestBacklogTransientFailureRequeuesThenErrors(t *testing.T) {
 	}
 }
 
-// TestBacklogRetryOnlyForTransientBacklogFailures: a definitive refusal, a
-// job that is not backlog, and a backlog job with no feed_items partner (the
-// scheduler admits Queued rows through that join, so Queued would strand it)
-// all end in Error at once.
+// TestBacklogRetryOnlyForTransientBacklogFailures: a definitive refusal and a
+// job that is not backlog both end in Error at once. A backlog job with no
+// feed_items partner — a removed channel's kept backlog, whose partner the
+// departure prune deleted — is retried like the rest: the scheduler admits
+// it all the same (W25-09), where it used to end in Error because Queued
+// would have stranded it.
 //
 // Mutants: drop the classifyProbeErr check — the 404 is requeued; drop the
-// CookieResumeStatus check — the broadcast is requeued and the partnerless
-// job is stranded in Queued.
+// CookieResumeStatus check — the broadcast is requeued; answer Queued only
+// with a feed_items partner again (CookieResumeStatus) — the partnerless job
+// ends in Error.
 func TestBacklogRetryOnlyForTransientBacklogFailures(t *testing.T) {
+	t.Run("no feed_items partner", func(t *testing.T) {
+		w, db := testWorkerSetup(t)
+		backlogRetryJob(t, db, "kept", 1, false)
+		w.processStreamFn = func(context.Context, *database.Job) (*StreamProcessResult, error) {
+			return nil, dialRefused
+		}
+		w.processJob(context.Background(), "kept")
+		if row, _ := db.GetJob("kept"); row.Status != database.StatusQueued {
+			t.Errorf("status = %s (%q), want Queued for a retry", row.Status, row.Error)
+		}
+		if ids, _ := db.NextQueuedJobs("UC_retry", 5); len(ids) != 1 || ids[0] != "kept" {
+			t.Errorf("NextQueuedJobs = %v, want the requeued row admissible", ids)
+		}
+	})
 	for _, tc := range []struct {
 		name     string
 		priority int
@@ -191,7 +208,6 @@ func TestBacklogRetryOnlyForTransientBacklogFailures(t *testing.T) {
 	}{
 		{"a deleted video", 1, true, errors.New("full fetch failed: web API error: HTTP 404")},
 		{"not backlog", 0, true, dialRefused},
-		{"no feed_items partner", 1, false, dialRefused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)

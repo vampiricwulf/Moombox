@@ -672,7 +672,7 @@ reads; a target the operator adds starts a new message at its next allowed
 event; and deleting the job drops the row and the ids with it (no DELETE is ever
 sent to Discord) — and the running process's copy too: `onJobDeleted` calls
 `ForgetJob`, and the jobs-list subscriber (`onJobsChange`) calls `RetainJobs` for
-the bulk prune of a departed channel, which fires no per-job event
+the bulk delete of a removed channel's pending jobs, which fires no per-job event
 (`cmd/moombox/monitor_callbacks.go`).
 A YouTube job's id is its video id, so the same id comes back on a re-add or a
 re-detection, and a process still holding the deleted job's id PATCHed its old

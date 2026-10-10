@@ -419,7 +419,7 @@ func NewDownloadWorker(
 	// which is the process's.
 	//
 	// Two subscriptions for the two ways a row goes: DeleteJob fires
-	// OnJobDeleted, while the departed-channel prune
+	// OnJobDeleted, while a channel removal's "delete its pending jobs"
 	// (DeleteJobsAndHistoryForChannel) deletes in bulk and fires only one
 	// OnJobsChange, with the list it left behind (endStreaksGoneFrom). That
 	// list is delivered off the writer's goroutine, so a third makes the
@@ -515,32 +515,22 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 //     archive-slots entirely, and left CountBacklogInFlight over-counting
 //     until they drained.
 //   - priority 0 (live, upcoming, manually added) resumes to Upcoming. The
-//     scheduler never admits a priority-0 row, so Queued would strand it.
-//   - priority 1 with NO feed_items partner also resumes to Upcoming, because
-//     Queued would strand it just as surely. CancelAndPrune (channel REMOVAL)
-//     deletes the channel's never-started jobs and then its feed_items rows,
-//     but deliberately leaves a RUNNING download alone; a backlog VOD that
-//     was Downloading at that moment survives with no partner, and it is
-//     exactly the row that parks in COOKIES? later. NextQueuedJobs
-//     INNER-JOINs feed_items, so the scheduler would never return it, /retry
-//     and /resume both refuse Queued, and ShouldProcess(Queued) is false —
-//     the row would be lost permanently and silently.
+//     scheduler never admits a priority-0 row, so Queued would strand it; so
+//     would a priority-1 row with no channel, since the scheduler only sweeps
+//     channels (QueuedChannels skips a NULL channel_id).
 //
-// The partner check is GetFeedItem (nil, nil for no row). A read that errors
-// returns that error with Upcoming: the cheap answer is the one that can
-// still finish the download.
-func CookieResumeStatus(db *database.Database, job *database.Job) (database.JobStatus, error) {
+// A backlog row of a REMOVED channel resumes to Queued like any other. Its
+// feed_items partner is gone — the departure prune deletes the channel's feed
+// history, and the row was kept, either by the removal's default or as a
+// download already running — and it used to resume to Upcoming for that,
+// because NextQueuedJobs INNER-JOINed feed_items and would never have
+// returned it. The join is a LEFT JOIN now (W25-09), and the scheduler admits
+// such a row under the global archive_slots.
+func CookieResumeStatus(job *database.Job) database.JobStatus {
 	if job.QueuePriority != 1 || job.ChannelID == nil {
-		return database.StatusUpcoming, nil
+		return database.StatusUpcoming
 	}
-	it, err := db.GetFeedItem(*job.ChannelID, job.VideoID)
-	if err != nil {
-		return database.StatusUpcoming, err
-	}
-	if it != nil {
-		return database.StatusQueued, nil
-	}
-	return database.StatusUpcoming, nil
+	return database.StatusQueued
 }
 
 // Scheduler returns the worker's archive-slots scheduler. Creation sites
@@ -1968,11 +1958,7 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		// classifies the stream afresh (per audit reports/worker.md
 		// Finding 21) — or Queued for a backlog VOD, which re-enters through
 		// the scheduler's pacing like the cookie-parked sweep's resumes.
-		status, err := CookieResumeStatus(w.db, job)
-		if err != nil {
-			w.logger.Debug("could not read the feed_items partner; resuming to Upcoming",
-				"jobID", job.ID, "err", err)
-		}
+		status := CookieResumeStatus(job)
 		// Only while the row is still parked. The refresh can take two
 		// minutes, and both UIs offer Cancel on a COOKIES? row: written
 		// unconditionally, this turned the operator's Cancelled back into

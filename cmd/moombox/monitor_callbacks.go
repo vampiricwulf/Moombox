@@ -106,11 +106,7 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 		if !sweepShouldResume(job, platform, currentIdentity) {
 			continue
 		}
-		status, err := worker.CookieResumeStatus(db, job)
-		if err != nil {
-			log.Debug("cookie-parked sweep: could not read the feed_items partner; resuming to Upcoming",
-				"job", job.ID, "platform", platform, "err", err)
-		}
+		status := worker.CookieResumeStatus(job)
 		// Only while the row is still parked: GetAllJobs read it COOKIES?,
 		// and an operator's Cancel can land before this write — which,
 		// written unconditionally, turned the Cancelled row back into a
@@ -1555,11 +1551,25 @@ func (s *runState) wireMonitorCallbacks() {
 		return enabled && s.ytService.HasAnyAuthCookie()
 	}
 
+	// channelMonitored asks the live config whether a channel is still
+	// configured and enabled — the backfill worker's own check.
+	channelMonitored := liveChannelEnabled(s.configStore)
+
 	// createYouTubeJob creates a YouTube job per the disposition's creation
 	// semantics (spec §10's creator table, via jobCreationForDisposition).
 	// Stream-status classification is handled by the monitors via
 	// ProcessYouTubeVideo.
 	createYouTubeJob := func(videoID, title, videoURL string, ch *config.ChannelConfig, source string, d monitor.JobDisposition) {
+		// A monitor cycle takes its channel list as it starts, so a channel
+		// removed or disabled since can still reach here until the cycle
+		// ends — and a removal that deleted the channel's pending jobs had
+		// them created again, history and all, by the cycle already under
+		// way (W25-09). The live config decides instead.
+		if ch.ID != "" && !channelMonitored(ch.ID) {
+			s.log.Info("Video found for a channel no longer monitored; no job created",
+				slog.String("source", source), slog.String("videoID", videoID), slog.String("channel", ch.ID))
+			return
+		}
 		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID),
 			slog.String("title", title), slog.String("disposition", d.String()))
 

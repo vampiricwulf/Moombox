@@ -31,6 +31,8 @@ func newChannelRoutesFixture(t *testing.T) *channelRoutesFixture {
 	r := chi.NewRouter()
 	f := &channelRoutesFixture{router: r, store: store}
 	ChannelRoutes(r, store, func() { f.channelChange.Add(1) }, nil)
+	ChannelRemovalRoutes(r, &ChannelRemovalRoutesDeps{Store: store,
+		OnChannelChange: func() { f.channelChange.Add(1) }, Logger: nopRouteLogger{}})
 	return f
 }
 

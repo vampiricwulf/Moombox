@@ -414,6 +414,39 @@ func (db *Database) QueuedChannels() ([]string, error) {
 	return channels, rows.Err()
 }
 
+// ChannelJob is one job of a channel as ListChannelJobs reads it: what a
+// channel removal's confirmation counts and names.
+type ChannelJob struct {
+	ID     string
+	Title  string
+	Status JobStatus
+}
+
+// ListChannelJobs returns every job carrying channelID — whatever its status
+// — oldest first. jobs.channel_id is nullable and `channel_id = ?` never
+// matches NULL, so Twitch and manually added jobs are never listed.
+func (db *Database) ListChannelJobs(channelID string) ([]ChannelJob, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, title, status FROM jobs WHERE channel_id = ? ORDER BY created_at, id`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []ChannelJob
+	for rows.Next() {
+		var j ChannelJob
+		if err := rows.Scan(&j.ID, &j.Title, &j.Status); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
 // CountBacklogInFlight returns the channel's admitted-backlog count — the M
 // count of spec §10.
 //
@@ -436,22 +469,26 @@ func (db *Database) CountBacklogInFlight(channelID string) (int, error) {
 // NextQueuedJobs returns up to limit Queued job IDs for the channel, in the
 // order the scheduler admits them.
 //
-// Admission order: published DESC — no priority term (only backlog is ever Queued).
-// INNER JOIN is guaranteed to hit: only the archival pass creates Queued rows.
-// A cookie repair also returns priority-1 rows to Queued, and those were created
-// by the archival pass too — the cookie sweep checks for the partner
-// (GetFeedItem) before choosing Queued, so no Queued row lacks one. It has to:
-// the prune deletes {Queued, Upcoming, COOKIES?} jobs before it deletes
-// feed_items (backfill.go) but leaves a RUNNING download alone, and that is the
-// row that parks in COOKIES? afterwards with no partner left.
+// Admission order: published DESC — no priority term (only backlog is ever
+// Queued) — then created_at DESC for the rows with no feed_items partner,
+// which a NULL published sorts after every dated one.
+//
+// LEFT JOIN, because a Queued row can outlive its partner: removing a channel
+// keeps its jobs unless the operator chose to delete the pending ones, while
+// the departure prune still deletes the channel's feed_items (backfill.go
+// CancelAndPrune). An INNER JOIN left those kept rows in Queued with no exit —
+// ShouldProcess(Queued) is false and /retry and /resume both refuse it — so
+// keeping them would have meant losing them. The scheduler admits them under
+// the archive_slots its resolver gives a channel no longer configured: the
+// global default.
 func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(), `SELECT j.id FROM jobs j
-  JOIN feed_items f ON f.channel_id = j.channel_id AND f.video_id = j.video_id
+  LEFT JOIN feed_items f ON f.channel_id = j.channel_id AND f.video_id = j.video_id
  WHERE j.channel_id = ? AND j.status = 'Queued'
- ORDER BY f.published DESC
+ ORDER BY f.published DESC, j.created_at DESC
  LIMIT ?;`, channelID, limit)
 	if err != nil {
 		return nil, err
@@ -470,13 +507,16 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 }
 
 // DeleteJobsAndHistoryForChannel deletes the channel's jobs in the given
-// statuses AND their processing-history rows, returning the number of jobs
-// deleted. Plan 5's backfill prune calls it with {Queued, Upcoming, COOKIES?}
-// (spec §11): pre-download states with nothing on disk. AddToHistory fires at
-// job CREATION, so deleting the job while its history row survives
-// manufactures an orphan — HasProcessed keeps answering true and the re-added
-// channel can never re-archive the video (the exact class that re-armed
-// gr-ZTohjwnQ).
+// statuses AND their processing-history rows, sparing the rows whose IDs are
+// in keep, and returns the number of jobs deleted. Its one caller is the
+// "delete its pending jobs" choice of a channel removal
+// (worker.DeletePendingChannelJobs), with {Queued, Upcoming, COOKIES?} and
+// keep naming the rows whose staging holds recorded footage: a COOKIES? row
+// can be a live capture parked mid-stream, and deleting it left its footage
+// with no job to resume or mux it from. AddToHistory fires at job CREATION,
+// so deleting the job while its history row survives manufactures an orphan
+// — HasProcessed keeps answering true and the re-added channel can never
+// re-archive the video (the exact class that re-armed gr-ZTohjwnQ).
 //
 // Statement order is load-bearing: the history delete's subquery reads the
 // jobs table, so it must run BEFORE the jobs delete. Both run in one
@@ -498,12 +538,12 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // full jobs fetches in the WS subscriber and can overflow the TUI's bounded
 // drop-on-full channel. A prune that deleted nothing dispatches nothing
 // (DeleteJob's rowsAffected guard).
-func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus) (int, error) {
+func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus, keep []string) (int, error) {
 	if len(statuses) == 0 {
 		return 0, nil
 	}
 
-	deleted, jobs, err := db.deleteJobsAndHistoryForChannelTx(channelID, statuses)
+	deleted, jobs, err := db.deleteJobsAndHistoryForChannelTx(channelID, statuses, keep)
 	if err != nil {
 		return 0, err
 	}
@@ -515,16 +555,22 @@ func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []
 // under db.mu and, when rows were deleted, snapshots the post-delete jobs
 // list for the caller's OnJobsChange dispatch (the snapshot must be taken
 // while the lock is still held).
-func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus) (deleted int, snapshot jobsSnapshot, err error) {
+func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus, keep []string) (deleted int, snapshot jobsSnapshot, err error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
 	match := "channel_id = ? AND status IN (" + placeholders + ")"
-	args := make([]any, 0, len(statuses)+1)
+	args := make([]any, 0, len(statuses)+len(keep)+1)
 	args = append(args, channelID)
 	for _, s := range statuses {
 		args = append(args, string(s))
+	}
+	if len(keep) > 0 {
+		match += " AND id NOT IN (" + strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",") + ")"
+		for _, id := range keep {
+			args = append(args, id)
+		}
 	}
 
 	ctx := db.getCtx()

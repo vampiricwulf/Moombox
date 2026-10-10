@@ -321,10 +321,10 @@ func TestResumeCookieParkedJobs_RespectsQueuePriority(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The feed_items partner NextQueuedJobs INNER-JOINs on. Every priority-1
-	// row the archival pass creates has one, so this is the ordinary shape;
-	// the row WITHOUT one has its own test below (a removed channel's
-	// still-running backlog download).
+	// The feed_items partner NextQueuedJobs orders by. Every priority-1 row
+	// the archival pass creates has one, so this is the ordinary shape; the
+	// row WITHOUT one has its own test below (a removed channel's kept
+	// backlog).
 	seedFeedPartner(t, db, chID, "backlog1")
 	db.UpdateJobFields("backlog1", map[string]any{"error": "parked: auth"})
 
@@ -396,8 +396,8 @@ func TestResumeNotificationsSayTheBacklogIsPaced(t *testing.T) {
 	}
 }
 
-// seedFeedPartner writes the feed_items row NextQueuedJobs INNER-JOINs against,
-// so a priority-1 job created here has the partner the archival pass would have
+// seedFeedPartner writes the feed_items row NextQueuedJobs joins against, so a
+// priority-1 job created here has the partner the archival pass would have
 // given it.
 func seedFeedPartner(t *testing.T, db *database.Database, channelID, videoID string) {
 	t.Helper()
@@ -410,37 +410,26 @@ func seedFeedPartner(t *testing.T, db *database.Database, channelID, videoID str
 	}
 }
 
-// TestResumeCookieParkedJobs_APartnerlessBacklogRowGoesToUpcoming is the close
-// review's B-1: MON-4's Queued arm strands a removed channel's parked backlog
-// with no path out and nothing saying so.
+// TestResumeCookieParkedJobs_ARemovedChannelsBacklogRowGoesBackToQueued: a
+// parked backlog row of a REMOVED channel resumes to Queued like any other and
+// the scheduler can still admit it (W25-09).
 //
-// The sequence, every step an ordinary operator gesture:
-//
-//  1. CancelAndPrune (channel REMOVAL) deletes the channel's never-started
-//     jobs — {Queued, Upcoming, COOKIES?} — and then its feed_items rows. A
-//     job that was DOWNLOADING is deliberately left running, so it survives
-//     with no feed_items partner.
-//  2. That download hits an auth wall and parks in COOKIES?.
-//  3. Cookies are repaired, the sweep runs, and priority 1 means Queued.
-//  4. NextQueuedJobs INNER-JOINs feed_items, so the scheduler returns zero
-//     rows for it on every sweep, forever — silently, because an empty answer
-//     is indistinguishable from "nothing to admit".
-//  5. /retry and /resume accept Error | Cancelled | COOKIES? only, and
-//     ShouldProcess(Queued) is false, so neither the operator nor startup
-//     recovery nor the heartbeat can move it. Delete-and-re-add is the only
-//     way out and nothing says so.
-//
-// So a priority-1 row goes to Queued only when it HAS a partner; without one
-// it takes the pre-MON-4 path to Upcoming, which the heartbeat poller drains.
-// Pacing is not the property at stake for a channel that no longer exists.
+// Its feed_items partner is gone: removing a channel keeps its jobs unless the
+// operator deletes the pending ones, and the departure prune deletes the
+// channel's feed history either way. The row used to resume to Upcoming for
+// that — the close review's B-1 — because NextQueuedJobs INNER-JOINed
+// feed_items, so a partnerless Queued row was never returned and Queued has no
+// other exit (/retry and /resume refuse it, ShouldProcess(Queued) is false).
+// The join is a LEFT JOIN now, and the kept backlog is paced through the
+// archive slots like the rest of it, under the global default once the
+// channel has no config entry.
 //
 // Mutants:
-//   - drop the partner check -> the partnerless row lands in Queued and
-//     NextQueuedJobs returns nothing for it: the strand, reproduced.
-//   - check the partner for priority-0 rows too -> harmless but pointless; the
-//     sibling assertions below still pass, which is why the Queued row is
-//     asserted through NextQueuedJobs rather than through its status alone.
-func TestResumeCookieParkedJobs_APartnerlessBacklogRowGoesToUpcoming(t *testing.T) {
+//   - answer Queued only with a partner again (CookieResumeStatus) -> the
+//     orphan resumes to Upcoming.
+//   - the INNER JOIN back in NextQueuedJobs -> the scheduler's admitted set
+//     is [partnered] alone: the strand.
+func TestResumeCookieParkedJobs_ARemovedChannelsBacklogRowGoesBackToQueued(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "strand.db"))
 	if err != nil {
 		t.Fatalf("database.Open: %v", err)
@@ -458,44 +447,33 @@ func TestResumeCookieParkedJobs_APartnerlessBacklogRowGoesToUpcoming(t *testing.
 			t.Fatal(err)
 		}
 	}
-	// Only the second one keeps its feed row: the first is the job whose
-	// channel was removed mid-download.
+	// Only the second one keeps its feed row: the first belongs to the
+	// removed channel whose feed history the departure prune deleted.
 	seedFeedPartner(t, db, chID, "partnered")
 
 	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, func() {}, "youtube", ""); n != 2 {
 		t.Fatalf("resumed = %d, want 2", n)
 	}
 
-	orphan, _ := db.GetJob("orphan")
-	if orphan.Status != database.StatusUpcoming {
-		t.Errorf("a priority-1 row with no feed_items partner resumed to %q, want %q — "+
-			"NextQueuedJobs INNER-JOINs feed_items, /retry and /resume both refuse Queued, and "+
-			"nothing else moves a Queued row, so this row would be lost silently and permanently",
-			orphan.Status, database.StatusUpcoming)
-	}
-	partnered, _ := db.GetJob("partnered")
-	if partnered.Status != database.StatusQueued {
-		t.Errorf("a priority-1 row WITH its partner resumed to %q, want %q — the partner check must "+
-			"not cost the ordinary backlog row its archive-slots pacing", partnered.Status, database.StatusQueued)
-	}
 	for _, id := range []string{"orphan", "partnered"} {
 		j, _ := db.GetJob(id)
+		if j.Status != database.StatusQueued {
+			t.Errorf("%s: a priority-1 row resumed to %q, want %q — a backlog row re-enters "+
+				"through the archive-slots pacing, partner or not", id, j.Status, database.StatusQueued)
+		}
 		if j.ParkReason != database.ParkReasonNone || j.ParkIdentity != "" || j.Error != "" {
 			t.Errorf("%s: the park fields were not cleared: %+v", id, j)
 		}
 	}
 
-	// The strand, stated the way the scheduler sees it: the admitted set holds
-	// the partnered row and nothing else. With the partner check dropped the
-	// orphan is Queued too and this answer is still [partnered] — which is the
-	// whole defect: the row is in Queued and the scheduler cannot see it.
+	// The scheduler's view: both rows are admissible, the dated one first.
 	admit, err := db.NextQueuedJobs(chID, 10)
 	if err != nil {
 		t.Fatalf("NextQueuedJobs: %v", err)
 	}
-	if len(admit) != 1 || admit[0] != "partnered" {
-		t.Errorf("NextQueuedJobs = %v, want exactly [partnered] — a Queued row the scheduler can "+
-			"never admit has no exit at all", admit)
+	if len(admit) != 2 || admit[0] != "partnered" || admit[1] != "orphan" {
+		t.Errorf("NextQueuedJobs = %v, want [partnered orphan] — a Queued row the scheduler "+
+			"cannot admit has no exit at all", admit)
 	}
 }
 

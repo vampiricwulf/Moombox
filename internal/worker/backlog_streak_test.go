@@ -136,9 +136,10 @@ func TestDeletedBacklogRowLeavesNoStreak(t *testing.T) {
 }
 
 // TestPrunedBacklogRowLeavesNoStreak is the same through the other way a row
-// goes: the departed-channel prune (backfill.go's CancelAndPrune ->
-// DeleteJobsAndHistoryForChannel) deletes the channel's Queued rows in bulk
-// and fires no OnJobDeleted, only one OnJobsChange. A row pruned mid-backoff
+// goes: a channel removal's "delete its pending jobs" choice
+// (DeletePendingChannelJobs -> DeleteJobsAndHistoryForChannel) deletes the
+// channel's Queued rows in bulk and fires no OnJobDeleted, only one
+// OnJobsChange. A row pruned mid-backoff
 // left its count and hold behind, and the re-added channel's rescan created
 // the same id again, held, with the old count. A held row of a channel the
 // prune does not touch keeps its streak.
@@ -167,7 +168,7 @@ func TestPrunedBacklogRowLeavesNoStreak(t *testing.T) {
 	kept := requeue("streak_kept")
 
 	n, err := db.DeleteJobsAndHistoryForChannel("UC_retry",
-		[]database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies})
+		[]database.JobStatus{database.StatusQueued, database.StatusUpcoming, database.StatusCookies}, nil)
 	if err != nil || n != 1 {
 		t.Fatalf("prune: deleted %d, err %v; want the one Queued row", n, err)
 	}

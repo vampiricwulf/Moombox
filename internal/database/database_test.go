@@ -1720,7 +1720,7 @@ func TestDeleteJobsAndHistoryForChannel(t *testing.T) {
 	seed("other_channel", StatusQueued, &otherCh) // pruned status, different channel
 	seed("null_channel", StatusQueued, nil)       // pruned status, NULL channel_id
 
-	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, pruneStatuses)
+	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, pruneStatuses, nil)
 	if err != nil {
 		t.Fatalf("DeleteJobsAndHistoryForChannel: %v", err)
 	}
@@ -1785,7 +1785,7 @@ func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
 	defer uD()
 
 	// Empty statuses: a pure no-op — zero deleted, no error, no dispatch.
-	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, nil)
+	deleted, err := db.DeleteJobsAndHistoryForChannel(chID, nil, nil)
 	if err != nil || deleted != 0 {
 		t.Fatalf("empty statuses: deleted=%d err=%v, want 0, nil", deleted, err)
 	}
@@ -1796,7 +1796,7 @@ func TestDeleteJobsAndHistoryForChannelDispatch(t *testing.T) {
 		// expected
 	}
 
-	deleted, err = db.DeleteJobsAndHistoryForChannel(chID, []JobStatus{StatusQueued})
+	deleted, err = db.DeleteJobsAndHistoryForChannel(chID, []JobStatus{StatusQueued}, nil)
 	if err != nil {
 		t.Fatalf("DeleteJobsAndHistoryForChannel: %v", err)
 	}
