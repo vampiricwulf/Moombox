@@ -567,8 +567,18 @@ type importRecording struct {
 	stem  string       // the entry name its files share, less any " - partN" and the extension
 	parts []importPart // in part order
 	chat  *zip.File    // "<stem>.chat.json": the recording's own chat
-	// unpairedChats are the zip's .chat.json entries named after no video.
+	// unpairedChats are the zip's chats named after no video: every
+	// ".chat.json" so named, and every such ".json" holding a chat.
 	unpairedChats []string
+}
+
+// importChatEntry is a chat-shaped entry of a zip — "<stem>.chat.json", or
+// a "<stem>.json" that may hold a chat — as the scan met it.
+type importChatEntry struct {
+	entry *zip.File
+	name  string // its entry name
+	stem  string // less ".chat.json" or ".json"
+	json  bool   // a ".json": a chat only if it holds a messages array
 }
 
 // scanImportRecording finds the recording in a zip's entries. A zip with
@@ -581,7 +591,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	var videos []importPart
 	chats := map[string]*zip.File{}
 	jsons := map[string]*zip.File{}
-	var chatOrder []string
+	var chatEntries []importChatEntry // both kinds, in zip order
 	for _, f := range entries {
 		if f.FileInfo().IsDir() {
 			continue
@@ -600,11 +610,12 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		case strings.HasSuffix(lower, ".chat.json"):
 			if stem := name[:len(name)-len(".chat.json")]; chats[stem] == nil {
 				chats[stem] = f
-				chatOrder = append(chatOrder, stem)
+				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem})
 			}
 		case strings.ToLower(ext) == ".json":
 			if stem := name[:len(name)-len(".json")]; jsons[stem] == nil {
 				jsons[stem] = f
+				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem, json: true})
 			}
 		}
 	}
@@ -629,10 +640,8 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		slices.SortFunc(rec.parts, func(a, b importPart) int { return a.num - b.num })
 	}
 
-	paired := map[string]bool{}
 	pair := func(stem string) *zip.File {
 		if c := chats[stem]; c != nil {
-			paired[stem] = true
 			return c
 		}
 		if j := jsons[stem]; j != nil && importJSONIsChat(j) {
@@ -641,14 +650,19 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		return nil
 	}
 	rec.chat = pair(rec.stem)
-	if len(rec.parts) > 1 {
-		for i := range rec.parts {
+	named := map[string]bool{rec.stem: true}
+	for i := range rec.parts {
+		named[rec.parts[i].stem] = true
+		if len(rec.parts) > 1 {
 			rec.parts[i].chat = pair(rec.parts[i].stem)
 		}
 	}
-	for _, stem := range chatOrder {
-		if !paired[stem] {
-			rec.unpairedChats = append(rec.unpairedChats, filepath.Base(stem)+".chat.json")
+	// A chat named after none of the videos is left out, and named in the
+	// response — a ".json" as much as a ".chat.json", when it holds a chat:
+	// "chat.json" beside "Stream [id].mp4" was dropped with a plain 201.
+	for _, c := range chatEntries {
+		if !named[c.stem] && (!c.json || importJSONIsChat(c.entry)) {
+			rec.unpairedChats = append(rec.unpairedChats, filepath.Base(c.name))
 		}
 	}
 	return rec, nil
@@ -703,27 +717,41 @@ func importMultipleRecordingsError(videos []importPart) error {
 		"(a split recording's parts are named \"<name> - part1\", \"<name> - part2\"…)", strings.Join(names, ", "))
 }
 
-// importJSONIsChat reports whether a ".json" entry is a chat archive: a
-// messages array with at least one message. Anything past 10 MB is not read.
+// importJSONIsChat reports whether a ".json" entry is a chat archive: an
+// object whose "messages" is an array of at least one message. It reads as a
+// stream, as readImportChatMeta does, and only as far as the first message:
+// it read the whole file into memory, and so refused anything past 10 MB
+// unread — a long stream's chat, which was then left out without a word.
 func importJSONIsChat(f *zip.File) bool {
-	if f.UncompressedSize64 > 10*1024*1024 {
-		return false
-	}
 	rc, err := f.Open()
 	if err != nil {
 		return false
 	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
+	defer rc.Close()
+	dec := json.NewDecoder(rc)
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return false
 	}
-	var parsed struct {
-		Messages []struct {
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if key, _ := t.(string); key != "messages" {
+			if !skipJSONValue(dec) {
+				return false
+			}
+			continue
+		}
+		if t, err := dec.Token(); err != nil || t != json.Delim('[') || !dec.More() {
+			return false
+		}
+		var first struct {
 			OffsetMs json.Number `json:"offsetMs"`
-		} `json:"messages"`
+		}
+		return dec.Decode(&first) == nil
 	}
-	return json.Unmarshal(data, &parsed) == nil && len(parsed.Messages) > 0
+	return false
 }
 
 // metaChat is the chat an import reads the recording's id, title, channel

@@ -3,6 +3,7 @@ package routes
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -373,5 +374,63 @@ func TestImportSkipsMacOSMetadata(t *testing.T) {
 			}
 			assertNoLeftovers(t, f, tc.want...)
 		})
+	}
+}
+
+// A ".json" holding a messages array is a chat by the import's own rule,
+// and one named after no video was left out with a plain 201 — nothing in
+// unpairedChats, no note — where a ".chat.json" so named is reported. It is
+// reported the same way now; a ".json" that holds no chat is not a chat
+// and is not listed.
+//
+// Mutants: reporting only ".chat.json" entries (chat.json is left out
+// without a word); listing every unpaired ".json" (info.json is listed).
+func TestImportReportsAJSONChatNamedAfterNoVideo(t *testing.T) {
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t,
+		importEntry{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+		importEntry{name: "chat.json", data: chatJSONFor(t, map[string]any{"videoId": "dQw4w9WgXcQ"})},
+		importEntry{name: "info.json", data: []byte(`{"title":"Stream","formats":[]}`)},
+	))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	r := decodeImportResult(t, rec.Body.Bytes())
+	if job.ChatFilename != "" {
+		t.Errorf("chat %q: a chat named after no video was paired", job.ChatFilename)
+	}
+	if !slices.Equal(r.Import.UnpairedChats, []string{"chat.json"}) || !strings.Contains(r.Import.Note, "chat.json") {
+		t.Errorf("outcome %+v, want chat.json (and only it) named as left out", r.Import)
+	}
+	assertNoLeftovers(t, f, "Stream [dQw4w9WgXcQ].mp4")
+}
+
+// A "<name>.json" chat pairs with "<name>.mp4" whatever its size. The check
+// read the whole file into memory and refused anything past 10 MB unread, so
+// a long stream's chat from another tool was neither imported nor reported.
+//
+// Mutant: the 10 MB cap put back ahead of the streaming read (no chat, no
+// title from its header).
+func TestImportPairsALongJSONChatByName(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"videoTitle":"Long Stream","channelName":"Chan","messages":[`)
+	for i := 0; b.Len() < 11<<20; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"offsetMs":%d,"message":"an ordinary chat line, number %d"}`, i*100, i)
+	}
+	b.WriteString("]}")
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t,
+		importEntry{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+		importEntry{name: "Stream [dQw4w9WgXcQ].json", data: []byte(b.String())},
+	))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if job.ChatFilename != "imports/Long Stream [dQw4w9WgXcQ].chat.json" || job.Title != "Long Stream" || job.ChannelName != "Chan" {
+		t.Errorf("chat %q title %q channel %q: the %d-byte chat named after the video was not imported",
+			job.ChatFilename, job.Title, job.ChannelName, b.Len())
 	}
 }
