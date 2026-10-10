@@ -1078,7 +1078,7 @@ func (m *SetupWizardModel) channelEditHint() string {
 	if m.channelResolving {
 		return "Resolving channel...  Esc: Cancel"
 	}
-	return "Esc: Cancel  Enter: Save  ↑/↓: Fields"
+	return "Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"
 }
 
 // clampChannelEditField adjusts channelEditField when cycling platform may
