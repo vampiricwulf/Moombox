@@ -2150,23 +2150,25 @@ func (s *runState) onJobDeleted(jobID string) {
 // onJobsChange is the OnJobsChange subscriber's body — onJobDeleted's twin for
 // the bulk writers, a method for the same reason: a test can drive it.
 func (s *runState) onJobsChange(jobs []*database.Job) {
-	// Per-job log routing: drop the rows a bulk delete removed, and nothing
-	// else. Neither bulk writer writes a status, and every status write
-	// already re-routes its own job (syncJobLogRoutingOnChange), so a
-	// SyncJobLogTracking over the whole list changed nothing it needed to —
-	// and untracked every terminal job, ending the routing RecoverAsides and
-	// cleanupStagingAfterMux hold open for a terminal job's last lines: a
-	// Mark Watched on any rows during a recovery sent the rest of its
-	// progress to no job's log.
-	activeIDs := make(map[string]struct{}, len(jobs))
-	for _, j := range jobs {
-		activeIDs[j.ID] = struct{}{}
-	}
-	s.db.PruneJobLogs(activeIDs)
+	// Per-job log routing is not touched here at all. Neither bulk writer
+	// writes a status, and every status write already re-routes its own job
+	// (syncJobLogRoutingOnChange): a SyncJobLogTracking over the whole list
+	// changed nothing it needed to, and untracked every terminal job — ending
+	// the routing RecoverAsides and cleanupStagingAfterMux hold open for a
+	// terminal job's last lines. The bulk delete drops its own rows' logs
+	// under db.mu (DeleteJobsAndHistoryForChannel), because this list is read
+	// at commit and arrives later: a prune of every id missing from it also
+	// dropped the routing of a job AddJob created in between.
+	//
 	// The bulk deletes (a departed channel's prune) fire only this event, so
 	// the notifier's edit-mode state for their jobs goes here, as onJobDeleted
-	// drops a single job's.
+	// drops a single job's. RetainJobs is written for a list that may be older
+	// than a job added since (it never marks one dropping).
 	if s.notifyMgr != nil {
+		activeIDs := make(map[string]struct{}, len(jobs))
+		for _, j := range jobs {
+			activeIDs[j.ID] = struct{}{}
+		}
 		s.notifyMgr.RetainJobs(activeIDs)
 	}
 	s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))

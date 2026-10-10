@@ -2719,9 +2719,11 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	// route to it for the duration and hand it back at the end. Nothing that
 	// happens to another job ends it: cmd/moombox re-routes a job only on its
 	// own events — its OnJobAdded, a status write through OnJobChange, its
-	// OnJobDeleted — and the bulk writers' OnJobsChange drops only the rows
-	// they removed (onJobsChange). A status write on THIS job does re-route
-	// it by its new status, and deleting it ends the routing with the row.
+	// OnJobDeleted — the bulk writers' OnJobsChange leaves routing alone
+	// (onJobsChange), and the channel prune drops only the rows it deleted
+	// (DeleteJobsAndHistoryForChannel). A status write on THIS job does
+	// re-route it by its new status, and deleting it ends the routing with
+	// the row.
 	w.db.TrackJobForLogs(jobID)
 
 	w.wg.Go(func() {

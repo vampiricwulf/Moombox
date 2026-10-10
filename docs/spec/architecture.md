@@ -174,7 +174,7 @@ After all services are created, `main.go` wires the event callbacks:
 - `feedMon.OnSchedule` / `decapiMon.OnSchedule` / `twitchMon.OnSchedule` -> broadcasts all three monitor timer values via WebSocket
 - `db.OnJobChange` -> `wsHub.BroadcastJobProgress()` for a progress-only write, otherwise `wsHub.BroadcastJobUpdate()` (per-job WebSocket messages); re-syncs per-job log routing on a status write
 - `db.OnJobAdded` / `db.OnTrimsChanged` -> `wsHub.BroadcastJobUpdate()` for the one job; `db.OnJobDeleted` -> `onJobDeleted` (clear the job's log buffer + `BroadcastJobDeleted`)
-- `db.OnJobsChange` (the two bulk writers only) -> `wsHub.BroadcastJobsUpdate()` (full job list), re-sync and prune job logs
+- `db.OnJobsChange` (the two bulk writers only) -> `wsHub.BroadcastJobsUpdate()` (full job list) and the notifier's `RetainJobs`; per-job log routing is left alone (the channel prune drops its deleted rows' logs itself, under the write lock)
 - `log.SetLineRouter(db.RouteLogToJobs)` (per-job log buffers) — synchronous, inside every log call, so a line logged before a status write is routed before the write can untrack its job — and `log.SubscribeLines()` -> `wsHub.BroadcastLog(text, seq)` (`wireLogForwarding`), each frame numbered as the logger's ring numbered the line
 - `cookieRefresh.OnRecoveryNeeded` -> `runCookieRecovery()` in a background goroutine: `autoCookieSvc.RefreshCookiesDetailed()`, then notifies on the triggering platform's own verdict (OK / Failed / Unknown)
 

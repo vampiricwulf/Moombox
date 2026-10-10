@@ -569,6 +569,13 @@ func (db *Database) NextQueuedJobs(channelID string, limit int) ([]string, error
 // full jobs fetches in the WS subscriber and can overflow the TUI's bounded
 // drop-on-full channel. A prune that deleted nothing dispatches nothing
 // (DeleteJob's rowsAffected guard).
+//
+// The deleted rows' per-job logs go with them here, under db.mu, rather than
+// in an OnJobsChange subscriber: that list was read at commit and reaches the
+// subscribers later, on a goroutine, so a job AddJob creates in between is
+// missing from it without having been deleted — a prune of "everything not in
+// the list" dropped the new job's routing that its own OnJobAdded had just
+// set up, and its lines reached no log until its next status write.
 func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []JobStatus, keep []string) (int, error) {
 	if len(statuses) == 0 {
 		return 0, nil
@@ -583,9 +590,11 @@ func (db *Database) DeleteJobsAndHistoryForChannel(channelID string, statuses []
 }
 
 // deleteJobsAndHistoryForChannelTx runs the two-statement prune transaction
-// under db.mu and, when rows were deleted, snapshots the post-delete jobs
-// list for the caller's OnJobsChange dispatch (the snapshot must be taken
-// while the lock is still held).
+// under db.mu and, when rows were deleted, drops their per-job logs and
+// snapshots the post-delete jobs list for the caller's OnJobsChange dispatch
+// (both while the lock is still held: an AddJob re-creating one of the ids
+// waits for it, so the routing its OnJobAdded sets up is never the one
+// dropped).
 func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses []JobStatus, keep []string) (deleted int, snapshot jobsSnapshot, err error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -618,19 +627,32 @@ func (db *Database) deleteJobsAndHistoryForChannelTx(channelID string, statuses 
 		return 0, jobsSnapshot{}, err
 	}
 
-	res, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE "+match, args...)
+	rows, err := tx.QueryContext(ctx, "DELETE FROM jobs WHERE "+match+" RETURNING id", args...)
 	if err != nil {
 		return 0, jobsSnapshot{}, err
 	}
-	n, _ := res.RowsAffected()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, jobsSnapshot{}, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, jobsSnapshot{}, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, jobsSnapshot{}, err
 	}
-	if n == 0 {
+	if len(ids) == 0 {
 		return 0, jobsSnapshot{}, nil
 	}
-	return int(n), db.snapshotJobsChange(), nil
+	db.clearJobLogsOf(ids)
+	return len(ids), db.snapshotJobsChange(), nil
 }
 
 // AddGap adds a gap record for a job.
@@ -1108,10 +1130,18 @@ func (db *Database) GetJobLogs(jobID string) []string {
 
 // ClearJobLogs removes the per-job log buffer and stops routing to it.
 func (db *Database) ClearJobLogs(jobID string) {
+	db.clearJobLogsOf([]string{jobID})
+}
+
+// clearJobLogsOf is ClearJobLogs for a list, under one lock acquisition: the
+// bulk channel prune drops its deleted rows' logs through it.
+func (db *Database) clearJobLogsOf(jobIDs []string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
-	delete(db.jobLogs, jobID)
-	delete(db.logRouted, jobID)
+	for _, id := range jobIDs {
+		delete(db.jobLogs, id)
+		delete(db.logRouted, id)
+	}
 }
 
 // RouteLogToJobs checks if a log line contains any TRACKED job ID and routes
@@ -1186,24 +1216,5 @@ func (db *Database) trackForLogsLocked(jobID string) {
 	db.logRouted[jobID] = struct{}{}
 	if _, ok := db.jobLogs[jobID]; !ok {
 		db.jobLogs[jobID] = nil
-	}
-}
-
-// PruneJobLogs removes log entries — and routing — for job IDs not in the
-// provided set. Called on jobsChange to keep the log maps in sync with the
-// database: a bulk delete's removed rows lose their buffers and routing, and
-// nothing else changes.
-func (db *Database) PruneJobLogs(activeIDs map[string]struct{}) {
-	db.jobLogsMu.Lock()
-	defer db.jobLogsMu.Unlock()
-	for id := range db.jobLogs {
-		if _, ok := activeIDs[id]; !ok {
-			delete(db.jobLogs, id)
-		}
-	}
-	for id := range db.logRouted {
-		if _, ok := activeIDs[id]; !ok {
-			delete(db.logRouted, id)
-		}
 	}
 }

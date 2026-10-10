@@ -99,20 +99,21 @@ func TestSyncJobLogTrackingFollowsLiveJobsOnly(t *testing.T) {
 	}
 }
 
-// ClearJobLogs and PruneJobLogs own BOTH maps: a routed ID left behind after
-// its buffer is gone is a job RouteLogToJobs keeps scanning for forever, which
-// is the leak CORE-12's set would otherwise introduce.
+// ClearJobLogs and clearJobLogsOf (its list form, which the bulk channel
+// prune drops its rows' logs through) own BOTH maps: a routed ID left behind
+// after its buffer is gone is a job RouteLogToJobs keeps scanning for forever,
+// which is the leak CORE-12's set would otherwise introduce.
 //
-// Mutant: deleting only from jobLogs in either — the routed job resurrects a
-// buffer on the next matching line.
-func TestClearAndPruneDropTheRoutedIDToo(t *testing.T) {
+// Mutant: clearJobLogsOf deleting only from jobLogs — the routed job
+// resurrects a buffer on the next matching line.
+func TestClearJobLogsDropsTheRoutedIDToo(t *testing.T) {
 	db := newLogRoutingDB()
 	db.TrackJobForLogs("cleared")
 	db.TrackJobForLogs("pruned")
 	db.TrackJobForLogs("kept")
 
 	db.ClearJobLogs("cleared")
-	db.PruneJobLogs(map[string]struct{}{"cleared": {}, "kept": {}})
+	db.clearJobLogsOf([]string{"pruned", "never-tracked"})
 
 	db.RouteLogToJobs("2026-09-17 12:00:00 INFO cleared line")
 	db.RouteLogToJobs("2026-09-17 12:00:00 INFO pruned line")

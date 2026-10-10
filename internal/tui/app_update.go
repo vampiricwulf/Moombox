@@ -1579,10 +1579,10 @@ func (a *App) handleJobDeleted(ev *database.JobDeleted) {
 
 // closeJobLogOfDeletedJob closes the O L overlay when the job it shows is
 // gone, as the dashboard closes its job dialog on job_deleted. The job's log
-// buffer goes with its row (ClearJobLogs, or PruneJobLogs for the bulk
-// deletes), so the next read would blank the page the operator was reading
-// with nothing on screen to say why. Retiring the epoch drops the session's
-// refresh chain and any read still in flight.
+// buffer goes with its row (ClearJobLogs, which the bulk channel prune runs
+// for each row it deletes), so the next read would blank the page the
+// operator was reading with nothing on screen to say why. Retiring the epoch
+// drops the session's refresh chain and any read still in flight.
 func (a *App) closeJobLogOfDeletedJob(jobID string) {
 	if !a.jobLog.IsVisible() || a.jobLog.JobID() != jobID {
 		return

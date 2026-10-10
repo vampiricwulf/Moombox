@@ -260,11 +260,11 @@ func TestTheLineBeforeATerminalWriteReachesTheJobsOwnLog(t *testing.T) {
 // dashboard's watched routes and the TUI's A W) or a channel's removal ended
 // a running recovery's routing, and the rest of its progress reached no job's
 // log. Neither bulk writer writes a status; the fan-out now leaves routing to
-// the per-job events and drops only the rows a bulk delete removed.
+// the per-job events, and the bulk delete drops its own rows' logs itself.
 //
 // Mutants: onJobsChange calling SyncJobLogTracking again — the held job loses
-// the line after the Watched toggle; onJobsChange without PruneJobLogs — the
-// removed row keeps its routing and buffer.
+// the line after the Watched toggle; DeleteJobsAndHistoryForChannel without
+// its clearJobLogsOf — the removed row keeps its routing and buffer.
 func TestABulkWriteLeavesAHeldJobsLogRouting(t *testing.T) {
 	db, s := logRoutingFixture(t)
 	s.wsHub = web.NewWebSocketHub(sweepTestLogger{})
@@ -315,18 +315,110 @@ func TestABulkWriteLeavesAHeldJobsLogRouting(t *testing.T) {
 		t.Error("the bulk write started routing to a Finished job nothing holds — a terminal ID left in the routed set is CORE-12")
 	}
 
-	// A bulk delete still drops what it removed.
-	db.TrackJobForLogs("vidgone0001")
-	db.RouteLogToJobs("last line, job vidgone0001")
-	jobs, err := db.GetAllJobs()
-	if err != nil {
-		t.Fatalf("GetAllJobs: %v", err)
+	// A bulk delete still drops what it removed — by the time it returns.
+	ch := "UC_departed"
+	if _, err := db.AddJob(&database.Job{
+		ID: "vidgone0001", VideoID: "vidgone0001", URL: "https://example.invalid/vidgone0001",
+		Platform: "youtube", Status: database.StatusQueued, ChannelID: &ch,
+	}); err != nil {
+		t.Fatalf("AddJob(vidgone0001): %v", err)
 	}
-	s.onJobsChange(jobs) // the list a bulk delete hands over: vidgone0001 is not in it
+	db.RouteLogToJobs("last line, job vidgone0001")
+	if n, err := db.DeleteJobsAndHistoryForChannel(ch, []database.JobStatus{database.StatusQueued}, nil); err != nil || n != 1 {
+		t.Fatalf("DeleteJobsAndHistoryForChannel = %d, %v; want 1, nil", n, err)
+	}
 	if logs := db.GetJobLogs("vidgone0001"); len(logs) != 0 {
 		t.Errorf("a row the bulk write removed keeps its buffer: %v", logs)
 	}
 	if routedTo("vidgone0001", "a later line, job vidgone0001") {
 		t.Error("a row the bulk write removed is still routed to")
+	}
+	waitDelivered()
+	if !routedTo("vidrecover1", "recovering, job vidrecover1, after a channel's removal") {
+		t.Error("a channel's removal ended the held job's routing")
+	}
+}
+
+// A bulk write's OnJobsChange list is read under db.mu at commit and reaches
+// the subscribers later, on a goroutine of its own. A job AddJob creates in
+// that window is missing from the list without having been deleted, and its
+// own OnJobAdded has already routed it. onJobsChange used to prune the routed
+// set and the buffers down to the list, so it dropped that job's routing and
+// buffer — a stream a monitor found, or a Queued row a backfill scan added,
+// while an operator marked a job watched or removed a channel logged nothing
+// to its own log until its next status write: hours, for an Upcoming one.
+//
+// The dispatch is held at a subscriber registered ahead of onJobsChange, the
+// stand-in for that goroutine not having got there yet. Both bulk writers
+// are driven.
+//
+// Mutant: onJobsChange pruning the log maps down to its list again (the
+// PruneJobLogs it used to call, restored) — the new job holds no line at all.
+func TestABulkWritesOlderListLeavesALaterJobsLogRouting(t *testing.T) {
+	ch := "UC_bulkrace"
+	for _, bulk := range []struct {
+		name  string
+		write func(t *testing.T, db *database.Database)
+	}{
+		{"BatchSetWatched", func(t *testing.T, db *database.Database) {
+			addJob(t, db, "vidwatched1", database.StatusFinished)
+			if err := db.BatchSetWatched([]string{"vidwatched1"}, true); err != nil {
+				t.Fatalf("BatchSetWatched: %v", err)
+			}
+		}},
+		{"DeleteJobsAndHistoryForChannel", func(t *testing.T, db *database.Database) {
+			if _, err := db.AddJob(&database.Job{
+				ID: "vidpruned01", VideoID: "vidpruned01", URL: "https://example.invalid/vidpruned01",
+				Platform: "youtube", Status: database.StatusQueued, ChannelID: &ch,
+			}); err != nil {
+				t.Fatalf("AddJob(vidpruned01): %v", err)
+			}
+			if n, err := db.DeleteJobsAndHistoryForChannel(ch, []database.JobStatus{database.StatusQueued}, nil); err != nil || n != 1 {
+				t.Fatalf("DeleteJobsAndHistoryForChannel = %d, %v; want 1, nil", n, err)
+			}
+		}},
+	} {
+		t.Run(bulk.name, func(t *testing.T) {
+			db, s := logRoutingFixture(t)
+			s.wsHub = web.NewWebSocketHub(sweepTestLogger{})
+			s.configStore = config.NewStore(config.Defaults(), "")
+
+			entered := make(chan struct{}, 1)
+			release := make(chan struct{})
+			released := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(released)
+			t.Cleanup(db.OnJobsChange(func([]*database.Job) {
+				entered <- struct{}{}
+				<-release
+			}))
+			delivered := make(chan struct{}, 1)
+			t.Cleanup(db.OnJobsChange(func(jobs []*database.Job) {
+				s.onJobsChange(jobs)
+				delivered <- struct{}{}
+			}))
+			wait := func(ch <-chan struct{}, what string) {
+				t.Helper()
+				select {
+				case <-ch:
+				case <-time.After(10 * time.Second):
+					t.Fatal(what)
+				}
+			}
+
+			bulk.write(t, db)
+			wait(entered, "the bulk write's OnJobsChange never arrived")
+
+			// A stream a monitor finds while the list is on its way.
+			addJob(t, db, "vidnewlive1", database.StatusUpcoming)
+			db.RouteLogToJobs("waiting for vidnewlive1 to start")
+			released()
+			wait(delivered, "onJobsChange never ran")
+			db.RouteLogToJobs("vidnewlive1 still upcoming")
+
+			if logs := db.GetJobLogs("vidnewlive1"); len(logs) != 2 {
+				t.Errorf("the job added while the bulk write's list was on its way holds %d lines, want 2: %q — "+
+					"a list read before the job existed must not end its routing", len(logs), logs)
+			}
+		})
 	}
 }
