@@ -38,6 +38,17 @@ func assertNoMediaSecret(t *testing.T, what, got string) {
 //   - isGooglevideoHost answering false: the "googlevideo host, another
 //     endpoint" rows keep the IP.
 //   - the fragment kept: the "fragment" row keeps it.
+//   - MediaURL without its isTwitchMedia branch: every Twitch row keeps its
+//     session.
+//   - isTwitchMedia without its /v1/ path test: the "a test server's segment
+//     endpoint" row keeps it; answering false for a ttvnw.net or
+//     live-video.net host: the "another layout" and "no /v1/ path" rows.
+//   - twitchPath keeping every segment but the last: the "another layout"
+//     row keeps the session ahead of the file.
+//   - isFileExt without its length bound: the "a dot inside the session" row
+//     keeps the session's tail as an extension.
+//   - the Twitch branch appending the query as it came: the "another layout"
+//     and usher rows keep their query values.
 func TestMediaURL(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{
@@ -88,11 +99,57 @@ func TestMediaURL(t *testing.T) {
 			"http://[::1%zz/videoplayback?ip=<redacted>&sig=<redacted>&itag=1",
 		},
 		{"empty value and bare key kept", "https://h/videoplayback?ip=&ratebypass&itag=1", "https://h/videoplayback?ip=&ratebypass&itag=1"},
+		// Twitch: the session is the path.
+		{
+			"Twitch weaver variant playlist",
+			"https://video-weaver.fra05.hls.ttvnw.net/v1/playlist/CsoESECRETSESSION-x_y.m3u8",
+			"https://video-weaver.fra05.hls.ttvnw.net/v1/playlist/<redacted>.m3u8",
+		},
+		{
+			"Twitch edge segment",
+			"https://video-edge-c2a0d4.fra05.abs.hls.ttvnw.net/v1/segment/CuwESECRETSESSION.ts",
+			"https://video-edge-c2a0d4.fra05.abs.hls.ttvnw.net/v1/segment/<redacted>.ts",
+		},
+		{
+			"Twitch, a test server's segment endpoint",
+			"http://127.0.0.1:40181/v1/segment/CuwESECRETSESSION.ts",
+			"http://127.0.0.1:40181/v1/segment/<redacted>.ts",
+		},
+		{
+			"Twitch host, another layout, query and fragment",
+			"https://video-edge-1.pdx01.abs.hls.live-video.net/v2/SECRETSESSION/12.ts?dna=SECRETDNA&x#SECRETFRAG",
+			"https://video-edge-1.pdx01.abs.hls.live-video.net/<redacted>/<redacted>/12.ts?dna=<redacted>&x#<redacted>",
+		},
+		{
+			"Twitch host, no /v1/ path, case",
+			"https://Video-Edge.ABS.HLS.TTVNW.NET:443/SECRETSESSION.ts",
+			"https://Video-Edge.ABS.HLS.TTVNW.NET:443/<redacted>.ts",
+		},
+		{
+			"Twitch, a dot inside the session",
+			"https://video-edge-x.abs.hls.ttvnw.net/v1/segment/CuwE.SECRETSESSIONTAIL",
+			"https://video-edge-x.abs.hls.ttvnw.net/v1/segment/<redacted>",
+		},
+		{
+			"Twitch usher, live",
+			"https://usher.ttvnw.net/api/channel/hls/somelogin.m3u8?sig=SECRETSIG&token=SECRETTOKEN",
+			"https://usher.ttvnw.net/api/channel/hls/<redacted>.m3u8?sig=<redacted>&token=<redacted>",
+		},
+		{
+			"Twitch usher, VOD",
+			"https://usher.ttvnw.net/vod/2212345678.m3u8?sig=SECRETSIG",
+			"https://usher.ttvnw.net/vod/2212345678.m3u8?sig=<redacted>",
+		},
 		// Not a media URL: only a PO token goes.
 		{"not media, PO token", "https://h/v?itag=1&pot=SECRETPOT&ip=x", "https://h/v?itag=1&pot=<redacted>&ip=x"},
 		{"not media, a watch page", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10"},
 		{"not media, videoplayback deeper in the path", "https://h/x/videoplayback?a=b", "https://h/x/videoplayback?a=b"},
 		{"not media, a host named like one", "https://googlevideo.com.example/x?ip=1", "https://googlevideo.com.example/x?ip=1"},
+		{"not media, Twitch GQL", "https://gql.twitch.tv/gql?a=b", "https://gql.twitch.tv/gql?a=b"},
+		{"not media, a Twitch thumbnail", "https://static-cdn.jtvnw.net/previews-ttv/live_user_x-1280x720.jpg", "https://static-cdn.jtvnw.net/previews-ttv/live_user_x-1280x720.jpg"},
+		{"not media, a Twitch host named like one", "https://ttvnw.net.example/v2/x?a=b", "https://ttvnw.net.example/v2/x?a=b"},
+		{"not media, /v1/segment deeper in the path", "https://h/x/v1/segment/a.ts?a=b", "https://h/x/v1/segment/a.ts?a=b"},
+		{"not media, innertube", "https://www.youtube.com/youtubei/v1/player?prettyPrint=false", "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +191,11 @@ func TestMediaText(t *testing.T) {
 			"two URLs, unquoted",
 			"a https://h/videoplayback?ip=" + clientIP + " then https://h/videoplayback/ip/" + clientIP + "/itag/1 end",
 			"a https://h/videoplayback?ip=<redacted> then https://h/videoplayback/ip/<redacted>/itag/1 end",
+		},
+		{
+			"setJobError's shape, a Twitch variant playlist",
+			`setup download: HLS playlist fetch failed after 10 consecutive errors: Get "https://video-weaver.fra05.hls.ttvnw.net/v1/playlist/CsoESECRETSESSION.m3u8": dial tcp: i/o timeout`,
+			`setup download: HLS playlist fetch failed after 10 consecutive errors: Get "https://video-weaver.fra05.hls.ttvnw.net/v1/playlist/<redacted>.m3u8": dial tcp: i/o timeout`,
 		},
 		{"token outside a URL", "token pot=SECRETPOT and /pot/SECRETPOT", "token pot=<redacted> and /pot/<redacted>"},
 		{"no URL at all", "no URL at all", "no URL at all"},

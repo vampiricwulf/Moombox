@@ -18,6 +18,14 @@ import (
 // transport failure is a *url.Error that quotes the whole URL, and a job's
 // error posts that text to the Job Failed embed — the operator's home address
 // to everyone who reads the webhook channel.
+//
+// A Twitch live HLS URL carries its session the other way round: as the path,
+// not as named parameters. The video-weaver variant playlist an usher master
+// lists is …/v1/playlist/<session>.m3u8, and every segment that playlist names
+// is …/v1/segment/<session>.ts, <session> an opaque blob the edge minted for
+// this viewer's playback session — what the playback token granted, to whom,
+// from where. The engine polls the one and fetches the other, so a transport
+// failure quotes it just the same.
 
 // mediaKeepKeys are the parameters whose values MediaURL keeps: they say which
 // format a fetch was for, which part of it, and whether its URL had run out,
@@ -46,10 +54,23 @@ var mediaKeepKeys = map[string]bool{
 // A media URL is one whose path is /videoplayback/… or /api/manifest/<kind>/…,
 // whatever its host — a test server's included — or any URL on a
 // googlevideo.com host. Its fragment, which googlevideo never uses, is cut
-// whole. Every URL, a media URL or not, has its GVS PO token cut
-// (PoTokenURL). The string is spliced rather than re-serialised through
-// url.URL, so a URL net/url cannot parse, or one a log line truncated, is
-// still handled, and a second call changes nothing.
+// whole.
+//
+// A Twitch media URL — one whose path is /v1/playlist/… or /v1/segment/…,
+// whatever its host, or any URL on a ttvnw.net or live-video.net host — keeps
+// its scheme, its host (which edge served it) and the endpoint's words, and
+// loses the rest of its path (twitchPath): the session its file name spells
+// goes, the file's extension stays, so the text still says a playlist or a
+// segment, and from which edge:
+//
+//	https://video-edge-c2a0d4.fra05.abs.hls.ttvnw.net/v1/segment/<redacted>.ts
+//
+// Every query value of one is cut too, and its fragment.
+//
+// Every URL, a media URL or not, has its GVS PO token cut (PoTokenURL). The
+// string is spliced rather than re-serialised through url.URL, so a URL
+// net/url cannot parse, or one a log line truncated, is still handled, and a
+// second call changes nothing.
 func MediaURL(rawURL string) string {
 	s := PoTokenURL(rawURL)
 	prefix, rest := "", s
@@ -75,22 +96,31 @@ func MediaURL(rawURL string) string {
 	path, tail := rest[:pathEnd], rest[pathEnd:]
 
 	segs := strings.Split(path, "/")
-	start, ok := mediaParamsStart(segs, isGooglevideoHost(host))
-	if !ok {
-		return s
-	}
-	for k := start; k+1 < len(segs); k += 2 {
-		if !mediaKeepKeys[segs[k]] && segs[k+1] != "" {
-			segs[k+1] = Marker
+	if start, ok := mediaParamsStart(segs, isGooglevideoHost(host)); ok {
+		for k := start; k+1 < len(segs); k += 2 {
+			if !mediaKeepKeys[segs[k]] && segs[k+1] != "" {
+				segs[k+1] = Marker
+			}
 		}
+		return prefix + strings.Join(segs, "/") + cutQueryValues(tail, mediaKeepKeys)
 	}
-	out := prefix + strings.Join(segs, "/")
+	if isTwitchMedia(segs, host) {
+		twitchPath(segs)
+		return prefix + strings.Join(segs, "/") + cutQueryValues(tail, nil)
+	}
+	return s
+}
 
+// cutQueryValues returns tail — a URL's "?query#fragment", either part
+// optional — with every query value but keep's replaced by Marker, and its
+// fragment cut whole.
+func cutQueryValues(tail string, keep map[string]bool) string {
+	out := ""
 	query, frag, hasFrag := strings.Cut(tail, "#")
 	if strings.HasPrefix(query, "?") {
 		parts := strings.Split(query[1:], "&")
 		for i, p := range parts {
-			if key, val, hasVal := strings.Cut(p, "="); hasVal && val != "" && !mediaKeepKeys[key] {
+			if key, val, hasVal := strings.Cut(p, "="); hasVal && val != "" && !keep[key] {
 				parts[i] = key + "=" + Marker
 			}
 		}
@@ -123,8 +153,87 @@ func mediaParamsStart(segs []string, googlevideo bool) (int, bool) {
 
 // isGooglevideoHost reports whether host is googlevideo.com or under it.
 func isGooglevideoHost(host string) bool {
+	return hostUnder(host, "googlevideo.com")
+}
+
+// hostUnder reports whether host is domain or a name under it, in any case.
+func hostUnder(host, domain string) bool {
 	host = strings.ToLower(host)
-	return host == "googlevideo.com" || strings.HasSuffix(host, ".googlevideo.com")
+	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+// twitchKeepSegs are the path segments a Twitch media URL keeps: the words of
+// its endpoints — a weaver's /v1/playlist/, an edge's /v1/segment/, an usher's
+// /api/channel/hls/ and /vod/ — none of which names a session.
+var twitchKeepSegs = map[string]bool{
+	"v1":       true,
+	"playlist": true,
+	"segment":  true,
+	"api":      true,
+	"channel":  true,
+	"hls":      true,
+	"vod":      true,
+}
+
+// isTwitchMedia reports whether a URL — its path split on '/' as segs, and its
+// host — is a Twitch media URL: a /v1/playlist/ or /v1/segment/ path on any
+// host, or any path on a ttvnw.net or live-video.net host.
+func isTwitchMedia(segs []string, host string) bool {
+	if len(segs) > 2 && segs[0] == "" && segs[1] == "v1" && (segs[2] == "playlist" || segs[2] == "segment") {
+		return true
+	}
+	return hostUnder(host, "ttvnw.net") || hostUnder(host, "live-video.net")
+}
+
+// twitchPath cuts a Twitch media URL's session out of its path, segs in
+// place: every segment but twitchKeepSegs' becomes Marker. The last one — the
+// file — keeps its extension, and its whole name when that is a number (a
+// sequence number names no session); any other name goes, whatever it spells.
+func twitchPath(segs []string) {
+	for i, seg := range segs {
+		if seg == "" || twitchKeepSegs[seg] {
+			continue
+		}
+		if i < len(segs)-1 {
+			segs[i] = Marker
+			continue
+		}
+		stem, ext := seg, ""
+		if dot := strings.LastIndexByte(seg, '.'); dot > 0 && isFileExt(seg[dot+1:]) {
+			stem, ext = seg[:dot], seg[dot:]
+		}
+		if !isDigits(stem) {
+			segs[i] = Marker + ext
+		}
+	}
+}
+
+// isFileExt reports whether ext — what follows a name's last '.' — reads as a
+// media file's extension (ts, m3u8, mp4, m4s, aac): one to five ASCII letters
+// and digits. Anything else is the session's own text and goes with it.
+func isFileExt(ext string) bool {
+	if ext == "" || len(ext) > 5 {
+		return false
+	}
+	for _, c := range ext {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// isDigits reports whether s is one or more ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // urlInTextRe matches a URL inside flattened text: a scheme, "://", and

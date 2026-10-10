@@ -7,10 +7,11 @@
 // is hiding and the rule for finding that secret lives in one place rather
 // than in a string edit at every site that meets it:
 //
-//   - a googlevideo media URL's credentials — the client's public IP, the
-//     signatures, the GVS PO token and the rest of what the server signed
-//     the URL for (media.go): MediaError for an error, MediaURL for a URL,
-//     MediaText for text already flattened;
+//   - a media URL's credentials (media.go) — a googlevideo URL's client
+//     public IP, signatures, GVS PO token and the rest of what the server
+//     signed it for, and the playback session a Twitch weaver playlist's or
+//     edge segment's path spells: MediaError for an error, MediaURL for a
+//     URL, MediaText for text already flattened;
 //   - the GVS PO token alone, in any URL (potoken.go): PoTokenURL for a URL,
 //     PoTokenText for text; the media rules apply both;
 //   - a credential inside a URL (url.go): URLOrigin for a URL whose secret can

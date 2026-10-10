@@ -82,7 +82,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | disk/ | ~130 | 3 | 2 | Disk space queries: kernel32 on Windows, statfs on Linux |
 | httpx/ | ~110 | 1 | 1 | Shared keep-alive-tuned http.Client/Transport shapes |
 | sqliteuri/ | ~30 | 1 | 1 | The `file:` URI every SQLite open goes through — the job database and the browsers' cookie databases |
-| redact/ | ~430 | 4 | 3 | One redaction rule per kind of secret for error text, log lines and notifications — a googlevideo media URL's credentials (client IP, signatures, the GVS PO token in both its URL forms), a credential inside a URL |
+| redact/ | ~540 | 4 | 3 | One redaction rule per kind of secret for error text, log lines and notifications — a media URL's credentials (a googlevideo URL's client IP, signatures and GVS PO token in both its URL forms; the playback session a Twitch weaver playlist's or edge segment's path spells), a credential inside a URL |
 | bgutils/embed/ | ~80 | 4 | 1 | go:embed boundary for the Node binaries + sidecar tarball |
 | stats/ | ~70 | 1 | 1 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |
 | webtest/ | ~70 | 1 | 1 | Shared goja harness for evaluating shipped Web UI JS (`settings.js`) from Go tests |
