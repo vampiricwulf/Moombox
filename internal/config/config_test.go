@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -872,6 +873,41 @@ func TestValidate_ConnectivityProbeTargets(t *testing.T) {
 	Normalize(norm)
 	if len(norm.Connectivity.ProbeTargets) == 0 || norm.Connectivity.ProbeTargets[0] == "not-a-host-port" {
 		t.Fatalf("Normalize should restore defaults, got %v", norm.Connectivity.ProbeTargets)
+	}
+}
+
+// TestLoadLeavesDefaultProbeTargetsIntact: Load decodes the file into
+// Defaults(), and toml.Decode writes a slice into the existing backing array
+// when its capacity suffices. While Defaults() handed out DefaultProbeTargets
+// itself, a config.toml with one to three probe targets overwrote the shipped
+// list for the rest of the process, so Normalize's fallback for an empty list
+// and every later Defaults() caller read the file's targets instead.
+//
+// Mutant killed: Defaults() setting ProbeTargets to DefaultProbeTargets
+// without the clone.
+func TestLoadLeavesDefaultProbeTargetsIntact(t *testing.T) {
+	shipped := []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
+	// A failing run must not leave the corruption for later tests.
+	t.Cleanup(func() { DefaultProbeTargets = slices.Clone(shipped) })
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := Defaults()
+	cfg.Connectivity.ProbeTargets = []string{"10.0.0.1:443"}
+	if err := Save(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(loaded.Connectivity.ProbeTargets, []string{"10.0.0.1:443"}) {
+		t.Fatalf("loaded probe_targets = %v, want the file's [10.0.0.1:443]", loaded.Connectivity.ProbeTargets)
+	}
+	if !slices.Equal(DefaultProbeTargets, shipped) {
+		t.Errorf("DefaultProbeTargets = %v after Load, want %v", DefaultProbeTargets, shipped)
+	}
+	if got := Defaults().Connectivity.ProbeTargets; !slices.Equal(got, shipped) {
+		t.Errorf("Defaults().Connectivity.ProbeTargets = %v after Load, want %v", got, shipped)
 	}
 }
 

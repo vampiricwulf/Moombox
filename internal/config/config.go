@@ -191,7 +191,11 @@ func Defaults() *MoomboxConfig {
 			SidecarHardLimitMB: 512, // BotGuard bursts ≈ 400-500 MB
 		},
 		Connectivity: ConnectivityConfig{
-			ProbeTargets: DefaultProbeTargets,
+			// A copy, never DefaultProbeTargets itself: loadFromFile decodes
+			// into Defaults(), and toml.Decode writes a list that fits into
+			// the existing backing array, which would rewrite the shipped
+			// defaults for the rest of the process.
+			ProbeTargets: slices.Clone(DefaultProbeTargets),
 		},
 	}
 }
