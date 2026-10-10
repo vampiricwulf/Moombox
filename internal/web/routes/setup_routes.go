@@ -20,6 +20,11 @@ type SetupDeps struct {
 	OnRestart      func()
 }
 
+// setupCompleteBeforeLock runs as /api/setup/complete reaches the store
+// lock, after its first-run check and the work before the save. A no-op;
+// tests hold two completes here to overlap them.
+var setupCompleteBeforeLock = func() {}
+
 // SetupRoutes registers setup wizard endpoints. The Store carries cfg
 // and the lock; setup/complete keeps copy-on-write so a save failure
 // never leaks partial mutations into the live config.
@@ -134,7 +139,21 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 			}
 		}
 
+		setupCompleteBeforeLock()
 		mu.Lock()
+
+		// The first-run guard again, now under the lock. The read at the
+		// top runs before the body is validated and the password hashed,
+		// and two completes that overlapped there — the tab Moombox opens
+		// on boot and a second one — both passed it: each applied and saved
+		// its settings over the other's, and each scheduled a restart. Save
+		// sets ConfigLoaded, so whichever takes the lock second finds setup
+		// done.
+		if cfg.ConfigLoaded {
+			mu.Unlock()
+			jsonError(rw, "setup already completed", http.StatusBadRequest)
+			return
+		}
 
 		// Work on a copy so the live config isn't modified if save fails
 		cfgCopy := *cfg

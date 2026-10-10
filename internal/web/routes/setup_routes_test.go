@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -29,6 +30,10 @@ func newSetupFixture(t *testing.T) *setupFixture {
 	dir := t.TempDir()
 
 	cfg := config.Defaults()
+	// The directories a complete creates, in the temp dir: the defaults
+	// are relative, and left alone they land in this package's directory.
+	cfg.Paths.OutputDirectory = filepath.Join(dir, "output")
+	cfg.Paths.StagingDirectory = filepath.Join(dir, "staging")
 	store := config.NewStore(cfg, filepath.Join(dir, "config.toml"))
 
 	auth := web.NewAuthService()
@@ -425,5 +430,79 @@ func TestSetupCompleteStripsInstallYtdlpKeyBeforeValidation(t *testing.T) {
 	f.store.Read(func(c *config.MoomboxConfig) { port = c.Network.Port })
 	if port != 1234 {
 		t.Errorf("port: want 1234, got %d", port)
+	}
+}
+
+// postSetupComplete sends body to /api/setup/complete from loopback, as the
+// wizard does.
+func postSetupComplete(t *testing.T, router http.Handler, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(raw))
+	req.RemoteAddr = "127.0.0.1:0"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestSetupCompleteGuardHoldsForOverlappingCompletes pins W26-11: two
+// completes that overlap — the tab Moombox opens on boot and a second one —
+// both passed the "setup already completed" check, which ran before the
+// lock and was never repeated, so both applied, both saved over each other
+// and both restarted. Held together at the lock, exactly one is applied; the
+// other is refused and the saved port is the applied one's.
+//
+// Mutant killed: dropping the ConfigLoaded recheck under the lock (both
+// answer 200).
+func TestSetupCompleteGuardHoldsForOverlappingCompletes(t *testing.T) {
+	f := newSetupFixture(t)
+
+	var atLock sync.WaitGroup
+	atLock.Add(2)
+	prev := setupCompleteBeforeLock
+	setupCompleteBeforeLock = func() { atLock.Done(); atLock.Wait() }
+	t.Cleanup(func() { setupCompleteBeforeLock = prev })
+
+	codes := make([]int, 2)
+	var done sync.WaitGroup
+	for i := range codes {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("complete %d panicked: %v", i, p)
+				}
+			}()
+			codes[i] = postSetupComplete(t, f.router, map[string]any{
+				"network": map[string]any{"port": 7001 + i},
+			}).Code
+		}()
+	}
+	done.Wait()
+
+	applied := -1
+	for i, code := range codes {
+		switch code {
+		case http.StatusOK:
+			if applied >= 0 {
+				t.Fatalf("both overlapping completes were applied: codes %v", codes)
+			}
+			applied = i
+		case http.StatusBadRequest:
+		default:
+			t.Fatalf("complete %d answered %d", i, code)
+		}
+	}
+	if applied < 0 {
+		t.Fatalf("neither complete was applied: codes %v", codes)
+	}
+	var port int
+	f.store.Read(func(c *config.MoomboxConfig) { port = c.Network.Port })
+	if port != 7001+applied {
+		t.Errorf("saved port %d, want %d — the refused complete's settings reached the config", port, 7001+applied)
 	}
 }

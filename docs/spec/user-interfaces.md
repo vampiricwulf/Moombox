@@ -1014,7 +1014,7 @@ The same two lists carry every other restart-required key — `port`, `network_a
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/setup/status` | Check if first-run setup has been completed. |
-| `POST` | `/api/setup/complete` | Mark setup as complete. |
+| `POST` | `/api/setup/complete` | Save the wizard's settings and restart — loopback only, and once: the "setup already completed" check (400) is made again under the store lock, so of two completes that overlap (the tab Moombox opens on boot and a second one) one is applied and the other refused, instead of both saving over each other and both restarting. See [First-Run Setup Wizard](#first-run-setup-wizard). |
 
 ### Logs
 
@@ -1103,6 +1103,8 @@ Both UIs implement a setup wizard that runs on first launch, i.e. when no config
 4. **Cookie capture** — guide the user through providing browser cookies for authenticated access.
 
 The Web UI implementation is in `modules/setup.js`. The TUI implementation is in `setup_wizard.go` (using `huh` forms).
+
+**Completing setup.** The Web wizard saves through `POST /api/setup/complete` (`internal/web/routes/setup_routes.go`); the TUI's saves in the `save` action's command (`internal/tui/app_keys.go`) through `OnComplete`. Setup completes once: the Web route repeats its "setup already completed" check under the store lock, so two overlapping completes cannot both apply.
 
 ### Job Lifecycle Visualization
 
