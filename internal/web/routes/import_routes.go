@@ -388,12 +388,17 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		for _, v := range videos {
 			totalSize += v.size
 		}
+		// The recording's length is probed, best effort: a split one's from
+		// its parts' durations, a single file's from its own — the row's
+		// length_seconds, which a finished recording gets from the mux's
+		// probe. A file ffprobe cannot read imports all the same, without it.
+		var ffmpegPath string
+		store.Read(func(c *config.MoomboxConfig) { ffmpegPath = c.Paths.FfmpegPath })
+		ffprobePath := engine.NewMuxer(ffmpegPath, logger).FFprobePath()
 		var segments []database.Segment
+		var totalSeconds float64
 		if len(videos) > 1 {
 			videoOutName = filepath.Join("imports", stem)
-			var ffmpegPath string
-			store.Read(func(c *config.MoomboxConfig) { ffmpegPath = c.Paths.FfmpegPath })
-			ffprobePath := engine.NewMuxer(ffmpegPath, logger).FFprobePath()
 			for _, v := range videos {
 				seg := importSegment(videoID, v, files)
 				// The player lays the parts on one timeline by their
@@ -402,8 +407,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 				if seg.DurationSeconds = importProbeDuration(req.Context(), ffprobePath, v.tmp); seg.DurationSeconds <= 0 {
 					logger.Warn("import: could not read a part's duration", "part", seg.Filename)
 				}
+				totalSeconds += seg.DurationSeconds
 				segments = append(segments, *seg)
 			}
+		} else if totalSeconds = importProbeDuration(req.Context(), ffprobePath, videos[0].tmp); totalSeconds <= 0 {
+			logger.Warn("import: could not read the recording's duration", "file", filepath.Base(videos[0].dest))
 		}
 		chatOutName, absChat := "", ""
 		if c := importJobChat(files); c != nil {
@@ -434,10 +442,6 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			ManuallyAdded:   true,
 			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 			UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
-		}
-		var totalSeconds float64
-		for _, s := range segments {
-			totalSeconds += s.DurationSeconds
 		}
 		if totalSeconds > 0 {
 			length := int(totalSeconds)

@@ -340,6 +340,73 @@ func TestImportProbeDurationReadsFFprobe(t *testing.T) {
 	}
 }
 
+// A single-file import probes its recording's length, as a split one's parts
+// are probed: it recorded none, so the row of a one-file import had no
+// length_seconds while the same recording imported in parts had its parts'
+// total. A file the probe cannot read imports all the same, without a
+// length, and says so in the log.
+//
+// Mutants: no probe for a single file (no lengthSeconds); probing its
+// destination, which does not exist until the row is in (0, no
+// lengthSeconds); no warning for a failed probe.
+func TestImportProbesASingleRecordingsLength(t *testing.T) {
+	stubImportDurations(t)
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t, importEntry{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("TWELVE-BYTES")}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if job.LengthSeconds == nil || *job.LengthSeconds != 120 {
+		t.Errorf("lengthSeconds %v, want the probed 120", job.LengthSeconds)
+	}
+	if stored, err := f.db.GetJob(job.ID); err != nil || stored.LengthSeconds == nil || *stored.LengthSeconds != 120 {
+		t.Errorf("stored lengthSeconds %v (%v), want 120", stored.LengthSeconds, err)
+	}
+
+	importProbeDuration = func(context.Context, string, string) float64 { return 0 }
+	g := newImportFixture(t)
+	rec, job = importZip(t, g, orderedImportZip(t, importEntry{name: "Other [aaaaaaaaaaa].mp4", data: []byte("v")}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("an unreadable file must still import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if job.LengthSeconds != nil {
+		t.Errorf("lengthSeconds %v for a file the probe could not read, want none", *job.LengthSeconds)
+	}
+	if !strings.Contains(g.log.all(), "could not read the recording's duration") {
+		t.Errorf("the failed probe was not logged: %q", g.log.all())
+	}
+}
+
+// The same through the real ffprobe, where FFmpeg is installed: a 2 s clip
+// imported alone is a 2 s row.
+//
+// Mutant: no probe for a single file — no lengthSeconds.
+func TestImportASingleClipRecordsItsLength(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	media := filepath.Join(t.TempDir(), "clip.mp4")
+	if out, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16:d=2", "-c:v", "mpeg4", media).CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg could not make a clip: %v %s", err, out)
+	}
+	clip, err := os.ReadFile(media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t, importEntry{name: "Clip [dQw4w9WgXcQ].mp4", data: clip}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if job.LengthSeconds == nil || *job.LengthSeconds != 2 {
+		t.Errorf("lengthSeconds %v, want 2", job.LengthSeconds)
+	}
+}
+
 // appleDoubleFile is the head of a macOS AppleDouble file ("._<name>"): the
 // magic 0x00051607, version 2, the "Mac OS X" filler and room for an entry.
 var appleDoubleFile = append([]byte{0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00},
