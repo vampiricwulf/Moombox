@@ -657,6 +657,15 @@ type App struct {
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).
 	OnSaveConfig func(cfg *config.MoomboxConfig) error
+	// OnChannelRemovalSummary counts what removing a channel would do to its
+	// jobs, for the Settings → Channels removal prompt (W25-09);
+	// OnDeletePendingChannelJobs is that prompt's "delete its pending jobs",
+	// run once the save that removes the channel has succeeded, answering
+	// how many it deleted and how many parked recordings with footage it
+	// kept. worker.SummarizeChannelRemoval / DeletePendingChannelJobs,
+	// adapted in cmd/moombox. Without them the prompt offers keep and Esc.
+	OnChannelRemovalSummary    func(channelID string) (ChannelRemovalInfo, error)
+	OnDeletePendingChannelJobs func(channelID string) (deleted, footageKept int, err error)
 	// OnFfmpegPathChange re-applies paths.ffmpeg_path to the services that
 	// captured it when their muxers were built. Separate from OnSaveConfig
 	// because the FFmpeg overlay deliberately keeps a validated path live

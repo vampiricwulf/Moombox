@@ -18,7 +18,9 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if !a.settings.IsVisible() {
 			a.afterSettingsClose()
 		}
-		return a, nil
+		// [ Save & Return ] can be the save that removes a channel with "delete
+		// its pending jobs".
+		return a, a.channelPruneCmd()
 	}
 
 	// The O L overlay scrolls under the wheel as the log panel does, three

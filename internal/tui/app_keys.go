@@ -62,17 +62,22 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Settings panel intercepts all keys (before normalization to preserve case for text input)
 	if a.settings.IsVisible() {
 		action := a.settings.HandleKey(key)
+		// A save that just removed channels with "delete its pending jobs"
+		// hands their IDs over here (settings_channel_removal.go).
+		prune := a.channelPruneCmd()
 		switch action {
 		case "close":
 			a.afterSettingsClose()
 		case "restart":
 			if a.OnRestart != nil {
 				onRestart := a.OnRestart
-				return a, safeCmd(func() tea.Msg {
+				return a, tea.Batch(prune, safeCmd(func() tea.Msg {
 					onRestart()
 					return tea.QuitMsg{}
-				})
+				}))
 			}
+		case "channel_removal_summary":
+			return a, a.channelRemovalSummaryCmd(a.settings.ChannelRemovalID())
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
 		case "test_notification":
@@ -84,7 +89,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.Open()
 			a.ffmpegCheck.SetSize(a.width, a.height)
 		}
-		return a, nil
+		return a, prune
 	}
 
 	// Help overlay intercepts all keys (scroll handled by viewport in routeComponentMsg)

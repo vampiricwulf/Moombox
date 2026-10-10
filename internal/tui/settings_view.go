@@ -519,13 +519,16 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 
 	var lines []string
 
-	// Action bar. The delete prompt replaces the key list rather than
-	// trailing it: the two together are wider than a 60-column box.
-	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete")
+	// Action bar. The removal prompt replaces the key list rather than
+	// trailing it — the two together are wider than a 60-column box — and
+	// takes its extra rows from the list's window.
 	if m.channelDeleteConf {
-		actionBar = YellowStyle.Render("Press D again to confirm delete")
+		prompt := m.channelRemovalPromptLines(w, maxH)
+		lines = append(lines, prompt...)
+		maxH = max(maxH-(len(prompt)-1), 1)
+	} else {
+		lines = append(lines, DimStyle.Render("A: Add  Enter: Edit  D: Delete"))
 	}
-	lines = append(lines, actionBar)
 
 	if len(m.channels) == 0 {
 		lines = append(lines, "")

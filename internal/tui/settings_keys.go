@@ -370,6 +370,7 @@ func (m *SettingsModel) saveAndClose() string {
 		m.status = saveSaved
 		m.dirty = false
 		m.structDirty = false
+		m.handOverChannelPrunes()
 		needsRestart := m.hasRestartChanges()
 		m.originalValues = make(map[string]string, len(m.values))
 		maps.Copy(m.originalValues, m.values)

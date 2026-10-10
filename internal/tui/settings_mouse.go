@@ -382,6 +382,13 @@ func (m *SettingsModel) handleMouseChannelClick(contentY int) {
 		return
 	}
 
+	// The removal prompt takes several lines above the list, so a click maps
+	// to no row while it is up: it cancels the prompt, as a key would.
+	if m.channelDeleteConf {
+		m.channelDeleteConf = false
+		return
+	}
+
 	// List mode: line 0 is action bar, then channels start at line 1.
 	// The list renders a window around the selection — offset by its start.
 	chIdx := listWindowStart(m.channelIndex, m.settingsContentHeight()) + contentY - 1

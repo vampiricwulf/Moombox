@@ -404,6 +404,10 @@ type SettingsModel struct {
 	channelResolving  bool // true while async URL resolution is in progress
 	channels          []config.ChannelConfig
 
+	// The channel-removal prompt and the choices it took
+	// (settings_channel_removal.go).
+	channelRemovalState
+
 	// Notification sub-editor state
 	notifIndex      int
 	notifMode       string // "list" or "edit"
@@ -499,6 +503,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.closeConfirm = false
 	m.afterClose = ""
 	m.buttonFocus = -1
+	m.resetChannelRemoval()
 
 	// Snapshot config under read lock. Use the closure-scoped `c`
 	// (the locked snapshot) consistently — `cfg` is the outer store

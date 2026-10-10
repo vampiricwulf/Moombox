@@ -949,6 +949,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
 		return a, nil
 
+	case channelRemovalSummaryMsg:
+		a.settings.HandleChannelRemovalSummary(msg.ID, msg.Info, msg.Err)
+		return a, nil
+
+	case channelJobsPrunedMsg:
+		a.setFeedbackWithSeverity(channelJobsPrunedFeedback(msg))
+		return a, nil
+
 	case testNotificationResultMsg:
 		// Route into the settings overlay's status line — the overlay
 		// covers the main feedback line while it's open.

@@ -127,22 +127,10 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		return m.handleChannelEditKey(key)
 	}
 
-	// List mode
+	// List mode. The removal prompt (settings_channel_removal.go) owns
+	// every key while it is up.
 	if m.channelDeleteConf {
-		if key == "d" || key == "D" {
-			if m.channelIndex < len(m.channels) {
-				m.channels = append(m.channels[:m.channelIndex], m.channels[m.channelIndex+1:]...)
-				if m.channelIndex >= len(m.channels) && m.channelIndex > 0 {
-					m.channelIndex--
-				}
-				m.dirty = true
-				m.structDirty = true
-			}
-			m.channelDeleteConf = false
-		} else {
-			m.channelDeleteConf = false
-		}
-		return ""
+		return m.handleChannelRemovalKey(key)
 	}
 
 	switch key {
@@ -176,8 +164,8 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		m.channelMode = "edit"
 		m.updateTextInputForField()
 	case "d", "D":
-		if len(m.channels) > 0 {
-			m.channelDeleteConf = true
+		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
+			return m.beginChannelRemoval()
 		}
 	case keyTab:
 		m.switchSection((m.sectionIndex + 1) % len(sections))
