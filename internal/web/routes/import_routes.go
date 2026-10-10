@@ -587,15 +587,18 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		}
 		name := zipEntryName(f)
 		lower := strings.ToLower(name)
-		switch ext := filepath.Ext(lower); {
-		case importVideoExts[ext]:
-			videos = append(videos, importPart{video: f, stem: name[:len(name)-len(ext)], ext: name[len(name)-len(ext):]})
+		// The extension is cut from the name as written: lower-casing can
+		// change a rune's length (KELVIN SIGN is "k"), so an offset taken
+		// from the lowered name can split the original.
+		switch ext := filepath.Ext(name); {
+		case importVideoExts[strings.ToLower(ext)]:
+			videos = append(videos, importPart{video: f, stem: strings.TrimSuffix(name, ext), ext: ext})
 		case strings.HasSuffix(lower, ".chat.json"):
 			if stem := name[:len(name)-len(".chat.json")]; chats[stem] == nil {
 				chats[stem] = f
 				chatOrder = append(chatOrder, stem)
 			}
-		case ext == ".json":
+		case strings.ToLower(ext) == ".json":
 			if stem := name[:len(name)-len(".json")]; jsons[stem] == nil {
 				jsons[stem] = f
 			}

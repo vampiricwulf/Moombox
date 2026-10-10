@@ -245,6 +245,23 @@ func TestImportSplitRecordingWithARefusedPartRowLeavesNothing(t *testing.T) {
 	}
 }
 
+// The extension is cut from the entry's name as written. Lower-casing can
+// change a rune's length — KELVIN SIGN (three bytes) lowers to "k" — so an
+// offset taken from the lowered name split the original: ".mKv" passed
+// as ".mkv" and was cut mid-rune into an invalid name.
+//
+// Mutant: slicing the name at the lowered extension's length.
+func TestImportCutsTheExtensionFromTheNameAsWritten(t *testing.T) {
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t, importEntry{name: "Stream [dQw4w9WgXcQ].mKv", data: []byte("v")}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if want := "imports/Stream [dQw4w9WgXcQ].mKv"; job.Filename != want || job.Title != "Stream" {
+		t.Errorf("filename %q title %q, want %q / Stream", job.Filename, job.Title, want)
+	}
+}
+
 // The real probe: ffprobe's format duration, 0 for what it cannot read. The
 // media half runs where FFmpeg is installed, and reads the part through its
 // temporary ".partial" name, as the import does.
