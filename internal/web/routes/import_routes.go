@@ -2,6 +2,7 @@ package routes
 
 import (
 	"archive/zip"
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -278,7 +279,14 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// that fails the check falls back to the generated one rather than
 		// failing the import: O-AA chose "imports everything" over
 		// "surfaces bad archives".
-		if videoID == "" && utils.IsVideoID(meta.VideoID) {
+		//
+		// A Moombox Twitch archive says what it is twice: its chat header
+		// (twitch.TwitchChatData, platform "twitch") and the "tw_" job id its
+		// file is named with. It imported as a YouTube row — channel
+		// "Import", a watch URL for a video that does not exist, and the
+		// "[tw_…]" id left in its title (W25-03).
+		twitchArchive := meta.Platform == "twitch" || strings.HasPrefix(videoID, "tw_")
+		if videoID == "" && !twitchArchive && utils.IsVideoID(meta.VideoID) {
 			videoID = meta.VideoID
 		}
 		if videoID == "" {
@@ -299,8 +307,26 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		if channel == "" {
 			channel = meta.ChannelName
 		}
+		if channel == "" && twitchArchive {
+			channel = cmp.Or(meta.ChannelDisplayName, meta.ChannelLogin)
+		}
 		if channel == "" {
 			channel = "Import"
+		}
+
+		// Where the row points. A YouTube id is a watch page and a
+		// thumbnail; of Twitch's ids only a VOD's names a page
+		// (twitch.tv/videos/<id>) — a live capture's stream id names none,
+		// so that row carries no URL rather than a wrong one.
+		platform := "youtube"
+		videoURL := "https://www.youtube.com/watch?v=" + videoID
+		thumbnailURL := "https://i.ytimg.com/vi/" + videoID + "/maxresdefault.jpg"
+		isVod := false
+		if twitchArchive {
+			platform, videoURL, thumbnailURL = "twitch", "", ""
+			if m := importTwitchVODRe.FindStringSubmatch(videoID); m != nil {
+				videoURL, isVod = "https://www.twitch.tv/videos/"+m[1], true
+			}
 		}
 
 		// Check for duplicate (use JobExists to match TS - checks ALL jobs, not just active)
@@ -396,11 +422,12 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		job := &database.Job{
 			ID:              videoID,
 			VideoID:         videoID,
-			URL:             "https://www.youtube.com/watch?v=" + videoID,
+			URL:             videoURL,
 			Title:           title,
 			ChannelName:     channel,
-			ThumbnailURL:    "https://i.ytimg.com/vi/" + videoID + "/maxresdefault.jpg",
-			Platform:        "youtube",
+			ThumbnailURL:    thumbnailURL,
+			Platform:        platform,
+			IsVod:           isVod,
 			Status:          database.StatusFinished,
 			Progress:        "Imported",
 			Percent:         100,
@@ -784,11 +811,18 @@ func importStem(title, id string) string {
 const importNameMaxBytes = 255
 
 // importNameIDRe is a bracketed id in an archive's file name: a YouTube video
-// id, or the "imp_" placeholder an earlier import minted (randomHex(4), the
-// shape the dashboard's isImportPlaceholderId and the TUI's
-// isImportPlaceholderID read), so re-importing an imported archive keeps its
-// id. Every shape is path-safe — the id is interpolated into the output name.
-var importNameIDRe = regexp.MustCompile(`\[(imp_[0-9a-f]{8}|[a-zA-Z0-9_-]{11})\]`)
+// id; a Moombox Twitch job's id, which its archives are named with
+// (worker.go names a Twitch recording by job.ID: "tw_v<vod id>",
+// "tw_<stream id>", "tw_manual_<login>_<n>"); or the "imp_" placeholder an
+// earlier import minted (randomHex(4), the shape the dashboard's
+// isImportPlaceholderId and the TUI's isImportPlaceholderID read), so
+// re-importing an imported archive keeps its id. Every shape is path-safe —
+// the id is interpolated into the output name.
+var importNameIDRe = regexp.MustCompile(`\[(tw_[a-zA-Z0-9_]{1,64}|imp_[0-9a-f]{8}|[a-zA-Z0-9_-]{11})\]`)
+
+// importTwitchVODRe is a Twitch VOD job's id, the one Twitch id shape that
+// names a page of its own: twitch.tv/videos/<digits>.
+var importTwitchVODRe = regexp.MustCompile(`^tw_v([0-9]+)$`)
 
 // importNameID returns the id a file name's stem carries and the stem without
 // it. The id is the LAST bracketed one: Moombox ("${title} [${id}]") and
@@ -859,20 +893,36 @@ func CleanupOldImportTemp(outputDir string) (removed int, err error) {
 	return removed, err
 }
 
-// importChatMeta is what an import reads out of a chat archive's header.
+// importChatMeta is what an import reads out of a chat archive's header: a
+// YouTube archive's (chat.ChatData) videoId, videoTitle and channelName, or a
+// Twitch archive's (twitch.TwitchChatData) platform, channelLogin and
+// channelDisplayName.
 type importChatMeta struct {
 	VideoID     string
 	VideoTitle  string
 	ChannelName string
+
+	Platform           string
+	ChannelLogin       string
+	ChannelDisplayName string
 }
 
-// readImportChatMeta reads the top-level videoId, videoTitle and channelName
-// strings of a chat archive as a stream. The whole file used to be read into
-// memory and unmarshalled for these three strings, and a long stream's chat
-// runs to hundreds of MB. Moombox writes them ahead of the messages, so the
-// read normally stops before reaching them; any value in between is skipped
-// token by token, never held. A file that is not a JSON object, or ends early,
-// yields whatever was found before that.
+// importChatHeaders are the header sets readImportChatMeta stops at: either
+// writer's three strings, all of which it always writes ahead of the
+// messages.
+var importChatHeaders = [][]string{
+	{"videoId", "videoTitle", "channelName"},
+	{"platform", "channelLogin", "channelDisplayName"},
+}
+
+// readImportChatMeta reads the top-level header strings of a chat archive as
+// a stream. The whole file used to be read into memory and unmarshalled for
+// three strings, and a long stream's chat runs to hundreds of MB. Moombox
+// writes them ahead of the messages, so the read normally stops — once
+// either writer's set is complete (importChatHeaders) — before reaching
+// them; any value in between is skipped token by token, never held. A file
+// that is not a JSON object, or ends early, yields whatever was found before
+// that.
 func readImportChatMeta(r io.Reader) importChatMeta {
 	var meta importChatMeta
 	dec := json.NewDecoder(r)
@@ -880,11 +930,23 @@ func readImportChatMeta(r io.Reader) importChatMeta {
 		return meta
 	}
 	fields := map[string]*string{
-		"videoId":     &meta.VideoID,
-		"videoTitle":  &meta.VideoTitle,
-		"channelName": &meta.ChannelName,
+		"videoId":            &meta.VideoID,
+		"videoTitle":         &meta.VideoTitle,
+		"channelName":        &meta.ChannelName,
+		"platform":           &meta.Platform,
+		"channelLogin":       &meta.ChannelLogin,
+		"channelDisplayName": &meta.ChannelDisplayName,
 	}
-	for found := 0; found < len(fields) && dec.More(); {
+	found := map[string]bool{}
+	complete := func() bool {
+		for _, set := range importChatHeaders {
+			if found[set[0]] && found[set[1]] && found[set[2]] {
+				return true
+			}
+		}
+		return false
+	}
+	for !complete() && dec.More() {
 		t, err := dec.Token()
 		if err != nil {
 			return meta
@@ -894,7 +956,7 @@ func readImportChatMeta(r io.Reader) importChatMeta {
 			if v, err := dec.Token(); err == nil {
 				if str, isStr := v.(string); isStr {
 					*dst = str
-					found++
+					found[key] = true
 					continue
 				}
 				if d, isDelim := v.(json.Delim); isDelim && !skipJSONContainer(dec, d) {
