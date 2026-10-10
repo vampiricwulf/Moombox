@@ -3,11 +3,11 @@
  */
 import { renderTemplatePreview } from "./settings.js";
 import {
-  channelInputNeedsResolve,
   cookieSetupAbortReport,
   cookieSetupAcceptedToast,
   cookieSetupProbe,
   cookieSetupRejectedMessage,
+  needsChannelResolve,
   NOT_A_CHANNEL_URL,
   serverErrorMessage,
 } from "./utils.js";
@@ -688,7 +688,7 @@ export class SetupController {
     let platform = document.getElementById("setup-ch-platform")?.value || "youtube";
 
     // Resolve a channel URL or a bare @handle
-    if (channelInputNeedsResolve(id)) {
+    if (needsChannelResolve(id)) {
       const saveBtn = document.getElementById("setup-ch-save");
       if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {

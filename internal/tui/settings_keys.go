@@ -372,10 +372,10 @@ func (m *SettingsModel) saveAndClose() string {
 		m.dirty = false
 		m.structDirty = false
 		m.handOverChannelPrunes()
-		m.resyncChannels()
 		needsRestart := m.hasRestartChanges()
 		m.originalValues = make(map[string]string, len(m.values))
 		maps.Copy(m.originalValues, m.values)
+		m.resyncChannels()
 		if needsRestart {
 			// Surface a persistent banner so dismissing the modal with
 			// Esc still leaves a visual reminder that the on-disk config

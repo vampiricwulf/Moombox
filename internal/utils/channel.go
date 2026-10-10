@@ -87,7 +87,7 @@ func LooksLikeURL(input string) bool {
 // URL, or a bare @handle. Resolving a YouTube handle is a page fetch with
 // retries, so the writers decide on this whether to rate limit (POST
 // /api/config/channels, PUT /api/config) or to go asynchronous (the TUI
-// editors). The dashboard's channelInputNeedsResolve
+// editors). The dashboard's needsChannelResolve
 // (web/public/modules/utils.js) is the same rule.
 func NeedsChannelResolve(input string) bool {
 	input = strings.TrimSpace(input)

@@ -51,7 +51,7 @@ async function openWith(channels, routes = {}) {
 
 const toastTexts = (h) => h.toasts().map((t) => t.textContent.trim());
 
-// Mutants killed: dropping the "@" arm of channelInputNeedsResolve (no
+// Mutants killed: dropping the "@" arm of needsChannelResolve (no
 // resolve call, "@SomeHandle" posted); not applying the resolved ID.
 test("Add Channel resolves a bare @handle before it posts", { skip }, async () => {
   const h = await openWith([]);

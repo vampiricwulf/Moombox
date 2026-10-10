@@ -1057,7 +1057,7 @@ export function channelTermsForSave(existingTerms, seedShown, typed) {
  * posted verbatim it named no channel the monitors could poll). The Go side's
  * utils.NeedsChannelResolve is the same rule.
  */
-export function channelInputNeedsResolve(id) {
+export function needsChannelResolve(id) {
   const v = String(id ?? "").trim();
   return v.startsWith("@") || v.includes("youtube.com") || v.includes("youtu.be") || v.includes("twitch.tv");
 }

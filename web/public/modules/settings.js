@@ -6,7 +6,6 @@ import {
   browserPathValidationOutcome,
   channelRemovalPrompt,
   channelRemovedToast,
-  channelInputNeedsResolve,
   channelTermsForSave,
   cookieImportRolledBackToast,
   cookieSetupAbortReport,
@@ -14,6 +13,7 @@ import {
   cookieSetupProbe,
   cookieSetupRejectedMessage,
   formatRelativeTime,
+  needsChannelResolve,
   NOT_A_CHANNEL_URL,
   restartValuesChanged,
   serverErrorMessage,
@@ -1686,7 +1686,7 @@ export class SettingsController {
     const enabled = enabledSwitch ? enabledSwitch.checked : true;
 
     // Resolve a channel URL or a bare @handle (only for new channels)
-    if (!this.editingChannelId && channelInputNeedsResolve(id)) {
+    if (!this.editingChannelId && needsChannelResolve(id)) {
       const saveBtn = document.getElementById("channel-save-btn");
       if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
