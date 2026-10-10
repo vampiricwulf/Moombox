@@ -48,8 +48,8 @@ func TestUntrackStopsRoutingButKeepsTheBuffer(t *testing.T) {
 	}
 }
 
-// SyncJobLogTracking is the policy both callers in cmd/moombox share: the
-// boot seed over every existing job and the OnJobsChange fan-out. A live job
+// SyncJobLogTracking is the policy of cmd/moombox's boot seed over every
+// existing job (the OnJobsChange fan-out called it too, once). A live job
 // is tracked — that is the whole point of the boot seed — and a terminal one
 // is not, which is what stops RouteLogToJobs scanning years of Finished rows
 // per log line (CORE-12).

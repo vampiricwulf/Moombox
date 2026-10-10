@@ -2654,8 +2654,9 @@ func (w *DownloadWorker) claimJobOperation(jobID, op string) (func(), error) {
 // the buffer kept) once terminal.
 //
 // The counterpart to the TrackJobForLogs RecoverAsides does on the way in.
-// That bracket exists because RouteLogToJobs scans only db.logRouted, and
-// SyncJobLogTracking deletes every terminal job from it (CORE-12) — so a
+// That bracket exists because RouteLogToJobs scans only db.logRouted, which
+// holds no terminal job (CORE-12: the status write that makes a job terminal
+// untracks it, and the boot seed's SyncJobLogTracking tracks none) — so a
 // recovery, which runs ONLY on a terminal job and deliberately never writes a
 // status, would emit every one of its log lines into nothing. MuxJob has no
 // such problem: it flips the row to Muxing first.
@@ -2715,11 +2716,12 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 	releaseStaging := claimOutputStem(jobID, filepath.Join(stagingBase, jobID))
 	// The job is terminal, so nothing is routing its log lines (CORE-12).
 	// Both UIs point the operator at the job's log for this run's progress, so
-	// route to it for the duration and hand it back at the end. Best-effort,
-	// not a guarantee: SyncJobLogTracking drops every terminal ID from the
-	// routed set and re-runs on each OnJobsChange fan-out, i.e. on every AddJob
-	// and DeleteJob — so a stream discovered while a long aside is muxing
-	// silently ends the routing and the rest of this run's lines go nowhere.
+	// route to it for the duration and hand it back at the end. Nothing that
+	// happens to another job ends it: cmd/moombox re-routes a job only on its
+	// own events — its OnJobAdded, a status write through OnJobChange, its
+	// OnJobDeleted — and the bulk writers' OnJobsChange drops only the rows
+	// they removed (onJobsChange). A status write on THIS job does re-route
+	// it by its new status, and deleting it ends the routing with the row.
 	w.db.TrackJobForLogs(jobID)
 
 	w.wg.Go(func() {

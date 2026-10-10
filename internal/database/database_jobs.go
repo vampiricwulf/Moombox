@@ -1159,10 +1159,13 @@ func (db *Database) UntrackJobForLogs(jobID string) {
 
 // SyncJobLogTracking brings the routed set in line with a job list: every
 // non-terminal job is tracked, every terminal one untracked (buffer kept).
-// Both callers in cmd/moombox — the boot seed over GetAllJobs and the
-// OnJobsChange fan-out — used to track EVERY row, which is what made
-// RouteLogToJobs scan the whole history per log line (CORE-12). One lock
-// acquisition for the list, not one per job.
+// Its caller is cmd/moombox's boot seed over GetAllJobs, which — like the
+// OnJobsChange fan-out that also called it once — used to track EVERY row,
+// which is what made RouteLogToJobs scan the whole history per log line
+// (CORE-12). After boot, routing follows each job's own events; a sync over
+// the whole table would untrack a terminal job a worker bracket is routing
+// to (RecoverAsides, cleanupStagingAfterMux). One lock acquisition for the
+// list, not one per job.
 func (db *Database) SyncJobLogTracking(jobs []*Job) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
@@ -1188,7 +1191,8 @@ func (db *Database) trackForLogsLocked(jobID string) {
 
 // PruneJobLogs removes log entries — and routing — for job IDs not in the
 // provided set. Called on jobsChange to keep the log maps in sync with the
-// database.
+// database: a bulk delete's removed rows lose their buffers and routing, and
+// nothing else changes.
 func (db *Database) PruneJobLogs(activeIDs map[string]struct{}) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()

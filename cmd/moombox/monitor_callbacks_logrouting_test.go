@@ -6,7 +6,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/web"
@@ -244,5 +246,87 @@ func TestTheLineBeforeATerminalWriteReachesTheJobsOwnLog(t *testing.T) {
 	if !failJob("vidlagging") {
 		t.Error("with the forwarder out of the picture the failed job's own log lacks its \"job error\" line — " +
 			"per-job routing must not depend on a subscriber keeping up")
+	}
+}
+
+// A terminal job's routing that a worker bracket holds open — RecoverAsides
+// for a whole recovery, cleanupStagingAfterMux for the staging outcome — must
+// outlast what happens to OTHER jobs meanwhile. Routing follows each job's own
+// events: OnJobAdded (syncJobLogRouting), a status write through OnJobChange
+// (syncJobLogRoutingOnChange) and OnJobDeleted (ClearJobLogs), none of which
+// touches another job's. The bulk writers' OnJobsChange fan-out was the
+// exception: it re-ran SyncJobLogTracking over the whole table, which untracks
+// every terminal job, so a Mark Watched on any rows (BatchSetWatched — the
+// dashboard's watched routes and the TUI's A W) or a channel's removal ended
+// a running recovery's routing, and the rest of its progress reached no job's
+// log. Neither bulk writer writes a status; the fan-out now leaves routing to
+// the per-job events and drops only the rows a bulk delete removed.
+//
+// Mutants: onJobsChange calling SyncJobLogTracking again — the held job loses
+// the line after the Watched toggle; onJobsChange without PruneJobLogs — the
+// removed row keeps its routing and buffer.
+func TestABulkWriteLeavesAHeldJobsLogRouting(t *testing.T) {
+	db, s := logRoutingFixture(t)
+	s.wsHub = web.NewWebSocketHub(sweepTestLogger{})
+	s.configStore = config.NewStore(config.Defaults(), "")
+	delivered := make(chan struct{}, 4)
+	t.Cleanup(db.OnJobsChange(func(jobs []*database.Job) {
+		s.onJobsChange(jobs)
+		delivered <- struct{}{}
+	}))
+	waitDelivered := func() {
+		t.Helper()
+		select {
+		case <-delivered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the bulk write's OnJobsChange never arrived")
+		}
+	}
+	routedTo := func(id, line string) bool {
+		t.Helper()
+		db.RouteLogToJobs(line)
+		logs := db.GetJobLogs(id)
+		return len(logs) > 0 && logs[len(logs)-1] == line
+	}
+
+	addJob(t, db, "vidrecover1", database.StatusFinished)
+	addJob(t, db, "vidwatched1", database.StatusFinished)
+	addJob(t, db, "vidlive0001", database.StatusDownloading)
+	db.TrackJobForLogs("vidrecover1") // RecoverAsides' bracket opens
+
+	// A stream discovered meanwhile: AddJob routes the new job and only it.
+	addJob(t, db, "viddiscov01", database.StatusUpcoming)
+	if !routedTo("vidrecover1", "recovering, job vidrecover1, after a new job") {
+		t.Fatal("an AddJob ended the held job's routing")
+	}
+
+	// An operator marks another job watched while the recovery runs.
+	if err := db.BatchSetWatched([]string{"vidwatched1"}, true); err != nil {
+		t.Fatalf("BatchSetWatched: %v", err)
+	}
+	waitDelivered()
+	if !routedTo("vidrecover1", "recovering, job vidrecover1, after a Watched toggle") {
+		t.Error("a Mark Watched on another job ended the held job's routing — the recovery's remaining lines reach no job's log")
+	}
+	if !routedTo("vidlive0001", "segment, job vidlive0001") {
+		t.Error("a live job stopped being routed to after the bulk write")
+	}
+	if routedTo("vidwatched1", "a line naming vidwatched1") {
+		t.Error("the bulk write started routing to a Finished job nothing holds — a terminal ID left in the routed set is CORE-12")
+	}
+
+	// A bulk delete still drops what it removed.
+	db.TrackJobForLogs("vidgone0001")
+	db.RouteLogToJobs("last line, job vidgone0001")
+	jobs, err := db.GetAllJobs()
+	if err != nil {
+		t.Fatalf("GetAllJobs: %v", err)
+	}
+	s.onJobsChange(jobs) // the list a bulk delete hands over: vidgone0001 is not in it
+	if logs := db.GetJobLogs("vidgone0001"); len(logs) != 0 {
+		t.Errorf("a row the bulk write removed keeps its buffer: %v", logs)
+	}
+	if routedTo("vidgone0001", "a later line, job vidgone0001") {
+		t.Error("a row the bulk write removed is still routed to")
 	}
 }

@@ -2150,13 +2150,18 @@ func (s *runState) onJobDeleted(jobID string) {
 // onJobsChange is the OnJobsChange subscriber's body — onJobDeleted's twin for
 // the bulk writers, a method for the same reason: a test can drive it.
 func (s *runState) onJobsChange(jobs []*database.Job) {
-	// Keep per-job log tracking in sync (matches TS knownJobIds update):
-	// live jobs routed, terminal ones dropped from the scan (CORE-12).
+	// Per-job log routing: drop the rows a bulk delete removed, and nothing
+	// else. Neither bulk writer writes a status, and every status write
+	// already re-routes its own job (syncJobLogRoutingOnChange), so a
+	// SyncJobLogTracking over the whole list changed nothing it needed to —
+	// and untracked every terminal job, ending the routing RecoverAsides and
+	// cleanupStagingAfterMux hold open for a terminal job's last lines: a
+	// Mark Watched on any rows during a recovery sent the rest of its
+	// progress to no job's log.
 	activeIDs := make(map[string]struct{}, len(jobs))
 	for _, j := range jobs {
 		activeIDs[j.ID] = struct{}{}
 	}
-	s.db.SyncJobLogTracking(jobs)
 	s.db.PruneJobLogs(activeIDs)
 	// The bulk deletes (a departed channel's prune) fire only this event, so
 	// the notifier's edit-mode state for their jobs goes here, as onJobDeleted
