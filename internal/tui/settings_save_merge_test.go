@@ -399,6 +399,109 @@ func TestTUINoOpSaveWritesNothing(t *testing.T) {
 	}
 }
 
+// TestTUISaveWritesTargetEditsTheFormUsedToHide: whether a target was
+// edited is decided by notifFormValues, which hid two differences the
+// manager acts on. A filter naming only events outside the vocabulary — a
+// retired connectivity_pause, still delivered through its alias, or
+// connectivity_lost, which matches nothing — read as "*", every event, so
+// ticking every row to make the target receive every event was no edit: the
+// overlay said Saved, OnSave never ran, and the live config and config.toml
+// both kept the old filter. And the URL was compared trimmed, so deleting
+// the stray space the manager refuses a padded URL for was no edit either.
+//
+// Mutants killed: notifFormEvents reading a filter with no vocabulary event
+// as "*" (the old known-events-only form) — the retired filters stay;
+// "url" compared trimmed — the padded URL stays; Space on an event row not
+// marking the rows touched — Enter keeps the stored filter.
+func TestTUISaveWritesTargetEditsTheFormUsedToHide(t *testing.T) {
+	for _, retired := range []string{"connectivity_pause", "connectivity_lost"} {
+		t.Run(retired, func(t *testing.T) {
+			m, store, saves := overlayOverStore(t, func(c *config.MoomboxConfig) {
+				c.Notifications = []config.NotificationConfig{{URL: hookA, Events: []string{retired}}}
+			})
+			editTarget(t, m, 0, func() {
+				for _, e := range allNotifEvents {
+					if !m.notifEditEvents[e] {
+						toggleEvent(m, e)
+					}
+				}
+			})
+			saveOverlay(t, m)
+			if *saves != 1 {
+				t.Errorf("OnSave called %d times, want the edit written once", *saves)
+			}
+			live, disk := liveAndDisk(t, store)
+			for name, c := range map[string]*config.MoomboxConfig{"live": live, "config.toml": disk} {
+				if got := c.Notifications[0].Events; len(got) != 0 {
+					t.Errorf("%s: events = %v after the TUI saved every event, want none (every event)", name, got)
+				}
+			}
+		})
+	}
+	t.Run("padded URL", func(t *testing.T) {
+		m, store, saves := overlayOverStore(t, func(c *config.MoomboxConfig) {
+			c.Notifications = []config.NotificationConfig{{URL: " " + hookA}}
+		})
+		editTarget(t, m, 0, func() { m.notifEditURL = hookA })
+		saveOverlay(t, m)
+		if *saves != 1 {
+			t.Errorf("OnSave called %d times, want the edit written once", *saves)
+		}
+		live, disk := liveAndDisk(t, store)
+		for name, c := range map[string]*config.MoomboxConfig{"live": live, "config.toml": disk} {
+			if got := c.Notifications[0].URL; got != hookA {
+				t.Errorf("%s: URL = %q after the TUI deleted its stray space, want %q", name, got, hookA)
+			}
+		}
+	})
+}
+
+// TestNotifEditorKeepsAFilterItsRowsCannotShow: the editor's rows show only
+// the vocabulary, so a filter naming a retired key opens with no row
+// ticked. Now that the save tells such a filter from "every event", an
+// Enter that rebuilt the filter from those rows would turn a look at the
+// target into an edit to every event. The filter is rebuilt only once an
+// event row was toggled in that editing session — by Space or by a click —
+// and a toggle in an earlier session left with Esc does not count.
+//
+// Mutants killed: Enter rebuilding the filter whether or not a row was
+// toggled; opening a target without clearing the earlier session's toggle;
+// a click on an event row not marking the rows touched. Clearing it when
+// "a" opens an added target is not pinned: "a" ticks every row, and the
+// rebuilt filter is then every event, the same as an untouched one.
+func TestNotifEditorKeepsAFilterItsRowsCannotShow(t *testing.T) {
+	retired := []string{"connectivity_pause"}
+	m, store, saves := overlayOverStore(t, func(c *config.MoomboxConfig) {
+		c.Notifications = []config.NotificationConfig{{URL: hookA, Events: retired}}
+	})
+	// An abandoned session: a row toggled, then Esc.
+	m.switchSection(sectionIndexByName(t, "Integrations"))
+	m.notifIndex = 0
+	m.handleNotifKey(keyEnter)
+	toggleEvent(m, allNotifEvents[0])
+	m.handleNotifEditKey(keyEsc)
+
+	editTarget(t, m, 0, func() {})
+	if got := m.notifications[0].Events; !slices.Equal(got, retired) {
+		t.Fatalf("an Enter that toggled no row left the entry's events at %v, want the stored %v", got, retired)
+	}
+	saveOverlay(t, m)
+	if *saves != 0 {
+		t.Errorf("OnSave called %d times for a save that changed nothing", *saves)
+	}
+	if got := store.Snapshot().Notifications[0].Events; !slices.Equal(got, retired) {
+		t.Errorf("live events = %v, want the stored %v", got, retired)
+	}
+
+	// A click on the first event row is a toggle as Space is: line 0 of the
+	// event area is the group's blank line, 1 its header, 2 its first event.
+	m.Open(store.Config())
+	editTarget(t, m, 0, func() { m.clickNotifEvent(2) })
+	if got, want := m.notifications[0].Events, []string{notifEventGroups[0].events[0]}; !slices.Equal(got, want) {
+		t.Errorf("a click that ticked one row left the entry's events at %v, want %v", got, want)
+	}
+}
+
 // TestTUISaveValidatesTheMergedResult: the checks run on what will be
 // live after the save — the TUI's edits over the live config as it stands
 // — not on the overlay's Open-time copy. A warning threshold the TUI raised

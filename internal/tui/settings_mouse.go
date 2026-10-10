@@ -486,6 +486,7 @@ func (m *SettingsModel) clickNotifEvent(eventLine int) {
 			if eventLine == line {
 				m.notifEditFocus = flatIdx + notifEditEventBase
 				m.notifEditEvents[event] = !m.notifEditEvents[event]
+				m.notifEditEventsTouched = true
 				m.updateTextInputForField()
 				return
 			}

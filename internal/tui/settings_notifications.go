@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -54,6 +55,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 			n := m.notifications[m.notifIndex]
 			m.notifEditURL = n.URL
 			m.notifEditEvents = make(map[string]bool)
+			m.notifEditEventsTouched = false
 			if len(n.Events) == 0 {
 				// All events
 				for _, e := range allNotifEvents {
@@ -96,6 +98,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 	case "a", "A":
 		m.notifEditURL = ""
 		m.notifEditEvents = make(map[string]bool)
+		m.notifEditEventsTouched = false
 		for _, e := range allNotifEvents {
 			m.notifEditEvents[e] = true
 		}
@@ -251,10 +254,14 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		n.Mode = m.notifEditDelivery
 		// An empty selection stores Events = nil, which the manager, the web
 		// card and operations.md all read as "all events". Silence is the
-		// Enabled toggle, not an empty filter.
-		n.Events = nil
-		if selected > 0 && selected < len(allNotifEvents) {
-			n.Events = events
+		// Enabled toggle, not an empty filter. Untouched rows leave the stored
+		// filter as it is (notifEditEventsTouched); an added target has none,
+		// which is every event — the rows "a" ticks.
+		if m.notifEditEventsTouched {
+			n.Events = nil
+			if selected > 0 && selected < len(allNotifEvents) {
+				n.Events = events
+			}
 		}
 		// Written explicitly either way, never deleted back to absent, so the
 		// state an operator chose reads the same in config.toml as it does
@@ -337,6 +344,7 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		if eventIdx := m.notifEditFocus - notifEditEventBase; eventIdx >= 0 && eventIdx < len(allNotifEvents) {
 			event := allNotifEvents[eventIdx]
 			m.notifEditEvents[event] = !m.notifEditEvents[event]
+			m.notifEditEventsTouched = true
 		}
 		return ""
 	case "m", "M":
@@ -355,30 +363,18 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 	return ""
 }
 
-// notifFormValues is a target as the notification editor shows it, each
-// field in the form its Enter writes it: the trimmed URL, the mute as
-// IsEnabled reads it, the event filter as the editor would store it (its
-// known events, "*" when that is none or all — both store nil, "every
-// event"), the canonical mention, the mention filter as a set (or
+// notifFormValues is a target as the notification editor's Enter writes
+// it, each field in a form that tells apart exactly what the manager tells
+// apart: the URL as stored (the manager refuses a padded one, so trimming
+// it is an edit), the mute as IsEnabled reads it, the event filter as a set
+// (notifFormEvents), the canonical mention, the mention filter as a set (or
 // "default", absent), and the delivery mode with absent reading separate.
 // Two targets with equal form values differ only in spelling, so a save
 // that compared the stored structs would read an Enter that changed
-// nothing — which spells an absent enabled out as true — as an edit.
+// nothing — which spells an absent enabled out as true — as an edit; and a
+// form that hid a difference the manager acts on would drop a real edit as
+// none.
 func notifFormValues(n config.NotificationConfig) map[string]string {
-	events := "*"
-	filter := make(map[string]bool, len(n.Events))
-	for _, e := range n.Events {
-		filter[e] = true
-	}
-	var picked []string
-	for _, e := range allNotifEvents {
-		if filter[e] {
-			picked = append(picked, e)
-		}
-	}
-	if len(picked) > 0 && len(picked) < len(allNotifEvents) {
-		events = strings.Join(picked, ",")
-	}
 	mention := strings.TrimSpace(n.Mention)
 	if canonical, _, _, err := config.ParseMention(n.Mention); err == nil {
 		mention = canonical
@@ -394,13 +390,40 @@ func notifFormValues(n config.NotificationConfig) map[string]string {
 		mode = "edit"
 	}
 	return map[string]string{
-		"url":            strings.TrimSpace(n.URL),
+		"url":            n.URL,
 		"enabled":        boolToDisplay(n.IsEnabled()),
-		"events":         events,
+		"events":         notifFormEvents(n.Events),
 		"mention":        mention,
 		"mention_events": mentionEvents,
 		"mode":           mode,
 	}
+}
+
+// notifEventsSorted is the editor's event vocabulary, sorted.
+var notifEventsSorted = func() []string {
+	out := slices.Clone(allNotifEvents)
+	slices.Sort(out)
+	return out
+}()
+
+// notifFormEvents is an event filter as notifFormValues compares it: "*"
+// for every event — no filter, or one naming each vocabulary event and
+// nothing else — and otherwise the names it holds, as a sorted set. A
+// filter naming only events outside the vocabulary is its own value, not
+// "*": the manager reads it as a filter (one naming a retired key matches
+// that key's alias; connectivity_lost matches nothing), so turning it into
+// "every event" is an edit.
+func notifFormEvents(events []string) string {
+	if len(events) == 0 {
+		return "*"
+	}
+	set := slices.Clone(events)
+	slices.Sort(set)
+	set = slices.Compact(set)
+	if slices.Equal(set, notifEventsSorted) {
+		return "*"
+	}
+	return fmt.Sprintf("%q", set)
 }
 
 // writeNotifField writes the form field key — one of notifFormValues'
@@ -470,8 +493,9 @@ func notifIdentities(list []config.NotificationConfig) []string {
 //
 // A target is known by the URL it had at Open (notifIdentities), so one
 // whose URL the editor changed is still the same target. A base target the
-// editor deleted is removed from live. One it changed — compared as the form
-// shows it, notifFormValues — is merged field by field into live's target
+// editor deleted is removed from live. One it changed — compared by
+// notifFormValues, which tells apart what the manager does — is merged
+// field by field into live's target
 // with that identity: only the fields the editor changed are written, so a
 // dashboard mute or mention on the same target survives a TUI edit of its
 // events, and a field both changed takes the editor's value. An edit of a
@@ -557,7 +581,7 @@ func mergeNotificationEdits(base, edited []config.NotificationConfig, from []int
 
 // mergeNotifFields is the three-way merge of one target: live as it stands
 // at save time, with each form field the editor changed — where edited
-// differs from base, the copy Open took, compared as the form shows them —
+// differs from base, the copy Open took, compared by notifFormValues —
 // taken from edited. A field the editor left alone keeps live's value,
 // whatever the dashboard set it to meanwhile.
 func mergeNotifFields(live, base, edited config.NotificationConfig) config.NotificationConfig {

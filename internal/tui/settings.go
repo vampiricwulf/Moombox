@@ -422,6 +422,14 @@ type SettingsModel struct {
 	notifMode       string // "list" or "edit"
 	notifEditURL    string
 	notifEditEvents map[string]bool
+	// notifEditEventsTouched records whether the operator toggled an event row
+	// in this editing session. False keeps the target's filter exactly as
+	// stored on Enter: the rows show only this build's vocabulary, so a
+	// filter naming a retired key (connectivity_pause, still delivered
+	// through its alias) or none at all opens with no row ticked, and
+	// rebuilding it from the rows would turn an Enter that changed nothing
+	// into "every event".
+	notifEditEventsTouched bool
 	// notifEditDelivery is the per-TARGET delivery mode being edited,
 	// "separate" or "edit". Deliberately not named notifEditMode: notifMode
 	// above is the SUB-EDITOR's mode ("list" / "edit"), a different axis that
