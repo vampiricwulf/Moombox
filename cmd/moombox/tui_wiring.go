@@ -510,9 +510,7 @@ func (s *runState) runTUI() {
 			}
 			return info.TagName, info.ReleaseNotes, nil
 		}
-		app.OnDismissUpdate = func(tag string) error {
-			return routes.DismissUpdate(s.configStore, tag)
-		}
+		app.OnDismissUpdate = s.dismissUpdateFromTUI
 	}
 	app.OnRecheckCookies = func() (cookies.RefreshVerdict, cookies.RefreshVerdict, string, string) {
 		s.log.Info("Cookie recheck requested from TUI")
@@ -1294,6 +1292,21 @@ func (s *runState) checkUpdateFromTUI() (*tui.UpdateStatusMsg, error) {
 		TagName:      release.TagName,
 		ReleaseNotes: release.ReleaseNotes,
 	}, nil
+}
+
+// dismissUpdateFromTUI is the TUI's S beside a pending update's notes: it
+// skips tag through routes.DismissUpdate, the helper POST /api/update/dismiss
+// uses, and then announces the withdrawal the way that route does (its
+// OnCleared). Every open dashboard holds its own copy of the pending release,
+// and a skip from here used to reach none of them: the badge stayed up until a
+// reload, and its Update Now and Skip answered "no update available" and "no
+// update pending".
+func (s *runState) dismissUpdateFromTUI(tag string) error {
+	if err := routes.DismissUpdate(s.configStore, tag); err != nil {
+		return err
+	}
+	announceUpdateCleared(s.wsHub, s.tuiUpdateStatusCh, tag)
+	return nil
 }
 
 // forwardTUILogs copies the logger's lines into the TUI's log channel until
