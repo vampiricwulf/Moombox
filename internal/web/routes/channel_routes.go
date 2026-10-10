@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"net/url"
@@ -90,41 +91,34 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 			return
 		}
 
-		channel.ID = strings.TrimSpace(channel.ID)
-		if channel.ID == "" {
+		if strings.TrimSpace(channel.ID) == "" {
 			jsonError(rw, "channel ID required", http.StatusBadRequest)
 			return
 		}
 
-		// Safety net: an ID that looks like a URL is resolved first. That is
-		// a youtube.com fetch with retries — the reason POST
-		// /api/resolve-channel is rate limited — so it rides the same
-		// limiter here; a plain ID (every enable/disable toggle posts one)
-		// does not. A URL that does not resolve is refused rather than
-		// stored: the monitor would poll channel_id=https://… forever.
-		if utils.LooksLikeURL(channel.ID) {
-			limitedBy(rl)(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-				resolved, err := utils.ResolveChannelInput(req.Context(), channel.ID)
-				if err != nil {
-					jsonError(rw, "failed to resolve channel", http.StatusUnprocessableEntity)
-					return
-				}
-				if resolved == nil {
-					jsonError(rw, "not a YouTube or Twitch channel URL", http.StatusBadRequest)
-					return
-				}
-				channel.ID = resolved.ID
-				if channel.Name == "" && resolved.Name != "" {
-					channel.Name = resolved.Name
-				}
-				if resolved.Platform != "" {
-					channel.Platform = resolved.Platform
-				}
-				saveChannel(rw, channel)
-			})).ServeHTTP(rw, req)
+		// The ID goes through utils.NormalizeChannelID, the normaliser
+		// every channel writer shares: trimmed, and a URL or a bare
+		// @handle resolved to the channel's ID. Resolving is a youtube.com
+		// fetch with retries — the reason POST /api/resolve-channel is
+		// rate limited — so it rides the same limiter here; a plain ID
+		// (every enable/disable toggle posts one) does not. One that does
+		// not resolve is refused rather than stored: the monitor would
+		// poll channel_id=https://… forever.
+		normalize := func(rw http.ResponseWriter, req *http.Request) {
+			resolved, err := normalizeChannelID(req.Context(), channel.ID)
+			if err != nil {
+				msg, status := channelIDRefusal(err)
+				jsonError(rw, msg, status)
+				return
+			}
+			applyResolvedChannel(&channel, resolved)
+			saveChannel(rw, channel)
+		}
+		if utils.NeedsChannelResolve(channel.ID) {
+			limitedBy(rl)(http.HandlerFunc(normalize)).ServeHTTP(rw, req)
 			return
 		}
-		saveChannel(rw, channel)
+		normalize(rw, req)
 	})
 
 	// DELETE /api/config/channels/{id} is ChannelRemovalRoutes': removing
@@ -232,6 +226,35 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 			"resolved": true,
 		})
 	})
+}
+
+// normalizeChannelID is utils.NormalizeChannelID behind a variable, so the
+// route tests can answer a handle's lookup without reaching youtube.com.
+var normalizeChannelID = utils.NormalizeChannelID
+
+// channelIDRefusal words utils.NormalizeChannelID's refusal for an API
+// response: an input that names no channel is the caller's mistake (400);
+// a lookup that failed — YouTube unreachable, the handle's page gone — is
+// the 422 POST /api/resolve-channel answers for the same failure.
+func channelIDRefusal(err error) (string, int) {
+	if errors.Is(err, utils.ErrNotChannelURL) {
+		return utils.ErrNotChannelURL.Error(), http.StatusBadRequest
+	}
+	return "failed to resolve channel", http.StatusUnprocessableEntity
+}
+
+// applyResolvedChannel writes NormalizeChannelID's answer onto the channel
+// being saved: its ID always; the resolved display name only where none
+// was given; the resolved platform whenever resolution found one — a
+// twitch.tv URL is a Twitch channel whatever the form said.
+func applyResolvedChannel(ch *config.ChannelConfig, resolved *utils.ResolvedChannel) {
+	ch.ID = resolved.ID
+	if strings.TrimSpace(ch.Name) == "" && resolved.Name != "" {
+		ch.Name = resolved.Name
+	}
+	if resolved.Platform != "" {
+		ch.Platform = resolved.Platform
+	}
 }
 
 // validChannelPlatform reports whether p is a channel platform the monitors

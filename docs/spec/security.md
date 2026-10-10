@@ -583,7 +583,7 @@ All rate limiters use a 60-second sliding window. The limit constants live in `c
 | Password set/remove | 3 | 60s | Prevents rapid password changes |
 | POT generation (`/get_pot`) | 10 | 60s | Limits BotGuard work (sidecar IPC + Google WAA round-trip on cache miss) |
 | Import (`/api/import`) | 5 | 60s | Limits resource-intensive archive imports |
-| API general | 20 | 60s | One shared limiter on the routes that cost something per call: `POST /api/jobs`, the FFmpeg check/install POSTs, the cookie "heavy" group, `GET /api/formats/{id}` (a YouTube extraction), `POST /api/resolve-channel` (a youtube.com fetch with retries) and `POST /api/jobs/{id}/trims` (an FFmpeg process). Not every API route — cheap reads stay unlimited |
+| API general | 20 | 60s | One shared limiter on the routes that cost something per call: `POST /api/jobs`, the FFmpeg check/install POSTs, the cookie "heavy" group, `GET /api/formats/{id}` (a YouTube extraction), `POST /api/resolve-channel` (a youtube.com fetch with retries), the same fetch when `POST /api/config/channels` or `PUT /api/config` carries a channel URL or `@handle` to resolve, and `POST /api/jobs/{id}/trims` (an FFmpeg process). Not every API route — cheap reads stay unlimited |
 
 **Source:** `internal/web/rate_limiter.go`, limit constants in `cmd/moombox/main.go`, instantiation and `ClientIP` wiring in `cmd/moombox/services.go` and `internal/web/routes/import_routes.go`.
 

@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
 	"time"
@@ -92,8 +93,15 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		installYtdlp, _ := updates["install_ytdlp_plugin"].(bool)
 		delete(updates, "install_ytdlp_plugin")
 
+		// Channel IDs through the shared normaliser first, as PUT /api/config
+		// does: the web wizard resolves URLs itself, but whatever reaches
+		// here is stored. No rate limit — this route is loopback-only and
+		// runs once.
+		channelErrs := normalizeChannelUpdates(req.Context(), updates)
+
 		// Validate the field constraints before anything is applied.
 		validationErrs := validateConfigUpdates(updates)
+		maps.Copy(validationErrs, channelErrs)
 		var storedFFmpeg string
 		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
 		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {

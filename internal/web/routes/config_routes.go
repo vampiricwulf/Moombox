@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // flexDurationValue extracts the numeric value of a FlexDuration update for
@@ -101,6 +104,11 @@ type ConfigRoutesCallbacks struct {
 	// whole saved DownloaderConfig because the two keys are reconciled
 	// against each other (see config.DownloaderConfig.ReorderLimitBytes).
 	OnReorderBudgetChange func(d config.DownloaderConfig)
+	// ResolveRateLimit bounds a PUT whose channels[] carries an ID that has
+	// to be resolved — a URL or a bare @handle, each a youtube.com fetch
+	// with retries — as POST /api/config/channels is bounded for the same
+	// fetch. nil leaves it unbounded.
+	ResolveRateLimit *web.RateLimiter
 }
 
 // diskSettings is the comparable form of what the disk gauge reads.
@@ -621,6 +629,61 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	return errs
 }
 
+// channelUpdatesNeedResolve reports whether a PUT's channels[] carries an
+// ID normalizeChannelUpdates has to resolve (utils.NeedsChannelResolve).
+func channelUpdatesNeedResolve(updates map[string]any) bool {
+	chs, _ := updates["channels"].([]any)
+	for _, raw := range chs {
+		if obj, ok := raw.(map[string]any); ok {
+			if id, ok := obj["id"].(string); ok && utils.NeedsChannelResolve(id) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeChannelUpdates runs each channels[] entry's ID through
+// utils.NormalizeChannelID — the normaliser POST /api/config/channels and
+// both TUI channel editors use — and writes the result back into updates,
+// so validateConfigUpdates' empty and duplicate checks and
+// applyConfigUpdates see the ID that is stored. This path used to trim the
+// ID for its checks only and store it as sent, padding and URLs included:
+// the monitors then polled channel_id=https://… or a padded ID forever.
+// A resolved name fills an empty one and a resolved platform replaces the
+// sent one, as POST does. An ID that names no channel, or whose lookup
+// fails, is a field error keyed like validateConfigUpdates' own; an
+// entry that is not an object, or whose id is no string, is left to its
+// checks. Shared by PUT /api/config and /api/setup/complete.
+func normalizeChannelUpdates(ctx context.Context, updates map[string]any) map[string]string {
+	chs, _ := updates["channels"].([]any)
+	errs := map[string]string{}
+	for i, raw := range chs {
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, ok := obj["id"].(string)
+		if !ok {
+			continue
+		}
+		resolved, err := normalizeChannelID(ctx, id)
+		if err != nil {
+			msg, _ := channelIDRefusal(err)
+			errs[fmt.Sprintf("channels[%d].id", i)] = msg
+			continue
+		}
+		obj["id"] = resolved.ID
+		if name, _ := obj["name"].(string); strings.TrimSpace(name) == "" && resolved.Name != "" {
+			obj["name"] = resolved.Name
+		}
+		if resolved.Platform != "" {
+			obj["platform"] = resolved.Platform
+		}
+	}
+	return errs
+}
+
 // decodeConfigEntries re-decodes one of PUT /api/config's object arrays —
 // `channels` and `notifications`, the two the SPA round-trips whole — into its
 // typed slice, through the JSON round trip both arms used separately before.
@@ -1095,16 +1158,17 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		rw.Write(body)
 	})
 
-	// PUT /api/config
-	r.Put("/api/config", func(rw http.ResponseWriter, req *http.Request) {
-		var updates map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
-			jsonError(rw, "invalid request body", http.StatusBadRequest)
-			return
-		}
+	// handlePut is PUT /api/config once its body is decoded (registered
+	// below, where a save that has channel IDs to resolve is rate limited).
+	handlePut := func(rw http.ResponseWriter, req *http.Request, updates map[string]any) {
+		// Channel IDs first, through the normaliser every channel writer
+		// shares, so the checks below and applyConfigUpdates see the IDs
+		// that will be stored.
+		channelErrs := normalizeChannelUpdates(req.Context(), updates)
 
 		// Validate the field constraints before anything is applied.
 		validationErrs := validateConfigUpdates(updates)
+		maps.Copy(validationErrs, channelErrs)
 		var storedFFmpeg string
 		store.Read(func(c *config.MoomboxConfig) { storedFFmpeg = c.Paths.FfmpegPath })
 		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
@@ -1271,5 +1335,29 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
+	}
+
+	var resolveRL *web.RateLimiter
+	if callbacks != nil {
+		resolveRL = callbacks.ResolveRateLimit
+	}
+	// PUT /api/config
+	r.Put("/api/config", func(rw http.ResponseWriter, req *http.Request) {
+		var updates map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		// A channel ID that has to be resolved is a youtube.com fetch with
+		// retries, so such a save rides the limiter POST
+		// /api/config/channels resolves under; every other save — the
+		// dashboard's full-form save sends no channels at all — does not.
+		if channelUpdatesNeedResolve(updates) {
+			limitedBy(resolveRL)(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				handlePut(rw, req, updates)
+			})).ServeHTTP(rw, req)
+			return
+		}
+		handlePut(rw, req, updates)
 	})
 }
